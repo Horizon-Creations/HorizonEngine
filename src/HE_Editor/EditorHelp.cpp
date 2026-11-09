@@ -1018,6 +1018,69 @@ namespace
 	  "so a camera that hovers on a boundary does not make plants flicker "
 	  "between two levels. The Draw Distance edge is not affected.",
 	  "", "scenes#foliage" },
+	{ "Foliage/Generate LODs", "",
+	  "Makes simpler copies of the layer's mesh as assets next to it (Name_LOD1, "
+	  "Name_LOD2 ...) and replaces this layer's detail levels with them. Each "
+	  "level starts at the distance where its error shrinks to the pixel error "
+	  "you choose, and the far ones draw fewer plants. The layer's Draw Distance "
+	  "is kept; a level that would start beyond it is left out. Undo takes the "
+	  "levels back; the generated files stay on disk.",
+	  "", "scenes#foliage" },
+
+	{ "Foliage/Bake Impostor", "",
+	  "Bakes a picture of the layer's plant, seen from two sides, and makes it the "
+	  "layer's farthest detail level: a cross card (two crossed quads, sized to the "
+	  "plant) with a cut-out material over the picture. Writes Name_Impostor, "
+	  "Name_ImpostorMat and Name_ImpostorCard next to the mesh; baking again "
+	  "replaces them in place. The size is the one in Generate LODs. Undo takes "
+	  "the level back; the files stay on disk.",
+	  "", "scenes#foliage" },
+
+	// ── Generate LODs (dialog) ───────────────────────────────────────────────
+	{ "Generate LODs/Levels", "",
+	  "How many simpler copies to make after the original: 3 gives the original "
+	  "plus three, each with fewer triangles.",
+	  "", "rendering#performance" },
+	{ "Generate LODs/Reduction Per Level", "",
+	  "The share of the previous level's triangles each level keeps: 0.5 halves "
+	  "the count every step. The last level ignores this and lands on Lowest Level.",
+	  "", "rendering#performance" },
+	{ "Generate LODs/Lowest Level", "",
+	  "The share of the original's triangles the last level keeps, in percent.",
+	  "", "rendering#performance" },
+	{ "Generate LODs/Pixel Error", "",
+	  "How wrong a level may look, in pixels on a 1080 p screen at 60 degrees, "
+	  "where it takes over. Each level's distance is worked out from the error "
+	  "its simplification introduced, so a higher value switches earlier.",
+	  "", "rendering#performance" },
+	{ "Generate LODs/Foliage Mode", "",
+	  "For leaf cards and other thin geometry: whole pieces may disappear, and if "
+	  "the material's texture has an alpha channel a level has to keep most of "
+	  "the original's visible leaf area. Leave off for solid meshes such as rocks.",
+	  "", "rendering#performance" },
+	{ "Generate LODs/End on Cross Card", "",
+	  "Adds the engine's cross card as the last detail level. Without Bake "
+	  "Impostor it draws the layer's material, so it only looks right for "
+	  "materials whose texture already shows one plant.",
+	  "", "scenes#foliage" },
+	{ "Generate LODs/Bake Impostor", "",
+	  "Also bakes a picture of the plant, seen from two sides, and puts it on the "
+	  "last level's cross card (the card is sized to the plant). Implies End on "
+	  "Cross Card. The files are Name_Impostor, Name_ImpostorMat and "
+	  "Name_ImpostorCard next to the mesh.",
+	  "", "scenes#foliage" },
+	{ "Generate LODs/Impostor Size", "",
+	  "Texels along one side of each view; the picture holds both views side by "
+	  "side. 512 suits a plant that is a few pixels tall when the card takes over; "
+	  "1024 for a tree that is still large.",
+	  "", "scenes#foliage" },
+	{ "Generate LODs/Generate", "",
+	  "Writes the simplified meshes next to the original and applies them where "
+	  "this dialog was opened from.",
+	  "", "rendering#performance" },
+	{ "Generate LODs/Cancel", "",
+	  "Closes the dialog without making anything.",
+	  "Esc", "rendering#performance" },
 
 	// ── Navigation ───────────────────────────────────────────────────────────
 	{ "Nav Mesh/Cell Size", "",
@@ -2165,6 +2228,13 @@ namespace
 	  "Adds a detail level: a cheaper mesh and the distance from which it takes "
 	  "over.",
 	  "", "rendering#performance" },
+	{ "LOD/Generate LODs", "",
+	  "Makes simpler copies of this entity's mesh as assets next to it (Name_LOD1, "
+	  "Name_LOD2 ...) and replaces the levels here with them: LOD 0 stays the "
+	  "mesh itself, each further level shows from the distance where its error "
+	  "shrinks to the pixel error you choose, scaled by the entity's size. Undo "
+	  "takes the levels back; the generated files stay on disk.",
+	  "", "rendering#performance" },
 	{ "UI Canvas/Screen Space", "",
 	  "The canvas is drawn flat on the screen, at the same size wherever the "
 	  "camera is — a HUD, a menu.",
@@ -2879,6 +2949,12 @@ namespace
 	  "Reads the source file again and rebuilds the asset from it — after the "
 	  "model was changed in the program it came from. A texture keeps its "
 	  "color space setting.",
+	  "", "editor#content-browser" },
+	{ "Content Browser/Generate LODs...", "",
+	  "Makes simpler copies of this static mesh as assets next to it (Name_LOD1, "
+	  "Name_LOD2 ...), e.g. 100 / 50 / 25 / 10 % of the triangles. Material slots "
+	  "are kept. Running it again replaces the copies and keeps their references. "
+	  "A foliage layer or a LOD component then uses them via its own Generate LODs.",
 	  "", "editor#content-browser" },
 	{ "Content Browser/Color Space...", "",
 	  "Says whether the selected textures hold color (sRGB, decoded by the GPU) "
@@ -4376,6 +4452,13 @@ namespace
 	  "Keeps mesh and texture data in main memory after it has been uploaded to "
 	  "the GPU. It costs RAM and saves a re-read.",
 	  "", "advanced#assets" },
+	{ "Preferences/Content Browser/Generate LODs on Import", "",
+	  "When a static mesh is imported, also write simplified copies next to it "
+	  "(Name_LOD1, Name_LOD2 ... at 50, 25 and 10 % of the triangles). Reimporting "
+	  "a mesh that already has them refreshes them. Off by default: it adds files "
+	  "to every import. Generate LODs in the Content Browser does the same for a "
+	  "mesh that is already in the project.",
+	  "", "editor#preferences" },
 	{ "Preferences/Content Browser/Refresh Interval (s)", "",
 	  "How often the Content Browser re-checks the project folder for files "
 	  "changed outside the editor.",
@@ -10147,6 +10230,7 @@ namespace
 		// The target-folder dialog of "Import to Project...", raised from the same
 		// context menu.
 		{ "Import to Project/", "editor-interface", "Editor Interface", "Content Browser" },
+		{ "Generate LODs/",     "editor-interface", "Editor Interface", "Content Browser" },
 		{ "New Asset/",        "editor-interface", "Editor Interface", "Creating assets" },
 		{ "Console/",          "editor-interface", "Editor Interface", "Console" },
 		{ "Audio Mixer/",      "editor-interface", "Editor Interface", "Audio Mixer" },

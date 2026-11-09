@@ -1,5 +1,6 @@
 #include "EditorApplication.h"
 #include "EditorGraphics.h"   // the project's copy of the graphics fields
+#include "ImporterCommon.h"   // Importer::setAutoLodOnImport
 #include <Window/Window.h>           // hiddenWindowRequested — no OS windows of ImGui's own
 #include <ContentManager/HAsset.h>   // asset type of a just-saved file
 #include <cstring>
@@ -106,6 +107,7 @@ static void onProjectWriteRefused(const char* what);   // ProjectWriteGate handl
 #include <HorizonScene/Components/FoliageComponent.h>   // HE_DUMP_FOLIAGETEST witness
 #include <HorizonScene/FoliageSystem.h>
 #include <HorizonScene/LayerMeshPresets.h>   // HE_DUMP_AUTOLANDMESHES witness
+#include "AutoLodDialog.h"                    // HE_AUTOLOD_BAKE witness
 #include <HorizonScene/LandscapeHlod.h>        // HE_DUMP_HLODBAKE / HE_DUMP_HLODFAR witnesses
 #include <HorizonScene/LandscapeHlodBaker.h>
 #include <HorizonScene/AnimationSystem.h>
@@ -1604,6 +1606,7 @@ void EditorApplication::OnInit()
 	GlobalState& globalstate = GlobalState::getInstance();
 	m_editorConfig.ContentBrowserRefreshRate   = globalstate.getCustomConfigInt("ContentBrowserRefreshRate",   m_editorConfig.ContentBrowserRefreshRate);
 	m_editorConfig.KeepCPUAssets               = globalstate.getCustomConfigBool("KeepCPUAssets",               m_editorConfig.KeepCPUAssets);
+	m_editorConfig.AutoLodOnImport             = globalstate.getCustomConfigBool("AutoLodOnImport",             m_editorConfig.AutoLodOnImport);
 	// The persisted key was misspelled "KeepCPUAssetsInfoAcknoleged" until the
 	// 2026-07 rework. Read the old spelling FIRST and hand it in as the default for
 	// the corrected key, so a user who already dismissed the info box keeps that
@@ -3462,6 +3465,9 @@ void EditorApplication::OnRender(float dt)
 			window()->SetTitle(title);
 		}
 	}
+	// The importers read the preference through a process default (they have no
+	// AppContext), so it is handed over every frame: live, no restart.
+	Importer::setAutoLodOnImport(m_editorConfig.AutoLodOnImport);
 	// ── Automatic asynchronous content refresh ────────────────────────────────
 	if (m_projectLoaded && m_editorConfig.ContentBrowserRefreshRate > 0)
 	{
@@ -5268,6 +5274,63 @@ void EditorApplication::OnRender(float dt)
 		// And after the UI for the asset tabs too: a Save pressed this frame has
 		// already cleared its tab, so its copy is pruned in the same frame.
 		updateAssetAutosave(nowMs, ctx);
+	}
+
+	// ── HE_AUTOLOD_BAKE witness (Thema 331 S3/S4) ─────────────────────────────
+	// HE_AUTOLOD_BAKE=<out.hescene>:<chain|card|impostor> runs the REAL Generate LODs / Bake
+	// Impostor code (AutoLodDialog::run) over every foliage layer of the project's scene the
+	// editor just opened, writes the scene to <out.hescene> and quits. The scene is the input
+	// of scripts/he_perf_capture.py --scene and of an HE_CAPTURE_FRAME picture, which is how
+	// the far level is seen in the editor loop rather than in a synthetic world:
+	//   chain     the LOD chain only
+	//   card      ...ended on the engine's cross card, drawn with the layer's material
+	//   impostor  ...ended on the baked impostor card
+	// The project's own files get the sidecars, so point it at a COPY of the project.
+	if (const char* ab = std::getenv("HE_AUTOLOD_BAKE"); ab && *ab && m_projectLoaded && m_editorWorld && !m_isPlaying)
+	{
+		static int s_autoLodBakeWait = 0;
+		static bool s_autoLodBakeDone = false;
+		if (!s_autoLodBakeDone && ++s_autoLodBakeWait > 30)
+		{
+			s_autoLodBakeDone = true;
+			std::string spec = ab;
+			std::string mode = "impostor";
+			if (const size_t colon = spec.rfind(':'); colon != std::string::npos && colon > 1)
+			{
+				mode = spec.substr(colon + 1);
+				spec.resize(colon);
+			}
+			AutoLodDialog::Options o;
+			o.foliage       = true;
+			o.crossCard     = mode != "chain";
+			o.bakeImpostor  = mode == "impostor";
+			o.impostorSize  = 1;
+			if (const char* sz = std::getenv("HE_AUTOLOD_IMPOSTOR_SIZE"); sz && *sz) o.impostorSize = std::clamp(std::atoi(sz), 0, 2);
+			int layers = 0, ok = 0;
+			auto& reg = m_editorWorld->registry();
+			for (auto e : reg.view<FoliageComponent>())
+			{
+				const size_t count = reg.get<FoliageComponent>(e).layers.size();
+				for (size_t li = 0; li < count; ++li)
+				{
+					AutoLodDialog::Request req;
+					req.kind   = AutoLodDialog::Kind::FoliageLayer;
+					req.entity = e;
+					req.layer  = static_cast<int>(li);
+					const AutoLodDialog::Outcome r = AutoLodDialog::run(ctx, req, o);
+					++layers;
+					ok += r.ok ? 1 : 0;
+					HE_LOG_INFO(Editor, "EditorApplication: HE_AUTOLOD_BAKE %s layer %zu: %s%s", mode.c_str(), li,
+						r.ok ? "" : "FAILED ", r.message.c_str());
+				}
+			}
+			SceneSerializer saver;
+			const bool saved = saver.save(*m_editorWorld, spec, SerializeFormat::JSON);
+			HE_LOG_INFO(Editor, "EditorApplication: HE_AUTOLOD_BAKE %d of %d layer(s) ok, scene %s -> %s",
+				ok, layers, saved ? "written" : "NOT written", spec.c_str());
+			m_quitConfirmed = true;
+			Quit();
+		}
 	}
 
 	// ── FPS counter ───────────────────────────────────────────────────────
@@ -7829,6 +7892,31 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 				fl.lods.push_back(d);
 			}
 			HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_FOLIAGELOD %zu level(s) from '%s'", fl.lods.size(), fd);
+		}
+		// HE_DUMP_FOLIAGEIMPOSTOR=<from>:<card path>:<material path> adds a baked impostor level
+		// (Thema 331 S4): the card and its cut-out material are project files, loaded by
+		// path, so the dump needs the project in the config (LastProjectPath). The log line
+		// says whether the three assets (card, material, its atlas) resolved; this is how
+		// the far level is seen on a backend the editor loop cannot drive headless (GL).
+		if (const char* ip = std::getenv("HE_DUMP_FOLIAGEIMPOSTOR"); ip && *ip && fl.lods.size() < FoliageLayer::kMaxLods)
+		{
+			const std::string spec(ip);
+			const size_t c1 = spec.find(':'), c2 = c1 == std::string::npos ? c1 : spec.find(':', c1 + 1);
+			if (c2 != std::string::npos)
+			{
+				FoliageLod d;
+				d.distance = static_cast<float>(std::atof(spec.c_str()));
+				d.meshAssetId     = contentManager().loadAsset(spec.substr(c1 + 1, c2 - c1 - 1));
+				d.materialAssetId = contentManager().loadAsset(spec.substr(c2 + 1));
+				const MaterialAsset* im = contentManager().getMaterial(d.materialAssetId);
+				const std::string atlas = im && !im->texturePaths.empty() ? im->texturePaths[0] : std::string{};
+				const HE::UUID atlasId = atlas.empty() ? HE::UUID{} : contentManager().loadAsset(atlas);
+				HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_FOLIAGEIMPOSTOR card %s, material %s, atlas '%s' %s",
+				            d.meshAssetId == HE::UUID{} ? "NOT loaded" : "loaded",
+				            d.materialAssetId == HE::UUID{} ? "NOT loaded" : "loaded", atlas.c_str(),
+				            atlasId == HE::UUID{} ? "NOT loaded" : "loaded");
+				fl.lods.push_back(d);
+			}
 		}
 		reg.emplace<FoliageComponent>(land, fol);
 		TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
@@ -15742,6 +15830,7 @@ void EditorApplication::writeEditorConfig()
 {
 	GlobalState& globalstate = GlobalState::getInstance();
 	globalstate.setCustomConfigEntry("KeepCPUAssets",               m_editorConfig.KeepCPUAssets);
+	globalstate.setCustomConfigEntry("AutoLodOnImport",             m_editorConfig.AutoLodOnImport);
 	globalstate.setCustomConfigEntry("KeepCPUAssetsInfoAcknowledged", m_editorConfig.KeepCPUAssetsInfoAcknowledged);
 	globalstate.setCustomConfigEntry("ContentBrowserRefreshRate",   m_editorConfig.ContentBrowserRefreshRate);
 	globalstate.setCustomConfigEntry("CbTreeWidth",                 m_editorConfig.CbTreeWidth);

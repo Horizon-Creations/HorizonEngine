@@ -202,6 +202,7 @@ namespace
     }
 
     // ── Detail levels ───────────────────────────────────────────────────────
+    constexpr float   kMinPlantScale = 0.01f;   // a degenerate matrix must not divide by zero
     constexpr uint8_t kUnknown = 0xFF;   // bucket or plant: no level remembered
     constexpr uint8_t kMixed   = 0xFE;   // bucket: a boundary split it, the plant bytes hold the levels
     constexpr int     kLevels  = FoliageExtractStats::kLevels;
@@ -223,7 +224,7 @@ namespace
     {
         HE::UUID mesh;
         HE::UUID material;
-        float    from    = 0.0f;   // m, ground plane: where the level starts
+        float    from    = 0.0f;   // m, ground plane, for a mean-scale plant (Levels::seen): where the level starts
         float    density = 1.0f;
         Reach    reach;
         int      group   = 0;      // the first level drawing the same mesh and material (Ordered)
@@ -236,6 +237,21 @@ namespace
         Level lv[kLevels];
         int   n          = 1;
         float hysteresis = 0.0f;
+
+        // Screen size per plant. The levels' `from` are the ground distances at which a plant of
+        // the layer's MEAN scale (`refScale`) shows the level's pixel size (AutoLodApply.h
+        // authors them so). A plant of scale s is that many pixels tall at d * refScale / s, so
+        // `seen` turns its ground distance into the mean plant's equivalent and every comparison
+        // below stays one distance against `from`. factorLo/Hi: the factor's extremes over the
+        // layer's scale range (a bucket's plants all lie between them).
+        float refScale = 1.0f;
+        float factorLo = 1.0f;
+        float factorHi = 1.0f;
+
+        float seen(float d, float plantScale) const
+        {
+            return d * refScale / std::max(plantScale, kMinPlantScale);
+        }
 
         // By distance alone: the last level that has started.
         int plain(float d) const
@@ -266,6 +282,8 @@ namespace
         // each of them whatever they had before. -1 when a band runs through the bucket.
         int whole(float nearSq, float farSq) const
         {
+            nearSq *= factorLo * factorLo;   // the smallest equivalent distance any plant of the bucket can have
+            farSq  *= factorHi * factorHi;   // and the largest
             int level = 0;
             for (int k = 1; k < n; ++k)
             {
@@ -279,13 +297,46 @@ namespace
         }
     };
 
-    Levels levelsOf(const FoliageLayer& fol, const ContentManager* cm)
+    // What a General parent multiplies every plant's height scale by (its Y axis' length);
+    // 1 for Identity/Translation, where the parent cannot scale at all.
+    float parentYScale(const InstanceBlock& b)
+    {
+        return b.kind == InstanceBlock::Parent::General ? glm::length(glm::vec3(b.parent[1])) : 1.0f;
+    }
+
+    // The height scale of plant `i` of a block (the stored matrix's Y axis, under the parent's when that
+    // is a general matrix): what the plant's pixel height is proportional to.
+    float plantScaleOf(const InstanceBlock& b, uint32_t i)
+    {
+        const glm::mat4& m = (*b.matrices)[static_cast<size_t>(b.first) + i];
+        return glm::length(glm::vec3(m[1])) * parentYScale(b);
+    }
+
+    // `parentScale` is parentYScale() of the layer's InstanceBlock: factorLo/factorHi bound
+    // plantScaleOf() (layer scale times parent scale), so whole() must divide by the same
+    // parent scale or it bounds a quantity the per-instance paths never compute.
+    Levels levelsOf(const FoliageLayer& fol, const ContentManager* cm, float parentScale)
     {
         Levels L;
         L.lv[0].mesh     = fol.meshAssetId;
         L.lv[0].material = fol.materialAssetId;
         L.lv[0].reach    = reachOf(fol, meshLocalBounds(cm, fol.meshAssetId));
         L.hysteresis     = std::max(0.0f, fol.lodHysteresis);
+        {
+            // The scale AutoLodApply measured the thresholds at is 0.5 * (min + max); a layer
+            // whose scales average out to nothing (mirrored) falls back to its largest.
+            const float a = std::abs(fol.minScale), b = std::abs(fol.maxScale);
+            float ref = 0.5f * (fol.minScale + fol.maxScale);
+            if (!(ref >= kMinPlantScale)) ref = std::max(std::max(a, b), 1.0f);
+            L.refScale = ref;
+            const float pScale = std::max(parentScale, kMinPlantScale);
+            L.factorLo = ref / (std::max(std::max(a, b), kMinPlantScale) * pScale);
+            L.factorHi = ref / (std::max(std::min(a, b), 0.05f) * pScale);
+            // A plant at mean scale (times the parent's) must stay inside the range.
+            const float meanFactor = 1.0f / pScale;
+            L.factorLo = std::min(L.factorLo, meanFactor);
+            L.factorHi = std::max(L.factorHi, meanFactor);
+        }
         const size_t take = std::min(fol.lods.size(), static_cast<size_t>(kLevels - 1));
         for (size_t i = 0; i < take; ++i)
         {
@@ -313,7 +364,7 @@ namespace
     // ── The old path ────────────────────────────────────────────────────────
     // One RenderObject per instance in range, bounds left invalid for the backends
     // to refine — what extractFoliage did before clusters (HE_FOLIAGE_CLUSTERS=0).
-    // Detail levels by distance alone (no hysteresis), the same thinning as the clusters.
+    // Detail levels by the plant's screen size alone (no hysteresis), the same thinning as the clusters.
     void extractPerInstance(const FoliageLayer& fol, const Levels& L, entt::entity e, const InstanceBlock& all,
                             const glm::vec3& cam, RenderWorld& out)
     {
@@ -326,7 +377,7 @@ namespace
                 const float dx = wp.x - cam.x;
                 const float dz = wp.z - cam.z;
                 if (dx * dx + dz * dz > dd2) continue;
-                const int level = L.n > 1 ? L.plain(std::sqrt(dx * dx + dz * dz)) : 0;
+                const int level = L.n > 1 ? L.plain(L.seen(std::sqrt(dx * dx + dz * dz), plantScaleOf(all, i))) : 0;
                 if (i - b.first >= keptOf(L.lv[level].density, b.count)) { ++t_stats.thinnedInstances; continue; }
                 ++t_stats.levelInstances[level];
                 const glm::mat4 inst = all.world(i);
@@ -348,7 +399,7 @@ namespace
     // FoliageMode::Ordered: every instance in range, in the order RenderSorter::sort would give
     // the per-instance objects (mesh first — one mesh per level here — then squared 3D distance
     // from the camera to the instance's origin, nearest first), as ONE cluster per mesh and
-    // material over the frame's scratch. Levels by distance alone, as the per-instance path.
+    // material over the frame's scratch. Levels by screen size alone, as the per-instance path.
     void extractOrdered(const FoliageLayer& fol, const Levels& L, entt::entity e, const InstanceBlock& all,
                         const glm::vec3& cam, RenderWorld& out,
                         std::shared_ptr<std::vector<glm::mat4>>& scratch)
@@ -364,7 +415,7 @@ namespace
                 const glm::vec3 wp = all.position(i);
                 const float dx = wp.x - cam.x, dz = wp.z - cam.z;
                 if (dx * dx + dz * dz > dd2) continue;
-                const int level = L.n > 1 ? L.plain(std::sqrt(dx * dx + dz * dz)) : 0;
+                const int level = L.n > 1 ? L.plain(L.seen(std::sqrt(dx * dx + dz * dz), plantScaleOf(all, i))) : 0;
                 if (i - b.first >= keptOf(L.lv[level].density, b.count)) { ++t_stats.thinnedInstances; continue; }
                 ++t_stats.levelInstances[level];
                 const glm::vec3 d = wp - cam;
@@ -544,7 +595,8 @@ namespace
                 continue;
             }
             bool held = false;
-            const int level = had ? L.choose(std::sqrt(d2), had[j], held) : L.plain(std::sqrt(d2));
+            const float seen = L.seen(std::sqrt(d2), plantScaleOf(layer, b.first + j));
+            const int level = had ? L.choose(seen, had[j], held) : L.plain(seen);
             if (had) had[j] = static_cast<uint8_t>(level);
             if (held) ++r.held;
             if (j >= keep[level]) { ++r.thinned; continue; }
@@ -694,6 +746,7 @@ namespace
             for (int r = 0; r < 4; ++r) key.push_back(bitsOf(P.layer.parent[c][r]));
         key.push_back(static_cast<uint64_t>(P.L.n));
         key.push_back(bitsOf(P.L.hysteresis));
+        key.push_back(bitsOf(P.L.refScale)); key.push_back(bitsOf(P.L.factorLo)); key.push_back(bitsOf(P.L.factorHi));
         for (int k = 0; k < P.L.n; ++k)
         {
             const Level& l = P.L.lv[k];
@@ -840,7 +893,7 @@ void extractFoliage(entt::registry& reg, RenderWorld& out, const ContentManager*
             layer.parent   = parent;
             layer.kind     = InstanceBlock::classify(parent);
 
-            const Levels L       = levelsOf(fol, cm);
+            const Levels L       = levelsOf(fol, cm, parentYScale(layer));
             const bool   leveled = L.n > 1;
 
             if (mode == FoliageMode::PerInstance)
