@@ -183,6 +183,7 @@ void RvtLandscape::refreshAnalysis(HorizonWorld& live, entt::entity terrain, Seg
     an.env.switches = std::move(env.switches);
     const MatRvtMaterialState ms = matRvtMaterialState(an.graph, an.split, an.env);
     an.state = ms.state;
+    an.layer = matRvtLayerState(an.split, ms, kAutoLandscapeRvtName);
     seg.reads = ms.reads;
 }
 
@@ -230,6 +231,16 @@ uint64_t RvtLandscape::stateHash(HorizonWorld& live, entt::entity terrain, Segme
     // (not the graph text: an edit after the Read node changes the text and no page)
     mix(geo, seg.analysis->state);
     return geo ? geo : 1;
+}
+
+uint32_t RvtLandscape::markStale(Segment& seg, uint8_t layers, FrameStats& st, const glm::vec4* rectXZ)
+{
+    if (!m_manager || !seg.volumeLive || layers == 0) return 0;
+    const uint32_t n = rectXZ ? m_manager->invalidateRect(seg.volume, glm::vec2(rectXZ->x, rectXZ->y), glm::vec2(rectXZ->z, rectXZ->w), layers)
+                              : m_manager->invalidateVolume(seg.volume, layers);
+    for (int k = 0; k < 3; ++k)
+        if (layers & (1u << k)) st.layersStale[k] += n;
+    return n;
 }
 
 bool RvtLandscape::ensurePool()
@@ -595,10 +606,18 @@ RvtLandscape::FrameStats RvtLandscape::tick(HorizonWorld& live, const glm::vec3&
             {
                 // RVT 2.0: a parameter before the Write node moved, the landscape itself did not. The scratch copy, the volume and
                 // the pool stay: the three page materials are rebuilt in place from the material's Write inputs, and the resident
-                // pages are marked stale, so the budget repaints them from the nearest out. (The pool has one stale flag per page,
-                // not per layer: a changed roughness repaints the colour layer of the page too.)
+                // pages are marked stale, so the budget repaints them from the nearest out. The stale flag is per layer: only the
+                // layers whose page hashes moved are marked (a changed roughness repaints the AO/roughness layer, not the colour
+                // and normal layers), and a change that is in none of the painted layers (an optional Write pin) marks nothing.
                 refreshConsumer(seg);
-                st.pagesStale += m_manager ? m_manager->invalidateVolume(seg.volume) : 0;
+                if (m_manager)
+                {
+                    uint8_t mask = 0;
+                    for (int k = 0; k < 3; ++k)
+                        if (seg.analysis->layer.hash[k] != seg.layerHash[k]) mask |= uint8_t(1u << k);
+                    st.pagesStale += markStale(seg, mask, st, /*rect=*/nullptr);
+                }
+                for (int k = 0; k < 3; ++k) seg.layerHash[k] = seg.analysis->layer.hash[k];
                 seg.stateHash = h;
                 ++st.pageRebuilds;
             }
@@ -643,6 +662,7 @@ RvtLandscape::FrameStats RvtLandscape::tick(HorizonWorld& live, const glm::vec3&
         seg.failed = false;
         seg.stateHash = h;
         seg.geoHash = geo;
+        if (seg.analysis) for (int k = 0; k < 3; ++k) seg.layerHash[k] = seg.analysis->layer.hash[k];
         ++st.attaches;
         if (seg.baked) ++st.bakedAttaches;
     }
@@ -676,17 +696,34 @@ RvtLandscape::FrameStats RvtLandscape::tick(HorizonWorld& live, const glm::vec3&
             continue;
         }
         const glm::vec3 pos = HE::worldPositionOf(live, kv.first);
-        if (j.all)
+        if (j.all) seg.baker->syncTerrain(tc, true, glm::vec2(0.0f), glm::vec2(0.0f));
+        else       seg.baker->syncTerrain(tc, false, glm::vec2(j.minX, j.minZ), glm::vec2(j.maxX, j.maxZ));
+        // Which layers: each layer reads its own part of the ground (the pages it is cut from), so a stroke the colour pages read
+        // and the normal pages do not leaves the normal layer alone. Layers with the same kinds share one marking (one rect).
+        // A material without RVT nodes is one program for all three layers: all of them read what the pages read.
+        const bool perLayer = seg.analysis && seg.analysis->split.hasRvtNodes;
+        uint8_t doneKinds[3] = { 0, 0, 0 };
+        uint32_t marked = 0;
+        for (int k = 0; k < 3; ++k)
         {
-            seg.baker->syncTerrain(tc, true, glm::vec2(0.0f), glm::vec2(0.0f));
-            st.pagesStale += m_manager->invalidateVolume(seg.volume);
+            const uint32_t lr = perLayer ? seg.analysis->layer.reads[k] : seg.reads;
+            const uint8_t lk = static_cast<uint8_t>((matRvtEditReaches(lr, kRvtEditSculpt) ? J::kHeight : 0)
+                                                  | (matRvtEditReaches(lr, kRvtEditPaint) ? J::kWeights : 0));
+            const J::Part lj = tc.rvtJournal.selected(lk);
+            if (!lj.any) continue;
+            uint8_t mask = 0;
+            for (int o = 0; o < 3; ++o)
+                if (o >= k && doneKinds[o] == 0 && (perLayer ? seg.analysis->layer.reads[o] : seg.reads) == lr) { mask |= uint8_t(1u << o); doneKinds[o] = 1; }
+            if (mask == 0) continue;   // an earlier layer with the same reads took it
+            if (lj.all)
+                marked = std::max(marked, markStale(seg, mask, st, nullptr));
+            else
+            {
+                const glm::vec4 rect(pos.x + lj.minX, pos.z + lj.minZ, pos.x + lj.maxX, pos.z + lj.maxZ);
+                marked = std::max(marked, markStale(seg, mask, st, &rect));
+            }
         }
-        else
-        {
-            seg.baker->syncTerrain(tc, false, glm::vec2(j.minX, j.minZ), glm::vec2(j.maxX, j.maxZ));
-            st.pagesStale += m_manager->invalidateRect(seg.volume, glm::vec2(pos.x + j.minX, pos.z + j.minZ),
-                                                       glm::vec2(pos.x + j.maxX, pos.z + j.maxZ));
-        }
+        st.pagesStale += marked;
         tc.rvtJournal.clear();
     }
 

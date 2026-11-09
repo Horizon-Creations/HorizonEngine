@@ -86,6 +86,11 @@ struct VolumeView
 	ViewDesc view;
 };
 
+// The pool has three layers per page (colour; normal; AO + roughness): a page is stale per layer, so a changed roughness
+// repaints the AO/roughness layer of the page and leaves the colour and normal layers as they are. Bit k = layer k.
+constexpr uint8_t kRvtLayerCount = 3;
+constexpr uint8_t kRvtAllLayers  = (1u << kRvtLayerCount) - 1u;
+
 // One page the producer has to paint now.
 struct PageRender
 {
@@ -94,13 +99,15 @@ struct PageRender
 	glm::vec2 rectMin{0.0f};         // world rect to paint, border included
 	glm::vec2 rectMax{0.0f};
 	bool      repaint = false;       // false: first paint; true: it was resident but dirty
+	uint8_t   layers = kRvtAllLayers;// which layers to paint: all on a first paint, the stale ones on a repaint
 };
 
 struct Stats
 {
 	uint32_t poolSlots     = 0;
 	uint32_t resident      = 0;
-	uint32_t dirty         = 0;
+	uint32_t dirty         = 0;              // pages with at least one stale layer
+	uint32_t dirtyLayer[kRvtLayerCount] = { 0, 0, 0 };   // pages whose layer k is stale
 	uint32_t pinned        = 0;
 	uint32_t renderedLastUpdate = 0;
 	uint32_t wantedMissing = 0;      // still missing after the per-frame budget
@@ -149,13 +156,15 @@ public:
 	void setMaxRendersPerFrame(uint32_t n) { m_maxRenders = n; }   // the paint budget; takes effect with the next update
 
 	// A content change in a world rect (paint stroke, sculpt, parameter): resident pages that overlap it
-	// (border included) become dirty. Returns how many.
-	uint32_t invalidateRect(uint16_t volume, glm::vec2 mn, glm::vec2 mx);
-	uint32_t invalidateVolume(uint16_t volume);        // material recompiled, switch/parameter changed
+	// (border included) become dirty. Returns how many. `layers` (bit k = layer k) says which of the page's layers the change
+	// touches: only those are stale afterwards (and repainted), the others keep their picture. Default: all three.
+	uint32_t invalidateRect(uint16_t volume, glm::vec2 mn, glm::vec2 mx, uint8_t layers = kRvtAllLayers);
+	uint32_t invalidateVolume(uint16_t volume, uint8_t layers = kRvtAllLayers);   // material recompiled, switch/parameter changed
 	void     dropVolumePages(uint16_t volume);         // tile unloaded: pages are free again at once
 
 	bool     isResident(const PageKey& k) const { return m_pages.count(k.pack()) != 0; }
-	bool     isDirty(const PageKey& k) const;
+	bool     isDirty(const PageKey& k) const;                  // any layer stale
+	uint8_t  dirtyLayers(const PageKey& k) const;              // the stale layers of a resident page (0 = clean or not resident)
 	// Best resident page for (mip,x,y): the page itself or its nearest resident coarser ancestor.
 	uint32_t resolve(uint16_t volume, int mip, int x, int y) const;
 	// The page table of one mip, row-major (y * pagesPerSide + x), with the fallback filled in.
@@ -171,7 +180,7 @@ public:
 	uint32_t freeSlots() const { return uint32_t(m_freeSlots.size()); }
 
 private:
-	struct Page { uint32_t slot = 0; uint64_t lastUsed = 0; bool dirty = false; bool pinned = false; };
+	struct Page { uint32_t slot = 0; uint64_t lastUsed = 0; uint8_t dirty = 0; bool pinned = false; };   // dirty: stale layers (bit k)
 	struct Volume { VolumeLayout layout; bool live = false; uint64_t tableVersion = 0; };
 
 	bool acquireSlot(uint32_t& slot);                 // free slot, else evict the least recently used

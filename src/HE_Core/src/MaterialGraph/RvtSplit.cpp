@@ -330,6 +330,35 @@ MatRvtMaterialState matRvtMaterialState(const MaterialGraph& g, const MatRvtSpli
     return r;
 }
 
+MatRvtLayerState matRvtLayerState(const MatRvtSplit& split, const MatRvtMaterialState& state, const std::string& rvtName)
+{
+    // The same page per pin as matRvtLayerViews takes (the first of that RVT), and the same pin-to-layer cut.
+    const MatRvtPage* pg[4] = { nullptr, nullptr, nullptr, nullptr };
+    size_t idx[4] = { 0, 0, 0, 0 };
+    for (size_t i = 0; i < split.pages.size(); ++i)
+    {
+        const MatRvtPage& p = split.pages[i];
+        if (p.rvtName == rvtName && p.writePin >= 0 && p.writePin < 4 && !pg[p.writePin]) { pg[p.writePin] = &p; idx[p.writePin] = i; }
+    }
+    static const int kPinsOfLayer[3][2] = { { kRvtWriteBaseColorPin, -1 }, { kRvtWriteNormalPin, -1 }, { kRvtWriteRoughnessPin, kRvtWriteAOPin } };
+    MatRvtLayerState r;
+    for (int k = 0; k < 3; ++k)
+    {
+        Fnv f;
+        f.str("rvt-layer-v1");
+        f.i32(k);
+        for (int pin : kPinsOfLayer[k])
+        {
+            if (pin < 0 || !pg[pin]) continue;
+            f.i32(pin);
+            if (idx[pin] < state.pageHashes.size()) f.bytes(&state.pageHashes[idx[pin]], sizeof(uint64_t));
+            if (idx[pin] < state.pageDeps.size()) r.reads[k] |= state.pageDeps[idx[pin]].reads;
+        }
+        r.hash[k] = f.h ? f.h : 1;
+    }
+    return r;
+}
+
 MatRvtSplit matSplitRvt(const MaterialGraph& graph)
 {
     MatRvtSplit r;

@@ -1,0 +1,18 @@
+EditorApplication: HE_DUMP_RVTDRIVER fill: active after 3 frames, 21 pages painted (8 at most per frame)
+EditorApplication: HE_DUMP_RVTDRIVER idle: 10 frames, 0 pages painted, 0 table uploads (expected 0, 0)
+EditorApplication: HE_DUMP_RVTDRIVER baseline pages vs own material: mean 1.07 /255, max 88
+EditorApplication: HE_DUMP_RVTDRIVER render path forward: pages vs own material mean 1.05 /255, max 100 (ok)
+EditorApplication: HE_DUMP_RVTDRIVER render path deferred: pages vs own material mean 1.07 /255, max 88 (ok)
+EditorApplication: HE_DUMP_RVTDRIVER sculpt stroke: 7 pages marked stale (independent count 7), 7 repainted, 0 still dirty, journal drained
+EditorApplication: HE_DUMP_RVTDRIVER sculpt stroke picture: own material vs stale pages mean 1.07 (max 88), vs repainted pages mean 1.07 (max 88); inside the stroke: stale 0.00, repainted 0.00  [the control must be clearly worse]
+EditorApplication: HE_DUMP_RVTDRIVER debug view: clean state: 21 resident, 0 stale (grid 4 x 4)
+EditorApplication: HE_DUMP_RVTDRIVER debug view: after a stroke (1 page per frame): 5 stale pages in the manager, 4 stale cells in the mip-0 grid
+EditorApplication: HE_DUMP_RVTDRIVER debug view: clean vs stale picture mean 13.93 /255 (max 215), inside the stroke 115.68  [stale marks change the picture]
+EditorApplication: HE_DUMP_RVTDRIVER paint stroke: 6 pages marked stale (independent count about 6), 6 repainted, 0 still dirty
+EditorApplication: HE_DUMP_RVTDRIVER paint stroke picture: own material vs stale pages mean 1.16 (max 92), vs repainted pages mean 1.09 (max 88); inside the stroke: stale 7.60, repainted 4.97
+MP_RVTDRIVER camera +30 m (near radius 40 m): 0 pages to settle the start, then 0 painted for the move (at most 0 in one frame, budget 8), 0 marked stale (expected 0), resident 21 -> 21
+EditorApplication: HE_DUMP_RVTDRIVER material: snow line 320.0 -> 335.0, after sync 335.0 (slot 20 of 68 floats, parent 'Engine/Materials/M_AutoLandscape.hasset')
+EditorApplication: HE_DUMP_RVTDRIVER material parameter change (snow line, after the Read; expected: no re-attach, 0 rebuilds, 0 stale, 0 painted, 1+ live-only): re-attached NO, 0 page rebuild(s), 0 stale (layers colour/normal/AO+rough: 0/0/0), 0 painted over 3 frames, 1 live-only change(s), pages vs own material mean 1.27 (max 88)
+EditorApplication: HE_DUMP_RVTDRIVER material parameter change (rock slope, before the Write; expected: no re-attach, 1 rebuild, only the layers whose Write pins read it stale and painted): re-attached NO, 1 page rebuild(s), 21 stale (layers colour/normal/AO+rough: 21/21/21), 17 painted over 300 frames, 0 live-only change(s), pages vs own material mean 1.30 (max 88)
+EditorApplication: HE_DUMP_RVTDRIVER layers (Witness Rough, only in front of the Roughness pin; expected: no re-attach, 1 rebuild, stale in the AO+rough layer only, colour/normal 0): re-attached NO, 1 page rebuild(s), 21 page(s) marked stale, per layer colour/normal/AO+rough marked 0/0/21, stale at the start 4/4/4 and at most at once 4/4/13 (of 21 resident), 17 painted over 300 frames, 0 still dirty NO
+EditorApplication: HE_DUMP_RVTDRIVER done: 112 pages painted in total, detached

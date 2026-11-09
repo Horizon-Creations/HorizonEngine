@@ -11845,19 +11845,20 @@ void EditorApplication::dumpFrameHeadless()
 					contentManager().syncMaterialInstance(directMat);
 					HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTDRIVER material: snow line %.1f -> %.1f, after sync %.1f (slot %zu of %zu floats, parent '%s')", before, before + 15.0f, ma->shaderParamData[snowSlot], snowSlot, ma->shaderParamData.size(), ma->parentMaterialPath.c_str());
 					r->InvalidateMaterial(directMat);
-					bool rescanned = false; uint32_t painted = 0, liveOnly = 0, rebuilds = 0, staleF = 0; int refill = 0;
+					bool rescanned = false; uint32_t painted = 0, liveOnly = 0, rebuilds = 0, staleF = 0, staleL[3] = { 0, 0, 0 }; int refill = 0;
 					for (; refill < 300; ++refill)
 					{
 						st = sceneTick(); rescanned = rescanned || st.rescanned; painted += st.pagesPainted;
 							liveOnly += st.liveOnlyChanges; rebuilds += st.pageRebuilds; staleF += st.pagesStale;
+							for (int k = 0; k < 3; ++k) staleL[k] += st.layersStale[k];
 						if (refill > 2 && drv.active() && drv.manager() && drv.manager()->stats().wantedMissing == 0 && drv.manager()->stats().dirty == 0) break;
 					}
 					std::vector<uint8_t> a, b;
 					bool okF = captureDirect(a) && capture(b);
 					double mF = 0; unsigned xF = 0;
 					if (okF) diffStats(a, b, mF, xF);
-					HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTDRIVER material parameter change (snow line, after the Read; expected: no re-attach, 0 rebuilds, 0 stale, 0 painted, 1+ live-only): re-attached %s, %u page rebuild(s), %u stale, %u painted over %d frames, %u live-only change(s), pages vs own material mean %.2f (max %u)",
-					            rescanned ? "yes" : "NO", rebuilds, staleF, painted, refill, liveOnly, mF, xF);
+					HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTDRIVER material parameter change (snow line, after the Read; expected: no re-attach, 0 rebuilds, 0 stale, 0 painted, 1+ live-only): re-attached %s, %u page rebuild(s), %u stale (layers colour/normal/AO+rough: %u/%u/%u), %u painted over %d frames, %u live-only change(s), pages vs own material mean %.2f (max %u)",
+					            rescanned ? "yes" : "NO", rebuilds, staleF, staleL[0], staleL[1], staleL[2], painted, refill, liveOnly, mF, xF);
 				}
 				// ... and the rock slope is BEFORE the Write node: the page materials are rebuilt in place (no re-attach) and the
 				// resident pages repainted.
@@ -11874,19 +11875,91 @@ void EditorApplication::dumpFrameHeadless()
 						ma2->shaderParamData[rockSlot] += 0.08f;
 						contentManager().syncMaterialInstance(directMat);
 						r->InvalidateMaterial(directMat);
-						bool rescanned = false; uint32_t painted = 0, liveOnly = 0, rebuilds = 0, staleF = 0; int refill = 0;
+						bool rescanned = false; uint32_t painted = 0, liveOnly = 0, rebuilds = 0, staleF = 0, staleL[3] = { 0, 0, 0 }; int refill = 0;
 						for (; refill < 300; ++refill)
 						{
 							st = sceneTick(); rescanned = rescanned || st.rescanned; painted += st.pagesPainted;
 							liveOnly += st.liveOnlyChanges; rebuilds += st.pageRebuilds; staleF += st.pagesStale;
+							for (int k = 0; k < 3; ++k) staleL[k] += st.layersStale[k];
 							if (refill > 2 && drv.active() && drv.manager() && drv.manager()->stats().wantedMissing == 0 && drv.manager()->stats().dirty == 0) break;
 						}
 						std::vector<uint8_t> a, b;
 						const bool okF = captureDirect(a) && capture(b);
 						double mF = 0; unsigned xF = 0;
 						if (okF) diffStats(a, b, mF, xF);
-						HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTDRIVER material parameter change (rock slope, before the Write; expected: no re-attach, 1 rebuild, pages stale and painted): re-attached %s, %u page rebuild(s), %u stale, %u painted over %d frames, %u live-only change(s), pages vs own material mean %.2f (max %u)",
-						            rescanned ? "yes" : "NO", rebuilds, staleF, painted, refill, liveOnly, mF, xF);
+						HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTDRIVER material parameter change (rock slope, before the Write; expected: no re-attach, 1 rebuild, only the layers whose Write pins read it stale and painted): re-attached %s, %u page rebuild(s), %u stale (layers colour/normal/AO+rough: %u/%u/%u), %u painted over %d frames, %u live-only change(s), pages vs own material mean %.2f (max %u)",
+						            rescanned ? "yes" : "NO", rebuilds, staleF, staleL[0], staleL[1], staleL[2], painted, refill, liveOnly, mF, xF);
+					}
+				}
+				// G) per-layer stale flags (RVT 2.0 step 8): every shipped Auto Landscape parameter feeds the layer blend, which all three
+				// layers read, so none of them can show a single layer. A witness parameter can: a "Witness Rough" float is multiplied into
+				// the graph in front of the Write node's Roughness pin only. Editing the graph starts the segment over (a graph edit);
+				// moving the parameter afterwards must mark the AO/roughness layer of the resident pages and no other layer.
+				{
+					const MaterialAsset* inst = contentManager().getMaterial(directMat);
+					const HE::UUID parentId = inst ? contentManager().loadAsset(inst->parentMaterialPath) : HE::UUID{};
+					MaterialAsset* parent = parentId != HE::UUID{} ? contentManager().getMaterialMutable(parentId) : nullptr;
+					HE::MaterialGraph g;
+					bool edited = false;
+					if (parent && materialGraphFromJson(parent->nodeGraphJson, g))
+					{
+						int writeId = 0, srcNode = 0, srcPin = 0;
+						for (const HE::MatGraphNode& n : g.nodes) if (n.type == HE::MatNodeType::RvtWrite) writeId = n.id;
+						for (const HE::MatGraphLink& l : g.links)
+							if (l.dstNode == writeId && l.dstPin == HE::kRvtWriteRoughnessPin) { srcNode = l.srcNode; srcPin = l.srcPin; }
+						if (writeId != 0 && srcNode != 0)
+						{
+							const int pf = g.addNode(HE::MatNodeType::ParamFloat);
+							g.findNode(pf)->s = "Witness Rough";
+							g.findNode(pf)->p[0] = 1.0f;
+							const int mul = g.addNode(HE::MatNodeType::Multiply);
+							g.connect(srcNode, srcPin, mul, 0);
+							g.connect(pf, 0, mul, 1);
+							g.connect(mul, 0, writeId, HE::kRvtWriteRoughnessPin);
+							parent->nodeGraphJson = materialGraphToJson(g);
+							contentManager().regenerateMaterialFromGraph(parentId);
+							contentManager().syncMaterialInstance(directMat);
+							r->InvalidateMaterial(parentId);
+							r->InvalidateMaterial(directMat);
+							edited = true;
+						}
+					}
+					if (!edited) HE_LOG_WARN(Editor, "EditorApplication: HE_DUMP_RVTDRIVER layers: could not add the witness parameter");
+					else
+					{
+						bool rescanned = false; int refill = 0;
+						for (; refill < 300; ++refill)
+						{
+							st = sceneTick(); rescanned = rescanned || st.rescanned;
+							if (refill > 2 && drv.active() && drv.manager() && drv.manager()->stats().wantedMissing == 0 && drv.manager()->stats().dirty == 0) break;
+						}
+						MaterialAsset* ma3 = contentManager().getMaterialMutable(directMat);
+						size_t slot = ~size_t(0);
+						if (ma3)
+							for (size_t i = 0; i < ma3->graphParamNames.size(); ++i)
+								if (ma3->graphParamNames[i] == "Witness Rough") slot = i * 4;
+						if (ma3 && slot < ma3->shaderParamData.size())
+						{
+							if (std::find(ma3->instanceOverriddenParams.begin(), ma3->instanceOverriddenParams.end(), "Witness Rough") == ma3->instanceOverriddenParams.end())
+								ma3->instanceOverriddenParams.push_back("Witness Rough");
+							ma3->shaderParamData[slot] = 0.35f;
+							contentManager().syncMaterialInstance(directMat);
+							r->InvalidateMaterial(directMat);
+							const HE::rvt::Stats before = drv.manager()->stats();
+							bool reattached = false; uint32_t painted = 0, rebuilds = 0, staleF = 0, staleL[3] = { 0, 0, 0 }, maxDirty[3] = { 0, 0, 0 };
+							int frames = 0;
+							for (; frames < 300; ++frames)
+							{
+								st = sceneTick(); reattached = reattached || st.rescanned; painted += st.pagesPainted;
+								rebuilds += st.pageRebuilds; staleF += st.pagesStale;
+								for (int k = 0; k < 3; ++k) { staleL[k] += st.layersStale[k]; maxDirty[k] = std::max(maxDirty[k], drv.manager()->stats().dirtyLayer[k]); }
+								if (frames > 2 && drv.active() && drv.manager() && drv.manager()->stats().wantedMissing == 0 && drv.manager()->stats().dirty == 0) break;
+							}
+							HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTDRIVER layers (Witness Rough, only in front of the Roughness pin; expected: no re-attach, 1 rebuild, stale in the AO+rough layer only, colour/normal 0): re-attached %s, %u page rebuild(s), %u page(s) marked stale, per layer colour/normal/AO+rough marked %u/%u/%u, stale at the start %u/%u/%u and at most at once %u/%u/%u (of %u resident), %u painted over %d frames, 0 still dirty %s",
+							            reattached ? "yes" : "NO", rebuilds, staleF, staleL[0], staleL[1], staleL[2], before.dirtyLayer[0], before.dirtyLayer[1], before.dirtyLayer[2], maxDirty[0], maxDirty[1], maxDirty[2],
+							            before.resident, painted, frames, drv.manager()->stats().dirty == 0 ? "yes" : "NO");
+						}
+						else HE_LOG_WARN(Editor, "EditorApplication: HE_DUMP_RVTDRIVER layers: the witness parameter has no slot (re-attached %s)", rescanned ? "yes" : "no");
 					}
 				}
 			}

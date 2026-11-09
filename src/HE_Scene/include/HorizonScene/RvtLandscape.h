@@ -29,6 +29,7 @@
 #include <entt/entt.hpp>
 #include <glm/vec2.hpp>
 #include <glm/vec3.hpp>
+#include <glm/vec4.hpp>
 #include <chrono>
 #include <cstdint>
 #include <map>
@@ -59,7 +60,8 @@ namespace HE::landscape
         struct FrameStats
         {
             uint32_t pagesPainted  = 0;    // this frame, all segments
-            uint32_t pagesStale    = 0;    // marked stale by the journals this frame
+            uint32_t pagesStale    = 0;    // pages marked stale (in at least one layer) by the journals and page rebuilds this frame
+            uint32_t layersStale[3] = { 0, 0, 0 };   // of those, how many had layer k (colour, normal, AO + roughness) marked this frame
             uint32_t tablesUploaded = 0;
             uint32_t attaches      = 0;    // segments attached this frame
             uint32_t detaches      = 0;    // segments deactivated or removed this frame
@@ -127,6 +129,9 @@ namespace HE::landscape
         bool active(entt::entity landscape) const;
         bool attached(entt::entity landscape) const;
         const rvt::RvtManager* manager() const { return m_manager.get(); }
+        // The hash layer k's resident pages were last marked at (a test / witness hook), 0 for an unknown landscape.
+        uint64_t layerHashOf(entt::entity landscape, int layer) const
+        { const auto it = m_segments.find(landscape); return it != m_segments.end() && layer >= 0 && layer < 3 ? it->second.layerHash[layer] : 0; }
         uint16_t volumeOf(entt::entity landscape) const;
         HE::UUID consumerOf(entt::entity landscape) const;
         // Whether the segment's pages come from the export's baked base right now (a witness / test hook).
@@ -158,10 +163,14 @@ namespace HE::landscape
                 MaterialGraph    graph;
                 MatRvtSplit      split;
                 uint64_t         state = 0;       // matRvtMaterialState().state under the current values
+                MatRvtLayerState layer;           // per pool layer: what it is painted from now, and what of the ground it reads
                 MatRvtEnv        env;             // asset revisions, function reads (parameters are refilled every tick)
             };
             std::shared_ptr<Analysis> analysis;   // null: not an RVT-node material (the Thema 333 path: the whole material is the page input)
             uint32_t   reads = 0xFFFFFFFFu;       // kRvtReads* the pages need from the ground; everything for a legacy material
+            // Per pool layer (colour, normal, AO + roughness): the hash the resident pages were last marked/painted at. A page change
+            // marks stale only the layers whose hash moved (Analysis::layer), a terrain edit only the layers that read that ground.
+            uint64_t   layerHash[3] = { 0, 0, 0 };
             uint64_t   uploadedVersion = ~0ull;
             // RVT 2.0 step 6: the pages are painted from the pak's baked pictures (HlodBaker::bakedViews), the page graphs are never
             // built. Ends for good (bakedOff) with the first ground edit the pages read or the first change before the Write node:
@@ -196,6 +205,9 @@ namespace HE::landscape
         void refreshFallback(HorizonWorld& live, entt::entity terrain, Segment& seg, uint64_t liveHash);
         // Tells the renderer what to draw for the landscape: the consumer (pages) or, where a fallback exists, the fallback.
         void applySwap(entt::entity terrain, Segment& seg, bool pages);
+        // Marks the resident pages of the segment's volume stale in `layers` (bit k = pool layer k), all of them or the ones under the
+        // world rect (minX, minZ, maxX, maxZ). Returns how many pages that touched; the per-layer counts go into st.layersStale.
+        uint32_t markStale(Segment& seg, uint8_t layers, FrameStats& st, const glm::vec4* rectXZ);
         bool ensurePool();
         void note(const std::string& why);
 

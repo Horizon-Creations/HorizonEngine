@@ -180,6 +180,18 @@ struct MatRvtLayerViews
 };
 HE_API MatRvtLayerViews matRvtLayerViews(const MatRvtSplit& split, const std::string& rvtName);
 
+// What each of the pool's three layers is painted from, right now: the hashes of the pages it is cut from folded together, and the
+// union of what those pages read of the ground. A driver keeps the hashes of the last paint and compares: `hash[k]` unequal means
+// layer k of every resident page is stale and nothing else is (a Write pin that is not painted, an optional pin, or another RVT's
+// Write is in no layer). `reads[k]` is the same union as MatRvtMaterialState::reads, per layer, so a terrain edit only makes the
+// layers stale that read that kind of ground. A layer without a connected page has a fixed hash and reads nothing.
+struct MatRvtLayerState
+{
+    uint64_t hash[3]  = { 0, 0, 0 };
+    uint32_t reads[3] = { 0, 0, 0 };
+};
+HE_API MatRvtLayerState matRvtLayerState(const MatRvtSplit& split, const MatRvtMaterialState& state, const std::string& rvtName);
+
 // Whether a terrain edit (kRvtEditSculpt / kRvtEditPaint, or both) can change a page that reads `reads`.
 inline bool matRvtEditReaches(uint32_t reads, uint32_t editKinds) { return (reads & editKinds) != 0; }
 } // namespace HE

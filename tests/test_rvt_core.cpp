@@ -163,6 +163,67 @@ TEST_CASE("RVT: a dirty rect re-paints exactly the pages it touches, once")
 	CHECK(m.invalidateVolume(v) == m.stats().resident);
 }
 
+TEST_CASE("RVT: a page is stale per layer, and a repaint names exactly the stale layers")
+{
+	RvtManager m(1000, 100000);
+	const uint16_t v = m.addVolume(square512());
+	m.beginFrame();
+	for (const PageRender& p : m.update(v, viewAt(256, 256))) CHECK(p.layers == kRvtAllLayers);   // first paint: everything
+	const uint32_t resident = m.stats().resident;
+
+	// Layer 1 (normal) only, whole volume: every page is dirty, in that layer alone.
+	CHECK(m.invalidateVolume(v, 1u << 1) == resident);
+	CHECK(m.stats().dirty == resident);
+	CHECK(m.stats().dirtyLayer[0] == 0);
+	CHECK(m.stats().dirtyLayer[1] == resident);
+	CHECK(m.stats().dirtyLayer[2] == 0);
+	CHECK(m.dirtyLayers({ v, 0, 7, 7 }) == (1u << 1));
+
+	// A rect in layer 2 on top: the page under it carries both, its neighbours only layer 1.
+	CHECK(m.invalidateRect(v, { 240, 240 }, { 245, 245 }, 1u << 2) == 5);
+	CHECK(m.dirtyLayers({ v, 0, 7, 7 }) == ((1u << 1) | (1u << 2)));
+	CHECK(m.dirtyLayers({ v, 0, 6, 7 }) == (1u << 1));
+	CHECK(m.stats().dirtyLayer[2] == 5);
+	CHECK(m.stats().dirty == resident);              // still one page count, not one per layer
+
+	// The repaint of a page asks for the layers that are stale, nothing more, and clears them.
+	m.beginFrame();
+	const auto r = m.update(v, viewAt(256, 256));
+	REQUIRE(r.size() == resident);
+	int withLayer2 = 0;
+	for (const PageRender& p : r)
+	{
+		CHECK(p.repaint);
+		CHECK((p.layers & (1u << 0)) == 0);          // nobody marked the colour layer: it is never repainted
+		CHECK((p.layers & (1u << 1)) != 0);          // every page was stale in layer 1
+		if (p.layers & (1u << 2)) ++withLayer2;
+		if (p.key.mip == 0) CHECK(p.layers == ((p.key.x == 7 && p.key.y == 7) ? ((1u << 1) | (1u << 2)) : (1u << 1)));
+	}
+	CHECK(withLayer2 == 5);                          // the stroke's page at each of the 5 mips
+	CHECK(m.stats().dirty == 0);
+	CHECK(m.stats().dirtyLayer[1] == 0);
+	m.beginFrame();
+	CHECK(m.update(v, viewAt(256, 256)).empty());
+
+	// A layer mask of 0 (or bits outside the three layers) marks nothing and is no news.
+	const uint64_t dv = m.dirtyVersion();
+	CHECK(m.invalidateVolume(v, 0) == 0);
+	CHECK(m.invalidateRect(v, { 0, 0 }, { 512, 512 }, 0x80) == 0);
+	CHECK(m.dirtyVersion() == dv);
+	// Marking a layer a page already has stale is no news either; adding a new one is.
+	CHECK(m.invalidateVolume(v, 1u << 0) == resident);
+	const uint64_t dv1 = m.dirtyVersion();
+	CHECK(dv1 > dv);
+	CHECK(m.invalidateVolume(v, 1u << 0) == resident);
+	CHECK(m.dirtyVersion() == dv1);
+	CHECK(m.invalidateVolume(v, 1u << 2) == resident);
+	CHECK(m.dirtyVersion() > dv1);
+
+	// The debug view's stale mark follows "any layer".
+	const std::vector<uint32_t> marked = m.pageTable(v, 0, true);
+	for (uint32_t e : marked) CHECK(pageTableStale(e));
+}
+
 TEST_CASE("RVT: the debug view's stale mark rides in bit 30 of the table entry, only on request, and follows the dirty flag")
 {
 	RvtManager m(1000, 100000);

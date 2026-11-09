@@ -146,6 +146,52 @@ TEST_CASE("RVT auto landscape: snow, sand, puddles and trails move no page hash;
 	}
 }
 
+TEST_CASE("RVT auto landscape: a changed parameter marks exactly the pool layers whose Write pins it reaches")
+{
+	for (const Variant& v : kVariants)
+	{
+		CAPTURE(v.name);
+		const HE::AutoLandscapeGraph g = HE::buildAutoLandscapeGraph(HE::AutoLandscapeView::Lit, v.group, v.mixed);
+		const HE::MatRvtSplit s = HE::matSplitRvt(g.graph);
+		REQUIRE(s.ok());
+		const HE::MatRvtLayerViews lv = HE::matRvtLayerViews(s, HE::kAutoLandscapeRvtName);
+		REQUIRE(lv.ok);
+		const HE::MatRvtMaterialState b = stateOf(g, s, HE::MatRvtEnv{});
+		const HE::MatRvtLayerState lb = HE::matRvtLayerState(s, b, HE::kAutoLandscapeRvtName);
+
+		const char* const all[] = { HE::kAutoLandscapeParamGroundTile, HE::kAutoLandscapeParamRockTile,
+		                            HE::kAutoLandscapeParamBombCell, HE::kAutoLandscapeParamRockSlope,
+		                            HE::kAutoLandscapeParamRockBlend, HE::kAutoLandscapeParamHeightBlend,
+		                            HE::kAutoLandscapeParamDirtAmount, HE::kAutoLandscapeParamDirtSize,
+		                            HE::kAutoLandscapeParamSnowHeight, HE::kAutoLandscapeParamSnowColor,
+		                            HE::kAutoLandscapeParamPuddleAmount };
+		for (const char* name : all)
+		{
+			CAPTURE(name);
+			HE::MatRvtEnv ev;
+			set(ev, name, 0.77f);
+			const HE::MatRvtMaterialState m = stateOf(g, s, ev);
+			const HE::MatRvtLayerState lm = HE::matRvtLayerState(s, m, HE::kAutoLandscapeRvtName);
+			for (int k = 0; k < 3; ++k)
+			{
+				CAPTURE(k);
+				// The layer moved iff a page the layer is cut from (lv.pins[k]) has another hash.
+				bool pageMoved = false;
+				for (size_t i = 0; i < s.pages.size(); ++i)
+					if (s.pages[i].rvtName == HE::kAutoLandscapeRvtName && (lv.pins[k] & (1u << s.pages[i].writePin)) && m.pageHashes[i] != b.pageHashes[i])
+						pageMoved = true;
+				CHECK((lm.hash[k] != lb.hash[k]) == pageMoved);
+			}
+			MESSAGE(v.name << " / " << name << ": layers moved colour=" << (lm.hash[0] != lb.hash[0]) << " normal=" << (lm.hash[1] != lb.hash[1])
+			        << " ao+rough=" << (lm.hash[2] != lb.hash[2]));
+			// Nothing a page does not read moves any layer.
+			if (m.state == b.state) for (int k = 0; k < 3; ++k) CHECK(lm.hash[k] == lb.hash[k]);
+		}
+		// Every layer reads some of the ground (the layer blend is in all of them), at most what the whole material reads.
+		for (int k = 0; k < 3; ++k) CHECK((lb.reads[k] & ~b.reads) == 0);
+	}
+}
+
 TEST_CASE("RVT auto landscape: the Bombing switch is a page input, not a live one")
 {
 	const HE::AutoLandscapeGraph g = HE::buildAutoLandscapeGraph();

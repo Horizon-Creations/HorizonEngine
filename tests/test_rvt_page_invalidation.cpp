@@ -85,6 +85,96 @@ TEST_CASE("RVT invalidation: a parameter AFTER the Read node changes no page has
 	}
 }
 
+TEST_CASE("RVT invalidation: a changed Write pin moves the hash of its pool layer only (colour, normal, AO + roughness)")
+{
+	// One parameter per pin, so each pin has an input of its own to change.
+	HE::MaterialGraph g;
+	const int out = g.addNode(T::Output);
+	const int cTint = g.addNode(T::ParamColor);  g.findNode(cTint)->s = "Tint";
+	const int cNorm = g.addNode(T::ParamColor);  g.findNode(cNorm)->s = "NormalVec";
+	const int fRough = g.addNode(T::ParamFloat); g.findNode(fRough)->s = "Rough";
+	const int fAo = g.addNode(T::ParamFloat);    g.findNode(fAo)->s = "Ao";
+	const int cSnow = g.addNode(T::ParamColor);  g.findNode(cSnow)->s = "SnowTint";
+	const int wr = g.addNode(T::RvtWrite); g.findNode(wr)->s = "Ground";
+	const int rd = g.addNode(T::RvtRead);  g.findNode(rd)->s = "Ground";
+	const int mulLive = g.addNode(T::Multiply);
+	g.connect(cTint, 0, wr, HE::kRvtWriteBaseColorPin);
+	g.connect(cNorm, 0, wr, HE::kRvtWriteNormalPin);
+	g.connect(fRough, 0, wr, HE::kRvtWriteRoughnessPin);
+	g.connect(fAo, 0, wr, HE::kRvtWriteAOPin);
+	g.connect(rd, HE::kRvtReadBaseColorPin, mulLive, 0);
+	g.connect(cSnow, 0, mulLive, 1);
+	g.connect(mulLive, 0, out, HE::kMatOutputBaseColorPin);
+	const HE::MatRvtSplit split = HE::matSplitRvt(g);
+	REQUIRE(split.ok());
+	REQUIRE(split.pages.size() == 4);
+
+	struct Vals { float tint = 0.5f, norm = 0.3f, rough = 0.6f, ao = 0.8f, snow = 0.9f; };
+	auto layerState = [&](const Vals& v) {
+		HE::MatRvtEnv e;
+		e.params["Tint"]      = { v.tint, v.tint, v.tint, 1.0f };
+		e.params["NormalVec"] = { v.norm, v.norm, 1.0f, 1.0f };
+		e.params["Rough"]     = { v.rough, 0.0f, 0.0f, 0.0f };
+		e.params["Ao"]        = { v.ao, 0.0f, 0.0f, 0.0f };
+		e.params["SnowTint"]  = { v.snow, v.snow, v.snow, 1.0f };
+		return HE::matRvtLayerState(split, HE::matRvtMaterialState(g, split, e), "Ground");
+	};
+	const HE::MatRvtLayerState base = layerState({});
+	for (int k = 0; k < 3; ++k) CHECK(base.hash[k] != 0);
+	CHECK(base.hash[0] != base.hash[1]);
+	CHECK(base.hash[1] != base.hash[2]);
+
+	// The same values again: nothing moved. The live half's snow tint: no layer.
+	{ const HE::MatRvtLayerState s = layerState({}); for (int k = 0; k < 3; ++k) CHECK(s.hash[k] == base.hash[k]); }
+	{ Vals v; v.snow = 0.1f; const HE::MatRvtLayerState s = layerState(v); for (int k = 0; k < 3; ++k) CHECK(s.hash[k] == base.hash[k]); }
+
+	// Each pin moves its own layer and no other one; AO and roughness share layer 2.
+	struct Case { const char* what; Vals v; bool moved[3]; };
+	Vals tint; tint.tint = 0.1f;
+	Vals norm; norm.norm = 0.9f;
+	Vals rough; rough.rough = 0.1f;
+	Vals ao; ao.ao = 0.2f;
+	const Case cases[] = {
+		{ "Base Color", tint,  { true,  false, false } },
+		{ "Normal",     norm,  { false, true,  false } },
+		{ "Roughness",  rough, { false, false, true  } },
+		{ "AO",         ao,    { false, false, true  } },
+	};
+	for (const Case& c : cases)
+	{
+		CAPTURE(c.what);
+		const HE::MatRvtLayerState s = layerState(c.v);
+		for (int k = 0; k < 3; ++k) { CAPTURE(k); CHECK((s.hash[k] != base.hash[k]) == c.moved[k]); }
+	}
+}
+
+TEST_CASE("RVT invalidation: a layer's reads are those of the pages it is cut from; a layer without a page reads nothing")
+{
+	// Colour reads the height, roughness the weights, AO nothing; the normal pin is not connected.
+	HE::MaterialGraph g;
+	const int out = g.addNode(T::Output);
+	const int wp = g.addNode(T::WorldPos);
+	const int lb = g.addNode(T::LandscapeLayerBlend);
+	const int flat = g.addNode(T::ConstColor);
+	const int wr = g.addNode(T::RvtWrite); g.findNode(wr)->s = "G";
+	const int rd = g.addNode(T::RvtRead);  g.findNode(rd)->s = "G";
+	g.connect(wp, 0, wr, HE::kRvtWriteBaseColorPin);
+	g.connect(lb, 0, wr, HE::kRvtWriteRoughnessPin);
+	g.connect(flat, 0, wr, HE::kRvtWriteAOPin);
+	g.connect(rd, HE::kRvtReadBaseColorPin, out, HE::kMatOutputBaseColorPin);
+	const HE::MatRvtSplit split = HE::matSplitRvt(g);
+	REQUIRE(split.ok());
+	const HE::MatRvtLayerState s = HE::matRvtLayerState(split, HE::matRvtMaterialState(g, split, HE::MatRvtEnv{}), "G");
+	CHECK(HE::matRvtEditReaches(s.reads[0], HE::kRvtEditSculpt));        // colour: height
+	CHECK_FALSE(HE::matRvtEditReaches(s.reads[0], HE::kRvtEditPaint));
+	CHECK(s.reads[1] == 0);                                              // normal: no page at all
+	CHECK(HE::matRvtEditReaches(s.reads[2], HE::kRvtEditPaint));         // AO + roughness: the weights (roughness), AO adds nothing
+	CHECK_FALSE(HE::matRvtEditReaches(s.reads[2], HE::kRvtEditSculpt));
+	// Another RVT's name: no layer has a page.
+	const HE::MatRvtLayerState none = HE::matRvtLayerState(split, HE::matRvtMaterialState(g, split, HE::MatRvtEnv{}), "Other");
+	for (int k = 0; k < 3; ++k) CHECK(none.reads[k] == 0);
+}
+
 TEST_CASE("RVT invalidation: an edit of a node after the Read node, or of the graph's live half, leaves the state alone")
 {
 	Fx f = build();

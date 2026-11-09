@@ -544,7 +544,7 @@ namespace HE::landscape
         return renderView(material, rect, px, /*srgb=*/false, rgba);
     }
 
-    bool HlodBaker::renderRvtPage(const HlodChunkRect& rect, uint32_t px, uint32_t slot)
+    bool HlodBaker::renderRvtPage(const HlodChunkRect& rect, uint32_t px, uint32_t slot, uint8_t layers)
     {
         if (!m_active || px == 0 || std::fabs(rect.size.x - rect.size.y) > 1e-3f) return false;
         // The renderer is told about a view material once; asking again for every page would drop what it remembers of it
@@ -552,6 +552,7 @@ namespace HE::landscape
         std::vector<uint8_t> none;
         for (int v = 0; v < 3; ++v)
         {
+            if (!(layers & (1u << v))) continue;   // this layer of the page is not stale: its picture stays
             if (!renderView(m_viewMat[v], rect, px, /*srgb=*/v == 0, none, int(slot), v, /*invalidate=*/!m_rvtSeen[v])) return false;
             m_rvtSeen[v] = true;
         }

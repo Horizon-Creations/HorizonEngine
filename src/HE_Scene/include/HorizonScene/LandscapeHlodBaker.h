@@ -88,7 +88,9 @@ namespace HE::landscape
         bool bakeRect(const HlodChunkRect& rect, uint32_t side, uint32_t supersample, HlodChunkImages& out);
         // Runtime Virtual Textures (Thema 333): the same three views of `rect`, `px` x `px`, but each goes straight into
         // slice `slot` of the renderer's RVT pool (layer 0 BaseColor, 1 Normal, 2 Surface), no readback, no filter.
-        bool renderRvtPage(const HlodChunkRect& rect, uint32_t px, uint32_t slot);
+        // `layers` (bit k = layer k): only those layers of the slice are painted, the others keep what they hold (a stale page whose
+        // roughness changed repaints the AO/roughness layer and nothing else). Default all three.
+        bool renderRvtPage(const HlodChunkRect& rect, uint32_t px, uint32_t slot, uint8_t layers = 0x7);
         void paintBegin();   // the renderer draws the scratch world ...
         void paintEnd();     // ... and the live one again
         // Lets the renderer drop the GPU copies of the scratch landscape's chunk meshes (InvalidateMesh) that the live landscape is not
