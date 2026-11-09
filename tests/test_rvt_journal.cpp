@@ -111,3 +111,38 @@ TEST_CASE("RVT journal: a paint stroke leaves its texel rect, a fill or an unann
 	l.tick();
 	CHECK(l.tc_().rvtJournal.all);
 }
+
+TEST_CASE("RVT journal: a group-mix stroke leaves its texel rect too, even after an unrelated paint already set 'any'")
+{
+	Land l;
+	TerrainPaint::ensureWeightmap(l.tc_());
+	REQUIRE(TerrainPaint::enableGroupMix(l.tc_(), 0));
+	l.tick();
+	l.tc_().rvtJournal.clear();
+
+	REQUIRE(TerrainPaint::paintGroup(l.tc_(), 10.0f, -8.0f, 1, 3.0f, 2.0f, 1.0f));   // reach 5 m, local (10, -8)
+	l.tick();
+	const auto& j = l.tc_().rvtJournal;
+	REQUIRE(j.any);
+	CHECK_FALSE(j.all);
+	CHECK(j.minX <= 5.0f);   CHECK(j.minX >= 4.0f);
+	CHECK(j.maxX >= 15.0f);  CHECK(j.maxX <= 16.0f);
+	CHECK(j.minZ <= -13.0f); CHECK(j.minZ >= -14.0f);
+	CHECK(j.maxZ >= -3.0f);  CHECK(j.maxZ <= -2.0f);
+
+	// Regression: a paint() stroke far away already sets rvtJournal.any before paintGroup()
+	// runs in the same undrained batch. TerrainSystem's "no rect noted" fallback (noteAll)
+	// only fires when `any` is still false, so paintGroup's own rect must merge in on its
+	// own, or its edit is silently dropped from the dirty region.
+	l.tc_().rvtJournal.clear();
+	REQUIRE(TerrainPaint::paint(l.tc_(), -20.0f, 20.0f, 1, 1.0f, 0.0f, 1.0f));       // far corner, unrelated to the group stroke
+	REQUIRE(TerrainPaint::paintGroup(l.tc_(), 10.0f, -8.0f, 2, 3.0f, 2.0f, 1.0f));
+	l.tick();
+	const auto& j2 = l.tc_().rvtJournal;
+	REQUIRE(j2.any);
+	CHECK_FALSE(j2.all);
+	CHECK(j2.minX <= -21.0f);                  // covers the far paint() rect ...
+	CHECK(j2.maxX >= 15.0f);  CHECK(j2.maxX <= 16.0f);   // ... and the paintGroup() rect
+	CHECK(j2.minZ <= -13.0f); CHECK(j2.minZ >= -14.0f);
+	CHECK(j2.maxZ >= 19.0f);
+}
