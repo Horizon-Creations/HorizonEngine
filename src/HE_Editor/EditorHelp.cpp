@@ -7873,13 +7873,28 @@ namespace
 	{ "Landscape/Terraces on Slopes##water", "Terraces on Slopes",
 	  "Water stays flat, so a stroke dragged down a hillside would only grow an ever "
 	  "deeper wedge hanging in the air over the slope. With this on, the stroke steps "
-	  "down instead, in separate bodies 2 m apart: where the ground under the brush "
-	  "is steeper than about 17 degrees, each spot gets the highest step that holds "
-	  "it at most 0.5 m deep (or Level Offset, if that is deeper). Every step is a "
-	  "shallow pool, and between two of them a waterfall band runs down the slope. "
-	  "Level ground and gentle slopes are unaffected: a pond there stays one body; "
-	  "the steep banks of a pond do step, so paint ponds with this off. One undo step "
-	  "still takes the whole stroke back.",
+	  "down instead, in separate bodies Step Height apart, and keeps its depth: where "
+	  "the ground under the brush is at least Min Slope steep, each spot gets the "
+	  "highest step that holds it at most Above Ground deep. Every step is a shallow "
+	  "pool, and between two of them a waterfall band runs down the slope. Flatter "
+	  "ground is unaffected: a pond there stays one body; the steep banks of a pond "
+	  "do step, so paint ponds with this off. One undo step still takes the whole "
+	  "stroke back.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Step Height##water", "Terrace Step Height",
+	  "How far apart, in metres, two steps of a stroke with Terraces on Slopes are. "
+	  "Smaller makes a finer staircase that follows the slope more closely, with more "
+	  "and shorter waterfalls; larger makes fewer, taller falls between longer "
+	  "stretches of band. On a gentle slope a step is lower than this by itself, so "
+	  "the band between two steps always reaches the next one. At least 0.4 m: a "
+	  "smaller drop hangs no waterfall band.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Min Slope##water", "Terrace Min Slope",
+	  "From which steepness of the ground under the brush, in degrees, a stroke with "
+	  "Terraces on Slopes steps down and keeps the water's depth (Above Ground) on the "
+	  "slope. On flatter ground the water stays one flat body and grows deeper where "
+	  "the ground falls away, as a pond does. Lower it to have gentle hillsides "
+	  "stepped too; raise it to keep the steps to steep ground only.",
 	  "", "editor#landscape-mode" },
 	{ "Landscape/Close Bed on Erase##water", "Close Bed on Erase",
 	  "When the eraser dries ground the brush dug (Dig Bed), that ground is raised "

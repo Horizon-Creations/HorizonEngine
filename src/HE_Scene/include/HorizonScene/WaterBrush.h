@@ -102,36 +102,58 @@ namespace HE::water::brush
         // stays flat per body, so a stroke dragged DOWN a slope would only grow an
         // ever deeper wedge, a sheet hanging in the air over the falling ground. With
         // this on, the stroke paints a LADDER of flat steps, one body each, every one
-        // kTerraceDrop below the one above (the first is the stroke's level). Where
-        // the ground under the brush is steeper than kTerraceSlope, every cell the
-        // dab wets goes to the HIGHEST step that holds it at most lipDepth deep
-        // (kTerraceDepth, or Level Offset when that is deeper): a step is a shallow
-        // pool whose downhill lip stands at most that high over the ground, and the
-        // ground between its lip and the next step's waterline belongs, hidden under
-        // the slope, to the step below, which is where the waterfall band runs
-        // (WaterFall.h). The next step is made once the front half of the brush
-        // (the way it moves) reaches ground deeper than that under the lowest step;
-        // a cliff makes several at once, those that get no cell go at end(). Cells
-        // move only between steps this stroke made; a body it continued, and every
-        // other body, keep their cells. Level ground and gentle slopes never step,
-        // so a pond on them is still one body; the steep banks of a pond do step.
-        // Off by default: "one stroke, one body" is the rule everywhere else.
+        // stepHeight() below the one above (the first is the stroke's level). Where
+        // the ground under the brush is at least terraceSlope steep, every cell the
+        // dab wets goes to the HIGHEST step that holds it at most lipDepth deep (the
+        // stroke's depth, Above Ground): a step is a shallow pool whose downhill lip
+        // stands at most that high over the ground, and the ground between its lip
+        // and the next step's waterline belongs, hidden under the slope, to the step
+        // below, which is where the waterfall band runs (WaterFall.h). So on a slope
+        // the water keeps the depth it was painted with instead of deepening. The
+        // next step is made once the front half of the brush (the way it moves)
+        // reaches ground deeper than that under the lowest step; a cliff makes several
+        // at once, those that get no cell go at end(). Cells move only between steps
+        // this stroke made; a body it continued, and every other body, keep their
+        // cells. Ground flatter than terraceSlope never steps, so a pond there is
+        // still one body; the steep banks of a pond do step. Off by default: "one
+        // stroke, one body" is the rule everywhere else.
         bool  cascade = false;
+        // Step Height: the most two steps are apart (m). On a gentle slope a step is
+        // lower, so the band between two steps never runs further than it can
+        // (stepHeight). kTerraceMinDrop..kMaxTerraceStep.
+        float terraceStep  = 1.0f;
+        // Min Slope: from this steepness of the ground under the brush (m/m) the water
+        // steps down the slope at its depth; flatter ground deepens one body, as a
+        // pond. kMinTerraceSlope..kMaxTerraceSlope (the panel shows degrees).
+        float terraceSlope = 0.3f;
     };
 
     // Terrace thresholds, calibrated on the hill witness (HE_DUMP_WATERLAKE=hill,
-    // docs/water-flow-2026-11-09.md, Schritt 11): a step every metre or so made a
-    // staircase of hovering plates, few long falls with shallow pools read as water
-    // running down the slope.
-    inline constexpr float kTerraceDepth   = 0.5f;    // m: the most water a step holds at its downhill lip (at least)
-    inline constexpr float kTerraceDrop    = 2.0f;    // m between two steps of one stroke
-    inline constexpr float kTerraceSlope   = 0.3f;    // m/m of ground under the brush (about 17 degrees) from which a stroke steps
-    inline constexpr float kTerraceMinDrop = 0.4f;    // m: smallest level difference that hangs a waterfall band (WaterFall.h)
+    // docs/water-flow-2026-11-09.md, Schritt 11): a step every metre made a
+    // staircase of plates hanging in the air while the steps kept the ground the
+    // brush had wetted ahead of them; shallow pools with the bands running down the
+    // slope between them read as water running down it.
+    inline constexpr float kTerraceDepth    = 0.5f;    // m: the lip of a stroke at a fixed Level (no Above Ground to take)
+    inline constexpr float kMinLipDepth     = 0.1f;    // m: the shallowest lip, whatever Above Ground says
+    inline constexpr float kTerraceDrop     = 1.0f;    // m: Params::terraceStep's default
+    inline constexpr float kTerraceSlope    = 0.3f;    // m/m: Params::terraceSlope's default (about 17 degrees)
+    inline constexpr float kTerraceMinDrop  = 0.4f;    // m: smallest level difference that hangs a waterfall band (WaterFall.h)
+    inline constexpr float kMaxTerraceStep  = 10.0f;   // m
+    inline constexpr float kMinTerraceSlope = 0.05f;   // m/m, about 3 degrees: flatter is a pond's floor
+    inline constexpr float kMaxTerraceSlope = 2.0f;    // m/m, about 63 degrees
     static_assert(kTerraceDrop >= kTerraceMinDrop, "two steps of a stroke must always be far enough apart for a band");
 
-    // The lip depth of a cascade stroke's steps: kTerraceDepth, or the stroke's
-    // Level Offset when it asks for deeper water (levelFromGround only).
+    // The lip depth of a cascade stroke's steps: the depth it paints with, Above
+    // Ground (levelOffset), at least kMinLipDepth; kTerraceDepth at a fixed level.
     float lipDepth(const Params& p);
+
+    // How far below the lowest step the next one goes, where the ground under the
+    // brush is `slope` steep: Params::terraceStep (clamped), but on a gentle slope
+    // no more than the band between the two can run (WaterFall.h kFallMaxRun, with a
+    // quarter to spare) past the lip, never under kTerraceMinDrop.
+    float stepHeight(const Params& p, float slope);
+    // Params::terraceSlope, clamped to kMinTerraceSlope..kMaxTerraceSlope.
+    float minTerraceSlope(const Params& p);
 
     // Steepness of the terrain at terrain-local (x, z): |∇h| by central differences
     // one water cell apart. 0 for a landscape with no area or a non-finite point.

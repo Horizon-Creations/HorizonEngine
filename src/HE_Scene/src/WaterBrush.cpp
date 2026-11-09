@@ -625,8 +625,24 @@ float groundSlope(const TerrainComponent& tc, float x, float z)
 
 float lipDepth(const Params& p)
 {
-    const float offset = p.levelFromGround && std::isfinite(p.levelOffset) ? p.levelOffset : 0.0f;
-    return std::max(kTerraceDepth, offset);
+    if (!p.levelFromGround) return kTerraceDepth;
+    return std::isfinite(p.levelOffset) ? std::max(kMinLipDepth, p.levelOffset) : kTerraceDepth;
+}
+
+float stepHeight(const Params& p, float slope)
+{
+    const float want = std::isfinite(p.terraceStep) ? std::clamp(p.terraceStep, kTerraceMinDrop, kMaxTerraceStep) : kTerraceDrop;
+    if (!std::isfinite(slope) || slope <= 0.0f) return want;
+    // The band runs from a step's lip (lipDepth over the ground) down to where the ground meets
+    // the next step: (step - lip) / slope metres. WaterFall follows the ground kFallMaxRun (8 m)
+    // at most; three quarters of that leaves room for a ground that is gentler than the brush saw.
+    constexpr float kRun = 6.0f;
+    return std::clamp(lipDepth(p) + slope * kRun, kTerraceMinDrop, want);
+}
+
+float minTerraceSlope(const Params& p)
+{
+    return std::isfinite(p.terraceSlope) ? std::clamp(p.terraceSlope, kMinTerraceSlope, kMaxTerraceSlope) : kTerraceSlope;
 }
 
 namespace
@@ -648,7 +664,7 @@ namespace
     }
 
     // Params::cascade, one dab (Thema 232 Schritt 11): the stroke's steps form a
-    // ladder kTerraceDrop apart, and on a slope every cell of the dab goes to the
+    // ladder stepHeight() apart, and on a slope every cell of the dab goes to the
     // step that suits its ground (see Params::cascade). Returns what addCircle
     // returns, with the cells handed between steps counted in; `stepped` when the
     // dab made a step.
@@ -662,7 +678,9 @@ namespace
 
         const glm::vec2 cell = cellSize(tc);
         const float lip = lipDepth(p);
-        const bool slope = brushSlope(tc, x, z, std::max(outer, std::max(cell.x, cell.y))) >= kTerraceSlope;
+        const float steepness = brushSlope(tc, x, z, std::max(outer, std::max(cell.x, cell.y)));
+        const bool slope = steepness >= minTerraceSlope(p);
+        const float drop = stepHeight(p, steepness);
         const Field& f = tc.water;
         const int res = static_cast<int>(f.res);
         const int cx0 = std::max(0, static_cast<int>(std::floor((x - outer + tc.sizeX * 0.5f) / cell.x)));
@@ -701,7 +719,7 @@ namespace
                     }
             for (int n = 0; n < kMaxStepsPerDab && std::isfinite(low) && low + lip < s.level; ++n)
             {
-                const float next = s.level - kTerraceDrop;
+                const float next = s.level - drop;
                 const uint16_t body = tc.water.createBody(next);
                 if (body == kNoBody) break;     // out of body ids: keep painting into the one we have
                 s.body  = body;

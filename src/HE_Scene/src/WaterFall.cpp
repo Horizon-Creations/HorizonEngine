@@ -185,11 +185,12 @@ bool buildFalls(const TerrainComponent& tc, uint16_t upper, const Lattice& latti
     }
     if (pieces.empty()) return true;
 
-    // A ribbon is only hung where it lands in the lower body's water: the first cell past its foot (along
-    // the way the apron goes) that the upper body does not hold is the lower body's. Where the ground under
+    // A ribbon is only hung where it lands in water: the first cell past its foot (along the way the apron
+    // goes) that the upper body does not hold is the lower body's, or a body lower still (a step's pool can
+    // be narrower than a cell, and the cell after the foot is then the next step's). Where the ground under
     // the edge runs away from the painted water (the sides of a hilltop a stroke began on), the ground would
     // carry the ribbon down onto dry land, metres past any water (Thema 232 Schritt 11).
-    const auto landsIn = [&](const Foot& ft, uint16_t lower) {
+    const auto landsIn = [&](const Foot& ft, uint16_t lower, float lowLevel) {
         for (int k = 0; k < kProbeCells; ++k)
         {
             const glm::dvec2 q = ft.at + ft.dir * (probeNear + k * probeStep);
@@ -197,7 +198,9 @@ bool buildFalls(const TerrainComponent& tc, uint16_t upper, const Lattice& latti
             if (ci < 0) return false;
             const uint16_t owner = f.owner[static_cast<size_t>(ci)];
             if (owner == upper) continue;
-            return owner == lower;
+            if (owner == lower) return true;
+            const Body* b = owner == kNoBody ? nullptr : f.findBody(owner);
+            return b && b->level <= lowLevel + 1e-3f;
         }
         return false;
     };
@@ -228,7 +231,7 @@ bool buildFalls(const TerrainComponent& tc, uint16_t upper, const Lattice& latti
         q.fb = footAt(pc.b, n, pc.low);
         q.low = pc.low;
         if (!q.fa.ok || !q.fb.ok) continue;
-        if (!landsIn(q.fa, pc.lower) || !landsIn(q.fb, pc.lower)) continue;
+        if (!landsIn(q.fa, pc.lower, pc.low) || !landsIn(q.fb, pc.lower, pc.low)) continue;
         grow(q.ta); grow(q.tb);
         grow(q.fa.at + q.fa.dir * static_cast<double>(kFallApron));
         grow(q.fb.at + q.fb.dir * static_cast<double>(kFallApron));

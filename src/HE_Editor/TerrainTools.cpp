@@ -84,6 +84,8 @@ static float       s_waterBedSlope    = HE::water::kDefaultBedSlope;   // metres
 static float       s_waterBedRough    = 0.2f;   // Bed Roughness, 0..1
 static bool        s_waterCloseBed    = true;   // the eraser gives the dug ground back under the water it dries
 static bool        s_waterCascade     = false;  // steep strokes step down in terraces (Params::cascade)
+static float       s_waterStepHeight  = HE::water::brush::kTerraceDrop;   // Step Height (m), Params::terraceStep
+static float       s_waterMinSlopeDeg = 16.7f;  // Min Slope in degrees (atan of kTerraceSlope), Params::terraceSlope
 static bool        s_waterAutoFlow    = false;  // painted water runs downhill (Body::flowAuto), see the help
 static HE::water::brush::Stroke s_waterStroke;  // the stroke under the button, if any (ids, never entities)
 static int         s_waterResEdit     = 0;      // the grid slider's pending value
@@ -753,6 +755,8 @@ void sculptInViewport(AppContext& ctx, const RenderWorld& sceneSnapshot,
 			waterParams.closeBed        = s_waterCloseBed;
 			waterParams.autoFlow        = s_waterAutoFlow;
 			waterParams.cascade         = s_waterCascade;
+			waterParams.terraceStep     = s_waterStepHeight;
+			waterParams.terraceSlope    = std::tan(s_waterMinSlopeDeg * 0.017453293f);
 
 			ImDrawList* dl    = ImGui::GetWindowDrawList();
 			const float viewW = rectMax.x - rectMin.x;
@@ -2161,6 +2165,21 @@ void renderPanel(AppContext& ctx)
                 EditorWidgets::helpForLabel("Flow From Slope##water");
                 EditorWidgets::checkbox("Terraces on Slopes##water", &s_waterCascade);
                 EditorWidgets::helpForLabel("Terraces on Slopes##water");
+                // The ladder's two knobs (Thema 232 Schritt 11): how far apart the steps
+                // are, and from which steepness the water keeps its depth down the slope.
+                ImGui::BeginDisabled(!s_waterCascade);
+                rowLabel("Step Height");
+                ImGui::DragFloat("##water_step", &s_waterStepHeight, 0.05f, HE::water::brush::kTerraceMinDrop,
+                                 HE::water::brush::kMaxTerraceStep, "%.2f m");
+                EditorWidgets::helpForLabel("Step Height##water");
+                rowLabel("Min Slope");
+                const float minDeg = std::atan(HE::water::brush::kMinTerraceSlope) * 57.29578f;
+                const float maxDeg = std::atan(HE::water::brush::kMaxTerraceSlope) * 57.29578f;
+                ImGui::DragFloat("##water_minslope", &s_waterMinSlopeDeg, 0.25f, minDeg, maxDeg, "%.1f deg");
+                EditorWidgets::helpForLabel("Min Slope##water");
+                s_waterStepHeight  = std::clamp(s_waterStepHeight, HE::water::brush::kTerraceMinDrop, HE::water::brush::kMaxTerraceStep);
+                s_waterMinSlopeDeg = std::clamp(s_waterMinSlopeDeg, minDeg, maxDeg);
+                ImGui::EndDisabled();
 
                 // The grid the water lives on: cells per side over the whole
                 // landscape. A typed field, like the weightmap's (32..2048 on a few

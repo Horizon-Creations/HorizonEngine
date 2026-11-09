@@ -169,7 +169,7 @@ TEST_CASE("Water fall: a stroke down a modelled hill is shallow pools and one-st
         CHECK(d > 0.0f);
         // The first step began on the gentle top, the last ends on the gentle foot (both under kTerraceSlope:
         // a pond there stays one body); every step on the flank between is a pool no deeper than its lip.
-        if (k == 0 || k + 1 == s.bodies.size()) CHECK(d <= brush::kTerraceDrop);
+        if (k == 0 || k + 1 == s.bodies.size()) CHECK(d <= 2.0f);       // was 4.2 and 9 m
         else                                     CHECK(d <= lip + 1e-3f);
     }
 

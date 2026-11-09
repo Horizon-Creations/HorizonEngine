@@ -8340,6 +8340,11 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 			p.radius = 2.5f; p.falloff = 1.0f; p.amount = 1.0f;
 			p.levelFromGround = true; p.levelOffset = 0.3f;
 			p.cascade = true; p.autoFlow = true;
+			// The panel's Step Height and Min Slope (Thema 232 Schritt 11): HE_DUMP_WATERSTEP=<m> and
+			// HE_DUMP_WATERMINSLOPE=<degrees>; unset = the panel's defaults.
+			if (const char* v = std::getenv("HE_DUMP_WATERSTEP"); v && *v) p.terraceStep = static_cast<float>(std::atof(v));
+			if (const char* v = std::getenv("HE_DUMP_WATERMINSLOPE"); v && *v)
+				p.terraceSlope = std::tan(static_cast<float>(std::atof(v)) * 0.017453293f);
 			// "hill": from near the crest down the +X flank of the mound, with a gentle sideways meander.
 			const bool hill = mode == "hill";
 			const float x0 = hill ? 3.0f : 22.0f, x1 = hill ? 46.0f : -12.0f;
