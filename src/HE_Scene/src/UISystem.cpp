@@ -246,18 +246,31 @@ void extract(HorizonWorld& world, float vpWidth, float vpHeight,
             {
                 // Font path -> baked atlas key (0 = shared default font), the
                 // same resolution WidgetManager::refreshElementAssets does for
-                // widget elements. Re-resolved every extract: transient, like
-                // UIElement::fontAtlasKey, and cheap (loadAsset/keyFor both hit
-                // a cache once the font is loaded and baked once).
-                txt->fontAtlasKey = 0;
-                if (contentManager && !txt->font.empty())
+                // widget elements. Re-resolved only when `font` changed since
+                // the last resolution, not every extract: a HIT is cheap
+                // (loadAsset/keyFor both hit a cache once loaded/baked), but a
+                // MISS is not — a stale path re-probes the disk and an
+                // unparseable TTF re-runs the full atlas bake, every call,
+                // because keyFor only caches successful bakes. Without a
+                // contentManager there is nothing to resolve either way, so
+                // the key always falls back to the shared default.
+                if (!contentManager)
                 {
-                    const HE::UUID fid = contentManager->loadAsset(txt->font);
-                    if (const FontAsset* fa = fid == HE::UUID{} ? nullptr : contentManager->getFont(fid);
-                        fa && !fa->fontData.empty())
+                    txt->fontAtlasKey = 0;
+                }
+                else if (txt->font != txt->resolvedFont)
+                {
+                    txt->resolvedFont = txt->font;
+                    txt->fontAtlasKey = 0;
+                    if (!txt->font.empty())
                     {
-                        const float bakePx = fa->size > 0 ? (float)fa->size : 48.0f;
-                        txt->fontAtlasKey = HE::UIFontCache::keyFor(fid.hi ^ fid.lo, fa->fontData, bakePx);
+                        const HE::UUID fid = contentManager->loadAsset(txt->font);
+                        if (const FontAsset* fa = fid == HE::UUID{} ? nullptr : contentManager->getFont(fid);
+                            fa && !fa->fontData.empty())
+                        {
+                            const float bakePx = fa->size > 0 ? (float)fa->size : 48.0f;
+                            txt->fontAtlasKey = HE::UIFontCache::keyFor(fid.hi ^ fid.lo, fa->fontData, bakePx);
+                        }
                     }
                 }
 
