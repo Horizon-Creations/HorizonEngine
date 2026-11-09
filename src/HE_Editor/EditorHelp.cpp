@@ -7870,6 +7870,15 @@ namespace
 	  "that already follows the ground keeps doing so until you turn that off in "
 	  "its Water Physics.",
 	  "", "editor#landscape-mode" },
+	{ "Landscape/Terraces on Slopes##water", "Terraces on Slopes",
+	  "Water stays flat, so a stroke dragged down a steep hillside would only grow "
+	  "an ever deeper wedge. With this on, the stroke steps down instead: as soon as "
+	  "the water under the brush is deeper than 1 m on ground steeper than about "
+	  "35 degrees, it goes on in a new, separate body one step lower (flat at the "
+	  "ground under the brush plus Level Offset, at least 0.4 m below the step "
+	  "above). Level ground and gentle slopes are unaffected: a pond stays one body. "
+	  "One undo step still takes the whole stroke back.",
+	  "", "editor#landscape-mode" },
 	{ "Landscape/Close Bed on Erase##water", "Close Bed on Erase",
 	  "When the eraser dries ground the brush dug (Dig Bed), that ground is raised "
 	  "again, back toward the height it had before the digging, at the brush's "

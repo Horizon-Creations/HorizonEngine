@@ -606,7 +606,45 @@ void begin(Stroke& s, TerrainComponent& tc, float x, float z, const Params& p)
         s.created = s.body != kNoBody;
     }
     s.active = s.body != kNoBody;
+    if (s.active) s.bodies.push_back(s.body);
     if (s.active && p.autoFlow) setFlowAuto(tc, s.body, true);
+}
+
+float groundSlope(const TerrainComponent& tc, float x, float z)
+{
+    if (!hasArea(tc) || !std::isfinite(x) || !std::isfinite(z)) return 0.0f;
+    const glm::vec2 cell = cellSize(tc);
+    const float hx = terrainHeightAt(tc, x + cell.x, z) - terrainHeightAt(tc, x - cell.x, z);
+    const float hz = terrainHeightAt(tc, x, z + cell.y) - terrainHeightAt(tc, x, z - cell.y);
+    if (!std::isfinite(hx) || !std::isfinite(hz)) return 0.0f;
+    const float gx = hx / (2.0f * cell.x), gz = hz / (2.0f * cell.y);
+    return std::sqrt(gx * gx + gz * gz);
+}
+
+namespace
+{
+    // Params::cascade: if the water this stroke holds under the dab at (x, z) is
+    // deeper than kTerraceDepth, on ground steeper than kTerraceSlope, and a flat
+    // step at the ground there + levelOffset would sit at least kTerraceMinDrop
+    // under the current level, the stroke moves on into a new body at that level.
+    bool startTerrace(Stroke& s, TerrainComponent& tc, float x, float z, const Params& p)
+    {
+        if (!p.cascade || s.erase || !std::isfinite(x) || !std::isfinite(z)) return false;
+        const float ground = terrainHeightAt(tc, x, z);
+        if (!std::isfinite(ground)) return false;
+        if (!(s.level - ground > kTerraceDepth)) return false;
+        if (!(groundSlope(tc, x, z) >= kTerraceSlope)) return false;
+        const float next = ground + (std::isfinite(p.levelOffset) ? p.levelOffset : 0.0f);
+        if (!(s.level - next >= kTerraceMinDrop)) return false;
+        const uint16_t body = tc.water.createBody(next);
+        if (body == kNoBody) return false;     // out of body ids: keep painting into the one we have
+        s.body  = body;
+        s.level = next;
+        s.bodies.push_back(body);
+        ++s.terraces;
+        if (p.autoFlow) setFlowAuto(tc, body, true);
+        return true;
+    }
 }
 
 Dab dab(Stroke& s, TerrainComponent& tc, float x, float z, const Params& p)
@@ -643,6 +681,7 @@ Dab dab(Stroke& s, TerrainComponent& tc, float x, float z, const Params& p)
     // Undo (or anything else that replaced the field) can take the body away
     // mid-stroke; painting into a body that is gone would have no owner to give.
     if (!tc.water.findBody(s.body)) return d;
+    d.terrace = startTerrace(s, tc, x, z, p);
     const Result r = addCircle(tc, s.body, x, z, p.radius, p.falloff, p.amount);
     d.ok    = r.ok;
     d.cells = r.changed;
@@ -678,27 +717,31 @@ Dab dab(Stroke& s, TerrainComponent& tc, float x, float z, const Params& p)
 
 void end(Stroke& s, TerrainComponent& tc)
 {
-    if (s.active && s.created && s.body != kNoBody && tc.water.findBody(s.body))
+    // A press that landed nowhere (off the landscape, a brush of no size)
+    // leaves a body with no cell and no source: nothing would ever clean it up.
+    // The first body is the stroke's own only if it made it; every terrace is.
+    for (size_t k = 0; s.active && k < s.bodies.size(); ++k)
     {
-        // A press that landed nowhere (off the landscape, a brush of no size)
-        // leaves a body with no cell and no source: nothing would ever clean it up.
+        const uint16_t id = s.bodies[k];
+        if ((k == 0 && !s.created) || !tc.water.findBody(id)) continue;
         bool owns = false;
         const Field& f = tc.water;
         if (f.allocated())
             for (size_t i = 0; i < f.owner.size() && !owns; ++i)
-                owns = f.owner[i] == s.body && f.coverage[i] > 0;
-        if (!owns) removeBody(tc, s.body);
+                owns = f.owner[i] == id && f.coverage[i] > 0;
+        if (!owns) removeBody(tc, id);
     }
     // The current follows the ground only for a body that asked for it (flowAuto);
     // for any other physics.flow is the user's number and stays as it is. Computed
     // once per stroke, from the cells the stroke left, not per dab.
-    if (s.active && !s.erase && s.body != kNoBody)
-        if (const Body* b = tc.water.findBody(s.body); b && b->flowAuto)
-        {
-            BodyPhysics ph = b->physics;
-            ph.flow = slopeFlow(tc, s.body);
-            setPhysics(tc, s.body, ph);
-        }
+    if (s.active && !s.erase)
+        for (const uint16_t id : s.bodies)
+            if (const Body* b = tc.water.findBody(id); b && b->flowAuto)
+            {
+                BodyPhysics ph = b->physics;
+                ph.flow = slopeFlow(tc, id);
+                setPhysics(tc, id, ph);
+            }
     // A press that never wet a cell (or an eraser that dried the last one) leaves
     // an allocated all-dry grid behind, and a grid makes the scene non-pristine:
     // hand it back, so such a stroke costs the file nothing. Only when there is no

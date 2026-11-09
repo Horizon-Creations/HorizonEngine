@@ -1,6 +1,7 @@
 #pragma once
 #include <HorizonScene/WaterField.h>
 #include <cstdint>
+#include <vector>
 
 struct TerrainComponent;
 
@@ -12,7 +13,8 @@ struct TerrainComponent;
 // editor (TerrainTools.cpp) owns the cursor, the pacing and the undo step; this
 // owns what a stroke means for the water model (WaterField.h) and the ground.
 //
-// A STROKE is begin(), any number of dab()s, end(). It paints into ONE body:
+// A STROKE is begin(), any number of dab()s, end(). It paints into ONE body (but
+// see Params::cascade: dragged down a steep slope it can step into new bodies):
 //
 //   - pressed on water that is already there (a lake, or earlier brush water),
 //     the stroke CONTINUES that body, at its level. That is what makes the brush
@@ -95,7 +97,27 @@ namespace HE::water::brush
         // Off never switches it OFF: a body that already follows the ground keeps
         // doing so, and one that does not keeps its own physics.flow untouched.
         bool  autoFlow = false;
+
+        // Terraces (Thema 232 Schritt 4, docs/water-flow-2026-11-09.md §2): water
+        // stays flat per body, so a stroke dragged DOWN a steep slope would only
+        // grow an ever deeper wedge. With this on, the stroke starts a NEW body one
+        // step lower (flat at the ground under the brush + levelOffset) whenever the
+        // water under the dab is deeper than kTerraceDepth, the ground there is
+        // steeper than kTerraceSlope and the step is at least kTerraceMinDrop. The
+        // stroke then goes on in the new body; the old one keeps what it has. Level
+        // ground and gentle slopes never terrace, so a pond is still one body. Off by
+        // default: "one stroke, one body" is the rule everywhere else.
+        bool  cascade = false;
     };
+
+    // Candidate thresholds, like the flow ones below (nothing measured yet).
+    inline constexpr float kTerraceDepth   = 1.0f;    // m of water under a dab that starts the next step
+    inline constexpr float kTerraceSlope   = 0.7f;    // m/m of ground (about 35 degrees) from which a stroke steps
+    inline constexpr float kTerraceMinDrop = 0.4f;    // m: smallest level difference between two steps
+
+    // Steepness of the terrain at terrain-local (x, z): |∇h| by central differences
+    // one water cell apart. 0 for a landscape with no area or a non-finite point.
+    float groundSlope(const TerrainComponent& tc, float x, float z);
 
     // Candidate thresholds (nothing measured yet, docs/water-flow-2026-11-09.md §5):
     // below kFlowStillSlope the water stands, from kFlowFallSlope on it runs at
@@ -118,8 +140,13 @@ namespace HE::water::brush
         bool     erase   = false;
         uint16_t body    = kNoBody;   // 0 for an erasing stroke
         float    level   = 0.0f;
-        bool     created = false;     // this stroke made `body` (false = it continued one)
+        bool     created = false;     // this stroke made its FIRST body (false = it continued one)
         uint32_t dabs    = 0;
+        // Params::cascade: every body the stroke has painted into, in order (the
+        // first one, then one per terrace). `body` and `level` are the last of them.
+        // Every entry after the first was made by this stroke.
+        std::vector<uint16_t> bodies;
+        uint32_t terraces = 0;        // steps made so far (bodies.size() - 1)
     };
 
     // What a stroke that began at (x, z) would paint into, for the cursor and the
@@ -144,6 +171,7 @@ namespace HE::water::brush
         uint32_t cells  = 0;       // water cells whose coverage or owner moved
         uint32_t ground = 0;       // terrain vertices lowered (digging), the bank's included
         uint32_t bank   = 0;       // ... of them shaved into the bank, outside the water and above it
+        bool     terrace = false;  // this dab started a new step (Params::cascade): it painted into the new body
     };
     // One dab at terrain-local (x, z). Sets the water field's dirty rectangle and,
     // when it dug, the terrain's region-dirty rectangle (never TerrainComponent::dirty

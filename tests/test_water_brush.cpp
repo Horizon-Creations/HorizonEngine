@@ -1437,3 +1437,166 @@ TEST_CASE("Water brush: an erasing stroke never touches a current")
     REQUIRE(tc.water.findBody(s.body) != nullptr);
     CHECK(tc.water.findBody(s.body)->physics.flow == before);
 }
+
+// ── Terraces (Thema 232 Schritt 4) ───────────────────────────────────────────
+
+namespace
+{
+    // Every body of a stroke, in the order it made them, as {level, wet cells}.
+    std::vector<std::pair<float, uint32_t>> terraceRows(const TerrainComponent& tc, const brush::Stroke& s)
+    {
+        std::vector<std::pair<float, uint32_t>> rows;
+        for (const uint16_t id : s.bodies)
+            if (const water::Body* b = tc.water.findBody(id)) rows.emplace_back(b->level, tc.water.wetCells(id));
+        return rows;
+    }
+
+    brush::Params cascadeParams()
+    {
+        brush::Params p = params();
+        p.radius = 0.5f; p.falloff = 0.5f;     // a body keeps cells next to its neighbour
+        p.cascade = true;
+        return p;
+    }
+}
+
+TEST_CASE("Water brush terraces: a stroke down a steep slope steps into one flat body per terrace")
+{
+    TerrainComponent tc = makeLand(10.0f, 1.0f);                  // 45 degrees, rising toward +X
+    const brush::Params p = cascadeParams();
+    // Downhill from x = 20 to x = 0 in 1 m dabs. Ground and first level: 30 and 30.3.
+    const brush::Stroke s = drag(tc, { 20.0f, 0.0f }, { 0.0f, 0.0f }, p, 20);
+
+    REQUIRE(s.bodies.size() > 3u);
+    CHECK(s.terraces == s.bodies.size() - 1u);
+    CHECK(tc.water.bodies.size() == s.bodies.size());             // nothing else, nothing left empty
+    CHECK(s.body == s.bodies.back());
+    CHECK(s.level == doctest::Approx(tc.water.findBody(s.body)->level));
+
+    const auto rows = terraceRows(tc, s);
+    REQUIRE(rows.size() == s.bodies.size());
+    CHECK(rows.front().first == doctest::Approx(30.3f));
+    for (size_t i = 0; i < rows.size(); ++i)
+    {
+        CHECK(rows[i].second > 0u);                               // each step is water, not a stub id
+        if (i == 0) continue;
+        const float gap = rows[i - 1].first - rows[i].first;
+        CHECK(gap >= brush::kTerraceMinDrop);
+        // The step is the ground it started on + the offset: on 45 degrees and 1 m dabs, one metre of drop.
+        CHECK(gap == doctest::Approx(1.0f).epsilon(0.05));
+    }
+}
+
+TEST_CASE("Water brush terraces: off, the same drag is one body, as before")
+{
+    TerrainComponent tc = makeLand(10.0f, 1.0f);
+    brush::Params p = cascadeParams();
+    p.cascade = false;
+    const brush::Stroke s = drag(tc, { 20.0f, 0.0f }, { 0.0f, 0.0f }, p, 20);
+    CHECK(s.bodies.size() == 1u);
+    CHECK(s.terraces == 0u);
+    CHECK(tc.water.bodies.size() == 1u);
+    CHECK(tc.water.findBody(s.body)->level == doctest::Approx(30.3f));
+}
+
+TEST_CASE("Water brush terraces: level ground and gentle slopes stay one body, and so does painting uphill")
+{
+    SUBCASE("level ground")
+    {
+        TerrainComponent tc = makeLand(10.0f, 0.0f);
+        const brush::Stroke s = drag(tc, { -20.0f, 0.0f }, { 20.0f, 0.0f }, cascadeParams(), 40);
+        CHECK(s.terraces == 0u);
+        CHECK(tc.water.bodies.size() == 1u);
+    }
+    SUBCASE("a slope under the threshold deepens one body, however long the drag")
+    {
+        TerrainComponent tc = makeLand(10.0f, 0.5f);               // 0.5 < kTerraceSlope
+        const brush::Stroke s = drag(tc, { 30.0f, 0.0f }, { -30.0f, 0.0f }, cascadeParams(), 60);
+        CHECK(brush::groundSlope(tc, 0.0f, 0.0f) == doctest::Approx(0.5f).epsilon(0.02));
+        CHECK(s.terraces == 0u);
+        CHECK(tc.water.bodies.size() == 1u);
+    }
+    SUBCASE("uphill: the water gets shallower, never a new step")
+    {
+        TerrainComponent tc = makeLand(10.0f, 1.0f);
+        const brush::Stroke s = drag(tc, { -20.0f, 0.0f }, { 20.0f, 0.0f }, cascadeParams(), 40);
+        CHECK(s.terraces == 0u);
+        CHECK(tc.water.bodies.size() == 1u);
+    }
+}
+
+TEST_CASE("Water brush terraces: steps are never closer than kTerraceMinDrop, a deep offset only spaces them wider")
+{
+    TerrainComponent tc = makeLand(10.0f, 1.0f);
+    brush::Params p = cascadeParams();
+    p.levelOffset = 1.2f;       // already deeper than kTerraceDepth at the first dab: no drop yet, no step
+    const brush::Stroke s = drag(tc, { 20.0f, 0.0f }, { 0.0f, 0.0f }, p, 40);
+    REQUIRE(s.bodies.size() > 2u);
+    const auto rows = terraceRows(tc, s);
+    CHECK(rows.front().first == doctest::Approx(31.2f));
+    for (size_t i = 1; i < rows.size(); ++i)
+        CHECK(rows[i - 1].first - rows[i].first >= brush::kTerraceMinDrop - 1e-4f);
+    // Level starts 1.2 over the ground and a step needs the ground 0.4 further down
+    // than that: the first terrace is at least 0.4 m of ground below the start.
+    CHECK(rows[0].first - rows[1].first >= 0.4f - 1e-4f);
+}
+
+TEST_CASE("Water brush terraces: Flow From Slope gives every terrace its own downhill current")
+{
+    TerrainComponent tc = makeLand(10.0f, 1.0f);
+    brush::Params p = cascadeParams();
+    p.autoFlow = true;
+    const brush::Stroke s = drag(tc, { 20.0f, 0.0f }, { 0.0f, 0.0f }, p, 20);
+    REQUIRE(s.bodies.size() > 3u);
+    for (const uint16_t id : s.bodies)
+    {
+        const water::Body* b = tc.water.findBody(id);
+        REQUIRE(b != nullptr);
+        CHECK(b->flowAuto);
+        CHECK(b->physics.flow.x < -1.0f);
+    }
+}
+
+TEST_CASE("Water brush terraces: an erasing stroke never makes steps, and a dab reports the step it made")
+{
+    TerrainComponent tc = makeLand(10.0f, 1.0f);
+    brush::Params p = cascadeParams();
+    brush::Stroke s;
+    brush::begin(s, tc, 20.0f, 0.0f, p);
+    CHECK_FALSE(brush::dab(s, tc, 20.0f, 0.0f, p).terrace);       // 0.3 m deep
+    CHECK_FALSE(brush::dab(s, tc, 19.5f, 0.0f, p).terrace);       // 0.8 m
+    const uint16_t before = s.body;
+    CHECK(brush::dab(s, tc, 19.0f, 0.0f, p).terrace);             // 1.3 m: the next step
+    CHECK(s.body != before);
+    brush::end(s, tc);
+
+    brush::Params e = p;
+    e.erase = true;
+    const size_t bodies = tc.water.bodies.size();
+    const brush::Stroke es = drag(tc, { 20.0f, 0.0f }, { 0.0f, 0.0f }, e, 20);
+    CHECK(es.terraces == 0u);
+    CHECK(tc.water.bodies.size() <= bodies);
+}
+
+TEST_CASE("Water brush terraces: a stepped stroke saves and loads with every body")
+{
+    HorizonWorld world;
+    const Entity e = world.createEntity("Landscape");
+    world.registry().emplace<TransformComponent>(e);
+    world.registry().emplace<TerrainComponent>(e, makeLand(10.0f, 1.0f));
+    auto& tc = world.registry().get<TerrainComponent>(e);
+    const brush::Stroke s = drag(tc, { 20.0f, 0.0f }, { 0.0f, 0.0f }, cascadeParams(), 20);
+    REQUIRE(s.bodies.size() > 3u);
+
+    // Terraces are ordinary bodies: the field is the whole state, no new chunk.
+    SceneSerializer ser;
+    std::vector<uint8_t> blob;
+    REQUIRE(ser.saveToMemory(world, blob));
+    HorizonWorld loaded;
+    REQUIRE(ser.loadFromMemory(loaded, blob));
+    auto view = loaded.registry().view<TerrainComponent>();
+    REQUIRE(view.size() == 1u);
+    const TerrainComponent& lt = loaded.registry().get<TerrainComponent>(*view.begin());
+    CHECK(water::sameContent(lt.water, tc.water));
+    CHECK(lt.water.bodies.size() == s.bodies.size());
+}

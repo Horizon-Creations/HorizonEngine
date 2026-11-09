@@ -83,6 +83,7 @@ static float       s_waterDigDepth    = 2.0f;   // Max Depth: the bed never goes
 static float       s_waterBedSlope    = HE::water::kDefaultBedSlope;   // metres of depth per metre from the shore
 static float       s_waterBedRough    = 0.2f;   // Bed Roughness, 0..1
 static bool        s_waterCloseBed    = true;   // the eraser gives the dug ground back under the water it dries
+static bool        s_waterCascade     = false;  // steep strokes step down in terraces (Params::cascade)
 static bool        s_waterAutoFlow    = false;  // painted water runs downhill (Body::flowAuto), see the help
 static HE::water::brush::Stroke s_waterStroke;  // the stroke under the button, if any (ids, never entities)
 static int         s_waterResEdit     = 0;      // the grid slider's pending value
@@ -751,6 +752,7 @@ void sculptInViewport(AppContext& ctx, const RenderWorld& sceneSnapshot,
 			waterParams.bedRoughness    = s_waterBedRough;
 			waterParams.closeBed        = s_waterCloseBed;
 			waterParams.autoFlow        = s_waterAutoFlow;
+			waterParams.cascade         = s_waterCascade;
 
 			ImDrawList* dl    = ImGui::GetWindowDrawList();
 			const float viewW = rectMax.x - rectMin.x;
@@ -2157,6 +2159,8 @@ void renderPanel(AppContext& ctx)
                 EditorWidgets::helpForLabel("Close Bed on Erase##water");
                 EditorWidgets::checkbox("Flow From Slope##water", &s_waterAutoFlow);
                 EditorWidgets::helpForLabel("Flow From Slope##water");
+                EditorWidgets::checkbox("Terraces on Slopes##water", &s_waterCascade);
+                EditorWidgets::helpForLabel("Terraces on Slopes##water");
 
                 // The grid the water lives on: cells per side over the whole
                 // landscape. A typed field, like the weightmap's (32..2048 on a few

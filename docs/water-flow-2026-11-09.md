@@ -190,3 +190,20 @@ eigenes Thema (Pegel als Feld statt Skalar).
   ins Repo-EditorDeps kopiert; `DisplacementDemo.hasset` NICHT mitgenommen (die mat_gen-Ausgabe weicht von der eingecheckten Datei ab; Ursache nicht untersucht, nicht Teil des Schritts).
 - **Entscheidung:** Kein eigener "Variante aus"-Schalter (wäre eine neue serialisierte Einstellung): Fluss 0 = aus.
 - **Nächste Schritte:** Schritt 4 (Terrassen im Pinsel, Abschnitt 6), dann Wasserfall-Band, dann Backend-Abnahme.
+
+### Schritt 4 (Terrassen im Pinsel), erledigt
+
+- **Gebaut:** `Params::cascade` (Standard aus), `kTerraceDepth` 1,0 m, `kTerraceSlope` 0,7 m/m, `kTerraceMinDrop` 0,4 m, `brush::groundSlope`
+  (`WaterBrush.h/.cpp`). `dab()` ruft `startTerrace`: Wasser unter dem Dab tiefer als `kTerraceDepth`, Boden dort >= `kTerraceSlope`
+  und Stufe `Boden + levelOffset` mindestens `kTerraceMinDrop` unter dem aktuellen Pegel -> neuer Körper, Strich malt dort weiter
+  (`Stroke::body/level` zeigen auf den letzten). `Stroke::bodies` (alle Körper des Strichs, der erste zuerst) und `terraces`;
+  `Dab::terrace`. `end()` räumt leere Körper und rechnet `flowAuto`-Strömung über alle Körper des Strichs. `begin()` setzt
+  `flowAuto` auf Terrassen mit `autoFlow`. Editor: Häkchen "Terraces on Slopes" + Hilfeeintrag. Keine Serialisierungsänderung.
+- **Verifiziert (Mac, Release):** `ctest -R test_water` 9/9; 7 neue Fälle (`-tc=*terraces*`): 45°-Rampe gibt Körper je Meter mit
+  Stufenabstand 1,0 m, aus = ein Körper, eben/flach (0,5)/bergauf = ein Körper, hoher Offset hält Mindestabstand, Strömung je
+  Terrasse, Radierstrich, Speichern/Laden. `editor_help_audit.py --check` grün.
+- **Nicht verifiziert:** Editor-UI nur kompiliert, nicht bedient. Optik der Terrassen ohne Wasserfall-Band (Schritt 5) sichtbar als
+  Stufen ohne Verbindung. Der neue Körper nimmt dem alten die Zellen im Pinselkreis (addCircle), bei grobem Dab-Abstand und großem
+  Pinsel kann ein alter Körper fast leer werden.
+- **Entscheidung:** Bei `levelFromGround = false` gilt der feste Pegel nur für die erste Stufe, danach Boden + Offset.
+- **Nächste Schritte:** Schritt 5 (Wasserfall-Band zwischen Nachbar-Körpern, `Stroke`-Reihenfolge = Stufenreihenfolge nutzbar).
