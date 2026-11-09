@@ -45,10 +45,37 @@ All six read `UIRenderObject::fontAtlasKey` (`UIRenderObject.h:75`). Tests: rast
 4. **ComboBox popup** `WidgetManager.cpp:6852` and its measure ignore `cb->fontAtlasKey`; small fix, same file as step 2 only if wanted.
 5. Step 3: serialization (`SceneSerializer.cpp:1143` / `:2370`, old files must still load: absent key -> empty font), no export change needed (above).
 
-## Handoff
+## Handoff (step 1, survey; superseded by the final Handoff below)
 **Verified (by reading):** every file:line above (re-grepped `UIFontCache::`, `getFont(`, `UITextComponent`, `emitUITextGlyphs`, `fontAtlasKey`). The brief's `ContentManager.cpp:2256` is the Font *save*, the getter is `:2662`.
 **Not verified:** nothing compiled or run; D3D11/D3D12/Vulkan/Metal/GL/Software accept non-zero keys by code reading only; font rename-retarget; "no world-space text" is grep-based.
 **Decisions taken:** none beyond the survey. Suggested: step 2 copies the widget path (path string + transient key), no new route.
 **Traps for step 2:** (a) `keyFor` caches by (id, px, scripts) and never re-reads bytes (`UIFont.cpp:366-387`): a re-imported font with the same UUID keeps the old bake until restart. (b) The thumbnail bakes at 64 px, widgets at `FontAsset::size` (default 48, clamped 8..120): different atlases, so budget D3D12's 16 slots. (c) `UIElement` already re-measures on key/pointer change (`UIElement.cpp:1425-1433`); `UITextComponent` has no measure cache, so nothing to add there. (d) A runtime-registered Font needs `path` set or `loadAsset(path)` returns `UUID{}` (memory `asset-pointer-lifetime`, UI-texture lesson). (e) `getFont` pointers die at the next `loadAsset`: copy `size`/bytes into `keyFor` immediately, as `WidgetManager` does.
 **Do not touch in step 2:** `UIFont.cpp` bake/key logic, any backend `*Renderer.*`, `EditorApplication.cpp:1207-1234` (editor font), `HpakWriter.cpp`/`ProjectExporter.cpp` (no export change needed), `UIWidgetTree.cpp` serialization of `font`.
 **Next steps:** 1) step 2 as in gaps 1-2, test via a `FontAsset` built like `test_hpak.cpp:567` + `emitUITextGlyphs` output `fontAtlasKey != 0`; 2) step 3 serializer round trip incl. old form; 3) step 4 full `he_tests`.
+
+## Handoff
+
+- **Topic / step:** 226 (Font asset for the game), step 4 of 4 (verification); steps 1-3 are done
+- **Branch / commit:** `claude/font-asset-typ-f-rs-spiel-import-und-nutzung-in-widgets-und-` @ a0ed92aa5 + this doc commit (pushed: see the step result)
+- **Done:** `UITextComponent` (entity UI text) now carries a Font asset path. `UISystem::extract` resolves it to a baked atlas key every extract and draws with that atlas; empty path = shared default font as before. Inspector has a Font picker, scenes save/load the path. Nothing in this step changed code.
+- **Files touched (steps 2-3):**
+  - `src/HE_Scene/include/HorizonScene/Components/UITextComponent.h:12-15` — `font` (serialized) and `fontAtlasKey` (transient)
+  - `src/HE_Scene/src/UISystem.cpp:146,244-274` — `contentManager` param, `loadAsset` -> `getFont` -> `UIFontCache::keyFor(hi^lo, bytes, size>0?size:48)`, falls back to the key-0 emit overload when no face is found
+  - `src/HE_Scene/include/HorizonScene/UISystem.h` — `extract(..., ContentManager* = nullptr)`
+  - `src/HE_Rendering/src/RenderExtractor.cpp:1776` — passes `m_contentManager`
+  - `src/HE_Scene/src/SceneSerializer.cpp:1153` (write, only when set), `:2381` (read, absent = empty); no version bump
+  - `src/HE_Editor/InspectorPanel.cpp` (hunks near 397 and 3955) and `EditorHelp.cpp:1474` ("UI Text/Font")
+  - tests: `tests/test_ui.cpp:223`, `tests/test_scene_serializer.cpp:2928`
+- **Verified (Mac, Release, `cmake-build-release`):**
+  - `cmake --build ... --target he_tests` rc=0 but nothing recompiled (objects were already current). So warnings were checked separately: `-fsyntax-only -Wall -Wextra` with the targets' own flags.make flags on `UISystem.cpp`, `SceneSerializer.cpp`, `RenderExtractor.cpp`, `InspectorPanel.cpp`, `test_ui.cpp`, `test_scene_serializer.cpp`: all rc 0, no warning in a line this topic added. Old warnings remain: `test_scene_serializer.cpp:1494,1500` (unused structured bindings), `InspectorPanel.cpp:2687,2689` (misleading indentation), `:3303` (null char in literal). The `HorizonEditor` target itself was not built or linked here.
+  - Full `he_tests` run from the build dir with `HOME=/tmp/<empty>`: **5940 test cases, 5940 passed, 0 failed, 19 skipped** (1887901 assertions). The skips are the env-gated live tests (`HE_TEST_TEAM_SERVER`, `HE_TEST_RELAY`, ...).
+  - Targeted: `test_ui` 21/21, `test_scene_serializer` 47/47, `test_ui_widgets` 456/456, `test_ui_font_weight` 3/3, `test_ui_font_scripts` 1/1; `test_hpak` 59/59 with the clean `HOME`.
+  - `python3 scripts/editor_help_audit.py --check`: exit 0, 1243/1243 controls covered, 2059 help entries.
+- **First full run (real `$HOME`) had 1 failure, NOT caused by this topic:** `test_hpak.cpp:1188` (`scanContentDirectory() == 2`, got 10). Cause: `scanContentDirectory` (`ContentManager.cpp:3433`) also scans `GlobalState::engineContentCacheDir()` = `~/Library/Application Support/HorizonEngine/EngineContentCache`, which holds this Mac's SFTP-synced EngineContent (Audio, Meshes, Textures, manifest.json). With an empty `HOME` the case passes (9/9 asserts) and so does the whole suite. The topic touches nothing in `src/HE_Core`. I did not build `main` for a baseline: the main checkout is on release/0.8.0 with an October binary, and the cause above is shown directly.
+- **Not verified:** D3D11/D3D12/Vulkan/Metal/GL rendering of a non-zero entity-text key (backends read it by code only, table above); no screenshot of the Inspector picker or of entity text in a non-default font; Windows run of the full suite (the old five Windows failures, e.g. `test_physics_threading` SEH, were not re-run here and did not appear on this Mac).
+- **Decisions taken:** treated the `scanContentDirectory` failure as environmental, proved it by the `HOME` rerun and did not change test or code; renamed the step-1 handoff heading so this is the one `## Handoff`.
+- **Decisions suggested, not taken:** make the `test_hpak` case hermetic (point the cache dir at the temp dir, or assert `>= 2` on the two ids it authored) so it does not depend on a developer's synced EngineContent; any Mac that has ever synced content fails it.
+- **Pending:**
+  1. Designer preview ignores the Font asset (gap 3). 2. ComboBox popup and its measure ignore `cb->fontAtlasKey` (gap 4, `WidgetManager.cpp:6852`). 3. No script setter for the text font (`ScriptApi.h:65-67`; a registry row needs the "three (four) places"). 4. D3D12 has 16 atlas slots, each distinct (font, px) entity text costs one.
+- **Traps:** run `he_tests` from the build dir (CWD-relative paths); a real `$HOME` with synced EngineContent turns `test_hpak` scanContentDirectory red; `keyFor` never re-reads bytes, so a re-imported font with the same UUID keeps the old bake until restart; background task output is truncated, redirect to a file.
+- **Next steps:** 1. Merge by the queen. 2. Run the full suite once on NN-WS03 (Windows) for the old five. 3. Look at entity text with a non-default font on D3D12/Vulkan. 4. Optionally the hermetic `test_hpak` fix above.
