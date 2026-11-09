@@ -135,6 +135,15 @@ public:
 	uint64_t GetSubmittedFrameSerial() const { return m_submitSerial; }
 	uint64_t GetCompletedFrameSerial();
 
+	// View mode (IRenderer::SetViewMode) as the two questions the passes ask.
+	// Wireframe is drawn unlit — shaded edges say nothing a flat edge does not,
+	// and the flat one reads far better against the sky. Mirrors GL/Metal/D3D11/D3D12.
+	bool  UnlitViewActive() const
+	{
+		return m_viewMode == HE::ViewMode::Unlit || m_viewMode == HE::ViewMode::Wireframe;
+	}
+	bool  WireframeViewActive() const { return m_viewMode == HE::ViewMode::Wireframe; }
+
 private:
 	void createInstance();
 	void createSurface();

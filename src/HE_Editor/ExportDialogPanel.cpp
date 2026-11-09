@@ -861,7 +861,18 @@ void render(AppContext& ctx)
         // Holding the project still while the worker packs is the Build window's
         // job now — it is the modal that stays up for the whole run.
 
-        ImGui::SetNextWindowSize(ImVec2(560, 0), ImGuiCond_Always);
+        // Width follows the editor window instead of a fixed pixel count: 560 px
+        // is a sliver on a 4K display and most of the screen on a laptop, and
+        // resizing it by hand on every open is exactly what this avoids. The
+        // clamp keeps the profile row (combo + two buttons + name field) from
+        // being squeezed and the lines from becoming unreadably long;
+        // pinDialogToEditorWindow still caps it to the window on tiny screens.
+        // The floor follows the font as well: the profile row (combo, two buttons,
+        // a name field) is ~40 characters wide whatever the display scale is.
+        const float dlgW = std::clamp(ImGui::GetMainViewport()->WorkSize.x * 0.45f,
+                                      ImGui::GetFontSize() * 42.0f, 1100.0f);
+        const float dlgK = dlgW / 560.0f;   // scale for the fixed-width fields below
+        ImGui::SetNextWindowSize(ImVec2(dlgW, 0), ImGuiCond_Always);
         EditorWidgets::pinDialogToEditorWindow();
         if (ImGui::BeginPopupModal("Export Project##build", nullptr,
             ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings))
@@ -889,7 +900,7 @@ void render(AppContext& ctx)
 
                 ImGui::Text("Profile:");
                 ImGui::SameLine();
-                ImGui::SetNextItemWidth(180.0f);
+                ImGui::SetNextItemWidth(180.0f * dlgK);
                 if (ImGui::BeginCombo("##exportProfile",
                         proj.exportProfiles[s_exportProfileIdx].name.c_str()))
                 {
@@ -915,7 +926,7 @@ void render(AppContext& ctx)
                     pm->saveProject(proj.path);
                 }
                 ImGui::SameLine();
-                ImGui::SetNextItemWidth(120.0f);
+                ImGui::SetNextItemWidth(120.0f * dlgK);
                 ImGui::InputTextWithHint("##newProfileName", "new profile",
                                          &s_exportNewProfileName);
                 ImGui::SameLine();
@@ -988,9 +999,9 @@ void render(AppContext& ctx)
                 // rather than at the window edge: the popup is AlwaysAutoResize and
                 // only the SetNextWindowSize above keeps its width from following
                 // its own content, so a wrap at "the current width" is one dropped
-                // line away from shrinking the dialog frame over frame. 550 = the
-                // 560 the dialog is pinned to, minus the window padding.
-                EditorWidgets::WrapText wrap(550.0f);
+                // line away from shrinking the dialog frame over frame. dlgW - 10
+                // = the width the dialog is pinned to, minus the window padding.
+                EditorWidgets::WrapText wrap(dlgW - 10.0f);
                 const std::filesystem::path base =
                     SDL_GetBasePath() ? std::filesystem::path(SDL_GetBasePath())
                                       : std::filesystem::path{};
@@ -1056,7 +1067,7 @@ void render(AppContext& ctx)
             {
                 ImGui::Text("Texture compression:");
                 ImGui::SameLine();
-                ImGui::SetNextItemWidth(170.0f);
+                ImGui::SetNextItemWidth(170.0f * dlgK);
                 const char* fmtPreview = s_exportTextureFormat == "None"
                                              ? "None (RGBA8)" : "Auto (per target)";
                 if (ImGui::BeginCombo("##textureFormat", fmtPreview))
@@ -1071,7 +1082,7 @@ void render(AppContext& ctx)
                 ImGui::SameLine();
                 ImGui::TextUnformatted("Quality:");
                 ImGui::SameLine();
-                ImGui::SetNextItemWidth(110.0f);
+                ImGui::SetNextItemWidth(110.0f * dlgK);
                 static const char* const kQualityNames[] = { "Fast", "Balanced", "High" };
                 const int q = std::clamp(s_exportTextureQuality, 0, 2);
                 ImGui::BeginDisabled(s_exportTextureFormat == "None");
@@ -1084,6 +1095,9 @@ void render(AppContext& ctx)
                 }
                 ImGui::EndDisabled();
                 EditorWidgets::helpForKey("Export/Texture quality");
+                // Wrapped: these notes are longer than the dialog, and a clipped
+                // sentence reads as a complete one.
+                EditorWidgets::WrapText wrap(dlgW - 10.0f);
                 if (s_exportTextureFormat == "None")
                     ImGui::TextDisabled("Uncompressed RGBA8 with baked mips: the exact pixels, "
                                         "and the largest pak.");
@@ -1100,7 +1114,10 @@ void render(AppContext& ctx)
             EditorWidgets::checkbox("Compress assets",       &s_exportCompress);
             EditorWidgets::checkbox("Encrypt assets",        &s_exportEncrypt);
             if (s_exportEncrypt)
+            {
+                EditorWidgets::WrapText wrap(dlgW - 10.0f);
                 ImGui::TextDisabled("Note: encryption key management is the project's responsibility.");
+            }
             // Mods are a game's idea: a .hpak dropped next to the executable that
             // replaces content. An application is not modded from outside, and a
             // switch nobody should touch is worse than no switch.
@@ -1108,7 +1125,10 @@ void render(AppContext& ctx)
             {
                 EditorWidgets::checkbox("Enable mod support",    &s_exportModSupport);
                 if (s_exportModSupport)
+                {
+                    EditorWidgets::WrapText wrap(dlgW - 10.0f);
                     ImGui::TextDisabled("The game mounts every .hpak in a Mods/ folder next to the executable.");
+                }
             }
             else
                 s_exportModSupport = false;
@@ -1118,7 +1138,10 @@ void render(AppContext& ctx)
             {
                 EditorWidgets::checkbox("Development hotkeys",   &s_exportDevTools);
                 if (s_exportDevTools)
+                {
+                    EditorWidgets::WrapText wrap(dlgW - 10.0f);
                     ImGui::TextDisabled("F10 shows the stats card with per-pass GPU times, V toggles VSync. Leave off for the build players get.");
+                }
             }
             else
                 s_exportDevTools = false;
@@ -1134,7 +1157,7 @@ void render(AppContext& ctx)
             // against, or what stops it before anything runs.
             const HE::ExportSdk::ExportGate sdkGate = currentExportGate(ctx);
             {
-                EditorWidgets::WrapText wrap(550.0f);
+                EditorWidgets::WrapText wrap(dlgW - 10.0f);
                 ExportSdkGateUi::drawGameCompileStatus(ctx, sdkGate);
             }
 
@@ -1175,7 +1198,7 @@ void render(AppContext& ctx)
                 const auto lastRun = BuildProgressDialog::interpretedClasses();
                 if (!lastRun.headline.empty())
                 {
-                    EditorWidgets::WrapText wrap(550.0f);
+                    EditorWidgets::WrapText wrap(dlgW - 10.0f);
                     ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f),
                                        "Last export: %s", lastRun.headline.c_str());
                     // Four is what the build window shows before it scrolls;
@@ -1353,8 +1376,27 @@ void render(AppContext& ctx)
 
     if (s_startRequest && !s_exportRunning.load())
     {
-        s_startRequest = false;
-        requestStart(ctx);
+        // The setup in startExport (every scene loaded and serialized, every
+        // HorizonCode asset read) runs on this thread and blocks the editor for
+        // as long as the project is big. Start it one frame later and put the
+        // Build window up first, so the click is answered with "Preparing…"
+        // instead of a window that simply stops. Only when the run is going to
+        // start: a parked or refused one must not leave this run behind.
+        static bool s_announced = false;
+        if (!s_announced && currentExportGate(ctx).state == HE::ExportSdk::GateState::Ready)
+        {
+            s_announced = true;
+            Build::begin({ "Setup" });
+            Build::stepBegin(0);
+            Build::setActivity("Preparing export: reading scenes and assets\xe2\x80\xa6");
+            BuildProgressDialog::requestOpen();
+        }
+        else
+        {
+            s_announced    = false;
+            s_startRequest = false;
+            requestStart(ctx);
+        }
     }
     pumpWaitingExport(ctx);
 #else

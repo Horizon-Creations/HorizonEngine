@@ -88,6 +88,15 @@ public:
     // + this frame's CPU draw/triangle/visibility counters.
     FrameGpuStats GetFrameGpuStats() const override;
 
+    // View mode (IRenderer::SetViewMode) as the two questions the passes ask.
+    // Wireframe is drawn unlit — shaded edges say nothing a flat edge does not,
+    // and the flat one reads far better against the sky. Mirrors GL/Metal.
+    bool  UnlitViewActive() const
+    {
+        return m_viewMode == HE::ViewMode::Unlit || m_viewMode == HE::ViewMode::Wireframe;
+    }
+    bool  WireframeViewActive() const { return m_viewMode == HE::ViewMode::Wireframe; }
+
 private:
     // Extract → cull → sort → RenderGraph → replay into the currently bound targets.
     void DrawScene(int width, int height);

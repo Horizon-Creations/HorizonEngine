@@ -469,7 +469,8 @@ cbuffer PerFrame : register(b1)
     float4   uCascadeSplits;
     float4   uCameraFwd;    // xyz = world forward, w = 1 / shadow map size
     float4   uShadowBias;
-    int4     uShadowEnabled; // x = 0/1, y = 1 → tint fragments by cascade (debug)
+    int4     uShadowEnabled; // x = 0/1, y = 1 → tint fragments by cascade (debug),
+                              // z = 1 → Unlit/Wireframe view (heLitP's twin below)
     float4   uSunDir;    // xyz = sun direction
     float4   uFog;       // x=fogDensity, y=fogHeightFalloff
     float4   uViewport;  // x=W, y=H, z=ssaoEnabled
@@ -764,6 +765,12 @@ float4 PSMain(VSOut i) : SV_TARGET
     // Mirrors GL/Metal/D3D11: a base-color texture (when present, flagged by uColor.a)
     // replaces the flat colour; PBR scalars still come from uPBR.
     float3 base  = (uColor.a > 0.5) ? uAlbedo.Sample(uAlbedoSamp, i.uv).rgb : uColor.rgb;
+    // Unlit view mode: the material's base colour and nothing else — before
+    // any lighting, shadow or weather term. Twin of GL's uUnlit/Metal's
+    // scene.unlit/D3D11's kSceneHLSL; heLitP in MaterialShaderLibrary.cpp
+    // covers graph materials and the deferred resolve the same way.
+    if (uShadowEnabled.z != 0)
+        return float4(base, uPBR.z);
     float  met   = uPBR.x, rough = max(uPBR.y, 0.04);
     float3 N     = normalize(i.normal);
     // Flat-shade fallback for a scene without any light. With clustering on
@@ -1245,7 +1252,7 @@ namespace
         glm::vec4  cascadeSplits;   // xyz = planar view-space far distances, w = count
         glm::vec4  cameraFwd;       // xyz = world forward, w = 1 / shadow map size
         glm::vec4  shadowBias;      // x = slope-scaled factor, y = minimum
-        glm::ivec4 shadowEnabled;   // x = 0/1, y = cascade debug tint
+        glm::ivec4 shadowEnabled;   // x = 0/1, y = cascade debug tint, z = Unlit/Wireframe view
         glm::vec4  sunDir;     // xyz = sun direction
         glm::vec4  fog;        // x=fogDensity, y=fogHeightFalloff
         glm::vec4  viewport;   // x=W, y=H, z=ssaoEnabled
@@ -12219,7 +12226,8 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
         f.cascadeSplits = cascadeSplits;
         f.cameraFwd     = glm::vec4(camFwd, 1.0f / static_cast<float>(std::max(p.shadowSize, 1)));
         f.shadowBias    = glm::vec4(p.shadowSettings.slopeBias, p.shadowSettings.minBias, 0.0f, 0.0f);
-        f.shadowEnabled = glm::ivec4(shadows ? 1 : 0, p.debugShadowCascades ? 1 : 0, 0, 0);
+        f.shadowEnabled = glm::ivec4(shadows ? 1 : 0, p.debugShadowCascades ? 1 : 0,
+                                     UnlitViewActive() ? 1 : 0, 0);
         f.sunDir = glm::vec4(p.m_renderWorld.sunDirection, 0.0f);
         // Volumetric fog owns the opaque fog this frame (Thema 225 step 9): the full-screen
         // Apply pass fogs the finished opaque scene + sky instead; the analytic term on top
@@ -12373,6 +12381,10 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
         lit.fog[1] = m_environment.fogHeightFalloff;
         lit.fog[2] = skyEnvBound ? 1.0f : 0.0f;
         lit.fog[3] = aoActive    ? 1.0f : 0.0f;
+        // Viewport view mode (v3.2): Unlit/Wireframe hand heLitP's base colour
+        // back untouched — graph materials, the deferred resolve (rl copies
+        // frameMatLight) and the forward replay all read this. Mirrors GL/Metal/D3D11.
+        lit.viewMode[0] = UnlitViewActive() ? 1.0f : 0.0f;
         // Volumetric fog (HeLighting v3.6, Thema 225 step 9): fogVol.x gates the opaque
         // heApplyFog (Apply owns it instead). fogVol.w (heFogVolume bound) stays 0 and
         // fogVol.w: heFogVolume (t34) is bound in every forward material block this frame, so
