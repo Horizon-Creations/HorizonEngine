@@ -1309,9 +1309,9 @@ bool nodeTypeByName(const std::string& name, HE::MatNodeType& out)
 }
 
 // Why a MASTER's add menu would not offer this type, or nullptr when it would.
-// The same three exclusions MaterialEditorPanel's `listed` makes, minus
-// FunctionCall, which the panel offers through its function list and this
-// interface offers through 's'.
+// The same exclusions MaterialEditorPanel's `listed` makes, minus FunctionCall,
+// which the panel offers through its function list and this interface offers
+// through 's'.
 const char* masterTypeRefusal(HE::MatNodeType t)
 {
 	switch (t)
@@ -1325,6 +1325,10 @@ const char* masterTypeRefusal(HE::MatNodeType t)
 		return "Function Input / Function Output are the interface of a material "
 		       "FUNCTION; on a material they would be pins of nothing, and the "
 		       "Material Editor's add menu does not offer them here either.";
+	case HE::MatNodeType::RvtSample:
+		return "RvtSample is engine-internal (Thema 333): the runtime landscape path "
+		       "wires its inputs itself when it builds a virtual-texture consumer "
+		       "material, and the Material Editor's add menu does not offer it either.";
 	default:
 		return nullptr;
 	}
@@ -1559,6 +1563,9 @@ void addNodeTypes(McpToolRegistry& registry, ContentManager& content,
 			if (d.type == HE::MatNodeType::Output) continue;
 			const bool fnOnly = isFunctionOnly(d.type);
 			if (filtered && fnOnly && !forFunction) continue;
+			// RvtSample is engine-internal on every asset (Thema 333), same as the
+			// panel's add menu; unlike FnInput/FnOutput this holds for a function too.
+			if (filtered && d.type == HE::MatNodeType::RvtSample) continue;
 			const char* enumName = nodeTypeName(d.type);
 			if (!matches({ enumName, d.name, d.category })) continue;
 
