@@ -145,7 +145,7 @@ bool RvtLandscape::attach(HorizonWorld& live, entt::entity terrain, Segment& seg
 
     rvt::VolumeDesc vd;
     vd.origin = r0.min;
-    vd.sizeM = tc.sizeX;
+    vd.sizeM = tc.sizeX;                           // the volume is a square; sizeX == sizeZ here, HlodBaker::begin refuses non-square chunks
     vd.finestMetersPerTexel = m_settings.metersPerTexel;
     seg.volume = m_manager->addVolume(vd);
     seg.volumeLive = true;
