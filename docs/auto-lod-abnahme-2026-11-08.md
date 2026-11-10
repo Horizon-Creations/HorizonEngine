@@ -48,6 +48,18 @@ Stand 08.11.2026, Metal auf dem M5 (MacBook Air). **Kein Engine-Code geaendert**
 | Kette (Schritt 3, ohne Karte) | 1 / 2 | 23,40 M | 24 | 72 / 72 | 87,7 / 86,5 | 62,3 / 61,6 | 17,1 / 16,5 | 6,6 / 6,5 | 21,2 (41,2) / 21,5 (46,7) | 12,0 / 4,0 |
 | **Endkonfiguration: Kette + Impostor** | 1 / 2 / 3 | **0,14 M** | 25 | 144 / 144 | **29,8 / 27,1 / 27,3** | 25,7 / 23,6 / 23,5 | 0,84 / 0,78 / 0,79 | 1,26 / 1,17 / 1,17 | 41,1 (14,9) / 64,1 (10,4) / 50,0 (15,6) | 11,4 / 2,4 / 3,6 |
 
+**Achtung, Spalte SSAO ist kein reines SSAO (Nachtrag 10.11., Schritt 22).** Der Integrationscheck (Thema 341) las in derselben Szene SSAO ~11 ms (Impostor) bzw. ~61 ms (v0)
+statt 1,2 / 11,6 ms, bei gleicher oder niedrigerer Summe. Das ist **keine SSAO-Regression**, sondern die Zuordnung des Detailed-Captures:
+* Die Metal-Passzeit gehoert zum Command Buffer, nicht zum Algorithmus: `flushPass("SSAO")` (`MetalRenderer.mm`, nach dem GIProbes-Update) bis `flushPass("Scene")` ist der Eimer "SSAO".
+  Im **Forward-Pfad** liegt darin nur der SSAO-Vorpass (daher 1,2 ms hier). Im **Deferred-Tile-Pfad** liegen darin auch `EncodeGBuffer` + Decals + `EncodeDeferredResolveTile` (die eigentliche
+  Szenen-Rasterung), Velocity, GI-Reflexionen/SSR und der Wasser-Pre-Pass; "Scene" ist dann nur noch der Forward-Rest (Transparente, Sky, Fog). Die Rasterzeit der Pflanzen (v0: 47 M Dreiecke) wandert so von Scene nach SSAO.
+* Es hat **keinen Commit gegeben, der die Eimergrenzen seit diesem Bericht verschoben haette**: `git diff 88945637f HEAD` an `MetalRenderer.mm` enthaelt kein `flushPass`/`runSSAO`. Die Aufteilung Deferred/Forward
+  existiert seit Deferred P6 (31.07.) und dem Wasser-Pre-Pass (52ffe4e39, 28.10.), beides vor diesem Bericht. Die Zeilen oben liefen mit `--set RenderScale=2` und frischem `cfgdir`
+  ohne Render-Pfad-Angabe (Standard `Forward`, `IRenderer.h` `m_renderPath`); der Check lief sehr wahrscheinlich mit Deferred (persistierte Editor-Einstellung oder `HE_DUMP_RENDERPATH`). **Das ist aus den Dateien
+  geschlossen, der Check-Lauf selbst wurde hier nicht wiederholt (nicht gemessen).**
+* Vergleichbar sind deshalb nur **GPU ges.** und die Summe Scene + SSAO (bei gleichem Render-Pfad), nicht die Einzelspalten ueber Pfade hinweg. Wer Scene/SSAO/Shadow vergleicht, nennt den Render-Pfad dazu.
+* Die Tabelle gilt unveraendert fuer den **Forward-Pfad**; der Gewinn "Schatten + SSAO 43,6 -> 2,0 ms" in Abschnitt 1 ist dort ein reiner Forward-Wert.
+
 Bloom 0,8 bis 0,9 und Present 0,26 bis 0,28 ms in allen Zeilen gleich. fps im Pass-Lauf (Zaehler an, RS2), nur als Beleg, lastabhaengig:
 v0 4,5 / 5,0 / 8,3; v5 7,6 / 16,9; Kette 5,5 / 10,9; Impostor 11,4 / 27,7 / 15,1.
 
