@@ -2,6 +2,7 @@
 #include "ImporterCommon.h"
 #include "PbrMaterialImport.h"
 #include "Diagnostics/Logger.h"
+#include "Hpak/MeshTextureBake.h"
 
 #include <algorithm>
 #include <cmath>
@@ -28,18 +29,6 @@ constexpr float kAlphaCutoff = 0.2f;
 // shadow and SSAO passes draw again and pay for (docs/auto-lod-impostor-overdraw-2026-11-08.md).
 constexpr int kCardBands = 4, kCardRunsPerBand = 2, kCardGapDivisor = 4;
 
-// ── sRGB, only for tinting: a tint is a LINEAR multiplier and the texture holds
-// encoded bytes, so a tint other than white goes through linear and back.
-float srgbToLinear(float c)
-{
-    return c <= 0.04045f ? c / 12.92f : std::pow((c + 0.055f) / 1.055f, 2.4f);
-}
-float linearToSrgb(float c)
-{
-    c = std::clamp(c, 0.0f, 1.0f);
-    return c <= 0.0031308f ? c * 12.92f : 1.055f * std::pow(c, 1.0f / 2.4f) - 0.055f;
-}
-
 struct Sample
 {
     uint8_t r = 0, g = 0, b = 0;
@@ -63,8 +52,12 @@ struct View
     }
 };
 
+// A tint is a LINEAR multiplier and the texture holds encoded bytes, so a tint other than
+// white goes through linear and back.
 uint8_t tinted(uint8_t c, float tint, bool srgb)
 {
+    using HE::MeshBake::linearToSrgb;
+    using HE::MeshBake::srgbToLinear;
     if (tint == 1.0f) return c;
     const float v = srgb ? linearToSrgb(srgbToLinear(static_cast<float>(c) / 255.0f) * tint)
                          : static_cast<float>(c) / 255.0f * tint;

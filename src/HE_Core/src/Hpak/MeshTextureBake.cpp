@@ -8,11 +8,6 @@
 namespace HE::MeshBake
 {
 
-namespace
-{
-
-constexpr float kEps = 1e-4f;
-
 float srgbToLinear(float c)
 {
 	return c <= 0.04045f ? c / 12.92f : std::pow((c + 0.055f) / 1.055f, 2.4f);
@@ -22,6 +17,12 @@ float linearToSrgb(float c)
 	c = std::clamp(c, 0.0f, 1.0f);
 	return c <= 0.0031308f ? c * 12.92f : 1.055f * std::pow(c, 1.0f / 2.4f) - 0.055f;
 }
+
+namespace
+{
+
+constexpr float kEps = 1e-4f;
+
 uint8_t toByte(float v) { return static_cast<uint8_t>(std::lround(std::clamp(v, 0.0f, 1.0f) * 255.0f)); }
 
 const std::array<float, 256>& srgbLut()

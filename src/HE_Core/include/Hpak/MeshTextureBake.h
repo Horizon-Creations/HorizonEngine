@@ -108,4 +108,9 @@ inline constexpr const char* kBakedEmissive = "baked:emissive";
 
 HE_API Result bake(const MeshInput& mesh, const ImageLookup& images, const Options& options);
 
+// The sRGB transfer curve (c in 0..1). Exported because the impostor bake tints encoded bytes
+// the same way; linearToSrgb clamps its input to 0..1.
+HE_API float srgbToLinear(float c);
+HE_API float linearToSrgb(float c);
+
 } // namespace HE::MeshBake
