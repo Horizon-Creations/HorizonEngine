@@ -8,6 +8,8 @@
 
 #include <HorizonScene/UISystem.h>
 #include <Renderer/UIFont.h>
+#include <ContentManager/ContentManager.h>
+#include <ContentManager/Assets.h>
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/EntityActive.h>   // the "Active" switch: a switched-off canvas or element draws nowhere
 #include <HorizonScene/Components/UICanvasComponent.h>
@@ -142,7 +144,7 @@ bool computeScreenRect(entt::registry& reg, entt::entity e,
 }
 
 void extract(HorizonWorld& world, float vpWidth, float vpHeight,
-             std::vector<UIRenderObject>& out)
+             std::vector<UIRenderObject>& out, ContentManager* contentManager)
 {
     auto& reg = world.registry();
 
@@ -242,9 +244,50 @@ void extract(HorizonWorld& world, float vpWidth, float vpHeight,
             // scaled to pixels like every other vertical extent.
             if (auto* txt = reg.try_get<UITextComponent>(elemEnt))
             {
-                HE::emitUITextGlyphs(txt->text, screenPos, screenSize,
-                                     txt->fontSize * scaleY, txt->color,
-                                     sortLayer + (btn ? 1 : 0), btn != nullptr, out);
+                // Font path -> baked atlas key (0 = shared default font), the
+                // same resolution WidgetManager::refreshElementAssets does for
+                // widget elements. Re-resolved only when `font` changed since
+                // the last resolution, not every extract: a HIT is cheap
+                // (loadAsset/keyFor both hit a cache once loaded/baked), but a
+                // MISS is not — a stale path re-probes the disk and an
+                // unparseable TTF re-runs the full atlas bake, every call,
+                // because keyFor only caches successful bakes. Without a
+                // contentManager there is nothing to resolve either way, so
+                // the key always falls back to the shared default. resolvedFont
+                // is cleared with the key: leaving it set would make a later
+                // call WITH a contentManager think the (now zeroed) key is
+                // still valid for `font` and never resolve it again.
+                if (!contentManager)
+                {
+                    txt->fontAtlasKey = 0;
+                    txt->resolvedFont.clear();
+                }
+                else if (txt->font != txt->resolvedFont)
+                {
+                    txt->resolvedFont = txt->font;
+                    txt->fontAtlasKey = 0;
+                    if (!txt->font.empty())
+                    {
+                        const HE::UUID fid = contentManager->loadAsset(txt->font);
+                        if (const FontAsset* fa = fid == HE::UUID{} ? nullptr : contentManager->getFont(fid);
+                            fa && !fa->fontData.empty())
+                        {
+                            const float bakePx = fa->size > 0 ? (float)fa->size : 48.0f;
+                            txt->fontAtlasKey = HE::UIFontCache::keyFor(fid.hi ^ fid.lo, fa->fontData, bakePx);
+                        }
+                    }
+                }
+
+                const HE::BakedUIFont* face =
+                    txt->fontAtlasKey != 0 ? HE::UIFontCache::find(txt->fontAtlasKey) : nullptr;
+                if (face)
+                    HE::emitUITextGlyphs(*face, txt->fontAtlasKey, txt->text, screenPos, screenSize,
+                                         txt->fontSize * scaleY, txt->color,
+                                         sortLayer + (btn ? 1 : 0), btn != nullptr, out);
+                else
+                    HE::emitUITextGlyphs(txt->text, screenPos, screenSize,
+                                         txt->fontSize * scaleY, txt->color,
+                                         sortLayer + (btn ? 1 : 0), btn != nullptr, out);
             }
         }
     }
