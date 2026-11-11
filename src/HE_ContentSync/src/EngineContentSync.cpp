@@ -76,12 +76,16 @@ bool EngineContentSync::refreshManifestBlocking()
 	// for, SFTP stays the fallback for installs that never set config.json's
 	// "EngineContentServerUrl". Both feed the same refreshManifestWith, so single-flighting
 	// (m_refreshMutex), the cache write and the rename guard are identical either way.
+	// Retried on a failed CONNECTION only, same as the SFTP path below (see
+	// sftpWithConnectRetry): a 4xx/404 from the server itself is not transient and
+	// comes back from contentServerGetManifest with `transient` unset.
 	const ContentServerEndpoint& server = contentServerEndpoint();
 	if (server.configured())
 	{
 		return refreshManifestWith([&server](const std::string& localPath)
 		{
-			return contentServerGetManifest(server, localPath);
+			return sftpWithConnectRetry(
+				[&] { return contentServerGetManifest(server, localPath); });
 		});
 	}
 
