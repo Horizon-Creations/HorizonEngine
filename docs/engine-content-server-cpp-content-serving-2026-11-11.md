@@ -4,6 +4,42 @@ Topic 194. Still nothing of the new server lives in this repo (see step 1's doc,
 `docs/engine-content-server-cpp-scaffold-2026-11-11.md`); this doc only records where it is and
 what is open. All work for this step is in the separate repo, on a branch, not yet merged.
 
+## Windows manifest-lock bug: step 6 verification (2026-11-11)
+
+The known bug (`docs/engine-content-manifest-windows-lock-2026-10-13.md`, topic 187) was two
+threads of the **engine editor client** racing a temp-file rename of the same cached manifest
+(`EngineContentSync.cpp`'s `.manifest.json.tmp(.partial)`); MSVC never opens a file with
+`FILE_SHARE_DELETE`, so one thread's open handle makes the other's `rename` fail. Fixed there
+with `m_refreshMutex` plus a retrying `detail::renameReplacing` (`CsRename.h:32`).
+
+The new **server** cannot hit this: `loadOrScanManifest` (`src/Manifest.cpp:498`, server repo)
+opens `manifest.json`, slurps it whole, closes it — sub-millisecond — and `main.cpp:84-95` does
+this exactly once, at startup; every `GET /manifest.json` after that is served from one
+in-memory string (`Listener.h:33-36`), never touching the file again. No rename, no second
+handle, nothing to race.
+
+Verified live (NN-WS03, Release build of server-repo commit 97accd8, real
+`horizon-content-server.exe`, 20 MiB test file):
+1. Replacing `manifest.json` mid-download, no external holder: git-bash `mv` succeeded instantly, the
+   concurrent download finished byte-exact, server unaffected (serves the old cached body until
+   restarted — expected, not a bug).
+2. Same, but a second process held `manifest.json` open (`FileShare.Read`, no delete — the
+   "scanner/indexer" case topic 187 names): the replace itself failed (`Device or resource
+   busy`, confirmed still in flight via a PID check on the holder and on curl) until the holder
+   released, then succeeded — ordinary Windows filesystem behavior from an external holder, not
+   the server. The concurrent download was unaffected in both cases.
+3. Same setup against the **content file being downloaded** instead of `manifest.json`:
+   replacing it mid-transfer *does* fail the same way (`FileServer::serveFile`,
+   `FileServer.cpp:93-150`, holds its `ifstream` open for the whole transfer, no
+   `FILE_SHARE_DELETE`). This is the same Win32 mechanism as the bug, on a different file — it's
+   real, but it's step 4's (deploy/publish) problem, not step 6's: options are deploying to a
+   new path and swapping the manifest, a Linux host (no issue there), or opening with
+   `FILE_SHARE_DELETE` under `_WIN32`.
+
+**Conclusion:** the manifest-lock bug class is avoided by construction (no reopen, no rename,
+no second handle on `manifest.json`), confirmed under load; no server code change was needed.
+The content-file variant found in test 3 is real and carried forward to step 4, not fixed here.
+
 ## Handoff
 
 - **Topic / step:** 194 Engine-Content-Server neu in C++, step 2 of 5
@@ -80,7 +116,9 @@ what is open. All work for this step is in the separate repo, on a branch, not y
   Linux/macOS.
 - **Pending:** no CI workflow yet for the server repo (Linux/macOS builds still unverified,
   carried over from step 1). The branch above is not merged — needs the queen's review/merge
-  before step 3 can build on it.
+  before step 3 can build on it. Step 6 (see section above) found the manifest-lock bug does not
+  reach the server, but a same-mechanism lock on a content file being replaced while downloaded
+  does — step 4's deploy/publish design needs to account for that (not fixed here).
 - **Traps:** `Listener() = default;` written inline in the header does not compile once a member
   is a `unique_ptr` to a forward-declared nested type (`Listener::Pool`) — MSVC needs `Pool`
   complete to reason about the implicit constructor's exception safety, even though nothing in
@@ -93,5 +131,8 @@ what is open. All work for this step is in the separate repo, on a branch, not y
 - **Next steps:** 1. Queen reviews/merges
   `claude/content-server-step-2-file-serving` on the server repo. 2. Step 3: engine-side
   `HE_ContentSync` client talks to this server (manifest fetch + `GET /content/...`), SFTP stays
-  as fallback, reuse the matched manifest schema. 3. Carry forward: CI workflow for the server
-  repo, Linux/macOS verification.
+  as fallback, reuse the matched manifest schema — route the new HTTP fetch through the existing
+  `EngineContentSync::refreshManifestWith` / `m_refreshMutex` / `detail::renameReplacing`
+  (`EngineContentSync.cpp:82-101`, `CsRename.h:32`) guard against topic 187's bug, don't write
+  the local cache file directly from a new path. 3. Carry forward: CI workflow for the server
+  repo, Linux/macOS verification, and (step 4) the content-file lock from the section above.
