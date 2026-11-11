@@ -1521,6 +1521,9 @@ if(TARGET HorizonContentSync)
     target_sources(he_tests PRIVATE test_engine_content_manifest_refresh.cpp test_sftp_connection.cpp)
     # LandscapeFoliageLayer through publish scan / manifest / passive pull, no server (Thema 327)
     target_sources(he_tests PRIVATE test_landscape_foliage_sync.cpp)
+    # Thema 194 step 3: the new HTTP content-server client (manifest + file fetch), against a
+    # real loopback server — no SFTP, no EngineContentSync singleton, see the file's own comment.
+    target_sources(he_tests PRIVATE test_content_server_client.cpp)
     target_link_libraries(he_tests PRIVATE HorizonContentSync)
     target_include_directories(he_tests PRIVATE ${CMAKE_SOURCE_DIR}/src/HE_ContentSync/src)
     if(WIN32)

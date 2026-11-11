@@ -68,6 +68,7 @@
 #include <Diagnostics/Log.h>
 #ifdef HE_HAVE_LIBSSH2
 #include <ContentSync/EngineContentSync.h> // EngineContent manifest fetch, driven by the SFTP probe
+#include <ContentSync/ContentServerClient.h> // Thema 194: the new HTTP content server, checked alongside the SFTP probe
 #include "EngineContentPublishDialog.h"    // takeRunSucceeded / shutdown
 #endif
 #ifdef HE_HAVE_LIBSSH2
@@ -2671,11 +2672,18 @@ void EditorApplication::startSftpProbe()
 		m_sftpProbe = probe;
 		m_sftpChecked.store(true, std::memory_order_release);
 
+		// Thema 194: the new HTTP content server is a second, independent way the remote
+		// library can be "available" — probeSftp() only ever checks the SFTP side, so a build
+		// configured ONLY with config.json's EngineContentServerUrl (no SFTP credentials) would
+		// otherwise never even attempt a refresh. refreshManifestBlocking() itself already
+		// prefers the content server when it is configured (EngineContentSync.cpp).
+		const bool contentServerConfigured = HE::Cs::contentServerEndpoint().configured();
+
 		// Manifest fetch + Engine-tree re-merge run on this same worker thread —
 		// GlobalState's setters/refresh only touch their own mutex-guarded tree
 		// and the filesystem, never ImGui, so this is safe off the main thread
 		// (the existing m_contentRefreshFuture async path relies on the same fact).
-		bool haveManifest = probe.ready() &&
+		bool haveManifest = (probe.ready() || contentServerConfigured) &&
 		                    HE::Cs::EngineContentSync::instance().refreshManifestBlocking();
 		// No server this session — fall back to the catalogue the last successful
 		// refresh wrote beside the downloads. Without it an offline editor shows
