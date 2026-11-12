@@ -22,6 +22,9 @@
 #include <ContentManager/TextureArrayBuild.h>
 #include <MaterialGraph/AutoLandscapeMaterial.h>
 #include <MaterialGraph/MaterialParamLimits.h>
+#include <Physics/WaterWaves.h>
+#include <HorizonScene/Components/EnvironmentComponent.h>
+#include <ContentManager/DefaultAssets.h>
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/EntityActive.h>
 #include <HorizonScene/LODSystem.h>
@@ -602,6 +605,59 @@ TEST_CASE("RenderExtractor: a param override past slot 16 still reaches the HePa
 	REQUIRE(rw.objects[0].paramOverride.size() == size_t(HE::kMatParamFloats));
 	CHECK(rw.objects[0].paramOverride[farSlot * 4 + 0] == 9.0f);
 	CHECK(rw.objects[0].paramOverride[farSlot * 4 + 1] == 8.0f);
+}
+
+TEST_CASE("RenderExtractor: engine water's WaveA/B/C at slot 16..31 take the scene wind")
+{
+	// The wind loop over the WaveA/B/C knobs was capped at `k < 16`, so a water material whose
+	// knobs sit past the old limit kept the sea of the material and ignored the Environment's wind.
+	ContentManager cm;
+	StaticMeshAsset mesh; mesh.type = HE::AssetType::StaticMesh; mesh.name = "m";
+	mesh.indices = { 0, 1, 2 };
+	const HE::UUID meshId = cm.registerStaticMesh(mesh);
+
+	MaterialAsset ma; ma.type = HE::AssetType::Material; ma.name = "water32";
+	ma.id = HE::kEngineWaterMaterialId;
+	const size_t slotA = 20, slotB = 25, slotC = 31;
+	ma.graphParamNames.resize(size_t(HE::kMatMaxParams));
+	for (size_t i = 0; i < ma.graphParamNames.size(); ++i) ma.graphParamNames[i] = "P" + std::to_string(i);
+	ma.graphParamNames[slotA] = "WaveA"; ma.graphParamNames[slotB] = "WaveB"; ma.graphParamNames[slotC] = "WaveC";
+	ma.shaderParamData = std::vector<float>(size_t(HE::kMatParamFloats), 0.0f);
+	for (size_t s : { slotA, slotB, slotC })
+	{
+		ma.shaderParamData[s * 4 + 0] = 10.0f;  // direction
+		ma.shaderParamData[s * 4 + 1] = 1.0f;   // speed
+		ma.shaderParamData[s * 4 + 2] = 10.0f;  // length
+		ma.shaderParamData[s * 4 + 3] = 1.0f;   // steepness
+	}
+	const HE::UUID matId = cm.registerMaterial(ma);
+	REQUIRE(matId == HE::kEngineWaterMaterialId);
+
+	HorizonWorld world;
+	auto& reg = world.registry();
+	EnvironmentComponent env; env.windDirection = 90.0f; env.windSpeed = 3.0f;
+	reg.emplace<EnvironmentComponent>(world.createEntity("env"), env);
+	auto e = world.createEntity("water");
+	reg.emplace<TransformComponent>(e, TransformComponent{});
+	MeshComponent mc; mc.meshAssetId = meshId;
+	reg.emplace<MeshComponent>(e, mc);
+	MaterialComponent mat; mat.materialAssetId = matId;
+	reg.emplace<MaterialComponent>(e, mat);
+
+	RenderExtractor ex; ex.setContentManager(&cm);
+	RenderWorld rw;
+	ex.extract(world, rw, 1.0f);
+
+	REQUIRE(rw.objects.size() == 1);
+	REQUIRE(rw.objects[0].paramOverride.size() == size_t(HE::kMatParamFloats));
+	for (size_t s : { slotA, slotB, slotC })
+	{
+		const HE::water::WaveTrain want = HE::water::windTrain({ 10.0f, 1.0f, 10.0f, 1.0f }, 90.0f, 3.0f);
+		const auto& b = rw.objects[0].paramOverride;
+		CHECK(b[s * 4 + 0] == doctest::Approx(want.directionDeg));
+		CHECK(b[s * 4 + 2] == doctest::Approx(want.length));
+		CHECK(b[s * 4 + 0] != doctest::Approx(10.0f)); // the wind really moved it
+	}
 }
 
 TEST_CASE("AABB build and ray intersection")

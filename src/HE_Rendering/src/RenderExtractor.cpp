@@ -86,7 +86,7 @@ void windWaterParams(const MaterialAsset& ma, const MaterialComponent* mc,
 	}
 	static const char* const kKnobs[3] = { "WaveA", "WaveB", "WaveC" };
 	for (const char* knob : kKnobs)
-		for (size_t k = 0; k < ma.graphParamNames.size() && k < 16; ++k)
+		for (size_t k = 0; k < ma.graphParamNames.size() && k < size_t(HE::kMatMaxParams); ++k)
 		{
 			if (ma.graphParamNames[k] != knob) continue;
 			bool authored = false;
