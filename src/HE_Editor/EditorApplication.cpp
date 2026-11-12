@@ -68,6 +68,7 @@
 #include <Diagnostics/Log.h>
 #ifdef HE_HAVE_LIBSSH2
 #include <ContentSync/EngineContentSync.h> // EngineContent manifest fetch, driven by the SFTP probe
+#include <ContentSync/ContentServerClient.h> // Thema 194: the new HTTP content server, checked alongside the SFTP probe
 #include "EngineContentPublishDialog.h"    // takeRunSucceeded / shutdown
 #endif
 #ifdef HE_HAVE_LIBSSH2
@@ -2671,12 +2672,24 @@ void EditorApplication::startSftpProbe()
 		m_sftpProbe = probe;
 		m_sftpChecked.store(true, std::memory_order_release);
 
+		// Thema 194: the new HTTP content server is a second, independent way the remote
+		// library can be "available" — probeSftp() only ever checks the SFTP side, so a build
+		// configured ONLY with config.json's EngineContentServerUrl (no SFTP credentials) would
+		// otherwise never even attempt a refresh. refreshManifestBlocking() itself already
+		// prefers the content server when it is configured (EngineContentSync.cpp).
+		const bool contentServerConfigured = HE::Cs::contentServerEndpoint().configured();
+
 		// Manifest fetch + Engine-tree re-merge run on this same worker thread —
 		// GlobalState's setters/refresh only touch their own mutex-guarded tree
 		// and the filesystem, never ImGui, so this is safe off the main thread
 		// (the existing m_contentRefreshFuture async path relies on the same fact).
-		bool haveManifest = probe.ready() &&
+		// Whether refreshManifestBlocking() itself succeeded, before the cache
+		// fallback below can turn a failed refresh back into "have a manifest" —
+		// the notes need this to tell "fetched fine" from "fell back to yesterday's
+		// copy", which `haveManifest` alone can no longer say once it is set.
+		const bool manifestRefreshed = (probe.ready() || contentServerConfigured) &&
 		                    HE::Cs::EngineContentSync::instance().refreshManifestBlocking();
+		bool haveManifest = manifestRefreshed;
 		// No server this session — fall back to the catalogue the last successful
 		// refresh wrote beside the downloads. Without it an offline editor shows
 		// NO EngineContent at all: not the assets that are still on the server,
@@ -2698,15 +2711,29 @@ void EditorApplication::startSftpProbe()
 		// (SftpCredentials.h), so an empty one means a build that was never meant
 		// to reach the server, and nagging about it every start would train the
 		// user to ignore the bell before it has ever carried anything real.
-		if (probe.configured && !probe.reachable)
+		// refreshManifestBlocking() always prefers the HTTP content server once it is
+		// configured (EngineContentSync.cpp), so once contentServerConfigured is true that
+		// is the transport that actually ran here, regardless of what the SFTP probe found.
+		// Basing the note on `probe` in that case would either stay silent on an HTTP
+		// failure next to a reachable SFTP endpoint, or blame SFTP ("accepted the login")
+		// for a fault that is really on the HTTP server — lastManifestError() is the one
+		// thing that reports what this refresh actually did, on whichever transport ran.
+		const bool httpFailed      = contentServerConfigured && !manifestRefreshed;
+		const bool sftpUnreachable = !contentServerConfigured && probe.configured && !probe.reachable;
+		if (httpFailed || sftpUnreachable)
 		{
+			const std::string reason = httpFailed
+				? HE::Cs::EngineContentSync::instance().lastManifestError() : probe.detail;
 			HE::Ed::NoteSpec note;
 			note.level = haveManifest ? HE::Ed::NoteLevel::Important : HE::Ed::NoteLevel::Critical;
-			note.title = "EngineContent server unreachable";
-			note.text  = "The EngineContent server could not be reached.";
-			note.detail = (probe.detail.empty()
+			// HTTP failures besides an unreachable server also land here (e.g. a manifest
+			// that failed to parse), so "unreachable" is only accurate for the SFTP case.
+			note.title = httpFailed ? "EngineContent catalogue unavailable" : "EngineContent server unreachable";
+			note.text  = httpFailed ? "The EngineContent catalogue could not be fetched."
+			                        : "The EngineContent server could not be reached.";
+			note.detail = (reason.empty()
 					? std::string("The connection was refused or timed out.")
-					: probe.detail)
+					: reason)
 				+ (haveManifest
 					? "  Working from the catalogue of the last successful connection: "
 					  "assets already downloaded still work, anything else cannot be "
@@ -2718,7 +2745,7 @@ void EditorApplication::startSftpProbe()
 			note.actions.push_back({ "Try again", [this] { refreshEngineContentManifest(); }, true });
 			HE::Ed::notify(std::move(note));
 		}
-		else if (probe.configured && !haveManifest)
+		else if (!contentServerConfigured && probe.configured && !haveManifest)
 		{
 			// Reached and authenticated, but the catalogue itself did not arrive —
 			// a different fault (manifest missing, unreadable, or unparseable) and

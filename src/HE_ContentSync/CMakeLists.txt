@@ -17,6 +17,7 @@ add_library(HorizonContentSync SHARED
 	src/EngineContentManifest.cpp
 	src/EngineContentSync.cpp
 	src/EngineContentPublish.cpp
+	src/ContentServerClient.cpp
 )
 
 # HorizonCore for the engine log. HorizonNet for HE::Net::Socket (Layer 0 —
