@@ -111,7 +111,11 @@ SocketHandle connectAndSend(const HttpUrl& parsed, const std::string& method,
             return kInvalidSocket;
         }
         if (rc == SocketResult::WouldBlock) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            // Wake the moment the connect finishes; a sleep here costs ~100 ms per request on a
+            // battery-powered Mac (timer coalescing) — see socketWaitConnected.
+            const auto remainingMs = static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                deadline - std::chrono::steady_clock::now()).count());
+            socketWaitConnected(sock, std::clamp(remainingMs, 0, 200));
         }
     }
 

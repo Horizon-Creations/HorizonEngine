@@ -161,6 +161,13 @@ HE_NET_API SocketResult socketRecv(SocketHandle h, std::uint8_t* buf,
 // calls) — never on the transport path the editor frame loop pumps.
 HE_NET_API bool socketWaitReadable(SocketHandle h, int timeoutMs);
 
+// Block until a pending non-blocking connect has finished (successfully or not — resolve which
+// with socketConnectPoll) or the timeout elapses. Same one-shot-worker-thread rule as above.
+// Waiting here instead of sleeping between socketConnectPoll calls matters: a short sleep_for
+// is stretched to ~100 ms by timer coalescing on a battery-powered Mac and to a 15 ms tick on
+// Windows, which showed up as the dominant latency of a small HTTP download.
+HE_NET_API bool socketWaitConnected(SocketHandle h, int timeoutMs);
+
 // ─── UDP ─────────────────────────────────────────────────────────────────────
 // Needed for router port mapping: SSDP discovery is multicast UDP, and NAT-PMP
 // is a small binary UDP protocol.
