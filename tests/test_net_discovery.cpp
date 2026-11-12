@@ -1,5 +1,7 @@
 #include "doctest.h"
 
+#include "helpers/OneShotHttpServer.h"
+
 #include <Net/HttpClient.h>
 #include <Net/PortMapper.h>
 #include <Net/RouterProbe.h>
@@ -7,8 +9,12 @@
 
 #include <atomic>
 #include <chrono>
+#include <filesystem>
+#include <fstream>
+#include <functional>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 using namespace HE::Net;
@@ -423,6 +429,126 @@ TEST_CASE("httpRequest: a refused connection fails without hanging")
     CHECK_FALSE(r.ok);
     CHECK(!r.error.empty());
     CHECK(elapsed < std::chrono::seconds(5));   // bounded by the timeout
+}
+
+// ─── httpDownloadToFile (Thema 194: streams a GET body to disk) ──────────────
+
+using HE::Test::OneShotHttpServer;
+
+namespace {
+std::string readWholeFile(const std::filesystem::path& p)
+{
+    std::ifstream in(p, std::ios::binary);
+    return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+}
+} // namespace
+
+TEST_CASE("httpDownloadToFile: streams a real GET body straight to a file")
+{
+    const std::string payload(200 * 1024, 'x');   // bigger than one 64 KiB recv chunk
+    OneShotHttpServer srv;
+    const std::string headers =
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: application/octet-stream\r\n"
+        "Content-Length: " + std::to_string(payload.size()) + "\r\n"
+        "\r\n";
+    srv.start(headers, [&](SocketHandle client) { srv.sendAll(client, payload); });
+
+    const std::filesystem::path dest =
+        std::filesystem::temp_directory_path() / "he_http_download_test.bin";
+    std::error_code rmEc;
+    std::filesystem::remove(dest, rmEc);
+
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> progress;
+    const HttpResponse r = httpDownloadToFile(
+        "http://127.0.0.1:" + std::to_string(srv.port) + "/content/Big.bin", dest.string(),
+        [&](std::uint64_t done, std::uint64_t total) { progress.push_back({ done, total }); });
+    srv.server.join();
+
+    REQUIRE(srv.served.load());
+    CHECK(srv.receivedRequest.find("GET /content/Big.bin HTTP/1.1") != std::string::npos);
+
+    CHECK(r.ok);
+    CHECK(r.statusCode == 200);
+    CHECK(r.body.empty());   // streamed to disk, never buffered in the response
+    REQUIRE(std::filesystem::exists(dest));
+    CHECK(std::filesystem::file_size(dest) == payload.size());
+    CHECK(readWholeFile(dest) == payload);
+    REQUIRE_FALSE(progress.empty());
+    CHECK(progress.back().first == payload.size());
+    CHECK(progress.back().second == payload.size());
+
+    std::filesystem::remove(dest, rmEc);
+}
+
+TEST_CASE("httpDownloadToFile: a body shorter than Content-Length fails and leaves no file")
+{
+    OneShotHttpServer srv;
+    const std::string headers =
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Length: 1000\r\n"
+        "\r\n";
+    // Sends far less than advertised, then the server closes — the client must not mistake
+    // the close for a complete, merely-short file.
+    srv.start(headers, [&](SocketHandle client) { srv.sendAll(client, std::string(10, 'y')); });
+
+    const std::filesystem::path dest =
+        std::filesystem::temp_directory_path() / "he_http_download_truncated_test.bin";
+    std::error_code rmEc;
+    std::filesystem::remove(dest, rmEc);
+
+    const HttpResponse r = httpDownloadToFile(
+        "http://127.0.0.1:" + std::to_string(srv.port) + "/content/Short.bin", dest.string());
+    srv.server.join();
+
+    REQUIRE(srv.served.load());
+    CHECK_FALSE(r.ok);
+    CHECK(r.error.find("10/1000") != std::string::npos);
+    CHECK_FALSE(std::filesystem::exists(dest));
+}
+
+TEST_CASE("httpDownloadToFile: a response with no Content-Length is refused")
+{
+    OneShotHttpServer srv;
+    srv.start("HTTP/1.1 200 OK\r\n\r\n", [&](SocketHandle client) { srv.sendAll(client, "whatever"); });
+
+    const std::filesystem::path dest =
+        std::filesystem::temp_directory_path() / "he_http_download_no_length_test.bin";
+    std::error_code rmEc;
+    std::filesystem::remove(dest, rmEc);
+
+    const HttpResponse r = httpDownloadToFile(
+        "http://127.0.0.1:" + std::to_string(srv.port) + "/content/NoLength.bin", dest.string());
+    srv.server.join();
+
+    CHECK_FALSE(r.ok);
+    CHECK(r.error.find("Content-Length") != std::string::npos);
+    CHECK_FALSE(std::filesystem::exists(dest));
+}
+
+TEST_CASE("httpDownloadToFile: a 404 is reported with the server's body, not left as a file")
+{
+    OneShotHttpServer srv;
+    const std::string body = "not found\n";
+    const std::string headers =
+        "HTTP/1.1 404 Not Found\r\n"
+        "Content-Length: " + std::to_string(body.size()) + "\r\n"
+        "\r\n";
+    srv.start(headers, [&](SocketHandle client) { srv.sendAll(client, body); });
+
+    const std::filesystem::path dest =
+        std::filesystem::temp_directory_path() / "he_http_download_404_test.bin";
+    std::error_code rmEc;
+    std::filesystem::remove(dest, rmEc);
+
+    const HttpResponse r = httpDownloadToFile(
+        "http://127.0.0.1:" + std::to_string(srv.port) + "/content/Missing.bin", dest.string());
+    srv.server.join();
+
+    CHECK_FALSE(r.ok);
+    CHECK(r.statusCode == 404);
+    CHECK(r.error.find("not found") != std::string::npos);
+    CHECK_FALSE(std::filesystem::exists(dest));
 }
 
 // ─── NAT-PMP (RFC 6886) ──────────────────────────────────────────────────────

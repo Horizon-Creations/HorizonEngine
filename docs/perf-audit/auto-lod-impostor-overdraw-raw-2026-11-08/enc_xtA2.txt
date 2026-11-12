@@ -1,0 +1,10 @@
+cmdbuffers 294 typical encoder count 23 frames 292
+  enc  0  vertex p50  0.072  fragment p50  0.101
+  enc  2  vertex p50  0.194  fragment p50  0.049
+  enc  3  vertex p50  0.002  fragment p50  0.642
+  enc  4  vertex p50  0.314  fragment p50  0.054
+  enc  5  vertex p50  0.004  fragment p50  0.258
+  enc  7  vertex p50  0.003  fragment p50  6.442
+  enc  8  vertex p50  0.178  fragment p50  5.723
+  enc 22  vertex p50  0.026  fragment p50  0.240
+  sum of all encoders (vertex+fragment, p50 each) 14.89 ms

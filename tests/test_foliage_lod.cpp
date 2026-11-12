@@ -55,11 +55,13 @@ namespace
 		ContentManager cm;
 		entt::entity   terrain = entt::null;
 
-		explicit Field(std::vector<FoliageLod> lods, float hysteresis = 2.0f)
+		explicit Field(std::vector<FoliageLod> lods, float hysteresis = 2.0f, glm::vec3 scale = glm::vec3(1.0f))
 		{
 			auto& reg = world.registry();
 			terrain = world.createEntity("Terrain");
-			reg.emplace_or_replace<TransformComponent>(terrain);
+			TransformComponent tf;
+			tf.scale = scale;
+			reg.emplace_or_replace<TransformComponent>(terrain, tf);
 			TerrainComponent tc;
 			tc.sizeX = tc.sizeZ = 200.0f;
 			tc.heightScale = 0.0f;
@@ -143,6 +145,14 @@ namespace
 
 	// The test's own copy of the rule: level by ground-plane distance (the last level
 	// that has started), then the level's density keeps the first plants of each bucket.
+	// The test's own copy of the screen-size rule: a plant's ground distance scaled by the layer's mean
+	// scale over the plant's own (a plant 1.2x as big is as tall on screen at 1.2x the distance).
+	float seenDistance(const FoliageLayer& l, const glm::mat4& m, float camX, float camZ)
+	{
+		const float ref = 0.5f * (l.minScale + l.maxScale);
+		return std::hypot(m[3].x - camX, m[3].z - camZ) * ref / glm::length(glm::vec3(m[1]));
+	}
+
 	struct Expected
 	{
 		ByMesh   byMesh;
@@ -165,7 +175,7 @@ namespace
 				const float dx = m[3].x - cam.x, dz = m[3].z - cam.z;
 				const float d2 = dx * dx + dz * dz;
 				if (d2 > dd2) continue;
-				const float d = std::sqrt(d2);
+				const float d = seenDistance(l, m, cam.x, cam.z);
 				int level = 0;
 				for (size_t k = 0; k < lods.size(); ++k)
 					if (lods[k].distance <= d) level = static_cast<int>(k + 1);
@@ -249,6 +259,46 @@ TEST_CASE("Foliage levels: every plant in range is drawn once, with the mesh its
 			CHECK(st.clusters > st.straddlingBuckets);   // whole buckets are one cluster each, no copy
 		}
 	}
+}
+
+TEST_CASE("Foliage levels: a scaled parent's own scale is folded into a whole bucket's level, like a straddler's")
+{
+	// The terrain carries a uniform 2x scale (a General parent): every plant is twice as
+	// big on screen as its layer scale alone says, so its level must be chosen from the
+	// SAME total scale whether the deciding bucket is taken whole (Levels::whole(),
+	// FoliageExtract.cpp:283) or plant by plant (plantScaleOf, used by the straddlers and
+	// by PerInstance). The camera sits far from the terrain and the boundary far from the
+	// camera, so a bucket's own width (tens of metres) is a small fraction of the gap
+	// between "clearly inside" and "clearly outside" the boundary: whole() gets to decide
+	// most buckets outright, instead of handing them to a straddler job (which already
+	// calls plantScaleOf, so it cannot show this bug by itself).
+	const std::vector<HE::UUID> meshOfLevel = { HE::kDefaultCubeMeshId, HE::kDefaultQuadMeshId };
+	Field f({ lod(500.0f, HE::kDefaultQuadMeshId) }, 0.0f, glm::vec3(2.0f));
+	f.layer().drawDistance = 800.0f;
+	const glm::vec3 cam(0.0f, 4.0f, -700.0f);
+
+	RenderExtractor exC;
+	const auto gotClusters = [&]
+	{
+		Mode mode(HE::FoliageMode::Clusters);
+		return levelsOf(drawn(extractWith(exC, f, cam)), meshOfLevel);
+	}();
+	// The scale must actually have made the terrain a General parent, and the boundary
+	// still cut some buckets (straddlers get the scale right on their own; only whole()
+	// is at risk).
+	REQUIRE(InstanceBlock::classify(f.world.registry().get<TransformComponent>(f.terrain).worldMatrix)
+	        == InstanceBlock::Parent::General);
+	REQUIRE(HE::lastFoliageExtractStats().straddlingBuckets > 0u);
+
+	RenderExtractor exP;
+	const auto gotPerInstance = [&]
+	{
+		Mode mode(HE::FoliageMode::PerInstance);
+		return levelsOf(drawn(extractWith(exP, f, cam)), meshOfLevel);
+	}();
+
+	REQUIRE(gotClusters.size() == gotPerInstance.size());
+	CHECK(gotClusters == gotPerInstance);
 }
 
 TEST_CASE("Foliage levels: a level without a mesh thins the layer's own, evenly")
@@ -340,6 +390,9 @@ TEST_CASE("Foliage levels: a plant near a boundary keeps its level until it is t
 	RenderExtractor ex;
 	const glm::vec3 cam0(0.0f, 2.0f, 0.0f);
 	const auto before = levelsOf(drawn(extractWith(ex, f, cam0)), meshOfLevel);
+	// The matrix of every plant by position, to read its scale back.
+	std::map<std::pair<float, float>, glm::mat4> plantAt;
+	for (const glm::mat4& m : f.layer().store->local) plantAt[{ m[3].x, m[3].z }] = m;
 	CHECK(before == expected(f, cam0).level);   // the first frame: by distance alone
 
 	// Three metres along x: plants on both sides of the boundary move by up to 3 m,
@@ -351,7 +404,7 @@ TEST_CASE("Foliage levels: a plant near a boundary keeps its level until it is t
 	uint64_t held = 0;
 	for (const auto& [xz, level] : after)
 	{
-		const float d = std::hypot(xz.first - cam1.x, xz.second - cam1.z);
+		const float d = seenDistance(f.layer(), plantAt.at(xz), cam1.x, cam1.z);
 		const auto was = before.find(xz);
 		int want = plain.at(xz);
 		if (was != before.end() && was->second != want && std::abs(d - boundary) <= hysteresis)
@@ -375,9 +428,93 @@ TEST_CASE("Foliage levels: a plant near a boundary keeps its level until it is t
 	const auto plain2 = expected(f, cam2).level;
 	for (const auto& [xz, level] : moved)
 	{
-		const float d = std::hypot(xz.first - cam2.x, xz.second - cam2.z);
+		const float d = seenDistance(f.layer(), plantAt.at(xz), cam2.x, cam2.z);
 		if (std::abs(d - boundary) > hysteresis) CHECK(level == plain2.at(xz));
 	}
+}
+
+// ─── Screen size per plant ──────────────────────────────────────────────────
+
+TEST_CASE("Foliage levels: two plants at one distance but different heights pick different levels, in every mode")
+{
+	// Scales 0.8..1.2 (mean 1.0), the level starts at 40 m for a mean-scale plant. At the same ground
+	// distance (34..46 m) a plant of 1.15x or more is still under its pixel size for the level
+	// (40 / 1.15 = 34.8 m seen), one of 0.85x or less is already past it.
+	const std::vector<HE::UUID> meshOfLevel = { HE::kDefaultCubeMeshId, HE::kDefaultQuadMeshId };
+	Field f({ lod(40.0f, HE::kDefaultQuadMeshId) }, 0.0f);
+	const glm::vec3 cam(0.0f, 2.0f, 0.0f);
+	std::map<std::pair<float, float>, float> scaleAt;
+	for (const glm::mat4& m : f.layer().store->local) scaleAt[{ m[3].x, m[3].z }] = glm::length(glm::vec3(m[1]));
+
+	for (const HE::FoliageMode mode : { HE::FoliageMode::Clusters, HE::FoliageMode::PerInstance, HE::FoliageMode::Ordered })
+	{
+		CAPTURE(static_cast<int>(mode));
+		Mode m(mode);
+		RenderExtractor ex;
+		const auto got = levelsOf(drawn(extractWith(ex, f, cam)), meshOfLevel);
+		int bigNear = 0, smallFar = 0;
+		for (const auto& [xz, level] : got)
+		{
+			const float d = std::hypot(xz.first - cam.x, xz.second - cam.z);
+			if (d < 34.0f || d >= 46.0f) continue;
+			const float s = scaleAt.at(xz);
+			if (s >= 1.15f) { CHECK(level == 0); ++bigNear; }
+			if (s <= 0.85f) { CHECK(level == 1); ++smallFar; }
+		}
+		CHECK(bigNear > 5);
+		CHECK(smallFar > 5);
+		CHECK(got == expected(f, cam).level);
+	}
+}
+
+TEST_CASE("Foliage levels: a layer of one scale keeps the plain distance rule")
+{
+	// minScale == maxScale: every plant is the mean plant, the factor is 1 and a bucket is whole
+	// exactly where it was before the screen-size rule.
+	Field f({ lod(30.0f, HE::kDefaultQuadMeshId) }, 0.0f);
+	f.layer().minScale = f.layer().maxScale = 1.0f;
+	f.layer().dirty = true;
+	FoliageSystem::update(f.world);
+	const glm::vec3 cam(0.0f, 2.0f, 0.0f);
+	RenderExtractor ex;
+	const auto got = levelsOf(drawn(extractWith(ex, f, cam)), { HE::kDefaultCubeMeshId, HE::kDefaultQuadMeshId });
+	REQUIRE(!got.empty());
+	for (const auto& [xz, level] : got)
+		CHECK(level == (std::hypot(xz.first - cam.x, xz.second - cam.z) >= 30.0f ? 1 : 0));
+	CHECK(HE::lastFoliageExtractStats().clusters > HE::lastFoliageExtractStats().straddlingBuckets);
+}
+
+TEST_CASE("Foliage levels: a camera that wobbles on a boundary does not flip plants, one without memory does")
+{
+	const std::vector<HE::UUID> meshOfLevel = { HE::kDefaultCubeMeshId, HE::kDefaultQuadMeshId };
+	const float boundary = 30.0f;
+	Field f({ lod(boundary, HE::kDefaultQuadMeshId) }, 2.0f);
+	std::map<std::pair<float, float>, glm::mat4> plantAt;
+	for (const glm::mat4& m : f.layer().store->local) plantAt[{ m[3].x, m[3].z }] = m;
+
+	RenderExtractor ex;
+	const glm::vec3 cam0(0.0f, 2.0f, 0.0f);
+	const auto first = levelsOf(drawn(extractWith(ex, f, cam0)), meshOfLevel);
+
+	uint64_t flipsHeld = 0, flipsFresh = 0, onBoundary = 0;
+	for (int frame = 1; frame <= 8; ++frame)
+	{
+		// 0.6 m to and fro: well inside the 2 m band, but across the boundary for a lot of plants.
+		const glm::vec3 cam((frame & 1) ? 0.6f : 0.0f, 2.0f, 0.0f);
+		const auto held = levelsOf(drawn(extractWith(ex, f, cam)), meshOfLevel);
+		RenderExtractor fresh;
+		const auto plain = levelsOf(drawn(extractWith(fresh, f, cam)), meshOfLevel);
+		for (const auto& [xz, level] : first)
+		{
+			if (std::abs(seenDistance(f.layer(), plantAt.at(xz), cam0.x, cam0.z) - boundary) > 1.0f) continue;
+			++onBoundary;
+			flipsHeld  += held.at(xz) != level;
+			flipsFresh += plain.at(xz) != level;
+		}
+	}
+	CHECK(onBoundary > 50u);
+	CHECK(flipsHeld == 0u);
+	CHECK(flipsFresh > 0u);
 }
 
 TEST_CASE("Foliage levels: the level memory follows the stores, so a re-scatter every frame cannot grow it")

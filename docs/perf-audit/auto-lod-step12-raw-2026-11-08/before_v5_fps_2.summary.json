@@ -1,0 +1,939 @@
+{
+  "session": {
+    "backend": "Metal",
+    "captureNote": "vsync OFF \u2014 frame/FPS reflect true cost",
+    "frameCount": 600,
+    "gpu": "unknown",
+    "height": 1528,
+    "note": "before_v5_fps_2 | display 1440x932 @60.000000 Hz, density 2.000000",
+    "os": "macOS",
+    "vsync": false,
+    "width": 2840
+  },
+  "fps": {
+    "avg": 22.995803555832065,
+    "frames": 600,
+    "low01Percent": 2.650260966859685,
+    "low1Percent": 2.8978013112711727,
+    "note": "1%/0.1% low = AVERAGE of the slowest 1%/0.1% of frames expressed as FPS (benchmark convention), not the p99 frame time"
+  },
+  "deltaMs": {
+    "count": 600,
+    "max": 377.3213326931,
+    "mean": 43.48619510390563,
+    "min": 0.875874946359545,
+    "p50": 21.0441667586565,
+    "p95": 162.4598354101181,
+    "p99": 292.8118407726288,
+    "stddev": 59.68941176924473
+  },
+  "cpuMs": {
+    "count": 600,
+    "max": 375.36175,
+    "mean": 43.049981470000034,
+    "min": 0.8741669999999999,
+    "p50": 20.350666,
+    "p95": 158.483625,
+    "p99": 292.80699999999996,
+    "stddev": 59.300886195712444
+  },
+  "gpuMs": {
+    "count": 600,
+    "max": 70.58541662991047,
+    "mean": 29.840325613816578,
+    "min": 19.37483297660947,
+    "p50": 31.062624882906675,
+    "p95": 44.74945832043886,
+    "p99": 55.566499941051006,
+    "stddev": 9.447072988262173
+  },
+  "gpuTimingModes": {
+    "whole-frame": 600
+  },
+  "gpuPassesOverlap": false,
+  "gpuPasses": {},
+  "topScopesBySelfTime": [
+    {
+      "count": 600,
+      "scope": "OnRender",
+      "selfMs": 10722.099794,
+      "totalMs": 13367.586672999993
+    },
+    {
+      "count": 600,
+      "scope": "Metal::NextDrawable",
+      "selfMs": 6010.528565000007,
+      "totalMs": 6010.528565000007
+    },
+    {
+      "count": 600,
+      "scope": "Render",
+      "selfMs": 1157.1448050000004,
+      "totalMs": 5136.218460999999
+    },
+    {
+      "count": 600,
+      "scope": "Metal::EncodeScene",
+      "selfMs": 1008.5157210000004,
+      "totalMs": 1045.8864550000003
+    },
+    {
+      "count": 600,
+      "scope": "PollEvents",
+      "selfMs": 929.2300040000001,
+      "totalMs": 929.2300040000001
+    },
+    {
+      "count": 600,
+      "scope": "OutlinerPanel::render",
+      "selfMs": 572.0494540000001,
+      "totalMs": 572.0494540000001
+    },
+    {
+      "count": 600,
+      "scope": "Metal::EncodeShadowMap",
+      "selfMs": 528.5985559999997,
+      "totalMs": 875.546867
+    },
+    {
+      "count": 600,
+      "scope": "SceneSystemsTick",
+      "selfMs": 477.5347150000006,
+      "totalMs": 1595.8732240000024
+    },
+    {
+      "count": 600,
+      "scope": "Terrain",
+      "selfMs": 407.00704499999995,
+      "totalMs": 407.00704499999995
+    },
+    {
+      "count": 600,
+      "scope": "Metal::Overlay",
+      "selfMs": 366.5452419999998,
+      "totalMs": 366.5452419999998
+    },
+    {
+      "count": 3000,
+      "scope": "RenderExtractor::extract",
+      "selfMs": 364.2590399999984,
+      "totalMs": 1045.371629000008
+    },
+    {
+      "count": 600,
+      "scope": "Metal::ShadowPrepare",
+      "selfMs": 338.75316700000025,
+      "totalMs": 344.4194979999997
+    },
+    {
+      "count": 600,
+      "scope": "Extract::meshes",
+      "selfMs": 333.26099700000026,
+      "totalMs": 333.26099700000026
+    },
+    {
+      "count": 600,
+      "scope": "Metal::EncodeSSAO",
+      "selfMs": 233.29241900000002,
+      "totalMs": 240.19086699999986
+    },
+    {
+      "count": 600,
+      "scope": "Metal::EncodeCloudShadow",
+      "selfMs": 225.27625100000012,
+      "totalMs": 225.27625100000012
+    },
+    {
+      "count": 600,
+      "scope": "SceneAnimationTick",
+      "selfMs": 165.861054,
+      "totalMs": 309.1177779999997
+    },
+    {
+      "count": 600,
+      "scope": "Weather",
+      "selfMs": 160.18467099999987,
+      "totalMs": 160.18467099999987
+    },
+    {
+      "count": 600,
+      "scope": "ExtractFoliage",
+      "selfMs": 148.0994259999999,
+      "totalMs": 148.0994259999999
+    },
+    {
+      "count": 600,
+      "scope": "Foliage",
+      "selfMs": 144.43846300000024,
+      "totalMs": 144.43846300000024
+    },
+    {
+      "count": 600,
+      "scope": "WaitForFrame",
+      "selfMs": 112.6018550000001,
+      "totalMs": 6123.130420000004
+    }
+  ],
+  "hitchCount": 64,
+  "counters_midframe": {
+    "audioSources": 0,
+    "blasBuilds": 0,
+    "blasTris": 0,
+    "chunkBuilds": 0,
+    "draws": 28,
+    "emitters": 0,
+    "entities": 29,
+    "giInstances": 0,
+    "gpuParticles": 0,
+    "gpuStalls": 0,
+    "lights": 2,
+    "lodSwitches": 0,
+    "meshInvalidations": 0,
+    "meshReplaceBytes": 0,
+    "meshUploadBytes": 0,
+    "meshUploads": 0,
+    "particles": 0,
+    "rigidBodies": 0,
+    "scripts": 0,
+    "stitchBuilds": 0,
+    "streamingInFlight": 0,
+    "tessBuilds": 0,
+    "tessReleases": 0,
+    "total": 30,
+    "tris": 6275636,
+    "visible": 30,
+    "vramBudgetMB": 0.0,
+    "vramUsedMB": 0.0
+  },
+  "gpuMs_median": 31.17866674438119,
+  "gpuPassPercentiles": {},
+  "cpuScopePerFrame": {
+    "Metal::NextDrawable": {
+      "p10": 0.022042,
+      "p50": 0.106083,
+      "p90": 32.118415999999996,
+      "frames": 600
+    },
+    "WaitForFrame": {
+      "p10": 0.031667,
+      "p50": 0.281625,
+      "p90": 32.222042,
+      "frames": 600
+    },
+    "PollEvents": {
+      "p10": 0.062625,
+      "p50": 0.163041,
+      "p90": 5.013417,
+      "frames": 600
+    },
+    "Terrain": {
+      "p10": 0.008125,
+      "p50": 0.013833,
+      "p90": 2.052583,
+      "frames": 600
+    },
+    "Movement": {
+      "p10": 0.000708,
+      "p50": 0.001083,
+      "p90": 0.300792,
+      "frames": 600
+    },
+    "Navigation": {
+      "p10": 0.000542,
+      "p50": 0.0009159999999999999,
+      "p90": 0.49174999999999996,
+      "frames": 600
+    },
+    "Weather": {
+      "p10": 0.001375,
+      "p50": 0.002375,
+      "p90": 0.630666,
+      "frames": 600
+    },
+    "GpuParticleParams": {
+      "p10": 0.000167,
+      "p50": 0.00033299999999999996,
+      "p90": 0.001,
+      "frames": 600
+    },
+    "ParticleSystem": {
+      "p10": 0.000375,
+      "p50": 0.0006659999999999999,
+      "p90": 0.001292,
+      "frames": 600
+    },
+    "Foliage": {
+      "p10": 0.004958,
+      "p50": 0.009459,
+      "p90": 0.30324999999999996,
+      "frames": 600
+    },
+    "RopeTrail": {
+      "p10": 0.000958,
+      "p50": 0.0015409999999999998,
+      "p90": 0.131334,
+      "frames": 600
+    },
+    "TerrainTess": {
+      "p10": 0.001125,
+      "p50": 0.0021249999999999997,
+      "p90": 0.007666999999999999,
+      "frames": 600
+    },
+    "LOD": {
+      "p10": 0.004167,
+      "p50": 0.007291,
+      "p90": 0.277875,
+      "frames": 600
+    },
+    "TerrainSeams": {
+      "p10": 0.005915999999999999,
+      "p50": 0.010416,
+      "p90": 0.06945799999999999,
+      "frames": 600
+    },
+    "SceneSystemsTick": {
+      "p10": 0.038167,
+      "p50": 0.078791,
+      "p90": 7.498374999999999,
+      "frames": 600
+    },
+    "WeatherAudio": {
+      "p10": 0.0016669999999999999,
+      "p50": 0.002541,
+      "p90": 0.383208,
+      "frames": 600
+    },
+    "SequenceBegin": {
+      "p10": 0.000292,
+      "p50": 0.0005,
+      "p90": 0.122833,
+      "frames": 600
+    },
+    "Animation": {
+      "p10": 0.000375,
+      "p50": 0.0006659999999999999,
+      "p90": 0.10375,
+      "frames": 600
+    },
+    "AnimationBlend": {
+      "p10": 0.000375,
+      "p50": 0.000584,
+      "p90": 0.001,
+      "frames": 600
+    },
+    "AnimationStateMachine": {
+      "p10": 0.000375,
+      "p50": 0.000667,
+      "p90": 0.017832999999999998,
+      "frames": 600
+    },
+    "PropertyAnimation": {
+      "p10": 0.00029099999999999997,
+      "p50": 0.00045799999999999997,
+      "p90": 0.0008749999999999999,
+      "frames": 600
+    },
+    "SequenceApply": {
+      "p10": 0.000375,
+      "p50": 0.000667,
+      "p90": 0.0405,
+      "frames": 600
+    },
+    "SceneAnimationTick": {
+      "p10": 0.004958,
+      "p50": 0.00825,
+      "p90": 1.1111659999999999,
+      "frames": 600
+    },
+    "EnvironmentPush": {
+      "p10": 0.0021249999999999997,
+      "p50": 0.0036249999999999998,
+      "p90": 0.173083,
+      "frames": 600
+    },
+    "RenderExtractor::extractCameraOnly": {
+      "p10": 0.000417,
+      "p50": 0.000833,
+      "p90": 0.027417,
+      "frames": 600
+    },
+    "OutlinerPanel::render": {
+      "p10": 0.036917,
+      "p50": 0.07875,
+      "p90": 2.608125,
+      "frames": 600
+    },
+    "OnRender": {
+      "p10": 0.49516699999999997,
+      "p50": 3.299166,
+      "p90": 73.704083,
+      "frames": 600
+    },
+    "Transforms::scan": {
+      "p10": 0.000625,
+      "p50": 0.001333,
+      "p90": 0.006417,
+      "frames": 600
+    },
+    "Transforms::propagate": {
+      "p10": 0.001833,
+      "p50": 0.0032909999999999997,
+      "p90": 0.020042,
+      "frames": 600
+    },
+    "Extract::transforms": {
+      "p10": 0.00225,
+      "p50": 0.004042,
+      "p90": 0.299458,
+      "frames": 600
+    },
+    "Extract::meshes": {
+      "p10": 0.012832999999999999,
+      "p50": 0.0225,
+      "p90": 1.346625,
+      "frames": 600
+    },
+    "ExtractFoliage": {
+      "p10": 0.022042,
+      "p50": 0.041958999999999996,
+      "p90": 0.5163329999999999,
+      "frames": 600
+    },
+    "Extract::foliage": {
+      "p10": 0.022209,
+      "p50": 0.042499999999999996,
+      "p90": 0.7374999999999999,
+      "frames": 600
+    },
+    "Extract::lights": {
+      "p10": 0.000959,
+      "p50": 0.001542,
+      "p90": 0.0027919999999999998,
+      "frames": 600
+    },
+    "Extract::shadowFit": {
+      "p10": 0.001875,
+      "p50": 0.002959,
+      "p90": 0.00475,
+      "frames": 600
+    },
+    "RenderExtractor::extract": {
+      "p10": 0.052417,
+      "p50": 0.103041,
+      "p90": 5.163542,
+      "frames": 600
+    },
+    "Metal::RefineBounds": {
+      "p10": 0.0020829999999999998,
+      "p50": 0.003208,
+      "p90": 0.230542,
+      "frames": 600
+    },
+    "Metal::ExtractFrame": {
+      "p10": 0.054084,
+      "p50": 0.104292,
+      "p90": 5.618791,
+      "frames": 600
+    },
+    "RenderExtractor::reuse": {
+      "p10": 4.2e-05,
+      "p50": 0.000126,
+      "p90": 0.000334,
+      "frames": 600
+    },
+    "FrustumCuller::cull": {
+      "p10": 0.0017499999999999998,
+      "p50": 0.0025,
+      "p90": 0.006,
+      "frames": 597
+    },
+    "Metal::ShadowPrepare": {
+      "p10": 0.025374999999999998,
+      "p50": 0.051583,
+      "p90": 1.465209,
+      "frames": 600
+    },
+    "Metal::ShadowInstanceMvp": {
+      "p10": 0.0,
+      "p50": 4.2e-05,
+      "p90": 0.000208,
+      "frames": 600
+    },
+    "Metal::EncodeShadowMap": {
+      "p10": 0.142875,
+      "p50": 0.304625,
+      "p90": 3.7682919999999998,
+      "frames": 600
+    },
+    "Metal::EncodeCloudShadow": {
+      "p10": 0.024125,
+      "p50": 0.041541,
+      "p90": 0.6599999999999999,
+      "frames": 600
+    },
+    "Metal::EncodeSkyViewLut": {
+      "p10": 0.000208,
+      "p50": 0.000334,
+      "p90": 0.044,
+      "frames": 600
+    },
+    "Metal::CullCameraObjects::reuse": {
+      "p10": 0.000168,
+      "p50": 0.0005,
+      "p90": 0.001584,
+      "frames": 600
+    },
+    "Metal::EncodeSSAO": {
+      "p10": 0.063833,
+      "p50": 0.129542,
+      "p90": 1.179458,
+      "frames": 600
+    },
+    "RenderGraph::record": {
+      "p10": 0.00325,
+      "p50": 0.004833,
+      "p90": 0.010208,
+      "frames": 600
+    },
+    "Metal::EncodeScene": {
+      "p10": 0.124917,
+      "p50": 0.26075,
+      "p90": 5.315875,
+      "frames": 600
+    },
+    "Metal::Overlay": {
+      "p10": 0.041208,
+      "p50": 0.086125,
+      "p90": 1.317375,
+      "frames": 600
+    },
+    "Metal::Commit": {
+      "p10": 0.017499999999999998,
+      "p50": 0.032833,
+      "p90": 0.087792,
+      "frames": 600
+    },
+    "Render": {
+      "p10": 0.884583,
+      "p50": 2.793666,
+      "p90": 25.191542,
+      "frames": 600
+    },
+    "GameLogicTick": {
+      "p10": 0.00045799999999999997,
+      "p50": 0.000833,
+      "p90": 0.28625,
+      "frames": 600
+    },
+    "SwapBuffers": {
+      "p10": 0.000167,
+      "p50": 0.000375,
+      "p90": 0.000833,
+      "frames": 600
+    }
+  },
+  "cpuScopes": {
+    "Animation": {
+      "avg": 0.0703516716666665,
+      "self": 0.0703516716666665,
+      "p95": 0.210583,
+      "count": 600,
+      "depth": 2
+    },
+    "AnimationBlend": {
+      "avg": 0.002354764999999996,
+      "self": 0.002354764999999996,
+      "p95": 0.0012079999999999999,
+      "count": 600,
+      "depth": 2
+    },
+    "AnimationStateMachine": {
+      "avg": 0.03598938500000001,
+      "self": 0.03598938500000001,
+      "p95": 0.04425,
+      "count": 600,
+      "depth": 2
+    },
+    "EnvironmentPush": {
+      "avg": 0.09519903333333336,
+      "self": 0.09519903333333336,
+      "p95": 0.283334,
+      "count": 600,
+      "depth": 1
+    },
+    "Extract::foliage": {
+      "avg": 0.3261115933333332,
+      "self": 0.07927921666666668,
+      "p95": 1.562792,
+      "count": 600,
+      "depth": 3
+    },
+    "Extract::lights": {
+      "avg": 0.004931398333333323,
+      "self": 0.004931398333333323,
+      "p95": 0.003583,
+      "count": 600,
+      "depth": 3
+    },
+    "Extract::meshes": {
+      "avg": 0.5554349950000005,
+      "self": 0.5554349950000005,
+      "p95": 3.807375,
+      "count": 600,
+      "depth": 3
+    },
+    "Extract::shadowFit": {
+      "avg": 0.008795969999999988,
+      "self": 0.008795969999999988,
+      "p95": 0.00575,
+      "count": 600,
+      "depth": 3
+    },
+    "Extract::transforms": {
+      "avg": 0.23973649000000005,
+      "self": 0.12895645,
+      "p95": 1.5905,
+      "count": 600,
+      "depth": 3
+    },
+    "ExtractFoliage": {
+      "avg": 0.24683237666666652,
+      "self": 0.24683237666666652,
+      "p95": 1.3167499999999999,
+      "count": 600,
+      "depth": 4
+    },
+    "Foliage": {
+      "avg": 0.24073077166666706,
+      "self": 0.24073077166666706,
+      "p95": 1.0879999999999999,
+      "count": 600,
+      "depth": 2
+    },
+    "FrustumCuller::cull": {
+      "avg": 0.0026614988257397804,
+      "self": 0.009443884999999987,
+      "p95": 0.0020829999999999998,
+      "count": 2129,
+      "depth": 3
+    },
+    "GameLogicTick": {
+      "avg": 0.18032973000000005,
+      "self": 0.18032973000000005,
+      "p95": 1.142459,
+      "count": 600,
+      "depth": 0
+    },
+    "GpuParticleParams": {
+      "avg": 0.0020402383333333316,
+      "self": 0.0020402383333333316,
+      "p95": 0.00125,
+      "count": 600,
+      "depth": 2
+    },
+    "LOD": {
+      "avg": 0.15913862833333337,
+      "self": 0.15913862833333337,
+      "p95": 0.994833,
+      "count": 600,
+      "depth": 2
+    },
+    "Metal::Commit": {
+      "avg": 0.08245763333333331,
+      "self": 0.08245763333333331,
+      "p95": 0.251208,
+      "count": 600,
+      "depth": 1
+    },
+    "Metal::CullCameraObjects::reuse": {
+      "avg": 0.002964544166666685,
+      "self": 0.00592908833333337,
+      "p95": 0.001166,
+      "count": 1200,
+      "depth": 2
+    },
+    "Metal::EncodeCloudShadow": {
+      "avg": 0.37546041833333355,
+      "self": 0.37546041833333355,
+      "p95": 2.0197499999999997,
+      "count": 600,
+      "depth": 1
+    },
+    "Metal::EncodeSSAO": {
+      "avg": 0.4003181116666664,
+      "self": 0.3888206983333334,
+      "p95": 1.873708,
+      "count": 600,
+      "depth": 1
+    },
+    "Metal::EncodeScene": {
+      "avg": 1.7431440916666672,
+      "self": 1.6808595350000006,
+      "p95": 9.429499999999999,
+      "count": 600,
+      "depth": 1
+    },
+    "Metal::EncodeShadowMap": {
+      "avg": 1.4592447783333333,
+      "self": 0.8809975933333328,
+      "p95": 7.4479169999999995,
+      "count": 600,
+      "depth": 1
+    },
+    "Metal::EncodeSkyViewLut": {
+      "avg": 0.09742064166666653,
+      "self": 0.09742064166666653,
+      "p95": 0.344667,
+      "count": 600,
+      "depth": 1
+    },
+    "Metal::ExtractFrame": {
+      "avg": 1.861862816666668,
+      "self": 0.07174585666666665,
+      "p95": 12.340708,
+      "count": 600,
+      "depth": 1
+    },
+    "Metal::NextDrawable": {
+      "avg": 10.017547608333345,
+      "self": 10.017547608333345,
+      "p95": 34.384791,
+      "count": 600,
+      "depth": 1
+    },
+    "Metal::Overlay": {
+      "avg": 0.6109087366666663,
+      "self": 0.6109087366666663,
+      "p95": 3.114375,
+      "count": 600,
+      "depth": 1
+    },
+    "Metal::RefineBounds": {
+      "avg": 0.10624020166666655,
+      "self": 0.10624020166666655,
+      "p95": 0.6014579999999999,
+      "count": 600,
+      "depth": 2
+    },
+    "Metal::ShadowInstanceMvp": {
+      "avg": 8.92116666666667e-05,
+      "self": 8.92116666666667e-05,
+      "p95": 0.00025,
+      "count": 600,
+      "depth": 2
+    },
+    "Metal::ShadowPrepare": {
+      "avg": 0.5740324966666661,
+      "self": 0.5645886116666671,
+      "p95": 3.307209,
+      "count": 600,
+      "depth": 2
+    },
+    "Movement": {
+      "avg": 0.1543829149999999,
+      "self": 0.1543829149999999,
+      "p95": 1.163584,
+      "count": 600,
+      "depth": 2
+    },
+    "Navigation": {
+      "avg": 0.18320092833333337,
+      "self": 0.18320092833333337,
+      "p95": 1.179042,
+      "count": 600,
+      "depth": 2
+    },
+    "OnRender": {
+      "avg": 22.279311121666655,
+      "self": 17.870166323333333,
+      "p95": 114.50058399999999,
+      "count": 600,
+      "depth": 0
+    },
+    "OutlinerPanel::render": {
+      "avg": 0.9534157566666668,
+      "self": 0.9534157566666668,
+      "p95": 6.031916,
+      "count": 600,
+      "depth": 1
+    },
+    "ParticleSystem": {
+      "avg": 0.004865344999999991,
+      "self": 0.004865344999999991,
+      "p95": 0.001875,
+      "count": 600,
+      "depth": 2
+    },
+    "PollEvents": {
+      "avg": 1.5487166733333335,
+      "self": 1.5487166733333335,
+      "p95": 9.366208,
+      "count": 600,
+      "depth": 0
+    },
+    "PropertyAnimation": {
+      "avg": 0.0009279649999999975,
+      "self": 0.0009279649999999975,
+      "p95": 0.001125,
+      "count": 600,
+      "depth": 2
+    },
+    "Render": {
+      "avg": 8.560364101666664,
+      "self": 1.9285746750000006,
+      "p95": 43.173041,
+      "count": 600,
+      "depth": 0
+    },
+    "RenderExtractor::extract": {
+      "avg": 0.3484572096666693,
+      "self": 0.6070983999999973,
+      "p95": 0.624917,
+      "count": 3000,
+      "depth": 1
+    },
+    "RenderExtractor::extractCameraOnly": {
+      "avg": 0.016038141666666665,
+      "self": 0.016038141666666665,
+      "p95": 0.05325,
+      "count": 600,
+      "depth": 1
+    },
+    "RenderExtractor::reuse": {
+      "avg": 4.4300416666666704e-05,
+      "self": 0.00017720166666666682,
+      "p95": 0.000125,
+      "count": 2400,
+      "depth": 2
+    },
+    "RenderGraph::record": {
+      "avg": 0.014541266666666655,
+      "self": 0.014541266666666655,
+      "p95": 0.013916999999999999,
+      "count": 600,
+      "depth": 2
+    },
+    "RopeTrail": {
+      "avg": 0.09125498833333326,
+      "self": 0.09125498833333326,
+      "p95": 0.324334,
+      "count": 600,
+      "depth": 2
+    },
+    "SceneAnimationTick": {
+      "avg": 0.5151962966666662,
+      "self": 0.27643509,
+      "p95": 3.1752499999999997,
+      "count": 600,
+      "depth": 1
+    },
+    "SceneSystemsTick": {
+      "avg": 2.6597887066666708,
+      "self": 0.7958911916666677,
+      "p95": 14.515875,
+      "count": 600,
+      "depth": 1
+    },
+    "SequenceApply": {
+      "avg": 0.055863323333333256,
+      "self": 0.055863323333333256,
+      "p95": 0.20475,
+      "count": 600,
+      "depth": 2
+    },
+    "SequenceBegin": {
+      "avg": 0.07327409666666654,
+      "self": 0.07327409666666654,
+      "p95": 0.31587499999999996,
+      "count": 600,
+      "depth": 2
+    },
+    "SwapBuffers": {
+      "avg": 0.030200155000000024,
+      "self": 0.030200155000000024,
+      "p95": 0.004542,
+      "count": 600,
+      "depth": 0
+    },
+    "Terrain": {
+      "avg": 0.678345075,
+      "self": 0.678345075,
+      "p95": 4.496708,
+      "count": 600,
+      "depth": 2
+    },
+    "TerrainSeams": {
+      "avg": 0.0743157083333334,
+      "self": 0.0743157083333334,
+      "p95": 0.31854099999999996,
+      "count": 600,
+      "depth": 2
+    },
+    "TerrainTess": {
+      "avg": 0.00864846499999999,
+      "self": 0.00864846499999999,
+      "p95": 0.011833999999999999,
+      "count": 600,
+      "depth": 2
+    },
+    "Transforms::propagate": {
+      "avg": 0.1107800399999999,
+      "self": 0.10580573166666658,
+      "p95": 0.574917,
+      "count": 600,
+      "depth": 4
+    },
+    "Transforms::scan": {
+      "avg": 0.004974308333333329,
+      "self": 0.004974308333333329,
+      "p95": 0.009459,
+      "count": 600,
+      "depth": 5
+    },
+    "WaitForFrame": {
+      "avg": 10.205217366666673,
+      "self": 0.1876697583333335,
+      "p95": 34.807417,
+      "count": 600,
+      "depth": 0
+    },
+    "Weather": {
+      "avg": 0.26697445166666645,
+      "self": 0.26697445166666645,
+      "p95": 1.725666,
+      "count": 600,
+      "depth": 2
+    },
+    "WeatherAudio": {
+      "avg": 0.16950686333333334,
+      "self": 0.16950686333333334,
+      "p95": 0.979375,
+      "count": 600,
+      "depth": 1
+    }
+  },
+  "rssMB": {
+    "max": 245.046875,
+    "last": 79.5625,
+    "samples": 44
+  },
+  "runner": {
+    "label": "before_v5_fps_2",
+    "rc": 0,
+    "wallSeconds": 50.8,
+    "editor": "/private/tmp/auto-lod-abnahme/Editor/HorizonEditor",
+    "sets": [],
+    "cam": "0,2.5,-24,3.14159,-0.15",
+    "scene": "/private/tmp/auto-lod-abnahme/proj/variants/v5_all.hescene",
+    "warmup": 300,
+    "frames": 600,
+    "detailed": false,
+    "counters": false,
+    "vsync": "off",
+    "rhi": "Metal",
+    "env": [
+      "HE_SKY_TIME=40000"
+    ]
+  }
+}

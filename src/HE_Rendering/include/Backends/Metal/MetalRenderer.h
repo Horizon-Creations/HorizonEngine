@@ -12,6 +12,7 @@
 #include <HorizonRendering/RenderGraph.h>
 #include <HorizonRendering/CommandBuffer.h>
 #include <HorizonRendering/FrameUploadRing.h>
+#include <HorizonRendering/FogVolume.h>
 #include <HorizonRendering/RenderConstants.h> // HE::kShadowMapResolution
 #include <HorizonRendering/GiBvh.h>
 #include <HorizonRendering/GIProbeGrid.h>
@@ -219,8 +220,13 @@ private:
 	// lighting resolve is drawn (plus the forward-routed opaque replay), and the
 	// transparency list is taken from the hand-off. Everything else (skinned,
 	// sky, transparency, particles) is the SAME code as forward.
+	// fogCmdBuf / fogScenePass: only when the volumetric fog is on this frame. EncodeScene then
+	// ends the encoder after the sky, runs the full-screen Apply pass on fogCmdBuf and opens
+	// a second encoder from fogScenePass (colour + depth Load) for the translucent tail; the
+	// encoder that is live on return is left in m_fogSceneEncoder (retained — the caller takes it).
 	void EncodeScene(void* renderEncoder, int width, int height,
-	                 MetalDeferredFrame* deferred = nullptr);
+	                 MetalDeferredFrame* deferred = nullptr,
+	                 void* fogCmdBuf = nullptr, void* fogScenePass = nullptr);
 	bool EncodeWaterReflPrepass(void* cmdBuf, int width, int height, const std::vector<TPDraw>& draws);
 
 	// ── Deferred render path (G-buffer + lighting resolve) ───────────────────
@@ -1201,6 +1207,45 @@ private:
 	void  EnsureCloudShadowTarget();
 	void  DestroyCloudShadowTarget();
 	void  EncodeCloudShadow(void* cmdBuf);
+
+	// ── Volumetric fog (Thema 225, docs/volumetric-fog-plan.md) ──────────────
+	// fogMode 1: Inject (density + light + shadows + history) and Integrate (front-to-back
+	// scan) as two compute dispatches before the scene encoder, Apply as a full-screen pass
+	// between the sky and the translucent draws (the scene encoder is split there), and
+	// heApplyFogT on translucent graph materials reading the integrated volume at fragment
+	// texture 17. All of it only while m_fogFrameActive; with fogMode 0 nothing below runs
+	// and every shader sees fogVol = 0 (the analytic fog, pixel for pixel as before).
+	// Kernels: MaterialShaderLibrary::fogInject/fogIntegrate/fogApply (one GLSL source).
+	bool       EnsureFogPipelines();
+	void       EnsureFogTargets(const glm::ivec3& grid);
+	void       DestroyFogTargets();
+	void       EncodeFogVolume(void* cmdBuf, float aspect);          // Inject + Integrate
+	void*      EncodeFogApplyAndReopen(void* sceneEncoder, void* cmdBuf, void* scenePass, int width, int height);
+	void       FillFogLighting(HE::MaterialShaderLibrary::Lighting& lit) const;
+	void*      m_fogInjectPipe    = nullptr; // id<MTLComputePipelineState>
+	void*      m_fogIntegratePipe = nullptr; // id<MTLComputePipelineState>
+	void*      m_fogApplyPipe     = nullptr; // id<MTLRenderPipelineState>
+	bool       m_fogTried         = false;   // the pipelines are built once; a failure keeps the analytic fog
+	void*      m_fogInject[2]     = { nullptr, nullptr }; // id<MTLTexture> 3D RGBA16F, ping-pong (S, sigma_t)
+	void*      m_fogIntegrated    = nullptr; // id<MTLTexture> 3D RGBA16F (L, T at each slice's far edge)
+	void*      m_fogNoise         = nullptr; // id<MTLTexture> 3D RG16Unorm 64^3: HE::BuildSkyNoise3D(64), the same generator as the sky's 256^3 volume, small enough to stay in cache
+	void*      m_fogDummy3D       = nullptr; // id<MTLTexture> 1x1x1 3D: what texture 17 holds when the volume is off
+	glm::ivec3 m_fogGrid          = glm::ivec3(0);
+	int        m_fogHist          = 0;       // index of the inject volume holding LAST frame's result
+	bool       m_fogHistValid     = false;
+	uint32_t   m_fogFrameIndex    = 0;
+	glm::vec3  m_fogNoiseOffset   = glm::vec3(0.0f); // wind-accumulated (plan §6.2)
+	float      m_fogNoiseTime     = 0.0f;
+	glm::mat4  m_fogPrevViewProj  = glm::mat4(1.0f);
+	glm::vec3  m_fogPrevCam       = glm::vec3(0.0f);
+	float      m_fogPrevFocal     = 0.0f;    // projection[1][1], a FOV change resets the history
+	double     m_fogLastTime      = 0.0;     // steady clock seconds of the last inject
+	bool       m_fogFrameActive   = false;   // this frame runs the volume (set in EncodeFrame, read by every fill)
+	HE::FogVolumeConstants m_fogApplyConstants; // this frame's constants, for the Apply pass
+	HE::FogVolumeData m_fogFrame;            // this frame's data (copy of the walk's, for the fills)
+	glm::mat4  m_fogViewProjFlip  = glm::mat4(1.0f); // y-flipped unjittered viewProj for heApplyFogT
+	uint32_t   m_fogSceneTimerBase = 0xFFFFFFFFu; // ftBeginMulti("Scene") pair spanning the split scene encoders
+	void*      m_fogSceneEncoder  = nullptr; // CFBridgingRetain'd: the encoder EncodeScene left open after the split
 
 	// ── SSAO (screen-space ambient occlusion) ───────────────────────────────
 	// Mirrors the GL backend: a view-space position pre-pass feeds a hemisphere-

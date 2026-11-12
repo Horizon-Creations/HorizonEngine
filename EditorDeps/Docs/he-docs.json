@@ -17329,6 +17329,16 @@
         [
          {
           "s": "b",
+          "t": "Volumetric fog"
+         },
+         {
+          "s": "",
+          "t": " — set Fog Mode to Volumetric for a real 3D fog volume (a froxel grid in front of the camera) instead of the flat per-pixel blend: sun and light shafts, shadows inside the fog, drifting 3D noise, and a ground-hugging fog bank with its own base height and thickness. Quality sets the grid size, Volume Distance how far it reaches before the Density fog takes over, Anisotropy how strongly it glows toward the sun. A Sky you add starts on Volumetric (it draws nothing until Density or Bank Density is above 0); scenes saved before it stay on Analytic. It runs on Metal, OpenGL and Vulkan; on Direct3D 11/12 and the software renderer the Density fog stands in, and the camera underwater hands over to the underwater effect."
+         }
+        ],
+        [
+         {
+          "s": "b",
           "t": "Rain / Snow / Wetness"
          },
          {
@@ -17418,7 +17428,7 @@
      ],
      "eyebrow": "Above",
      "id": "sky",
-     "text": "The sky is fully procedural — atmosphere, sun, moon, stars, clouds, aurora — and doubles as the scene's image-based light source. All of it lives on the Sky entity's Environment component, edited in the Details panel and scriptable at runtime through the env API group (every field has a get/set). Procedural daytime sky with volumetric clouds Day-night cycle A time-of-day clock slider (0.25 = sunrise, 0.5 = noon, 0.75 = sunset) with optional Auto-Advance and a configurable full-day length. The sun and moon arcs, their colours and brightness, the moon phase (eight named phases, with an optional automatic lunar cycle over N days) all follow the clock. Clouds Coverage-driven procedural clouds with two modes — Sky-dome (default) and 3D volumetric (parallax), where clouds are anchored in world space and parallax as you move (with a tunable cloud height). Quality presets (Low / Medium / High), an optional quarter-resolution cloud pass for performance, plus Density, Fluffiness, Tint and wind direction/speed. Separate Cirrus and Contrail layers add high-altitude detail. Sunset sky Sun effects, fog & precipitation God rays — crepuscular rays through broken cloud; Lens flare — camera artifact overlay. Atmospheric fog — density plus a ground-hugging height falloff; distant geometry picks up aerial perspective. Rain / Snow / Wetness — precipitation amounts spawn particles, wetness darkens the ground and snow whitens it (usually driven by the Weather system). Night sky Night sky with stars, Milky Way and nebula Stars — brightness, colour, density, size and variation, glow, twinkle. Milky Way band and night-only shooting stars. Nebula — three-colour procedural nebula with quality presets and a seed. Aurora — intensity, base and top colours, height and fragmentation.",
+     "text": "The sky is fully procedural — atmosphere, sun, moon, stars, clouds, aurora — and doubles as the scene's image-based light source. All of it lives on the Sky entity's Environment component, edited in the Details panel and scriptable at runtime through the env API group (every field has a get/set). Procedural daytime sky with volumetric clouds Day-night cycle A time-of-day clock slider (0.25 = sunrise, 0.5 = noon, 0.75 = sunset) with optional Auto-Advance and a configurable full-day length. The sun and moon arcs, their colours and brightness, the moon phase (eight named phases, with an optional automatic lunar cycle over N days) all follow the clock. Clouds Coverage-driven procedural clouds with two modes — Sky-dome (default) and 3D volumetric (parallax), where clouds are anchored in world space and parallax as you move (with a tunable cloud height). Quality presets (Low / Medium / High), an optional quarter-resolution cloud pass for performance, plus Density, Fluffiness, Tint and wind direction/speed. Separate Cirrus and Contrail layers add high-altitude detail. Sunset sky Sun effects, fog & precipitation God rays — crepuscular rays through broken cloud; Lens flare — camera artifact overlay. Atmospheric fog — density plus a ground-hugging height falloff; distant geometry picks up aerial perspective. Volumetric fog  — set Fog Mode to Volumetric for a real 3D fog volume (a froxel grid in front of the camera) instead of the flat per-pixel blend: sun and light shafts, shadows inside the fog, drifting 3D noise, and a ground-hugging fog bank with its own base height and thickness. Quality sets the grid size, Volume Distance how far it reaches before the Density fog takes over, Anisotropy how strongly it glows toward the sun. A Sky you add starts on Volumetric (it draws nothing until Density or Bank Density is above 0); scenes saved before it stay on Analytic. It runs on Metal, OpenGL and Vulkan; on Direct3D 11/12 and the software renderer the Density fog stands in, and the camera underwater hands over to the underwater effect. Rain / Snow / Wetness — precipitation amounts spawn particles, wetness darkens the ground and snow whitens it (usually driven by the Weather system). Night sky Night sky with stars, Milky Way and nebula Stars — brightness, colour, density, size and variation, glow, twinkle. Milky Way band and night-only shooting stars. Nebula — three-colour procedural nebula with quality presets and a seed. Aurora — intensity, base and top colours, height and fragmentation.",
      "title": "Sky & Atmosphere"
     },
     {
@@ -17516,6 +17526,16 @@
         ],
         [
          {
+          "s": "b",
+          "t": "Fog"
+         },
+         {
+          "s": "",
+          "t": " — Foggy sets the Density fog and, with Fog Mode on Volumetric, a thick ground bank with wispy noise; Rain and Storm add a faint bank. Intensity scales them. Move Bank Density or Noise Amount yourself and the weather leaves that value alone until the next preset pick."
+         }
+        ],
+        [
+         {
           "s": "",
           "t": "Environment sliders stay live — once you hand-tune a field, the weather stops owning it."
          }
@@ -17559,7 +17579,7 @@
      ],
      "eyebrow": "Dynamic",
      "id": "weather",
-     "text": "The Weather entity blends between built-in presets — Clear, Cloudy, Overcast, Foggy, Rain, Storm, Snow — and writes cloud coverage, fog, wind, precipitation and wetness into the Environment over a configurable transition time. An Auto-Cycle mode wanders between weathers on its own. Intensity scales the active preset; Transition sets the blend duration. Precipitation — camera-following rain and snow particle pools (with per-type particle caps) that collide with the ground; on capable backends the simulation runs entirely on the GPU. Storm adds lightning flashes; each one is followed by thunder, later and quieter the farther away it struck. Sound — the weather makes its own noise: rain, wind, snow and storm beds that fade in and out with the weather, and a thunder roll after each strike. The sounds ship with the engine (Engine » Audio » Weather in the Content Browser), so a project needs no files of its own and no script starts or fades anything. The Weather component's Sound section switches it off, sets the volume and the mixer bus, and has a slot for each sound to swap in your own; an empty slot plays the engine's. In the editor viewport outside Play the sounds follow Preferences » Effects » Weather Sounds in Edit Mode. Environment sliders stay live — once you hand-tune a field, the weather stops owning it. Scripts can drive weather directly via env.setCloudCoverage, env.setFogDensity, env.setWindSpeed and friends.",
+     "text": "The Weather entity blends between built-in presets — Clear, Cloudy, Overcast, Foggy, Rain, Storm, Snow — and writes cloud coverage, fog, wind, precipitation and wetness into the Environment over a configurable transition time. An Auto-Cycle mode wanders between weathers on its own. Intensity scales the active preset; Transition sets the blend duration. Precipitation — camera-following rain and snow particle pools (with per-type particle caps) that collide with the ground; on capable backends the simulation runs entirely on the GPU. Storm adds lightning flashes; each one is followed by thunder, later and quieter the farther away it struck. Sound — the weather makes its own noise: rain, wind, snow and storm beds that fade in and out with the weather, and a thunder roll after each strike. The sounds ship with the engine (Engine » Audio » Weather in the Content Browser), so a project needs no files of its own and no script starts or fades anything. The Weather component's Sound section switches it off, sets the volume and the mixer bus, and has a slot for each sound to swap in your own; an empty slot plays the engine's. In the editor viewport outside Play the sounds follow Preferences » Effects » Weather Sounds in Edit Mode. Fog  — Foggy sets the Density fog and, with Fog Mode on Volumetric, a thick ground bank with wispy noise; Rain and Storm add a faint bank. Intensity scales them. Move Bank Density or Noise Amount yourself and the weather leaves that value alone until the next preset pick. Environment sliders stay live — once you hand-tune a field, the weather stops owning it. Scripts can drive weather directly via env.setCloudCoverage, env.setFogDensity, env.setWindSpeed and friends.",
      "title": "Weather"
     },
     {

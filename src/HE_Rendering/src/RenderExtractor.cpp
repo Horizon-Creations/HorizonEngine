@@ -1486,6 +1486,21 @@ float fogWaterlineBand(float signedDepth)
 	return 1.0f - t * t * (3.0f - 2.0f * t);
 }
 
+FogVolumeData ExtractFogVolumeData(HorizonWorld& world, bool backendSupportsVolumetricFog,
+                                   bool cameraUnderwater, float aspectWidthOverHeight,
+                                   float shadowDistance)
+{
+	// First Sky entity wins, like the puddleAmount walk above; a world with none
+	// keeps the default (disabled) component, so MakeFogVolumeData sees fogMode 0.
+	EnvironmentComponent ec{};
+	for (auto [ee, e] : world.registry().view<EnvironmentComponent>().each()) { ec = e; break; }
+	// dt = 0: this is a read of the current state, not a tick — must not advance
+	// timeOfDay (see makeWorldPreviewEnvironment's identical reasoning above).
+	const IRenderer::EnvironmentSettings settings = makeEnvironmentSettings(ec, 0.0f);
+	return MakeFogVolumeData(settings, backendSupportsVolumetricFog, cameraUnderwater,
+	                         aspectWidthOverHeight, shadowDistance);
+}
+
 } // namespace HE
 
 // Out-of-line on purpose (see the header): the one definition the DLL exports.
@@ -1632,6 +1647,10 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 	{ HE_PROFILE_SCOPE_N("Extract::transforms"); extractTransforms(world, reg); }
 	extractCamera(reg, out, aspectRatio, editorCam);
 	out.underwaterCamera = HE::queryUnderwaterCamera(world, out.camera.position, renderWaveClock());
+	// Volumetric fog: the Sky entity's settings gated on the backend's capability and the
+	// camera being dry (the underwater pass owns the view under water). Read once per walk.
+	out.fogVolume = HE::ExtractFogVolumeData(world, m_fogCapable, out.underwaterCamera.wet,
+	                                         aspectRatio, m_shadowDistance);
 	// Renderables. Everything that ends up in out.objects must run before the
 	// shadow fit below, which fits its frustum around their union.
 	{ HE_PROFILE_SCOPE_N("Extract::meshes"); extractMeshes(reg, out, m_contentManager, m_sectionMaterialMissing); }
@@ -1801,7 +1820,7 @@ void RenderExtractor::extractUI(HorizonWorld& world, float vpWidth, float vpHeig
 {
 	out.uiObjects.clear();
 	if (windowId == 0)
-		UISystem::extract(world, vpWidth, vpHeight, out.uiObjects);
+		UISystem::extract(world, vpWidth, vpHeight, out.uiObjects, m_contentManager);
 	// Live widgets (WidgetManager) append after the sorted entity UI, so they
 	// always draw on top of it; internally sorted by (zOrder, layer, depth).
 	world.widgets().extract(windowId, vpWidth, vpHeight, out.uiObjects);

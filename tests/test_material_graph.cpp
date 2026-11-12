@@ -5073,26 +5073,35 @@ TEST_CASE("Vulkan: heLandscapeWeights (binding 14) is in the material layout, an
 	CHECK(row);
 
 	// The device limits. The fixed textures are plain sampled images read through TWO shared
-	// samplers (Unreal's "Shared: Clamp"), so the fragment stage holds 8 SAMPLERS with the row
-	// (heTex0, heTexP0..3, heLandscapeWeights, the two shared ones) and 17 images. As combined
-	// descriptors it was 17 samplers: one over the spec minimum and MoltenVK's hard limit of 16,
-	// where a Mac lost the row to the fallback and every layer-blend terrain drew white.
-	CHECK(HE::vkmat::fragmentSamplerCount(true) == 8);
-	CHECK(HE::vkmat::fragmentSamplerCount(false) == 7);
-	CHECK(HE::vkmat::fragmentImageCount(true) == 17);
-	CHECK(HE::vkmat::fragmentImageCount(false) == 16);
+	// samplers (Unreal's "Shared: Clamp"), so the fragment stage holds 8 SAMPLERS (heTex0,
+	// heTexP0..3, heLandscapeWeights, the two shared ones) whatever the optional rows do, and
+	// 18 images with both of them (the weightmap and, Thema 225 step 5, the fog volume at 34,
+	// a texelFetch-only SampledImage), 17 without the fog row, 16 (the spec minimum, which every
+	// device meets) without either - the renderer's fallbacks. As combined descriptors it was 17
+	// samplers: over MoltenVK's hard limit of 16, where a Mac lost the row and every layer-blend
+	// terrain drew white.
+	CHECK(HE::vkmat::fragmentSamplerCount(true, true) == 8);
+	CHECK(HE::vkmat::fragmentSamplerCount(false, false) == 7);
+	CHECK(HE::vkmat::fragmentImageCount(true, true) == 18);
+	CHECK(HE::vkmat::fragmentImageCount(true, false) == 17);
+	CHECK(HE::vkmat::fragmentImageCount(false, false) == 16);
 	CHECK(HE::vkmat::landscapeWeightsFit(16, 256));          // MoltenVK
-	CHECK(HE::vkmat::landscapeWeightsFit(8, 17));
-	CHECK_FALSE(HE::vkmat::landscapeWeightsFit(16, 16));      // a device at the image minimum: fallback
+	CHECK_FALSE(HE::vkmat::landscapeWeightsFit(16, 16, false)); // a device at the image minimum: fallback
+	CHECK(HE::vkmat::landscapeWeightsFit(8, 17, false));
 	CHECK_FALSE(HE::vkmat::landscapeWeightsFit(7, 256));
-	CHECK(HE::vkmat::landscapeWeightsFit(1u << 20, 1u << 20)); // NVIDIA / lavapipe class
+	CHECK_FALSE(HE::vkmat::landscapeWeightsFit(1u << 20, 16, false));
+	CHECK_FALSE(HE::vkmat::fogVolumeFit(16, 17));
+	CHECK(HE::vkmat::fogVolumeFit(16, 18));
+	CHECK_FALSE(HE::vkmat::fogVolumeFit(7, 256));
+	CHECK(HE::vkmat::fogVolumeFit(1u << 20, 1u << 20)); // NVIDIA / lavapipe class
+	CHECK(HE::vkmat::landscapeWeightsFit(1u << 20, 1u << 20));
 	// The SPIR-V flavour reads the fixed textures through the shared samplers and no combined
 	// sampler stands in for them: the reflection loop below fails on a shader that declares one.
 	for (uint32_t i = 0; i < HE::vkmat::kBindingCount; ++i)
 	{
 		const auto& r = HE::vkmat::kBindings[i];
 		if (r.binding == 10 || r.binding == 11 || r.binding == 12 || r.binding == 13 || r.binding == 15
-		    || r.binding == 16 || r.binding == 17 || r.binding == 18 || (r.binding >= 31 && r.binding <= 33))
+		    || r.binding == 16 || r.binding == 17 || r.binding == 18 || (r.binding >= 31 && r.binding <= 34))
 			CHECK(r.kind == DescKind::SampledImage);
 	}
 

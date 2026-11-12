@@ -1172,6 +1172,10 @@ namespace
 				{ "fontSize", t2->fontSize },
 				{ "color",    vec4ToJson(t2->color) },
 			};
+			// Same key as UIElement in UIWidgetTree.cpp. Empty = default UI font,
+			// so older readers and scenes without the key stay identical. The baked
+			// fontAtlasKey is transient and re-resolved at extract.
+			if (!t2->font.empty()) comps["uitext"]["font"] = t2->font;
 		}
 		if (auto* img = registry.try_get<UIImageComponent>(entity))
 		{
@@ -2416,6 +2420,7 @@ namespace
 			t2.text     = c.value("text",     t2.text);
 			t2.fontSize = c.value("fontSize", t2.fontSize);
 			t2.color    = jsonToVec4(c.value("color", json()), t2.color);
+			t2.font     = c.value("font",     std::string());
 			registry.emplace_or_replace<UITextComponent>(entity, std::move(t2));
 		}
 		if (comps.contains("uiimage"))

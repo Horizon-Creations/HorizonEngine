@@ -112,6 +112,15 @@ public:
     void* CreateImGuiTexture(const void* rgba8Pixels, int width, int height) override;
     void  DestroyImGuiTexture(void* handle) override;
 
+    // View mode (IRenderer::SetViewMode) as the two questions the passes ask.
+    // Wireframe is drawn unlit — shaded edges say nothing a flat edge does not,
+    // and the flat one reads far better against the sky. Mirrors GL/Metal/D3D11.
+    bool  UnlitViewActive() const
+    {
+        return m_viewMode == HE::ViewMode::Unlit || m_viewMode == HE::ViewMode::Wireframe;
+    }
+    bool  WireframeViewActive() const { return m_viewMode == HE::ViewMode::Wireframe; }
+
 private:
     // Extract → cull → sort → RenderGraph → replay into the bound command list.
     void DrawScene(void* cmdList, int width, int height);

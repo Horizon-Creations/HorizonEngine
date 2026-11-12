@@ -2613,6 +2613,28 @@ MatShaderGen generateFragment(const MaterialGraph& graph, const MatFunctionLoade
     // the tail reads.
     c.uiDomain = static_cast<int>(out->p[3]) == static_cast<int>(MatDomain::UserInterface);
 
+    // ── Blend mode (Output p[1]) decides what pin 4 means and where alpha comes from. ──
+    const int   blendMode = std::clamp(static_cast<int>(out->p[1]), 0, 2);
+    const float cutoff    = out->p[2] > 0.0f ? out->p[2] : 0.5f; // mask threshold
+    std::string opacity   = "1.0";                                // Opaque/Masked → solid
+    std::string mask;
+    if (blendMode == (int)MatBlendMode::Masked)
+    {
+        // Evaluate the mask and discard BEFORE BaseColor/Metallic/.../Normal: a masked
+        // fragment that fails the cutoff must not pay for the rest of the graph's
+        // texture samples (a normal map's screen-space tangent frame, metallic/
+        // roughness/AO/emissive reads) only to be thrown away. The mask usually reuses
+        // the base-colour texture's alpha (see PbrMaterialImport::buildGraph), so this
+        // does not add a sample — it only moves the ones the mask depends on ahead of
+        // the ones it doesn't (Thema 331 step 8: foliage cutout overdraw).
+        mask = inputExpr(c, root, *out, kMatOutputOpacityPin, F::Float);
+        // The mask may resolve to a variable a pending If-branch block has not
+        // assigned yet (computeBranchGuards can guard the Opacity pin same as any
+        // other); flush it before the discard statement below reads that variable.
+        if (refsPending(c, mask)) flushGuards(c);
+        c.body += "    if (" + mask + " < " + fmtF(cutoff) + ") discard;\n";
+    }
+
     const std::string base    = inputExpr(c, root, *out, kMatOutputBaseColorPin, F::Vec3);
     const std::string met     = inputExpr(c, root, *out, kMatOutputMetallicPin,  F::Float);
     const std::string spec    = inputExpr(c, root, *out, kMatOutputSpecularPin,  F::Float);
@@ -2631,14 +2653,7 @@ MatShaderGen generateFragment(const MaterialGraph& graph, const MatFunctionLoade
                                    : static_cast<int>(MatDomain::Surface);
     const bool lit = !uiDomain && out->p[0] > 0.5f;
 
-    // ── Blend mode (Output p[1]) decides what pin 4 means and where alpha comes from. ──
-    const int   blendMode = std::clamp(static_cast<int>(out->p[1]), 0, 2);
-    const float cutoff    = out->p[2] > 0.0f ? out->p[2] : 0.5f; // mask threshold
-    std::string opacity   = "1.0";                                // Opaque/Masked → solid
-    std::string mask;
-    if (blendMode == (int)MatBlendMode::Masked)
-        mask = inputExpr(c, root, *out, kMatOutputOpacityPin, F::Float);
-    else if (blendMode == (int)MatBlendMode::Translucent)
+    if (blendMode == (int)MatBlendMode::Translucent)
         opacity = inputExpr(c, root, *out, kMatOutputOpacityPin, F::Float);
 
     // ── Surface normal (pin 5): unconnected → the interpolated vertex normal. ──
@@ -2695,9 +2710,8 @@ MatShaderGen generateFragment(const MaterialGraph& graph, const MatFunctionLoade
                              + "// heDispBody\n" + dispStatements;
     }
     src += "void main() {\n" + c.body;
-    // Masked: kill sub-cutoff fragments BEFORE shading — hard-edged holes, opaque pass.
-    if (blendMode == (int)MatBlendMode::Masked)
-        src += "    if (" + mask + " < " + fmtF(cutoff) + ") discard;\n";
+    // Masked: the "< cutoff → discard" statement is already in c.body (emitted
+    // ahead of BaseColor/Metallic/.../Normal, above) — hard-edged holes, opaque pass.
     src += "    vec3 heN = " + normalExpr + ";\n";
 
     // The declarations + body + masked-discard + heN prologue is IDENTICAL for
@@ -2726,7 +2740,12 @@ MatShaderGen generateFragment(const MaterialGraph& graph, const MatFunctionLoade
         // graph material stayed saturated while everything around it faded into
         // the horizon. UNLIT output is deliberately left alone: there "unlit"
         // means "my colour, verbatim".
-        src += "    oColor = vec4(heApplyFog(heLitP(" + base + ", heN, " + met + ", " + rough
+        // Translucent surfaces are drawn AFTER the volumetric-fog Apply pass (which fogs
+        // the opaque scene + sky), so they read the froxel volume themselves:
+        // heApplyFogT. It is heApplyFog (the analytic fog) wherever no volume is bound.
+        src += std::string("    oColor = vec4(")
+             + (blendMode == (int)MatBlendMode::Translucent ? "heApplyFogT" : "heApplyFog")
+             + "(heLitP(" + base + ", heN, " + met + ", " + rough
              + ", vWorldPos, " + spec + ", " + ao + ") + "
              + emis + ", vWorldPos), " + opacity + ");\n";
     else
