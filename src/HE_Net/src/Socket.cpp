@@ -578,7 +578,7 @@ SocketHandle socketCreateListenerLoopback(std::uint16_t port, int backlog) {
     return h;
 }
 
-SocketResult socketConnectPoll(SocketHandle h) {
+SocketResult socketConnectPoll(SocketHandle h, int timeoutMs) {
     if (h == kInvalidSocket) return SocketResult::Error;
 
     // A pending non-blocking connect signals completion by becoming writable;
@@ -597,7 +597,9 @@ SocketResult socketConnectPoll(SocketHandle h) {
     FD_SET(s, &errSet);
     const int nfds = s + 1;
 #endif
-    timeval tv{};   // zero timeout — pure poll, never blocks the caller
+    timeval tv{};   // timeoutMs 0 (default): pure poll, never blocks the caller
+    tv.tv_sec  = timeoutMs / 1000;
+    tv.tv_usec = (timeoutMs % 1000) * 1000;
 
     const int rc = ::select(nfds, nullptr, &writeSet, &errSet, &tv);
     if (rc < 0) {
@@ -678,32 +680,6 @@ bool socketWaitReadable(SocketHandle h, int timeoutMs) {
     tv.tv_usec = (timeoutMs % 1000) * 1000;
 
     return ::select(nfds, &readSet, nullptr, nullptr, &tv) > 0;
-}
-
-bool socketWaitConnected(SocketHandle h, int timeoutMs) {
-    if (h == kInvalidSocket) return false;
-
-    // Same two sets socketConnectPoll watches: a finished connect makes the socket writable,
-    // a failed one shows up as writable (POSIX) or in the except set (Winsock).
-    fd_set writeSet, errSet;
-    FD_ZERO(&writeSet);
-    FD_ZERO(&errSet);
-#ifdef _WIN32
-    const SOCKET s = static_cast<SOCKET>(h);
-    FD_SET(s, &writeSet);
-    FD_SET(s, &errSet);
-    const int nfds = 0;   // ignored by Winsock
-#else
-    const int s = static_cast<int>(h);
-    FD_SET(s, &writeSet);
-    FD_SET(s, &errSet);
-    const int nfds = s + 1;
-#endif
-    timeval tv{};
-    tv.tv_sec  = timeoutMs / 1000;
-    tv.tv_usec = (timeoutMs % 1000) * 1000;
-
-    return ::select(nfds, nullptr, &writeSet, &errSet, &tv) > 0;
 }
 
 SocketResult socketRecv(SocketHandle h, std::uint8_t* buf, std::size_t len,

@@ -143,8 +143,12 @@ HE_NET_API SocketResult socketCreateTcpConnecting(const std::string& host,
 HE_NET_API SocketResult socketConnect(SocketHandle h, const std::string& host,
                                       std::uint16_t port);
 // Resolve a pending connect: Ok when established, WouldBlock while still
-// pending, Error when it failed.
-HE_NET_API SocketResult socketConnectPoll(SocketHandle h);
+// pending, Error when it failed. With timeoutMs > 0 it waits up to that long for the connect to
+// finish instead of returning at once; only do that on a one-shot worker thread (never on the
+// transport path the editor frame loop pumps). Waiting here instead of sleeping between zero-timeout
+// polls matters: a short sleep_for is stretched to ~100 ms by timer coalescing on a battery-powered
+// Mac and to a 15 ms tick on Windows, which showed up as the dominant latency of a small HTTP download.
+HE_NET_API SocketResult socketConnectPoll(SocketHandle h, int timeoutMs = 0);
 
 // ─── I/O ─────────────────────────────────────────────────────────────────────
 
@@ -160,13 +164,6 @@ HE_NET_API SocketResult socketRecv(SocketHandle h, std::uint8_t* buf,
 // request/response exchanges on a worker thread (SSDP discovery, router SOAP
 // calls) — never on the transport path the editor frame loop pumps.
 HE_NET_API bool socketWaitReadable(SocketHandle h, int timeoutMs);
-
-// Block until a pending non-blocking connect has finished (successfully or not — resolve which
-// with socketConnectPoll) or the timeout elapses. Same one-shot-worker-thread rule as above.
-// Waiting here instead of sleeping between socketConnectPoll calls matters: a short sleep_for
-// is stretched to ~100 ms by timer coalescing on a battery-powered Mac and to a 15 ms tick on
-// Windows, which showed up as the dominant latency of a small HTTP download.
-HE_NET_API bool socketWaitConnected(SocketHandle h, int timeoutMs);
 
 // ─── UDP ─────────────────────────────────────────────────────────────────────
 // Needed for router port mapping: SSDP discovery is multicast UDP, and NAT-PMP

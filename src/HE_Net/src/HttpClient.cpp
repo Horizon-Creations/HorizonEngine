@@ -104,18 +104,15 @@ SocketHandle connectAndSend(const HttpUrl& parsed, const std::string& method,
             outError = "connect timeout";
             return kInvalidSocket;
         }
-        rc = socketConnectPoll(sock);
+        // Wake the moment the connect finishes; a sleep here costs ~100 ms per request on a
+        // battery-powered Mac (timer coalescing) — see socketConnectPoll.
+        const auto remainingMs = static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(
+            deadline - std::chrono::steady_clock::now()).count());
+        rc = socketConnectPoll(sock, std::clamp(remainingMs, 0, 200));
         if (rc == SocketResult::Error) {
             socketClose(sock);
             outError = "connect failed";
             return kInvalidSocket;
-        }
-        if (rc == SocketResult::WouldBlock) {
-            // Wake the moment the connect finishes; a sleep here costs ~100 ms per request on a
-            // battery-powered Mac (timer coalescing) — see socketWaitConnected.
-            const auto remainingMs = static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(
-                deadline - std::chrono::steady_clock::now()).count());
-            socketWaitConnected(sock, std::clamp(remainingMs, 0, 200));
         }
     }
 

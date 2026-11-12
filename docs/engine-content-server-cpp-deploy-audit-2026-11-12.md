@@ -49,8 +49,8 @@ was measured against it and what is left. Server repo work is on branch
 - **Engine-side diff (one fix, found by the audit):** `HE::Net::httpRequest/httpDownloadToFile`
   slept 2 ms in the connect loop (`HttpClient.cpp`, `connectAndSend`). macOS stretches that to
   ~120 ms, so every request cost >=120 ms locally and ~1.5 s through the tunnel regardless of file
-  size (a 262-file sync would be minutes of pure waiting). New `socketWaitConnected`
-  (`Socket.h/.cpp`, select on write+except) replaces the sleep. Measured with the engine's own
+  size (a 262-file sync would be minutes of pure waiting). `socketConnectPoll`
+  (`Socket.h/.cpp`) got a `timeoutMs` argument (select on write+except) that replaces the sleep. Measured with the engine's own
   client (standalone harness built from these sources): small file, local loopback server,
   **120-130 ms -> 0.5-1.4 ms**; manifest 0.3 ms; through the tunnel 1.5 s -> 52 ms (manifest) /
   67-158 ms (32 KB file). The 2 ms sleep in the send loop and on the SFTP side were not touched.
