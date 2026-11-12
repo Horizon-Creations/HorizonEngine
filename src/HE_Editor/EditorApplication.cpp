@@ -15458,6 +15458,10 @@ void EditorApplication::setPlayMode(bool play)
 		// The streamed cells go first, while the physics world their bodies are in
 		// still stands; the snapshot below brings back the base the split left.
 		if (m_playCells) m_playCells->end(*m_editorWorld);
+		// Segments are keyed by entt::entity of the outgoing world; clear() recycles
+		// those ids, so a stale segment would alias an unrelated entity in the restored
+		// snapshot (same reason GameApplication::loadScene detaches before its clear()).
+		if (m_rvtLandscape) m_rvtLandscape->detach();
 		m_editorWorld->clear();
 		if (!serializer.load(*m_editorWorld, snapshot, SerializeFormat::Binary))
 		{
@@ -16211,6 +16215,9 @@ bool EditorApplication::restoreRecoveredScene()
 	m_undo.snapshotNow("Restore Recovered Scene");   // the file's state; Undo brings it back
 
 	SceneSerializer serializer;
+	// See openScene: clear() recycles entt ids, so a segment from the scene opened
+	// above would alias an unrelated entity in the snapshot loaded over it.
+	if (m_rvtLandscape) m_rvtLandscape->detach();
 	m_editorWorld->clear();
 	m_levelScriptMirror = {};   // as in openScene: another scene, another level script
 	if (!serializer.load(*m_editorWorld, pending->snapshotPath, SerializeFormat::JSON))
@@ -16353,6 +16360,10 @@ bool EditorApplication::openScene(const std::string& path)
 	if (m_isPlaying) setPlayMode(false); // leave play mode before switching scenes
 
 	SceneSerializer serializer;
+	// Segments are keyed by entt::entity; clear() recycles those ids, so a segment
+	// from the old scene would alias an unrelated entity in the new one (same
+	// reason GameApplication::loadScene detaches before its clear()).
+	if (m_rvtLandscape) m_rvtLandscape->detach();
 	m_editorWorld->clear();
 	// A different scene brings a different level script — see onWorldReplaced.
 	m_levelScriptMirror = {};
@@ -16440,6 +16451,9 @@ void EditorApplication::newScene()
 
 	if (m_isPlaying) setPlayMode(false);
 
+	// See openScene: clear() recycles entt ids, so a segment from the old scene
+	// would alias an unrelated entity in the new empty one.
+	if (m_rvtLandscape) m_rvtLandscape->detach();
 	m_editorWorld->clear(); // keeps the root entity, drops all children
 	m_currentScenePath.clear();
 	m_selection.clear();
