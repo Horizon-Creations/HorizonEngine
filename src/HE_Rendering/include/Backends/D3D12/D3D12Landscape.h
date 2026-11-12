@@ -14,9 +14,9 @@ struct ID3D12Resource;
 // ─── The world-scale landscape on D3D12 (Thema 326, step 2, part B) ──────────
 // The same job as D3D11Landscape (one HLSL source, kLandscapeHLSL in HorizonRendering/LandscapeShaderSource.h): copies a
 // HE::LandscapeRenderFrame's uploads into the tile atlas and draws its patches with the shared 65 x 65 grid. The class owns its root signature
-// (b12 root CBV with the frame's constants, b13 twelve root constants with the patch, a table of ten SRVs t32-t41 and a static sampler s13 for
-// the borrowed albedo array), its pipeline states (one per colour format), a descriptor heap of its own (a ring of tables, the albedo
-// descriptor is rewritten for every draw), the atlas images and the buffers that feed them. D3D12Renderer calls upload() once per
+// (b12 root CBV with the frame's constants, b13 twelve root constants with the patch, a table of twelve SRVs t32-t43 and a static sampler s13
+// for the borrowed albedo/normal/mask arrays), its pipeline states (one per colour format), a descriptor heap of its own (a ring of tables,
+// the three borrowed descriptors are rewritten for every draw), the atlas images and the buffers that feed them. D3D12Renderer calls upload() once per
 // scene frame, as soon as it has the frame, and draw() in the opaque pass; the capture tool (landscape_gpu_check) calls both on a device of
 // its own.
 //
@@ -37,6 +37,10 @@ public:
 		// The texture group's albedo array of the world-UV ground (LandscapeRenderStatic::albedoArrayPath, resolved and uploaded by the renderer; a
 		// texture array in the shader-resource state, with its mips, not owned here). Null = flat layer colours.
 		ID3D12Resource* albedoArray = nullptr;
+		// Its normal and mask arrays (LandscapeRenderStatic::normalArrayPath / maskArrayPath), the same way; only count with albedoArray bound,
+		// like the GL/Vulkan/Metal backends. Null normal = the geometric normal; null mask = no AO.
+		ID3D12Resource* normalArray = nullptr;
+		ID3D12Resource* maskArray = nullptr;
 	};
 	struct Stats
 	{

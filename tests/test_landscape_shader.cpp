@@ -132,33 +132,28 @@ TEST_CASE("landscape shader source: the HLSL port has every GLSL uniform as a me
 	std::set<std::string> uniforms = uniformsOf(HE::glsl::kLandscapeVS);
 	for (const std::string& u : uniformsOf(HE::glsl::kLandscapeFS)) uniforms.insert(u);
 	const std::set<std::string> images = { "uTileHeights", "uSlotTable", "uCoarseHeights", "uTileWeights0", "uTileWeights1", "uTileWeights2",
-	                                       "uCoarseWeights0", "uCoarseWeights1", "uCoarseWeights2", "uAlbedoArray" };
-	// The GLSL and the MSL read the group's NORMAL and MASK arrays too (02.11.2026); the D3D port does not yet: its ground is lit with the
-	// geometric normal and no AO. This list is the known gap (Windows work order, docs/landscape-world-scale-windows-auftrag-2026-11-02.md §1):
-	// when the port has them, they come out of this list and into the checks above.
-	const std::set<std::string> notPortedYet = { "uTexMaps", "uNormalArray", "uMaskArray" };
-	for (const std::string& u : notPortedYet) CHECK_MESSAGE(uniforms.count(u) == 1, "the GLSL no longer has " << u << ": take it off the list");
+	                                       "uCoarseWeights0", "uCoarseWeights1", "uCoarseWeights2", "uAlbedoArray", "uNormalArray", "uMaskArray" };
 	// `patch` is an HLSL keyword: the per-patch block spells uPatch as lsPatch, everything else as the MSL does
 	int members = 0;
 	for (const std::string& u : uniforms)
 	{
-		if (images.count(u) || notPortedYet.count(u)) continue;
+		if (images.count(u)) continue;
 		std::string m = u == "uPatch" ? std::string("LsPatch") : u.substr(1);
 		m[0] = static_cast<char>(std::tolower(static_cast<unsigned char>(m[0])));
 		INFO("GLSL uniform " << u << " as HLSL member " << m);
 		CHECK((hlsl.find(" " + m + ";") != std::string::npos || hlsl.find(" " + m + "[") != std::string::npos));
 		++members;
 	}
-	CHECK(members == 16);
-	// entry points (D3D11Landscape / D3D12Landscape compile them by name), the two blocks and the ten images: b12/b13, t32-t41, nothing else
+	CHECK(members == 17);
+	// entry points (D3D11Landscape / D3D12Landscape compile them by name), the two blocks and the twelve images: b12/b13, t32-t43, nothing else
 	CHECK(hlsl.find("VSMain(uint vid : SV_VertexID)") != std::string::npos);
 	CHECK(hlsl.find("float4 PSMain(") != std::string::npos);
 	CHECK(hlsl.find("cbuffer LsGlobals : register(b12)") != std::string::npos);
 	CHECK(hlsl.find("cbuffer LsPatch : register(b13)") != std::string::npos);
-	for (int t = 32; t <= 41; ++t) CHECK(hlsl.find("register(t" + std::to_string(t) + ")") != std::string::npos);
-	CHECK(hlsl.find("register(t42)") == std::string::npos);
+	for (int t = 32; t <= 43; ++t) CHECK(hlsl.find("register(t" + std::to_string(t) + ")") != std::string::npos);
+	CHECK(hlsl.find("register(t44)") == std::string::npos);
 	CHECK(hlsl.find("register(t31)") == std::string::npos);    // nothing in the range the D3D11 renderer and its graph materials bind
-	CHECK(hlsl.find("register(s13)") != std::string::npos);     // the albedo array's sampler, the only one (D3D11Landscape and D3D12Landscape make it)
+	CHECK(hlsl.find("register(s13)") != std::string::npos);     // the albedo/normal/mask arrays' sampler, the only one (D3D11Landscape and D3D12Landscape make it)
 	CHECK(hlsl.find("register(s", hlsl.find("register(s13)") + 1) == std::string::npos);
 	// the same distance for the morph as the GLSL: horizontal plus the slab term, never the vertex's own height
 	const size_t at = hlsl.find("float d = sqrt(");
@@ -167,8 +162,11 @@ TEST_CASE("landscape shader source: the HLSL port has every GLSL uniform as a me
 	CHECK(line.find("cameraRel.w") != std::string::npos);
 	CHECK(line.find("d2") != std::string::npos);
 	CHECK(hlsl.find("discard;") != std::string::npos);          // the world's edge
-	// the derivatives are taken before the discard: a divergent discard must not make them undefined
+	// the derivatives, and the albedo/normal/mask samples, are taken before the discard: a divergent discard must not make a gradient undefined
 	CHECK(hlsl.find("ddx(") < hlsl.find("discard;"));
+	CHECK(hlsl.find("albedoArr.Sample(") < hlsl.find("discard;"));
+	CHECK(hlsl.find("normalArr.Sample(") < hlsl.find("discard;"));
+	CHECK(hlsl.find("maskArr.Sample(") < hlsl.find("discard;"));
 	CHECK(hlsl.find("layout(") == std::string::npos);
 }
 

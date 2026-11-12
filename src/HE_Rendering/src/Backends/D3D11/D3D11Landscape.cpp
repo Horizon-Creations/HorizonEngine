@@ -23,7 +23,7 @@ struct D3D11Landscape::Impl
 	ComPtr<ID3D11DepthStencilState> depth;
 	ComPtr<ID3D11RasterizerState>   raster;
 	ComPtr<ID3D11BlendState>        blend;
-	ComPtr<ID3D11SamplerState>      sampler;   // the albedo array's: linear, repeat, mips
+	ComPtr<ID3D11SamplerState>      sampler;   // the albedo/normal/mask arrays': linear, repeat, mips
 	ComPtr<ID3D11Buffer>            globalsCB, patchCB, indices;
 
 	// the nine images, in the register order of kLandscapeHLSL (t32 ..): tile heights, slot table, coarse heights, 3 x tile weights, 3 x coarse weights
@@ -333,7 +333,8 @@ void D3D11Landscape::draw(ID3D11DeviceContext* ctx, const HE::LandscapeRenderFra
 	StateGuard guard(ctx);
 
 	d3dls::Globals g;
-	d3dls::fillGlobals(g, f, viewProj, shading.sunDir, shading.sunColor, shading.ambient, shading.albedoArray != nullptr);
+	d3dls::fillGlobals(g, f, viewProj, shading.sunDir, shading.sunColor, shading.ambient, shading.albedoArray != nullptr,
+	                   shading.normalArray != nullptr, shading.maskArray != nullptr);
 	D3D11_MAPPED_SUBRESOURCE mapped{};
 	if (FAILED(ctx->Map(m.globalsCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) return;
 	std::memcpy(mapped.pData, &g, sizeof(g));
@@ -341,7 +342,10 @@ void D3D11Landscape::draw(ID3D11DeviceContext* ctx, const HE::LandscapeRenderFra
 
 	ID3D11ShaderResourceView* views[d3dls::kSrvCount];
 	for (unsigned i = 0; i < d3dls::kImageCount; ++i) views[i] = m.srv[i].Get();
-	views[d3dls::kImageCount] = shading.albedoArray;   // t41: the world-UV albedo array, or nothing (the shader reads it only where tex.y says so)
+	// t41-t43: the world-UV albedo/normal/mask arrays, or nothing (the shader reads them only where tex.y / texMaps say so)
+	views[d3dls::kImageCount] = shading.albedoArray;
+	views[d3dls::kImageCount + 1] = shading.normalArray;
+	views[d3dls::kImageCount + 2] = shading.maskArray;
 	ID3D11SamplerState* smp = m.sampler.Get();
 	ctx->PSSetSamplers(d3dls::kSamplerReg, 1, &smp);
 	ctx->VSSetShader(m.vs.Get(), nullptr, 0);

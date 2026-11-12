@@ -12140,8 +12140,15 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
         for (const LightData& l : p.m_renderWorld.lights)
             if (l.type == static_cast<uint8_t>(HE::LightType::Directional)) { sh.sunColor = l.color * l.intensity; break; }
         if (p.landscapeFrame.world && !p.landscapeFrame.world->albedoArrayPath.empty())
+        {
             // The texture group's albedo array (the world-UV ground), resolved and uploaded like a material's texture array; not loaded (yet) = null = flat colours.
             sh.albedoArray = p.resolveGraphTexture(cl, HE::UUID{}, p.landscapeFrame.world->albedoArrayPath, m_contentManager, /*array=*/true);
+            // Its normal and mask arrays, the same way; only resolved once the albedo array is there, like GL/Vulkan/Metal.
+            if (sh.albedoArray && !p.landscapeFrame.world->normalArrayPath.empty())
+                sh.normalArray = p.resolveGraphTexture(cl, HE::UUID{}, p.landscapeFrame.world->normalArrayPath, m_contentManager, /*array=*/true);
+            if (sh.albedoArray && !p.landscapeFrame.world->maskArrayPath.empty())
+                sh.maskArray = p.resolveGraphTexture(cl, HE::UUID{}, p.landscapeFrame.world->maskArrayPath, m_contentManager, /*array=*/true);
+        }
         p.landscape.draw(cl, p.landscapeFrame, viewProj, sh, p.usingHDR ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_R8G8B8A8_UNORM);
     };
 

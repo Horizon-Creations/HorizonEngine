@@ -162,8 +162,9 @@ struct D3D12Landscape::Impl
 		return h;
 	}
 
-	// The borrowed albedo array at the tail of a table (null = a null view: nothing reads it where the shader's tex.y says "flat").
-	void writeAlbedo(unsigned set, ID3D12Resource* res)
+	// A borrowed texture-group array (albedo, normal or mask) at `slot` of a table (null = a null view: nothing reads it where the shader's
+	// tex.y / texMaps says "flat" / "off").
+	void writeBorrowed(unsigned set, unsigned slot, ID3D12Resource* res)
 	{
 		D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
 		sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
@@ -178,7 +179,7 @@ struct D3D12Landscape::Impl
 			sv.Texture2DArray.MipLevels = d.MipLevels;
 			sv.Texture2DArray.ArraySize = d.DepthOrArraySize;
 		}
-		device->CreateShaderResourceView(res, &sv, cpuSlot(set, d3dls::kImageCount));
+		device->CreateShaderResourceView(res, &sv, cpuSlot(set, slot));
 	}
 
 	ID3D12PipelineState* psoFor(DXGI_FORMAT fmt)
@@ -229,8 +230,8 @@ bool D3D12Landscape::init(ID3D12Device* device, std::function<void()> waitIdle, 
 		return false;
 	}
 
-	// root signature: 0 = b12 (the frame's constants, a root CBV), 1 = b13 (the patch, twelve root constants), 2 = t32-t41 (the images),
-	// static sampler s13 (the albedo array: linear, repeat, mips)
+	// root signature: 0 = b12 (the frame's constants, a root CBV), 1 = b13 (the patch, twelve root constants), 2 = t32-t43 (the images),
+	// static sampler s13 (the albedo/normal/mask arrays: linear, repeat, mips, the only one)
 	D3D12_DESCRIPTOR_RANGE range{};
 	range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
 	range.NumDescriptors = d3dls::kSrvCount;
@@ -278,7 +279,12 @@ bool D3D12Landscape::init(ID3D12Device* device, std::function<void()> waitIdle, 
 		return false;
 	}
 	m.srvInc = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-	for (unsigned s = 0; s < kSets; ++s) m.writeAlbedo(s, nullptr);   // every descriptor of a table is valid from the start (resource binding tier 1)
+	for (unsigned s = 0; s < kSets; ++s)   // every descriptor of a table is valid from the start (resource binding tier 1)
+	{
+		m.writeBorrowed(s, d3dls::kImageCount, nullptr);
+		m.writeBorrowed(s, d3dls::kImageCount + 1, nullptr);
+		m.writeBorrowed(s, d3dls::kImageCount + 2, nullptr);
+	}
 
 	m.globals = makeUploadBuffer(device, m.globalsStride * kGlobalsSlots, &m.globalsMapped);
 	if (!m.globals)
@@ -466,11 +472,15 @@ void D3D12Landscape::draw(ID3D12GraphicsCommandList* cl, const HE::LandscapeRend
 	const LandscapeRenderStatic& w = *m.world;
 
 	d3dls::Globals g;
-	d3dls::fillGlobals(g, f, viewProj, shading.sunDir, shading.sunColor, shading.ambient, shading.albedoArray != nullptr);
+	d3dls::fillGlobals(g, f, viewProj, shading.sunDir, shading.sunColor, shading.ambient, shading.albedoArray != nullptr,
+	                   shading.normalArray != nullptr, shading.maskArray != nullptr);
 	const unsigned slot = m.globalsNext++ % kGlobalsSlots;
 	std::memcpy(m.globalsMapped + static_cast<size_t>(slot) * m.globalsStride, &g, sizeof(g));
 	const unsigned set = m.setNext++ % kSets;
-	m.writeAlbedo(set, shading.albedoArray);   // a table no frame in flight is reading: the ring is deeper than the draws of the renderer's frames
+	// a table no frame in flight is reading: the ring is deeper than the draws of the renderer's frames
+	m.writeBorrowed(set, d3dls::kImageCount, shading.albedoArray);
+	m.writeBorrowed(set, d3dls::kImageCount + 1, shading.normalArray);
+	m.writeBorrowed(set, d3dls::kImageCount + 2, shading.maskArray);
 
 	ID3D12DescriptorHeap* heaps[] = { m.srvHeap.Get() };
 	cl->SetDescriptorHeaps(1, heaps);

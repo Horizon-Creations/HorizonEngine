@@ -60,33 +60,39 @@ public:
 		sh.sunDir = in.sunDir;
 		sh.sunColor = in.sunColor;
 		sh.ambient = in.ambient;
-		ComPtr<ID3D11Texture2D> array;
-		ComPtr<ID3D11ShaderResourceView> arraySrv;
-		if (in.albedo && in.albedo->size > 0 && in.albedo->layers > 0)   // the world-UV ground's albedo array, RGBA8, no mips, like the other backends'
-		{
+		// The world-UV ground's albedo/normal/mask arrays, RGBA8, no mips, like the other backends'.
+		ComPtr<ID3D11Texture2D> albedoTex, normalTex, maskTex;
+		ComPtr<ID3D11ShaderResourceView> albedoSrv, normalSrv, maskSrv;
+		const auto makeArray = [&](const TexArray* t, ComPtr<ID3D11Texture2D>& tex, ComPtr<ID3D11ShaderResourceView>& srv) {
+			if (!t || t->size <= 0 || t->layers <= 0) return;
 			D3D11_TEXTURE2D_DESC d{};
-			d.Width = d.Height = static_cast<UINT>(in.albedo->size);
+			d.Width = d.Height = static_cast<UINT>(t->size);
 			d.MipLevels = 1;
-			d.ArraySize = static_cast<UINT>(in.albedo->layers);
+			d.ArraySize = static_cast<UINT>(t->layers);
 			d.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
 			d.SampleDesc.Count = 1;
 			d.Usage = D3D11_USAGE_IMMUTABLE;
 			d.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-			std::vector<D3D11_SUBRESOURCE_DATA> init(static_cast<size_t>(in.albedo->layers));
-			const size_t slice = static_cast<size_t>(in.albedo->size) * static_cast<size_t>(in.albedo->size) * 4;
+			std::vector<D3D11_SUBRESOURCE_DATA> init(static_cast<size_t>(t->layers));
+			const size_t slice = static_cast<size_t>(t->size) * static_cast<size_t>(t->size) * 4;
 			for (size_t i = 0; i < init.size(); ++i)
 			{
-				init[i].pSysMem = in.albedo->rgba.data() + i * slice;
-				init[i].SysMemPitch = static_cast<UINT>(in.albedo->size) * 4;
+				init[i].pSysMem = t->rgba.data() + i * slice;
+				init[i].SysMemPitch = static_cast<UINT>(t->size) * 4;
 			}
 			D3D11_SHADER_RESOURCE_VIEW_DESC v{};
 			v.Format = d.Format;
 			v.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DARRAY;
 			v.Texture2DArray.MipLevels = 1;
 			v.Texture2DArray.ArraySize = d.ArraySize;
-			if (SUCCEEDED(m_device->CreateTexture2D(&d, init.data(), array.GetAddressOf()))) m_device->CreateShaderResourceView(array.Get(), &v, arraySrv.GetAddressOf());
-		}
-		sh.albedoArray = arraySrv.Get();
+			if (SUCCEEDED(m_device->CreateTexture2D(&d, init.data(), tex.GetAddressOf()))) m_device->CreateShaderResourceView(tex.Get(), &v, srv.GetAddressOf());
+		};
+		makeArray(in.albedo, albedoTex, albedoSrv);
+		makeArray(in.normal, normalTex, normalSrv);
+		makeArray(in.mask, maskTex, maskSrv);
+		sh.albedoArray = albedoSrv.Get();
+		sh.normalArray = normalSrv.Get();
+		sh.maskArray = maskSrv.Get();
 		m_landscape.draw(m_ctx.Get(), frame, in.viewProj, sh);
 
 		m_ctx->CopyResource(m_colorStaging.Get(), m_color.Get());

@@ -13,10 +13,11 @@
 namespace HE::d3dls
 {
 
-constexpr unsigned kFirstSrv = 32;   // t32 .. t41, above everything the D3D11 renderer and its graph materials bind
-constexpr unsigned kSrvCount = 10;   // tile heights, slot table, coarse heights, three tile weight pages, three coarse weight pages, the albedo array (not ours)
+constexpr unsigned kFirstSrv = 32;   // t32 .. t43, above everything the D3D11 renderer and its graph materials bind
+constexpr unsigned kSrvCount = 12;   // tile heights, slot table, coarse heights, three tile weight pages, three coarse weight pages, the
+                                      // albedo/normal/mask arrays (not ours)
 constexpr unsigned kImageCount = 9;  // the images the landscape class owns: the first nine
-constexpr unsigned kSamplerReg = 13; // s13: the albedo array's sampler (linear, repeat, mips)
+constexpr unsigned kSamplerReg = 13; // s13: the albedo/normal/mask arrays' sampler (linear, repeat, mips), the only one
 constexpr unsigned kGlobalsReg = 12; // b12 (LsGlobals), b13 (LsPatch)
 constexpr unsigned kPatchReg = 13;
 constexpr int      kGridVerts = 65;  // the grid is (cells + 1)^2; the shader derives (i, j) from SV_VertexID with this
@@ -36,6 +37,7 @@ struct alignas(16) Globals
 	float   sunColor[4];
 	float   ambient[4];
 	float   tex[4];          // x = 1 / metres of one texture tile, y = 1 when the albedo array is bound, zw = fract(origin.xz * x)
+	float   texMaps[4];      // x = 1 when the normal array is bound, y = 1 when the mask array is bound
 };
 struct alignas(16) PatchData
 {
@@ -43,7 +45,7 @@ struct alignas(16) PatchData
 	float   patchPos[4];
 	float   morph[4];
 };
-static_assert(sizeof(Globals) == 64 + 4 * 16 + 16 + 8 * 16 + 16 * 16 + 12 * 16 + 4 * 16, "LsGlobals: the HLSL block and this struct have to be the same size");
+static_assert(sizeof(Globals) == 64 + 4 * 16 + 16 + 8 * 16 + 16 * 16 + 12 * 16 + 5 * 16, "LsGlobals: the HLSL block and this struct have to be the same size");
 static_assert(sizeof(PatchData) == 48, "LsPatch: the HLSL block and this struct have to be the same size");
 
 // A world these shaders can draw: the grid is the 65 x 65 one the shader's SV_VertexID arithmetic assumes.
@@ -53,9 +55,10 @@ inline bool worldUsable(const HE::LandscapeRenderStatic& w)
 	       && w.heightW > 0 && w.heightH > 0 && w.weightW > 0 && w.weightH > 0 && !w.patchIndices.empty();
 }
 
-// `albedoBound`: the albedo array of the world-UV ground is bound (the renderer resolved LandscapeRenderStatic::albedoArrayPath to something).
+// `albedoBound` / `normalBound` / `maskBound`: the renderer resolved LandscapeRenderStatic::albedoArrayPath / normalArrayPath / maskArrayPath to a
+// real array (not null). The normal and mask arrays only count with the albedo array, like on GL, Vulkan and Metal.
 inline void fillGlobals(Globals& g, const HE::LandscapeRenderFrame& f, const glm::mat4& viewProj, const glm::vec3& sunDir, const glm::vec3& sunColor,
-                        const glm::vec3& ambient, bool albedoBound)
+                        const glm::vec3& ambient, bool albedoBound, bool normalBound, bool maskBound)
 {
 	const HE::LandscapeRenderStatic& w = *f.world;
 	g = Globals{};
@@ -82,6 +85,8 @@ inline void fillGlobals(Globals& g, const HE::LandscapeRenderFrame& f, const glm
 	g.tex[1] = on ? 1.0f : 0.0f;
 	g.tex[2] = static_cast<float>(f.origin.x * k - std::floor(f.origin.x * k));
 	g.tex[3] = static_cast<float>(f.origin.z * k - std::floor(f.origin.z * k));
+	g.texMaps[0] = on && normalBound && !w.normalArrayPath.empty() ? 1.0f : 0.0f;
+	g.texMaps[1] = on && maskBound && !w.maskArrayPath.empty() ? 1.0f : 0.0f;
 }
 
 inline void fillPatch(PatchData& d, const HE::LandscapeRenderPatch& p)

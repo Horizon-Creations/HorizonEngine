@@ -520,10 +520,11 @@ fragment float4 fragmentMain(LsVertexOut in [[stage_in]],
 //   * the loose uniforms are two constant buffers: LsGlobals (b12, both stages) and LsPatch (b13, vertex stage, 48 bytes, one per patch).
 //     D3D11 only has b0-b13 and the renderer's own passes use the low ones; D3D12 maps the same two registers in a root signature of its own
 //   * images: t32 tile heights, t33 slot table, t34 coarse heights, t35-t37 tile weight pages, t38-t40 coarse weight pages, all
-//     read with Load(); t41 is the texture group's albedo array of the world-UV ground, the one image that is sampled (s13: linear, repeat,
-//     mips; a D3D12 static sampler, a D3D11 sampler state). The array is sampled unconditionally, before the discard and outside any
-//     branch (a gradient needs uniform flow), and `tex.y` picks between it and the flat colours. SRVs above t31 on purpose: the D3D11
-//     renderer and the graph materials use t0-t26 and do not rebind them after the landscape draw
+//     read with Load(); t41-t43 are the texture group's albedo, normal and mask arrays of the world-UV ground, the three images that are
+//     sampled (s13: linear, repeat, mips; a D3D12 static sampler, a D3D11 sampler state, the only one — normal and mask reuse it, like the
+//     GLSL/Vulkan/Metal ports). All three are sampled unconditionally, before the discard and outside any branch (a gradient needs uniform
+//     flow), and `tex.y` / `texMaps.x` / `texMaps.y` pick between them and the flat colours / geometric normal / no AO. SRVs above t31 on
+//     purpose: the D3D11 renderer and the graph materials use t0-t26 and do not rebind them after the landscape draw
 //   * `patch` is a keyword in HLSL, the per-patch block's member is lsPatch
 //   * D3D clip depth is 0..1 but the main scene pass rasterises the plain GL view-projection (kD3DClipFix is NOT applied there, like
 //     Metal): the landscape takes the same matrix, so its depth is the GL ndc z, 0..1 for the half of the frustum that is not clipped
@@ -544,6 +545,7 @@ cbuffer LsGlobals : register(b12)
     float4   sunColor;
     float4   ambient;
     float4   tex;            // x = 1 / metres of one texture tile, y = 1 when the albedo array is bound, zw = fract(origin.xz * x)
+    float4   texMaps;        // x = 1 when the normal array is bound, y = 1 when the mask array is bound
 };
 
 cbuffer LsPatch : register(b13)
@@ -563,7 +565,9 @@ Texture2D<float4>      coarseW0      : register(t38);
 Texture2D<float4>      coarseW1      : register(t39);
 Texture2D<float4>      coarseW2      : register(t40);
 Texture2DArray<float4> albedoArr     : register(t41);
-SamplerState           albedoSmp     : register(s13);
+Texture2DArray<float4> normalArr     : register(t42);   // tangent space, OpenGL convention: green = +V = +z in the world
+Texture2DArray<float4> maskArr       : register(t43);   // R = AO, G = roughness, B = height; only AO is used yet
+SamplerState           albedoSmp     : register(s13);    // shared by all three arrays, like the GLSL/Vulkan/Metal ports
 
 struct LsVertexOut
 {
@@ -640,12 +644,21 @@ float4 PSMain(LsVertexOut pin) : SV_Target
     // The derivatives first: nothing that follows is allowed to make them divergent.
     float3 dx = ddx(pin.worldRel);
     float3 dy = ddy(pin.worldRel);
-    // Layers 0-3 are the texture group's grass / dirt / rock / snow slices in world coordinates (see the GLSL); sampled here, in uniform flow.
+    // Layers 0-3 are the texture group's grass / dirt / rock / snow slices in world coordinates (see the GLSL); sampled here, in uniform
+    // flow, together with the normal and mask arrays (same reason: a gradient instruction must not follow a divergent discard).
     float2 uv = pin.worldRel.xz * tex.x + tex.zw;
     float3 t0 = albedoArr.Sample(albedoSmp, float3(uv, 0.0)).rgb;
     float3 t1 = albedoArr.Sample(albedoSmp, float3(uv, 1.0)).rgb;
     float3 t2 = albedoArr.Sample(albedoSmp, float3(uv, 2.0)).rgb;
     float3 t3 = albedoArr.Sample(albedoSmp, float3(uv, 3.0)).rgb;
+    float3 nm0 = normalArr.Sample(albedoSmp, float3(uv, 0.0)).xyz * 2.0 - 1.0;
+    float3 nm1 = normalArr.Sample(albedoSmp, float3(uv, 1.0)).xyz * 2.0 - 1.0;
+    float3 nm2 = normalArr.Sample(albedoSmp, float3(uv, 2.0)).xyz * 2.0 - 1.0;
+    float3 nm3 = normalArr.Sample(albedoSmp, float3(uv, 3.0)).xyz * 2.0 - 1.0;
+    float mk0 = maskArr.Sample(albedoSmp, float3(uv, 0.0)).r;
+    float mk1 = maskArr.Sample(albedoSmp, float3(uv, 1.0)).r;
+    float mk2 = maskArr.Sample(albedoSmp, float3(uv, 2.0)).r;
+    float mk3 = maskArr.Sample(albedoSmp, float3(uv, 3.0)).r;
     float2 abs2 = pin.worldRel.xz + origin.xz;
     if (abs2.x > world.x || abs2.y > world.y || abs2.x < 0.0 || abs2.y < 0.0) discard;
 
@@ -685,8 +698,24 @@ float4 PSMain(LsVertexOut pin) : SV_Target
                   + w2.x * layerColor[8].rgb + w2.y * layerColor[9].rgb + w2.z * layerColor[10].rgb + w2.w * layerColor[11].rgb;
     float3 n = normalize(cross(dx, dy));
     if (n.y < 0.0) n = -n;
+    // Normal and AO of layers 0-3 from their maps, in the same world coordinates (see the GLSL); the other layers contribute a flat normal and no occlusion.
+    float ao = 1.0;
+    if (tex.y > 0.5)
+    {
+        float wsum = w0.x + w0.y + w0.z + w0.w;
+        if (texMaps.x > 0.5)
+        {
+            float3 nm = float3(0.0, 0.0, 1.0) * (1.0 - wsum) + w0.x * nm0 + w0.y * nm1 + w0.z * nm2 + w0.w * nm3;
+            nm = normalize(nm);
+            float3 t = normalize(float3(1.0, 0.0, 0.0) - n * n.x);   // +u is +x, +v is +z
+            float3 b = cross(t, n);
+            n = normalize(t * nm.x + b * nm.y + n * nm.z);
+        }
+        if (texMaps.y > 0.5)
+            ao = (1.0 - wsum) + w0.x * mk0 + w0.y * mk1 + w0.z * mk2 + w0.w * mk3;
+    }
     float ndl = max(dot(n, normalize(sunDir.xyz)), 0.0);
-    return float4(albedo * (ambient.xyz + sunColor.xyz * ndl), 1.0);
+    return float4(albedo * (ambient.xyz * ao + sunColor.xyz * ndl), 1.0);
 }
 )HLSL";
 

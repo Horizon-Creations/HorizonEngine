@@ -91,9 +91,14 @@ public:
 		sh.sunDir = in.sunDir;
 		sh.sunColor = in.sunColor;
 		sh.ambient = in.ambient;
-		ComPtr<ID3D12Resource> array, arrayUpload;   // alive until the queue has finished this list (waitIdle below)
-		if (in.albedo && in.albedo->size > 0 && in.albedo->layers > 0) array = makeAlbedo(*in.albedo, arrayUpload);
-		sh.albedoArray = array.Get();
+		// alive until the queue has finished this list (waitIdle below)
+		ComPtr<ID3D12Resource> albedo, albedoUpload, normal, normalUpload, mask, maskUpload;
+		if (in.albedo && in.albedo->size > 0 && in.albedo->layers > 0) albedo = makeArray(*in.albedo, albedoUpload);
+		if (in.normal && in.normal->size > 0 && in.normal->layers > 0) normal = makeArray(*in.normal, normalUpload);
+		if (in.mask && in.mask->size > 0 && in.mask->layers > 0) mask = makeArray(*in.mask, maskUpload);
+		sh.albedoArray = albedo.Get();
+		sh.normalArray = normal.Get();
+		sh.maskArray = mask.Get();
 		m_landscape.draw(m_list.Get(), frame, in.viewProj, sh, DXGI_FORMAT_R8G8B8A8_UNORM);
 
 		D3D12_RESOURCE_BARRIER b[2]{};
@@ -164,9 +169,10 @@ private:
 		return errors;
 	}
 
-	// The world-UV ground's albedo array (RGBA8, no mips, like the other backends'): a default-heap texture array copied from an upload buffer by the
-	// open list, left in the pixel-shader-resource state. Null when something fails (the frame then draws flat colours).
-	ComPtr<ID3D12Resource> makeAlbedo(const TexArray& a, ComPtr<ID3D12Resource>& upload)
+	// The world-UV ground's albedo, normal or mask array (RGBA8, no mips, like the other backends'): a default-heap texture array copied from an
+	// upload buffer by the open list, left in the pixel-shader-resource state. Null when something fails (the frame then draws flat colours /
+	// the geometric normal / no AO).
+	ComPtr<ID3D12Resource> makeArray(const TexArray& a, ComPtr<ID3D12Resource>& upload)
 	{
 		D3D12_HEAP_PROPERTIES hp{};
 		hp.Type = D3D12_HEAP_TYPE_DEFAULT;
