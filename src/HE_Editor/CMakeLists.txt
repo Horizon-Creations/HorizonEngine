@@ -388,6 +388,7 @@ add_executable(HorizonEditor WIN32
 	SceneRecoveryDialog.cpp
 	AssetAutosave.cpp
 	AssetRecoveryDialog.cpp
+	AutoLodDialog.cpp
 	TextureColourSpaceDialog.cpp
 	EditorPanelState.cpp
 	EditorWidgets.cpp

@@ -68,6 +68,7 @@ constexpr uint32_t kClusterLightsBinding = 24; // HeClusterLights { vec4 clLight
 constexpr uint32_t kClusterGridBinding   = 25; // HeClusterGrid   { uvec2 clGrid[]; }
 constexpr uint32_t kClusterIdxBinding    = 26; // HeClusterIdx    { uint clIdx[]; }
 constexpr uint32_t kLandscapeWeightsBinding = 14; // heLandscapeWeights (MaterialGraph.cpp)
+constexpr uint32_t kFogVolumeBinding        = 34; // heFogVolume (MaterialShaderLibrary.cpp, HE_FOG_VOLUME)
 
 inline constexpr Binding kBindings[] = {
 	{  0, DescKind::UniformBuffer,        kStageFragment | kStageTess }, // HeLighting
@@ -115,6 +116,11 @@ inline constexpr Binding kBindings[] = {
 	{ 18, DescKind::CombinedImageSampler, kStageFragment }, // heGIVisibility
 	{ 32, DescKind::CombinedImageSampler, kStageFragment }, // heGIReflFwd
 	{ 33, DescKind::CombinedImageSampler, kStageFragment }, // heCloudShadow
+	// heFogVolume (Thema 225 step 5): the integrated froxel fog volume (3D, RGBA16F),
+	// read with texelFetch by heApplyFogT of a Translucent graph material. The SPIR-V
+	// of every such material uses it statically, so the row is always in the layout;
+	// a 1x1x1 3D dummy sits there on a frame without the volume (fogVol.w = 0).
+	{ kFogVolumeBinding, DescKind::CombinedImageSampler, kStageFragment },
 	// ── Thema 117: fragmentClustered's light lists (keep these LAST) ──
 	{ kClusterLightsBinding, DescKind::StorageBuffer, kStageFragment },
 	{ kClusterGridBinding,   DescKind::StorageBuffer, kStageFragment },
@@ -148,32 +154,44 @@ constexpr uint32_t kDynamicOffsetCount = 3;
 // Combined image samplers the FRAGMENT stage sees — what the device's
 // per-stage sampler and sampled-image limits are held against (a combined
 // descriptor counts against both).
-constexpr uint32_t fragmentSamplerCount(bool withLandscapeWeights = true)
+constexpr uint32_t fragmentSamplerCount(bool withLandscapeWeights = true, bool withFogVolume = true)
 {
 	uint32_t n = 0;
 	for (uint32_t i = 0; i < kBindingCount; ++i)
 		if (kBindings[i].kind == DescKind::CombinedImageSampler && (kBindings[i].stages & kStageFragment)
-		    && (withLandscapeWeights || kBindings[i].binding != kLandscapeWeightsBinding))
+		    && (withLandscapeWeights || kBindings[i].binding != kLandscapeWeightsBinding)
+		    && (withFogVolume || kBindings[i].binding != kFogVolumeBinding))
 			++n;
 	return n;
 }
 
-// Does the full layout (heLandscapeWeights included) fit the device's
-// maxPerStageDescriptorSamplers / maxPerStageDescriptorSampledImages? If not,
-// the renderer leaves the heLandscapeWeights row out of the layout.
-constexpr bool landscapeWeightsFit(uint32_t maxPerStageSamplers, uint32_t maxPerStageSampledImages)
+// Does the full layout fit the device's maxPerStageDescriptorSamplers /
+// maxPerStageDescriptorSampledImages? The renderer drops the heFogVolume row first
+// (its materials then compile without HE_FOG_VOLUME, see MaterialShaderLibrary::
+// setSpirvFogVolume), and only then asks this about heLandscapeWeights: the layout
+// WITHOUT that row (and with whatever fog decided) must fit, else it leaves the
+// heLandscapeWeights row out too.
+constexpr bool fogVolumeFit(uint32_t maxPerStageSamplers, uint32_t maxPerStageSampledImages)
 {
-	return fragmentSamplerCount(true) <= maxPerStageSamplers
-	    && fragmentSamplerCount(true) <= maxPerStageSampledImages;
+	return fragmentSamplerCount(true, true) <= maxPerStageSamplers
+	    && fragmentSamplerCount(true, true) <= maxPerStageSampledImages;
+}
+constexpr bool landscapeWeightsFit(uint32_t maxPerStageSamplers, uint32_t maxPerStageSampledImages,
+                                   bool withFogVolume = true)
+{
+	return fragmentSamplerCount(true, withFogVolume) <= maxPerStageSamplers
+	    && fragmentSamplerCount(true, withFogVolume) <= maxPerStageSampledImages;
 }
 
-static_assert(kBindingCount == 25, "material set 0: 22 canonical bindings + 3 cluster lists");
+static_assert(kBindingCount == 26, "material set 0: 23 canonical bindings + 3 cluster lists");
 static_assert(countOf(DescKind::UniformBuffer) == 5);        // b0, b1, b3, b8, b9
-static_assert(countOf(DescKind::CombinedImageSampler) == 17); // b2, b4-b7, b10-b18, b31-b33
+static_assert(countOf(DescKind::CombinedImageSampler) == 18); // b2, b4-b7, b10-b18, b31-b34
 static_assert(countOf(DescKind::StorageBuffer) == 3);         // b24-b26
-static_assert(fragmentSamplerCount(true) == 17 && fragmentSamplerCount(false) == 16,
-              "without heLandscapeWeights the layout must fit the spec minimum of 16");
-static_assert(!landscapeWeightsFit(16, 16) && landscapeWeightsFit(17, 17));
+static_assert(fragmentSamplerCount(true, true) == 18 && fragmentSamplerCount(true, false) == 17
+              && fragmentSamplerCount(false, false) == 16,
+              "without heLandscapeWeights AND heFogVolume the layout must fit the spec minimum of 16");
+static_assert(!landscapeWeightsFit(16, 16, false) && landscapeWeightsFit(17, 17, false));
+static_assert(!fogVolumeFit(17, 17) && fogVolumeFit(18, 18));
 static_assert(countOf(DescKind::StorageBuffer, kPreClusterBindingCount) == 0,
               "the cluster lists must be the last rows (negative control slices them off)");
 
@@ -237,4 +255,70 @@ static_assert(resolveCountOf(DescKind::CombinedImageSampler) == 15);  // b10-b13
 static_assert(resolveCountOf(DescKind::StorageBuffer) == 3);          // b24-b26
 static_assert(resolveCountOf(DescKind::StorageBuffer, kResolvePreClusterBindingCount) == 0,
               "the cluster lists must be the last rows (the 8-light resolve uses none of them)");
+
+// ── Volumetric fog passes, set 0 (Thema 225 step 5, docs/volumetric-fog-plan.md) ───────────
+// MaterialShaderLibrary::fogInject / fogIntegrate / fogApply (Backend::SpirV) keep the canonical
+// bindings of FogVolumeShaderSource.h (no pins), so each pass' descriptor-set layout is a table
+// like the two above: VulkanRenderer::createFogPipelines turns them into the three layouts and
+// he_tests (test_fog_volume.cpp) reflects each module's STATICALLY used descriptors against them.
+// The inject kernel pulls in the whole lighting preamble, so it declares every fixed sampler of
+// it (10/11/16/17/18/31/32/33 are GI masks, AO, probes, SSR, GI reflections and the cloud shadow:
+// white defaults, never sampled with their gate at 0) next to the ones it really reads.
+// Integrate and Apply fetch the depth / the inject volume with texelFetch on SEPARATE images
+// (GL_EXT_samplerless_texture_functions): SampledImage, no sampler.
+enum class FogDesc : uint8_t { Ubo, Cis, SampledImage, StorageImage };
+
+constexpr uint32_t kStageCompute = 0x20; // VK_SHADER_STAGE_COMPUTE_BIT
+
+struct FogBinding
+{
+	uint32_t binding;
+	FogDesc  kind;
+	uint32_t stages;
+};
+
+inline constexpr FogBinding kFogInjectBindings[] = {
+	{  0, FogDesc::Ubo,          kStageCompute }, // HeLighting
+	{ 10, FogDesc::Cis,          kStageCompute }, // heGIShadow   (white)
+	{ 11, FogDesc::Cis,          kStageCompute }, // heGILocal    (white)
+	{ 12, FogDesc::Cis,          kStageCompute }, // heCsm        (2D array)
+	{ 13, FogDesc::Cis,          kStageCompute }, // heLocalShadow (2D array)
+	{ 15, FogDesc::Cis,          kStageCompute }, // heSkyEnv     (cube)
+	{ 16, FogDesc::Cis,          kStageCompute }, // heAO         (white)
+	{ 17, FogDesc::Cis,          kStageCompute }, // heGIIrradiance (white)
+	{ 18, FogDesc::Cis,          kStageCompute }, // heGIVisibility (white)
+	{ 31, FogDesc::Cis,          kStageCompute }, // heSSRFwd     (white)
+	{ 32, FogDesc::Cis,          kStageCompute }, // heGIReflFwd  (white)
+	{ 33, FogDesc::Cis,          kStageCompute }, // heCloudShadow (white)
+	{ 35, FogDesc::Cis,          kStageCompute }, // heFogNoise   (3D, 64^3)
+	{ 36, FogDesc::Ubo,          kStageCompute }, // HeFogVol
+	{ 37, FogDesc::Cis,          kStageCompute }, // heFogHistory (3D)
+	{ 38, FogDesc::StorageImage, kStageCompute }, // heFogOut     (3D, writeonly)
+};
+inline constexpr FogBinding kFogIntegrateBindings[] = {
+	{ 36, FogDesc::Ubo,          kStageCompute }, // HeFogVol
+	{ 37, FogDesc::SampledImage, kStageCompute }, // heFogInjected (3D, texelFetch)
+	{ 38, FogDesc::StorageImage, kStageCompute }, // heFogOut      (3D, writeonly)
+};
+inline constexpr FogBinding kFogApplyBindings[] = {
+	{ 15, FogDesc::Cis,          kStageFragment }, // heSkyEnv (cube): the far field's colour
+	{ 34, FogDesc::Cis,          kStageFragment }, // heFogIntegrated (3D, trilinear)
+	{ 36, FogDesc::Ubo,          kStageFragment }, // HeFogVol
+	{ 39, FogDesc::SampledImage, kStageFragment }, // heFogDepth (scene depth, texelFetch)
+};
+constexpr uint32_t kFogInjectBindingCount    = sizeof(kFogInjectBindings) / sizeof(kFogInjectBindings[0]);
+constexpr uint32_t kFogIntegrateBindingCount = sizeof(kFogIntegrateBindings) / sizeof(kFogIntegrateBindings[0]);
+constexpr uint32_t kFogApplyBindingCount     = sizeof(kFogApplyBindings) / sizeof(kFogApplyBindings[0]);
+
+constexpr uint32_t fogCountOf(const FogBinding* t, uint32_t n, FogDesc kind)
+{
+	uint32_t c = 0;
+	for (uint32_t i = 0; i < n; ++i)
+		if (t[i].kind == kind) ++c;
+	return c;
+}
+// Per frame slot the pool must hold one set of each pass: its descriptors of each kind.
+static_assert(kFogInjectBindingCount == 16 && kFogIntegrateBindingCount == 3 && kFogApplyBindingCount == 4);
+static_assert(fogCountOf(kFogInjectBindings, kFogInjectBindingCount, FogDesc::Cis) == 13,
+              "13 combined samplers in the compute stage: inside the spec minimum of 16");
 } // namespace HE::vkmat

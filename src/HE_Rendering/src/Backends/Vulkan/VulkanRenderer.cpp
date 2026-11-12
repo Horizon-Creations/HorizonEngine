@@ -134,7 +134,8 @@ namespace
         glm::vec4  cascadeSplits;
         glm::vec4  cameraFwd;
         glm::vec4  shadowBias;
-        glm::ivec4 shadowEnabled; // x = 0/1, y = 1 → tint fragments by cascade (debug)
+        glm::ivec4 shadowEnabled; // x = 0/1, y = 1 → tint fragments by cascade (debug),
+                                  // z = 1 → Unlit/Wireframe view (heLitP's twin)
         // sky/fog additions — must match scene.frag Frame block exactly
         glm::vec4  sunDir;    // xyz = sun direction, w = 0
         glm::vec4  fog;       // x = fogDensity, y = fogHeightFalloff, zw = 0
@@ -217,6 +218,11 @@ void VulkanRenderer::Initialize(HE::Window* window)
     // cluster SSBOs) and the PostFX pipelines (m_postFxSceneRP): the flag it
     // feeds is read together with m_postFxReady (GetCapabilities).
     createDeferredPipelines();
+    // Volumetric fog (Thema 225 step 5): after the material layout (row 34), the PostFX passes
+    // (m_underwaterFogRP is Apply's render pass) and the deferred pipelines (m_hdrLoadRP).
+    // Eager, because the extractor only sets fogVolume.enabled once told the backend can.
+    createFogPipelines();
+    m_extractor.setVolumetricFogCapable(m_fogReady);
     // Deferred-path debug/headless knobs, GL's, Metal's and D3D's:
     // HE_RENDER_PATH=1/deferred forces the path without touching config,
     // HE_DUMP_GBUFFER=1..4 seeds a raw G-buffer view (the editor pushes its own
@@ -260,6 +266,7 @@ void VulkanRenderer::Shutdown()
     destroyDebugLinePipeline();
     destroyRibbonMeshes();
     destroyPostFXResources();      // the G-buffer targets with them
+    destroyFogResources();         // its Apply pipeline is built against the underwater fog's render pass
     destroyDeferredPipelines();    // before the material pipelines' render passes go
     destroyPostFXPipelines();
     // SSAO viewport-size targets (already freed by destroyViewportResources below,
@@ -921,6 +928,10 @@ void VulkanRenderer::DrawViewportFrame(VkCommandBuffer cmd)
         // A deferred frame leaves this pass after the sky: DrawScene ends it,
         // runs the G-buffer pass and reopens the HDR target as m_hdrLoadRP for
         // the resolve and the forward tail — the pass the End below closes.
+        // Volumetric fog (Thema 225): Inject + Integrate are compute, so they run here, outside
+        // any render pass, once the shadow maps / local atlas / sky cube of this frame are done.
+        // Sets m_fogFrameActive for DrawScene (Apply split, material fill); nothing at fogMode 0.
+        encodeFogVolume(cmd);
         VkRenderPassBeginInfo hdrpbi{ VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
         hdrpbi.renderPass  = m_postFxSceneRP;
         hdrpbi.framebuffer = m_hdrFB;
@@ -930,6 +941,7 @@ void VulkanRenderer::DrawViewportFrame(VkCommandBuffer cmd)
         vkCmdBeginRenderPass(cmd, &hdrpbi, VK_SUBPASS_CONTENTS_INLINE);
         DrawScene(cmd, m_viewportW, m_viewportH, /*hdr=*/true);
         vkCmdEndRenderPass(cmd);
+        m_fogFrameActive = false; // consumed: the world previews and the swapchain fallback must never see it
         m_hdrLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 
         // ── TAA velocity (A2): its own pass right after the scene, against the
@@ -1361,6 +1373,10 @@ IRenderer::Capabilities VulkanRenderer::GetCapabilities() const
     // branch), which the editor viewport and the packaged game both run; the
     // direct swapchain fallback and the world previews stay forward.
     c.supportsDeferredRendering = m_postFxReady && m_deferredReady;
+    // Thema 225 step 5: true only if the Inject/Integrate/Apply pipelines actually built
+    // (createFogPipelines, eager at Initialize) AND the HDR chain exists to host the Apply
+    // split. Never a blanket "Vulkan + shaderc": a failed step leaves the analytic fog.
+    c.supportsVolumetricFog = m_fogReady && m_postFxReady;
     c.supportsRawCapture        = m_postFxReady;   // RenderSceneImage's rawOutput rides the tonemap pass
     return c;
 }
@@ -3000,22 +3016,32 @@ void VulkanRenderer::createMaterialResources()
             maxSamplers = std::min(maxSamplers, n);
             maxImages   = std::min(maxImages, n);
         }
-        m_matLandscapeWeights = HE::vkmat::landscapeWeightsFit(maxSamplers, maxImages);
-        char line[384];
+        // The fog volume (Thema 225 step 5) is dropped first: the materials then compile without
+        // HE_FOG_VOLUME BEFORE any of them is built (the library's switch is read at compile time),
+        // keep the analytic fog, and supportsVolumetricFog stays false. Only then is the layout
+        // without it held against the weightmap row.
+        m_matFogVolume        = HE::vkmat::fogVolumeFit(maxSamplers, maxImages);
+        m_matShaderLib.setSpirvFogVolume(m_matFogVolume);
+        m_matLandscapeWeights = HE::vkmat::landscapeWeightsFit(maxSamplers, maxImages, m_matFogVolume);
+        char line[448];
         std::snprintf(line, sizeof line,
-            "VulkanRenderer: material set 0 needs %u fragment samplers (%u without heLandscapeWeights); "
-            "device maxPerStageDescriptorSamplers %u, maxPerStageDescriptorSampledImages %u%s -> heLandscapeWeights %s",
-            HE::vkmat::fragmentSamplerCount(true), HE::vkmat::fragmentSamplerCount(false),
+            "VulkanRenderer: material set 0 needs %u fragment samplers (%u without heFogVolume, %u without heLandscapeWeights either); "
+            "device maxPerStageDescriptorSamplers %u, maxPerStageDescriptorSampledImages %u%s -> heLandscapeWeights %s, heFogVolume %s",
+            HE::vkmat::fragmentSamplerCount(true, true), HE::vkmat::fragmentSamplerCount(true, false),
+            HE::vkmat::fragmentSamplerCount(false, false),
             maxSamplers, maxImages, (cap && *cap) ? " (capped by HE_VK_MAX_STAGE_SAMPLERS)" : "",
-            m_matLandscapeWeights ? "bound" : "LEFT OUT (layer-blend materials draw built-in)");
-        if (m_matLandscapeWeights) HE_LOG_INFO(RHI, "%s", line);
-        else                       HE_LOG_WARN(RHI, "%s", line);
+            m_matLandscapeWeights ? "bound" : "LEFT OUT (layer-blend materials draw built-in)",
+            m_matFogVolume ? "bound" : "LEFT OUT (volumetric fog off)");
+        if (m_matLandscapeWeights && m_matFogVolume) HE_LOG_INFO(RHI, "%s", line);
+        else                                         HE_LOG_WARN(RHI, "%s", line);
     }
     VkDescriptorSetLayoutBinding b[HE::vkmat::kBindingCount]{};
     uint32_t nb = 0;
     for (uint32_t i = 0; i < HE::vkmat::kBindingCount; ++i)
     {
         if (!m_matLandscapeWeights && HE::vkmat::kBindings[i].binding == HE::vkmat::kLandscapeWeightsBinding)
+            continue;
+        if (!m_matFogVolume && HE::vkmat::kBindings[i].binding == HE::vkmat::kFogVolumeBinding)
             continue;
         b[nb].binding         = HE::vkmat::kBindings[i].binding;
         b[nb].descriptorType  = HE::vkmat::kBindings[i].dynamic ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC
@@ -3097,13 +3123,61 @@ void VulkanRenderer::createMaterialResources()
         }
     }
 
+    // Row 34's stand-in (a 3D view the sampler3D can legally point at). Part of the material
+    // path, not of the fog pipelines: every Translucent graph material uses the binding
+    // statically, so a layout with the row and nothing to bind there would be the binding-14
+    // crash again. Without it the whole path stays off, as for the other defaults above.
+    if (m_matFogVolume && !createFogDummy())
+    {
+        HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: A4 material path disabled — heFogVolume dummy volume failed");
+        return;
+    }
+
     m_matReady = true;
     HE_LOG_INFO(RHI, "%s", "VulkanRenderer: A4 material resources created");
+}
+
+// 1x1x1 RGBA16F (0, 0, 0, 1): bound at material binding 34 on every frame without the volume.
+bool VulkanRenderer::createFogDummy()
+{
+    if (m_fogDummy.view) return true;
+    if (!createFogImage3D(1, 1, 1, VK_FORMAT_R16G16B16A16_SFLOAT,
+                          VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, m_fogDummy))
+        return false;
+    VkCommandBufferAllocateInfo cbai{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+    cbai.commandPool = m_cmdPool; cbai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY; cbai.commandBufferCount = 1;
+    VkCommandBuffer oneCB = VK_NULL_HANDLE;
+    vkAllocateCommandBuffers(m_device, &cbai, &oneCB);
+    VkCommandBufferBeginInfo bi{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(oneCB, &bi);
+    const VkImageSubresourceRange rng{ VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+    VkImageMemoryBarrier b{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+    b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    b.image = m_fogDummy.img; b.subresourceRange = rng;
+    b.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED; b.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    b.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    vkCmdPipelineBarrier(oneCB, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         0, 0, nullptr, 0, nullptr, 1, &b);
+    VkClearColorValue zero{}; zero.float32[3] = 1.0f; // "no fog yet"
+    vkCmdClearColorImage(oneCB, m_fogDummy.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &zero, 1, &rng);
+    b.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL; b.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    b.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT; b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    vkCmdPipelineBarrier(oneCB, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                         0, 0, nullptr, 0, nullptr, 1, &b);
+    vkEndCommandBuffer(oneCB);
+    VkSubmitInfo si{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
+    si.commandBufferCount = 1; si.pCommandBuffers = &oneCB;
+    submitGraphics(si, VK_NULL_HANDLE);
+    vkQueueWaitIdle(m_graphicsQueue);
+    vkFreeCommandBuffers(m_device, m_cmdPool, 1, &oneCB);
+    return true;
 }
 
 void VulkanRenderer::destroyMaterialResources()
 {
     m_matReady = false;
+    destroyFogImage3D(m_fogDummy);
     for (auto& kv : m_materialPipelines)
         if (kv.second) vkDestroyPipeline(m_device, kv.second, nullptr);
     m_materialPipelines.clear();
@@ -9094,13 +9168,17 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
         f.cameraFwd     = glm::vec4(m_cascadeCamFwd, 1.0f / float(std::max(m_shadowSize, 1u)));
         f.shadowBias    = glm::vec4(m_shadowSettings.slopeBias, m_shadowSettings.minBias, 0.0f, 0.0f);
         f.shadowEnabled = glm::ivec4(m_shadowRenderedThisFrame ? 1 : 0,
-                                     m_debugShadowCascades ? 1 : 0, 0, 0);
+                                     m_debugShadowCascades ? 1 : 0,
+                                     UnlitViewActive() ? 1 : 0, 0);
         static_assert(sizeof(f.localShadowVP) / sizeof(f.localShadowVP[0]) == kLocalShadowLayers,
                       "Frame UBO local atlas array must match kLocalShadowLayers");
         static_assert(kLocalShadowLayers == ShadowData::kMaxLocalShadowLayers,
                       "Vulkan local atlas layer count must match the extractor's");
         f.sunDir        = glm::vec4(m_renderWorld.sunDirection, 0.0f);
-        f.fog           = glm::vec4(m_environment.fogDensity, m_environment.fogHeightFalloff, 0.0f, 0.0f);
+        // Volume mode (Thema 225): the full-screen Apply pass fogs the opaque scene, so the
+        // built-in shader's own analytic fog must not stack on it - density 0 from this fill site.
+        f.fog           = glm::vec4((m_fogFrameActive && hdr) ? 0.0f : m_environment.fogDensity,
+                                    m_environment.fogHeightFalloff, 0.0f, 0.0f);
         // viewport.z == 1 iff runSSAO() completed this frame (blurRT holds valid data).
         // Using m_ssaoRanThisFrame (not just m_ssaoReady) ensures we never sample stale
         // blurRT in non-HDR paths or when SSAO was skipped due to an empty scene.
@@ -9264,6 +9342,26 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
         lit.camPos[0] = m_renderWorld.camera.position.x;
         lit.camPos[1] = m_renderWorld.camera.position.y;
         lit.camPos[2] = m_renderWorld.camera.position.z;
+        // Viewport view mode (v3.2): Unlit/Wireframe hand heLitP's base colour
+        // back untouched — graph materials, the deferred resolve (rl copies
+        // frameMatLight) and the forward replay all read this. Mirrors GL/Metal/D3D.
+        lit.viewMode[0] = UnlitViewActive() ? 1.0f : 0.0f;
+        // Volumetric fog (Thema 225 step 5, plan §2.5): fogVol.x = 1 hands the opaque fog to the
+        // Apply pass (heApplyFog is a no-op), .w = 1 says binding 34 holds the integrated volume
+        // on THIS frame (heApplyFogT reads it). fogViewProj is the PLAIN Vulkan clip matrix: its
+        // y-down NDC already addresses the volume's row 0 = top (see the block comment above
+        // createFogPipelines). Zero on every other frame, so the analytic fog runs unchanged.
+        if (m_fogFrameActive && hdr)
+        {
+            lit.fogVol[0] = 1.0f;
+            lit.fogVol[1] = m_fogFrame.distance;
+            lit.fogVol[2] = m_fogFrame.sliceC;
+            lit.fogVol[3] = m_fogIntegratedTex.view ? 1.0f : 0.0f;
+            lit.fogVolGrid[0] = static_cast<float>(m_fogFrame.grid.x);
+            lit.fogVolGrid[1] = static_cast<float>(m_fogFrame.grid.y);
+            lit.fogVolGrid[2] = static_cast<float>(m_fogFrame.grid.z);
+            std::memcpy(lit.fogViewProj, &m_fogViewProjMat[0][0], sizeof(lit.fogViewProj));
+        }
         if (m_matLightBuf[m_currentFrame].mapped)
             std::memcpy(m_matLightBuf[m_currentFrame].mapped, &lit, sizeof(lit));
         frameMatLight = lit;
@@ -9757,9 +9855,20 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                             // linear-CLAMP like D3D11's s0 (a [0,1] weight field; a
                             // repeating sampler would bleed the far edge's paint in).
                             // Only when the layout has the row (m_matLandscapeWeights).
-                            static_assert(HE::vkmat::kPreClusterBindingCount == 22,
-                                          "fixed writes w[0..20] + w[21] heLandscapeWeights, one per non-cluster row");
-                            uint32_t nWrites = HE::vkmat::kPreClusterBindingCount - 1;
+                            static_assert(HE::vkmat::kPreClusterBindingCount == 23,
+                                          "fixed writes w[0..20] + w[21] heFogVolume + w[22] heLandscapeWeights, one per non-cluster row");
+                            // heFogVolume (34, Thema 225 step 5): the integrated volume on a frame whose
+                            // Inject/Integrate ran (fogVol.w = 1 below), the 1x1x1 dummy otherwise - a
+                            // Translucent material's SPIR-V uses the binding statically, and a 3D sampler
+                            // needs a 3D view. Only when the layout has the row (m_matFogVolume).
+                            const bool fogVolBound = m_fogFrameActive && hdr && m_fogIntegratedTex.view;
+                            const VkDescriptorImageInfo fogII{ m_fogLinearSampler ? m_fogLinearSampler : m_albedoSampler,
+                                fogVolBound ? m_fogIntegratedTex.view : m_fogDummy.view,
+                                fogVolBound ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+                            uint32_t nWrites = HE::vkmat::kPreClusterBindingCount - 2;
+                            if (m_matFogVolume && m_fogDummy.view)
+                                wr(static_cast<int>(nWrites++), HE::vkmat::kFogVolumeBinding,
+                                   VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &fogII);
                             VkDescriptorImageInfo weightsII{ m_ssaoSampler ? m_ssaoSampler : m_albedoSampler,
                                                              heWeights, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
                             if (m_matLandscapeWeights)
@@ -10367,6 +10476,21 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
             // Restore scene pipeline and set=0 binding for any subsequent work.
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                 hdr && m_scenePipelineHDR ? m_scenePipelineHDR : m_scenePipeline);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_scenePipelineLayout,
+                                    0, 1, &m_frameUBO[m_currentFrame].set, 1, &m_sceneMatOffset);
+        }
+
+        // ── Volumetric fog Apply (Thema 225): the seam between "opaque + sky" and "transparent".
+        // The HDR pass ends here (forward: m_postFxSceneRP; deferred: m_hdrLoadRP already), the
+        // full-screen Apply runs on m_hdrView against the sampled scene depth, and the pass resumes
+        // as m_hdrLoadRP (colour + depth LOAD) for the translucent tail. Only on a frame whose
+        // Inject/Integrate ran - mode 0 never takes this branch, so its pass structure is untouched.
+        if (m_fogFrameActive && hdr)
+        {
+            vkCmdEndRenderPass(cmd);
+            encodeFogApplyAndReopen(cmd, width, height);
+            // Back to the scene pipeline + set 0 for the tail (the Apply pass bound its own).
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, activeMatScenePipe);
             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_scenePipelineLayout,
                                     0, 1, &m_frameUBO[m_currentFrame].set, 1, &m_sceneMatOffset);
         }
@@ -17085,4 +17209,685 @@ IRenderer::FrameGpuStats VulkanRenderer::GetFrameGpuStats() const
     s.visibleObjects = m_statVisible;
     s.totalObjects   = m_statTotal;
     return s;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Volumetric fog (docs/volumetric-fog-plan.md, Thema 225 step 5)
+//
+// Vulkan twin of MetalRenderer::EncodeFogVolume / EncodeFogApplyAndReopen. The kernels are
+// FogVolumeShaderSource.h's GLSL 450, compiled to SPIR-V as they stand
+// (MaterialShaderLibrary::fogInject/fogIntegrate/fogApply(Backend::SpirV), canonical set 0
+// bindings, no pins). Three descriptor-set layouts below mirror exactly what the SPIR-V uses
+// statically (spirv-cross --reflect of the three modules); the inject kernel pulls in the
+// WHOLE lighting preamble, so it declares all 13 of the preamble's samplers and the unused
+// ones (GI masks, AO, probes, SSR, GI reflections, cloud shadow) get the white defaults.
+//
+// Clip conventions — derived, not copied from GL (whose four bugs were all here):
+//   * The scene is rasterised with kVulkanClipFix * P * V: NDC y points DOWN, depth 0..1.
+//   * The shared kernels build NDC as (2u-1, 1-2v, d), i.e. y UP with v = 0 at the top of the
+//     image, exactly Metal's convention, and Vulkan's frag coord also has y = 0 at the top.
+//     kZeroToOneDepthClipFix is flipY * kVulkanClipFix (y up, same 0..1 depth), so the
+//     kernels get inverse(kZeroToOneDepthClipFix * P * V) and, for the history reprojection,
+//     the previous frame's matrix of the same form. Depth needs no remap (already 0..1).
+//   * heApplyFogT (material code) maps uv = clip.xy / clip.w * 0.5 + 0.5 and reads the rows
+//     the kernels wrote with row 0 at the TOP: with Vulkan's y-down NDC that is the PLAIN
+//     kVulkanClipFix * P * V, neither Metal's extra flip nor GL's identity-on-y-up.
+// ─────────────────────────────────────────────────────────────────────────────
+
+bool VulkanRenderer::createFogImage3D(uint32_t w, uint32_t h, uint32_t d, VkFormat fmt,
+                                      VkImageUsageFlags usage, FogImage3D& out)
+{
+    VkImageCreateInfo ici{ VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+    ici.imageType     = VK_IMAGE_TYPE_3D;
+    ici.format        = fmt;
+    ici.extent        = { w, h, d };
+    ici.mipLevels     = 1;
+    ici.arrayLayers   = 1;
+    ici.samples       = VK_SAMPLE_COUNT_1_BIT;
+    ici.tiling        = VK_IMAGE_TILING_OPTIMAL;
+    ici.usage         = usage;
+    ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    if (vkCreateImage(m_device, &ici, nullptr, &out.img) != VK_SUCCESS) { out = {}; return false; }
+    VkMemoryRequirements req{};
+    vkGetImageMemoryRequirements(m_device, out.img, &req);
+    VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+    mai.allocationSize  = req.size;
+    mai.memoryTypeIndex = findMemoryType(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    if (vkAllocateMemory(m_device, &mai, nullptr, &out.mem) != VK_SUCCESS) { destroyFogImage3D(out); return false; }
+    vkBindImageMemory(m_device, out.img, out.mem, 0);
+    VkImageViewCreateInfo vci{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+    vci.image            = out.img;
+    vci.viewType         = VK_IMAGE_VIEW_TYPE_3D;
+    vci.format           = fmt;
+    vci.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+    if (vkCreateImageView(m_device, &vci, nullptr, &out.view) != VK_SUCCESS) { destroyFogImage3D(out); return false; }
+    return true;
+}
+
+void VulkanRenderer::destroyFogImage3D(FogImage3D& im)
+{
+    if (im.view) vkDestroyImageView(m_device, im.view, nullptr);
+    if (im.img)  vkDestroyImage(m_device, im.img, nullptr);
+    if (im.mem)  vkFreeMemory(m_device, im.mem, nullptr);
+    im = {};
+}
+
+void VulkanRenderer::destroyFogTargets()
+{
+    destroyFogImage3D(m_fogInjectTex[0]);
+    destroyFogImage3D(m_fogInjectTex[1]);
+    destroyFogImage3D(m_fogIntegratedTex);
+    m_fogGridAlloc = glm::ivec3(0);
+    m_fogHistValid = false;
+}
+
+void VulkanRenderer::destroyFogResources()
+{
+    if (!m_device) return;
+    destroyFogTargets();
+    destroyFogImage3D(m_fogNoise);  // (m_fogDummy belongs to the material resources: createFogDummy)
+    for (VkPipeline* p : { &m_fogInjectPipe, &m_fogIntegratePipe, &m_fogApplyPipe })
+        if (*p) { vkDestroyPipeline(m_device, *p, nullptr); *p = VK_NULL_HANDLE; }
+    for (VkPipelineLayout* p : { &m_fogInjectPL, &m_fogIntegratePL, &m_fogApplyPL })
+        if (*p) { vkDestroyPipelineLayout(m_device, *p, nullptr); *p = VK_NULL_HANDLE; }
+    if (m_fogPool) { vkDestroyDescriptorPool(m_device, m_fogPool, nullptr); m_fogPool = VK_NULL_HANDLE; }
+    for (uint32_t f = 0; f < 2; ++f) m_fogInjectSet[f] = m_fogIntegrateSet[f] = m_fogApplySet[f] = VK_NULL_HANDLE;
+    for (VkDescriptorSetLayout* l : { &m_fogInjectDSL, &m_fogIntegrateDSL, &m_fogApplyDSL })
+        if (*l) { vkDestroyDescriptorSetLayout(m_device, *l, nullptr); *l = VK_NULL_HANDLE; }
+    for (VkSampler* s : { &m_fogLinearSampler, &m_fogNoiseSampler })
+        if (*s) { vkDestroySampler(m_device, *s, nullptr); *s = VK_NULL_HANDLE; }
+    for (uint32_t f = 0; f < 2; ++f)
+        for (MatFrameBuf* mb : { &m_fogVolBuf[f], &m_fogLightBuf[f] })
+        {
+            if (mb->mapped) vkUnmapMemory(m_device, mb->mem);
+            if (mb->buf)    vkDestroyBuffer(m_device, mb->buf, nullptr);
+            if (mb->mem)    vkFreeMemory(m_device, mb->mem, nullptr);
+            *mb = {};
+        }
+    m_fogReady = false;
+    m_fogFrameActive = false;
+    m_fogPipelinesTried = false;
+}
+
+// Built once at Initialize, EAGERLY: MakeFogVolumeData's `enabled` gate depends on
+// setVolumetricFogCapable being truthful before the first fog frame (a lazy build would wait
+// for a request that `enabled == false` never makes). A failure at any step leaves
+// supportsVolumetricFog false and the analytic fog running, as if this step never existed.
+bool VulkanRenderer::createFogPipelines()
+{
+    if (m_fogPipelinesTried) return m_fogReady;
+    m_fogPipelinesTried = true;
+#if !defined(HE_HAVE_SHADERC)
+    return false;
+#else
+    using Backend = HE::MaterialShaderLibrary::Backend;
+    auto fail = [&](const char* why) -> bool {
+        HE_LOG_WARN(RHI, "%s", (std::string("VulkanRenderer: volumetric fog off — ") + why).c_str());
+        destroyFogResources();
+        m_fogPipelinesTried = true;
+        return false;
+    };
+    // Row 34 must be in the material layout (else heApplyFogT's SPIR-V names a missing
+    // binding), and Apply needs the colour-only LOAD pass of the underwater fog plus the
+    // sampled-depth route; the scene's HDR LOAD pass is what the transparent tail resumes in.
+    if (!m_matReady || !m_matFogVolume) return fail("material layout without heFogVolume (binding 34)");
+    if (!m_underwaterFogRP || !m_hdrLoadRP) return fail("Apply render passes missing");
+    if (!m_whiteAlbedoView || !m_whiteArrayView || !m_whiteCubeView || !m_albedoSampler)
+        return fail("white default images missing");
+    {
+        VkPhysicalDeviceProperties props{};
+        vkGetPhysicalDeviceProperties(m_physDevice, &props);
+        // The inject kernel is 8 x 8 x 4 = 256 invocations; the spec minimum is only 128.
+        if (props.limits.maxComputeWorkGroupInvocations < 256 || props.limits.maxComputeWorkGroupSize[0] < 8
+            || props.limits.maxComputeWorkGroupSize[1] < 8 || props.limits.maxComputeWorkGroupSize[2] < 4)
+            return fail("compute work-group limit below 8x8x4");
+        if (props.limits.maxPerStageDescriptorSamplers < 14 || props.limits.maxPerStageDescriptorStorageImages < 1)
+            return fail("per-stage descriptor limits too small");
+    }
+
+    const auto& vs = m_matShaderLib.fullscreenVertex(Backend::SpirV);
+    const auto& fi = m_matShaderLib.fogInject(Backend::SpirV);
+    const auto& fg = m_matShaderLib.fogIntegrate(Backend::SpirV);
+    const auto& fa = m_matShaderLib.fogApply(Backend::SpirV);
+    if (!(vs.ok && fi.ok && fg.ok && fa.ok) || vs.spirv.empty() || fi.spirv.empty()
+        || fg.spirv.empty() || fa.spirv.empty())
+        return fail((std::string("shader compile failed\n") + vs.log + fi.log + fg.log + fa.log).c_str());
+
+    // ── Descriptor-set layouts: the VulkanMaterialLayout.h tables, which he_tests holds each
+    //    module's statically used descriptors against (test_fog_volume.cpp) ──
+    static_assert(static_cast<uint32_t>(VK_SHADER_STAGE_COMPUTE_BIT) == HE::vkmat::kStageCompute, "vkmat stage bits are Vulkan's");
+    constexpr VkDescriptorType kUbo = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    constexpr VkDescriptorType kCis = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    constexpr VkDescriptorType kImg = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    constexpr VkDescriptorType kSto = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    auto makeDSL = [&](const HE::vkmat::FogBinding* table, uint32_t n, VkDescriptorSetLayout& out) -> bool {
+        std::vector<VkDescriptorSetLayoutBinding> v(n);
+        for (uint32_t i = 0; i < n; ++i)
+        {
+            VkDescriptorType t = kUbo;
+            switch (table[i].kind)
+            {
+            case HE::vkmat::FogDesc::Ubo:          t = kUbo; break;
+            case HE::vkmat::FogDesc::Cis:          t = kCis; break;
+            case HE::vkmat::FogDesc::SampledImage: t = kImg; break;
+            case HE::vkmat::FogDesc::StorageImage: t = kSto; break;
+            }
+            v[i] = {};
+            v[i].binding = table[i].binding; v[i].descriptorType = t; v[i].descriptorCount = 1;
+            v[i].stageFlags = table[i].stages;
+        }
+        VkDescriptorSetLayoutCreateInfo ci{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
+        ci.bindingCount = n;
+        ci.pBindings    = v.data();
+        return vkCreateDescriptorSetLayout(m_device, &ci, nullptr, &out) == VK_SUCCESS;
+    };
+    if (!makeDSL(HE::vkmat::kFogInjectBindings,    HE::vkmat::kFogInjectBindingCount,    m_fogInjectDSL)
+     || !makeDSL(HE::vkmat::kFogIntegrateBindings, HE::vkmat::kFogIntegrateBindingCount, m_fogIntegrateDSL)
+     || !makeDSL(HE::vkmat::kFogApplyBindings,     HE::vkmat::kFogApplyBindingCount,     m_fogApplyDSL))
+        return fail("descriptor-set layout creation failed");
+    auto makePL = [&](VkDescriptorSetLayout dsl, VkPipelineLayout& out) -> bool {
+        VkPipelineLayoutCreateInfo ci{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+        ci.setLayoutCount = 1; ci.pSetLayouts = &dsl;
+        return vkCreatePipelineLayout(m_device, &ci, nullptr, &out) == VK_SUCCESS;
+    };
+    if (!makePL(m_fogInjectDSL, m_fogInjectPL) || !makePL(m_fogIntegrateDSL, m_fogIntegratePL)
+        || !makePL(m_fogApplyDSL, m_fogApplyPL))
+        return fail("pipeline layout creation failed");
+
+    // ── Pool: 3 sets per frame slot, rewritten every frame ──
+    {
+        using HE::vkmat::fogCountOf;
+        using HE::vkmat::FogDesc;
+        auto perFrame = [&](FogDesc k) {
+            return fogCountOf(HE::vkmat::kFogInjectBindings,    HE::vkmat::kFogInjectBindingCount,    k)
+                 + fogCountOf(HE::vkmat::kFogIntegrateBindings, HE::vkmat::kFogIntegrateBindingCount, k)
+                 + fogCountOf(HE::vkmat::kFogApplyBindings,     HE::vkmat::kFogApplyBindingCount,     k);
+        };
+        VkDescriptorPoolSize ps[4] = {
+            { kCis, 2 * perFrame(FogDesc::Cis) },          { kUbo, 2 * perFrame(FogDesc::Ubo) },
+            { kImg, 2 * perFrame(FogDesc::SampledImage) }, { kSto, 2 * perFrame(FogDesc::StorageImage) },
+        };
+        VkDescriptorPoolCreateInfo dpci{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
+        dpci.maxSets = 6; dpci.poolSizeCount = 4; dpci.pPoolSizes = ps;
+        if (vkCreateDescriptorPool(m_device, &dpci, nullptr, &m_fogPool) != VK_SUCCESS)
+            return fail("descriptor pool failed");
+        for (uint32_t f = 0; f < 2; ++f)
+        {
+            VkDescriptorSetLayout ls[3] = { m_fogInjectDSL, m_fogIntegrateDSL, m_fogApplyDSL };
+            VkDescriptorSet ss[3]{};
+            VkDescriptorSetAllocateInfo dsai{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
+            dsai.descriptorPool = m_fogPool; dsai.descriptorSetCount = 3; dsai.pSetLayouts = ls;
+            if (vkAllocateDescriptorSets(m_device, &dsai, ss) != VK_SUCCESS) return fail("descriptor sets failed");
+            m_fogInjectSet[f] = ss[0]; m_fogIntegrateSet[f] = ss[1]; m_fogApplySet[f] = ss[2];
+        }
+    }
+
+    // ── UBOs (host-visible, mapped for good, one per frame slot) ──
+    auto makeBuf = [&](VkDeviceSize size, MatFrameBuf& mb) -> bool {
+        VkBufferCreateInfo bci{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+        bci.size = size; bci.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+        if (vkCreateBuffer(m_device, &bci, nullptr, &mb.buf) != VK_SUCCESS) return false;
+        VkMemoryRequirements req{}; vkGetBufferMemoryRequirements(m_device, mb.buf, &req);
+        VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+        mai.allocationSize  = req.size;
+        mai.memoryTypeIndex = findMemoryType(req.memoryTypeBits,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        if (vkAllocateMemory(m_device, &mai, nullptr, &mb.mem) != VK_SUCCESS) return false;
+        vkBindBufferMemory(m_device, mb.buf, mb.mem, 0);
+        return vkMapMemory(m_device, mb.mem, 0, size, 0, &mb.mapped) == VK_SUCCESS;
+    };
+    for (uint32_t f = 0; f < 2; ++f)
+        if (!makeBuf(sizeof(HE::FogVolumeConstants), m_fogVolBuf[f])
+            || !makeBuf(sizeof(HE::MaterialShaderLibrary::Lighting), m_fogLightBuf[f]))
+            return fail("UBO allocation failed");
+
+    // ── Samplers ──
+    {
+        VkSamplerCreateInfo sci{ VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
+        sci.magFilter = sci.minFilter = VK_FILTER_LINEAR;
+        sci.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+        sci.addressModeU = sci.addressModeV = sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        if (vkCreateSampler(m_device, &sci, nullptr, &m_fogLinearSampler) != VK_SUCCESS) return fail("sampler failed");
+        sci.addressModeU = sci.addressModeV = sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT; // the bake tiles
+        if (vkCreateSampler(m_device, &sci, nullptr, &m_fogNoiseSampler) != VK_SUCCESS) return fail("sampler failed");
+    }
+
+    // ── One-shot uploads: the 64^3 noise (the fog's OWN volume, as on Metal and GL: one tap per
+    //    froxel against the sky's 256^3 would thrash the cache) and the 1x1x1 dummy bound at
+    //    binding 34 on every frame without the volume. ──
+    constexpr uint32_t kN = 64;
+    if (!createFogImage3D(kN, kN, kN, VK_FORMAT_R16G16_UNORM,
+                          VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, m_fogNoise))
+        return fail("noise volume allocation failed");
+    {
+        const std::vector<uint16_t> noise = HE::BuildSkyNoise3D(static_cast<int>(kN));
+        const VkDeviceSize dataSize = static_cast<VkDeviceSize>(kN) * kN * kN * 4; // RG16
+        VkBuffer stageBuf = VK_NULL_HANDLE; VkDeviceMemory stageMem = VK_NULL_HANDLE;
+        VkBufferCreateInfo bci{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+        bci.size = dataSize; bci.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+        bool ok = noise.size() * sizeof(uint16_t) >= dataSize
+               && vkCreateBuffer(m_device, &bci, nullptr, &stageBuf) == VK_SUCCESS;
+        if (ok)
+        {
+            VkMemoryRequirements mr{}; vkGetBufferMemoryRequirements(m_device, stageBuf, &mr);
+            VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+            mai.allocationSize  = mr.size;
+            mai.memoryTypeIndex = findMemoryType(mr.memoryTypeBits,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+            ok = vkAllocateMemory(m_device, &mai, nullptr, &stageMem) == VK_SUCCESS;
+            void* ptr = nullptr;
+            if (ok) { vkBindBufferMemory(m_device, stageBuf, stageMem, 0);
+                      ok = vkMapMemory(m_device, stageMem, 0, dataSize, 0, &ptr) == VK_SUCCESS; }
+            if (ok) { std::memcpy(ptr, noise.data(), static_cast<size_t>(dataSize)); vkUnmapMemory(m_device, stageMem); }
+        }
+        if (ok)
+        {
+            VkCommandBufferAllocateInfo cbai{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+            cbai.commandPool = m_cmdPool; cbai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY; cbai.commandBufferCount = 1;
+            VkCommandBuffer oneCB = VK_NULL_HANDLE;
+            vkAllocateCommandBuffers(m_device, &cbai, &oneCB);
+            VkCommandBufferBeginInfo bi{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+            bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+            vkBeginCommandBuffer(oneCB, &bi);
+            auto bar = [&](VkImage img, VkImageLayout from, VkImageLayout to, VkAccessFlags sa, VkAccessFlags da,
+                           VkPipelineStageFlags ss, VkPipelineStageFlags ds) {
+                VkImageMemoryBarrier b{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+                b.oldLayout = from; b.newLayout = to;
+                b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                b.image = img; b.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+                b.srcAccessMask = sa; b.dstAccessMask = da;
+                vkCmdPipelineBarrier(oneCB, ss, ds, 0, 0, nullptr, 0, nullptr, 1, &b);
+            };
+            const VkPipelineStageFlags kShaderStages = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+            bar(m_fogNoise.img, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                0, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+            VkBufferImageCopy region{};
+            region.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+            region.imageExtent      = { kN, kN, kN };
+            vkCmdCopyBufferToImage(oneCB, stageBuf, m_fogNoise.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+            bar(m_fogNoise.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, kShaderStages);
+            vkEndCommandBuffer(oneCB);
+            VkSubmitInfo si{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
+            si.commandBufferCount = 1; si.pCommandBuffers = &oneCB;
+            submitGraphics(si, VK_NULL_HANDLE);
+            vkQueueWaitIdle(m_graphicsQueue);
+            vkFreeCommandBuffers(m_device, m_cmdPool, 1, &oneCB);
+        }
+        if (stageBuf) vkDestroyBuffer(m_device, stageBuf, nullptr);
+        if (stageMem) vkFreeMemory(m_device, stageMem, nullptr);
+        if (!ok) return fail("noise upload failed");
+    }
+
+    // ── Pipelines ──
+    auto makeModule = [&](const std::vector<uint32_t>& spv) -> VkShaderModule {
+        VkShaderModuleCreateInfo ci{ VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO };
+        ci.codeSize = spv.size() * sizeof(uint32_t); ci.pCode = spv.data();
+        VkShaderModule mod = VK_NULL_HANDLE;
+        return vkCreateShaderModule(m_device, &ci, nullptr, &mod) == VK_SUCCESS ? mod : VK_NULL_HANDLE;
+    };
+    VkShaderModule icm = makeModule(fi.spirv), gcm = makeModule(fg.spirv);
+    VkShaderModule avm = makeModule(vs.spirv), afm = makeModule(fa.spirv);
+    auto makeCompute = [&](VkShaderModule m, VkPipelineLayout pl, VkPipeline& out) -> bool {
+        if (!m) return false;
+        VkComputePipelineCreateInfo cpi{ VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO };
+        cpi.stage.sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        cpi.stage.stage  = VK_SHADER_STAGE_COMPUTE_BIT;
+        cpi.stage.module = m;
+        cpi.stage.pName  = "main";
+        cpi.layout       = pl;
+        return createComputePipelines(1, &cpi, nullptr, &out) == VK_SUCCESS;
+    };
+    bool pipesOk = makeCompute(icm, m_fogInjectPL, m_fogInjectPipe) && makeCompute(gcm, m_fogIntegratePL, m_fogIntegratePipe);
+    if (pipesOk && avm && afm)
+    {
+        VkPipelineShaderStageCreateInfo st[2]{};
+        st[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        st[0].stage = VK_SHADER_STAGE_VERTEX_BIT;   st[0].module = avm; st[0].pName = "main";
+        st[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        st[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT; st[1].module = afm; st[1].pName = "main";
+        VkPipelineVertexInputStateCreateInfo vi{ VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
+        VkPipelineInputAssemblyStateCreateInfo ia{ VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO };
+        ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+        VkPipelineViewportStateCreateInfo vp{ VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO };
+        vp.viewportCount = 1; vp.scissorCount = 1;
+        VkPipelineRasterizationStateCreateInfo rs{ VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO };
+        rs.polygonMode = VK_POLYGON_MODE_FILL; rs.cullMode = VK_CULL_MODE_NONE;
+        rs.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE; rs.lineWidth = 1.0f;
+        VkPipelineMultisampleStateCreateInfo ms{ VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO };
+        ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+        // rgb' = rgb + dst.rgb * src.a (src.rgb = Lv + Tv*Lf, src.a = Tv*Tf): C*T + L. The
+        // alpha channel of the HDR target is left alone (ZERO / ONE), as on Metal and GL.
+        VkPipelineColorBlendAttachmentState cba{};
+        cba.blendEnable = VK_TRUE;
+        cba.srcColorBlendFactor = VK_BLEND_FACTOR_ONE;  cba.dstColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+        cba.srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO; cba.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+        cba.colorBlendOp = cba.alphaBlendOp = VK_BLEND_OP_ADD;
+        cba.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+        VkPipelineColorBlendStateCreateInfo cb{ VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO };
+        cb.attachmentCount = 1; cb.pAttachments = &cba;
+        VkDynamicState dynStates[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+        VkPipelineDynamicStateCreateInfo dyn{ VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO };
+        dyn.dynamicStateCount = 2; dyn.pDynamicStates = dynStates;
+        VkGraphicsPipelineCreateInfo pci{ VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO };
+        pci.stageCount = 2; pci.pStages = st;
+        pci.pVertexInputState = &vi; pci.pInputAssemblyState = &ia;
+        pci.pViewportState = &vp; pci.pRasterizationState = &rs;
+        pci.pMultisampleState = &ms; pci.pColorBlendState = &cb;
+        pci.pDynamicState = &dyn; pci.layout = m_fogApplyPL;
+        pci.renderPass = m_underwaterFogRP; pci.subpass = 0;   // colour-only RGBA16F, LOAD / STORE
+        pipesOk = createGraphicsPipelines(1, &pci, nullptr, &m_fogApplyPipe) == VK_SUCCESS;
+    }
+    else pipesOk = false;
+    for (VkShaderModule m : { icm, gcm, avm, afm }) if (m) vkDestroyShaderModule(m_device, m, nullptr);
+    if (!pipesOk) return fail("pipeline creation failed");
+
+    m_fogReady = true;
+    HE_LOG_INFO(RHI, "%s", "VulkanRenderer: volumetric fog ready (Inject/Integrate compute, Apply onto the HDR target)");
+    return true;
+#endif
+}
+
+bool VulkanRenderer::ensureFogTargets(const glm::ivec3& grid)
+{
+    if (m_fogIntegratedTex.view && grid == m_fogGridAlloc) return true;
+    // A grid change (first frame, aspect, quality) is rare; the old volumes may still be read by
+    // frames in flight, so drain the GPU before freeing them.
+    if (m_fogIntegratedTex.img || m_fogInjectTex[0].img) deviceWaitIdle();
+    destroyFogTargets();
+    const VkImageUsageFlags usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    const uint32_t gx = static_cast<uint32_t>(std::max(1, grid.x)), gy = static_cast<uint32_t>(std::max(1, grid.y)),
+                   gz = static_cast<uint32_t>(std::max(1, grid.z));
+    if (!createFogImage3D(gx, gy, gz, VK_FORMAT_R16G16B16A16_SFLOAT, usage, m_fogInjectTex[0])
+     || !createFogImage3D(gx, gy, gz, VK_FORMAT_R16G16B16A16_SFLOAT, usage, m_fogInjectTex[1])
+     || !createFogImage3D(gx, gy, gz, VK_FORMAT_R16G16B16A16_SFLOAT, usage, m_fogIntegratedTex))
+    {
+        HE_LOG_WARN(RHI, "%s", "VulkanRenderer: volumetric fog volumes could not be allocated");
+        destroyFogTargets();
+        return false;
+    }
+    // All three live in GENERAL for good: legal for the storage write and the sampled read.
+    VkCommandBufferAllocateInfo cbai{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+    cbai.commandPool = m_cmdPool; cbai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY; cbai.commandBufferCount = 1;
+    VkCommandBuffer oneCB = VK_NULL_HANDLE;
+    vkAllocateCommandBuffers(m_device, &cbai, &oneCB);
+    VkCommandBufferBeginInfo bi{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(oneCB, &bi);
+    for (VkImage img : { m_fogInjectTex[0].img, m_fogInjectTex[1].img, m_fogIntegratedTex.img })
+    {
+        VkImageMemoryBarrier b{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+        b.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED; b.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+        b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b.image = img; b.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+        b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        vkCmdPipelineBarrier(oneCB, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+            0, 0, nullptr, 0, nullptr, 1, &b);
+    }
+    vkEndCommandBuffer(oneCB);
+    VkSubmitInfo si{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
+    si.commandBufferCount = 1; si.pCommandBuffers = &oneCB;
+    submitGraphics(si, VK_NULL_HANDLE);
+    vkQueueWaitIdle(m_graphicsQueue);
+    vkFreeCommandBuffers(m_device, m_cmdPool, 1, &oneCB);
+    m_fogGridAlloc = grid;
+    m_fogHistValid = false; // a new grid has no history to reproject from
+    return true;
+}
+
+// Inject + Integrate. Recorded OUTSIDE any render pass, after the shadow maps, the local
+// atlas and the sky cube of this frame are current (DrawViewportFrame), before the scene
+// pass opens. Sets m_fogFrameActive; DrawScene's Apply split and the material fill read it.
+void VulkanRenderer::encodeFogVolume(VkCommandBuffer cmd)
+{
+    m_fogFrameActive = false;
+#if defined(HE_HAVE_SHADERC)
+    if (!m_fogReady || !m_world || !m_renderWorld.fogVolume.enabled) return;
+    // Apply (DrawScene) needs the LOAD pass, the colour-only framebuffer and the sampled depth:
+    // without any of them the whole feature stays off for this frame rather than half running.
+    if (!m_hdrLoadRP || !m_underwaterFogFB || !m_viewportDepthImage || !m_viewportDepthView || !m_hdrFB) return;
+    const HE::FogVolumeData fd = m_renderWorld.fogVolume;
+    if (!ensureFogTargets(fd.grid) || !m_fogIntegratedTex.view) return;
+    const uint32_t f = m_currentFrame;
+
+    // ── Time, history validity, wind drift (HE_SKY_TIME pins the clock: fixed 60 Hz steps) ──
+    const bool pinned = [] { const char* v = std::getenv("HE_SKY_TIME"); return v && *v; }();
+    const double now  = pinned ? (m_fogFrameIndex / 60.0)
+                               : std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    float dt = (m_fogLastTime > 0.0 || pinned) ? static_cast<float>(now - m_fogLastTime) : 0.0f;
+    if (pinned && m_fogFrameIndex == 0) dt = 0.0f;
+    m_fogLastTime = now;
+    const CameraData& cam = m_renderWorld.camera;
+    // The Vulkan clip the scene rasterised with (unjittered), and its y-up twin the kernels
+    // want (see the block comment above): kZeroToOneDepthClipFix = flipY * kVulkanClipFix.
+    const glm::mat4 viewProjVk = HE::kVulkanClipFix * cam.projection * cam.view;
+    const glm::mat4 viewProjUp = HE::kZeroToOneDepthClipFix * cam.projection * cam.view;
+    const glm::mat4 invViewProj = glm::inverse(viewProjUp);
+    const glm::vec3 camFwd = -glm::normalize(glm::vec3(glm::inverse(cam.view)[2]));
+    const float focal = cam.projection[1][1];
+    const bool historyOk = m_fogHistValid && dt > 0.0f && dt < 0.5f
+                        && glm::distance(cam.position, m_fogPrevCam) < 10.0f
+                        && std::abs(focal - m_fogPrevFocal) < 1e-4f * std::max(1.0f, std::abs(focal));
+    const IRenderer::EnvironmentSettings& env = GetEnvironment();
+    const float rad = glm::radians(env.windDirection);
+    m_fogNoiseOffset += glm::vec3(std::sin(rad), 0.0f, -std::cos(rad)) * std::max(env.windSpeed, 0.0f) * dt * 0.5f;
+    m_fogNoiseTime   += dt;
+
+    HE::FogVolumeTemporalState ts;
+    ts.jitter01     = HE::fogJitter(m_fogFrameIndex);
+    ts.historyAlpha = historyOk ? HE::fogHistoryAlpha(dt) : 1.0f;
+    ts.historyValid = historyOk;
+    ts.frameIndex   = m_fogFrameIndex;
+    ts.noiseOffset  = m_fogNoiseOffset;
+    ts.noiseTime    = m_fogNoiseTime;
+    const HE::FogVolumeConstants fc = HE::FillFogVolumeConstants(
+        fd, invViewProj, m_fogPrevViewProj, cam.position, camFwd, ts, 0.0f);
+    std::memcpy(m_fogVolBuf[f].mapped, &fc, sizeof(fc));
+
+    // ── HeLighting for the kernel's shadow / light functions: the lights and the CSM / local
+    //    atlas matrices exactly as a surface fragment of this frame sees them. DrawScene's own
+    //    fill lives inside the scene pass (and zeroes the CSM on GI frames), hence a second one. ──
+    {
+        HE::MaterialShaderLibrary::Lighting lit{};
+        glm::vec3 sunDir, sunColor;
+        m_renderWorld.dominantDirectionalLight(sunDir, sunColor);
+        lit.sunDir[0] = sunDir.x; lit.sunDir[1] = sunDir.y; lit.sunDir[2] = sunDir.z;
+        lit.sunColor[0] = sunColor.r; lit.sunColor[1] = sunColor.g; lit.sunColor[2] = sunColor.b;
+        const bool localShadows = m_localShadowLayerCount > 0 && m_localShadowView != VK_NULL_HANDLE;
+        HE::FillMaterialLightWindow(m_renderWorld, lit, /*localShadowsActive=*/localShadows);
+        if (localShadows)
+            for (int v = 0; v < m_localShadowLayerCount && v < kLocalShadowLayers; ++v)
+                std::memcpy(lit.localShadowVP[v], &m_localShadowClip[v][0][0], 16 * sizeof(float));
+        if (m_shadowRenderedThisFrame && m_shadowView && m_shadowLayoutValid)
+        {
+            const int nCascades = static_cast<int>(m_cascadeSplits.w);
+            for (int c = 0; c < nCascades && c < kCsmCascades; ++c)
+                std::memcpy(lit.csmVP[c], &m_cascadeClip[c][0][0], 16 * sizeof(float));
+            lit.csmSplits[0] = m_cascadeSplits.x; lit.csmSplits[1] = m_cascadeSplits.y;
+            lit.csmSplits[2] = m_cascadeSplits.z; lit.csmSplits[3] = m_cascadeSplits.w;
+            lit.camFwd[0] = m_cascadeCamFwd.x; lit.camFwd[1] = m_cascadeCamFwd.y; lit.camFwd[2] = m_cascadeCamFwd.z;
+            lit.shadowBias[0] = m_shadowSettings.slopeBias;
+            lit.shadowBias[1] = m_shadowSettings.minBias;
+        }
+        lit.fog[2] = m_skyEnvValid ? 1.0f : 0.0f;       // heSkyEnv is the baked cube (else heLight.ambient)
+        lit.ambient[0] = m_renderWorld.ambient.r; lit.ambient[1] = m_renderWorld.ambient.g; lit.ambient[2] = m_renderWorld.ambient.b;
+        lit.camPos[0] = cam.position.x; lit.camPos[1] = cam.position.y; lit.camPos[2] = cam.position.z;
+        std::memcpy(m_fogLightBuf[f].mapped, &lit, sizeof(lit));
+    }
+
+    // ── Descriptors (this slot's fence was waited on in Render(): free to rewrite) ──
+    const int cur = 1 - m_fogHist;
+    const VkSampler clampSampler = m_ssaoSampler ? m_ssaoSampler : m_albedoSampler;
+    const bool localShadowsOn = m_localShadowLayerCount > 0 && m_localShadowView != VK_NULL_HANDLE;
+    const VkDescriptorImageInfo whiteII{ m_albedoSampler, m_whiteAlbedoView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+    const VkDescriptorImageInfo csmII{
+        (m_shadowView && m_shadowLayoutValid) ? m_shadowSampler : m_albedoSampler,
+        (m_shadowView && m_shadowLayoutValid) ? m_shadowView    : m_whiteArrayView,
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+    const VkDescriptorImageInfo localII{
+        localShadowsOn ? m_shadowSampler   : m_albedoSampler,
+        localShadowsOn ? m_localShadowView : m_whiteArrayView,
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+    const VkDescriptorImageInfo skyII{
+        m_skyEnvValid ? clampSampler : m_albedoSampler,
+        m_skyEnvValid ? m_skyEnvView : m_whiteCubeView,
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+    const VkDescriptorImageInfo noiseII{ m_fogNoiseSampler, m_fogNoise.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+    const VkDescriptorImageInfo histII{ m_fogLinearSampler, m_fogInjectTex[m_fogHist].view, VK_IMAGE_LAYOUT_GENERAL };
+    const VkDescriptorImageInfo outII{ VK_NULL_HANDLE, m_fogInjectTex[cur].view, VK_IMAGE_LAYOUT_GENERAL };
+    const VkDescriptorImageInfo injII{ VK_NULL_HANDLE, m_fogInjectTex[cur].view, VK_IMAGE_LAYOUT_GENERAL };
+    const VkDescriptorImageInfo intII{ VK_NULL_HANDLE, m_fogIntegratedTex.view, VK_IMAGE_LAYOUT_GENERAL };
+    const VkDescriptorBufferInfo lightBI{ m_fogLightBuf[f].buf, 0, sizeof(HE::MaterialShaderLibrary::Lighting) };
+    const VkDescriptorBufferInfo volBI{ m_fogVolBuf[f].buf, 0, sizeof(HE::FogVolumeConstants) };
+    {
+        std::vector<VkWriteDescriptorSet> w;
+        w.reserve(24);
+        auto wr = [&](VkDescriptorSet set, uint32_t binding, VkDescriptorType type,
+                      const VkDescriptorBufferInfo* bi, const VkDescriptorImageInfo* ii) {
+            VkWriteDescriptorSet x{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+            x.dstSet = set; x.dstBinding = binding; x.descriptorCount = 1; x.descriptorType = type;
+            x.pBufferInfo = bi; x.pImageInfo = ii;
+            w.push_back(x);
+        };
+        constexpr VkDescriptorType kUbo = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        constexpr VkDescriptorType kCis = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        const VkDescriptorSet is = m_fogInjectSet[f];
+        wr(is, 0, kUbo, &lightBI, nullptr);
+        for (uint32_t b : { 10u, 11u, 16u, 17u, 18u, 31u, 32u, 33u }) // GI masks, AO, probes, SSR, GI refl, cloud shadow: unused here
+            wr(is, b, kCis, nullptr, &whiteII);
+        wr(is, 12, kCis, nullptr, &csmII);
+        wr(is, 13, kCis, nullptr, &localII);
+        wr(is, 15, kCis, nullptr, &skyII);
+        wr(is, 35, kCis, nullptr, &noiseII);
+        wr(is, 36, kUbo, &volBI, nullptr);
+        wr(is, 37, kCis, nullptr, &histII);
+        wr(is, 38, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, nullptr, &outII);
+        const VkDescriptorSet gs = m_fogIntegrateSet[f];
+        wr(gs, 36, kUbo, &volBI, nullptr);
+        wr(gs, 37, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, nullptr, &injII);
+        wr(gs, 38, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, nullptr, &intII);
+        vkUpdateDescriptorSets(m_device, static_cast<uint32_t>(w.size()), w.data(), 0, nullptr);
+    }
+
+    // ── Passes ──
+    auto memBarrier = [&](VkPipelineStageFlags ss, VkAccessFlags sa, VkPipelineStageFlags ds, VkAccessFlags da) {
+        VkMemoryBarrier mb{ VK_STRUCTURE_TYPE_MEMORY_BARRIER };
+        mb.srcAccessMask = sa; mb.dstAccessMask = da;
+        vkCmdPipelineBarrier(cmd, ss, ds, 0, 1, &mb, 0, nullptr, 0, nullptr);
+    };
+    // Everything before: the shadow passes (depth writes), the sky-cube transfer, last frame's
+    // fog reads and writes -> the inject kernel's reads and writes.
+    memBarrier(VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_MEMORY_WRITE_BIT,
+               VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_fogInjectPipe);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_fogInjectPL, 0, 1, &m_fogInjectSet[f], 0, nullptr);
+    vkCmdDispatch(cmd, (static_cast<uint32_t>(fd.grid.x) + 7u) / 8u, (static_cast<uint32_t>(fd.grid.y) + 7u) / 8u,
+                  (static_cast<uint32_t>(fd.grid.z) + 3u) / 4u);
+    memBarrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
+               VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_fogIntegratePipe);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_fogIntegratePL, 0, 1, &m_fogIntegrateSet[f], 0, nullptr);
+    vkCmdDispatch(cmd, (static_cast<uint32_t>(fd.grid.x) + 7u) / 8u, (static_cast<uint32_t>(fd.grid.y) + 7u) / 8u, 1u);
+    // The integrated volume: read by Apply and by every translucent material's fragment shader.
+    memBarrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
+               VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
+
+    m_fogHist         = cur;
+    m_fogHistValid    = true;
+    m_fogPrevViewProj = viewProjUp;
+    m_fogPrevCam      = cam.position;
+    m_fogPrevFocal    = focal;
+    ++m_fogFrameIndex;
+    m_fogFrame        = fd;
+    m_fogViewProjMat  = viewProjVk;
+    m_fogFrameActive  = true;
+    static bool s_fogLogged = false; // the runtime witness (he_vk_imagetests.py: required at fogMode 1, forbidden at 0)
+    if (!s_fogLogged)
+    {
+        s_fogLogged = true;
+        HE_LOG_INFO(RHI, "VulkanRenderer: volumetric fog frame (grid %dx%dx%d, range %.0f m, %s)",
+                    fd.grid.x, fd.grid.y, fd.grid.z, fd.distance, fd.parity ? "parity" : "full");
+    }
+#else
+    (void)cmd;
+#endif
+}
+
+// Apply: the full-screen pass onto m_hdrView between the opaque scene + sky and the transparent
+// tail. DrawScene ended the HDR render pass just before calling this; the scene depth is still
+// DEPTH_STENCIL_ATTACHMENT_OPTIMAL (both HDR passes store it and keep that layout), flipped to
+// SHADER_READ_ONLY around the draw exactly like the underwater fog does. Then the transparent
+// tail resumes in m_hdrLoadRP (colour and depth LOAD) on the same framebuffer.
+void VulkanRenderer::encodeFogApplyAndReopen(VkCommandBuffer cmd, uint32_t w, uint32_t h)
+{
+    const uint32_t f = m_currentFrame;
+    auto depthBarrier = [&](VkImageLayout from, VkImageLayout to, VkAccessFlags sa, VkAccessFlags da,
+                            VkPipelineStageFlags ss, VkPipelineStageFlags ds) {
+        VkImageMemoryBarrier b{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+        b.oldLayout = from; b.newLayout = to;
+        b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b.image = m_viewportDepthImage;
+        b.subresourceRange = { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1 };
+        b.srcAccessMask = sa; b.dstAccessMask = da;
+        vkCmdPipelineBarrier(cmd, ss, ds, 0, 0, nullptr, 0, nullptr, 1, &b);
+    };
+    depthBarrier(VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                 VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
+                 VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+
+    // The set: the integrated volume, the sky cube (the far field's colour), the constants and
+    // the depth. Rewritten per frame (this slot's earlier use is long finished).
+    const VkSampler clampSampler = m_ssaoSampler ? m_ssaoSampler : m_albedoSampler;
+    const VkDescriptorImageInfo volII{ m_fogLinearSampler, m_fogIntegratedTex.view, VK_IMAGE_LAYOUT_GENERAL };
+    const VkDescriptorImageInfo skyII{
+        m_skyEnvValid ? clampSampler : m_albedoSampler,
+        m_skyEnvValid ? m_skyEnvView : m_whiteCubeView,
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+    const VkDescriptorImageInfo depthII{ VK_NULL_HANDLE, m_viewportDepthView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+    const VkDescriptorBufferInfo volBI{ m_fogVolBuf[f].buf, 0, sizeof(HE::FogVolumeConstants) };
+    VkWriteDescriptorSet wr[4]{};
+    for (VkWriteDescriptorSet& x : wr) { x.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; x.dstSet = m_fogApplySet[f]; x.descriptorCount = 1; }
+    wr[0].dstBinding = 15; wr[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; wr[0].pImageInfo = &skyII;
+    wr[1].dstBinding = 34; wr[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; wr[1].pImageInfo = &volII;
+    wr[2].dstBinding = 36; wr[2].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;         wr[2].pBufferInfo = &volBI;
+    wr[3].dstBinding = 39; wr[3].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;          wr[3].pImageInfo = &depthII;
+    vkUpdateDescriptorSets(m_device, 4, wr, 0, nullptr);
+
+    VkRenderPassBeginInfo bi{ VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
+    bi.renderPass = m_underwaterFogRP; bi.framebuffer = m_underwaterFogFB;
+    bi.renderArea.extent = { w, h };
+    vkCmdBeginRenderPass(cmd, &bi, VK_SUBPASS_CONTENTS_INLINE);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_fogApplyPipe);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_fogApplyPL, 0, 1, &m_fogApplySet[f], 0, nullptr);
+    const VkViewport vp{ 0.0f, 0.0f, static_cast<float>(w), static_cast<float>(h), 0.0f, 1.0f };
+    const VkRect2D   sc{ { 0, 0 }, { w, h } };
+    vkCmdSetViewport(cmd, 0, 1, &vp);
+    vkCmdSetScissor(cmd, 0, 1, &sc);
+    vkCmdDraw(cmd, 3, 1, 0, 0);
+    vkCmdEndRenderPass(cmd);
+
+    depthBarrier(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                 VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                 VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT);
+    // m_hdrLoadRP's own dependency must equal m_postFxSceneRP's (see createDeferredPipelines), so
+    // it cannot order this pass' colour writes before its LOADs: one explicit barrier does, the
+    // same one the deferred branch of DrawScene puts between its passes.
+    {
+        VkMemoryBarrier mb{ VK_STRUCTURE_TYPE_MEMORY_BARRIER };
+        mb.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+        mb.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
+                         | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+        vkCmdPipelineBarrier(cmd,
+            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT
+                | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+            0, 1, &mb, 0, nullptr, 0, nullptr);
+    }
+    VkRenderPassBeginInfo hbi{ VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
+    hbi.renderPass = m_hdrLoadRP; hbi.framebuffer = m_hdrFB;
+    hbi.renderArea.extent = { w, h };
+    vkCmdBeginRenderPass(cmd, &hbi, VK_SUBPASS_CONTENTS_INLINE);
+    vkCmdSetViewport(cmd, 0, 1, &vp);
+    vkCmdSetScissor(cmd, 0, 1, &sc);
 }

@@ -1,0 +1,59 @@
+A_pass_1 load: load averages: 3.96 4.89 6.45  locked: 1  batt: AC Power
+B_pass_1 load: load averages: 4.12 4.86 6.39  locked: 1  batt: AC Power
+A_pass_2 load: load averages: 3.98 4.77 6.33  locked: 1  batt: AC Power
+B_pass_2 load: load averages: 3.53 4.62 6.24  locked: 1  batt: AC Power
+A_pass_3 load: load averages: 3.78 4.60 6.18  locked: 1  batt: AC Power
+B_pass_3 load: load averages: 3.96 4.58 6.14  locked: 1  batt: AC Power
+Ctc_pass_1 load: load averages: 3.44 4.12 5.76  locked: 1  batt: AC Power
+Atc_pass_1 load: load averages: 3.52 4.08 5.70  locked: 1  batt: AC Power
+Ctc_pass_2 load: load averages: 3.20 3.97 5.62  locked: 1  batt: AC Power
+Atc_pass_2 load: load averages: 3.02 3.86 5.54  locked: 1  batt: AC Power
+Dtd_pass_1 load: load averages: 3.18 3.33 4.95  locked: 1  batt: AC Power
+Atd_pass_1 load: load averages: 3.08 3.29 4.91  locked: 1  batt: AC Power
+Dtd_pass_2 load: load averages: 3.13 3.30 4.86  locked: 1  batt: AC Power
+Atd_pass_2 load: load averages: 2.89 3.23 4.80  locked: 1  batt: AC Power
+Att_pass_1 load: load averages: 2.13 2.60 3.94  locked: 1  batt: AC Power
+Ttt_pass_1 load: load averages: 2.52 2.66 3.92  locked: 1  batt: AC Power
+Utt_pass_1 load: load averages: 2.53 2.65 3.89  locked: 1  batt: AC Power
+Att_pass_2 load: load averages: 2.59 2.65 3.86  locked: 1  batt: AC Power
+Ttt_pass_2 load: load averages: 2.33 2.59 3.81  locked: 1  batt: AC Power
+Utt_pass_2 load: load averages: 2.65 2.65 3.80  locked: 1  batt: AC Power
+Att_pass_3 load: load averages: 3.11 2.77 3.82  locked: 1  batt: AC Power
+Ttt_pass_3 load: load averages: 2.61 2.68 3.76  locked: 1  batt: AC Power
+Utt_pass_3 load: load averages: 2.31 2.61 3.70  locked: 1  batt: AC Power
+Atv_pass_1 load: load averages: 2.91 2.71 3.55  locked: 1  batt: AC Power
+Vtv_pass_1 load: load averages: 3.13 2.79 3.56  locked: 1  batt: AC Power
+Wtv_pass_1 load: load averages: 2.63 2.70 3.51  locked: 1  batt: AC Power
+Xtv_pass_1 load: load averages: 3.13 2.81 3.53  locked: 1  batt: AC Power
+Ttv_pass_1 load: load averages: 2.74 2.75 3.49  locked: 1  batt: AC Power
+Atv_pass_2 load: load averages: 3.58 2.93 3.53  locked: 1  batt: AC Power
+Vtv_pass_2 load: load averages: 3.49 2.96 3.53  locked: 1  batt: AC Power
+Wtv_pass_2 load: load averages: 3.95 3.09 3.56  locked: 1  batt: AC Power
+Xtv_pass_2 load: load averages: 4.69 3.34 3.64  locked: 1  batt: AC Power
+Ttv_pass_2 load: load averages: 4.13 3.33 3.63  locked: 1  batt: AC Power
+Atv_pass_3 load: load averages: 4.73 3.50 3.68  locked: 1  batt: AC Power
+Vtv_pass_3 load: load averages: 4.00 3.42 3.65  locked: 1  batt: AC Power
+Wtv_pass_3 load: load averages: 4.62 3.62 3.71  locked: 1  batt: AC Power
+Xtv_pass_3 load: load averages: 3.86 3.51 3.67  locked: 1  batt: AC Power
+Ttv_pass_3 load: load averages: 3.71 3.50 3.66  locked: 1  batt: AC Power
+xtV1 load: load averages: 4.43 3.71 3.70
+xtW1 load: load averages: 5.21 4.20 3.89
+xtT1 load: load averages: 4.63 4.25 3.93
+xtV2 load: load averages: 7.90 5.40 4.40
+xtA2 load: load averages: 5.44 5.25 4.43
+xtW2 load: load averages: 5.95 5.35 4.53
+xtT2 load: load averages: 6.65 5.57 4.65
+Atf_fps_1 load: load averages: 5.10 5.24 4.68  locked: 1  batt: AC Power
+Ftf_fps_1 load: load averages: 7.35 5.78 4.89  locked: 1  batt: AC Power
+Atf_fps_2 load: load averages: 8.32 6.10 5.03  locked: 1  batt: AC Power
+Ftf_fps_2 load: load averages: 7.55 6.08 5.04  locked: 1  batt: AC Power
+Atf_fps_3 load: load averages: 9.06 6.48 5.21  locked: 1  batt: AC Power
+Ftf_fps_3 load: load averages: 11.01 7.16 5.49  locked: 1  batt: AC Power
+Atf_fps_4 load: load averages: 10.95 7.47 5.65  locked: 1  batt: AC Power
+Ftf_fps_4 load: load averages: 10.74 7.69 5.78  locked: 1  batt: AC Power
+Avs_fps_1 load: load averages: 10.86 8.23 6.10  locked: 1  batt: AC Power
+Fvs_fps_1 load: load averages: 10.44 8.54 6.36  locked: 1  batt: AC Power
+Avs_fps_2 load: load averages: 12.08 9.42 6.83  locked: 1  batt: AC Power
+Fvs_fps_2 load: load averages: 11.32 9.56 7.02  locked: 1  batt: AC Power
+Avs_fps_3 load: load averages: 17.31 11.81 8.10  locked: 1  batt: AC Power
+Fvs_fps_3 load: load averages: 23.67 14.59 9.43  locked: 1  batt: AC Power

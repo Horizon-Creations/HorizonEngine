@@ -687,6 +687,57 @@ MaterialTextures resolveTextures(const PbrMaterialDesc& m, ImageCache& images,
 	return tex;
 }
 
+// The graph, its generated GLSL and the scalar fields of one material, written to
+// `out`. Shared by importMaterial and writeCutoutMaterial so a material made by hand
+// (the impostor bake) is the same asset an imported one is.
+std::string writeMaterial(const PbrMaterialDesc& m, const MaterialTextures& tex,
+                          const ResolvedOutput& out, const std::filesystem::path& contentRoot,
+                          HE::UUID* idOut = nullptr)
+{
+	const HE::MaterialGraph graph = buildGraph(m, tex);
+	// The graph is the source of truth, but the baked GLSL is generated HERE rather
+	// than left to ContentManager's load-time regeneration: the packer reads .hasset
+	// chunks raw (HpakWriter), so a material whose MTRL carries only the graph would
+	// ship with no shader at all.
+	const HE::MatShaderGen gen = HE::generateFragment(graph);
+
+	MaterialAsset mat;
+	mat.type = HE::AssetType::Material;
+	mat.name = out.name;
+	mat.path = out.path;
+	// shaderPath is a dead field for graph materials — no renderer reads it and the
+	// packer resolves it to a UUID, which the old "builtin/unlit" placeholder never
+	// had. Empty is the value that path explicitly handles.
+	mat.shaderPath = {};
+	// The legacy single-texture slot (heTex0) every backend still uses for meshes
+	// without a graph shader, and what the Inspector shows as the material's texture.
+	if (!tex.baseColor.empty())
+		mat.texturePaths.push_back(tex.baseColor.path);
+
+	mat.nodeGraphJson        = HE::materialGraphToJson(graph);
+	mat.customShaderFragGlsl = gen.glsl;
+	mat.customShaderGBufGlsl = gen.glslGBuffer;
+	mat.customShaderVertGlsl = gen.vertexBody;
+	mat.customShaderDispGlsl = gen.displacementBody;
+	mat.blendMode            = gen.blendMode;
+	mat.graphTexturePaths    = gen.textures;
+
+	// The scalar PBR fields too, not just the graph: they are what the Inspector
+	// edits, what PropertyAnimClip animates, and what a consumer bypassing the graph
+	// shader falls back to — a material whose graph says metal and whose scalars say
+	// dielectric is a bug waiting for the first such consumer.
+	for (int k = 0; k < 3; ++k) mat.baseColor[k] = m.baseColor[k];
+	mat.metallic     = m.metallic;
+	mat.roughness    = m.roughness;
+	mat.opacity      = m.baseColor[3];
+	mat.doubleSided  = m.doubleSided;
+
+	if (!writeAsset(mat, contentRoot))
+		return {};
+	if (idOut) *idOut = mat.id;
+	return mat.path;
+}
+
 // Writes one MaterialAsset for `m`. Returns its asset path, or empty on failure.
 std::string importMaterial(const PbrMaterialDesc&       m,
                            ImageCache&                  images,
@@ -739,47 +790,7 @@ std::string importMaterial(const PbrMaterialDesc&       m,
 		return out.path;
 	}
 
-	const HE::MaterialGraph graph = buildGraph(m, tex);
-	// The graph is the source of truth, but the baked GLSL is generated HERE rather
-	// than left to ContentManager's load-time regeneration: the packer reads .hasset
-	// chunks raw (HpakWriter), so a material whose MTRL carries only the graph would
-	// ship with no shader at all.
-	const HE::MatShaderGen gen = HE::generateFragment(graph);
-
-	MaterialAsset mat;
-	mat.type = HE::AssetType::Material;
-	mat.name = out.name;
-	mat.path = out.path;
-	// shaderPath is a dead field for graph materials — no renderer reads it and the
-	// packer resolves it to a UUID, which the old "builtin/unlit" placeholder never
-	// had. Empty is the value that path explicitly handles.
-	mat.shaderPath = {};
-	// The legacy single-texture slot (heTex0) every backend still uses for meshes
-	// without a graph shader, and what the Inspector shows as the material's texture.
-	if (!tex.baseColor.empty())
-		mat.texturePaths.push_back(tex.baseColor.path);
-
-	mat.nodeGraphJson        = HE::materialGraphToJson(graph);
-	mat.customShaderFragGlsl = gen.glsl;
-	mat.customShaderGBufGlsl = gen.glslGBuffer;
-	mat.customShaderVertGlsl = gen.vertexBody;
-	mat.customShaderDispGlsl = gen.displacementBody;
-	mat.blendMode            = gen.blendMode;
-	mat.graphTexturePaths    = gen.textures;
-
-	// The scalar PBR fields too, not just the graph: they are what the Inspector
-	// edits, what PropertyAnimClip animates, and what a consumer bypassing the graph
-	// shader falls back to — a material whose graph says metal and whose scalars say
-	// dielectric is a bug waiting for the first such consumer.
-	for (int k = 0; k < 3; ++k) mat.baseColor[k] = m.baseColor[k];
-	mat.metallic     = m.metallic;
-	mat.roughness    = m.roughness;
-	mat.opacity      = m.baseColor[3];
-	mat.doubleSided  = m.doubleSided;
-
-	if (!writeAsset(mat, contentRoot))
-		return {};
-	return mat.path;
+	return writeMaterial(m, tex, out, contentRoot);
 }
 
 } // namespace
@@ -880,6 +891,26 @@ PbrMaterialImport importPbrMaterials(const std::vector<PbrMaterialDesc>& materia
 	}
 
 	return result;
+}
+
+std::string writeCutoutMaterial(const std::string&           name,
+                                const std::string&           texturePath,
+                                float                        roughness,
+                                float                        alphaCutoff,
+                                const std::filesystem::path& contentRoot,
+                                const std::filesystem::path& relativeOutputDir,
+                                HE::UUID*                    idOut)
+{
+	PbrMaterialDesc m;
+	m.name        = name;
+	m.metallic    = 0.0f;
+	m.roughness   = roughness;
+	m.alphaMode   = PbrMaterialDesc::AlphaMode::Mask;
+	m.alphaCutoff = alphaCutoff;
+	m.doubleSided = true;
+	MaterialTextures tex;
+	tex.baseColor.path = texturePath;
+	return writeMaterial(m, tex, resolveOutput({}, relativeOutputDir, name), contentRoot, idOut);
 }
 
 } // namespace Importer

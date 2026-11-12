@@ -143,6 +143,9 @@ add_executable(he_tests
     # Its sibling for asset tabs: per-row answers carry the row's key, and it
     # waits for the scene's offer.
     test_asset_recovery_ui.cpp
+    # Generate LODs: the dialog opens and closes, the runner fills a foliage layer / a
+    # LOD component / only the sidecars, and Undo takes the scene edit back (Thema 331 S3).
+    test_auto_lod_ui.cpp
     # The "git is missing" remedy: Install Git exactly when the route can run,
     # the manual way otherwise. Nothing is installed (the callback is a counter).
     test_git_install_ui.cpp
@@ -204,6 +207,11 @@ add_executable(he_tests
     # the same WaterIndex the physics immersion detection uses, wired onto
     # RenderWorld by RenderExtractor::extract() for the post-processing stage.
     test_underwater_camera.cpp
+    # Thema 225 step 2: volumetric fog's host side — FogVolume.h's slice math,
+    # the analytic height-fog integral it has to seam with, FogVolumeData/
+    # MakeFogVolumeData/ExtractFogVolumeData gating, and (under HE_TESTS_HAVE_SHADERC)
+    # the §10 feasibility probe: the real shadow preamble through SPIRV-Cross as Compute.
+    test_fog_volume.cpp
     # The ground under a lake: a polygon dug to a floor with a soft bank, the
     # chunks it rebuilds, and the editor's one undo step giving it back exactly.
     test_terrain_excavate.cpp
@@ -231,6 +239,16 @@ add_executable(he_tests
     test_foliage_lod.cpp
     # Straddler buckets on the pool give the single-threaded result (Thema 238 S2).
     test_foliage_parallel.cpp
+    # meshoptimizer-backed LOD simplifier, tool-only, not wired into the importer or
+    # editor yet (Thema 331 S2): triangle/attribute floors, UV-seam and border locks,
+    # the foliage alpha-coverage retry loop.
+    test_mesh_simplifier.cpp
+    # Auto-LOD chains: generator, sidecars, screen-error distances, foliage/LOD fill (Thema 331 S3).
+    test_auto_lod.cpp
+    # Impostor bake: CPU albedo+alpha picture of a plant, the sized card, the cut-out material (Thema 331 S4).
+    test_impostor.cpp
+    # Meshlet culling prototype: build/frustum/cone vs brute force, opt-in foliage probe (Thema 331 S6).
+    test_meshlet_cull.cpp
     # Graph materials (wind) drawn instanced on GL and Metal (Thema 182, 2e).
     test_graph_instancing.cpp
     test_debug_draw.cpp
@@ -1008,6 +1026,9 @@ add_executable(he_tests
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/SceneRecoveryDialog.cpp
     # And the asset tabs' recovery dialog, for test_asset_recovery_ui.cpp.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/AssetRecoveryDialog.cpp
+    # The Generate LODs dialog and runner, for test_auto_lod_ui.cpp (Thema 331 S3):
+    # same AppContext, same per-file HE_IMGUI_ENABLED. HorizonImporters is linked.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/AutoLodDialog.cpp
     # The git-missing dialog and its remedy, for test_git_install_ui.cpp: same
     # AppContext, same per-file HE_IMGUI_ENABLED. It reads the probe and the
     # git-install callbacks; HorizonSourceControl is linked below.
@@ -1119,6 +1140,8 @@ set_source_files_properties(
     test_scene_recovery_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/AssetRecoveryDialog.cpp
     test_asset_recovery_ui.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/AutoLodDialog.cpp
+    test_auto_lod_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/GitMissingDialog.cpp
     test_git_install_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/ToolSetupDialog.cpp
@@ -1519,6 +1542,9 @@ if(TARGET HorizonContentSync)
     target_sources(he_tests PRIVATE test_engine_content_manifest_refresh.cpp test_sftp_connection.cpp)
     # LandscapeFoliageLayer through publish scan / manifest / passive pull, no server (Thema 327)
     target_sources(he_tests PRIVATE test_landscape_foliage_sync.cpp)
+    # Thema 194 step 3: the new HTTP content-server client (manifest + file fetch), against a
+    # real loopback server — no SFTP, no EngineContentSync singleton, see the file's own comment.
+    target_sources(he_tests PRIVATE test_content_server_client.cpp)
     target_link_libraries(he_tests PRIVATE HorizonContentSync)
     target_include_directories(he_tests PRIVATE ${CMAKE_SOURCE_DIR}/src/HE_ContentSync/src)
     if(WIN32)

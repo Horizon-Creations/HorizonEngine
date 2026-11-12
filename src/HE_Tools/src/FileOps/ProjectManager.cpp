@@ -1618,12 +1618,16 @@ static json startupSceneJson(ProjectPreset preset)
 		// tour's "drag the time-of-day slider" step actually move the sun.
 		// Keys are EnvironmentComponent member names (HE_ENV_FIELDS_* /
 		// SceneSerializer); anything left out falls back to the struct default.
+		// fogMode 1 = the volumetric fog (Thema 225): a new project starts on it, while the
+		// struct default (what a scene saved before the field loads as) stays 0. It draws
+		// nothing until the fog density or the bank is raised.
 		addChild("Sky", json{ { "environment", (furnish || playable)
 			? json{ { "dayNightCycle", true  },   // without this timeOfDay is inert
 			        { "timeOfDay",     0.32f },   // mid-morning: raking light, long shadows
 			        { "cloudMode",     1     },   // volumetric clouds rather than the dome
-			        { "cloudCoverage", 0.4f  } }
-			: json::object() } });
+			        { "cloudCoverage", 0.4f  },
+			        { "fogMode",       1     } }
+			: json{ { "fogMode", 1 } } } });
 		addChild("Weather", json{ { "weather", json::object() } });
 	}
 
