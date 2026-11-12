@@ -175,6 +175,59 @@ TEST_CASE("landscape runtime: the frame covers the view, the fine levels sit on 
 	CHECK(src.use_count() == 1);
 }
 
+// Thema 326, step 14: LandscapeStore::invalidate's only wired consumer so far. tileChanged() must not touch m_generation
+// (LandscapeFrame::coarseGeneration): every backend wipes the atlas's GPU arrays and slot table to empty on a generation
+// change and only replays uploads/tableUpdates collected since the last buildFrame, so bumping it would blank every tile
+// the edit did not itself touch (see the hive lesson on LandscapeRuntime.cpp). The tile's own slot comes back through the
+// ordinary store/atlas sync instead: invalidate() makes it non-resident, sync() releases the slot, the store reloads it,
+// sync() takes it up again.
+TEST_CASE("landscape runtime: tileChanged drops a tile so the atlas gives its slot back and takes it up again, without touching the coarse generation")
+{
+	auto src = smallRealWorld();
+	LandscapeRuntime rt;
+	LandscapeRuntimeConfig cfg;
+	REQUIRE(rt.begin(src, cfg));
+	const glm::dvec3 cam(3000.0, 900.0, 3000.0);
+	const glm::dvec3 origin(0.0);
+	const glm::dmat4 vp = viewProjRelative(cam, origin, glm::dvec3(1, -0.1, 0.2));
+
+	REQUIRE(settle(rt, cam));
+	LandscapeFrame f0;
+	rt.buildFrame(vp, origin, false, f0);                  // drains the initial uploads
+	REQUIRE(f0.active);
+	const uint64_t generationBefore = f0.coarseGeneration;
+
+	const LandscapeTileKey key = rt.store()->residentKeys().front();
+	REQUIRE(rt.atlas()->contains(key));
+	const uint16_t oldSlot = rt.atlas()->slotOf(key);
+
+	rt.tileChanged({ key });
+	CHECK(rt.store()->revision(key) == 1);
+	CHECK_FALSE(rt.store()->isResident(key));              // gone at once
+
+	rt.updateAt(cam, glm::vec3(0.0f), 1.0);                // the atlas notices the store dropped it on the very next sync
+	LandscapeFrame f1;
+	rt.buildFrame(vp, origin, false, f1);
+	bool releasedOld = false;
+	for (const auto& r : f1.releases) if (r.key == key && r.slot == oldSlot) releasedOld = true;
+	CHECK(releasedOld);
+	CHECK_FALSE(rt.atlas()->contains(key));
+	CHECK(f1.coarseGeneration == generationBefore);        // the trap: an edit must not look like "the runtime began again"
+
+	REQUIRE(settle(rt, cam));
+	LandscapeFrame f2;
+	rt.buildFrame(vp, origin, false, f2);
+	bool uploadedAgain = false;
+	for (const auto& u : f2.uploads) if (u.key == key) uploadedAgain = true;
+	CHECK(uploadedAgain);
+	CHECK(rt.atlas()->contains(key));
+	CHECK(f2.coarseGeneration == generationBefore);
+
+	// a runtime that has not begun ignores tileChanged instead of crashing
+	LandscapeRuntime idle;
+	idle.tileChanged({ key });
+}
+
 TEST_CASE("landscape runtime: the same view gives the same patches whatever the floating origin is")
 {
 	auto src = smallRealWorld();

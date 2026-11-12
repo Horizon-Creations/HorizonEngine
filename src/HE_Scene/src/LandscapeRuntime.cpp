@@ -259,6 +259,12 @@ void LandscapeRuntime::updateAt(const glm::dvec3& cameraAbsolute, const glm::vec
 	}
 }
 
+void LandscapeRuntime::tileChanged(const std::vector<LandscapeTileKey>& keys)
+{
+	if (!active()) return;
+	m_store->invalidate(keys);
+}
+
 void LandscapeRuntime::setNavigation(const LandscapeNavConfig* config)
 {
 	if (!config) { m_nav.reset(); m_navAnchors.clear(); return; }

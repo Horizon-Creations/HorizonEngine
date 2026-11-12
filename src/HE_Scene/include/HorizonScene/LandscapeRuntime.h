@@ -160,6 +160,12 @@ public:
 	LandscapeProvider renderProvider(std::function<glm::dvec3()> origin);
 	LandscapeProvider renderProvider(const HorizonWorld& world);
 
+	// An edit (sculpt/paint write-back, Thema 326 step 14) committed these tiles to the source: drop them from the store so the
+	// next update() reads them again, which makes the atlas give the slot back on its next sync() and take it up again once the
+	// tile is resident. Physics, foliage, navigation and water do not yet react (later steps); the coarse world does not either,
+	// since nothing before the edit overlay (step 15) can make it stale. A runtime that is not active ignores this.
+	void tileChanged(const std::vector<LandscapeTileKey>& keys);
+
 	const LandscapeStore*  store() const { return m_store.get(); }
 	const LandscapeAtlas*  atlas() const { return m_atlas.get(); }
 	const LandscapeQuadtreeConfig& quadtree() const { return m_quadtree; }

@@ -48,7 +48,7 @@ Options: (a) accept 4.6 cm steps and tell the author (the brush's `amount` below
 
 | Consumer | What must happen |
 |---|---|
-| Atlas (GPU) | re-upload the slot of the tile; coarse world: bump `coarseGeneration` (re-uploads the whole grid, acceptable per committed stroke, not per dab) |
+| Atlas (GPU) | re-upload the slot of the tile: `invalidate()` already makes it non-resident, so the atlas's own `sync()` releases and later re-takes it, no runtime code needed (step 14, verified). Coarse world: **not** `LandscapeRuntime::m_generation` — every backend's `*Landscape.cpp/.mm` wipes `tileHeights`/`weights`/the slot table to empty on a generation change and only `LandscapeAtlas::sync()` repopulates already-resident tiles' slots, so a generation bump loses every tile the edit did not touch. Step 15 needs its own coarse-only revision and a matching refresh path in each backend that leaves the atlas textures alone |
 | `LandscapePhysics` | rebuild the tile's ground body |
 | Foliage | the tile's scatter is stale (heights and weights changed): drop and re-scatter that tile |
 | Navigation | rebuild that nav tile |

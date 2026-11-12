@@ -725,6 +725,71 @@ TEST_CASE("landscape coarse world: a pack without one, a version 1 pack, and a c
 	std::filesystem::remove(good);
 }
 
+// ── invalidate (Thema 326, step 14: sculpt/paint write-back) ──────────────────
+TEST_CASE("landscape store: invalidate drops a resident tile, bumps its revision, and the next update loads it again")
+{
+	auto src = std::make_shared<ProceduralLandscapeSource>(smallWorld(40));
+	LandscapeStoreConfig cfg;
+	cfg.loadRadius = 1500.0f;
+	LandscapeStore store(src, cfg);
+	const std::vector<LandscapeAnchor> anchors = { { glm::dvec3(10240.0, 0.0, 10240.0) } };
+	REQUIRE(settleStore(store, anchors));
+	const LandscapeTileKey key{ 20, 20 };
+	REQUIRE(store.isResident(key));
+	CHECK(store.revision(key) == 0);
+	const uint64_t startedBefore = store.stats().loadsStarted;
+
+	store.invalidate({ key });
+	CHECK(store.revision(key) == 1);
+	CHECK_FALSE(store.isResident(key));              // gone at once, not next frame
+
+	REQUIRE(settleStore(store, anchors));
+	CHECK(store.isResident(key));                     // reloaded
+	CHECK(store.stats().loadsStarted == startedBefore + 1);
+
+	// a second invalidation of the same key bumps the revision again
+	store.invalidate({ key });
+	CHECK(store.revision(key) == 2);
+	REQUIRE(settleStore(store, anchors));
+
+	// a key never seen, and one that is not resident any more: no crash, nothing scheduled, revision still counts
+	const LandscapeTileKey never{ 39, 39 }, farAway{ 0, 0 };
+	CHECK(store.revision(never) == 0);
+	const uint64_t startedBefore2 = store.stats().loadsStarted;
+	store.invalidate({ never, farAway });
+	CHECK(store.revision(never) == 1);
+	CHECK(store.revision(farAway) == 1);
+	CHECK(store.stats().loadsStarted == startedBefore2);          // neither was resident or loading: nothing to reload
+}
+
+TEST_CASE("landscape store: invalidating a tile mid-load cancels or discards it and a fresh load ends resident")
+{
+	ThreadPool pool(2);
+	auto src = std::make_shared<GatedSource>(smallWorld(40));
+	LandscapeStoreConfig cfg;
+	cfg.loadRadius = 1500.0f;
+	cfg.maxInFlight = 64;
+	LandscapeStore store(src, cfg, &pool);
+	const std::vector<LandscapeAnchor> anchors = { { glm::dvec3(10240.0, 0.0, 10240.0) } };
+	store.update(anchors, 1.0);
+	for (int i = 0; i < 2000 && src->started.load() < 1; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+	REQUIRE(src->started.load() >= 1);
+	REQUIRE(store.stats().loading > 0);
+	const LandscapeTileKey key = store.residentKeys().empty() ? LandscapeTileKey{ 20, 20 } : store.residentKeys().front();
+	REQUIRE(store.isLoading(key));
+	const uint64_t startedBefore = store.stats().loadsStarted;
+
+	store.invalidate({ key });
+	CHECK(store.revision(key) == 1);
+	CHECK_FALSE(store.isLoading(key));                // the old entry is gone at once
+
+	src->open = true;                                 // let the gated loads (old and new) through
+	REQUIRE(settleStore(store, anchors));
+	CHECK(store.isResident(key));                      // a fresh load for it ended resident
+	CHECK(store.stats().loadsStarted > startedBefore);  // at least the replacement load ran
+	CHECK(store.stats().loadsStarted == store.stats().loadsFinished + store.stats().loadsFailed + store.stats().loadsCancelled + store.stats().loadsDiscarded);
+}
+
 TEST_CASE("landscape store: destroying it waits for the loads that are running, so nothing holds the source (or its file) afterwards")
 {
 	ThreadPool pool(2);
