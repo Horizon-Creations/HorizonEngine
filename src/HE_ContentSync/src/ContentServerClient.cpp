@@ -114,6 +114,16 @@ SftpResult contentServerGetManifest(const ContentServerEndpoint& endpoint, const
 		return r;
 	}
 
+	// The server closed early: a half manifest must neither be cached nor parsed. Transient, so
+	// sftpWithConnectRetry tries again.
+	if (resp.contentLength >= 0 && resp.body.size() < static_cast<std::size_t>(resp.contentLength))
+	{
+		SftpResult r;
+		r.error     = "truncated response";
+		r.transient = true;
+		return r;
+	}
+
 	std::ofstream out(localPath, std::ios::binary | std::ios::trunc);
 	if (!out) return { false, "could not write the manifest temp file" };
 	out.write(resp.body.data(), static_cast<std::streamsize>(resp.body.size()));

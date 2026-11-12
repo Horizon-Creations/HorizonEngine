@@ -116,6 +116,28 @@ TEST_CASE("contentServerGetManifest: a server error is reported, not written to 
 	CHECK_FALSE(std::filesystem::exists(dest));
 }
 
+TEST_CASE("contentServerGetManifest: a body shorter than Content-Length is a transient error, nothing cached")
+{
+	OneShotHttpServer srv;
+	const std::string body = R"({"entries":[{"path":"Materials/Foo.hasset")";
+	srv.start("HTTP/1.1 200 OK\r\nContent-Length: " + std::to_string(body.size() + 40) + "\r\n\r\n",
+	          [&](HE::Net::SocketHandle client) { srv.sendAll(client, body); }); // closes early
+
+	const HE::Cs::ContentServerEndpoint endpoint{ "127.0.0.1", srv.port };
+	const std::filesystem::path dest =
+		std::filesystem::temp_directory_path() / "he_content_server_manifest_truncated_test.json";
+	std::error_code rmEc;
+	std::filesystem::remove(dest, rmEc);
+
+	const HE::Cs::SftpResult r = HE::Cs::contentServerGetManifest(endpoint, dest.string());
+	srv.server.join();
+
+	CHECK_FALSE(r.ok);
+	CHECK(r.error == "truncated response");
+	CHECK(r.transient);
+	CHECK_FALSE(std::filesystem::exists(dest));
+}
+
 TEST_CASE("contentServerGetFile: percent-encodes the path, finalizes via rename, no .partial left")
 {
 	OneShotHttpServer srv;

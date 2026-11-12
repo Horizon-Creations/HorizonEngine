@@ -35,6 +35,9 @@ struct HttpResponse {
     int         statusCode = 0;
     std::string body;
     std::string error;                // populated when ok == false
+    // The declared Content-Length of a non-chunked response, -1 when absent or chunked. Lets a
+    // caller tell a body cut short by an early close from a complete one (body.size() < it).
+    long long   contentLength = -1;
 };
 
 // A URL split into its parts. Only http:// is accepted.

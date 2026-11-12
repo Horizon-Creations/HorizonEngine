@@ -200,6 +200,7 @@ bool httpParseResponse(const std::string& raw, HttpResponse& out) {
         const std::string cl = findHeader(headers, "Content-Length");
         if (!cl.empty()) {
             const auto want = static_cast<std::size_t>(std::strtoul(cl.c_str(), nullptr, 10));
+            out.contentLength = static_cast<long long>(want);
             if (body.size() > want) body.resize(want);
         }
     }
