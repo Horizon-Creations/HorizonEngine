@@ -21,6 +21,7 @@
 #include <HorizonRendering/UnderwaterSurfaceShared.h>
 #include <ContentManager/TextureArrayBuild.h>
 #include <MaterialGraph/AutoLandscapeMaterial.h>
+#include <MaterialGraph/MaterialParamLimits.h>
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/EntityActive.h>
 #include <HorizonScene/LODSystem.h>
@@ -561,6 +562,46 @@ TEST_CASE("RenderExtractor: the wide mesh walk gives every object the fields the
 	CHECK(allOk);
 	CHECK(k == rw.objects.size());
 	CHECK(k > 4000);   // the mix draws most of them
+}
+
+TEST_CASE("RenderExtractor: a param override past slot 16 still reaches the HeParams block")
+{
+	// kMatMaxParams was raised from 16 to 32 (the Desert landscape material had used all 16);
+	// the override merge loop that locates a named parameter's slot stayed hard-coded to
+	// `k < 16`, so an override on a parameter at index 16..31 was accepted but silently never
+	// written into the block. Pin a parameter past the old limit and check it lands.
+	ContentManager cm;
+	StaticMeshAsset mesh; mesh.type = HE::AssetType::StaticMesh; mesh.name = "m";
+	mesh.indices = { 0, 1, 2 };
+	const HE::UUID meshId = cm.registerStaticMesh(mesh);
+
+	MaterialAsset ma; ma.type = HE::AssetType::Material; ma.name = "manyParams";
+	const size_t farSlot = static_cast<size_t>(HE::kMatMaxParams) - 1;   // past the old 16-slot cap
+	ma.graphParamNames.resize(farSlot + 1);
+	for (size_t i = 0; i <= farSlot; ++i) ma.graphParamNames[i] = "P" + std::to_string(i);
+	ma.graphParamNames[farSlot] = "Tint";
+	ma.shaderParamData = std::vector<float>((farSlot + 1) * 4, 0.1f);
+	const HE::UUID matId = cm.registerMaterial(ma);
+
+	HorizonWorld world;
+	auto& reg = world.registry();
+	auto e = world.createEntity("e");
+	reg.emplace<TransformComponent>(e, TransformComponent{});
+	MeshComponent mc; mc.meshAssetId = meshId;
+	reg.emplace<MeshComponent>(e, mc);
+	MaterialComponent mat; mat.materialAssetId = matId;
+	MaterialParamOverride ov; ov.name = "Tint"; ov.value[0] = 9.0f; ov.value[1] = 8.0f;
+	mat.paramOverrides.push_back(ov);
+	reg.emplace<MaterialComponent>(e, mat);
+
+	RenderExtractor ex; ex.setContentManager(&cm);
+	RenderWorld rw;
+	ex.extract(world, rw, 1.0f);
+
+	REQUIRE(rw.objects.size() == 1);
+	REQUIRE(rw.objects[0].paramOverride.size() == size_t(HE::kMatParamFloats));
+	CHECK(rw.objects[0].paramOverride[farSlot * 4 + 0] == 9.0f);
+	CHECK(rw.objects[0].paramOverride[farSlot * 4 + 1] == 8.0f);
 }
 
 TEST_CASE("AABB build and ray intersection")

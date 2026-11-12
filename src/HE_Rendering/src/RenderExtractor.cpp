@@ -511,7 +511,7 @@ void windWaterParams(const MaterialAsset& ma, const MaterialComponent* mc,
 							const size_t n = std::min(ma->shaderParamData.size(), size_t(HE::kMatParamFloats));
 							std::copy(ma->shaderParamData.begin(), ma->shaderParamData.begin() + n, block.begin());
 							for (const auto& ov : matComp->paramOverrides)
-								for (size_t k = 0; k < ma->graphParamNames.size() && k < 16; ++k)
+								for (size_t k = 0; k < ma->graphParamNames.size() && k < size_t(HE::kMatMaxParams); ++k)
 									if (ma->graphParamNames[k] == ov.name)
 									{
 										for (int c = 0; c < 4; ++c) block[k * 4 + c] = ov.value[c];
