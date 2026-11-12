@@ -266,6 +266,16 @@ enum class MatNodeType : uint8_t
     // The indices feed a texture array's Slice pin, so the material reads two groups' slices
     // per fragment instead of four. A map with no third page, or no shares at all, is group 0.
     LandscapeGroupPick,
+
+    // ── v21: material quality (Thema 336) ──
+    // No inputs; Level = the engine's material quality as a number: 0 Low, 1 Medium,
+    // 2 High. It is a uniform (heLight.counts.y, written by HE::FillMaterialWind from
+    // the quality settings), so a graph that feeds it into If / Greater / Smoothstep
+    // really branches per quality: the expensive side is skipped, not computed and
+    // discarded (If moves plain-arithmetic nodes into its branches). A pass that never
+    // fills the lane (previews, UI, a backend that has not been taught) reads 2, High —
+    // full quality, as every material rendered before this node existed.
+    QualityLevel,
 };
 
 // True for every node whose `s` is a texture path sampled through a heTexP slot

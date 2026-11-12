@@ -5226,6 +5226,68 @@ namespace
 	  "floor under the slope bias — the number that matters on flat ground under "
 	  "a high sun.",
 	  "", "rendering#shadows" },
+	// ── World ▸ Quality ──────────────────────────────────────────────────────
+	{ "Quality/Quality preset", "Quality preset",
+	  "One word for the whole quality bundle. Low and Medium save frame time on slower machines, High is the everyday setting, Ultra turns every effect up. A preset writes shadows, anti-aliasing, render scale, ambient occlusion, reflections, global illumination and texture and material detail together, and makes this project's graphics its own.\n\n"
+	  "Change any single value afterwards and the preset reads Custom. Picking Custom keeps the values as they are. Scripts change the player's choice at run time with Set Quality Preset.",
+	  "", "rendering#quality" },
+	{ "Quality/Anti-aliasing", "Anti-aliasing",
+	  "How edges are smoothed: Off, FXAA (cheap blur of edges), SMAA (sharper, a bit dearer), TAA (uses earlier frames, softest and best on thin detail, Metal and OpenGL) or MetalFX (Metal only). A method the backend cannot do falls back to the next simpler one.",
+	  "", "rendering#quality" },
+	{ "Quality/Render scale", "Render scale",
+	  "How large the picture is drawn before it is put on screen, as a fraction of the window. Below 1 draws fewer pixels and upscales, which is the cheapest way to gain frames; above 1 draws more and shrinks, a costly supersample.",
+	  "", "rendering#quality" },
+	{ "Quality/Shadow resolution", "Shadow resolution",
+	  "Texels along one edge of each cascade's shadow map: the same value as Shadows ▸ Resolution. 2048 is the engine's default; 4096 sharpens the far cascades at four times the memory and fill.",
+	  "", "rendering#quality" },
+	{ "Quality/Shadow distance", "Shadow distance",
+	  "How far from the camera the sun's shadows reach, in metres: the same value as Shadows ▸ Shadow distance. Beyond it nothing casts a shadow.",
+	  "", "rendering#quality" },
+	{ "Quality/Shadow cascades", "Shadow cascades",
+	  "How many shadow maps the distance is cut into: the same value as Shadows ▸ Cascades. More is sharper close to the camera and costs one more depth pass each; three is the ceiling.",
+	  "", "rendering#quality" },
+	{ "Quality/Ambient occlusion", "Ambient occlusion",
+	  "Darkens creases and contact points where ambient light cannot reach. Costs a screen-space pass per frame. The radius, strength and method are on Post-Processing.",
+	  "", "rendering#quality" },
+	{ "Quality/Screen-space reflections", "Screen-space reflections",
+	  "Reflections of what is already on screen, on glossy surfaces. Cheap next to ray-traced ones, but cannot show what is off screen. Used where the backend supports it (Metal deferred in the first version).",
+	  "", "rendering#quality" },
+	{ "Quality/Reflection quality", "Reflection quality",
+	  "How many steps the reflection ray takes: Low 16, Medium 32 with a blur, High 64 with glossy blur. More steps find thinner detail and cost more.",
+	  "", "rendering#quality" },
+	{ "Quality/Global illumination", "Global illumination",
+	  "Light that bounces between surfaces, so a sunlit floor tints the wall beside it and shadows are not pure black. The most expensive effect in this list; used where the backend can ray trace.",
+	  "", "rendering#quality" },
+	{ "Quality/GI shadow quality", "GI shadow quality",
+	  "How many sun rays are traced per pixel for the shadow mask of global illumination: Low 1, Medium 2, High more. More rays reduce flicker in soft shadow edges and cost a full trace each.",
+	  "", "rendering#quality" },
+	{ "Quality/GI reflections", "GI reflections",
+	  "Ray-traced reflections that include global illumination, so a mirror shows bounced light too. Needs ray tracing hardware support; where there is none the setting does nothing.",
+	  "", "rendering#quality" },
+	{ "Quality/GI reflection quality", "GI reflection quality",
+	  "The resolution and ray count of the ray-traced reflections: Low raw, Medium blurred, High glossy with temporal smoothing. Each step costs noticeably more.",
+	  "", "rendering#quality" },
+	{ "Quality/GI reflection bounces", "GI reflection bounces",
+	  "How many times a reflection ray may bounce between mirrors, 1 to 4. Metal only; OpenGL traces one segment. Each extra bounce adds a full trace.",
+	  "", "rendering#quality" },
+	{ "Quality/Texture quality", "Texture quality",
+	  "How much texture detail the game uses. Low and Medium keep material textures off their finest two or one mip levels, so they read blurrier and take less memory bandwidth. High uses every level, as the engine always did. Acts on Metal today; a texture without a mip chain does not change.",
+	  "", "rendering#quality" },
+	{ "Quality/Material quality", "Material quality",
+	  "Switches expensive material features off on weaker machines. Materials with procedural noise (the water and landscape graphs) use fewer noise octaves at Low and Medium and all four at High, and a Quality Level node lets a material graph branch on the level itself. Acts on every render backend through the shared material parameters.",
+	  "", "rendering#quality" },
+	{ "Quality/Automatic quality", "Automatic quality",
+	  "Lets the game lower and raise its own quality level to hold a frame rate. A frame rate that stays below the target for about two seconds steps the level down; a long steady stretch (about fifteen seconds) tries one level up, and a level that just failed is left alone for a minute. Saved with the project, but not part of the preset. The player can turn it off by picking a preset, and the editor viewport never uses it.",
+	  "", "rendering#quality" },
+	{ "Quality/Target frame rate", "Target frame rate",
+	  "The frame rate automatic quality tries to hold. A game that meets it for a long time may try a higher level; one that misses it steps down.",
+	  "", "rendering#quality" },
+	{ "Quality/Lowest level", "Lowest level",
+	  "The level automatic quality never goes below, however slow the machine is.",
+	  "", "rendering#quality" },
+	{ "Quality/Highest level", "Highest level",
+	  "The level automatic quality never goes above, however fast the machine is.",
+	  "", "rendering#quality" },
 	// ── Physics ▸ Simulation ─────────────────────────────────────────────────
 	{ "Physics/Fixed rate", "Fixed rate",
 	  "How many simulation steps a second of game time is cut into, whatever "
@@ -5455,6 +5517,23 @@ namespace
 	  "handshake — so press it after switching Remote Control on or moving the "
 	  "editor, which are the two things that change its answer.",
 	  "", "editor#preferences" },
+
+	// ── Preferences » Preview » Hardware ─────────────────────────────────────
+	// A table of what this machine is, as text; only the copy button is a control.
+	{ "Hardware/Graphics card to use", "Graphics card to use",
+	  "Which graphics card the program starts on when the machine has more than one (a laptop with an "
+	  "integrated and a dedicated card, a PC with two). \"Default (system)\" lets the system decide, as "
+	  "before. A chosen card is looked up by its id when the program starts; one that is gone (removed, or "
+	  "the settings moved to another PC) falls back to the default card with a warning in the log. The "
+	  "change takes effect at the next start. OpenGL cannot pick a card (the drop-down is greyed and says "
+	  "so): use Direct3D 11, Direct3D 12 or Vulkan. A game sets the same choice with Set Preferred GPU.",
+	  "", "rendering#hardware" },
+	{ "Hardware/Copy summary", "Copy summary",
+	  "Puts the main facts on the clipboard as text: processor, memory, graphics card with "
+	  "driver and video memory, display, and operating system. Paste it into a bug report or a "
+	  "forum post. A line says \"unknown\" when the machine could not tell. Nothing is sent "
+	  "anywhere; the same values are what a game reads through the hardware rows.",
+	  "", "rendering#hardware" },
 
 	// ── The tool setup dialog (ToolSetupDialog) ──────────────────────────────
 	// cmake, the C++ compiler, git, Git LFS and the git identity in one list. It
@@ -10292,6 +10371,7 @@ namespace
 		{ "settings.",       "editor-settings", "Settings Reference", "Preferences" },
 		{ "Source Control/", "editor-settings", "Settings Reference", "Source control setup" },
 		{ "Tool Status/",    "editor-settings", "Settings Reference", "Tool status" },
+		{ "Hardware/",       "editor-settings", "Settings Reference", "Hardware" },
 		// The palette's element types get their own section of the UI chapter:
 		// "what can I put on a page" is the first question somebody has, and it
 		// deserves a list rather than being scattered through the designer's
@@ -10307,6 +10387,7 @@ namespace
 		{ "Anti-Cheat/",      "editor-settings", "Settings Reference", "Project: anti-cheat" },
 		{ "Multiplayer/",      "editor-settings", "Settings Reference", "Project: multiplayer" },
 		{ "Render Defaults/",  "editor-settings", "Settings Reference", "Project: render defaults" },
+		{ "Quality/",          "editor-settings", "Settings Reference", "Project: quality" },
 		{ "Shadows/",          "editor-settings", "Settings Reference", "Project: shadows" },
 		{ "Physics/",          "editor-settings", "Settings Reference", "Project: physics" },
 		{ "Audio Buses/",      "editor-settings", "Settings Reference", "Project: audio buses" },

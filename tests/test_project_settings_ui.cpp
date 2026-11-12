@@ -249,6 +249,7 @@ TEST_CASE("project settings ui: every page draws over a real project, and lookin
 		{ P::AntiCheat,       "anti-cheat" },
 		{ P::Multiplayer,     "multiplayer" },
 		{ P::RenderDefaults,  "render-defaults" },
+		{ P::Quality,         "quality" },
 		{ P::Shadows,         "shadows" },
 		{ P::Simulation,      "physics" },
 		{ P::CollisionLayers, "collision-layers" },
@@ -464,5 +465,163 @@ TEST_CASE("project settings ui: Input - switching the project's deadzones on sta
 	CHECK(pm.currentProject().settings.input.stickDeadzone == doctest::Approx(0.3f));
 	CHECK(std::filesystem::exists(HE::projectSettingsPath(pm.projectRoot())));
 
+	he_test::removeAllQuiet(dir);
+}
+
+// ── World ▸ Quality ──────────────────────────────────────────────────────────
+// The preset and the regulators it is made of. What a person would check: the
+// page shows the preset the values hold (Ultra here, with the extra rows the
+// effects it switches on bring), one edit on a project that does not set its own
+// graphics yet starts from the editor's values and turns the block on, and the
+// file says so after a reload. Both halves of the page are written out with
+// HE_UI_DUMP_DIR, since the display is shorter than the page.
+
+namespace
+{
+	float g_qualityScroll = -1.0f;
+
+	void showQualityPage()
+	{
+		ProjectSettingsPanel::requestOpen(ProjectSettingsPanel::Page::Quality);
+		ProjectSettingsPanel::takeOpenRequest();
+		g_body = [](AppContext& c)
+		{
+			if (g_qualityScroll >= 0.0f) ImGui::SetScrollY(g_qualityScroll);
+			ProjectSettingsPanel::drawPage(c, ProjectSettingsPanel::Page::Quality);
+		};
+	}
+}
+
+TEST_CASE("project settings ui: Quality - an Ultra project shows Ultra, both halves of the page")
+{
+	Harness harness;
+
+	const auto dir = std::filesystem::temp_directory_path() / "he_project_settings_ui_quality_shot";
+	he_test::removeAllQuiet(dir);
+	ProjectManager pm;
+	REQUIRE(pm.createNewProject(dir.string(), "Settings", ProjectPreset::Game));
+	HE::ProjectSettings& s = pm.currentProject().settings;
+	HE::applyQualityPreset(HE::QualityPreset::Ultra, s.graphics, s.shadows);
+	REQUIRE(HE::detectQualityPreset(s.graphics, s.shadows) == HE::QualityPreset::Ultra);
+
+	ContextBits bits;
+	AppContext ctx = bits.make(pm);
+	showQualityPage();
+	ImGui::GetIO().AddMousePosEvent(float(W) - 2.0f, float(H) - 2.0f);
+
+	const char* dump = std::getenv("HE_UI_DUMP_DIR");
+	he_ui::Image top, bottom;
+	g_qualityScroll = 0.0f;
+	for (int i = 0; i < 4; ++i) frame(ctx, false, i == 3 ? &top : nullptr);
+	g_qualityScroll = 100000.0f;   // clamped to the end of the page
+	for (int i = 0; i < 4; ++i) frame(ctx, false, i == 3 ? &bottom : nullptr);
+	g_qualityScroll = -1.0f;
+	REQUIRE(top.valid());
+	REQUIRE(bottom.valid());
+	CHECK(top.inkedPixels(kBgR, kBgG, kBgB) > 1500);
+	CHECK(bottom.inkedPixels(kBgR, kBgG, kBgB) > 1500);
+	if (dump && *dump)
+	{
+		he_ui::writeBmp(top,    std::string(dump) + "/quality-ultra-top.bmp");
+		he_ui::writeBmp(bottom, std::string(dump) + "/quality-ultra-bottom.bmp");
+	}
+	// Looking changed nothing: the page only reads the project.
+	CHECK(HE::detectQualityPreset(s.graphics, s.shadows) == HE::QualityPreset::Ultra);
+	CHECK_FALSE(std::filesystem::exists(HE::projectSettingsPath(pm.projectRoot())));
+
+	he_test::removeAllQuiet(dir);
+}
+
+TEST_CASE("project settings ui: Quality - the first edit starts from the editor's values, turns the block on and reads Custom")
+{
+	Harness harness;
+
+	const auto dir = std::filesystem::temp_directory_path() / "he_project_settings_ui_quality_edit";
+	he_test::removeAllQuiet(dir);
+	ProjectManager pm;
+	REQUIRE(pm.createNewProject(dir.string(), "Settings", ProjectPreset::Game));
+	const auto settingsFile = HE::projectSettingsPath(pm.projectRoot());
+
+	ContextBits bits;
+	bits.config.AntiAliasing = 2;          // the user's own SMAA …
+	bits.config.RenderScale  = 0.8f;       // … and render scale
+	AppContext ctx = bits.make(pm);
+	showQualityPage();
+	ImGui::GetIO().AddMousePosEvent(float(W) - 2.0f, float(H) - 2.0f);
+	g_qualityScroll = 100000.0f;
+	for (int i = 0; i < 4; ++i) frame(ctx, false);
+
+	REQUIRE_FALSE(pm.currentProject().settings.graphics.enabled);
+	// With every effect off the bottom of the page is, top to bottom: ambient
+	// occlusion, screen-space reflections, global illumination, GI reflections,
+	// texture quality, material quality, automatic quality (off: no rows below it).
+	const std::vector<Item> items = itemsDown(ctx, kPageX + 8.0f, 4.0f, float(H) - 4.0f);
+	REQUIRE_MESSAGE(items.size() >= 7, "controls found at the end of the Quality page: " << items.size());
+	const Item& ssao = items[items.size() - 7];
+	REQUIRE(bits.config.SSAOEnabled);       // on by default: the click turns it off
+
+	clickAt(ctx, kPageX + 8.0f, ssao.mid);
+	const HE::ProjectGraphics& g = pm.currentProject().settings.graphics;
+	CHECK(g.enabled);
+	CHECK_FALSE(g.ssaoEnabled);
+	CHECK(g.antiAliasing == 2);                           // started from what the editor drew
+	CHECK(g.renderScale == doctest::Approx(0.8f));
+	CHECK(g.preset == HE::QualityPreset::Custom);
+	REQUIRE(std::filesystem::exists(settingsFile));
+
+	ProjectManager again;
+	REQUIRE(again.loadProject(pm.currentProject().path));
+	CHECK(again.currentProject().settings.graphics.enabled);
+	CHECK_FALSE(again.currentProject().settings.graphics.ssaoEnabled);
+	CHECK(again.currentProject().settings.graphics.antiAliasing == 2);
+	// The editor's own config is untouched.
+	CHECK(bits.config.SSAOEnabled);
+
+	g_qualityScroll = -1.0f;
+	he_test::removeAllQuiet(dir);
+}
+
+TEST_CASE("project settings ui: Quality - the automatic quality switch is the last control, and turns its rows on")
+{
+	Harness harness;
+
+	const auto dir = std::filesystem::temp_directory_path() / "he_project_settings_ui_quality_auto";
+	he_test::removeAllQuiet(dir);
+	ProjectManager pm;
+	REQUIRE(pm.createNewProject(dir.string(), "Settings", ProjectPreset::Game));
+	REQUIRE_FALSE(pm.currentProject().settings.autoQuality.enabled);
+
+	ContextBits bits;
+	AppContext ctx = bits.make(pm);
+	showQualityPage();
+	ImGui::GetIO().AddMousePosEvent(float(W) - 2.0f, float(H) - 2.0f);
+	g_qualityScroll = 100000.0f;
+	for (int i = 0; i < 4; ++i) frame(ctx, false);
+
+	// Off: the checkbox is the last control on the page, nothing below it.
+	std::vector<Item> items = itemsDown(ctx, kPageX + 8.0f, 4.0f, float(H) - 4.0f);
+	REQUIRE(!items.empty());
+	clickAt(ctx, kPageX + 8.0f, items.back().mid);
+	const HE::ProjectAutoQuality& aq = pm.currentProject().settings.autoQuality;
+	CHECK(aq.enabled);
+	CHECK(aq.targetFps == doctest::Approx(60.0f));
+	CHECK_FALSE(pm.currentProject().settings.graphics.enabled);   // the preset block is not touched
+	REQUIRE(std::filesystem::exists(HE::projectSettingsPath(pm.projectRoot())));
+
+	// On: the checkbox plus three rows (frame rate, lowest, highest) end the page.
+	g_qualityScroll = 100000.0f;
+	he_ui::Image img;
+	for (int i = 0; i < 4; ++i) frame(ctx, false, i == 3 ? &img : nullptr);
+	REQUIRE(img.valid());
+	if (const char* dump = std::getenv("HE_UI_DUMP_DIR"); dump && *dump)
+		he_ui::writeBmp(img, std::string(dump) + "/quality-auto-on-bottom.bmp");
+	const std::vector<Item> on = itemsDown(ctx, kPageX + 8.0f, 4.0f, float(H) - 4.0f);
+	CHECK(on.size() >= 4);
+
+	ProjectManager again;
+	REQUIRE(again.loadProject(pm.currentProject().path));
+	CHECK(again.currentProject().settings.autoQuality.enabled);
+
+	g_qualityScroll = -1.0f;
 	he_test::removeAllQuiet(dir);
 }

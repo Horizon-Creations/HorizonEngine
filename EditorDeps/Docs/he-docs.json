@@ -17585,6 +17585,1370 @@
     {
      "blocks": [
       {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "One word instead of a dozen sliders. A "
+        },
+        {
+         "s": "b",
+         "t": "quality preset"
+        },
+        {
+         "s": "",
+         "t": " — "
+        },
+        {
+         "s": "b",
+         "t": "Low, Medium, High, Ultra"
+        },
+        {
+         "s": "",
+         "t": " or "
+        },
+        {
+         "s": "b",
+         "t": "Custom"
+        },
+        {
+         "s": "",
+         "t": " — sets shadows, anti-aliasing, render resolution, ambient occlusion, reflections, global illumination and texture detail together. It lives in "
+        },
+        {
+         "s": "c",
+         "t": "Project Settings » World » Quality"
+        },
+        {
+         "s": "",
+         "t": ", is saved in "
+        },
+        {
+         "s": "c",
+         "t": "Config/ProjectSettings.json"
+        },
+        {
+         "s": "",
+         "t": " beside the project, and is what both the editor viewport and the exported build draw with. A project that never opens the page keeps drawing exactly what it drew before: presets are opt-in, and a project without a choice reads as "
+        },
+        {
+         "s": "i",
+         "t": "Custom"
+        },
+        {
+         "s": "",
+         "t": "."
+        }
+       ]
+      },
+      {
+       "head": [
+        [
+         {
+          "s": "",
+          "t": "Setting"
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "Low"
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "Medium"
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "High"
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "Ultra"
+         }
+        ]
+       ],
+       "k": "table",
+       "rows": [
+        [
+         [
+          {
+           "s": "b",
+           "t": "Anti-aliasing"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "FXAA"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "SMAA"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "SMAA"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "TAA"
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "b",
+           "t": "Render scale"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "0.75"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "1.0"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "1.0"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "1.0"
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "b",
+           "t": "Ambient occlusion"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "off"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "on"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "on"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "on"
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "b",
+           "t": "Screen-space reflections"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "off"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "off"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "on · Medium"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "on · High"
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "b",
+           "t": "Global illumination"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "off"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "off"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "on · Medium"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "on · High"
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "b",
+           "t": "GI reflections"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "off"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "off"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "off"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "on · High · 2 bounces"
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "b",
+           "t": "Shadows"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "1024 px · 2 cascades · 100 m"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "2048 px · 3 cascades · 200 m"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "2048 px · 3 cascades · 250 m"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "4096 px · 3 cascades · 500 m"
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "b",
+           "t": "Texture quality"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Low"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Medium"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "High"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "High"
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "b",
+           "t": "Material quality"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Low"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Medium"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "High"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "High"
+          }
+         ]
+        ]
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "The numbers are tuned by hand for “each step up looks visibly better and costs visibly more”; they are not benchmarked per machine. A preset leaves everything that is a matter of "
+        },
+        {
+         "s": "i",
+         "t": "look"
+        },
+        {
+         "s": "",
+         "t": " at equal cost alone — bloom, depth of field, motion blur, shadow bias, the render path — those stay on their own pages. Change any single value afterwards and the preset reads "
+        },
+        {
+         "s": "b",
+         "t": "Custom"
+        },
+        {
+         "s": "",
+         "t": "; picking Custom keeps the values as they are. While a project does not set its own graphics, the page shows what your editor draws with, and the first preset or change makes those values the project's."
+        }
+       ]
+      },
+      {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
+         "t": "Texture quality"
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "b",
+         "t": "Low"
+        },
+        {
+         "s": "",
+         "t": " and "
+        },
+        {
+         "s": "b",
+         "t": "Medium"
+        },
+        {
+         "s": "",
+         "t": " keep textures off their finest two and one mip levels, so they read softer and take less memory bandwidth; "
+        },
+        {
+         "s": "b",
+         "t": "High"
+        },
+        {
+         "s": "",
+         "t": " uses every level, as the engine always did. It is a sampler setting, not a reload: a change at run time shows on the next frame. It reaches the landscape layers, material texture slots and the base colour of meshes, skinned meshes, decals and blended draws, but never the shadow map, the sky environment, ambient occlusion or the interface."
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "Two things to know. It only changes textures that carry a mip chain (cooked textures and the engine's landscape arrays do; a plain imported image has one level and looks the same), and it only shows where a pixel covers less ground than a texel of the clamped level — in practice within a metre or two of the camera. It acts on "
+        },
+        {
+         "s": "b",
+         "t": "Metal"
+        },
+        {
+         "s": "",
+         "t": " today; the other backends ignore the setting. "
+        },
+        {
+         "s": "b",
+         "t": "Material quality"
+        },
+        {
+         "s": "",
+         "t": " is stored with the preset and handed to the renderer, but no material feature switches on it yet."
+        }
+       ]
+      },
+      {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
+         "t": "Backends"
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "A level a backend does not have is ignored silently. Cascaded shadows are drawn on Metal and OpenGL; Direct3D and Vulkan keep one whole-scene shadow map. Anti-aliasing methods a backend cannot do fall back to a simpler one (TAA -> SMAA, MetalFX -> TAA), and screen-space reflections, global illumination and GI reflections are used only where the backend can do them."
+        }
+       ]
+      },
+      {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
+         "t": "From scripts"
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "A game's graphics menu is a "
+        },
+        {
+         "s": "b",
+         "t": "player setting"
+        },
+        {
+         "s": "",
+         "t": ": it sits in the same store as VSync, fullscreen and volume, so "
+        },
+        {
+         "s": "c",
+         "t": "settings.save"
+        },
+        {
+         "s": "",
+         "t": " keeps it and "
+        },
+        {
+         "s": "c",
+         "t": "settings.resetToDefaults"
+        },
+        {
+         "s": "",
+         "t": " hands back the project's own values. It never edits the project file, in the exported game or in the editor preview. The same six rows exist in HorizonCode ("
+        },
+        {
+         "s": "i",
+         "t": "Set Quality Preset"
+        },
+        {
+         "s": "",
+         "t": ", "
+        },
+        {
+         "s": "i",
+         "t": "Get Quality Preset"
+        },
+        {
+         "s": "",
+         "t": ", "
+        },
+        {
+         "s": "i",
+         "t": "Quality Preset Names"
+        },
+        {
+         "s": "",
+         "t": ", "
+        },
+        {
+         "s": "i",
+         "t": "Set Quality Value"
+        },
+        {
+         "s": "",
+         "t": ", "
+        },
+        {
+         "s": "i",
+         "t": "Get Quality Value"
+        },
+        {
+         "s": "",
+         "t": ", "
+        },
+        {
+         "s": "i",
+         "t": "Quality Fields"
+        },
+        {
+         "s": "",
+         "t": "), Lua, Python and C++:"
+        }
+       ]
+      },
+      {
+       "head": [
+        [
+         {
+          "s": "",
+          "t": "Row"
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "What it does"
+         }
+        ]
+       ],
+       "k": "table",
+       "rows": [
+        [
+         [
+          {
+           "s": "c",
+           "t": "settings.setQualityPreset(name)"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Low, Medium, High or Ultra, case-insensitive; “Custom” is accepted and changes nothing; anything else returns false. Replaces single values chosen before."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "settings.qualityPreset()"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "What the values read as now: a preset name, or “Custom” once a single value moved off a preset."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "settings.qualityPresetNames()"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Low, Medium, High, Ultra, Custom — to fill a drop-down."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "settings.setQualityValue(field, value)"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "One regulator by name. Yes/no fields take 0 or 1; values are clamped to the field's range; an unknown name returns false."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "settings.qualityValue(field)"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "The current value, 0 for an unknown name."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "settings.qualityFields()"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "The field names: "
+          },
+          {
+           "s": "c",
+           "t": "antiAliasing"
+          },
+          {
+           "s": "",
+           "t": ", "
+          },
+          {
+           "s": "c",
+           "t": "renderScale"
+          },
+          {
+           "s": "",
+           "t": ", "
+          },
+          {
+           "s": "c",
+           "t": "ssaoEnabled"
+          },
+          {
+           "s": "",
+           "t": ", "
+          },
+          {
+           "s": "c",
+           "t": "ssrEnabled"
+          },
+          {
+           "s": "",
+           "t": ", "
+          },
+          {
+           "s": "c",
+           "t": "ssrQuality"
+          },
+          {
+           "s": "",
+           "t": ", "
+          },
+          {
+           "s": "c",
+           "t": "giEnabled"
+          },
+          {
+           "s": "",
+           "t": ", "
+          },
+          {
+           "s": "c",
+           "t": "giShadowQuality"
+          },
+          {
+           "s": "",
+           "t": ", "
+          },
+          {
+           "s": "c",
+           "t": "giReflectionsEnabled"
+          },
+          {
+           "s": "",
+           "t": ", "
+          },
+          {
+           "s": "c",
+           "t": "giReflQuality"
+          },
+          {
+           "s": "",
+           "t": ", "
+          },
+          {
+           "s": "c",
+           "t": "giReflBounces"
+          },
+          {
+           "s": "",
+           "t": ", "
+          },
+          {
+           "s": "c",
+           "t": "textureQuality"
+          },
+          {
+           "s": "",
+           "t": ", "
+          },
+          {
+           "s": "c",
+           "t": "materialQuality"
+          },
+          {
+           "s": "",
+           "t": ", "
+          },
+          {
+           "s": "c",
+           "t": "bloomEnabled"
+          },
+          {
+           "s": "",
+           "t": ", "
+          },
+          {
+           "s": "c",
+           "t": "dofEnabled"
+          },
+          {
+           "s": "",
+           "t": ", "
+          },
+          {
+           "s": "c",
+           "t": "motionBlurEnabled"
+          },
+          {
+           "s": "",
+           "t": ", "
+          },
+          {
+           "s": "c",
+           "t": "shadowDistance"
+          },
+          {
+           "s": "",
+           "t": ", "
+          },
+          {
+           "s": "c",
+           "t": "shadowCascades"
+          },
+          {
+           "s": "",
+           "t": ", "
+          },
+          {
+           "s": "c",
+           "t": "shadowResolution"
+          },
+          {
+           "s": "",
+           "t": "."
+          }
+         ]
+        ]
+       ]
+      },
+      {
+       "k": "code",
+       "text": "-- A graphics menu: pick a preset, then nudge one value\nhorizon.settings.setQualityPreset(\"High\")\nhorizon.settings.setQualityValue(\"textureQuality\", 1)\n\n-- the preset now reads \"Custom\"; save it for the next start\nlocal name = horizon.settings.qualityPreset()\nhorizon.settings.save()",
+       "title": "graphics_menu.lua"
+      },
+      {
+       "k": "code",
+       "text": "import horizon\n\nhorizon.settings.setQualityPreset(\"Ultra\")\nfor field in horizon.settings.qualityFields():\n    print(field, horizon.settings.qualityValue(field))",
+       "title": "graphics_menu.py"
+      }
+     ],
+     "eyebrow": "Settings",
+     "id": "quality",
+     "text": "One word instead of a dozen sliders. A quality preset — Low, Medium, High, Ultra or Custom — sets shadows, anti-aliasing, render resolution, ambient occlusion, reflections, global illumination and texture detail together. It lives in Project Settings » World » Quality, is saved in Config/ProjectSettings.json beside the project, and is what both the editor viewport and the exported build draw with. A project that never opens the page keeps drawing exactly what it drew before: presets are opt-in, and a project without a choice reads as Custom. Setting Low Medium High Ultra Anti-aliasing FXAA SMAA SMAA TAA Render scale 0.75 1.0 1.0 1.0 Ambient occlusion off on on on Screen-space reflections off off on · Medium on · High Global illumination off off on · Medium on · High GI reflections off off off on · High · 2 bounces Shadows 1024 px · 2 cascades · 100 m 2048 px · 3 cascades · 200 m 2048 px · 3 cascades · 250 m 4096 px · 3 cascades · 500 m Texture quality Low Medium High High Material quality Low Medium High High The numbers are tuned by hand for “each step up looks visibly better and costs visibly more”; they are not benchmarked per machine. A preset leaves everything that is a matter of look at equal cost alone — bloom, depth of field, motion blur, shadow bias, the render path — those stay on their own pages. Change any single value afterwards and the preset reads Custom; picking Custom keeps the values as they are. While a project does not set its own graphics, the page shows what your editor draws with, and the first preset or change makes those values the project's. Texture quality Low and Medium keep textures off their finest two and one mip levels, so they read softer and take less memory bandwidth; High uses every level, as the engine always did. It is a sampler setting, not a reload: a change at run time shows on the next frame. It reaches the landscape layers, material texture slots and the base colour of meshes, skinned meshes, decals and blended draws, but never the shadow map, the sky environment, ambient occlusion or the interface. Two things to know. It only changes textures that carry a mip chain (cooked textures and the engine's landscape arrays do; a plain imported image has one level and looks the same), and it only shows where a pixel covers less ground than a texel of the clamped level — in practice within a metre or two of the camera. It acts on Metal today; the other backends ignore the setting. Material quality is stored with the preset and handed to the renderer, but no material feature switches on it yet. Backends A level a backend does not have is ignored silently. Cascaded shadows are drawn on Metal and OpenGL; Direct3D and Vulkan keep one whole-scene shadow map. Anti-aliasing methods a backend cannot do fall back to a simpler one (TAA -> SMAA, MetalFX -> TAA), and screen-space reflections, global illumination and GI reflections are used only where the backend can do them. From scripts A game's graphics menu is a player setting: it sits in the same store as VSync, fullscreen and volume, so settings.save keeps it and settings.resetToDefaults hands back the project's own values. It never edits the project file, in the exported game or in the editor preview. The same six rows exist in HorizonCode (Set Quality Preset, Get Quality Preset, Quality Preset Names, Set Quality Value, Get Quality Value, Quality Fields), Lua, Python and C++: Row What it does settings.setQualityPreset(name) Low, Medium, High or Ultra, case-insensitive; “Custom” is accepted and changes nothing; anything else returns false. Replaces single values chosen before. settings.qualityPreset() What the values read as now: a preset name, or “Custom” once a single value moved off a preset. settings.qualityPresetNames() Low, Medium, High, Ultra, Custom — to fill a drop-down. settings.setQualityValue(field, value) One regulator by name. Yes/no fields take 0 or 1; values are clamped to the field's range; an unknown name returns false. settings.qualityValue(field) The current value, 0 for an unknown name. settings.qualityFields() The field names: antiAliasing, renderScale, ssaoEnabled, ssrEnabled, ssrQuality, giEnabled, giShadowQuality, giReflectionsEnabled, giReflQuality, giReflBounces, textureQuality, materialQuality, bloomEnabled, dofEnabled, motionBlurEnabled, shadowDistance, shadowCascades, shadowResolution. graphics_menu.lua -- A graphics menu: pick a preset, then nudge one value\nhorizon.settings.setQualityPreset(\"High\")\nhorizon.settings.setQualityValue(\"textureQuality\", 1)\n\n-- the preset now reads \"Custom\"; save it for the next start\nlocal name = horizon.settings.qualityPreset()\nhorizon.settings.save() graphics_menu.py import horizon\n\nhorizon.settings.setQualityPreset(\"Ultra\")\nfor field in horizon.settings.qualityFields():\n    print(field, horizon.settings.qualityValue(field))",
+     "title": "Quality Settings"
+    },
+    {
+     "blocks": [
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "What machine is the game running on? The engine finds out once at start-up and keeps it: the "
+        },
+        {
+         "s": "b",
+         "t": "processor"
+        },
+        {
+         "s": "",
+         "t": ", the "
+        },
+        {
+         "s": "b",
+         "t": "memory"
+        },
+        {
+         "s": "",
+         "t": ", the "
+        },
+        {
+         "s": "b",
+         "t": "graphics card"
+        },
+        {
+         "s": "",
+         "t": " (asked of the renderer that is actually running, so it is the card that draws), the "
+        },
+        {
+         "s": "b",
+         "t": "display"
+        },
+        {
+         "s": "",
+         "t": " the window is on and the "
+        },
+        {
+         "s": "b",
+         "t": "operating system"
+        },
+        {
+         "s": "",
+         "t": ". A settings screen or an about box reads the values through the "
+        },
+        {
+         "s": "c",
+         "t": "hardware"
+        },
+        {
+         "s": "",
+         "t": " rows: "
+        },
+        {
+         "s": "c",
+         "t": "Get Hardware Info"
+        },
+        {
+         "s": "",
+         "t": " and the single getters in HorizonCode, "
+        },
+        {
+         "s": "c",
+         "t": "horizon.hardware"
+        },
+        {
+         "s": "",
+         "t": " in Lua and Python, "
+        },
+        {
+         "s": "c",
+         "t": "HE::api::hardware"
+        },
+        {
+         "s": "",
+         "t": " in C++. The editor shows the same table under "
+        },
+        {
+         "s": "c",
+         "t": "Preferences » Preview » Hardware"
+        },
+        {
+         "s": "",
+         "t": ", with a button that copies it for a bug report."
+        }
+       ]
+      },
+      {
+       "head": [
+        [
+         {
+          "s": "",
+          "t": "Value"
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "Script row"
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "Example (a desktop PC)"
+         }
+        ]
+       ],
+       "k": "table",
+       "rows": [
+        [
+         [
+          {
+           "s": "b",
+           "t": "Processor"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "cpuName, cpuCores, cpuThreads, cpuArch"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "AMD Ryzen 9 9950X 16-Core Processor, 16 cores, 32 threads, x64"
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "b",
+           "t": "Memory"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "ramTotalMB, ramFreeMB"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "31859 MB installed; free memory is read fresh every time"
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "b",
+           "t": "Graphics card"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "gpuName, gpuVendor, gpuDriver, gpuVramMB, graphicsApi"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "NVIDIA GeForce RTX 4070, NVIDIA, 621.01, 12010 MB, D3D12"
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "b",
+           "t": "Display"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "displayWidth, displayHeight, displayRefreshHz, displayScale, displayName"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "2560 x 1440, 60 Hz, scale 1.25"
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "b",
+           "t": "System"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "osName, osVersion, hasBattery, onBattery"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Windows 11 (10.0 build 26300), no battery"
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "b",
+           "t": "Everything at once"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "summary, fields, value(name), info(HardwareProperty)"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "five lines of text; the list of names; one value by name or by enum"
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "b",
+           "t": "Suggestion"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "recommendedPreset, recommendedPresetReason"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Ultra, because of 12010 MB video memory, 31859 MB RAM, 32 threads"
+          }
+         ]
+        ]
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "A value the machine cannot tell reads "
+        },
+        {
+         "s": "i",
+         "t": "empty"
+        },
+        {
+         "s": "",
+         "t": " (text) or "
+        },
+        {
+         "s": "i",
+         "t": "0"
+        },
+        {
+         "s": "",
+         "t": ", never a guess: the number of physical cores on some ARM boards, the video memory of an OpenGL card that does not say, the display before a window exists. The editor page shows a dash for them. The graphics card's memory is whatever the API reports: Direct3D and Vulkan give the dedicated memory, OpenGL asks NVIDIA cards through an extension and otherwise says 0, Apple GPUs share the system memory and report the share macOS recommends."
+        }
+       ]
+      },
+      {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
+         "t": "From a script"
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "A settings screen that lists everything needs no list of names in the script: "
+        },
+        {
+         "s": "c",
+         "t": "fields()"
+        },
+        {
+         "s": "",
+         "t": " gives the names in order and "
+        },
+        {
+         "s": "c",
+         "t": "value(name)"
+        },
+        {
+         "s": "",
+         "t": " the text of one. The numbers and flags also come typed."
+        }
+       ]
+      },
+      {
+       "k": "code",
+       "text": "-- Fill an about box: one line per hardware value\nfor _, field in ipairs(horizon.hardware.fields()) do\n    local text = horizon.hardware.value(field)\n    if text == \"\" then text = \"-\" end   -- the machine could not tell\n    print(field .. \": \" .. text)\nend\n\n-- Or typed, for a decision\nif horizon.hardware.gpuVramMB() > 0 and horizon.hardware.gpuVramMB() < 3000 then\n    horizon.settings.setQualityPreset(\"Low\")\nend",
+       "title": "about_box.lua"
+      },
+      {
+       "k": "code",
+       "text": "import horizon\n\nprint(horizon.hardware.summary())\nprint(\"GPU:\", horizon.hardware.gpuName(), horizon.hardware.gpuDriver(), horizon.hardware.graphicsApi())\n\n# Offer the suggestion, apply it only if the player agrees\nsuggested = horizon.hardware.recommendedPreset()\nprint(\"Suggested preset:\", suggested, \"-\", horizon.hardware.recommendedPresetReason())",
+       "title": "about_box.py"
+      },
+      {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
+         "t": "A suggestion, not a setting"
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "c",
+         "t": "recommendedPreset"
+        },
+        {
+         "s": "",
+         "t": " is a deliberately coarse guess from the video memory, the RAM and the processor threads: 10000 MB of video memory and up reads Ultra, 6000 High, 3000 Medium, below that Low; Apple GPUs go by RAM; no usable GPU or the software rasterizer reads Low; unknown video memory never reads more than Medium. The host can lower it: Ultra needs 16 GB and 8 threads, High 12 GB and 6, Medium 8 GB and 4. Nothing applies it by itself — pass it to "
+        },
+        {
+         "s": "c",
+         "t": "Set Quality Preset"
+        },
+        {
+         "s": "",
+         "t": " if the player says yes. The Quality page of the project settings shows it as a hint. A recommendation measured on the machine (timing the presets) is a later topic and would replace this guess."
+        }
+       ]
+      },
+      {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
+         "t": "Several graphics cards and displays"
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "A PC with two graphics cards, or a laptop with an integrated and a dedicated one, lists "
+        },
+        {
+         "s": "i",
+         "t": "every"
+        },
+        {
+         "s": "",
+         "t": " adapter, with the one the game renders on marked; a second monitor does the same for displays, and the current display follows the window when it is dragged to another monitor or a monitor is plugged in or taken out. The editor page lists both and has a drop-down "
+        },
+        {
+         "s": "b",
+         "t": "Graphics card to use"
+        },
+        {
+         "s": "",
+         "t": ". The choice is read when the program starts (before the renderer exists), so a change applies at the next start. \"Default (system)\" lets the system decide, as before."
+        }
+       ]
+      },
+      {
+       "head": [
+        [
+         {
+          "s": "",
+          "t": "What"
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "Script row"
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "Example"
+         }
+        ]
+       ],
+       "k": "table",
+       "rows": [
+        [
+         [
+          {
+           "s": "b",
+           "t": "Graphics cards"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "gpuCount, gpuNames, gpuIds, gpuAt(i), activeGpuId"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "2 cards; the ids look like 10de:2786:0 (vendor:device:number)"
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "b",
+           "t": "The choice"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "preferredGpu, setPreferredGpu(id), gpuChoiceNote"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "setPreferredGpu(\"\") goes back to the default; an id that is not listed is refused"
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "b",
+           "t": "Displays"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "displayCount, displayNames, displayAt(i), currentDisplayIndex"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "2 displays; the second one is current"
+          }
+         ]
+        ]
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "A chosen card is looked up by its id at start. Direct3D 11, Direct3D 12 and Vulkan create their device on it (Vulkan only if that card can draw to the window); a card that is gone, or a device that cannot be created, falls back to the default card with a warning in the log and in "
+        },
+        {
+         "s": "c",
+         "t": "gpuChoiceNote"
+        },
+        {
+         "s": "",
+         "t": ". OpenGL cannot pick a card, the page greys the drop-down and says so. In the editor the choice is saved in config.json, in a shipped game in a small file next to the player's other settings, so a player's choice survives and an export can carry a default (config.json key GpuAdapter). For tests and support, the environment variable HE_GPU_ADAPTER overrides the saved choice (an id, or default)."
+        }
+       ]
+      },
+      {
+       "k": "code",
+       "text": "-- A graphics-card menu: names for the drop-down, ids for saving\nlocal names, ids = horizon.hardware.gpuNames(), horizon.hardware.gpuIds()\nfor i = 1, #names do\n    print(i, names[i], ids[i])\nend\n\n-- The player picked the second card: applies at the next start\nif horizon.hardware.setPreferredGpu(ids[2]) then\n    print(\"Restart to use \" .. names[2])\nend",
+       "title": "gpu_menu.lua"
+      },
+      {
+       "blocks": [
+        {
+         "k": "p",
+         "r": [
+          {
+           "s": "b",
+           "t": "Privacy: "
+          },
+          {
+           "s": "",
+           "t": "only type and model names and sizes. No serial numbers, device ids, MAC addresses or user names, and the engine never sends any of it anywhere. A game may read the values and decide what to do with them."
+          }
+         ]
+        }
+       ],
+       "k": "callout",
+       "tone": "info"
+      }
+     ],
+     "eyebrow": "Settings",
+     "id": "hardware",
+     "text": "What machine is the game running on? The engine finds out once at start-up and keeps it: the processor, the memory, the graphics card (asked of the renderer that is actually running, so it is the card that draws), the display the window is on and the operating system. A settings screen or an about box reads the values through the hardware rows: Get Hardware Info and the single getters in HorizonCode, horizon.hardware in Lua and Python, HE::api::hardware in C++. The editor shows the same table under Preferences » Preview » Hardware, with a button that copies it for a bug report. Value Script row Example (a desktop PC) Processor cpuName, cpuCores, cpuThreads, cpuArch AMD Ryzen 9 9950X 16-Core Processor, 16 cores, 32 threads, x64 Memory ramTotalMB, ramFreeMB 31859 MB installed; free memory is read fresh every time Graphics card gpuName, gpuVendor, gpuDriver, gpuVramMB, graphicsApi NVIDIA GeForce RTX 4070, NVIDIA, 621.01, 12010 MB, D3D12 Display displayWidth, displayHeight, displayRefreshHz, displayScale, displayName 2560 x 1440, 60 Hz, scale 1.25 System osName, osVersion, hasBattery, onBattery Windows 11 (10.0 build 26300), no battery Everything at once summary, fields, value(name), info(HardwareProperty) five lines of text; the list of names; one value by name or by enum Suggestion recommendedPreset, recommendedPresetReason Ultra, because of 12010 MB video memory, 31859 MB RAM, 32 threads A value the machine cannot tell reads empty (text) or 0, never a guess: the number of physical cores on some ARM boards, the video memory of an OpenGL card that does not say, the display before a window exists. The editor page shows a dash for them. The graphics card's memory is whatever the API reports: Direct3D and Vulkan give the dedicated memory, OpenGL asks NVIDIA cards through an extension and otherwise says 0, Apple GPUs share the system memory and report the share macOS recommends. From a script A settings screen that lists everything needs no list of names in the script: fields() gives the names in order and value(name) the text of one. The numbers and flags also come typed. -- Fill an about box: one line per hardware value\nfor _, field in ipairs(horizon.hardware.fields()) do\n    local text = horizon.hardware.value(field)\n    if text == \"\" then text = \"-\" end   -- the machine could not tell\n    print(field .. \": \" .. text)\nend\n\n-- Or typed, for a decision\nif horizon.hardware.gpuVramMB() > 0 and horizon.hardware.gpuVramMB() < 3000 then\n    horizon.settings.setQualityPreset(\"Low\")\nend import horizon\n\nprint(horizon.hardware.summary())\nprint(\"GPU:\", horizon.hardware.gpuName(), horizon.hardware.gpuDriver(), horizon.hardware.graphicsApi())\n\n# Offer the suggestion, apply it only if the player agrees\nsuggested = horizon.hardware.recommendedPreset()\nprint(\"Suggested preset:\", suggested, \"-\", horizon.hardware.recommendedPresetReason()) A suggestion, not a setting recommendedPreset is a deliberately coarse guess from the video memory, the RAM and the processor threads: 10000 MB of video memory and up reads Ultra, 6000 High, 3000 Medium, below that Low; Apple GPUs go by RAM; no usable GPU or the software rasterizer reads Low; unknown video memory never reads more than Medium. The host can lower it: Ultra needs 16 GB and 8 threads, High 12 GB and 6, Medium 8 GB and 4. Nothing applies it by itself — pass it to Set Quality Preset if the player says yes. The Quality page of the project settings shows it as a hint. A recommendation measured on the machine (timing the presets) is a later topic and would replace this guess. Several graphics cards and displays A PC with two graphics cards, or a laptop with an integrated and a dedicated one, lists every adapter, with the one the game renders on marked; a second monitor does the same for displays, and the current display follows the window when it is dragged to another monitor or a monitor is plugged in or taken out. The editor page lists both and has a drop-down Graphics card to use. The choice is read when the program starts (before the renderer exists), so a change applies at the next start. \"Default (system)\" lets the system decide, as before. What Script row Example Graphics cards gpuCount, gpuNames, gpuIds, gpuAt(i), activeGpuId 2 cards; the ids look like 10de:2786:0 (vendor:device:number) The choice preferredGpu, setPreferredGpu(id), gpuChoiceNote setPreferredGpu(\"\") goes back to the default; an id that is not listed is refused Displays displayCount, displayNames, displayAt(i), currentDisplayIndex 2 displays; the second one is current A chosen card is looked up by its id at start. Direct3D 11, Direct3D 12 and Vulkan create their device on it (Vulkan only if that card can draw to the window); a card that is gone, or a device that cannot be created, falls back to the default card with a warning in the log and in gpuChoiceNote. OpenGL cannot pick a card, the page greys the drop-down and says so. In the editor the choice is saved in config.json, in a shipped game in a small file next to the player's other settings, so a player's choice survives and an export can carry a default (config.json key GpuAdapter). For tests and support, the environment variable HE_GPU_ADAPTER overrides the saved choice (an id, or default). -- A graphics-card menu: names for the drop-down, ids for saving\nlocal names, ids = horizon.hardware.gpuNames(), horizon.hardware.gpuIds()\nfor i = 1, #names do\n    print(i, names[i], ids[i])\nend\n\n-- The player picked the second card: applies at the next start\nif horizon.hardware.setPreferredGpu(ids[2]) then\n    print(\"Restart to use \" .. names[2])\nend Privacy: only type and model names and sizes. No serial numbers, device ids, MAC addresses or user names, and the engine never sends any of it anywhere. A game may read the values and decide what to do with them.",
+     "title": "Hardware Info"
+    },
+    {
+     "blocks": [
+      {
        "head": [
         [
          {

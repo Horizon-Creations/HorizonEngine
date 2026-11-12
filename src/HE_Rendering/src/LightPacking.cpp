@@ -1,4 +1,5 @@
 #include "HorizonRendering/LightPacking.h"
+#include <Renderer/IRenderer.h>   // IRenderer::MaterialQualityLevel for the quality lane
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -67,6 +68,13 @@ void FillMaterialWind(const ::EnvironmentSettings& env, MaterialShaderLibrary::L
 	out.sunColor[3] = std::sin(rad);
 	out.ambient[3]  = -std::cos(rad);
 	out.camPos[3]   = std::max(env.windSpeed, 0.0f);
+	// The material quality (0 Low .. 2 High) as counts.y, plus one: 0 stays "nobody
+	// filled this" (previews, UI, a pass that skips this helper) and reads as High in the
+	// shader, so a lane that is not written is full quality. Here and not in a helper of
+	// its own because this is the one that every backend already calls at every pass that
+	// animates a graph material, which are exactly the passes the Quality Level node and
+	// the noise helpers' octave count are for.
+	out.counts[1]   = static_cast<float>(IRenderer::MaterialQualityLevel()) + 1.0f;
 }
 
 void FillMaterialWeather(const ::EnvironmentSettings& env, MaterialShaderLibrary::Lighting& out)

@@ -1381,6 +1381,11 @@ struct D3D11RendererImpl
     ComPtr<ID3D11Buffer>         perObjectCB;
     ComPtr<ID3D11Buffer>         perFrameCB;
     ComPtr<ID3D11SamplerState>   sampler;
+    // Texture quality (Thema 324/336): `sampler` (scene slot 0), m_matSampler (graph-material
+    // textures) and decalTexSampler start at mip level `textureMinLod`; samplerFull is the
+    // unclamped copy of the scene sampler for asset previews, which keep full detail.
+    ComPtr<ID3D11SamplerState>   samplerFull;
+    float                        textureMinLod = 0.0f;
     ComPtr<ID3D11DepthStencilState> depthState;
     ComPtr<ID3D11DepthStencilState> depthReadOnlyState; // transparent pass: test but no write
     ComPtr<ID3D11BlendState>        alphaBlendState;    // SRC_ALPHA / INV_SRC_ALPHA
@@ -5023,6 +5028,8 @@ struct D3D11RendererImpl
         sd.Filter   = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
         sd.AddressU = sd.AddressV = sd.AddressW = D3D11_TEXTURE_ADDRESS_WRAP;
         sd.MaxLOD   = D3D11_FLOAT32_MAX;
+        device->CreateSamplerState(&sd, &samplerFull);
+        sd.MinLOD   = textureMinLod;
         device->CreateSamplerState(&sd, &sampler);
 
         D3D11_DEPTH_STENCIL_DESC dsd{};
@@ -5313,6 +5320,7 @@ struct D3D11RendererImpl
         sd.Filter   = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
         sd.AddressU = sd.AddressV = sd.AddressW = D3D11_TEXTURE_ADDRESS_WRAP;
         sd.MaxLOD   = D3D11_FLOAT32_MAX;
+        sd.MinLOD   = textureMinLod;
         const bool sampOk = SUCCEEDED(device->CreateSamplerState(&sd, &m_matSampler));
         // The weightmap's own sampler (linear-clamp, s0 during the draw). Not
         // giLinearClamp: that one only exists once the GI path initialised.
@@ -5668,6 +5676,7 @@ struct D3D11RendererImpl
             sd.Filter   = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
             sd.AddressU = sd.AddressV = sd.AddressW = D3D11_TEXTURE_ADDRESS_WRAP;
             sd.MaxLOD   = D3D11_FLOAT32_MAX;
+            sd.MinLOD   = textureMinLod;
             if (FAILED(device->CreateSamplerState(&sd, &decalTexSampler))) return false;
         }
         {   // The depth: point + clamp. uv = SV_Position.xy / viewport is texel-exact,
@@ -5779,6 +5788,31 @@ struct D3D11RendererImpl
         ID3D11ShaderResourceView* raw = srv.Get();
         uiTexCache.emplace(key, std::move(srv));
         return raw;
+    }
+
+    // Texture quality: Low / Medium keep the world's samplers off the finest one or two mip
+    // levels (MetalRenderer::ApplyTextureQuality, VulkanRenderer::applyTextureQuality). D3D11
+    // sampler states are immutable, so a change re-creates the three of them from their own
+    // description; the draws bind them from these ComPtrs every frame, so nothing is cached
+    // anywhere else. A texture with a single level is unaffected.
+    void applyTextureQuality(float minLod)
+    {
+        textureMinLod = minLod;
+        if (!device) return;
+        bool changed = false;
+        auto remake = [&](ComPtr<ID3D11SamplerState>& st)
+        {
+            if (!st) return;
+            D3D11_SAMPLER_DESC d{};
+            st->GetDesc(&d);
+            if (d.MinLOD == minLod) return;
+            d.MinLOD = minLod;
+            ComPtr<ID3D11SamplerState> next;
+            if (SUCCEEDED(device->CreateSamplerState(&d, &next))) { st = next; changed = true; }
+        };
+        remake(sampler); remake(m_matSampler); remake(decalTexSampler);
+        if (changed)
+            HE_LOG_INFO(RHI, "D3D11Renderer: texture quality - world and material samplers start at mip level %.0f", minLod);
     }
 
     // ─── Volumetric fog (Thema 225 step 8) ──────────────────────────────────────
@@ -7369,11 +7403,26 @@ void D3D11Renderer::Initialize(HE::Window* window)
     HRESULT hr;
     {
         Phase phase("D3D11", "D3D11CreateDeviceAndSwapChain");
-        hr = D3D11CreateDeviceAndSwapChain(
-            nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0,
-            nullptr, 0, D3D11_SDK_VERSION,
-            &scd, &m_impl->swapchain,
-            &m_impl->device, &fl, &m_impl->context);
+        // The GPU choice (Thema 337): an explicit adapter needs D3D_DRIVER_TYPE_UNKNOWN. Any failure goes on
+        // to the default adapter below, so a stale choice never keeps the game from starting.
+        Microsoft::WRL::ComPtr<IDXGIAdapter1> chosen = HE::d3d::chooseAdapter();
+        hr = E_FAIL;
+        if (chosen)
+        {
+            hr = D3D11CreateDeviceAndSwapChain(
+                chosen.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr, 0,
+                nullptr, 0, D3D11_SDK_VERSION,
+                &scd, &m_impl->swapchain,
+                &m_impl->device, &fl, &m_impl->context);
+            if (FAILED(hr)) chosen.Reset();
+        }
+        if (FAILED(hr))
+            hr = D3D11CreateDeviceAndSwapChain(
+                nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0,
+                nullptr, 0, D3D11_SDK_VERSION,
+                &scd, &m_impl->swapchain,
+                &m_impl->device, &fl, &m_impl->context);
+        if (SUCCEEDED(hr)) HE::d3d::noteSelection("D3D11Renderer", chosen != nullptr);
     }
     if (FAILED(hr))
         throw std::runtime_error("D3D11Renderer: D3D11CreateDeviceAndSwapChain failed");
@@ -7381,7 +7430,7 @@ void D3D11Renderer::Initialize(HE::Window* window)
         ComPtr<IDXGIDevice> dxgiDev;
         ComPtr<IDXGIAdapter> adapter;
         if (SUCCEEDED(m_impl->device.As(&dxgiDev))) dxgiDev->GetAdapter(&adapter);
-        HE::d3d::logAdapter("D3D11Renderer", adapter.Get());
+        m_adapterInfo = HE::d3d::logAdapter("D3D11Renderer", adapter.Get(), "D3D11");
     }
     // Hull/domain shaders are a feature level 11_0 feature: the Displacement pin
     // (Thema 207) tessellates from there on; HE_TESSELLATION=0 is GL's A/B switch.
@@ -7564,6 +7613,8 @@ void D3D11Renderer::DrawScene(int width, int height)
         p.shadowSize = std::clamp(p.shadowSettings.resolution, 256, 8192);
         p.createShadowArray();
         p.shadowSizeDirty = false;
+        HE_LOG_INFO(RHI, "D3D11Renderer: shadow cascades rebuilt at %dx%d (%d cascades, distance %.0f)",
+                    p.shadowSize, p.shadowSize, p.shadowSettings.cascadeCount, p.shadowSettings.distance);
     }
     p.m_extractor.setShadowSettings(p.shadowSettings.distance, p.shadowSettings.cascadeCount,
                                     p.shadowSettings.splitLambda, p.shadowSize);
@@ -9990,7 +10041,7 @@ void* D3D11Renderer::RenderWorldPreview(ContentManager& cm, HorizonWorld& world,
     ctx->VSSetConstantBuffers(0, 1, p.perObjectCB.GetAddressOf());
     ctx->PSSetConstantBuffers(0, 1, p.perObjectCB.GetAddressOf());
     ctx->PSSetConstantBuffers(1, 1, p.previewLightCB.GetAddressOf());
-    ctx->PSSetSamplers(0, 1, p.sampler.GetAddressOf());
+    ctx->PSSetSamplers(0, 1, p.samplerFull.GetAddressOf()); // previews keep full texture detail
 
     // ── Static meshes.
     ctx->IASetInputLayout(p.inputLayout.Get());
@@ -10156,6 +10207,12 @@ void D3D11Renderer::DestroyImGuiTexture(void* handle)
 void D3D11Renderer::SetDebugLines(const std::vector<DebugLine>& lines)
 {
     m_impl->m_debugLines = lines;
+}
+
+void D3D11Renderer::SetQualitySettings(const QualitySettings& s)
+{
+    IRenderer::SetQualitySettings(s);
+    m_impl->applyTextureQuality(TextureMinLodForQuality(m_quality.textureQuality));
 }
 
 void D3D11Renderer::SetSSAOSettings(const SSAOSettings& s)

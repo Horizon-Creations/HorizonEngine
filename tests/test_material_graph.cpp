@@ -23,6 +23,7 @@
 #include <material/MaterialShaderBake.h>
 #include <Renderer/IRenderer.h>
 #include <HorizonRendering/LightPacking.h>   // FillMaterialWind
+#include <Renderer/IRenderer.h>              // IRenderer::SetQualitySettings publishes the quality lane
 #include <HorizonRendering/SkyFrameParams.h> // CloudWindVector (the compass it must share)
 #include <cmath>
 
@@ -408,10 +409,10 @@ TEST_CASE("Every node type has a registry entry and its emit matches its pins")
 {
 	// The registry (pins) drives both the editor UI and codegen; a type missing from
 	// it, or an emit case reading a pin the registry doesn't declare, is a bug.
-	// LandscapeFoliage is the LAST enum value today; a node added after it
+	// QualityLevel is the LAST enum value today; a node added after it
 	// must move this bound, or it silently drops out of the loop (which is how
 	// v10/v11 — and the v13 array nodes — went unchecked for a while).
-	for (int t = 0; t <= (int)MatNodeType::LandscapeFoliage; ++t)
+	for (int t = 0; t <= (int)MatNodeType::QualityLevel; ++t)
 	{
 		const auto type = static_cast<MatNodeType>(t);
 		const HE::MatNodeDesc& d = HE::matNodeDesc(type);
@@ -4903,8 +4904,8 @@ std::vector<VkUse> activeVkDescriptors(const std::vector<uint32_t>& spirv, std::
 		add(r.uniform_buffers, static_cast<int>(K::UniformBuffer));
 		add(r.sampled_images,  static_cast<int>(K::CombinedImageSampler));
 		add(r.storage_buffers, static_cast<int>(K::StorageBuffer));
-		add(r.separate_images,   -1);
-		add(r.separate_samplers, -1);
+		add(r.separate_images,   static_cast<int>(K::SampledImage));
+		add(r.separate_samplers, static_cast<int>(K::Sampler));
 		add(r.storage_images,    -1);
 	}
 	catch (const std::exception& e)
@@ -5071,20 +5072,38 @@ TEST_CASE("Vulkan: heLandscapeWeights (binding 14) is in the material layout, an
 		              && (HE::vkmat::kBindings[i].stages & ~HE::vkmat::kStageTess) == HE::vkmat::kStageFragment);
 	CHECK(row);
 
-	// The device limit: 18 fragment samplers with both optional rows (the weightmap and,
-	// Thema 225 step 5, the fog volume at 34), 17 without the fog row, 16 (the spec
-	// minimum, which every device meets) without either — the renderer's fallbacks.
-	CHECK(HE::vkmat::fragmentSamplerCount(true, true) == 18);
-	CHECK(HE::vkmat::fragmentSamplerCount(true, false) == 17);
-	CHECK(HE::vkmat::fragmentSamplerCount(false, false) == 16);
-	CHECK_FALSE(HE::vkmat::landscapeWeightsFit(16, 16, false));
-	CHECK_FALSE(HE::vkmat::landscapeWeightsFit(16, 1u << 20, false));
+	// The device limits. The fixed textures are plain sampled images read through TWO shared
+	// samplers (Unreal's "Shared: Clamp"), so the fragment stage holds 8 SAMPLERS (heTex0,
+	// heTexP0..3, heLandscapeWeights, the two shared ones) whatever the optional rows do, and
+	// 18 images with both of them (the weightmap and, Thema 225 step 5, the fog volume at 34,
+	// a texelFetch-only SampledImage), 17 without the fog row, 16 (the spec minimum, which every
+	// device meets) without either - the renderer's fallbacks. As combined descriptors it was 17
+	// samplers: over MoltenVK's hard limit of 16, where a Mac lost the row and every layer-blend
+	// terrain drew white.
+	CHECK(HE::vkmat::fragmentSamplerCount(true, true) == 8);
+	CHECK(HE::vkmat::fragmentSamplerCount(false, false) == 7);
+	CHECK(HE::vkmat::fragmentImageCount(true, true) == 18);
+	CHECK(HE::vkmat::fragmentImageCount(true, false) == 17);
+	CHECK(HE::vkmat::fragmentImageCount(false, false) == 16);
+	CHECK(HE::vkmat::landscapeWeightsFit(16, 256));          // MoltenVK
+	CHECK_FALSE(HE::vkmat::landscapeWeightsFit(16, 16, false)); // a device at the image minimum: fallback
+	CHECK(HE::vkmat::landscapeWeightsFit(8, 17, false));
+	CHECK_FALSE(HE::vkmat::landscapeWeightsFit(7, 256));
 	CHECK_FALSE(HE::vkmat::landscapeWeightsFit(1u << 20, 16, false));
-	CHECK(HE::vkmat::landscapeWeightsFit(17, 17, false));
-	CHECK_FALSE(HE::vkmat::fogVolumeFit(17, 17));
-	CHECK(HE::vkmat::fogVolumeFit(18, 18));
+	CHECK_FALSE(HE::vkmat::fogVolumeFit(16, 17));
+	CHECK(HE::vkmat::fogVolumeFit(16, 18));
+	CHECK_FALSE(HE::vkmat::fogVolumeFit(7, 256));
 	CHECK(HE::vkmat::fogVolumeFit(1u << 20, 1u << 20)); // NVIDIA / lavapipe class
 	CHECK(HE::vkmat::landscapeWeightsFit(1u << 20, 1u << 20));
+	// The SPIR-V flavour reads the fixed textures through the shared samplers and no combined
+	// sampler stands in for them: the reflection loop below fails on a shader that declares one.
+	for (uint32_t i = 0; i < HE::vkmat::kBindingCount; ++i)
+	{
+		const auto& r = HE::vkmat::kBindings[i];
+		if (r.binding == 10 || r.binding == 11 || r.binding == 12 || r.binding == 13 || r.binding == 15
+		    || r.binding == 16 || r.binding == 17 || r.binding == 18 || (r.binding >= 31 && r.binding <= 34))
+			CHECK(r.kind == DescKind::SampledImage);
+	}
 
 	int landscapeCases = 0;
 	std::set<VkUse> fragGap;           // stage-aware: what no fragment row serves
@@ -5189,8 +5208,9 @@ TEST_CASE("Vulkan: the deferred resolve's set layout covers both resolve variant
 		if (vm::kResolveBindings[i].kind == DescKind::CombinedImageSampler
 		    && (vm::kResolveBindings[i].stages & vm::kStageFragment))
 			++fragSamplers;
-	CHECK(fragSamplers == 15);
-	CHECK(fragSamplers <= 16);
+	CHECK(fragSamplers == 4);   // the G-buffer; the fixed textures are images behind two shared samplers
+	CHECK(vm::resolveCountOf(DescKind::Sampler) + fragSamplers <= 16);
+	CHECK(fragSamplers + vm::resolveCountOf(DescKind::SampledImage) <= 16); // images: inside the spec minimum too
 
 	// Both variants, reflected.
 	const auto& plain = lib.deferredResolve(B::SpirV);
@@ -9107,4 +9127,109 @@ TEST_CASE("Material codegen fits a small thread stack: auto landscape views and 
 	for (size_t p = 0; (p = glsl.find(" + vec3(0.000000);\n", p)) != std::string::npos; ++p) ++adds;
 	CHECK(adds == 256);
 	CHECK(glsl.find("vec3(1.0, 0.0, 1.0)") == std::string::npos); // no cycle magenta
+}
+
+// ── Material quality (Thema 336) ─────────────────────────────────────────────
+
+TEST_CASE("Quality Level node: one uniform read, 0 Low .. 2 High, High when nobody filled the lane")
+{
+	REQUIRE(HE::matNodeDesc(MatNodeType::QualityLevel).outputs.size() == 1u);
+	CHECK(HE::matNodeDesc(MatNodeType::QualityLevel).inputs.empty());
+	REQUIRE(HE::matNodeDescByName("Quality Level") != nullptr);
+
+	MaterialGraph g;
+	const int out = g.addNode(MatNodeType::Output);
+	const int q   = g.addNode(MatNodeType::QualityLevel);
+	const int mul = g.addNode(MatNodeType::Multiply);
+	CHECK(g.connect(q, 0, mul, 0));
+	CHECK(g.connect(mul, 0, out, HE::kMatOutputBaseColorPin));
+	const std::string glsl = HE::generateFragmentGlsl(g);
+	// counts.y = material quality + 1; 0 (a pass that never filled it) reads as High.
+	CHECK(glsl.find("heLight.counts.y > 0.5 ? heLight.counts.y - 1.0 : 2.0") != std::string::npos);
+
+	MaterialGraph back;
+	REQUIRE(HE::materialGraphFromJson(HE::materialGraphToJson(g), back));
+	CHECK(HE::generateFragmentGlsl(back) == glsl);
+}
+
+TEST_CASE("Noise helpers: octaves follow the quality lane, and the full-quality path is the fixed loop it always was")
+{
+	// A graph with no noise does not carry the quality function at all.
+	{
+		MaterialGraph g;
+		const int out = g.addNode(MatNodeType::Output);
+		const int t   = g.addNode(MatNodeType::Time);
+		const int mul = g.addNode(MatNodeType::Multiply);
+		CHECK(g.connect(t, 0, mul, 0));
+		CHECK(g.connect(mul, 0, out, HE::kMatOutputBaseColorPin));
+		CHECK(HE::generateFragmentGlsl(g).find("heQualityOct") == std::string::npos);
+	}
+	// Each fbm flavour: the count comes from the lane (2 / 3 / 4 octaves for Low / Medium
+	// / High, 4 when the lane is 0), the short loop runs only below 4, and the original
+	// `< 4` loop is still there verbatim for the full-quality path.
+	struct Flavour { MatNodeType type; float p0; const char* fixedLoop; const char* shortLoop; };
+	for (const Flavour& f : { Flavour{ MatNodeType::Fbm, 0.0f,
+	                                   "for (int i = 0; i < 4; i++) { v += a * heValueNoise(p);",
+	                                   "for (int i = 0; i < n; i++) { v += a * heValueNoise(p);" },
+	                          Flavour{ MatNodeType::Fbm, 1.0f,
+	                                   "for (int k = 0; k < 4; k++) { v += a * heValueNoiseI(p);",
+	                                   "for (int k = 0; k < n; k++) { v += a * heValueNoiseI(p);" },
+	                          Flavour{ MatNodeType::FbmGrad, 0.0f,
+	                                   "for (int k = 0; k < 4; k++) { vec3 n = heValueNoiseIGrad(p);",
+	                                   "for (int k = 0; k < oct; k++) { vec3 n = heValueNoiseIGrad(p);" } })
+	{
+		MaterialGraph g;
+		const int out = g.addNode(MatNodeType::Output);
+		const int uv  = g.addNode(MatNodeType::UV);
+		const int fb  = g.addNode(f.type);
+		g.findNode(fb)->p[0] = f.p0;
+		const int mul = g.addNode(MatNodeType::Multiply);
+		CHECK(g.connect(uv, 0, fb, 0));
+		CHECK(g.connect(fb, 0, mul, 0));
+		CHECK(g.connect(mul, 0, out, HE::kMatOutputBaseColorPin));
+		const std::string glsl = HE::generateFragmentGlsl(g);
+		INFO("node ", (int)f.type, " p0 ", f.p0);
+		CHECK(glsl.find("int heQualityOct() { float q = heLight.counts.y; return q < 0.5 ? 4 : 1 + int(q + 0.5); }")
+		      != std::string::npos);
+		CHECK(glsl.find(f.fixedLoop) != std::string::npos);
+		CHECK(glsl.find(f.shortLoop) != std::string::npos);
+	}
+}
+
+TEST_CASE("FillMaterialWind: the quality lane is the material quality + 1, and 0 stays 'not filled'")
+{
+	HE::MaterialShaderLibrary::Lighting lit;
+	lit.counts[0] = 5.0f;                  // the light count: the lane must not touch it
+	EnvironmentSettings env;
+	// The smallest concrete IRenderer: the quality push is the base class's, and nothing
+	// else of a renderer is needed to see what it publishes.
+	struct StubRenderer final : IRenderer
+	{
+		void Initialize(HE::Window*) override {}
+		void Shutdown() override {}
+		void Render() override {}
+		Capabilities GetCapabilities() const override { return {}; }
+	} r;
+
+	r.SetQualitySettings(IRenderer::QualitySettings{ 2, 0 });
+	HE::FillMaterialWind(env, lit);
+	CHECK(lit.counts[1] == doctest::Approx(1.0f));   // Low
+	r.SetQualitySettings(IRenderer::QualitySettings{ 2, 1 });
+	HE::FillMaterialWind(env, lit);
+	CHECK(lit.counts[1] == doctest::Approx(2.0f));   // Medium
+	r.SetQualitySettings(IRenderer::QualitySettings{ 2, 2 });
+	HE::FillMaterialWind(env, lit);
+	CHECK(lit.counts[1] == doctest::Approx(3.0f));   // High: the shader reads level 2, 4 octaves
+	CHECK(lit.counts[0] == doctest::Approx(5.0f));
+
+	// Out of range is clamped, never 0 (which the shader reads as "nobody filled it").
+	r.SetQualitySettings(IRenderer::QualitySettings{ 2, -7 });
+	HE::FillMaterialWind(env, lit);
+	CHECK(lit.counts[1] == doctest::Approx(1.0f));
+	r.SetQualitySettings(IRenderer::QualitySettings{ 2, 9 });
+	HE::FillMaterialWind(env, lit);
+	CHECK(lit.counts[1] == doctest::Approx(3.0f));
+	CHECK(IRenderer::MaterialQualityLevel() == 2);
+
+	r.SetQualitySettings(IRenderer::QualitySettings{ 2, 2 });   // leave the process at full quality
 }

@@ -12,6 +12,7 @@ add_library(HorizonCore SHARED
 	src/Application/InputRebind.cpp
 	src/Diagnostics/GlobalState.cpp
 	src/Diagnostics/Log.cpp
+	src/Diagnostics/HardwareInfo.cpp
 	src/Diagnostics/Logger.cpp
 	src/Diagnostics/EngineProfiler.cpp
 	src/Diagnostics/DevStatsTile.cpp
@@ -72,6 +73,7 @@ add_library(HorizonCore SHARED
 	src/Audio/AudioBusConfig.cpp
 	src/Audio/AudioEdit.cpp
 	src/Project/ProjectSettings.cpp
+	src/Project/QualityGovernor.cpp
 	src/Types/TypeRegistry.cpp
 	src/ContentManager/AssetRefRetarget.cpp
 	src/ContentManager/AssetRefScan.cpp

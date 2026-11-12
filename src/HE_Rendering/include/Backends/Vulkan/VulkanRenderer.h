@@ -60,6 +60,7 @@ public:
 	void SetDebugLines(const std::vector<DebugLine>& lines) override;
 	void SetMoonTexture(const void* rgba8Pixels, int width, int height) override;
 	void SetSSAOSettings(const SSAOSettings& s) override;
+	void SetQualitySettings(const QualitySettings& s) override;
 	void SetBloomSettings(const BloomSettings& s) override;
 	void SetAntiAliasingSettings(const AntiAliasingSettings& s) override;
 	void SetGISettings(const GISettings& s) override;
@@ -502,7 +503,7 @@ private:
 	bool        m_matLandscapeWeights = false;
 	bool        m_matLandscapeWarned  = false; // one-time notice for the fallback above
 	// heFogVolume (binding 34, Thema 225 step 5) is in m_matSetLayout. False only on a device
-	// whose per-stage sampler limit cannot hold the 18th fragment sampler (fogVolumeFit); the
+	// whose per-stage image limit cannot hold the 18th fragment image (fogVolumeFit); the
 	// materials then compile without HE_FOG_VOLUME (m_matShaderLib.setSpirvFogVolume(false))
 	// and the volumetric fog stays off (supportsVolumetricFog false).
 	bool        m_matFogVolume        = true;
@@ -676,6 +677,14 @@ private:
 	VkDescriptorSetLayout m_albedoSetLayout = VK_NULL_HANDLE;
 	VkDescriptorSetLayout m_emptySetLayout  = VK_NULL_HANDLE;
 	VkSampler             m_albedoSampler   = VK_NULL_HANDLE; // linear + repeat
+	// The same sampler with a texture-quality mip floor (IRenderer::TextureMinLodForQuality):
+	// the mesh / skinned / decal base colour and the graph-material texture slots use it.
+	// m_albedoSampler stays unclamped for everything else that falls back to it (GI, sky,
+	// AO, post), which must not soften. Rebuilt by applyTextureQuality().
+	VkSampler             m_worldSampler    = VK_NULL_HANDLE;
+	float                 m_textureMinLod   = 0.0f;
+	VkSampler worldSampler() const { return m_worldSampler ? m_worldSampler : m_albedoSampler; }
+	void applyTextureQuality();
 	VkDescriptorPool      m_albedoPool      = VK_NULL_HANDLE; // per-mesh albedo sets
 	VkImage         m_whiteAlbedoImage = VK_NULL_HANDLE;
 	VkDeviceMemory  m_whiteAlbedoMem   = VK_NULL_HANDLE;

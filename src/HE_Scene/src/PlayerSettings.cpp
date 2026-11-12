@@ -1,4 +1,5 @@
 #include "HorizonScene/EngineApi.h"
+#include <Project/QualityGovernor.h>
 #include <Diagnostics/Logger.h>
 #include <nlohmann/json.hpp>
 #include <algorithm>
@@ -18,6 +19,9 @@ struct State
     Values values;
     Host   host;
     bool   installed = false;
+    // Automatic quality: the controller and whether it is running. Never saved.
+    HE::QualityGovernor governor;
+    bool                governorOn = false;
 };
 State& state() { static State s; return s; }
 
@@ -85,21 +89,95 @@ void applyVolumes(const std::map<std::string, float>& before)
     for (const auto& [bus, v] : state().values.volumes)
         if (!before.count(bus)) applyVolume(bus);
 }
+bool hasQuality(const Values& v) { return v.qualityPreset.has_value() || !v.quality.empty(); }
+
+// Is automatic quality in effect: this application can run it, and the player's switch
+// (else the project's) is on.
+bool autoActive(const State& s)
+{
+    return s.host.autoQualityAvailable && s.values.autoQuality.value_or(s.host.baseAuto.enabled);
+}
+
+// (Re)start the controller from the project's overall preset (High when the project's
+// values match none), or stop it. Called whenever the switch or the host may have
+// changed; a restart forgets which levels failed, which is right: it is a new session
+// of automation.
+void restartGovernor()
+{
+    State& s = state();
+    s.governorOn = autoActive(s);
+    if (!s.governorOn) return;
+    HE::QualityGovernorConfig cfg;
+    cfg.targetFps = s.host.baseAuto.targetFps;
+    cfg.minLevel  = s.host.baseAuto.minLevel;
+    cfg.maxLevel  = s.host.baseAuto.maxLevel;
+    const HE::QualityPreset base = HE::detectQualityPreset(s.host.baseGraphics, s.host.baseShadows);
+    s.governor.configure(cfg, base == HE::QualityPreset::Custom ? 2 : static_cast<int>(base));
+}
+
+// What the player's graphics choice comes to: the project's values (the host's
+// base), the preset over them, the single values over that. `enabled` is on
+// whenever the player chose anything, because the project's graphics block is
+// only followed while it is; `preset` says what the numbers read as now.
+struct EffectiveQuality
+{
+    HE::ProjectGraphics       graphics;
+    HE::ProjectShadowSettings shadows;
+};
+EffectiveQuality effectiveQuality()
+{
+    const State& s = state();
+    EffectiveQuality e{ s.host.baseGraphics, s.host.baseShadows };
+    // The governor's level, under everything the player chose.
+    if (s.governorOn && autoActive(s))
+        HE::applyQualityPreset(static_cast<HE::QualityPreset>(s.governor.level()), e.graphics, e.shadows);
+    if (s.values.qualityPreset)
+        if (HE::QualityPreset p; HE::qualityPresetFromName(*s.values.qualityPreset, p))
+            HE::applyQualityPreset(p, e.graphics, e.shadows);
+    for (const auto& [name, v] : s.values.quality)
+        HE::setQualityField(e.graphics, e.shadows, name, v);
+    if (hasQuality(s.values) || (s.governorOn && autoActive(s))) e.graphics.enabled = true;
+    e.graphics.preset = HE::detectQualityPreset(e.graphics, e.shadows);
+    return e;
+}
+void applyQuality()
+{
+    const State& s = state();
+    if (!s.host.applyQuality) return;
+    const EffectiveQuality e = effectiveQuality();
+    s.host.applyQuality(e.graphics, e.shadows);
+}
+
 // The camera values have no hook: the rig controller reads values() itself,
 // every frame, so there is nothing to push.
-void applyAll(const std::map<std::string, float>& volumesBefore)
+// Graphics are pushed only when the player has a choice now or had one a moment
+// ago (so a reset hands the project's values back); a player who never touched
+// them leaves the application's own graphics exactly as they were.
+void applyAll(const std::map<std::string, float>& volumesBefore, bool hadQuality)
 {
     applyDeadzone();
     applyVSync();
     applyFullscreen();
     applyVolumes(volumesBefore);
+    if (hadQuality || hasQuality(state().values) || autoActive(state())) applyQuality();
 }
 // Replace the held values and apply the difference.
 void replace(Values v)
 {
     const std::map<std::string, float> before = std::move(state().values.volumes);
+    const bool hadQuality = hasQuality(state().values);
     state().values = std::move(v);
-    applyAll(before);
+    restartGovernor();
+    applyAll(before, hadQuality);
+}
+
+// A quality value in the form the store keeps it: the field's own clamp and
+// rounding, so a hand-edited 1.4 for a three-level field cannot reach the row.
+bool normalisedQuality(const std::string& field, float value, float& out)
+{
+    HE::ProjectGraphics g;
+    HE::ProjectShadowSettings sh;
+    return HE::setQualityField(g, sh, field, value) && HE::getQualityField(g, sh, field, out);
 }
 
 Values sanitized(Values v)
@@ -107,13 +185,29 @@ Values sanitized(Values v)
     if (v.stickDeadzone)         v.stickDeadzone         = clampDeadzone(*v.stickDeadzone);
     if (v.stickSensitivityScale) v.stickSensitivityScale = clampScale(*v.stickSensitivityScale);
     for (auto& [bus, vol] : v.volumes) vol = clampVolume(vol);
+    // Graphics: a preset name the engine knows (never "Custom"), canonical spelling;
+    // single values only for fields that exist, in range.
+    if (v.qualityPreset)
+    {
+        HE::QualityPreset p;
+        if (HE::qualityPresetFromName(*v.qualityPreset, p) && p != HE::QualityPreset::Custom)
+            v.qualityPreset = HE::qualityPresetName(p);
+        else
+            v.qualityPreset.reset();
+    }
+    for (auto it = v.quality.begin(); it != v.quality.end();)
+    {
+        float n = 0.0f;
+        if (normalisedQuality(it->first, it->second, n)) { it->second = n; ++it; }
+        else it = v.quality.erase(it);
+    }
     return v;
 }
 
 bool isEmpty(const Values& v)
 {
     return !v.stickDeadzone && !v.stickSensitivityScale && !v.stickInvertY
-        && !v.vsync && !v.fullscreen && v.volumes.empty();
+        && !v.vsync && !v.fullscreen && v.volumes.empty() && !hasQuality(v) && !v.autoQuality;
 }
 } // namespace
 
@@ -122,7 +216,8 @@ void install(Host host)
     State& s = state();
     s.host      = std::move(host);
     s.installed = true;
-    applyAll({});   // buses the player never set are the project's already
+    restartGovernor();
+    applyAll({}, false);   // buses the player never set are the project's already
 }
 
 void uninstall()
@@ -152,6 +247,14 @@ std::string toJson(const Values& v)
         for (const auto& [bus, gain] : v.volumes) vol[bus] = gain;
         j["volumes"] = std::move(vol);
     }
+    if (v.autoQuality) j["autoQuality"] = *v.autoQuality;
+    if (v.qualityPreset) j["qualityPreset"] = *v.qualityPreset;
+    if (!v.quality.empty())
+    {
+        nlohmann::json q = nlohmann::json::object();
+        for (const auto& [field, value] : v.quality) q[field] = value;
+        j["quality"] = std::move(q);
+    }
     return j.dump();
 }
 
@@ -178,10 +281,19 @@ bool fromJson(const std::string& json, Values& out)
     flag("stickInvertY", out.stickInvertY);
     flag("vsync", out.vsync);
     flag("fullscreen", out.fullscreen);
+    flag("autoQuality", out.autoQuality);
     if (auto it = j.find("volumes"); it != j.end() && it->is_object())
         for (const auto& [bus, gain] : it->items())
             if (!bus.empty() && gain.is_number())
                 if (const float f = gain.get<float>(); std::isfinite(f)) out.volumes[bus] = f;
+    // The graphics choice: sanitized() below drops a name or field the engine
+    // does not know, so a file from a newer build loses only what it cannot read.
+    if (auto it = j.find("qualityPreset"); it != j.end() && it->is_string())
+        out.qualityPreset = it->get<std::string>();
+    if (auto it = j.find("quality"); it != j.end() && it->is_object())
+        for (const auto& [field, value] : it->items())
+            if (value.is_number())
+                if (const float f = value.get<float>(); std::isfinite(f)) out.quality[field] = f;
     out = sanitized(std::move(out));
     return true;
 }
@@ -227,6 +339,159 @@ float volume(const std::string& bus)
     const State& s = state();
     if (auto it = s.values.volumes.find(name); it != s.values.volumes.end()) return it->second;
     return s.host.currentVolume ? s.host.currentVolume(name) : 1.0f;
+}
+
+bool setQualityPreset(const std::string& name)
+{
+    HE::QualityPreset p;
+    if (!HE::qualityPresetFromName(name, p))
+    {
+        HE_LOG_WARN(Script, "settings.setQualityPreset: \"%s\" is not a preset (Low, Medium, High, Ultra)",
+                    name.c_str());
+        return false;
+    }
+    // Custom is what single values read as; choosing it keeps the values as they are.
+    if (p == HE::QualityPreset::Custom) return true;
+    State& s = state();
+    s.values.qualityPreset = HE::qualityPresetName(p);
+    s.values.quality.clear();   // a preset chosen after single values replaces them
+    s.values.autoQuality = false;   // a fixed preset and automation exclude each other
+    restartGovernor();              // → stopped
+    applyQuality();
+    return true;
+}
+
+std::string qualityPreset()
+{
+    return HE::qualityPresetName(effectiveQuality().graphics.preset);
+}
+
+std::vector<std::string> qualityPresetNames()
+{
+    std::vector<std::string> names;
+    for (int i = 0; i < HE::kQualityPresetCount; ++i)
+        names.push_back(HE::qualityPresetName(static_cast<HE::QualityPreset>(i)));
+    return names;
+}
+
+bool setQualityValue(const std::string& field, float value)
+{
+    if (!usable(value, "settings.setQualityValue")) return false;
+    float n = 0.0f;
+    if (!normalisedQuality(field, value, n))
+    {
+        HE_LOG_WARN(Script, "settings.setQualityValue: \"%s\" is not a quality field (see qualityFields)",
+                    field.c_str());
+        return false;
+    }
+    state().values.quality[field] = n;
+    applyQuality();
+    return true;
+}
+
+float qualityValue(const std::string& field)
+{
+    const EffectiveQuality e = effectiveQuality();
+    float v = 0.0f;
+    if (!HE::getQualityField(e.graphics, e.shadows, field, v))
+        HE_LOG_WARN(Script, "settings.qualityValue: \"%s\" is not a quality field (see qualityFields)",
+                    field.c_str());
+    return v;
+}
+
+std::vector<std::string> qualityFields()
+{
+    std::vector<std::string> names;
+    for (int i = 0; i < HE::qualityFieldCount(); ++i) names.push_back(HE::qualityFieldName(i));
+    return names;
+}
+
+int qualityLevel(int setting)
+{
+    if (setting < 0 || setting >= HE::kQualitySettingCount)
+    {
+        HE_LOG_WARN(Script, "settings.qualityLevel: %d is not a QualitySetting (0..%d)",
+                    setting, HE::kQualitySettingCount - 1);
+        return static_cast<int>(HE::QualityLevel::Custom);
+    }
+    const EffectiveQuality e = effectiveQuality();
+    return static_cast<int>(HE::qualityLevelOf(static_cast<HE::QualitySetting>(setting), e.graphics, e.shadows));
+}
+
+bool setQualityLevel(int setting, int level)
+{
+    if (setting < 0 || setting >= HE::kQualitySettingCount)
+    {
+        HE_LOG_WARN(Script, "settings.setQualityLevel: %d is not a QualitySetting (0..%d)",
+                    setting, HE::kQualitySettingCount - 1);
+        return false;
+    }
+    if (level < 0 || level >= HE::kQualityPresetCount)
+    {
+        HE_LOG_WARN(Script, "settings.setQualityLevel: %d is not a QualityLevel (0 Low … 4 Custom)", level);
+        return false;
+    }
+    const auto area = static_cast<HE::QualitySetting>(setting);
+    if (level == static_cast<int>(HE::QualityLevel::Custom)) return true;   // keep what is there
+    if (area == HE::QualitySetting::Overall)
+        return setQualityPreset(HE::qualityPresetName(static_cast<HE::QualityPreset>(level)));
+
+    // Start from what is in effect, move this one area to the level's row, and keep
+    // exactly that area's fields as the player's single values (over any preset).
+    EffectiveQuality e = effectiveQuality();
+    HE::setQualityLevelOf(area, static_cast<HE::QualityLevel>(level), e.graphics, e.shadows);
+    State& s = state();
+    for (const std::string& field : HE::qualityAreaFields(area))
+    {
+        float v = 0.0f;
+        if (HE::getQualityField(e.graphics, e.shadows, field, v)) s.values.quality[field] = v;
+    }
+    applyQuality();
+    return true;
+}
+
+uint32_t engineSettings() { return kEngineSettingsRef; }
+int  qualityOf(uint32_t, int setting) { return qualityLevel(setting); }
+bool setQualityOf(uint32_t, int setting, int level) { return setQualityLevel(setting, level); }
+
+bool autoQuality() { return autoActive(state()) && state().governorOn; }
+
+bool setAutoQuality(bool on)
+{
+    State& s = state();
+    if (!s.host.autoQualityAvailable)
+    {
+        HE_LOG_WARN(Script, "settings.setAutoQuality: automatic quality runs in the exported game only — "
+                    "ignored here");
+        return false;
+    }
+    s.values.autoQuality = on;
+    // Automation owns the OVERALL level; a preset the player had chosen would sit on top of
+    // it and the controller would move nothing. Their single values stay.
+    if (on) s.values.qualityPreset.reset();
+    restartGovernor();
+    applyQuality();
+    return true;
+}
+
+int autoQualityLevel()
+{
+    const State& s = state();
+    return (s.governorOn && autoActive(s)) ? s.governor.level() : static_cast<int>(HE::QualityLevel::Custom);
+}
+
+void tickAutoQuality(float realFrameSeconds)
+{
+    State& s = state();
+    if (!s.governorOn || !autoActive(s)) return;
+    const int before = s.governor.level();
+    if (s.governor.update(realFrameSeconds))
+    {
+        HE_LOG_INFO(Script, "Automatic quality: level %d -> %d (smoothed frame time %.1f ms, target %.0f fps)",
+                    before, s.governor.level(), s.governor.smoothedFrameTime() * 1000.0f,
+                    s.governor.config().targetFps);
+        applyQuality();
+    }
 }
 } // namespace settings
 

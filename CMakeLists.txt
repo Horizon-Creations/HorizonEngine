@@ -68,6 +68,20 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 # Clang's default (on) fuses only within one expression.
 add_compile_options($<$<COMPILE_LANG_AND_ID:CXX,GNU>:-ffp-contract=off>)
 
+# ─── MoltenVK (macOS, on by default when installed) ────────────────────────────
+# Runs the Vulkan backend on a Mac through MoltenVK (Vulkan -> Metal): the same backend
+# code as Windows/Linux, selectable next to Metal, and buildable/testable on a Mac.
+# Metal stays the default backend. The dylib is linked directly and ships with the
+# package (scripts/bundle_native_deps.sh relocates it like every other bundled dylib).
+# A Mac without MoltenVK (brew install molten-vk) configures as before, Vulkan off.
+if(APPLE)
+    set(_he_mvk_default ON)
+else()
+    set(_he_mvk_default OFF)
+endif()
+option(HE_ENABLE_MOLTENVK "macOS: build the Vulkan backend on top of MoltenVK (brew install molten-vk)" ${_he_mvk_default})
+include("${CMAKE_SOURCE_DIR}/cmake/HEMoltenVK.cmake")
+
 # ─── SDL3 ──────────────────────────────────────────────────────────────────────
 include(FetchContent)
 FetchContent_Declare(

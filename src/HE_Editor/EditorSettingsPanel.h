@@ -45,7 +45,9 @@ namespace EditorSettingsPanel
 		// user's own graphics values — what a project that sets none previews
 		// with, and an override for one that does (a machine that cannot carry
 		// the project's bloom and GI).
-		EditorRenderer, ViewportQuality,
+		// Hardware is what this machine is (CPU, RAM, GPU, display, OS) - the values a game reads
+		// through the hardware.* script rows; read-only.
+		EditorRenderer, ViewportQuality, Hardware,
 		// Accounts & Connections — who you are and what the editor talks to.
 		// SourceControl is git on this machine and the GitHub account (the
 		// repository of a PROJECT is on its Project Settings tab). Team is the
@@ -58,7 +60,7 @@ namespace EditorSettingsPanel
 		// Project / World / Online — one page per ProjectSettingsPanel::Page.
 		ProjectGeneral, ProjectApplication, ProjectWindow, ProjectFonts,
 		ProjectPermissions,
-		WorldShadows, WorldSimulation, WorldCollisionLayers, WorldAudioBuses,
+		WorldQuality, WorldShadows, WorldSimulation, WorldCollisionLayers, WorldAudioBuses,
 		OnlineAntiCheat, OnlineMultiplayer,
 	};
 

@@ -86,6 +86,7 @@ public:
 	void  SetBloomSettings(const BloomSettings& settings) override;
 	void  SetDepthOfFieldSettings(const DepthOfFieldSettings& settings) override;
 	void  SetMotionBlurSettings(const MotionBlurSettings& settings) override;
+	void  SetQualitySettings(const QualitySettings& settings) override;
 	void  SetSSAOSettings(const SSAOSettings& settings) override;
 	void  SetShadowSettings(const ShadowSettings& settings) override;
 	void  SetAntiAliasingSettings(const AntiAliasingSettings& settings) override;
@@ -675,6 +676,10 @@ private:
 	// Base-color textures for MaterialComponent overrides, keyed by material
 	// UUID. A present entry of 0 means "resolved, no texture". Drained/cleared
 	// by InvalidateMaterial via m_pendingMaterialInvalidations.
+	// Texture quality (Thema 324/336): the pushed mip floor, applied to the live textures at the top of DrawScene.
+	void  ApplyTextureQuality();
+	bool  m_textureMinLodDirty   = false;
+	float m_textureMinLodApplied = 0.0f;
 	std::unordered_map<HE::UUID, unsigned int> m_materialTexCache;
 	std::unordered_map<std::string, unsigned int> m_graphTexCache;
 	uint64_t m_graphTexMissEpoch = 0; // contentEpoch its 0 misses were taken at (HE::forgetGraphTextureMisses)

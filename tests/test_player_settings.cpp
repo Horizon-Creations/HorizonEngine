@@ -271,3 +271,173 @@ TEST_CASE("Player settings: uninstall drops the hooks but keeps the values")
     camera::setStickSensitivityScale(2.0f);
     CHECK(settings::values().stickSensitivityScale.value_or(0.0f) == doctest::Approx(2.0f));
 }
+
+// ── Graphics quality as a player setting ─────────────────────────────────────
+// The preset and the single values live in the same store as the volumes: a menu
+// sets them, Save keeps them, reset hands the project's graphics back. What the
+// application is told is the EFFECTIVE graphics: base, then preset, then values.
+
+namespace {
+struct GraphicsRecorder
+{
+    int calls = 0;
+    HE::ProjectGraphics       graphics;
+    HE::ProjectShadowSettings shadows;
+    settings::Host host()
+    {
+        settings::Host h;
+        h.baseGraphics.antiAliasing = 3;     // the project's own, so "base" is visible
+        h.baseShadows.resolution    = 4096;
+        h.applyQuality = [this](const HE::ProjectGraphics& g, const HE::ProjectShadowSettings& s)
+        { ++calls; graphics = g; shadows = s; };
+        return h;
+    }
+};
+}
+
+TEST_CASE("Player quality: a player who chose nothing leaves the application's graphics alone")
+{
+    Clean clean;
+    GraphicsRecorder rec;
+    settings::install(rec.host());
+    CHECK(rec.calls == 0);                        // install did not push the base back
+    CHECK(settings::qualityPreset() == "Custom"); // the project's values match no preset
+    CHECK(settings::qualityValue("antiAliasing") == doctest::Approx(3.0f));   // read from the base
+    CHECK(settings::qualityValue("shadowResolution") == doctest::Approx(4096.0f));
+}
+
+TEST_CASE("Player quality: a preset applies, a single value over it makes it Custom, a preset replaces the values")
+{
+    Clean clean;
+    GraphicsRecorder rec;
+    settings::install(rec.host());
+
+    CHECK(settings::setQualityPreset("high"));    // case-insensitive
+    CHECK(rec.calls == 1);
+    CHECK(rec.graphics.enabled);
+    CHECK(rec.graphics.textureQuality == 2);
+    CHECK(rec.shadows.resolution == 2048);
+    CHECK(settings::qualityPreset() == "High");
+    CHECK(rec.graphics.preset == HE::QualityPreset::High);
+
+    CHECK(settings::setQualityValue("textureQuality", 0.0f));
+    CHECK(rec.graphics.textureQuality == 0);
+    CHECK(rec.graphics.ssrEnabled);                // the rest is still High's
+    CHECK(settings::qualityPreset() == "Custom");
+    CHECK(settings::qualityValue("textureQuality") == doctest::Approx(0.0f));
+
+    CHECK(settings::setQualityPreset("Low"));      // drops the single value
+    CHECK(settings::values().quality.empty());
+    CHECK(rec.graphics.textureQuality == 0);       // Low's own, not the leftover
+    CHECK(rec.shadows.resolution == 1024);
+
+    // Custom keeps what is there.
+    const int before = rec.calls;
+    CHECK(settings::setQualityPreset("Custom"));
+    CHECK(rec.calls == before);
+    CHECK(settings::qualityPreset() == "Low");
+}
+
+TEST_CASE("Player quality: single values are clamped and rounded, unknown names are refused")
+{
+    Clean clean;
+    GraphicsRecorder rec;
+    settings::install(rec.host());
+
+    CHECK(settings::setQualityValue("textureQuality", 7.0f));
+    CHECK(settings::qualityValue("textureQuality") == doctest::Approx(2.0f));   // clamped to High
+    CHECK(settings::setQualityValue("giEnabled", 0.7f));
+    CHECK(rec.graphics.giEnabled);                                             // bool: >= 0.5
+    CHECK(settings::setQualityValue("shadowResolution", 3000.0f));
+    CHECK(rec.shadows.resolution == 2048);                                      // nearer power of two
+    CHECK(settings::setQualityValue("renderScale", 9.0f));
+    CHECK(rec.graphics.renderScale == doctest::Approx(2.0f));
+
+    const int calls = rec.calls;
+    CHECK_FALSE(settings::setQualityValue("bloomWobble", 1.0f));
+    CHECK_FALSE(settings::setQualityValue("textureQuality", std::nanf("")));
+    CHECK_FALSE(settings::setQualityPreset("Insane"));
+    CHECK(rec.calls == calls);
+    CHECK(settings::qualityValue("bloomWobble") == doctest::Approx(0.0f));
+}
+
+TEST_CASE("Player quality: reset hands the project's graphics back, and the lists name every field")
+{
+    Clean clean;
+    GraphicsRecorder rec;
+    settings::install(rec.host());
+    settings::setQualityPreset("Ultra");
+    REQUIRE(rec.graphics.antiAliasing == 3);       // Ultra's TAA happens to equal this base; shadows tell
+    CHECK(rec.shadows.resolution == 4096);
+    settings::setQualityPreset("Low");
+    CHECK(rec.shadows.resolution == 1024);
+
+    settings::resetToDefaults();
+    CHECK(rec.graphics.antiAliasing == 3);
+    CHECK(rec.shadows.resolution == 4096);         // the project's again
+    CHECK_FALSE(rec.graphics.enabled);
+    CHECK(settings::qualityPreset() == "Custom");
+
+    const auto names = settings::qualityPresetNames();
+    REQUIRE(names.size() == 5);
+    CHECK(names.front() == "Low");
+    CHECK(names.back() == "Custom");
+    const auto fields = settings::qualityFields();
+    CHECK(fields.size() == static_cast<size_t>(HE::qualityFieldCount()));
+    for (const std::string& f : fields)
+    {
+        INFO("field ", f);
+        float v = 0.0f;
+        CHECK(HE::getQualityField(rec.graphics, rec.shadows, f, v));
+    }
+}
+
+TEST_CASE("Player quality: JSON round-trips the choice and drops what the engine does not know")
+{
+    Clean clean;
+    settings::Values v;
+    v.qualityPreset = "ultra";
+    v.quality["textureQuality"] = 1.4f;            // rounds to 1
+    v.quality["noSuchField"]    = 3.0f;
+    settings::set(v);
+    CHECK(settings::values().qualityPreset.value_or("") == "Ultra");   // canonical spelling
+    CHECK(settings::values().quality.size() == 1);
+    CHECK(settings::values().quality.at("textureQuality") == doctest::Approx(1.0f));
+
+    settings::Values back;
+    REQUIRE(settings::fromJson(settings::toJson(settings::values()), back));
+    CHECK(back.qualityPreset.value_or("") == "Ultra");
+    CHECK(back.quality.size() == 1);
+
+    // A damaged file keeps the rest: wrong types are skipped, "Custom" is not stored.
+    settings::Values odd;
+    REQUIRE(settings::fromJson(
+        R"({"qualityPreset":"Custom","quality":{"giEnabled":"yes","bloomEnabled":0},"vsync":false})", odd));
+    CHECK_FALSE(odd.qualityPreset.has_value());
+    CHECK(odd.quality.size() == 1);
+    CHECK(odd.quality.count("bloomEnabled") == 1);
+    CHECK(odd.vsync.value_or(true) == false);
+
+    // Something chosen means the store is not empty, so save() will write it.
+    CHECK(settings::toJson(settings::values()).find("qualityPreset") != std::string::npos);
+}
+
+TEST_CASE("Player quality: the registry rows reach the store")
+{
+    Clean clean;
+    GraphicsRecorder rec;
+    settings::install(rec.host());
+
+    const auto ok = call("settings.setQualityPreset", { Value::ofString("Medium") });
+    REQUIRE(ok.size() == 1);
+    CHECK(ok[0].b);
+    CHECK(call("settings.qualityPreset")[0].s == "Medium");
+    CHECK(call("settings.setQualityValue", { Value::ofString("giEnabled"), Value::ofFloat(1.0f) })[0].b);
+    CHECK(call("settings.qualityValue", { Value::ofString("giEnabled") })[0].f == doctest::Approx(1.0f));
+    CHECK(call("settings.qualityPreset")[0].s == "Custom");
+    const auto names = call("settings.qualityPresetNames");
+    REQUIRE(names.size() == 1);
+    CHECK(names[0].isArray);
+    CHECK(names[0].items.size() == 5);
+    CHECK(call("settings.qualityFields")[0].items.size() == static_cast<size_t>(HE::qualityFieldCount()));
+}

@@ -1,4 +1,5 @@
 #pragma once
+#include <Diagnostics/HardwareInfo.h>   // HE::GpuInfo (GetAdapterInfo)
 #include "Types/Defines.h"
 #include "Types/Enums.h" // HE::RenderPath
 #include "Types/UUID.h"
@@ -312,6 +313,10 @@ public:
     // Called every frame for the primary window.
     virtual void Render()                        = 0;
     virtual Capabilities GetCapabilities() const = 0;
+    // The GPU this renderer runs on (name, vendor, driver, video memory, API), filled by Initialize().
+    // Empty before that. The application hands it to HE::setGpuInfo so scripts and the editor's
+    // Hardware page can show it (Thema 337).
+    HE::GpuInfo GetAdapterInfo() const { return m_adapterInfo; }
 
     // Why GI reflections cannot run although Capabilities::supportsGIReflections says the
     // backend has them: the pipelines are built on the first GI frame, so a driver that
@@ -637,6 +642,41 @@ public:
         bool  blur         = true;
     };
     virtual void SetGIReflectionSettings(const GIReflectionSettings& /*settings*/) {}
+
+    // ── Quality levels for asset detail (HE::QualityPreset, ProjectSettings.h) ─
+    // The levels the presets carry that no single effect above owns: 0 Low,
+    // 1 Medium, 2 High, and High is the full detail every backend drew before this
+    // existed. Pushed every frame from the same place as the other settings, so a
+    // preset change at run time lands on the next frame. The base class keeps the
+    // value (GetQualitySettings); a backend that acts on a level overrides this and
+    // calls the base. One that does not simply ignores it — see
+    // docs/engine-quality-settings-2026-11-05.md for which acts on what.
+    struct QualitySettings
+    {
+        // Low/Medium clamp the sampler's most detailed mip level (see
+        // TextureMinLodForQuality). A texture cooked with a single level has no
+        // coarser one to fall back to and does not change.
+        int textureQuality  = 2;
+        // 0 Low, 1 Medium, 2 High. Reaches every graph material as the Quality Level
+        // node (a lane of the lighting block, HE::FillMaterialWind) and shortens the
+        // engine's own noise loops at Low and Medium; High is the full quality every
+        // material had before.
+        int materialQuality = 2;
+    };
+    // Stores the settings; the base class also publishes materialQuality for the
+    // shared lighting fill (MaterialQualityLevel), so a backend that overrides this
+    // must call it.
+    virtual void SetQualitySettings(const QualitySettings& s);
+    // The material quality the lighting fill writes into the Lighting block's
+    // quality lane (0 Low .. 2 High). Process-wide, like the setting itself.
+    static int MaterialQualityLevel();
+    const QualitySettings& GetQualitySettings() const { return m_quality; }
+    // The finest mip level a sampler may use at this texture quality: 2 / 1 / 0
+    // for Low / Medium / High, anything else counts as High.
+    static float TextureMinLodForQuality(int textureQuality)
+    {
+        return textureQuality == 0 ? 2.0f : textureQuality == 1 ? 1.0f : 0.0f;
+    }
 
     // ── Render path (Forward | Deferred) ────────────────────────────────────
     // Pushed by the editor's preferences / the packaged game's GlobalState read,
@@ -1022,6 +1062,8 @@ public:
 protected:
     OverlayCallback      m_overlayCallback;
     HE::RenderPath       m_renderPath           = HE::RenderPath::Forward;
+    QualitySettings      m_quality;
+    HE::GpuInfo          m_adapterInfo;   // set by each backend's Initialize
     HE::ViewMode         m_viewMode             = HE::ViewMode::Lit;
     HorizonWorld*        m_world                = nullptr;
     ContentManager*      m_contentManager       = nullptr;

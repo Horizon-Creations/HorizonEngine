@@ -1735,6 +1735,8 @@ void EditorApplication::OnInit()
 	m_editorConfig.GIReflBlur                  = globalstate.getCustomConfigBool("GIReflBlur",                m_editorConfig.GIReflBlur);
 	m_editorConfig.GIReflQuality               = globalstate.getCustomConfigInt("GIReflQuality",              m_editorConfig.GIReflQuality);
 	m_editorConfig.GIReflBounces               = globalstate.getCustomConfigInt("GIReflBounces",              m_editorConfig.GIReflBounces);
+	m_editorConfig.TextureQuality              = globalstate.getCustomConfigInt("TextureQuality",             m_editorConfig.TextureQuality);
+	m_editorConfig.MaterialQuality             = globalstate.getCustomConfigInt("MaterialQuality",            m_editorConfig.MaterialQuality);
 	m_editorConfig.RenderPath                  = globalstate.getCustomConfigInt("RenderPath",           m_editorConfig.RenderPath);
 	m_editorConfig.OcclusionCulling            = globalstate.getCustomConfigBool("OcclusionCulling",    m_editorConfig.OcclusionCulling);
 	m_editorConfig.SSREnabled                  = globalstate.getCustomConfigBool("SSREnabled",          m_editorConfig.SSREnabled);
@@ -3751,6 +3753,10 @@ void EditorApplication::OnRender(float dt)
 				if (s > 0.0f) aa.specularAAStrength = s;   // doubles as the strength
 			}
 			renderer()->SetAntiAliasingSettings(aa);
+			// Texture / material levels of the quality presets, from the same
+			// config the project's block was copied into (syncGraphicsSource).
+			renderer()->SetQualitySettings(IRenderer::QualitySettings{
+				m_editorConfig.TextureQuality, m_editorConfig.MaterialQuality });
 		}
 		{
 			IRenderer::GISettings gi{
@@ -9255,6 +9261,34 @@ void EditorApplication::dumpFrameHeadless()
 	// loop-driven capture never fires.
 	r->SetOverlayCallback(nullptr);
 	{
+		// HE_DUMP_QUALITYPRESET=Low|Medium|High|Ultra: the quality preset for this
+		// capture only, taken the way a script's Set Quality Preset takes it while
+		// the preview plays — into the play-local copy that syncGraphicsSource and
+		// projectShadowSettings follow, so the project's file is never touched. It
+		// comes first: every override below (HE_DUMP_AA, HE_DUMP_GI, …) still wins
+		// over the preset's value.
+		if (const char* v = std::getenv("HE_DUMP_QUALITYPRESET"); v && *v)
+		{
+			HE::QualityPreset preset = HE::QualityPreset::Custom;
+			if (!HE::qualityPresetFromName(v, preset) || preset == HE::QualityPreset::Custom)
+				HE_LOG_WARN(Editor, "EditorApplication: HE_DUMP_QUALITYPRESET '%s' is not a preset "
+				                    "(Low, Medium, High, Ultra) — ignored", v);
+			else
+			{
+				m_playGraphics = m_projectLoaded ? m_projectManager.currentProject().settings.graphics
+				                                 : HE::ProjectGraphics{};
+				m_playShadows  = m_projectLoaded ? m_projectManager.currentProject().settings.shadows
+				                                 : HE::ProjectShadowSettings{};
+				if (!m_playGraphics.enabled) EditorGraphics::capture(m_editorConfig, m_playGraphics);
+				HE::applyQualityPreset(preset, m_playGraphics, m_playShadows);
+				m_playQualityActive = true;
+				syncGraphicsSource();   // m_editorConfig now holds the preset's values
+				HE_LOG_INFO(Editor, "EditorApplication: frame dump at quality preset %s",
+				            HE::qualityPresetName(preset));
+			}
+		}
+	}
+	{
 		// HE_DUMP_BLOOM=0|1: the bloom toggle for this capture only — the control
 		// shot that proves a bloom A/B has any bloom in it to compare.
 		IRenderer::BloomSettings bloom{
@@ -9323,6 +9357,13 @@ void EditorApplication::dumpFrameHeadless()
 			aa.specularAAStrength = s > 0.0f ? s : aa.specularAAStrength;
 		}
 		r->SetAntiAliasingSettings(aa);
+		// HE_DUMP_TEXQUALITY=<0|1|2>: texture quality for this capture only, the
+		// A/B knob for he_shot.py (0 Low = two mip levels off, 2 High = all).
+		IRenderer::QualitySettings qs{ m_editorConfig.TextureQuality, m_editorConfig.MaterialQuality };
+		if (const char* v = std::getenv("HE_DUMP_TEXQUALITY"); v && *v) qs.textureQuality = std::atoi(v);
+		// HE_DUMP_MATQUALITY=<0|1|2>: the same for the material quality lane.
+		if (const char* v = std::getenv("HE_DUMP_MATQUALITY"); v && *v) qs.materialQuality = std::atoi(v);
+		r->SetQualitySettings(qs);
 	}
 	{
 		// HE_DUMP_GI: override the persisted GI toggle for this capture only (does
@@ -10714,6 +10755,35 @@ void EditorApplication::dumpFrameHeadless()
 				("EditorApplication: HE_DUMP_TODSTEP moved the sun by " + std::to_string(todStep)
 				 + " of a day for the last " + std::to_string(atTod) + " frame(s)").c_str());
 			settleFrames = atTod;
+		}
+	}
+	// HE_DUMP_QUALITYSWITCH="tex,mat[,shadowResolution]": a quality change DURING a run, the path
+	// the automatic-quality governor and a script's Set Quality Level take in a game (a renderer
+	// that already has its textures, samplers and shadow array built). The capture's own knobs
+	// (HE_DUMP_TEXQUALITY / MATQUALITY / SHADOW) are the START state: the settle frames render
+	// there, then the new values are pushed and a few more frames render before the capture. The
+	// oracle: the frame must equal a plain run started at the NEW values (same camera, GI off).
+	if (const char* sw = std::getenv("HE_DUMP_QUALITYSWITCH"); sw && *sw)
+	{
+		int tex = 2, mat = 2, res = 0;
+		const int got = std::sscanf(sw, "%d,%d,%d", &tex, &mat, &res);
+		if (got >= 2)
+		{
+			for (int i = 0; i < settleFrames; ++i)
+				r->Render();
+			IRenderer::QualitySettings qs = r->GetQualitySettings();
+			qs.textureQuality  = std::clamp(tex, 0, 2);
+			qs.materialQuality = std::clamp(mat, 0, 2);
+			r->SetQualitySettings(qs);
+			if (got >= 3 && res > 0)
+			{
+				IRenderer::ShadowSettings ss = projectShadowSettings();
+				ss.resolution = res;
+				r->SetShadowSettings(ss);
+			}
+			settleFrames = std::max(settleFrames, 4);
+			HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_QUALITYSWITCH to texture %d, material %d%s after the first frames",
+			            qs.textureQuality, qs.materialQuality, got >= 3 ? ", shadow resolution changed" : "");
 		}
 	}
 	// HE_DUMP_PLAYCELLS=1 (with HE_DUMP_SKYTEST, e.g. CAMY=90 PITCH=-89): the witness
@@ -14313,6 +14383,29 @@ void EditorApplication::setPlayMode(bool play)
 				return bus == HE::api::settings::kMaster ? m_audioEngine.getMasterVolume()
 				                                         : m_audioEngine.getBusVolume(bus);
 			};
+			// Graphics quality: the base is the project's own values once it has
+			// them (graphics.enabled), the editor's live Preferences otherwise —
+			// same base dumpFrameHeadless and the Quality page
+			// (ProjectSettingsPanel::drawQualityPage) read, via EditorGraphics::
+			// capture, so a preset set from Play starts from the viewport's
+			// current look rather than from struct defaults. The player's choice
+			// lands in the play-local copy (see m_playGraphics), never in the
+			// project or the editor's Preferences, and the viewport follows it
+			// until play stops.
+			m_playQualityActive = false;
+			syncGraphicsSource();   // m_editorConfig holds the editor's own values now
+			if (m_projectLoaded)
+			{
+				host.baseGraphics = m_projectManager.currentProject().settings.graphics;
+				host.baseShadows  = m_projectManager.currentProject().settings.shadows;
+			}
+			if (!host.baseGraphics.enabled) EditorGraphics::capture(m_editorConfig, host.baseGraphics);
+			host.applyQuality = [this](const HE::ProjectGraphics& g, const HE::ProjectShadowSettings& s)
+			{
+				m_playGraphics      = g;
+				m_playShadows       = s;
+				m_playQualityActive = true;
+			};
 			HE::api::settings::install(std::move(host));
 		}
 
@@ -14467,6 +14560,7 @@ void EditorApplication::setPlayMode(bool play)
 		if (HE::api::settings::installed())
 		{
 			HE::api::settings::uninstall();
+			m_playQualityActive = false;   // the viewport goes back to the project's graphics
 			input().stickDeadzone   = m_editorConfig.GamepadStickDeadzone;
 			input().triggerDeadzone = m_editorConfig.GamepadTriggerDeadzone;
 			if (m_audioEngine.isInitialized())
@@ -14668,7 +14762,8 @@ std::string EditorApplication::gameInstancePath()
 void EditorApplication::syncGraphicsSource()
 {
 	const HE::ProjectGraphics* project =
-		m_projectLoaded ? &m_projectManager.currentProject().settings.graphics : nullptr;
+		m_playQualityActive ? &m_playGraphics
+		: m_projectLoaded   ? &m_projectManager.currentProject().settings.graphics : nullptr;
 	// One set of graphics rows (Preferences ▸ Graphics): when the project sets its
 	// own, the viewport shows them — what you see is what ships.
 	const bool follow = project && project->enabled;
@@ -14705,9 +14800,10 @@ float EditorApplication::playTriggerDeadzone()
 IRenderer::ShadowSettings EditorApplication::projectShadowSettings()
 {
 	IRenderer::ShadowSettings out;
-	if (m_projectLoaded)
+	if (m_projectLoaded || m_playQualityActive)
 	{
-		const HE::ProjectShadowSettings& s = m_projectManager.currentProject().settings.shadows;
+		const HE::ProjectShadowSettings& s = m_playQualityActive
+			? m_playShadows : m_projectManager.currentProject().settings.shadows;
 		out.distance     = s.distance;
 		out.cascadeCount = s.cascadeCount;
 		out.resolution   = s.resolution;
@@ -15983,6 +16079,8 @@ void EditorApplication::writeEditorConfig()
 	globalstate.setCustomConfigEntry("GIReflBlur",                m_editorConfig.GIReflBlur);
 	globalstate.setCustomConfigEntry("GIReflQuality",             m_editorConfig.GIReflQuality);
 	globalstate.setCustomConfigEntry("GIReflBounces",             m_editorConfig.GIReflBounces);
+	globalstate.setCustomConfigEntry("TextureQuality",            m_editorConfig.TextureQuality);
+	globalstate.setCustomConfigEntry("MaterialQuality",           m_editorConfig.MaterialQuality);
 	globalstate.setCustomConfigEntry("RenderPath",                m_editorConfig.RenderPath);
 	globalstate.setCustomConfigEntry("OcclusionCulling",          m_editorConfig.OcclusionCulling);
 	globalstate.setCustomConfigEntry("SSREnabled",                m_editorConfig.SSREnabled);

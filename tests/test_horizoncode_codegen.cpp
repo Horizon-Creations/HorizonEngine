@@ -17,6 +17,8 @@
 #include <HorizonCode/HorizonCodeRuntime.h>
 #include <HorizonScene/EngineApi.h>
 #include <Diagnostics/Log.h>   // addSink — the divide-by-zero case reads what reached the log
+#include <Diagnostics/HardwareInfo.h>   // the hardware parity case installs a fake machine
+#include <memory>
 #include <algorithm>
 #include <cmath>
 #include <climits>   // INT_MIN: the bitwise rows' edge operand
@@ -1425,6 +1427,115 @@ TEST_CASE("codegen parity: player_settings (the settings rows reach one store id
 	HE::api::Ctx ctx;
 	HE::api::prefs::remove(ctx, HE::api::settings::kPrefsKey);
 	HE::api::settings::uninstall();
+}
+
+TEST_CASE("codegen parity: hardware_rows (the hardware rows read one module identically)")
+{
+    struct Restore { ~Restore() { HE::setHardwareProvider(nullptr); } } restore;
+    struct Fake final : HE::HardwareProvider
+    {
+        HE::HardwareInfo detect() override
+        {
+            HE::HardwareInfo h;
+            h.cpuName = "Parity CPU"; h.cpuCores = 8; h.cpuThreads = 16; h.ramTotalMB = 32768; h.osName = "Parity OS";
+            return h;
+        }
+        uint64_t freeMemoryMB() override { return 1; }
+        bool     onBattery() override    { return false; }
+    };
+    HE::setHardwareProvider(std::make_shared<Fake>());
+    HE::GpuInfo gpu; gpu.name = "Parity GPU"; gpu.vramMB = 12010; gpu.api = "Vulkan";
+    HE::setGpuInfo(gpu);
+    HE::DisplayInfo disp; disp.width = 1920; disp.height = 1080; disp.refreshHz = 144.0f; disp.scale = 1.0f;
+    HE::setDisplayInfo(disp);
+
+    ParityPair p("fix/hardware_rows");
+    p.fire("Apply");
+
+    CHECK(p.var("cpu").s == "Parity CPU");
+    CHECK(p.var("threads").i == 16);
+    CHECK(p.var("ram").i == 32768);
+    CHECK(p.var("gpu").s == "Parity GPU");
+    CHECK(p.var("vram").i == 12010);
+    CHECK(p.var("hz").f == doctest::Approx(144.0f));
+    CHECK(p.var("api").s == "Vulkan");
+    CHECK(p.var("byName").s == "Parity OS");
+}
+
+TEST_CASE("codegen parity: quality_settings (the quality rows reach one store identically)")
+{
+	HE::api::settings::resetToDefaults();
+	// A recording host: what the application would be told to draw with.
+	std::vector<std::string> calls;
+	HE::api::settings::Host host;
+	host.baseGraphics.textureQuality = 2;
+	host.applyQuality = [&](const HE::ProjectGraphics& g, const HE::ProjectShadowSettings& s)
+	{
+		calls.push_back(std::string(HE::qualityPresetName(g.preset)) + " tex " + std::to_string(g.textureQuality)
+		                + " shadow " + std::to_string(s.resolution) + (g.enabled ? " on" : " off"));
+	};
+	HE::api::settings::install(std::move(host));
+	calls.clear();
+
+	ParityPair p("fix/quality_settings");
+	p.fire("Apply");
+
+	// Low, then textureQuality 1 over it: no longer a preset, so Custom, and the
+	// value reads back as set.
+	CHECK(p.var("preset").s == "Custom");
+	CHECK(p.var("tex").f == doctest::Approx(1.0f));
+
+	const std::vector<std::string> one = {
+		"Low tex 0 shadow 1024 on",       // setQualityPreset("Low")
+		"Custom tex 1 shadow 1024 on",    // setQualityValue("textureQuality", 1)
+		"Custom tex 2 shadow 2048 off",   // resetToDefaults: the base, as it was handed over
+	};
+	REQUIRE(calls.size() == one.size() * 2);
+	for (size_t i = 0; i < one.size(); ++i)
+	{
+		INFO("call ", i);
+		CHECK(calls[i] == one[i]);                  // interpreter
+		CHECK(calls[one.size() + i] == one[i]);     // compiled
+	}
+	HE::api::settings::uninstall();
+	HE::api::settings::resetToDefaults();
+}
+
+TEST_CASE("codegen parity: quality_levels (the engine's enums and the settings object, interpreted and compiled)")
+{
+	HE::api::settings::resetToDefaults();
+	std::vector<std::string> calls;
+	HE::api::settings::Host host;
+	host.applyQuality = [&](const HE::ProjectGraphics& g, const HE::ProjectShadowSettings& s)
+	{
+		calls.push_back("tex " + std::to_string(g.textureQuality) + " shadow " + std::to_string(s.resolution));
+	};
+	HE::api::settings::install(std::move(host));
+	calls.clear();
+
+	ParityPair p("fix/quality_levels");
+	p.fire("Apply");
+	// Textures set to Low through the object, read back as Low, and the Switch on the
+	// built-in enum took its "low" branch: the same in both halves.
+	CHECK(p.var("route").s == "low");
+
+	p.fire("Shadows");
+	// Set Quality Level (Shadows, Ultra) then Get Quality Level (Shadows): Ultra = 3.
+	CHECK(p.var("shadows").i == 3);
+
+	// fire() runs the interpreted half and then the compiled one for each event, so the
+	// host heard: Apply (interpreted), Apply (compiled), Shadows (interpreted),
+	// Shadows (compiled). Textures stay Low from the first event on.
+	const std::vector<std::string> expected = {
+		"tex 0 shadow 2048", "tex 0 shadow 2048", "tex 0 shadow 4096", "tex 0 shadow 4096" };
+	REQUIRE(calls.size() == expected.size());
+	for (size_t i = 0; i < expected.size(); ++i)
+	{
+		INFO("call ", i);
+		CHECK(calls[i] == expected[i]);
+	}
+	HE::api::settings::uninstall();
+	HE::api::settings::resetToDefaults();
 }
 
 TEST_CASE("codegen parity: player_slots (the local-player rows read one table identically)")

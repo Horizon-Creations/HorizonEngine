@@ -36,6 +36,9 @@ python3 scripts/editor_help_audit.py --check                                # ev
 
 * Assimp (`HE_ENABLE_ASSIMP`), SFTP credentials and so on are configure-time options; a build
   without them is normal and supported.
+* Vulkan on a Mac: MoltenVK is on by default (`brew install molten-vk shaderc`; `-DHE_ENABLE_MOLTENVK=OFF`
+  leaves it out), see `docs/moltenvk-macos-2026-11-06.md`. Without MoltenVK installed the Vulkan backend is
+  simply not built there. Metal stays the default backend; Vulkan is chosen per project/game (`GameBackend`).
 * In a container without the full toolchain, syntax-check a file instead of building
   everything: `g++ -std=c++20 -fsyntax-only -DHE_IMGUI_ENABLED <include dirs> file.cpp`.
 * Running the editor or game unattended: `HE_HIDDEN_WINDOW=1` (see `docs/headless-runs.md`),

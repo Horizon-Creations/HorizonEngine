@@ -56,7 +56,7 @@ public:
         float lightDir[8][4]    = {}; // xyz = travel direction, w = cos(spot half angle)
         float lightColor[8][4]  = {}; // rgb = colour,           w = intensity
         float lightParams[8][4] = {}; // x = range
-        float counts[4]         = {}; // x = light count
+        float counts[4]         = {}; // x = light count; y = material quality + 1 (0 = not filled → High)
         // Screen-space GI shadow inputs for heLitP(): xy = viewport size,
         // z = 1 when the GI masks are bound and valid this frame (0 → heLitP
         // skips the mask samples entirely; UI/preview passes leave this 0).
@@ -595,7 +595,7 @@ public:
 
     // Vulkan only: does the material descriptor set carry row 34 (heFogVolume)? Default yes.
     // VulkanRenderer turns it off BEFORE the first compile on a device whose per-stage
-    // sampler limit cannot hold the 18th fragment sampler (HE::vkmat::fogVolumeFit); the
+    // image limit cannot hold the 18th fragment image (HE::vkmat::fogVolumeFit); the
     // materials then compile without HE_FOG_VOLUME and keep the analytic fog. A pak's
     // baked blobs come from a default library, i.e. with the row.
     void setSpirvFogVolume(bool on) { m_spirvFogVolume = on; }

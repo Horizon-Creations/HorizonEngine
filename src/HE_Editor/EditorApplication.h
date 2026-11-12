@@ -640,6 +640,14 @@ private:
 	// "my own values".
 	EditorConfig m_userGraphics;
 	bool         m_graphicsFromProject = false;
+	// The graphics a script's quality rows chose while the preview plays
+	// (HE::api::settings). Kept apart from the open project's settings so that a
+	// script never edits, or dirties, the project: the settings host writes here,
+	// syncGraphicsSource and projectShadowSettings read it while active, and
+	// stopping play drops it.
+	HE::ProjectGraphics       m_playGraphics;
+	HE::ProjectShadowSettings m_playShadows;
+	bool                      m_playQualityActive = false;
 
 	// App-wide HorizonCode host: owns the runtime the editor world runs on and
 	// the GameInstance script. m_gameInstanceGraph is the authored source (edited

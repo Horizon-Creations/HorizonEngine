@@ -274,6 +274,8 @@ add_executable(he_tests
     test_input_gamepad.cpp
     test_input_rebind.cpp
     test_player_settings.cpp
+    test_quality_enums.cpp
+    test_quality_governor.cpp
     test_eventbus.cpp
     test_scripting.cpp
     test_scripting_binding.cpp
@@ -387,6 +389,7 @@ add_executable(he_tests
     test_async_streaming.cpp
     test_crash_handler.cpp
     test_logging.cpp
+    test_hardware_info.cpp
     test_project_exporter.cpp
     test_export_profiles.cpp
     test_export_sdk_build.cpp
@@ -964,6 +967,7 @@ add_executable(he_tests
     # HE_IMGUI_ENABLED (ImGuiKeyChord is its currency).
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorShortcuts.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/ShortcutsPage.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/HardwarePage.cpp
     # The World Outliner, for test_outliner_ui.cpp: it needs a real AppContext
     # (built there) and ImGui, and nothing else in this binary. Same per-file
     # HE_IMGUI_ENABLED as the gizmo — AppContext's layout depends on it, so the
@@ -1090,6 +1094,7 @@ set_source_files_properties(
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorShortcuts.cpp
     test_editor_shortcuts.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/ShortcutsPage.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/HardwarePage.cpp
     test_shortcuts_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/OutlinerPanel.cpp
     test_outliner_ui.cpp
@@ -1276,7 +1281,7 @@ set(HCGEN_CLASSES
     LatentFlow Enums Structs GameInstance GiCaller EngineEvents
     CastTarget Casts InheritBase InheritDerived
     InheritNovarsBase InheritNovars InputActions Containers Reroutes
-    CheatEvent DatetimeDouble SequenceTransport InputRumble InputRebind PlayerSettings PlayerSlots
+    CheatEvent DatetimeDouble SequenceTransport InputRumble InputRebind PlayerSettings HardwareRows QualitySettings QualityLevels PlayerSlots
     PullConstruct PullSpawner BindTo
     ExtractDestruct ExtractDerived ExtractListener
     EngineWorld

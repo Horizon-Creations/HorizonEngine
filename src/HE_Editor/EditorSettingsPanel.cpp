@@ -1,4 +1,5 @@
 #include "EditorSettingsPanel.h"
+#include "HardwarePage.h"        // Preferences » Preview » Hardware (Thema 337)
 #include "EditorGraphics.h"   // which rows the project's values lock
 #include "EditorApplication.h"           // AppContext, EditorConfig, EditorCamera
 #include "ToolSetupDialog.h"             // Tool Status "Fix" opens the setup dialog on that tool's row
@@ -1135,6 +1136,7 @@ void requestOpenProjectPage(ProjectSettingsPanel::Page page)
 	case P::RenderDefaults:  target = Page::ProjectWindow;       break;
 	case P::Fonts:           target = Page::ProjectFonts;        break;
 	case P::Permissions:     target = Page::ProjectPermissions;  break;
+	case P::Quality:         target = Page::WorldQuality;        break;
 	case P::Shadows:         target = Page::WorldShadows;        break;
 	case P::Simulation:      target = Page::WorldSimulation;     break;
 	case P::CollisionLayers: target = Page::WorldCollisionLayers; break;
@@ -2210,6 +2212,7 @@ constexpr NavItem kEditorItems[] = {
 constexpr NavItem kPreviewItems[] = {
 	{ Page::EditorRenderer,  "Editor Renderer" },
 	{ Page::ViewportQuality, "Graphics" },
+	{ Page::Hardware,        "Hardware" },
 };
 constexpr NavItem kConnectionItems[] = {
 	{ Page::SourceControl, "Source Control" },
@@ -2229,6 +2232,7 @@ constexpr NavItem kProjectItems[] = {
 	{ Page::ProjectPermissions, "Permissions" },
 };
 constexpr NavItem kWorldItems[] = {
+	{ Page::WorldQuality,        "Quality" },
 	{ Page::WorldShadows,        "Shadows" },
 	{ Page::WorldSimulation,     "Simulation" },
 	{ Page::WorldCollisionLayers, "Collision Layers" },
@@ -2259,6 +2263,7 @@ bool projectPageOf(Page p, ProjectSettingsPanel::Page& out)
 	case Page::ProjectWindow:       out = P::RenderDefaults;  return true;
 	case Page::ProjectFonts:        out = P::Fonts;           return true;
 	case Page::ProjectPermissions:  out = P::Permissions;     return true;
+	case Page::WorldQuality:        out = P::Quality;         return true;
 	case Page::WorldShadows:        out = P::Shadows;         return true;
 	case Page::WorldSimulation:     out = P::Simulation;      return true;
 	case Page::WorldCollisionLayers: out = P::CollisionLayers; return true;
@@ -2442,6 +2447,7 @@ void render(AppContext& ctx, const ImVec2& pos, const ImVec2& size)
 	}
 	else if (s_page == Page::SourceControl) drawSourceControlPage(ctx);
 	else if (s_page == Page::Status)      drawStatusPage(ctx);
+	else if (s_page == Page::Hardware)    HardwarePage::draw();
 	ImGui::EndChild();
 
 	// ── Footer ───────────────────────────────────────────────────────────────

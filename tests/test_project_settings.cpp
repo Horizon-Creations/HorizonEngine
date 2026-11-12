@@ -8,6 +8,8 @@
 #include "TestFsUtil.h"
 
 #include <Project/ProjectSettings.h>
+#include <Diagnostics/GlobalState.h>
+#include <Renderer/IRenderer.h>
 #include <HorizonScene/PhysicsTuning.h>   // kMaxThreads, pinned against the project's
 #include "ProjectManager.h"
 
@@ -1019,4 +1021,213 @@ TEST_CASE("ProjectSettings::clamp: a NaN or infinite float falls back, field by 
 		CHECK(s.graphics.aaSharpness == def.graphics.aaSharpness);
 		CHECK(s.graphics.dofAperture == def.graphics.dofAperture);
 	}
+}
+
+// ── Quality presets ──────────────────────────────────────────────────────────
+// A preset is a label over values that already existed (ProjectGraphics +
+// ProjectShadowSettings). What can go wrong: an old file that suddenly carries a
+// preset, a tag that outlives the values it named, or a preset that changes
+// nothing anyone can see because the graphics block is off.
+
+TEST_CASE("QualityPreset: default-constructed is Custom with today's values, and a file without the key stays so")
+{
+	const HE::ProjectSettings def;
+	CHECK(def.graphics.preset == HE::QualityPreset::Custom);
+	CHECK(def.graphics.textureQuality == 2);    // High = full detail = before these existed
+	CHECK(def.graphics.materialQuality == 2);
+	// Today's defaults match none of the tables: Custom is the honest reading.
+	CHECK(HE::detectQualityPreset(def.graphics, def.shadows) == HE::QualityPreset::Custom);
+
+	HE::ProjectSettings old;
+	old.fromJson(json{ { "graphics", { { "enabled", true }, { "antiAliasing", 3 } } } });
+	CHECK(old.graphics.preset == HE::QualityPreset::Custom);
+	CHECK(old.graphics.antiAliasing == 3);
+	CHECK(old.graphics.textureQuality == 2);
+	CHECK(old.shadows.resolution == 2048);
+}
+
+TEST_CASE("QualityPreset: applying a named preset writes its values and turns the graphics block on")
+{
+	HE::ProjectSettings s;
+	REQUIRE_FALSE(s.graphics.enabled);
+	const float bloom = s.graphics.bloomIntensity;
+	const float bias  = s.shadows.slopeBias;
+
+	HE::applyQualityPreset(HE::QualityPreset::Low, s.graphics, s.shadows);
+	CHECK(s.graphics.enabled);
+	CHECK(s.graphics.preset == HE::QualityPreset::Low);
+	CHECK(s.graphics.renderScale == doctest::Approx(0.75f));
+	CHECK_FALSE(s.graphics.ssaoEnabled);
+	CHECK(s.graphics.textureQuality == 0);
+	CHECK(s.shadows.resolution == 1024);
+	CHECK(s.shadows.cascadeCount == 2);
+	// What the picture looks like at equal cost is not a preset's business.
+	CHECK(s.graphics.bloomIntensity == doctest::Approx(bloom));
+	CHECK(s.shadows.slopeBias == doctest::Approx(bias));
+
+	HE::applyQualityPreset(HE::QualityPreset::Ultra, s.graphics, s.shadows);
+	CHECK(s.graphics.preset == HE::QualityPreset::Ultra);
+	CHECK(s.graphics.giReflectionsEnabled);
+	CHECK(s.graphics.giReflBounces == 2);
+	CHECK(s.shadows.resolution == 4096);
+}
+
+TEST_CASE("QualityPreset: Custom changes nothing, not even the enabled switch")
+{
+	HE::ProjectSettings s;
+	const HE::ProjectSettings before = s;
+	HE::applyQualityPreset(HE::QualityPreset::Custom, s.graphics, s.shadows);
+	CHECK(s == before);
+	CHECK_FALSE(s.graphics.enabled);
+}
+
+TEST_CASE("QualityPreset: detect names the preset the values hold, and every preset detects as itself")
+{
+	for (HE::QualityPreset p : { HE::QualityPreset::Low, HE::QualityPreset::Medium,
+	                             HE::QualityPreset::High, HE::QualityPreset::Ultra })
+	{
+		HE::ProjectSettings s;
+		HE::applyQualityPreset(p, s.graphics, s.shadows);
+		CHECK(HE::detectQualityPreset(s.graphics, s.shadows) == p);
+		s.graphics.enabled = false;   // not looked at
+		s.graphics.preset  = HE::QualityPreset::Custom;
+		CHECK(HE::detectQualityPreset(s.graphics, s.shadows) == p);
+	}
+	// The four tables are distinct, or detect would name the wrong one.
+	HE::ProjectSettings a, b;
+	HE::applyQualityPreset(HE::QualityPreset::Medium, a.graphics, a.shadows);
+	HE::applyQualityPreset(HE::QualityPreset::High,   b.graphics, b.shadows);
+	CHECK(a.graphics.ssrEnabled != b.graphics.ssrEnabled);
+}
+
+TEST_CASE("QualityPreset: a tag whose values have moved reads as Custom after clamp and after a reload")
+{
+	HE::ProjectSettings s;
+	HE::applyQualityPreset(HE::QualityPreset::High, s.graphics, s.shadows);
+	s.clamp();
+	CHECK(s.graphics.preset == HE::QualityPreset::High);   // untouched values keep the tag
+
+	s.graphics.renderScale = 0.9f;   // one slider after the preset
+	s.clamp();
+	CHECK(s.graphics.preset == HE::QualityPreset::Custom);
+
+	// A hand-edited file: tag says Ultra, a value says otherwise.
+	HE::ProjectSettings u;
+	HE::applyQualityPreset(HE::QualityPreset::Ultra, u.graphics, u.shadows);
+	json j;
+	u.toJson(j);
+	j["shadows"]["resolution"] = 1024;
+	HE::ProjectSettings loaded;
+	loaded.fromJson(j);
+	CHECK(loaded.graphics.preset == HE::QualityPreset::Custom);
+}
+
+TEST_CASE("QualityPreset: toJson/fromJson keeps the tag and the new fields; names parse case-insensitively")
+{
+	HE::ProjectSettings a;
+	HE::applyQualityPreset(HE::QualityPreset::Medium, a.graphics, a.shadows);
+	json j;
+	a.toJson(j);
+	CHECK(j["graphics"]["qualityPreset"].get<std::string>() == "Medium");
+	CHECK(j["graphics"]["textureQuality"].get<int>() == 1);
+	CHECK(j["graphics"]["materialQuality"].get<int>() == 1);
+
+	HE::ProjectSettings b;
+	b.fromJson(j);
+	CHECK(a == b);
+	CHECK(b.graphics.preset == HE::QualityPreset::Medium);
+
+	HE::QualityPreset p = HE::QualityPreset::Custom;
+	CHECK(HE::qualityPresetFromName("uLtRa", p));
+	CHECK(p == HE::QualityPreset::Ultra);
+	CHECK_FALSE(HE::qualityPresetFromName("Insane", p));
+	CHECK(p == HE::QualityPreset::Ultra);   // untouched on failure
+	for (int i = 0; i < HE::kQualityPresetCount; ++i)
+	{
+		HE::QualityPreset q = HE::QualityPreset::Low;
+		CHECK(HE::qualityPresetFromName(HE::qualityPresetName(static_cast<HE::QualityPreset>(i)), q));
+		CHECK(static_cast<int>(q) == i);
+	}
+
+	// An unknown name or the wrong type is Custom, not an error.
+	HE::ProjectSettings c;
+	c.fromJson(json{ { "graphics", { { "qualityPreset", "Insane" } } } });
+	CHECK(c.graphics.preset == HE::QualityPreset::Custom);
+	c.fromJson(json{ { "graphics", { { "qualityPreset", 7 } } } });
+	CHECK(c.graphics.preset == HE::QualityPreset::Custom);
+
+	// The two new levels are held to 0..2 like the other quality ints.
+	c.fromJson(json{ { "graphics", { { "textureQuality", 9 }, { "materialQuality", -3 } } } });
+	CHECK(c.graphics.textureQuality == 2);
+	CHECK(c.graphics.materialQuality == 0);
+}
+
+// ── Quality: the game's live source and the renderer's levels ────────────────
+// The packaged game fills ProjectSettings::graphics from config.json once and
+// pushes the struct every frame (GameApplication). The fill must read exactly the
+// keys the export writes, one per type, and a missing key must be today's default.
+
+TEST_CASE("readGraphicsFromConfig: reads each field from its config key, missing keys are the defaults")
+{
+	GlobalState& gs = GlobalState::getInstance();
+
+	// Nothing set: every field is its default (and `enabled` / `preset` untouched).
+	HE::ProjectGraphics g;
+	g.enabled = true;
+	g.preset  = HE::QualityPreset::High;
+	g.renderScale = 0.5f;   // a stale value: a missing key must NOT keep it
+	HE::readGraphicsFromConfig(g, gs);
+	const HE::ProjectGraphics def;
+	CHECK(g.enabled);
+	CHECK(g.preset == HE::QualityPreset::High);
+	CHECK(g.renderScale == doctest::Approx(def.renderScale));
+	CHECK(g.bloomEnabled == def.bloomEnabled);
+	CHECK(g.textureQuality == 2);
+
+	// One key per type, under the names the export dialog writes.
+	gs.setCustomConfigEntry("AntiAliasing", 3);                    // int
+	gs.setCustomConfigEntry("RenderScale", 0.75);                  // float
+	gs.setCustomConfigEntry("GlobalIlluminationEnabled", true);    // bool, key != member name
+	gs.setCustomConfigEntry("TextureQuality", 0);                  // the new ones
+	gs.setCustomConfigEntry("MaterialQuality", 1);
+	HE::readGraphicsFromConfig(g, gs);
+	CHECK(g.antiAliasing == 3);
+	CHECK(g.renderScale == doctest::Approx(0.75f));
+	CHECK(g.giEnabled);
+	CHECK(g.textureQuality == 0);
+	CHECK(g.materialQuality == 1);
+
+	// Put the process-wide state back for the tests after this one.
+	gs.setCustomConfigEntry("AntiAliasing", def.antiAliasing);
+	gs.setCustomConfigEntry("RenderScale", def.renderScale);
+	gs.setCustomConfigEntry("GlobalIlluminationEnabled", def.giEnabled);
+	gs.setCustomConfigEntry("TextureQuality", def.textureQuality);
+	gs.setCustomConfigEntry("MaterialQuality", def.materialQuality);
+}
+
+TEST_CASE("readGraphicsFromConfig + applyQualityPreset: a preset on the live struct is what the next push reads")
+{
+	GlobalState& gs = GlobalState::getInstance();
+	HE::ProjectSettings s;
+	HE::readGraphicsFromConfig(s.graphics, gs);
+	s.clamp();
+	CHECK(s.graphics.preset == HE::QualityPreset::Custom);
+
+	HE::applyQualityPreset(HE::QualityPreset::Low, s.graphics, s.shadows);
+	const IRenderer::QualitySettings q{ s.graphics.textureQuality, s.graphics.materialQuality };
+	CHECK(q.textureQuality == 0);
+	CHECK(IRenderer::TextureMinLodForQuality(q.textureQuality) == doctest::Approx(2.0f));
+}
+
+TEST_CASE("IRenderer::TextureMinLodForQuality: Low and Medium drop mip levels, High and anything unknown keep them all")
+{
+	CHECK(IRenderer::TextureMinLodForQuality(0) == doctest::Approx(2.0f));
+	CHECK(IRenderer::TextureMinLodForQuality(1) == doctest::Approx(1.0f));
+	CHECK(IRenderer::TextureMinLodForQuality(2) == doctest::Approx(0.0f));
+	CHECK(IRenderer::TextureMinLodForQuality(7) == doctest::Approx(0.0f));
+	CHECK(IRenderer::TextureMinLodForQuality(-1) == doctest::Approx(0.0f));
+	// The defaults are today's behaviour.
+	const IRenderer::QualitySettings d;
+	CHECK(d.textureQuality == 2);
+	CHECK(d.materialQuality == 2);
 }

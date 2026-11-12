@@ -1,4 +1,5 @@
 #include "ProjectSettingsPanel.h"
+#include <Diagnostics/HardwareInfo.h>   // the machine's suggested preset (Thema 337)
 #include "EditorApplication.h"           // AppContext, ProjectManager
 #include "EditorTheme.h"                 // rail accent bar
 #include "EditorWidgets.h"               // Row:: label-above widgets + wrapped hint()
@@ -787,6 +788,172 @@ void drawRenderDefaultsPage(AppContext& ctx)
 	if (commit) commitSettings(ctx, p, "render defaults");
 }
 
+// ─── World ▸ Quality ─────────────────────────────────────────────────────────
+// One word instead of a dozen sliders. A preset (HE::QualityPreset) writes the
+// cost-driving values of the project's graphics and shadows; the regulators below
+// are those same values, so a preset and a single change are one model and the
+// preset reads Custom the moment a value leaves its table. The page edits the
+// same members the Post-Processing / Reflections & GI pages and the Shadows page
+// do — nothing here is a second copy.
+//
+// While the project does not set its own graphics, the regulators show what the
+// editor draws with right now (the user's values), so nothing jumps; the first
+// preset or change turns the project's own graphics on, starting from those.
+void drawQualityPage(AppContext& ctx)
+{
+	HE::Ed::Help::Scope helpScope("Quality");
+	ProjectData* pp = openProject(ctx);
+	if (!pp) return;
+	ProjectData& p = *pp;
+	HE::ProjectGraphics&       g  = p.settings.graphics;
+	HE::ProjectShadowSettings& sh = p.settings.shadows;
+
+	settingsFileHint(g.enabled ? nullptr
+		: "This project does not set its own graphics yet: the values below are what your editor "
+		  "draws with. Picking a preset or changing a value makes them the project's.");
+	hint("A preset sets shadows, anti-aliasing, resolution, ambient occlusion, reflections, global "
+	     "illumination and texture detail together. Change one value and the preset reads Custom. "
+	     "Bloom, depth of field and the look of the picture stay on their own pages.");
+
+	// What the controls edit: the project's block, or the editor's values until it has one.
+	HE::ProjectGraphics       work = g;
+	HE::ProjectShadowSettings wsh  = sh;
+	if (!g.enabled) EditorGraphics::capture(ctx.editorConfig, work);
+
+	bool edited = false;
+	ImGui::SeparatorText("Preset");
+	{
+		static const char* const kNames[] = { "Low", "Medium", "High", "Ultra", "Custom" };
+		int cur = static_cast<int>(HE::detectQualityPreset(work, wsh));
+		if (Row::combo("Quality preset##qpreset", &cur, kNames, 5))
+		{
+			// Custom is what a moved value reads as; picking it keeps the values as they are.
+			if (cur != static_cast<int>(HE::QualityPreset::Custom))
+			{
+				HE::applyQualityPreset(static_cast<HE::QualityPreset>(cur), work, wsh);
+				edited = true;
+			}
+		}
+	}
+	hint("Low and Medium save frame time for slower machines, High is the everyday setting, "
+	     "Ultra turns every effect up. Scripts can change the player's choice at run time "
+	     "(Set Quality Preset).");
+	{
+		// A suggestion from the hardware (Thema 337), not a setting: nothing is applied from it.
+		const HE::HardwareInfo hw = HE::hardwareInfo();
+		hint(("This machine suggests " + std::string(HE::qualityPresetName(HE::recommendQualityPreset(hw))) + " ("
+		      + HE::recommendQualityReason(hw) + "). Only a suggestion; Preferences \xC2\xBB Hardware lists the machine.").c_str());
+	}
+	ImGui::Spacing();
+
+	static const char* const kLevel[] = { "Low", "Medium", "High" };
+
+	ImGui::SeparatorText("Resolution and edges");
+	{
+		static const char* const kAA[] = { "Off", "FXAA", "SMAA", "TAA", "MetalFX" };
+		int aa = std::clamp(work.antiAliasing, 0, 4);
+		if (Row::combo("Anti-aliasing##qaa", &aa, kAA, 5)) { work.antiAliasing = aa; edited = true; }
+		edited |= Row::sliderFloat("Render scale##qscale", &work.renderScale, 0.25f, 2.0f, "%.2f");
+	}
+	hint("Below 1 draws at a lower resolution and upscales; above 1 supersamples. "
+	     "Methods a backend cannot do fall back to a simpler one.");
+	ImGui::Spacing();
+
+	ImGui::SeparatorText("Shadows");
+	{
+		static const char* const kRes[]  = { "512", "1024", "2048", "4096", "8192" };
+		static const int         kResV[] = { 512, 1024, 2048, 4096, 8192 };
+		int cur = 2;
+		for (int i = 0; i < 5; ++i) if (wsh.resolution == kResV[i]) cur = i;
+		if (Row::combo("Shadow resolution##qshres", &cur, kRes, 5)) { wsh.resolution = kResV[cur]; edited = true; }
+		edited |= Row::dragFloat("Shadow distance##qshdist", &wsh.distance, 1.0f, 1.0f,
+		                         HE::ProjectShadowSettings::kMaxDistance, "%.0f m");
+		edited |= Row::sliderInt("Shadow cascades##qshcasc", &wsh.cascadeCount, 1,
+		                         HE::ProjectShadowSettings::kMaxCascades);
+	}
+	hint("The same values as the Shadows page, which also holds the bias settings. "
+	     "Metal and OpenGL draw cascades; the other backends ignore them.");
+	ImGui::Spacing();
+
+	ImGui::SeparatorText("Screen effects");
+	edited |= EditorWidgets::checkbox("Ambient occlusion##qssao", &work.ssaoEnabled);
+	edited |= EditorWidgets::checkbox("Screen-space reflections##qssr", &work.ssrEnabled);
+	if (work.ssrEnabled)
+	{
+		int q = std::clamp(work.ssrQuality, 0, 2);
+		if (Row::combo("Reflection quality##qssrq", &q, kLevel, 3)) { work.ssrQuality = q; edited = true; }
+	}
+	edited |= EditorWidgets::checkbox("Global illumination##qgi", &work.giEnabled);
+	if (work.giEnabled)
+	{
+		int q = std::clamp(work.giShadowQuality, 0, 2);
+		if (Row::combo("GI shadow quality##qgiq", &q, kLevel, 3)) { work.giShadowQuality = q; edited = true; }
+	}
+	edited |= EditorWidgets::checkbox("GI reflections##qgirefl", &work.giReflectionsEnabled);
+	if (work.giReflectionsEnabled)
+	{
+		int q = std::clamp(work.giReflQuality, 0, 2);
+		if (Row::combo("GI reflection quality##qgireflq", &q, kLevel, 3)) { work.giReflQuality = q; edited = true; }
+		edited |= Row::sliderInt("GI reflection bounces##qgibounce", &work.giReflBounces, 1, 4);
+	}
+	hint("Each effect is used only where the backend can do it (capability-gated). "
+	     "Intensity, radius and the rest are on Reflections & GI.");
+	ImGui::Spacing();
+
+	ImGui::SeparatorText("Asset detail");
+	{
+		int t = std::clamp(work.textureQuality, 0, 2);
+		if (Row::combo("Texture quality##qtex", &t, kLevel, 3)) { work.textureQuality = t; edited = true; }
+		int m = std::clamp(work.materialQuality, 0, 2);
+		if (Row::combo("Material quality##qmat", &m, kLevel, 3)) { work.materialQuality = m; edited = true; }
+	}
+	hint("Texture quality keeps material textures off their finest one or two mip levels "
+	     "(Metal today; a texture with no mip chain does not change). Material quality gives "
+	     "procedural noise in materials fewer octaves at Low and Medium, and the Quality "
+	     "Level node in a material graph reads it.");
+	ImGui::Spacing();
+
+	// Not part of the preset: the project's switch for the game's frame-time governor.
+	ImGui::SeparatorText("Automatic quality");
+	bool autoEdited = false;
+	{
+		HE::ProjectAutoQuality aq = p.settings.autoQuality;
+		static const char* const kAutoLevel[] = { "Low", "Medium", "High", "Ultra" };
+		autoEdited |= EditorWidgets::checkbox("Automatic quality##qauto", &aq.enabled);
+		if (aq.enabled)
+		{
+			autoEdited |= Row::dragFloat("Target frame rate##qautofps", &aq.targetFps, 1.0f,
+			                             HE::ProjectAutoQuality::kMinFps,
+			                             HE::ProjectAutoQuality::kMaxFps, "%.0f fps");
+			if (Row::combo("Lowest level##qautomin", &aq.minLevel, kAutoLevel, 4)) autoEdited = true;
+			if (Row::combo("Highest level##qautomax", &aq.maxLevel, kAutoLevel, 4)) autoEdited = true;
+			aq.maxLevel = std::max(aq.maxLevel, aq.minLevel);
+		}
+		if (autoEdited) p.settings.autoQuality = aq;
+	}
+	hint("In the game only: when the frame rate stays below the target for a couple of "
+	     "seconds the quality steps down one level, and after a long steady stretch it tries "
+	     "one level up again. A player who picks a preset turns it off. The editor viewport never changes "
+	     "level by itself.");
+
+	// The model follows every change; the file is written once, when no control is held.
+	static bool s_dirty = false;
+	if (edited)
+	{
+		work.enabled = true;
+		work.preset  = HE::detectQualityPreset(work, wsh);
+		g  = work;
+		sh = wsh;
+		s_dirty = true;
+	}
+	if (autoEdited) s_dirty = true;
+	if (s_dirty && !ImGui::IsAnyItemActive())
+	{
+		s_dirty = false;
+		commitSettings(ctx, p, "quality settings");
+	}
+}
+
 // ─── Project ▸ Source Control ────────────────────────────────────────────────
 // ─── World ▸ Shadows ─────────────────────────────────────────────────────
 // The directional light's cascaded shadow maps. The defaults are the constants
@@ -1292,6 +1459,7 @@ const char* pageTitle(Page page)
 	case Page::RenderDefaults:  return "Game Window";
 	case Page::Fonts:           return "Fonts";
 	case Page::Permissions:     return "Permissions";
+	case Page::Quality:         return "Quality";
 	case Page::Shadows:         return "Shadows";
 	case Page::Simulation:      return "Simulation";
 	case Page::CollisionLayers: return "Collision Layers";
@@ -1311,6 +1479,7 @@ void drawPage(AppContext& ctx, Page page)
 	case Page::RenderDefaults:  drawRenderDefaultsPage(ctx);  break;
 	case Page::Fonts:           drawFontsPage(ctx);           break;
 	case Page::Permissions:     drawPermissionsPage(ctx);     break;
+	case Page::Quality:         drawQualityPage(ctx);         break;
 	case Page::Shadows:         drawShadowsPage(ctx);         break;
 	case Page::Simulation:      drawSimulationPage(ctx);      break;
 	case Page::CollisionLayers: drawCollisionLayersPage(ctx); break;

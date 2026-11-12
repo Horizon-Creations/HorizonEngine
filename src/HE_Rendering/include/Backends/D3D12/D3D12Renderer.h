@@ -66,6 +66,7 @@ public:
 
     void SetDebugLines(const std::vector<DebugLine>& lines) override;
     void SetMoonTexture(const void* rgba8Pixels, int width, int height) override;
+    void SetQualitySettings(const QualitySettings& s) override;
     void SetSSAOSettings(const SSAOSettings& settings) override;
     void SetBloomSettings(const BloomSettings& settings) override;
     void SetAntiAliasingSettings(const AntiAliasingSettings& settings) override;

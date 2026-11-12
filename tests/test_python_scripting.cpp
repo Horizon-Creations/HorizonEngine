@@ -10,6 +10,8 @@
 #include <Scripting/PythonPluginAbi.h>
 #include <Platform/DynLib.h>
 #include <Types/TypeRegistry.h>
+#include <Diagnostics/HardwareInfo.h>
+#include <memory>
 #include <HorizonScene/ScriptContext.h>
 #include <HorizonScene/EngineApi.h>
 #include <HorizonScene/HcWatchEvents.h>             // on_changed_<Var> delivery, as the hosts run it
@@ -449,6 +451,45 @@ TEST_CASE("ScriptContext: registry-driven horizon.math.* (Python)")
     CHECK(t.position.x == doctest::Approx(3.0f));   // clamp(5, 0, 3)
     CHECK(t.position.y == doctest::Approx(5.0f));   // lerp(0, 10, 0.5)
     CHECK(t.position.z == doctest::Approx(9.0f));   // max(2, 9)
+}
+
+// The graphics quality rows, from a Python menu: asserted inside the script.
+static const char* kPyQuality = R"py(
+import horizon
+
+class QualityUser(horizon.Behavior):
+    def on_start(self):
+        assert horizon.settings.setQualityPreset("Ultra") is True
+        assert horizon.settings.qualityPreset() == "Ultra"
+        assert horizon.settings.setQualityValue("shadowResolution", 1024) is True
+        assert horizon.settings.qualityPreset() == "Custom"
+        assert horizon.settings.qualityValue("shadowResolution") == 1024
+        assert "textureQuality" in horizon.settings.qualityFields()
+        assert horizon.settings.qualityPresetNames()[0] == "Low"
+        horizon.setPosition(self.entity_id, 1, 2, 3)
+)py";
+
+TEST_CASE("ScriptContext: horizon.settings quality rows reach the player's settings store (Python)")
+{
+    HE::api::settings::uninstall();
+    HE::api::settings::resetToDefaults();
+    HE::api::settings::Host host;
+    host.applyQuality = [](const HE::ProjectGraphics&, const HE::ProjectShadowSettings&) {};
+    HE::api::settings::install(std::move(host));
+
+    HorizonWorld world;
+    ScriptContext ctx(world);
+    REQUIRE(ctx.loadScript("pyquality", kPyQuality, HE::ScriptLanguage::Python));
+    auto e  = makeEntity(world, "QualityHero");
+    auto id = ctx.createInstance("pyquality", e);
+    REQUIRE(id != ScriptEngine::kInvalidInstance);
+    REQUIRE(ctx.callOnStart(id));
+    // The script's asserts ran: the position is its last statement.
+    const auto& t = world.registry().get<TransformComponent>(e);
+    CHECK(t.position.z == doctest::Approx(3.0f));
+
+    HE::api::settings::uninstall();
+    HE::api::settings::resetToDefaults();
 }
 
 // Bitwise, both ways: Python's own operators (a language feature, nothing the
@@ -1546,3 +1587,51 @@ TEST_CASE("ScriptContext: the manual's Python water example runs, and rings wher
 }
 
 #endif // HE_HAVE_PYTHON
+
+// The hardware rows, from a Python about box: asserted inside the script.
+static const char* kPyHardware = R"py(
+import horizon
+
+class AboutBox(horizon.Behavior):
+    def on_start(self):
+        assert horizon.hardware.cpuName() == "Py CPU"
+        assert horizon.hardware.cpuThreads() == 12
+        assert horizon.hardware.gpuName() == "Py GPU"
+        assert horizon.hardware.gpuVramMB() == 6144
+        assert horizon.hardware.graphicsApi() == "D3D11"
+        assert horizon.hardware.value("RamTotalMB") == "8192"
+        assert horizon.hardware.value("nonsense") == ""
+        fields = horizon.hardware.fields()
+        assert fields[0] == "CpuName" and fields[-1] == "OnBattery"
+        assert "GPU: Py GPU" in horizon.hardware.summary()
+        horizon.setPosition(self.entity_id, 4, 5, 6)
+)py";
+
+TEST_CASE("ScriptContext: horizon.hardware rows read the machine's facts (Python)")
+{
+    struct Restore { ~Restore() { HE::setHardwareProvider(nullptr); } } restore;
+    struct Fake final : HE::HardwareProvider
+    {
+        HE::HardwareInfo detect() override
+        {
+            HE::HardwareInfo h;
+            h.cpuName = "Py CPU"; h.cpuCores = 6; h.cpuThreads = 12; h.ramTotalMB = 8192;
+            return h;
+        }
+        uint64_t freeMemoryMB() override { return 1000; }
+        bool     onBattery() override    { return false; }
+    };
+    HE::setHardwareProvider(std::make_shared<Fake>());
+    HE::GpuInfo gpu; gpu.name = "Py GPU"; gpu.vramMB = 6144; gpu.api = "D3D11";
+    HE::setGpuInfo(gpu);
+
+    HorizonWorld world;
+    ScriptContext ctx(world);
+    REQUIRE(ctx.loadScript("pyhardware", kPyHardware, HE::ScriptLanguage::Python));
+    auto e  = makeEntity(world, "AboutHero");
+    auto id = ctx.createInstance("pyhardware", e);
+    REQUIRE(id != ScriptEngine::kInvalidInstance);
+    REQUIRE(ctx.callOnStart(id));
+    const auto& t = world.registry().get<TransformComponent>(e);
+    CHECK(t.position.z == doctest::Approx(6.0f));   // the script's asserts all held
+}

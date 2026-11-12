@@ -415,8 +415,10 @@ namespace HcEditorUtil
 	// drift apart.
 	bool drawStructDefaultEditor(HorizonCode::Variable& v);
 
-	// Inline pin defaults: simple UNWIRED data inputs (Bool/Int/Float/String, no
-	// arrays) show a small entry right on the node — no literal node needed.
+	// Inline pin defaults: simple UNWIRED data inputs (Bool/Int/Float/String/Enum,
+	// no arrays) show a small entry right on the node — no literal node needed.
+	// An Enum pin draws the same dropdown its Const/Make-Enum literal node body
+	// does (the definition's entry names), keyed by the pin's own typeName.
 	// `pinSupportsInlineDefault` gates per unified pin; the editor draws inside
 	// the GraphEditor's positioned per-pin child. `committed` = snapshot time.
 	bool pinSupportsInlineDefault(const HorizonCode::Node& n, int unifiedPin);
@@ -437,7 +439,7 @@ namespace HcEditorUtil
 	                          const ParamChoices& choices = {},
 	                          const ParamHasChoices& hasChoices = {});
 	// How much room that editor needs, in graph units (0 = the canvas's default
-	// slot). A string pin asks for more: a name has to be readable to be
+	// slot). A string or enum pin asks for more: a name has to be readable to be
 	// checkable, and as a dropdown it carries an arrow as well.
 	float pinInlineEditorWidth(const HorizonCode::Node& n, int unifiedPin);
 
