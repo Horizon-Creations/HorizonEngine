@@ -9576,6 +9576,13 @@ static void packRvtPage(D3D11RendererImpl& p, int layer, uint32_t hotSlice, uint
 
     ComPtr<ID3D11RasterizerState> prevRS;
     p.context->RSGetState(&prevRS);
+    ComPtr<ID3D11BlendState> prevBlend;
+    FLOAT prevBlendFactor[4];
+    UINT prevSampleMask;
+    p.context->OMGetBlendState(&prevBlend, prevBlendFactor, &prevSampleMask);
+    ComPtr<ID3D11DepthStencilState> prevDSS;
+    UINT prevStencilRef;
+    p.context->OMGetDepthStencilState(&prevDSS, &prevStencilRef);
 
     ID3D11RenderTargetView* rtvRaw = rtv.Get();
     p.context->OMSetRenderTargets(1, &rtvRaw, nullptr);
@@ -9596,6 +9603,8 @@ static void packRvtPage(D3D11RendererImpl& p, int layer, uint32_t hotSlice, uint
 
     { ID3D11ShaderResourceView* none = nullptr; p.context->PSSetShaderResources(0, 1, &none); }
     p.context->RSSetState(prevRS.Get());
+    p.context->OMSetBlendState(prevBlend.Get(), prevBlendFactor, prevSampleMask);
+    p.context->OMSetDepthStencilState(prevDSS.Get(), prevStencilRef);
 }
 
 // The arrays hold `rvtAlloc` slices; a page for a slot beyond that grows them (a new array, the old slices copied across on the GPU,
