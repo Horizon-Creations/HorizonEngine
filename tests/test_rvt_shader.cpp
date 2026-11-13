@@ -59,6 +59,41 @@ TEST_CASE("RVT node: the fragment calls the shared lookup and declares the table
 	CHECK(pg.find("heRvt") == std::string::npos);
 }
 
+TEST_CASE("RVT node wired into Displacement: the domain stage gets a neutral value, never a call to the undeclared lookup")
+{
+	using T = HE::MatNodeType;
+	// Only the displacement reads it: no fragment use, so nothing of the RVT is declared anywhere.
+	{
+		HE::MaterialGraph g;
+		const int out = g.addNode(T::Output);
+		const int rvt = g.addNode(T::RvtSample);
+		g.connect(rvt, 2, out, HE::kMatOutputDisplacementPin); // AO: Float, the pin's type
+		const HE::MatShaderGen gen = HE::generateFragment(g);
+		REQUIRE_FALSE(gen.displacementBody.empty());
+		CHECK(gen.displacementBody.find("heRvt") == std::string::npos);
+		CHECK(gen.displacementBody.find("_ao = 1.0") != std::string::npos);
+		CHECK(gen.displacementBody.find("heDisp") != std::string::npos);
+		CHECK(gen.glsl.find("heRvt") == std::string::npos);
+	}
+	// The same node also feeds the fragment: the fragment keeps its lookup, the domain stage still has no call to it.
+	{
+		HE::MaterialGraph g = rvtGraph();
+		int out = 0, rvt = 0;
+		for (const HE::MatGraphNode& n : g.nodes)
+		{
+			if (n.type == T::Output) out = n.id;
+			if (n.type == T::RvtSample) rvt = n.id;
+		}
+		REQUIRE(out != 0);
+		REQUIRE(rvt != 0);
+		g.connect(rvt, 3, out, HE::kMatOutputDisplacementPin);
+		const HE::MatShaderGen gen = HE::generateFragment(g);
+		REQUIRE_FALSE(gen.displacementBody.empty());
+		CHECK(gen.displacementBody.find("heRvt") == std::string::npos);
+		CHECK(gen.glsl.find("heRvtSample(vWorldPos.xz") != std::string::npos);
+	}
+}
+
 TEST_CASE("RVT node: the HLSL keeps t40..t43, spends no live sampler, and the real FXC compiles it")
 {
 	using B = HE::MaterialShaderLibrary::Backend;

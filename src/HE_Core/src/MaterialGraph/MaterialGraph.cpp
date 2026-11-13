@@ -1574,6 +1574,14 @@ HE_MG_NOINLINE bool emitLayerBlendNode(EmitCtx& c, const Scope& sc, const MatGra
         }
         case MatNodeType::RvtSample:
         {
+            if (dsStage(sc)) // heRvtSample needs derivatives and its bindings are not declared here: "nothing to show"
+            {
+                // The same values heRvtSample starts from (RvtLookup.h), valid = 0.
+                decl = "vec3 " + v + "_b = vec3(0.5); vec3 " + v + "_n = vec3(0.0, 1.0, 0.0); float " + v + "_ao = 1.0; float " + v
+                     + "_r = 0.8; float " + v + "_ok = 0.0; vec3 " + v + " = " + v + "_b; // RVT Sample: fragment stage only";
+                pinExpr = { v + "_b", v + "_n", v + "_ao", v + "_r", v + "_ok" };
+                break;
+            }
             c.usesRvt = true;
             const std::string va = inputExpr(c, sc, n, 0, F::Vec4), vb = inputExpr(c, sc, n, 1, F::Vec4);
             decl = "vec3 " + v + "_b; vec3 " + v + "_n; float " + v + "_ao; float " + v + "_r; float " + v + "_ok; "
