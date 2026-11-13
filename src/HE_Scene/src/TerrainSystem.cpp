@@ -627,6 +627,7 @@ namespace TerrainSystem
                 tc.weightmapTextureId = HE::UUID{};   // unpainted → shader uses layer 0
                 if (tc.weightsDirty) { markWeightGatedFoliage(reg, te); tc.rvtJournal.noteAll(); }   // painted -> cleared (undo, reset)
                 tc.weightsDirty = false;
+                tc.weightsDirtyFromStroke = false;
                 setUnpaintedLayerAverage(tc);
                 continue;
             }
@@ -636,6 +637,7 @@ namespace TerrainSystem
                 tc.layerWeights.clear();              // defensive: never upload a short blob
                 tc.weightmapTextureId = HE::UUID{};
                 tc.weightsDirty = false;
+                tc.weightsDirtyFromStroke = false;
                 tc.rvtJournal.noteAll();
                 setUnpaintedLayerAverage(tc);
                 continue;
@@ -643,7 +645,11 @@ namespace TerrainSystem
             const bool have = tc.weightmapTextureId != HE::UUID{}
                            && cm.getTexture(tc.weightmapTextureId) != nullptr;
             if (have && !tc.weightsDirty) continue;
-            if (!tc.rvtJournal.any) tc.rvtJournal.noteAll();   // weights changed and no stroke said where (a fill, a load, an undo)
+            // A stroke (paint()/paintGroup()) notes its own rect and sets weightsDirtyFromStroke,
+            // so it must not be widened here even with another stroke's rect already pending from
+            // the same tick. Everything else that sets weightsDirty (a fill, a load, an undo) said
+            // nothing about where, independent of whatever is already in the journal.
+            if (!tc.weightsDirtyFromStroke) tc.rvtJournal.noteAll();
             computeAverageLayerWeights(tc);           // paint changed → refresh the mean
             markWeightGatedFoliage(reg, te);
 
@@ -664,6 +670,7 @@ namespace TerrainSystem
             else
                 tc.weightmapTextureId = cm.registerTexture(std::move(tex));
             tc.weightsDirty = false;
+            tc.weightsDirtyFromStroke = false;
         }
 
         // ── Chunk material follows the Landscape entity's material ───────────

@@ -146,3 +146,35 @@ TEST_CASE("RVT journal: a group-mix stroke leaves its texel rect too, even after
 	CHECK(j2.minZ <= -13.0f); CHECK(j2.minZ >= -14.0f);
 	CHECK(j2.maxZ >= 19.0f);
 }
+
+TEST_CASE("RVT journal: a no-rect weight change widens the journal even with a stroke's rect already pending")
+{
+	// Regression (Thema 333 step 29): TerrainSystem's "no rect noted" fallback used to check
+	// rvtJournal.any, so a fill arriving in the SAME undrained tick as an earlier stroke was
+	// silently covered by just that stroke's small rect instead of widening to all.
+	Land l;
+	TerrainPaint::ensureWeightmap(l.tc_());
+	l.tick();
+	l.tc_().rvtJournal.clear();
+
+	REQUIRE(TerrainPaint::paint(l.tc_(), 10.0f, -8.0f, 1, 3.0f, 2.0f, 1.0f));   // a stroke notes its rect ...
+	REQUIRE(TerrainPaint::fillLayer(l.tc_(), 2));                              // ... a fill arrives before the tick drains it
+	l.tick();
+	CHECK(l.tc_().rvtJournal.all);
+}
+
+TEST_CASE("RVT journal: a stroke on top of an unannounced fill does not narrow the journal back down")
+{
+	// Same regression, reverse order: the fill/undo happens FIRST, then a stroke runs before
+	// TerrainSystem drains either. The stroke must not claim weightsDirtyFromStroke for an edit
+	// that already outgrew its own rect.
+	Land l;
+	TerrainPaint::ensureWeightmap(l.tc_());
+	l.tick();
+	l.tc_().rvtJournal.clear();
+
+	REQUIRE(TerrainPaint::fillLayer(l.tc_(), 2));                              // a fill, no rect ...
+	REQUIRE(TerrainPaint::paint(l.tc_(), 10.0f, -8.0f, 1, 3.0f, 2.0f, 1.0f));   // ... then a stroke before the tick drains it
+	l.tick();
+	CHECK(l.tc_().rvtJournal.all);
+}

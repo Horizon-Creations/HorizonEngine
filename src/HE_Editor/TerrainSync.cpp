@@ -182,6 +182,7 @@ bool reallocateGrid(entt::registry& reg, Entity e, std::uint8_t f, std::uint32_t
 		 : f == TerrainSync::Weights2 ? t->layerWeights2 : t->layerWeights3).assign(n * 4, 0);
 		if (res > 0) t->weightRes = res;
 		t->weightsDirty = true;
+		t->weightsDirtyFromStroke = false;   // a peer's whole grid landed, not a local stroke
 		return true;
 	default:
 		if (auto* fol = isFoliageMask(f) ? foliageLayerOf(reg, e, f) : nullptr)
@@ -221,6 +222,7 @@ void markWritten(entt::registry& reg, Entity e, std::uint8_t f, const TerrainSyn
 	case TerrainSync::Weights2:
 	case TerrainSync::Weights3:
 		t->weightsDirty = true;
+		t->weightsDirtyFromStroke = false;   // a peer's patch landed, not a local stroke
 		break;
 	default:
 		if (auto* fol = isFoliageMask(f) ? foliageLayerOf(reg, e, f) : nullptr) fol->dirty = true;
