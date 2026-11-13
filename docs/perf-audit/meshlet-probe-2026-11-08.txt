@@ -1,0 +1,54 @@
+[meshlet-probe] fern_02: 6232 tris, 75 meshlets (64v/124t, cone 0), 75 (cone 0.5), mean 83.0933 tris/meshlet, size 2.99684 m
+[meshlet-probe] grass_medium_01: 24730 tris, 440 meshlets (64v/124t, cone 0), 440 (cone 0.5), mean 56.2045 tris/meshlet, size 5.69693 m
+[meshlet-probe] celandine_01: 8966 tris, 140 meshlets (64v/124t, cone 0), 140 (cone 0.5), mean 64.0429 tris/meshlet, size 2.41271 m
+[meshlet-probe] dandelion_01: 54764 tris, 711 meshlets (64v/124t, cone 0), 718 (cone 0.5), mean 77.0239 tris/meshlet, size 4.46002 m
+[meshlet-probe] weed_plant_02: 11116 tris, 142 meshlets (64v/124t, cone 0), 142 (cone 0.5), mean 78.2817 tris/meshlet, size 2.30167 m
+[meshlet-probe] nettle_plant: 31304 tris, 420 meshlets (64v/124t, cone 0), 417 (cone 0.5), mean 74.5333 tris/meshlet, size 1.15992 m
+[meshlet-probe] periwinkle_plant: 34350 tris, 526 meshlets (64v/124t, cone 0), 538 (cone 0.5), mean 65.3042 tris/meshlet, size 1.43391 m
+[meshlet-probe] shrub_03: 8287 tris, 100 meshlets (64v/124t, cone 0), 101 (cone 0.5), mean 82.87 tris/meshlet, size 1.61826 m
+[meshlet-probe] shrub_04: 27327 tris, 315 meshlets (64v/124t, cone 0), 338 (cone 0.5), mean 86.7524 tris/meshlet, size 0.673537 m
+[meshlet-probe] anthurium_botany_01: 67152 tris, 760 meshlets (64v/124t, cone 0), 762 (cone 0.5), mean 88.3579 tris/meshlet, size 4.0432 m
+[meshlet-probe] flower_gazania: 14340 tris, 262 meshlets (64v/124t, cone 0), 263 (cone 0.5), mean 54.7328 tris/meshlet, size 1.8182 m
+[meshlet-probe] shrub_02: 27254 tris, 315 meshlets (64v/124t, cone 0), 330 (cone 0.5), mean 86.5206 tris/meshlet, size 9.61686 m
+[meshlet-probe] camera: edge, looking over the field (baseline camera)
+[meshlet-probe]   fern_02: plants 72, in range 72, pass instance cull 4, wholly inside 0, tris 24928 -> 7480 (frustum meshlets) / 7406 (+ single-sided cone, upper bound)
+[meshlet-probe]   grass_medium_01: plants 432, in range 432, pass instance cull 403, wholly inside 248, tris 9966190 -> 7869635 (frustum meshlets) / 7853943 (+ single-sided cone, upper bound)
+[meshlet-probe]   celandine_01: plants 288, in range 288, pass instance cull 250, wholly inside 204, tris 2241500 -> 1961013 (frustum meshlets) / 1943681 (+ single-sided cone, upper bound)
+[meshlet-probe]   dandelion_01: plants 216, in range 216, pass instance cull 29, wholly inside 4, tris 1588156 -> 525555 (frustum meshlets) / 524419 (+ single-sided cone, upper bound)
+[meshlet-probe]   weed_plant_02: plants 216, in range 216, pass instance cull 191, wholly inside 158, tris 2123156 -> 1865937 (frustum meshlets) / 1824763 (+ single-sided cone, upper bound)
+[meshlet-probe]   nettle_plant: plants 144, in range 144, pass instance cull 144, wholly inside 144, tris 4507776 -> 4507776 (frustum meshlets) / 4079323 (+ single-sided cone, upper bound)
+[meshlet-probe]   periwinkle_plant: plants 144, in range 144, pass instance cull 144, wholly inside 144, tris 4946400 -> 4946400 (frustum meshlets) / 4917847 (+ single-sided cone, upper bound)
+[meshlet-probe]   shrub_03: plants 144, in range 144, pass instance cull 127, wholly inside 114, tris 1052449 -> 971180 (frustum meshlets) / 971242 (+ single-sided cone, upper bound)
+[meshlet-probe]   shrub_04: plants 115, in range 109, pass instance cull 109, wholly inside 109, tris 2978643 -> 2978643 (frustum meshlets) / 2972132 (+ single-sided cone, upper bound)
+[meshlet-probe]   anthurium_botany_01: plants 72, in range 72, pass instance cull 72, wholly inside 72, tris 4834944 -> 4834944 (frustum meshlets) / 4453455 (+ single-sided cone, upper bound)
+[meshlet-probe]   flower_gazania: plants 36, in range 36, pass instance cull 36, wholly inside 36, tris 516240 -> 516240 (frustum meshlets) / 506174 (+ single-sided cone, upper bound)
+[meshlet-probe]   shrub_02: plants 22, in range 22, pass instance cull 22, wholly inside 22, tris 599588 -> 599588 (frustum meshlets) / 596109 (+ single-sided cone, upper bound)
+[meshlet-probe]   TOTAL plants 1901 in range 1895 pass instance cull 1531 (partial 276); meshlets tested 514702 pass 454697; tris 35379970 -> 31584391 (saves 10.728 %), with cone 30650494 (saves 13.3677 %); draws for runs 1774 vs 1531 instances; CPU 47.3454 ms (one thread, incl. cone set)
+[meshlet-probe] camera: inside the field, eye height 1.7 m
+[meshlet-probe]   fern_02: plants 72, in range 72, pass instance cull 0, wholly inside 0, tris 0 -> 0 (frustum meshlets) / 0 (+ single-sided cone, upper bound)
+[meshlet-probe]   grass_medium_01: plants 432, in range 432, pass instance cull 48, wholly inside 0, tris 1187040 -> 64287 (frustum meshlets) / 64997 (+ single-sided cone, upper bound)
+[meshlet-probe]   celandine_01: plants 288, in range 288, pass instance cull 13, wholly inside 0, tris 116558 -> 1483 (frustum meshlets) / 1616 (+ single-sided cone, upper bound)
+[meshlet-probe]   dandelion_01: plants 216, in range 216, pass instance cull 0, wholly inside 0, tris 0 -> 0 (frustum meshlets) / 0 (+ single-sided cone, upper bound)
+[meshlet-probe]   weed_plant_02: plants 216, in range 216, pass instance cull 16, wholly inside 2, tris 177856 -> 46232 (frustum meshlets) / 44870 (+ single-sided cone, upper bound)
+[meshlet-probe]   nettle_plant: plants 144, in range 144, pass instance cull 111, wholly inside 103, tris 3474744 -> 3326804 (frustum meshlets) / 3038161 (+ single-sided cone, upper bound)
+[meshlet-probe]   periwinkle_plant: plants 144, in range 144, pass instance cull 116, wholly inside 101, tris 3984600 -> 3690525 (frustum meshlets) / 3674636 (+ single-sided cone, upper bound)
+[meshlet-probe]   shrub_03: plants 144, in range 144, pass instance cull 8, wholly inside 6, tris 66296 -> 56247 (frustum meshlets) / 56405 (+ single-sided cone, upper bound)
+[meshlet-probe]   shrub_04: plants 115, in range 115, pass instance cull 92, wholly inside 89, tris 2514084 -> 2434127 (frustum meshlets) / 2430269 (+ single-sided cone, upper bound)
+[meshlet-probe]   anthurium_botany_01: plants 72, in range 72, pass instance cull 72, wholly inside 72, tris 4834944 -> 4834944 (frustum meshlets) / 4453724 (+ single-sided cone, upper bound)
+[meshlet-probe]   flower_gazania: plants 36, in range 36, pass instance cull 36, wholly inside 36, tris 516240 -> 516240 (frustum meshlets) / 506484 (+ single-sided cone, upper bound)
+[meshlet-probe]   shrub_02: plants 22, in range 22, pass instance cull 22, wholly inside 14, tris 599588 -> 509648 (frustum meshlets) / 505866 (+ single-sided cone, upper bound)
+[meshlet-probe]   TOTAL plants 1901 in range 1901 pass instance cull 534 (partial 111); meshlets tested 233710 pass 201655; tris 17471950 -> 15480537 (saves 11.3978 %), with cone 14777028 (saves 15.4243 %); draws for runs 618 vs 534 instances; CPU 14.6788 ms (one thread, incl. cone set)
+[meshlet-probe] camera: inside the field, looking sideways
+[meshlet-probe]   fern_02: plants 72, in range 72, pass instance cull 0, wholly inside 0, tris 0 -> 0 (frustum meshlets) / 0 (+ single-sided cone, upper bound)
+[meshlet-probe]   grass_medium_01: plants 432, in range 432, pass instance cull 6, wholly inside 0, tris 148380 -> 0 (frustum meshlets) / 0 (+ single-sided cone, upper bound)
+[meshlet-probe]   celandine_01: plants 288, in range 288, pass instance cull 177, wholly inside 111, tris 1586982 -> 1198658 (frustum meshlets) / 1185603 (+ single-sided cone, upper bound)
+[meshlet-probe]   dandelion_01: plants 216, in range 216, pass instance cull 216, wholly inside 211, tris 11829024 -> 11802344 (frustum meshlets) / 11777579 (+ single-sided cone, upper bound)
+[meshlet-probe]   weed_plant_02: plants 216, in range 216, pass instance cull 0, wholly inside 0, tris 0 -> 0 (frustum meshlets) / 0 (+ single-sided cone, upper bound)
+[meshlet-probe]   nettle_plant: plants 144, in range 144, pass instance cull 0, wholly inside 0, tris 0 -> 0 (frustum meshlets) / 0 (+ single-sided cone, upper bound)
+[meshlet-probe]   periwinkle_plant: plants 144, in range 144, pass instance cull 105, wholly inside 80, tris 3606750 -> 3007004 (frustum meshlets) / 2996795 (+ single-sided cone, upper bound)
+[meshlet-probe]   shrub_03: plants 144, in range 144, pass instance cull 144, wholly inside 144, tris 1193328 -> 1193328 (frustum meshlets) / 1193328 (+ single-sided cone, upper bound)
+[meshlet-probe]   shrub_04: plants 115, in range 115, pass instance cull 0, wholly inside 0, tris 0 -> 0 (frustum meshlets) / 0 (+ single-sided cone, upper bound)
+[meshlet-probe]   anthurium_botany_01: plants 72, in range 72, pass instance cull 0, wholly inside 0, tris 0 -> 0 (frustum meshlets) / 0 (+ single-sided cone, upper bound)
+[meshlet-probe]   flower_gazania: plants 36, in range 36, pass instance cull 0, wholly inside 0, tris 0 -> 0 (frustum meshlets) / 0 (+ single-sided cone, upper bound)
+[meshlet-probe]   shrub_02: plants 22, in range 22, pass instance cull 22, wholly inside 9, tris 599588 -> 394113 (frustum meshlets) / 392958 (+ single-sided cone, upper bound)
+[meshlet-probe]   TOTAL plants 1901 in range 1901 pass instance cull 670 (partial 115); meshlets tested 257556 pass 237004; tris 18964052 -> 17595447 (saves 7.21684 %), with cone 17546263 (saves 7.47619 %); draws for runs 777 vs 670 instances; CPU 27.5998 ms (one thread, incl. cone set)

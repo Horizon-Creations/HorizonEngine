@@ -5071,25 +5071,30 @@ TEST_CASE("Vulkan: heLandscapeWeights (binding 14) is in the material layout, an
 		              && (HE::vkmat::kBindings[i].stages & ~HE::vkmat::kStageTess) == HE::vkmat::kStageFragment);
 	CHECK(row);
 
-	// The device limit: 17 fragment samplers with the row, 16 (the spec
-	// minimum, which every device meets) without it — the renderer's fallback.
-	CHECK(HE::vkmat::fragmentSamplerCount(true) == 17);
-	CHECK(HE::vkmat::fragmentSamplerCount(false) == 16);
-	CHECK_FALSE(HE::vkmat::landscapeWeightsFit(16, 16));
-	CHECK_FALSE(HE::vkmat::landscapeWeightsFit(16, 1u << 20));
-	CHECK_FALSE(HE::vkmat::landscapeWeightsFit(1u << 20, 16));
-	CHECK(HE::vkmat::landscapeWeightsFit(17, 17));
-	CHECK(HE::vkmat::landscapeWeightsFit(1u << 20, 1u << 20)); // NVIDIA / lavapipe class
-	// The RVT rows (Thema 333) are four more on top: 21 with the weights row, 20 without; a device that fits neither
-	// keeps the layout it had (no RVT).
-	CHECK(HE::vkmat::fragmentSamplerCount(true, true) == 21);
-	CHECK(HE::vkmat::fragmentSamplerCount(false, true) == 20);
-	CHECK(HE::vkmat::rvtFit(21, 21, true));
-	CHECK_FALSE(HE::vkmat::rvtFit(20, 21, true));
-	CHECK_FALSE(HE::vkmat::rvtFit(21, 20, true));
-	CHECK(HE::vkmat::rvtFit(20, 20, false));
-	CHECK_FALSE(HE::vkmat::rvtFit(16, 16, false));
-	CHECK(HE::vkmat::rvtFit(1u << 20, 1u << 20, true));
+	// The device limit: 18 fragment samplers with both optional rows (the weightmap and,
+	// Thema 225 step 5, the fog volume at 34), 17 without the fog row, 16 (the spec
+	// minimum, which every device meets) without either — the renderer's fallbacks.
+	CHECK(HE::vkmat::fragmentSamplerCount(true, true) == 18);
+	CHECK(HE::vkmat::fragmentSamplerCount(true, false) == 17);
+	CHECK(HE::vkmat::fragmentSamplerCount(false, false) == 16);
+	CHECK_FALSE(HE::vkmat::landscapeWeightsFit(16, 16, false));
+	CHECK_FALSE(HE::vkmat::landscapeWeightsFit(16, 1u << 20, false));
+	CHECK_FALSE(HE::vkmat::landscapeWeightsFit(1u << 20, 16, false));
+	CHECK(HE::vkmat::landscapeWeightsFit(17, 17, false));
+	CHECK_FALSE(HE::vkmat::fogVolumeFit(17, 17));
+	CHECK(HE::vkmat::fogVolumeFit(18, 18));
+	CHECK(HE::vkmat::fogVolumeFit(1u << 20, 1u << 20)); // NVIDIA / lavapipe class
+	CHECK(HE::vkmat::landscapeWeightsFit(1u << 20, 1u << 20));
+	// The RVT rows (Thema 333) are four more on top of whatever heLandscapeWeights/heFogVolume decided: 22 with both,
+	// 20 with neither; a device that fits neither keeps the layout it had (no RVT).
+	CHECK(HE::vkmat::fragmentSamplerCount(true, true, true) == 22);
+	CHECK(HE::vkmat::fragmentSamplerCount(false, false, true) == 20);
+	CHECK(HE::vkmat::rvtFit(22, 22, true, true));
+	CHECK_FALSE(HE::vkmat::rvtFit(21, 22, true, true));
+	CHECK_FALSE(HE::vkmat::rvtFit(22, 21, true, true));
+	CHECK(HE::vkmat::rvtFit(20, 20, false, false));
+	CHECK_FALSE(HE::vkmat::rvtFit(16, 16, false, false));
+	CHECK(HE::vkmat::rvtFit(1u << 20, 1u << 20, true, true));
 
 	int landscapeCases = 0;
 	std::set<VkUse> rvtUses;           // the RVT node's (Thema 333) own bindings, 40..43: layout rows since the Vulkan port

@@ -1,0 +1,5 @@
+- Code, der für alle fünf Render-Backends gilt, gehört in die gemeinsame Schicht und wird nicht je Backend kopiert; die handgepflegte Metal-Spiegelung des Himmels-Shaders ist die bekannte Ausnahme.
+- Neuer Code in einem Hot Path (Frame-Loop, Extraktion, Streaming, Render) bekommt einen Profiler-Scope.
+- Pro-Frame-Arbeit läuft über das Job-System, nicht über eigene Threads; keine neuen Sperren im Frame.
+- Allokationen im Frame über Arenen oder Pools; kein `std::function`, kein `dynamic_cast` in inneren Schleifen.
+- Vor einer Performance-Aussage: `scripts/he_perf_capture.py` vorher/nachher, Auswertung mit `scripts/perf/dump_scope_p50.py`.

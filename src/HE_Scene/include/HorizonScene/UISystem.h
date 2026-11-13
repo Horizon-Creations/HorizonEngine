@@ -6,6 +6,7 @@
 #include <cstdint>
 
 class HorizonWorld;
+class ContentManager;
 
 namespace UISystem {
 
@@ -43,7 +44,10 @@ bool computeScreenRect(entt::registry& reg, entt::entity e,
 // vpWidth/vpHeight are the current viewport dimensions in pixels.
 // An element is drawn exactly once, by the canvas it hangs under in the
 // hierarchy; elements outside every canvas subtree go to the first active one.
+// contentManager resolves a UITextComponent::font path to a baked atlas key
+// (the same resolution WidgetManager::refreshElementAssets does for widgets);
+// null leaves every text entity on the shared default font, same as before.
 void extract(HorizonWorld& world, float vpWidth, float vpHeight,
-             std::vector<UIRenderObject>& out);
+             std::vector<UIRenderObject>& out, ContentManager* contentManager = nullptr);
 
 } // namespace UISystem

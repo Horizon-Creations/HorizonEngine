@@ -477,8 +477,8 @@ private:
 	// before WarmupMaterials can build a program — and then forward graph-material
 	// programs are GLSL 4.30 from fragmentClustered. macOS (GL 4.1) never gets here.
 	bool         m_forwardClustered = false;
-	// Runtime Virtual Texture (Thema 333): units 21..24 are the table and the three pool arrays (the material programs'
-	// heRvtTable/Albedo/Normal/Surface), so a context needs 25 fragment texture units; macOS GL (16) does not have them.
+	// Runtime Virtual Texture (Thema 333): units 22..25 are the table and the three pool arrays (the material programs'
+	// heRvtTable/Albedo/Normal/Surface; unit 21 is heFogVolume's), so a context needs 26 fragment texture units; macOS GL (16) does not have them.
 	bool         m_rvtSupported = false;
 	unsigned int m_rvtPool[3] = { 0, 0, 0 };   // GL_TEXTURE_2D_ARRAY: BaseColor SRGB8_ALPHA8, Normal / Surface RGBA8
 	uint32_t     m_rvtSlots = 0, m_rvtPagePx = 0;   // m_rvtSlots: the manager's ceiling
@@ -853,6 +853,68 @@ private:
 	void CreateTonemapPipeline();
 	void EnsureHDRTarget(int width, int height);
 	void DestroyHDRTarget();
+
+	// ── Volumetric fog (docs/volumetric-fog-plan.md, Thema 225 step 4) ───────
+	// GL 4.1 core has no compute/image-load-store: Inject and Integrate run as
+	// one fullscreen-quad draw PER Z SLICE instead of Metal's single dispatch
+	// (FogVolumeShaderSource.h's kInjectMainGL/kIntegrateMainGL). Apply is a
+	// fragment pass on every backend already. Programs are built once, lazily,
+	// at the first frame that asks (mirrors EnsureDeferredPipelines); a link
+	// failure leaves the capability off and the analytic fog running, forever.
+	bool         m_fogPipelinesTried = false;
+	bool         m_fogPipelinesOk    = false; // GetCapabilities().supportsVolumetricFog
+	unsigned int m_fogInjectProgram    = 0;
+	unsigned int m_fogIntegrateProgram = 0;
+	unsigned int m_fogApplyProgram     = 0;
+	unsigned int m_fogVolUBO   = 0; // HeFogVol block (288 B, FogVolume.h), GL uniform binding point 9
+	unsigned int m_fogLightUBO = 0; // Inject-only HeLighting fill (incl. REAL CSM matrices, like m_resolveLightUBO)
+	// Inject's temporal history: 3D RGBA16F, ping-ponged like Metal's m_fogInject[2].
+	unsigned int m_fogInjectTex[2] = { 0, 0 };
+	unsigned int m_fogInjectFBO    = 0; // one COLOR0, re-targeted per Z layer via glFramebufferTextureLayer
+	// Integrate's running (L, T) state across the N per-slice draws: a 2D
+	// RGBA32F accumulator, ping-ponged (never read AND written by the same
+	// draw — GL 4.1 has no texture barrier). Cleared to the identity (0,0,0,1)
+	// once per frame before slice 0.
+	unsigned int m_fogAccumTex[2] = { 0, 0 };
+	unsigned int m_fogIntegrateFBO = 0; // MRT: attachment 0 = accum[dst] (2D), attachment 1 = m_fogIntegratedTex layer k
+	// The final integrated volume: 3D RGBA16F, what heFogVolume (material unit 21)
+	// and the Apply pass both read. Owns no history of its own — Integrate
+	// rewrites every layer every frame.
+	unsigned int m_fogIntegratedTex = 0;
+	unsigned int m_fogApplyFBO      = 0; // colour-only (m_hdrColor); depth is a TEXTURE input, never an attachment here
+	unsigned int m_fogDummy3D       = 0; // 1x1x1 dummy bound at material unit 21 when the volume is off (never a null sampler)
+	glm::ivec3   m_fogGrid      { 0 };
+	int          m_fogHist      = 0;     // which of m_fogInjectTex[] holds LAST frame's result
+	bool         m_fogHistValid = false;
+	uint32_t     m_fogFrameIndex = 0;
+	glm::vec3    m_fogNoiseOffset { 0.0f };
+	float        m_fogNoiseTime   = 0.0f;
+	double       m_fogLastTime    = 0.0;
+	glm::vec3    m_fogPrevCam     { 0.0f };
+	float        m_fogPrevFocal   = 0.0f;
+	glm::mat4    m_fogPrevViewProj  { 1.0f };
+	glm::mat4    m_fogViewProjFlip  { 1.0f }; // y-flipped viewProj for heApplyFogT (froxel/Metal-style top-left uv)
+	bool         m_fogFrameActive = false;    // this frame actually ran Inject/Integrate — gates Apply + the built-ins' analytic fog
+	HE::FogVolumeData m_fogFrame; // snapshot of what Inject/Integrate ran with, for fillMatLight/Apply
+	bool EnsureFogVolumePipelines();  // builds the 3 programs once; true == supportsVolumetricFog
+	void EnsureFogVolumeTargets(const glm::ivec3& grid);
+	void DestroyFogVolumeTargets();
+	// Inject + Integrate: analog to MetalRenderer::EncodeFogVolume. Sets
+	// m_fogFrameActive and m_fogFrame; no-ops (leaving both false/default) when
+	// the scene's fog isn't in volumetric mode or the pipelines never linked.
+	// Builds its OWN HeLighting fill internally (mirrors Metal's
+	// FillMaterialLighting, a real member function) rather than reusing
+	// DrawScene's fillMatLight lambda — that lambda needs matClustered/
+	// frameClusters/aoActive, all declared later than where this must run
+	// (right after UpdateSkyEnvCube, before the opaque draws), and Inject's
+	// kernel never reads any of the clustered/AO/DDGI fields anyway.
+	// shadows/localShadows/nCascades/cascadeSplits/camFwd are the same values
+	// DrawScene already computed for BindSceneLighting.
+	void RenderFogVolume(int pw, int ph, bool shadows, bool localShadows,
+	                     int nCascades, const glm::vec4& cascadeSplits, const glm::vec3& camFwd);
+	// Apply: full-screen, colour-only blit into m_hdrColor between the sky and
+	// the translucent tail. No-op unless m_fogFrameActive.
+	void RenderFogApply(int pw, int ph);
 
 	// ── Deferred render path (G-buffer + fullscreen lighting resolve) ────────
 	// docs/deferred-renderer-plan.md. MRT FBO: GB0 = SRGB8_ALPHA8 (BaseColor +
