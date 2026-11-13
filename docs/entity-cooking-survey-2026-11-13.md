@@ -225,9 +225,14 @@ Eine Entity ist **nicht** kochbar, wenn mindestens eine davon zutrifft:
    ist "THE switch") oder `ReplicatedVarsComponent` mit deklarierten Variablen.
 7. Trägt `SaveStateComponent` — `entity.applySavedState` kann jederzeit ein Savegame über die
    Entity schreiben, außerhalb von Skript/Engine-API im engeren Sinn.
-8. Trägt `LODComponent` mit mehr als einem Level (`levels.size() > 1`) — `LODSystem::update`
-   (`LODSystem.cpp:29`) schreibt `MeshComponent::meshAssetId` abhängig von der Kameradistanz jeden
-   Frame neu. Ein `LODComponent` mit nur dem Basis-Level ist unkritisch.
+8. Trägt `LODComponent` mit mehr als einem Level (`levels.size() > 1`) ODER mit gesetztem
+   `refinedMeshId` (`refinedMeshId != UUID{}`) — `LODSystem::update` (`LODSystem.cpp:29`) schreibt
+   `MeshComponent::meshAssetId` abhängig von der Kameradistanz jeden Frame neu. Der Skip bei :32
+   prüft nur `levels.empty()`; ein `LODComponent` mit nur einem Level, aber gesetztem
+   `refinedMeshId`, wechselt bei `dist <= refinedMaxDistance` (`LODSystem.cpp:83-86`) trotzdem auf
+   die feinere Mesh — das ist der Weg, über den `TerrainSystem` Terrain-Tessellation anschließt
+   (`TerrainSystem.cpp:316-317`). Nur ein `LODComponent` mit genau einem Level UND
+   `refinedMeshId == UUID{}` ist unkritisch.
 9. Trägt `TrailComponent` oder `RopeComponent` — beide schreiben jeden Frame ihre eigene
    Geometrie neu (Trail: "every frame is the whole point"; Rope: ändert sich, sobald ein
    Attachment sich bewegt). Trägt die Entity selbst `JointComponent`, zählt sie ohnehin schon über
@@ -259,7 +264,7 @@ API-Aufruf, keine Vorab-Ausschlussregel hier.
 
 Kochbar (keine der obigen Regeln): nur `TransformComponent` + `MeshComponent` + optional
 `MaterialComponent`, `ColliderComponent` + `RigidBodyComponent{type=Static}`,
-`LODComponent` mit einem Level, `HierarchyComponent` (wenn Vorfahren ebenfalls kochbar sind),
+`LODComponent` mit einem Level UND ohne `refinedMeshId`, `HierarchyComponent` (wenn Vorfahren ebenfalls kochbar sind),
 `EntityIdComponent`/`NameComponent` (reine Metadaten, keine Laufzeitwirkung).
 
 ## 6. Querverweise: eine Entity ohne jede "ausschließende" Komponente kann trotzdem Ziel sein
