@@ -14552,11 +14552,15 @@ void D3D12Renderer::UpdateRvtCold()
         const uint32_t px = p.rvtPagePx;
         const size_t pageBytes = size_t(px) * px * 4;
 
-        // 1. Encodes that came back.
+        // 1. Encodes that came back. Capped at one landed page (one rvtBegin/rvtEnd GPU flush) per real frame, like
+        // the readback below — a worker that falls behind and returns several finished encodes in the same frame
+        // must not turn into N consecutive full-pipeline stalls; whatever is left over waits for the next call.
         std::deque<D3D12RendererImpl::RvtColdWork::Done> finished;
         { std::lock_guard<std::mutex> lock(w.mutex); finished.swap(w.done); }
-        for (auto& d : finished)
+        while (!finished.empty())
         {
+            D3D12RendererImpl::RvtColdWork::Done d = std::move(finished.front());
+            finished.pop_front();
             if (d.blocks[0].empty() || d.ver != p.rvtSlotVer[d.slot] || p.rvtSlotHot[d.slot] < 0 || p.rvtSlotCold[d.slot]) continue;
             if (!growRvtCold12(p, d.slot)) continue;
             // The block data from BlockEncode.h is tightly packed (bx*16 bytes/row = 544 for 136 px); D3D12's placed
@@ -14602,6 +14606,14 @@ void D3D12Renderer::UpdateRvtCold()
                 p.rvtSlotCold[d.slot] = 1;
                 ++p.rvtStateVer;
             }
+            break;   // at most one landed encode (one GPU flush) per real frame
+        }
+        if (!finished.empty())
+        {
+            // Give back what did not land yet, ahead of anything the worker queued meanwhile, so order is preserved.
+            std::lock_guard<std::mutex> lock(w.mutex);
+            for (auto it = finished.rbegin(); it != finished.rend(); ++it)
+                w.done.push_front(std::move(*it));
         }
 
         // 2. One page that has stood still long enough: read it back now (synchronous) and queue it for encoding.
