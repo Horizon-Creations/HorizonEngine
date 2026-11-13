@@ -174,7 +174,7 @@ TEST_CASE("RVT cold bit (step 9): bit 23 never corrupts the 24-bit slot, boundar
 	CHECK(2048u < kMaxSlot);
 }
 
-TEST_CASE("RVT node: the MSL reads the table and the pool as textures 17..20 and spends no sampler (Metal's cap is 16)")
+TEST_CASE("RVT node: the MSL reads the table and the pool as textures 18..21 and spends no sampler (Metal's cap is 16)")
 {
 	using B = HE::MaterialShaderLibrary::Backend;
 	HE::MaterialShaderLibrary lib;
@@ -182,23 +182,24 @@ TEST_CASE("RVT node: the MSL reads the table and the pool as textures 17..20 and
 	const auto& ms = lib.fragment(std::hash<std::string>{}("rvt-node-msl"), glsl, B::Metal);
 	REQUIRE_MESSAGE(ms.ok, ms.log);
 	const std::string& msl = ms.source;
-	CHECK_MESSAGE(msl.find("heRvtTable [[texture(17)]]") != std::string::npos, msl);
-	CHECK(msl.find("heRvtAlbedo [[texture(18)]]") != std::string::npos);
-	CHECK(msl.find("heRvtNormal [[texture(19)]]") != std::string::npos);
-	CHECK(msl.find("heRvtSurface [[texture(20)]]") != std::string::npos);
+	// Texture 17 is heFogVolume's (Thema 225 step 5); RVT starts one higher than it used to.
+	CHECK_MESSAGE(msl.find("heRvtTable [[texture(18)]]") != std::string::npos, msl);
+	CHECK(msl.find("heRvtAlbedo [[texture(19)]]") != std::string::npos);
+	CHECK(msl.find("heRvtNormal [[texture(20)]]") != std::string::npos);
+	CHECK(msl.find("heRvtSurface [[texture(21)]]") != std::string::npos);
 	// The packed pool (step 6k): the normal layer holds x and z, the lookup rebuilds y from the unit length.
 	const char* packEnv = std::getenv("HE_RVT_PACK");
 	const size_t nrm = msl.find("heRvtNormalOf(");
 	CHECK(nrm != std::string::npos);
 	if (!(packEnv && *packEnv == '0') && nrm != std::string::npos)
 		CHECK(msl.find("sqrt(", nrm) != std::string::npos);
-	// The cold pool's block-compressed arrays (step 6j): textures 21..23, sampled (inline sampler), selected by the table entry's bit 23.
+	// The cold pool's block-compressed arrays (step 6j): textures 22..24, sampled (inline sampler), selected by the table entry's bit 23.
 	const char* coldEnv = std::getenv("HE_RVT_COLD");
 	if (!(coldEnv && *coldEnv == '0'))
 	{
-		CHECK(msl.find("heRvtAlbedoC [[texture(21)]]") != std::string::npos);
-		CHECK(msl.find("heRvtNormalC [[texture(22)]]") != std::string::npos);
-		CHECK(msl.find("heRvtSurfaceC [[texture(23)]]") != std::string::npos);
+		CHECK(msl.find("heRvtAlbedoC [[texture(22)]]") != std::string::npos);
+		CHECK(msl.find("heRvtNormalC [[texture(23)]]") != std::string::npos);
+		CHECK(msl.find("heRvtSurfaceC [[texture(24)]]") != std::string::npos);
 		CHECK(msl.find("heRvtAlbedoC.sample(") != std::string::npos);
 	}
 	// Fetch only (.read), and no [[sampler(n)]] with n >= 16 anywhere: an inline constexpr sampler stands in for the four.
