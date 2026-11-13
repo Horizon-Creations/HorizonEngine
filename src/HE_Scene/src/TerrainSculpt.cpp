@@ -19,6 +19,7 @@ namespace TerrainSculpt
 // Thema 174 Schritt 14) can mark the same rect dirty the same way.
 void markRegionDirty(TerrainComponent& tc, float mnX, float mnZ, float mxX, float mxZ)
 {
+    tc.rvtJournal.noteRect(mnX, mnZ, mxX, mxZ);   // the Runtime Virtual Texture pages under it are stale too
     if (tc.regionDirty)
     {
         tc.dirtyMinX = std::min(tc.dirtyMinX, mnX); tc.dirtyMaxX = std::max(tc.dirtyMaxX, mxX);

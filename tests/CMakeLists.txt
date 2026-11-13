@@ -374,10 +374,20 @@ add_executable(he_tests
     test_sky_noise_prewarm.cpp
     # The planner for the baked far-landscape material: needed resolution and the downscaling to a byte budget (Thema 228 request, for 326)
     test_landscape_hlod_plan.cpp
+    # Runtime Virtual Textures, CPU side: layout, page requests, dirty rects, pool/LRU, page table (Thema 333, step 1)
+    test_rvt_core.cpp
+    # The RVT read as a graph node: shared lookup, t40..t43 pins, no live sampler, FXC (Thema 333 step 3)
+    test_rvt_shader.cpp
+    # Block encoder for RVT cold pages: ASTC (Metal, step 6j) and BC7 (Windows, step 9)
+    test_block_encode.cpp
+    # The RVT change journal on TerrainComponent: strokes leave a rect, rebuilds leave all (Thema 333 step 4)
+    test_rvt_journal.cpp
     # two real exports of a project, filtered and not; a no-op without HE_REACH_PROJECT
     test_bench_export_reach.cpp
     # BC1/BC4/BC5 next to BC7/BC3: enum + block math, encoders (2D and arrays), CPU decoders (Thema 180, Schritt 10)
     test_texture_bcn.cpp
+    # editor: big RGBA8 texture arrays are read cooked for the GPU, cached by source path/size/mtime (GpuArrayCook.h)
+    test_gpu_array_cook.cpp
     # size / encode time / load time of the Auto Landscape arrays per format; a no-op without HE_BENCH_ARRAYS_IN (Thema 180, Schritt 6)
     test_bench_landscape_arrays.cpp
     # size / encode time / zstd of ONE baked landscape tile map per side and format; a no-op without HE_BENCH_TILE_PNG (Thema 228, for 326)
@@ -1521,6 +1531,8 @@ if(TARGET HorizonContentSync)
     target_sources(he_tests PRIVATE test_engine_content_manifest_refresh.cpp test_sftp_connection.cpp)
     # LandscapeFoliageLayer through publish scan / manifest / passive pull, no server (Thema 327)
     target_sources(he_tests PRIVATE test_landscape_foliage_sync.cpp)
+    # a cached EngineContent file the server replaced is dropped (CacheFreshness.h)
+    target_sources(he_tests PRIVATE test_content_cache_freshness.cpp)
     # Thema 194 step 3: the new HTTP content-server client (manifest + file fetch), against a
     # real loopback server — no SFTP, no EngineContentSync singleton, see the file's own comment.
     target_sources(he_tests PRIVATE test_content_server_client.cpp)

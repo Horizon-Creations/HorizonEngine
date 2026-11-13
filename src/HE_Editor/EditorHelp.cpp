@@ -5226,6 +5226,46 @@ namespace
 	  "floor under the slope bias — the number that matters on flat ground under "
 	  "a high sun.",
 	  "", "rendering#shadows" },
+	// ── World ▸ Virtual Texture ──────────────────────────────────────────────
+	{ "Virtual Texture/Runtime Virtual Texture", "Runtime Virtual Texture",
+	  "Draws the landscape from pages instead of running its material for every pixel of every frame. The landscape's "
+	  "material is rendered once into small tiles of a shared pool (a page: colour, normal and surface at a fixed ground "
+	  "resolution); from then on the landscape only reads them, and the material runs again only where something changed — "
+	  "a sculpt or paint stroke, an edited parameter. A frame in which nothing changed paints nothing.\n\n"
+	  "Off by default: with it off the landscape draws exactly what it always drew. Saved to Config/ProjectSettings.json and "
+	  "read as you edit, by the editor and by the exported game. Needs a graphics backend that supports it (D3D11, D3D12, "
+	  "Vulkan and OpenGL do; Metal and the software renderer do not yet) — the page above says so where it does not. The "
+	  "environment variable HE_RVT=1 or 0 forces it on or off over this switch.",
+	  "", "rendering#performance" },
+	{ "Virtual Texture/Pool size", "Pool size",
+	  "How many pages the pool holds, shared by every landscape: each page is 136 x 136 pixels in three layers, about "
+	  "0.22 MB, so 512 pages are 108 MB of video memory. A pool that is too small shows up on this page as a request "
+	  "count and an orange line: the farthest pages are then not painted and that part of the landscape stays on its "
+	  "own material.\n\n"
+	  "Changing it rebuilds the pool and repaints every page, so pick it once.",
+	  "", "rendering#performance" },
+	{ "Virtual Texture/Texel size", "Texel size",
+	  "How much ground one pixel of the finest page covers. 0.25 m is a pixel the size of a hand span on the screen from a "
+	  "walking camera; 0.125 m doubles the detail and quadruples the pages needed to cover the same ground, 0.5 m and 1 m do "
+	  "the opposite. Coarser levels are made automatically for the distance.\n\n"
+	  "Changing it rebuilds the pool and repaints every page, so pick it once.",
+	  "", "rendering#performance" },
+	{ "Virtual Texture/Near radius", "Near radius",
+	  "How far around the camera the landscape is kept at the finest level, in metres. Beyond it coarser levels are used, "
+	  "four times fewer pages per step. A larger radius needs more pages (see the pool size) and paints more after a "
+	  "change; changes to it apply at once, without rebuilding anything.",
+	  "", "rendering#performance" },
+	{ "Virtual Texture/Activation radius", "Activation radius",
+	  "How near a landscape must be to the camera, measured to its edge, to be drawn from pages. A farther one keeps "
+	  "drawing its own material and holds no pages, so a world of many landscapes only pays for the ones around you. "
+	  "It is drawn from pages again once it comes back in range, from a slightly larger radius than it switched on at, so "
+	  "it does not flicker at the border. Applies at once.",
+	  "", "rendering#performance" },
+	{ "Virtual Texture/Pages per frame", "Pages per frame",
+	  "The most pages one frame may paint, over every landscape together: the budget that spreads a first fill or the "
+	  "repaint after a stroke over several frames instead of one long one. A higher number finishes sooner and makes the "
+	  "frames it works in longer. The status line on this page shows what the last painting cost.",
+	  "", "rendering#performance" },
 	// ── Physics ▸ Simulation ─────────────────────────────────────────────────
 	{ "Physics/Fixed rate", "Fixed rate",
 	  "How many simulation steps a second of game time is cut into, whatever "
@@ -10308,6 +10348,7 @@ namespace
 		{ "Multiplayer/",      "editor-settings", "Settings Reference", "Project: multiplayer" },
 		{ "Render Defaults/",  "editor-settings", "Settings Reference", "Project: render defaults" },
 		{ "Shadows/",          "editor-settings", "Settings Reference", "Project: shadows" },
+		{ "Virtual Texture/",  "editor-settings", "Settings Reference", "Project: virtual texture" },
 		{ "Physics/",          "editor-settings", "Settings Reference", "Project: physics" },
 		{ "Audio Buses/",      "editor-settings", "Settings Reference", "Project: audio buses" },
 		{ "Permissions/",    "editor-settings", "Settings Reference", "Project permissions" },

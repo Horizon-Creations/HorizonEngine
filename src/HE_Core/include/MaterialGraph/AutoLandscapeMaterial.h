@@ -263,9 +263,11 @@ inline constexpr char kAutoLandscapeParamSnowMaxSlope[]   = "Snow Max Slope";
 inline constexpr char kAutoLandscapeParamPuddleAmount[]   = "Puddle Amount";
 inline constexpr char kAutoLandscapeParamPuddleMaxSlope[] = "Puddle Max Slope";
 inline constexpr char kAutoLandscapeSwitchBombing[]       = "Texture Bombing";
-// The procedural surfaces. A graph has kMatMaxParams (16) HeParams slots and 13 were taken, so the
-// look is packed: one Vec4 each (x..w in the order named here), plus the snow's colour as a colour
-// picker. The sand's colour is the reference's mean and stays baked, the Desert would be over budget.
+// The procedural surfaces. These were packed when a graph had 16 HeParams slots and 13 were taken:
+// one Vec4 each (x..w in the order named here), plus the snow's colour as a colour picker. The sand's
+// colour is the reference's mean and stays baked. The budget is kMatMaxParams (32) since the RVT work
+// (MaterialParamLimits.h), so packing is no longer forced, but the layout is serialized in the
+// materials and the witness, so keep it; the Desert uses 16 of 32 (autoLandscapeParamCount).
 inline constexpr char kAutoLandscapeParamSnowColor[]      = "Snow Color";
 inline constexpr char kAutoLandscapeParamSnowLook[]       = "Snow Look";  // Grain, Drift, Glitter, Softness
 inline constexpr char kAutoLandscapeParamSandLook[]       = "Sand Look";  // Grain Size (m), Ripple, Ripple Size (m), Glitter
@@ -302,7 +304,13 @@ struct AutoLandscapeGraph
 // parameters; the default (Mountains) builds exactly the graph this material always had.
 // `mixed` builds the mix material above instead (the group then only names the parameter defaults,
 // Mountains).
+// `displacement` (Lit view only) wires the Displacement pin: the final blended texture height (the arrays'
+// mask B, painted weights and puddles included) minus 0.5, times kAutoLandscapeDisplacementMetres, so the
+// terrain's chunk meshes are tessellated near the camera and pushed along their normal by the texture's
+// own relief (Thema 207's GPU tessellation; the shipped materials are built without it, byte for byte as before).
 HE_API AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view = AutoLandscapeView::Lit,
                                                   AutoLandscapeGroupId group = AutoLandscapeGroupId::Mountains,
-                                                  bool mixed = false);
+                                                  bool mixed = false, bool displacement = false);
+// Metres a full height range (0..1) of the texture moves the surface; the tessellation clamps to half of it.
+inline constexpr float kAutoLandscapeDisplacementMetres = 0.5f;
 } // namespace HE

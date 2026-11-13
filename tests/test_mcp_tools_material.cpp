@@ -1777,6 +1777,7 @@ TEST_CASE("mcp material tools: add_node takes the payloads and refuses the wrong
 	refused(json{ { "path", path }, { "type", "Output" } },                "refused_by_policy");
 	refused(json{ { "path", path }, { "type", "FnInput" } },               "refused_by_policy");
 	refused(json{ { "path", path }, { "type", "FnOutput" } },              "refused_by_policy");
+	refused(json{ { "path", path }, { "type", "RvtSample" } },             "refused_by_policy");
 	refused(json{ { "path", path }, { "type", "FunctionCall" } },          "invalid_payload");
 	refused(json{ { "path", path }, { "type", "FunctionCall" }, { "s", path } }, "invalid_path");
 	refused(json{ { "path", path }, { "type", "FunctionCall" },

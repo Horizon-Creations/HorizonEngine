@@ -8,6 +8,7 @@
 #include <MaterialGraph/MaterialGraph.h> // matSplitDisplacement
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <functional>
 
@@ -1008,8 +1009,9 @@ namespace
 // sunColor/ambient/camPos, params). Vertex-stage bindings 8/9 avoid the fragment
 // slots; Metal pins them to vertex buffers 2/3. HeLighting is not written here:
 // see wpoLightingBlock.
-constexpr const char* kWpoParams =
-    "layout(std140, set = 0, binding = 9) uniform HeParams { vec4 v[16]; } heParams;\n";
+// The array length is kMatMaxParams, like the fragment stage's block (MaterialGraph.cpp).
+const std::string kWpoParams =
+    "layout(std140, set = 0, binding = 9) uniform HeParams { vec4 v[" + std::to_string(kMatMaxParams) + "]; } heParams;\n";
 
 // The vertex stage's HeLighting is the fragment preamble's block, cut out of
 // kLightingPreamble and moved to binding 8 — never a shorter copy. OpenGL links
@@ -1827,7 +1829,8 @@ namespace
 he::shaderc::MslOptions kMaterialMslOptions()
 {
     he::shaderc::MslOptions opts;
-    opts.constexprLinearSamplers = { { 0u, 33u }, { 0u, 34u } }; // cloud shadow, froxel fog volume
+    opts.constexprLinearSamplers = { { 0u, 33u }, { 0u, 34u },  // cloud shadow, froxel fog volume
+                                      { 0u, 40u }, { 0u, 41u }, { 0u, 42u }, { 0u, 43u }, { 0u, 44u }, { 0u, 45u }, { 0u, 46u } };
     return opts;
 }
 
@@ -3084,6 +3087,35 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fragmentVariant(
                         || (backend == Backend::SpirV && m_spirvFogVolume)
                         || (backend == Backend::HLSL  && m_hlslFogVolume);
     const std::string injected = injectPreamble(glsl, clustered, fogVolume); // adds the lighting UBO + heLit()
+    // RVT cold pages on D3D11/D3D12/Vulkan (Thema 333 step 9, counterpart of Metal step 6j above): the shared env switch,
+    // and HE_RVT_COLD_FETCH picks RvtLookup.h's texelFetch/Load branch instead of Metal's sampler one (no spare sampler on
+    // D3D11; Vulkan and D3D12 could afford one, but the same shader text for all three keeps the contract simple). GL stays
+    // off here: it has no renderer-side cold pool/arrays from this step, so defining HE_RVT_COLD for it would statically
+    // reference three unbound sampler units it never binds.
+    static const bool rvtColdWin = [] { const char* e = std::getenv("HE_RVT_COLD"); return !(e && *e == '0'); }();
+    // RG8 hot pool on D3D11/D3D12/Vulkan/OpenGL (Thema 333 step 10, counterpart of Metal step 6k above): the normal layer
+    // keeps x and z, the surface layer keeps AO and roughness, in two channels instead of four (RvtLookup.h's
+    // heRvtNormalOf rebuilds y under HE_RVT_RGNORMAL). Same env switch as Metal's, and unconditional per backend (not
+    // gated on a device capability): RG8 is a mandatory render-target format on every one of these four backends, so
+    // CreateRvtPool's pool format and this define can never disagree about what the pool actually holds.
+    static const bool rvtPackWin = [] { const char* e = std::getenv("HE_RVT_PACK"); return !(e && *e == '0'); }();
+    const auto withRvtWin = [&](const std::string& src, bool allowCold) -> std::string {
+        if (src.find("heRvtSample(") == std::string::npos) return src;
+        // Vulkan only: a sampler2DArray is one combined-image-sampler descriptor there regardless of texelFetch vs
+        // Sample, so the three cold rows need the device to actually fit them (SetRvtColdVulkanFits, VulkanRenderer).
+        // D3D11/D3D12 never set this (texelFetch/Load costs no live sampler there) and always take the branch below.
+        const bool cold = allowCold && rvtColdWin && !(backend == Backend::SpirV && !s_rvtColdVulkanFits);
+        if (!cold && !rvtPackWin) return src;
+        std::string out2 = src;
+        const size_t vpos = out2.find("#version");
+        const size_t eol  = vpos == std::string::npos ? std::string::npos : out2.find('\n', vpos);
+        if (eol == std::string::npos) return src;
+        std::string defs;
+        if (cold) defs += "#define HE_RVT_COLD 1\n#define HE_RVT_COLD_FETCH 1\n";
+        if (rvtPackWin) defs += "#define HE_RVT_RGNORMAL 1\n";
+        out2.insert(eol + 1, defs);
+        return out2;
+    };
     if (backend == Backend::Metal)
     {
         // ── Fragment sampler budget ──────────────────────────────────────────
@@ -3174,7 +3206,21 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fragmentVariant(
               // Froxel fog volume (binding 34, only declared when injectPreamble defines
               // HE_FOG_VOLUME — Metal's material variants) → MSL TEXTURE 17, the next free
               // index; texelFetch + the inline constexpr sampler, no sampler slot.
-              { Stage::Fragment, 0, 34, static_cast<uint32_t>(kMetalFogVolumeTextureIndex) } });
+              { Stage::Fragment, 0, 34, static_cast<uint32_t>(kMetalFogVolumeTextureIndex) },
+              // Runtime Virtual Textures (RvtLookup.h, Thema 333): the page table (40) and the three pool arrays (41..43)
+              // → MSL TEXTURES 18..21, read with texelFetch (.read) only. Like the cloud-shadow map they take an inline
+              // constexpr sampler (kMaterialMslOptions), because SPIRV-Cross declares a sampler for a fetch-only combined
+              // sampler too and the stage is AT the 16-sampler cap. Bound per draw for a material that owns a table
+              // (MetalRenderer::BindRvtForDraw), inert 1x1 defaults otherwise (BindMaterialPreambleSlots). Index 17 is
+              // heFogVolume's (above), so RVT starts one higher than it used to.
+              { Stage::Fragment, 0, 40, 18 },
+              { Stage::Fragment, 0, 41, 19 },
+              { Stage::Fragment, 0, 42, 20 },
+              { Stage::Fragment, 0, 43, 21 },
+              // The cold pool's three block-compressed arrays (step 6j): textures 22..24, inline samplers like the four above.
+              { Stage::Fragment, 0, 44, 22 },
+              { Stage::Fragment, 0, 45, 23 },
+              { Stage::Fragment, 0, 46, 24 } });
         // Clustered variant: the three light lists are BUFFERS, so the sampler
         // budget above is untouched. Fragment buffers 4/5/6 — free in the scene
         // pass (fragmentMain reads 0 and 3), and the slots the clustered
@@ -3185,7 +3231,24 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fragmentVariant(
             pins.push_back({ Stage::Fragment, 0, 25, static_cast<uint32_t>(kMetalClusterGridBufferIndex) });
             pins.push_back({ Stage::Fragment, 0, 26, static_cast<uint32_t>(kMetalClusterIndexBufferIndex) });
         }
-        out = toCompiled(compileMslPinned(injected, Stage::Fragment, pins, kMaterialMslOptions()));
+        // The RVT lookup may read cold (block-compressed) pages on Metal: HE_RVT_COLD declares the three cold arrays and the branch
+        // (RvtLookup.h). HE_RVT_COLD=0 leaves it out of the shader (the hot-only A/B, and a Mac without ASTC sampling).
+        static const bool rvtCold = [] { const char* e = std::getenv("HE_RVT_COLD"); return !(e && *e == '0'); }();
+        // HE_RVT_RGNORMAL: the pool keeps the normal as x and z in two channels (step 6k); HE_RVT_PACK=0 keeps the three-channel pool.
+        static const bool rvtPack = [] { const char* e = std::getenv("HE_RVT_PACK"); return !(e && *e == '0'); }();
+        if ((rvtCold || rvtPack) && injected.find("heRvtSample(") != std::string::npos)
+        {
+            std::string withCold = injected;
+            const size_t vpos = withCold.find("#version");
+            const size_t eol  = vpos == std::string::npos ? std::string::npos : withCold.find('\n', vpos);
+            std::string defs;
+            if (rvtCold) defs += "#define HE_RVT_COLD 1\n";
+            if (rvtPack) defs += "#define HE_RVT_RGNORMAL 1\n";
+            if (eol != std::string::npos) withCold.insert(eol + 1, defs);
+            out = toCompiled(compileMslPinned(withCold, Stage::Fragment, pins, kMaterialMslOptions()));
+        }
+        else
+            out = toCompiled(compileMslPinned(injected, Stage::Fragment, pins, kMaterialMslOptions()));
     }
     else if (backend == Backend::HLSL)
     {
@@ -3276,6 +3339,18 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fragmentVariant(
             // binding 34 (m_hlslFogVolume false), so this line is harmless everywhere
             // until a backend turns the flag on.
             { Stage::Fragment, 0, 34, 34 },     // heFogVolume
+            // Runtime Virtual Textures (RvtLookup.h): the page table and the three pool arrays, read with texelFetch only.
+            // SPIRV-Cross still declares a SamplerState for each (a GLSL sampler2D is a pair), so the four dead ones go
+            // on s0 beside heAO's, exactly the shape FXC accepts; no live sampler, no new register below s16.
+            { Stage::Fragment, 0, 40, 40,  0 }, // heRvtTable
+            { Stage::Fragment, 0, 41, 41,  0 }, // heRvtAlbedo
+            { Stage::Fragment, 0, 42, 42,  0 }, // heRvtNormal
+            { Stage::Fragment, 0, 43, 43,  0 }, // heRvtSurface
+            // The cold pool's three BC7 arrays (Thema 333 step 9): same shape as the four above, texelFetch/Load only
+            // (HE_RVT_COLD_FETCH), so the same dead sampler on s0 covers them — no new register below s16.
+            { Stage::Fragment, 0, 44, 44,  0 }, // heRvtAlbedoC
+            { Stage::Fragment, 0, 45, 45,  0 }, // heRvtNormalC
+            { Stage::Fragment, 0, 46, 46,  0 }, // heRvtSurfaceC
         };
         // Clustered variant: three SRVs and NO sampler, so the table above is
         // untouched. Pinned to their binding numbers (what SPIRV-Cross would
@@ -3293,7 +3368,7 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fragmentVariant(
             pins.push_back({ Stage::Fragment, 0, 25, 25 }); // HeClusterGrid   → t25
             pins.push_back({ Stage::Fragment, 0, 26, 26 }); // HeClusterIdx    → t26
         }
-        out = toCompiled(compileHlslPinned(injected, Stage::Fragment, pins));
+        out = toCompiled(compileHlslPinned(withRvtWin(injected, /*allowCold=*/true), Stage::Fragment, pins));
     }
     else if (backend == Backend::GLSL430 && clustered)
     {
@@ -3301,14 +3376,19 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fragmentVariant(
         // would be a compile error on a driver at GL 4.3's guaranteed 8
         // bindings. Uniform blocks and samplers lose their binding (the GL
         // renderer binds them by name, exactly as for GLSL410).
-        out = toCompiled(compileGlslPinned(injected, Stage::Fragment,
+        out = toCompiled(compileGlslPinned(withRvtWin(injected, /*allowCold=*/false), Stage::Fragment,
             { { Stage::Fragment, 0, 24, static_cast<uint32_t>(kGlClusterLightsSsboBinding) },
               { Stage::Fragment, 0, 25, static_cast<uint32_t>(kGlClusterGridSsboBinding) },
               { Stage::Fragment, 0, 26, static_cast<uint32_t>(kGlClusterIndexSsboBinding) } }));
     }
     else
     {
-        out = toCompiled(compile(injected, Stage::Fragment, toTarget(backend)));
+        // Vulkan: the cold BC7 arrays (step 9), same texelFetch branch as HLSL above (rvtFit: the Vulkan descriptor-count
+        // sweep in test_material_graph grows from 21 to 24 bindings with HE_RVT_COLD on). OpenGL (GLSL410/430/ES300) gets
+        // no HE_RVT_COLD (no cold pool/arrays on that backend), but DOES get HE_RVT_RGNORMAL (step 10): the GL hot pool
+        // packs normal/surface the same way as the other three.
+        const std::string src = withRvtWin(injected, /*allowCold=*/backend == Backend::SpirV);
+        out = toCompiled(compile(src, Stage::Fragment, toTarget(backend)));
     }
     return m_fragCache.emplace(key, std::move(out)).first->second;
 }

@@ -13,11 +13,13 @@
 #include <Renderer/UIFont.h>             // icon names, the plate colour parser, font scripts
 #include <Physics/CollisionLayers.h>     // the project collision matrix
 #include <Project/ProjectSettings.h>     // Config/ProjectSettings.json
+#include <HorizonScene/RvtLandscape.h>  // the Virtual Texture page: DebugInfo, wanted
 #include <Net/RelayTransport.h>          // Multiplayer > Relay server: the field's parse check
 #include <algorithm>
 #include <cfloat>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <string>
@@ -840,6 +842,129 @@ void drawShadowsPage(AppContext& ctx)
 	if (commit) commitSettings(ctx, p, "shadow settings");
 }
 
+// ─── World ▸ Virtual Texture ─────────────────────────────────────────────────
+// The landscape's material rendered ONCE into pages of a shared pool and only read afterwards: the shader that paints it
+// runs when something changes (a stroke, a parameter), not every frame. Off by default: a project that never opens this
+// page draws exactly what it drew. Thema 333, docs/rvt-design-2026-11-04.md.
+void drawVirtualTexturePage(AppContext& ctx)
+{
+	HE::Ed::Help::Scope helpScope("Virtual Texture");
+	ProjectData* pp = openProject(ctx);
+	if (!pp) return;
+	ProjectData& p = *pp;
+	HE::ProjectRvtSettings& s = p.settings.rvt;
+
+	settingsFileHint(nullptr);
+	const bool supported = ctx.renderer && ctx.renderer->GetCapabilities().supportsRvt;
+	if (!supported)
+		hint("This graphics backend cannot draw from virtual texture pages (Metal and the software renderer do not yet; "
+		     "OpenGL needs 25 texture units, Vulkan a device that allows 21 samplers per stage). The setting is saved with "
+		     "the project and ignored here: the landscape keeps drawing its own material.");
+	{
+		const char* env = std::getenv("HE_RVT");
+		if (env && *env)
+		{
+			ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.78f, 0.35f, 1.0f));
+			ImGui::TextWrapped("HE_RVT=%s is set in the environment and overrides the switch below.", env);
+			ImGui::PopStyleColor();
+		}
+	}
+
+	bool commit = false;
+	ImGui::SeparatorText("Landscape");
+	if (EditorWidgets::checkbox("Runtime Virtual Texture", &s.enabled)) commit = true;
+
+	ImGui::SeparatorText("Pool");
+	{
+		static const int kPages[] = { 128, 256, 512, 1024, 2048 };
+		static const char* const kNames[] = { "128 pages  (27 MB)", "256 pages  (54 MB)", "512 pages  (108 MB)",
+		                                      "1024 pages  (216 MB)", "2048 pages  (432 MB)" };
+		int cur = 2;
+		for (int i = 0; i < 5; ++i) if (s.poolPages >= kPages[i]) cur = i;   // a hand-edited value shows as the size below it
+		if (Row::combo("Pool size##rvtpool", &cur, kNames, 5))
+		{
+			s.poolPages = kPages[cur];
+			commit = true;
+		}
+	}
+	{
+		static const float kTexel[] = { 0.125f, 0.25f, 0.5f, 1.0f };
+		static const char* const kNames[] = { "0.125 m  (finest)", "0.25 m", "0.5 m", "1 m  (coarsest)" };
+		int cur = 1;
+		for (int i = 0; i < 4; ++i) if (s.metersPerTexel >= kTexel[i] - 0.001f) cur = i;
+		if (Row::combo("Texel size##rvttexel", &cur, kNames, 4))
+		{
+			s.metersPerTexel = kTexel[cur];
+			commit = true;
+		}
+	}
+	hint("A change of either rebuilds the pool and repaints every page: pick them once, not while looking at the result.");
+	ImGui::Spacing();
+
+	ImGui::SeparatorText("Streaming");
+	Row::dragFloat("Near radius##rvtnear", &s.nearRadiusM, 1.0f, HE::ProjectRvtSettings::kMinRadius,
+	               HE::ProjectRvtSettings::kMaxRadius, "%.0f m");
+	commit |= ImGui::IsItemDeactivatedAfterEdit();
+	Row::dragFloat("Activation radius##rvtactive", &s.activationRadiusM, 5.0f, HE::ProjectRvtSettings::kMinRadius,
+	               HE::ProjectRvtSettings::kMaxRadius, "%.0f m");
+	commit |= ImGui::IsItemDeactivatedAfterEdit();
+	Row::sliderInt("Pages per frame##rvtbudget", &s.maxPagesPerFrame, HE::ProjectRvtSettings::kMinPagesPerFrame,
+	               HE::ProjectRvtSettings::kMaxPagesPerFrame);
+	commit |= ImGui::IsItemDeactivatedAfterEdit();
+
+	if (commit) commitSettings(ctx, p, "virtual texture settings");
+
+	// ── What the driver is doing right now (a snapshot: nothing here points into it) ──
+	ImGui::Spacing();
+	ImGui::SeparatorText("Status");
+	const HE::landscape::RvtLandscape::DebugInfo d = ctx.rvtDebugInfo ? ctx.rvtDebugInfo() : HE::landscape::RvtLandscape::DebugInfo{};
+	if (!d.running)
+	{
+		ImGui::TextDisabled("%s", HE::landscape::RvtLandscape::wanted(s)
+		                              ? (supported ? "Waiting for a landscape within the activation radius."
+		                                           : "Not running: this backend has no virtual texture.")
+		                              : "Off: the landscape draws its own material.");
+		return;
+	}
+	ImGui::Text("%u of %u landscape(s) drawn from pages", d.activeSegments, d.segments);
+	ImGui::Text("Pool: %u of %u pages in use, %u stale", d.resident, d.poolSlots, d.stale);
+	if (d.starved)
+	{
+		ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.78f, 0.35f, 1.0f));
+		ImGui::TextWrapped("The pool is too small for what the camera sees (%u requests found no free page): raise the pool size "
+		                   "or lower the activation radius.", d.starved);
+		ImGui::PopStyleColor();
+	}
+	ImGui::Text("Last painting: %u page(s) in %.1f ms  (%llu painted in all)", d.lastPagesPainted, d.lastPaintMs,
+	            static_cast<unsigned long long>(d.pagesPaintedTotal));
+
+	if (d.gridSide > 0)
+	{
+		// The finest level of the nearest landscape, one cell a page: dark = not there, green = painted, orange = painted
+		// but stale (a change under it is waiting for the budget).
+		ImGui::Spacing();
+		ImGui::TextDisabled("Pages at the finest level, nearest landscape (%d x %d, %.0f m a page)", d.gridSide, d.gridSide,
+		                    static_cast<double>(d.metersPerPage));
+		const float box  = std::min(ImGui::GetContentRegionAvail().x, 260.0f);
+		const float cell = std::max(1.0f, std::floor(box / float(d.gridSide)));
+		const ImVec2 origin = ImGui::GetCursorScreenPos();
+		const float  side   = cell * float(d.gridSide);
+		ImDrawList* dl = ImGui::GetWindowDrawList();
+		dl->AddRectFilled(origin, ImVec2(origin.x + side, origin.y + side), IM_COL32(28, 30, 36, 255));
+		const float gap = cell > 3.0f ? 1.0f : 0.0f;
+		for (int y = 0; y < d.gridSide; ++y)
+			for (int x = 0; x < d.gridSide; ++x)
+			{
+				const uint8_t v = d.grid[size_t(y) * size_t(d.gridSide) + size_t(x)];
+				if (!v) continue;
+				const ImVec2 a(origin.x + cell * float(x), origin.y + cell * float(y));
+				dl->AddRectFilled(a, ImVec2(a.x + cell - gap, a.y + cell - gap),
+				                  v == 2 ? IM_COL32(236, 150, 50, 255) : IM_COL32(70, 190, 110, 255));
+			}
+		ImGui::Dummy(ImVec2(side, side));
+	}
+}
+
 // ─── Physics ▸ Simulation ────────────────────────────────────────────────────
 void drawSimulationPage(AppContext& ctx)
 {
@@ -1293,6 +1418,7 @@ const char* pageTitle(Page page)
 	case Page::Fonts:           return "Fonts";
 	case Page::Permissions:     return "Permissions";
 	case Page::Shadows:         return "Shadows";
+	case Page::VirtualTexture:  return "Virtual Texture";
 	case Page::Simulation:      return "Simulation";
 	case Page::CollisionLayers: return "Collision Layers";
 	case Page::AudioBuses:      return "Audio Buses";
@@ -1312,6 +1438,7 @@ void drawPage(AppContext& ctx, Page page)
 	case Page::Fonts:           drawFontsPage(ctx);           break;
 	case Page::Permissions:     drawPermissionsPage(ctx);     break;
 	case Page::Shadows:         drawShadowsPage(ctx);         break;
+	case Page::VirtualTexture:  drawVirtualTexturePage(ctx);  break;
 	case Page::Simulation:      drawSimulationPage(ctx);      break;
 	case Page::CollisionLayers: drawCollisionLayersPage(ctx); break;
 	case Page::AudioBuses:      drawAudioBusesPage(ctx);      break;

@@ -5,6 +5,7 @@
 #include <ContentManager/TextureArrayBuild.h> // texture-array payload layout (Thema 158)
 #include <ContentManager/TextureBlockDecode.h> // CPU BC1/BC3/BC4/BC5 expand when the context cannot sample them
 #include <MaterialGraph/MaterialGraph.h>         // matGlslTextureArrayMask
+#include <MaterialGraph/RvtLookup.h>           // kRvtTableBinding (the RVT units)
 #include <HorizonRendering/ParticleShaderTemplates.h>
 #include <HorizonRendering/GiCasterRange.h>
 #include <HorizonRendering/GiHeightfield.h>
@@ -3488,6 +3489,15 @@ void OpenGLRenderer::Initialize(HE::Window* window)
 	m_forwardClustered = GLAD_GL_VERSION_4_3 != 0;
 	if (const char* cl = std::getenv("HE_FORWARD_CLUSTER"); cl && *cl && std::atoi(cl) == 0)
 		m_forwardClustered = false;
+	{
+		// The Runtime Virtual Texture's table and pool take units 22..25 (Thema 333; unit 21 is heFogVolume's,
+		// MaterialShaderLibrary::kGlFogVolumeTextureUnit).
+		GLint units = 0;
+		glGetIntegerv(GL_MAX_TEXTURE_IMAGE_UNITS, &units);
+		m_rvtSupported = units >= 26;
+		if (!m_rvtSupported)
+			HE_LOG_INFO(RHI, "OpenGLRenderer: Runtime Virtual Textures off: %d fragment texture units, the lookup needs 26", static_cast<int>(units));
+	}
 	if (m_forwardClustered)
 		CreateClusterSSBOs();
 	HE_LOG_INFO(RHI, "%s", m_forwardClustered
@@ -3859,7 +3869,7 @@ void OpenGLRenderer::EnsureMaterialUBOs()
 		static_cast<GLsizeiptr>(sizeof(HE::MaterialShaderLibrary::Lighting)), nullptr, GL_DYNAMIC_DRAW);
 	glGenBuffers(1, &m_matParamUBO);
 	glBindBuffer(GL_UNIFORM_BUFFER, m_matParamUBO);
-	glBufferData(GL_UNIFORM_BUFFER, 256, nullptr, GL_DYNAMIC_DRAW); // vec4 v[16]
+	glBufferData(GL_UNIFORM_BUFFER, HE::kMatParamBytes, nullptr, GL_DYNAMIC_DRAW); // vec4 v[kMatMaxParams]
 	// HeUI (D5 Schicht 1): rect, corner radii, interaction state — per QUAD, so
 	// unlike HeParams it is re-uploaded inside the UI loop rather than per draw
 	// call's material.
@@ -4084,6 +4094,13 @@ unsigned int OpenGLRenderer::GetOrBuildMaterialProgram(uint64_t key, const std::
 		// only heApplyFogT (Translucent materials) ever samples it.
 		if (GLint l = glGetUniformLocation(prog, "heFogVolume"); l >= 0)
 			glUniform1i(l, HE::MaterialShaderLibrary::kGlFogVolumeTextureUnit);
+		// The Runtime Virtual Texture's page table and pool (Thema 333, RvtLookup.h): units 22..25, bound per draw.
+		// One higher than it used to be: unit 21 is heFogVolume's now (above).
+		static_assert(HE::kRvtTableBinding == 40 && HE::kRvtSurfaceBinding == 43, "four RVT samplers, units 22..25");
+		if (GLint l = glGetUniformLocation(prog, "heRvtTable");   l >= 0) glUniform1i(l, 22);
+		if (GLint l = glGetUniformLocation(prog, "heRvtAlbedo");  l >= 0) glUniform1i(l, 23);
+		if (GLint l = glGetUniformLocation(prog, "heRvtNormal");  l >= 0) glUniform1i(l, 24);
+		if (GLint l = glGetUniformLocation(prog, "heRvtSurface"); l >= 0) glUniform1i(l, 25);
 		glUseProgram(0);
 	};
 
@@ -8461,8 +8478,8 @@ void OpenGLRenderer::RenderUIPass(int pw, int ph)
 			if (const MaterialAsset* ma = m_contentManager
 				? m_contentManager->getMaterial(obj.materialAssetId) : nullptr)
 			{
-				float padded[64] = { 0 };
-				if (const size_t n = std::min(ma->shaderParamData.size(), size_t(64)))
+				float padded[HE::kMatParamFloats] = { 0 };
+				if (const size_t n = std::min(ma->shaderParamData.size(), size_t(HE::kMatParamFloats)))
 					std::memcpy(padded, ma->shaderParamData.data(), n * sizeof(float));
 				glBindBuffer(GL_UNIFORM_BUFFER, m_matParamUBO);
 				glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(padded), padded);
@@ -10203,9 +10220,9 @@ bool OpenGLRenderer::DrawMaterialPreviewGeometry(const HE::UUID& materialId, flo
 
 	if (ma && !ma->shaderParamData.empty())
 	{
-		float padded[64] = { 0 };
+		float padded[HE::kMatParamFloats] = { 0 };
 		std::memcpy(padded, ma->shaderParamData.data(),
-		            std::min(ma->shaderParamData.size(), size_t(64)) * sizeof(float));
+		            std::min(ma->shaderParamData.size(), size_t(HE::kMatParamFloats)) * sizeof(float));
 		glBindBuffer(GL_UNIFORM_BUFFER, m_matParamUBO);
 		glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(padded), padded);
 		m_haveMatParams = false; // invalidate the main loop's content-skip
@@ -11372,6 +11389,8 @@ void OpenGLRenderer::Shutdown()
 
 	if (m_primarySdlWindow && m_glContext)
 		SDL_GL_MakeCurrent(m_primarySdlWindow, static_cast<SDL_GLContext>(m_glContext));
+	DestroyRvtPool();
+	if (m_rvtPackProgram) { glDeleteProgram(m_rvtPackProgram); m_rvtPackProgram = 0; }
 
 	for (auto& [id, mesh] : m_meshCache)
 	{
@@ -11593,6 +11612,323 @@ bool OpenGLRenderer::CaptureViewport(std::vector<uint8_t>& rgba, uint32_t& width
 	return true;
 }
 
+// ─── Runtime Virtual Texture (Thema 333, docs/rvt-design-2026-11-04.md) ───────────────────────────────────────
+// The contract is in IRenderer.h; D3D11's is the reference (D3D11Renderer.cpp). The pool slices are TOP-row-first (what the
+// shader's texelFetch(y = 0) and every other backend see): GL renders bottom-row-first, so RenderSceneImage flips on the blit.
+
+// mode 1 = normal (x, z = R, B of the page), mode 2 = surface (AO, roughness = R, G of the page) — same convention as
+// D3D11's kRvtPackHLSL / Vulkan's kRvtPackFragGLSL. The same vertical flip the (unpacked) blit does (dst Y0=height,
+// Y1=0): the page is bottom-row-first like every GL framebuffer, the pool array is read top-row-first everywhere
+// else, so the fragment reads the SOURCE at the mirrored row instead of flipping the destination geometry.
+static const char* kRvtPackVS = R"GLSL(
+#version 410 core
+void main()
+{
+	vec2 p = vec2(float((gl_VertexID & 1) << 2) - 1.0,
+	              float((gl_VertexID & 2) << 1) - 1.0);
+	gl_Position = vec4(p, 0.0, 1.0);
+}
+)GLSL";
+static const char* kRvtPackFS = R"GLSL(
+#version 410 core
+uniform sampler2D uRvtPackSrc;
+uniform int       uRvtPackMode;
+uniform int       uRvtPackSize;
+out vec2 outColor;
+void main()
+{
+	ivec2 p = ivec2(int(gl_FragCoord.x), (uRvtPackSize - 1) - int(gl_FragCoord.y));
+	vec4 c = texelFetch(uRvtPackSrc, p, 0);
+	outColor = uRvtPackMode == 1 ? c.rb : c.rg;
+}
+)GLSL";
+
+// Built lazily, once (a failure sticks — RenderSceneImage's page copy falls back to "page not packed, not written"
+// rather than retrying every page). CompileStage throws on a compile failure (this file's convention), so this is
+// wrapped rather than left to propagate into RenderSceneImage.
+bool OpenGLRenderer::ensureRvtPackPipeline()
+{
+	if (m_rvtPackProgram) return true;
+	if (m_rvtPackTried) return false;
+	m_rvtPackTried = true;
+	try
+	{
+		GLuint vs = CompileStage(GL_VERTEX_SHADER, kRvtPackVS);
+		GLuint fs = CompileStage(GL_FRAGMENT_SHADER, kRvtPackFS);
+		GLuint prog = glCreateProgram();
+		glAttachShader(prog, vs);
+		glAttachShader(prog, fs);
+		glLinkProgram(prog);
+		glDeleteShader(vs);
+		glDeleteShader(fs);
+		GLint ok = 0;
+		glGetProgramiv(prog, GL_LINK_STATUS, &ok);
+		if (!ok)
+		{
+			GLchar log[512];
+			glGetProgramInfoLog(prog, sizeof(log), nullptr, log);
+			glDeleteProgram(prog);
+			HE_LOG_ERROR(RHI, "%s", (std::string("OpenGLRenderer: RVT page pack link failed: ") + log).c_str());
+			return false;
+		}
+		m_rvtPackProgram = prog;
+		m_uRvtPackTex  = glGetUniformLocation(prog, "uRvtPackSrc");
+		m_uRvtPackMode = glGetUniformLocation(prog, "uRvtPackMode");
+		m_uRvtPackSize = glGetUniformLocation(prog, "uRvtPackSize");
+		return true;
+	}
+	catch (const std::exception& e)
+	{
+		HE_LOG_ERROR(RHI, "%s", (std::string("OpenGLRenderer: RVT page pack compile failed: ") + e.what()).c_str());
+		return false;
+	}
+}
+
+bool OpenGLRenderer::CreateRvtPool(uint32_t slots, uint32_t pagePx)
+{
+	DestroyRvtPool();
+	if (!m_rvtSupported || !m_primarySdlWindow || !m_glContext || slots == 0 || slots > 2048 || pagePx < 8 || pagePx > 1024) return false;
+	SDL_GL_MakeCurrent(m_primarySdlWindow, static_cast<SDL_GLContext>(m_glContext));
+	// The arrays start small and grow with the pages in use (rvtGrowPool, needs glCopyImageSubData = GL 4.3); HE_RVT_GROW=0 allocates
+	// the whole pool at once, as does a driver without 4.3.
+	static const bool s_grow = [] { const char* e = std::getenv("HE_RVT_GROW"); return !(e && *e == '0'); }();
+	const uint32_t first = (s_grow && GLAD_GL_VERSION_4_3) ? std::min(slots, 64u) : slots;
+	static const bool packWanted = [] { const char* e = std::getenv("HE_RVT_PACK"); return !(e && *e == '0'); }();
+	m_rvtPack = packWanted;
+	glGenTextures(3, m_rvtPool);
+	for (int layer = 0; layer < 3; ++layer)
+	{
+		const bool rg = m_rvtPack && layer > 0;
+		glBindTexture(GL_TEXTURE_2D_ARRAY, m_rvtPool[layer]);
+		// A complete texture for texelFetch: no mips, nearest (the default min filter would need a chain).
+		glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+		glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+		glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+		glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+		glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_BASE_LEVEL, 0);
+		glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAX_LEVEL, 0);
+		glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, rg ? GL_RG8 : (layer == 0 ? GL_SRGB8_ALPHA8 : GL_RGBA8), int(pagePx), int(pagePx), int(first), 0,
+		             rg ? GL_RG : GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+	}
+	glBindTexture(GL_TEXTURE_2D_ARRAY, 0);
+	if (glGetError() != GL_NO_ERROR) { DestroyRvtPool(); return false; }
+	m_rvtSlots  = slots;
+	m_rvtAlloc  = first;
+	m_rvtPagePx = pagePx;
+	return true;
+}
+
+// A page for a slot beyond the slices the arrays hold grows them: new arrays, the old slices copied across on the GPU
+// (glCopyImageSubData copies the raw bytes, so the sRGB albedo is not decoded), the old ones deleted (GL keeps a texture alive
+// while a queued command uses it). The manager hands out slots from 0 upwards and reuses freed ones (the highest slot in use never exceeds the peak page count), so a scene that needs 70 pages holds ~100
+// instead of the configured 512.
+bool OpenGLRenderer::rvtGrowPool(uint32_t slot)
+{
+	if (slot < m_rvtAlloc) return true;
+	if (slot >= m_rvtSlots || !m_rvtPool[0] || !GLAD_GL_VERSION_4_3) return false;
+	const uint32_t grown = std::min(m_rvtSlots, std::max((slot + 32u) & ~31u, m_rvtAlloc + m_rvtAlloc / 2));
+	GLuint fresh[3] = {};
+	glGenTextures(3, fresh);
+	for (int layer = 0; layer < 3; ++layer)
+	{
+		const bool rg = m_rvtPack && layer > 0;
+		glBindTexture(GL_TEXTURE_2D_ARRAY, fresh[layer]);
+		glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+		glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+		glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+		glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+		glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_BASE_LEVEL, 0);
+		glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAX_LEVEL, 0);
+		glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, rg ? GL_RG8 : (layer == 0 ? GL_SRGB8_ALPHA8 : GL_RGBA8), int(m_rvtPagePx), int(m_rvtPagePx), int(grown), 0,
+		             rg ? GL_RG : GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+		glCopyImageSubData(m_rvtPool[layer], GL_TEXTURE_2D_ARRAY, 0, 0, 0, 0, fresh[layer], GL_TEXTURE_2D_ARRAY, 0, 0, 0, 0,
+		                   int(m_rvtPagePx), int(m_rvtPagePx), int(m_rvtAlloc));
+	}
+	glBindTexture(GL_TEXTURE_2D_ARRAY, 0);
+	if (glGetError() != GL_NO_ERROR)
+	{
+		glDeleteTextures(3, fresh);
+		return false;
+	}
+	for (int layer = 0; layer < 3; ++layer)
+	{
+		glDeleteTextures(1, &m_rvtPool[layer]);
+		m_rvtPool[layer] = fresh[layer];
+	}
+	HE_LOG_INFO(RHI, "OpenGLRenderer: RVT pool grew %u -> %u of %u pages (%.0f MB, %s)", m_rvtAlloc, grown, m_rvtSlots,
+	            double(grown) * m_rvtPagePx * m_rvtPagePx * (m_rvtPack ? 8.0 : 12.0) / (1024.0 * 1024.0),
+	            m_rvtPack ? "RGBA8 + RG8 + RG8" : "RGBA8 x 3");
+	m_rvtAlloc = grown;
+	return true;
+}
+
+void OpenGLRenderer::DestroyRvtPool()
+{
+	if (m_primarySdlWindow && m_glContext)
+		SDL_GL_MakeCurrent(m_primarySdlWindow, static_cast<SDL_GLContext>(m_glContext));
+	else if (m_rvtPool[0] || !m_rvtTables.empty()) return;
+	m_rvtSwaps.clear();   // the pool the consumers read is gone: draw the landscapes themselves again
+	for (auto& kv : m_rvtTables) if (kv.second.tex) glDeleteTextures(1, &kv.second.tex);
+	m_rvtTables.clear();
+	for (unsigned int& t : m_rvtPool) { if (t) glDeleteTextures(1, &t); t = 0; }
+	m_rvtSlots = m_rvtAlloc = m_rvtPagePx = 0;
+	m_rvtPack = false;   // the pack program itself is renderer-lifetime, not pool-lifetime
+}
+
+void OpenGLRenderer::SetRvtLandscape(uint32_t terrainEntity, const HE::UUID& landscapeMaterial, const HE::UUID& consumerMaterial)
+{
+	if (consumerMaterial == HE::UUID{}) m_rvtSwaps.erase(terrainEntity);
+	else                               m_rvtSwaps[terrainEntity] = { landscapeMaterial, consumerMaterial };
+}
+
+void OpenGLRenderer::ReleaseRvtConsumer(const HE::UUID& consumerMaterial)
+{
+	for (auto it = m_rvtSwaps.begin(); it != m_rvtSwaps.end();)
+		it = it->second.consumerMat == consumerMaterial ? m_rvtSwaps.erase(it) : std::next(it);
+	const auto t = m_rvtTables.find(consumerMaterial);
+	if (t == m_rvtTables.end()) return;
+	if (m_primarySdlWindow && m_glContext) SDL_GL_MakeCurrent(m_primarySdlWindow, static_cast<SDL_GLContext>(m_glContext));
+	if (t->second.tex) glDeleteTextures(1, &t->second.tex);
+	m_rvtTables.erase(t);
+}
+
+bool OpenGLRenderer::SetRvtPageTable(const HE::UUID& consumerMaterial, const std::vector<std::vector<uint32_t>>& mips)
+{
+	if (!m_rvtSlots || !m_primarySdlWindow || !m_glContext || mips.empty() || mips.size() > 12) return false;
+	uint32_t side = 1;
+	while (uint64_t(side) * side < mips[0].size()) ++side;
+	if (uint64_t(side) * side != mips[0].size() || (side & (side - 1)) != 0 || side > 4096) return false;   // a power of two
+	for (size_t m = 0; m < mips.size(); ++m)
+	{
+		const uint32_t ms = side >> m;
+		if (ms == 0 || mips[m].size() != size_t(ms) * ms) return false;
+	}
+	SDL_GL_MakeCurrent(m_primarySdlWindow, static_cast<SDL_GLContext>(m_glContext));
+	RvtTable& t = m_rvtTables[consumerMaterial];
+	const bool fresh = !t.tex || t.side != side || t.mips != mips.size();
+	if (fresh)
+	{
+		if (t.tex) glDeleteTextures(1, &t.tex);
+		glGenTextures(1, &t.tex);
+		glBindTexture(GL_TEXTURE_2D, t.tex);
+		// An integer texture is complete only with a nearest filter; the mip chain ends where the table's does.
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_NEAREST);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL, 0);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, int(mips.size()) - 1);
+		t.side = side;
+		t.mips = static_cast<uint32_t>(mips.size());
+	}
+	else
+		glBindTexture(GL_TEXTURE_2D, t.tex);
+	glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+	for (size_t m = 0; m < mips.size(); ++m)
+	{
+		const int ms = int(side >> m);
+		if (fresh) glTexImage2D(GL_TEXTURE_2D, int(m), GL_R32UI, ms, ms, 0, GL_RED_INTEGER, GL_UNSIGNED_INT, mips[m].data());
+		else       glTexSubImage2D(GL_TEXTURE_2D, int(m), 0, 0, ms, ms, GL_RED_INTEGER, GL_UNSIGNED_INT, mips[m].data());
+	}
+	glBindTexture(GL_TEXTURE_2D, 0);
+	if (glGetError() != GL_NO_ERROR)
+	{
+		glDeleteTextures(1, &t.tex);
+		m_rvtTables.erase(consumerMaterial);
+		return false;
+	}
+	return true;
+}
+
+bool OpenGLRenderer::ReadbackRvtPageTable(const HE::UUID& consumerMaterial, std::vector<std::vector<uint32_t>>& mips)
+{
+	const auto found = m_rvtTables.find(consumerMaterial);
+	if (found == m_rvtTables.end() || !found->second.tex || !m_primarySdlWindow || !m_glContext) return false;
+	SDL_GL_MakeCurrent(m_primarySdlWindow, static_cast<SDL_GLContext>(m_glContext));
+	const RvtTable& t = found->second;
+	mips.assign(t.mips, {});
+	glBindTexture(GL_TEXTURE_2D, t.tex);
+	glPixelStorei(GL_PACK_ALIGNMENT, 4);
+	for (uint32_t m = 0; m < t.mips; ++m)
+	{
+		const uint32_t ms = t.side >> m;
+		mips[m].resize(size_t(ms) * ms);
+		glGetTexImage(GL_TEXTURE_2D, int(m), GL_RED_INTEGER, GL_UNSIGNED_INT, mips[m].data());
+	}
+	glBindTexture(GL_TEXTURE_2D, 0);
+	return glGetError() == GL_NO_ERROR;
+}
+
+bool OpenGLRenderer::ReadbackRvtSlot(int layer, uint32_t slot, std::vector<uint8_t>& rgba)
+{
+	if (layer < 0 || layer >= 3 || !m_rvtPool[layer] || slot >= m_rvtAlloc || !m_primarySdlWindow || !m_glContext) return false;
+	SDL_GL_MakeCurrent(m_primarySdlWindow, static_cast<SDL_GLContext>(m_glContext));
+	GLuint fbo = 0;
+	glGenFramebuffers(1, &fbo);
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo);
+	glFramebufferTextureLayer(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, m_rvtPool[layer], 0, int(slot));
+	bool ok = glCheckFramebufferStatus(GL_READ_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
+	const bool rg = m_rvtPack && layer > 0;
+	if (ok)
+	{
+		glPixelStorei(GL_PACK_ALIGNMENT, 1);
+		glReadBuffer(GL_COLOR_ATTACHMENT0);
+		const GLboolean srgb = glIsEnabled(GL_FRAMEBUFFER_SRGB);
+		glDisable(GL_FRAMEBUFFER_SRGB);       // the stored bytes, whatever the attachment's format
+		if (rg)
+		{
+			// Two channels in the pool: read GL_RG explicitly (a GL_RGBA read would auto-fill B=0, A=1 at the WRONG
+			// indices for this convention) and expand by hand — normal (x, z) to R and B, surface to R and G, the
+			// rest zero (RvtLayerChannels: layer 1 = 0x5, layer 2 = 0x3), same as every other backend.
+			std::vector<uint8_t> two(size_t(m_rvtPagePx) * m_rvtPagePx * 2);
+			glReadPixels(0, 0, int(m_rvtPagePx), int(m_rvtPagePx), GL_RG, GL_UNSIGNED_BYTE, two.data());
+			ok = glGetError() == GL_NO_ERROR;
+			if (ok)
+			{
+				rgba.assign(size_t(m_rvtPagePx) * m_rvtPagePx * 4, 0);
+				const int gDst = layer == 1 ? 2 : 1;
+				for (size_t i = 0; i < size_t(m_rvtPagePx) * m_rvtPagePx; ++i)
+				{
+					rgba[i * 4 + 0] = two[i * 2 + 0];
+					rgba[i * 4 + gDst] = two[i * 2 + 1];
+					rgba[i * 4 + 3] = 255;
+				}
+			}
+		}
+		else
+		{
+			rgba.resize(size_t(m_rvtPagePx) * m_rvtPagePx * 4);
+			glReadPixels(0, 0, int(m_rvtPagePx), int(m_rvtPagePx), GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
+			ok = glGetError() == GL_NO_ERROR;
+		}
+		if (srgb) glEnable(GL_FRAMEBUFFER_SRGB);
+	}
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	glDeleteFramebuffers(1, &fbo);
+	return ok;
+}
+
+uint32_t OpenGLRenderer::RvtLayerChannels(int layer) const
+{
+	if (!m_rvtPack) return 0xFu;
+	return layer == 1 ? 0x5u : layer == 2 ? 0x3u : 0xFu;   // normal: R and B (x, z); surface: R and G; albedo: all
+}
+
+// The consumer's page table and the pool on units 22..25, for a draw whose material owns a table; every other material's
+// program has no such sampler and never looks. Unit 21 is heFogVolume's (kGlFogVolumeTextureUnit, bound once per frame
+// for every material); RVT starts one higher so a page draw does not clobber it for the draws after it.
+void OpenGLRenderer::BindRvtForDraw(const HE::UUID& material)
+{
+	if (m_rvtTables.empty() || !m_rvtPool[0]) return;
+	const auto t = m_rvtTables.find(material);
+	if (t == m_rvtTables.end() || !t->second.tex) return;
+	glActiveTexture(GL_TEXTURE22); glBindTexture(GL_TEXTURE_2D,       t->second.tex);
+	glActiveTexture(GL_TEXTURE23); glBindTexture(GL_TEXTURE_2D_ARRAY, m_rvtPool[0]);
+	glActiveTexture(GL_TEXTURE24); glBindTexture(GL_TEXTURE_2D_ARRAY, m_rvtPool[1]);
+	glActiveTexture(GL_TEXTURE25); glBindTexture(GL_TEXTURE_2D_ARRAY, m_rvtPool[2]);
+	glActiveTexture(GL_TEXTURE0);
+}
+
 // ─── One still from somebody else's camera ────────────────────────────────────
 // The contract is in IRenderer.h; the shape is Metal's (MetalRenderer.mm,
 // RenderSceneImage). GL is the simpler case: Render() is the only thing that
@@ -11682,7 +12018,62 @@ bool OpenGLRenderer::RenderSceneImage(const EditorCameraOverride& camera, uint32
 	// glReadPixels waits for the GPU; no world → the cleared target, honestly
 	// black, which is what the viewport would show too.
 	uint32_t   gotW = 0, gotH = 0;
-	const bool ok   = CaptureViewport(rgba, gotW, gotH) && gotW == width && gotH == height;
+	bool       ok   = false;
+	if (camera.rvtSlot >= 0)
+	{
+		// A virtual texture page (Thema 333): the picture goes into its pool slice, flipped to top-row-first, nothing read back.
+		rgba.clear();
+		ok = camera.rvtLayer >= 0 && camera.rvtLayer < 3 && m_rvtPool[camera.rvtLayer]
+		  && width == m_rvtPagePx && height == m_rvtPagePx && rvtGrowPool(uint32_t(camera.rvtSlot))
+		  && m_viewportFBO && m_viewportW == int(width) && m_viewportH == int(height);
+		if (ok)
+		{
+			const bool packed = m_rvtPack && camera.rvtLayer > 0;
+			GLuint dst = 0;
+			glGenFramebuffers(1, &dst);
+			glBindFramebuffer(GL_READ_FRAMEBUFFER, m_viewportFBO);
+			glBindFramebuffer(GL_DRAW_FRAMEBUFFER, dst);
+			glFramebufferTextureLayer(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, m_rvtPool[camera.rvtLayer], 0, camera.rvtSlot);
+			ok = glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
+			if (ok && !packed)
+			{
+				// Raw bytes in, raw bytes out: the albedo slice is SRGB8_ALPHA8 and must not be encoded a second time.
+				const GLboolean srgb = glIsEnabled(GL_FRAMEBUFFER_SRGB);
+				glDisable(GL_FRAMEBUFFER_SRGB);
+				glBlitFramebuffer(0, 0, int(width), int(height), 0, int(height), int(width), 0, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+				if (srgb) glEnable(GL_FRAMEBUFFER_SRGB);
+			}
+			else if (ok && packed && ensureRvtPackPipeline())
+			{
+				// A packed layer (Thema 333 step 10, HE_RVT_PACK) cannot take glBlitFramebuffer — RGBA8 -> RG8 is a
+				// different component count, not a legal blit conversion — so a tiny fullscreen draw takes its place.
+				glViewport(0, 0, int(width), int(height));
+				glDisable(GL_DEPTH_TEST);
+				glDisable(GL_BLEND);
+				glUseProgram(m_rvtPackProgram);
+				glBindVertexArray(m_fsVAO);
+				glActiveTexture(GL_TEXTURE0);
+				glBindTexture(GL_TEXTURE_2D, m_viewportColor);
+				glUniform1i(m_uRvtPackTex, 0);
+				glUniform1i(m_uRvtPackMode, camera.rvtLayer == 1 ? 1 : 2);
+				glUniform1i(m_uRvtPackSize, int(width));
+				glDrawArrays(GL_TRIANGLES, 0, 3);
+				glBindTexture(GL_TEXTURE_2D, 0);
+				glUseProgram(0);
+				ok = glGetError() == GL_NO_ERROR;
+			}
+			else if (packed)
+			{
+				HE_LOG_WARN(RHI, "OpenGLRenderer: RVT page pack unavailable, slot %d layer %d not written this paint",
+				            camera.rvtSlot, camera.rvtLayer);
+				ok = false;
+			}
+			glBindFramebuffer(GL_FRAMEBUFFER, 0);
+			glDeleteFramebuffers(1, &dst);
+		}
+	}
+	else
+		ok = CaptureViewport(rgba, gotW, gotH) && gotW == width && gotH == height;
 
 	// The screenshot pair goes the way every viewport target goes (the colour
 	// texture is retired, not deleted — one release path, not two). The live
@@ -12050,6 +12441,25 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 	                    &m_editorCamera);
 	m_extractor.extractUI(*m_world, static_cast<float>(pw), static_cast<float>(ph),
 	                      m_renderWorld);
+	// A virtual texture page (RenderSceneImage with rvtSlot >= 0): the layer's view material replaces every object's own,
+	// after the walk. Section lists would override it; terrain has none.
+	if (m_editorCamera.rvtMaterial != HE::UUID{})
+		for (RenderObject& o : m_renderWorld.objects)
+		{
+			o.materialAssetId = m_editorCamera.rvtMaterial;
+			o.sections.clear();
+		}
+	// The landscape drawn from the virtual texture (SetRvtLandscape): its terrain chunks take the consumer material, and not
+	// the object's own parameter block (laid out for the old material; it would overwrite RvtVolumeA/B).
+	else if (!m_rvtSwaps.empty() && m_rvtPool[0])
+		for (RenderObject& o : m_renderWorld.objects)
+			if (o.terrainChunk)
+				if (const auto sw = m_rvtSwaps.find(o.terrainEntity); sw != m_rvtSwaps.end() && o.materialAssetId == sw->second.landscapeMat)
+				{
+					o.materialAssetId = sw->second.consumerMat;
+					o.paramOverride.clear();
+					o.sections.clear();
+				}
 
 	// GI acceleration structures (GL 4.3 compute port, Checkpoint GL-A): CPU
 	// BLAS build + SSBO upload from THIS extraction — no-op unless GI is on and
@@ -13138,9 +13548,9 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 					glBindBufferBase(GL_UNIFORM_BUFFER, 0, m_matLightUBO); // block "HeLighting" (Time)
 					if (!mParams.empty())
 					{
-						float padded[64] = { 0 };
+						float padded[HE::kMatParamFloats] = { 0 };
 						std::memcpy(padded, mParams.data(),
-						            std::min(mParams.size(), size_t(64)) * sizeof(float));
+						            std::min(mParams.size(), size_t(HE::kMatParamFloats)) * sizeof(float));
 						if (!m_haveMatParams || std::memcmp(padded, m_lastMatParams, sizeof(padded)) != 0)
 						{
 							std::memcpy(m_lastMatParams, padded, sizeof(padded));
@@ -13166,6 +13576,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 						glActiveTexture(GL_TEXTURE13);
 						glBindTexture(GL_TEXTURE_2D, ResolveGraphTexture(wid, {}));
 					}
+					BindRvtForDraw(dc.materialAssetId);
 					glActiveTexture(GL_TEXTURE0);
 					if (gbInstProg)
 					{
@@ -13411,9 +13822,9 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 						: (ma && !ma->shaderParamData.empty() ? &ma->shaderParamData : nullptr);
 					if (params)
 					{
-						float padded[64] = { 0 };
+						float padded[HE::kMatParamFloats] = { 0 };
 						std::memcpy(padded, params->data(),
-						            std::min(params->size(), size_t(64)) * sizeof(float));
+						            std::min(params->size(), size_t(HE::kMatParamFloats)) * sizeof(float));
 						// Skip the upload when the UBO already holds these exact params
 						// (the common case: many draws of the same material). Still correct
 						// for per-entity overrides — their block differs, so it re-uploads.
@@ -13473,6 +13884,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 						glBindTexture(GL_TEXTURE_2D, ResolveGraphTexture(wid, {}));
 						glActiveTexture(GL_TEXTURE0);
 					}
+					BindRvtForDraw(dc.materialAssetId);
 					if (matInstProg)
 					{
 						// The whole batch in one draw (the binds above are context
@@ -13768,9 +14180,9 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 					obj.pbr   = glm::vec4(t.metallic, t.roughness, t.opacity, 0.0f);
 					glBindBuffer(GL_UNIFORM_BUFFER, m_matObjUBO);
 					glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(obj), &obj);
-					float padded[64] = { 0 };
+					float padded[HE::kMatParamFloats] = { 0 };
 					std::memcpy(padded, t.params.data(),
-					            std::min(t.params.size(), size_t(64)) * sizeof(float));
+					            std::min(t.params.size(), size_t(HE::kMatParamFloats)) * sizeof(float));
 					glBindBuffer(GL_UNIFORM_BUFFER, m_matParamUBO);
 					glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(padded), padded);
 					glBindBuffer(GL_UNIFORM_BUFFER, 0);
@@ -14042,9 +14454,9 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 					obj.pbr   = glm::vec4(t.metallic, t.roughness, t.opacity, 0.0f);
 					glBindBuffer(GL_UNIFORM_BUFFER, m_matObjUBO);
 					glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(obj), &obj);
-					float padded[64] = { 0 };
+					float padded[HE::kMatParamFloats] = { 0 };
 					std::memcpy(padded, t.params.data(),
-					            std::min(t.params.size(), size_t(64)) * sizeof(float));
+					            std::min(t.params.size(), size_t(HE::kMatParamFloats)) * sizeof(float));
 					glBindBuffer(GL_UNIFORM_BUFFER, m_matParamUBO);
 					glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(padded), padded);
 					glBindBuffer(GL_UNIFORM_BUFFER, 0);
@@ -14614,6 +15026,7 @@ IRenderer::Capabilities OpenGLRenderer::GetCapabilities() const
 	// enough, but the shader cross-compiler must be built in.
 	c.supportsDeferredRendering  = true;
 	c.supportsRawCapture         = true;   // RenderSceneImage's rawOutput (kTonemapFS)
+	c.supportsRvt                = m_rvtSupported;   // a page is that raw capture blitted into the pool (the programs come from the cross-compiler)
 	// SSR: the FORWARD variant only (docs/ssr-cross-backend-plan.md checkpoint
 	// A) — the reflection MRT pre-pass plus last frame's HDR copy, exactly
 	// Metal's Option-A path. The deferred composite (A6) is not built, so in

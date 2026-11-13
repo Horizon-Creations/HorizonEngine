@@ -33,6 +33,22 @@ public:
     // into a fresh pair at the requested size and read back, nothing is presented.
     bool  RenderSceneImage(const EditorCameraOverride& camera, uint32_t width, uint32_t height,
                            std::vector<uint8_t>& rgba) override;
+    // Runtime Virtual Texture page pool (Thema 333); RenderSceneImage fills a slice when the camera says so.
+    bool  CreateRvtPool(uint32_t slots, uint32_t pagePx) override;
+    void  DestroyRvtPool() override;
+    bool  ReadbackRvtSlot(int layer, uint32_t slot, std::vector<uint8_t>& rgba) override;
+    // HE_RVT_PACK (Thema 333 step 10): the hot pool's normal/surface layers hold two channels, not four. 0xFu once
+    // CreateRvtPool never set it (A/B switch HE_RVT_PACK=0, or before the pool exists).
+    uint32_t RvtLayerChannels(int layer) const override;
+    bool  SetRvtPageTable(const HE::UUID& consumerMaterial, const std::vector<std::vector<uint32_t>>& mips) override;
+    bool  ReadbackRvtPageTable(const HE::UUID& consumerMaterial, std::vector<std::vector<uint32_t>>& mips) override;
+    void  SetRvtLandscape(uint32_t terrainEntity, const HE::UUID& landscapeMaterial, const HE::UUID& consumerMaterial) override;
+    void  ReleaseRvtConsumer(const HE::UUID& consumerMaterial) override;
+    // One page through the lean page pass (RenderSceneImage routes camera.rvtSlot >= 0 here).
+    bool  RenderRvtPage(const EditorCameraOverride& camera, uint32_t px);
+    // Once per real frame (Render()): ages pages, harvests finished BC7 encodes/readbacks of pages gone cold, starts new
+    // readbacks for pages that have stood still, re-uploads page tables whose entries changed temperature (Thema 333 step 9).
+    void  UpdateRvtCold();
     // An arbitrary world into a per-slot offscreen target (Class Editor, Mesh
     // viewer, secondary Scene viewports) — the GL/Metal contract in IRenderer.h.
     // Returns the target's ID3D11ShaderResourceView*.

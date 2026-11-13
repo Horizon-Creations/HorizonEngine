@@ -3,6 +3,7 @@
 #include "ImporterCommon.h"   // Importer::setAutoLodOnImport
 #include <Window/Window.h>           // hiddenWindowRequested — no OS windows of ImGui's own
 #include <ContentManager/HAsset.h>   // asset type of a just-saved file
+#include <ContentManager/GpuArrayCook.h>   // texture arrays cooked for the GPU on load
 #include <cstring>
 #include <Diagnostics/EngineProfiler.h> // HE_DUMP_GPUTIME turns live GPU timing on
 #include "AssetThumbnailCache.h" // renderer-owned Content-Browser tiles (freed on shutdown)
@@ -111,6 +112,8 @@ static void onProjectWriteRefused(const char* what);   // ProjectWriteGate handl
 #include "AutoLodDialog.h"                    // HE_AUTOLOD_BAKE witness
 #include <HorizonScene/LandscapeHlod.h>        // HE_DUMP_HLODBAKE / HE_DUMP_HLODFAR witnesses
 #include <HorizonScene/LandscapeHlodBaker.h>
+#include <HorizonScene/RvtProducer.h>
+#include <HorizonScene/RvtLandscape.h>
 #include <HorizonScene/AnimationSystem.h>
 #include <HorizonScene/AnimationBlendSystem.h>
 #include <HorizonScene/AnimationStateMachineSystem.h>
@@ -1287,6 +1290,21 @@ void EditorApplication::OnInit()
 		std::string engineContentPath = std::string(basePath ? basePath : "") + "EngineContent";
 		contentManager().setEngineContentRoot(engineContentPath);
 		m_globalState->refreshEngineFolder(engineContentPath);
+	}
+
+	// ── Texture arrays go to the GPU block-compressed (GpuArrayCook.h) ──────────
+	// Shared EngineContent holds the landscape's texture arrays as platform-neutral RGBA8 (291 MB each).
+	// Like an export does for its target, cook them for the GPU this editor runs on when they are read:
+	// BC7 on D3D/Vulkan/GL, ASTC on Metal, BC3 on macOS GL, cached beside the EngineContent download
+	// cache so the encoder runs once per download. HE_EDITOR_ARRAY_COMPRESS=none turns it off.
+	{
+		HE::GpuArrayCookSettings cook;
+		cook.format   = HE::gpuArrayCookFormatFor(static_cast<int>(m_backend));
+		cook.quality  = cook.format == 2 ? 1 : 0;   // BC7 balanced; ASTC and BC3 fast
+		cook.cacheDir = (GlobalState::userDataDir() / "EngineContentCookCache").string();
+		HE::setGpuArrayCook(cook);
+		HE_LOG_INFO(Editor, "Texture arrays for the GPU: %s",
+		            cook.format == 2 ? "BC7" : cook.format == 1 ? "ASTC 4x4" : cook.format == 3 ? "BC3" : "RGBA8 (not compressed)");
 	}
 
 	switch (m_backend)
@@ -4100,6 +4118,23 @@ void EditorApplication::OnRender(float dt)
 			                        m_editorCamera.position(), gameDt,
 			                        (m_isPlaying && m_physicsWorld) ? m_physicsWorld.get() : nullptr,
 			                        gpuParticles);
+			// The virtual texture of the landscape, after the terrain update of the tick: the project's setting (Project
+			// Settings ▸ Virtual Texture), or HE_RVT=1 / 0 over it. Switched off, the landscapes go back to their own material.
+			{
+				const HE::ProjectRvtSettings& rs = m_projectManager.currentProject().settings.rvt;
+				if (renderer() && HE::landscape::RvtLandscape::wanted(rs))
+				{
+					if (!m_rvtLandscape) m_rvtLandscape = std::make_shared<HE::landscape::RvtLandscape>(contentManager(), *renderer());
+					m_rvtLandscape->setSettings(HE::landscape::RvtLandscape::settingsFromProject(rs));
+					HE_PROFILE_SCOPE_N("RvtLandscape");
+					m_rvtLandscape->tick(*m_editorWorld, m_editorCamera.position());
+				}
+				else if (m_rvtLandscape)
+				{
+					m_rvtLandscape->detach();
+					m_rvtLandscape.reset();
+				}
+			}
 		}
 
 		// Step physics at a fixed rate during play mode
@@ -8093,15 +8128,20 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 		ltf.position = glm::vec3(0.0f, kBaseY, 0.0f);
 		reg.emplace<TransformComponent>(land, ltf);
 		TerrainComponent ltc;
-		ltc.sizeX = ltc.sizeZ = 128.0f;
-		ltc.resolution = 129;      // 2^n + 1: no resample, one vertex per metre
+		// HE_DUMP_AUTOLANDSIZE=<m>: a power of two, 128 (default) up to 2048: 4 .. 1024 chunks, for the cost of a page against
+		// the size of the landscape the scratch world holds (Thema 333).
+		float landSize = 128.0f;
+		if (const char* ls = std::getenv("HE_DUMP_AUTOLANDSIZE"); ls && *ls)
+			landSize = std::clamp(static_cast<float>(std::atof(ls)), 128.0f, 2048.0f);
+		ltc.sizeX = ltc.sizeZ = landSize;
+		ltc.resolution = static_cast<uint32_t>(landSize) + 1;   // 2^n + 1: no resample, one vertex per metre
 		ltc.heightScale = 0.0f;
 		ltc.seed = 0;
 		ltc.sculptHeights.resize(static_cast<size_t>(ltc.resolution) * ltc.resolution);
 		for (uint32_t zi = 0; zi < ltc.resolution; ++zi)
 			for (uint32_t xi = 0; xi < ltc.resolution; ++xi)
 			{
-				const float x = -64.0f + static_cast<float>(xi);
+				const float x = -0.5f * landSize + static_cast<float>(xi);
 				const float t = std::clamp((x + 24.0f) / kRamp, 0.0f, 1.0f);
 				ltc.sculptHeights[static_cast<size_t>(zi) * ltc.resolution + xi] =
 					kPlateau * t * t * (3.0f - 2.0f * t);
@@ -10852,6 +10892,8 @@ void EditorApplication::dumpFrameHeadless()
 	// HE_DUMP_HLODBAKE=<side>[,<cx>,<cz>] (Thema 228): the far-landscape bake on the first landscape of the
 	// scene (the HE_DUMP_AUTOLAND witness), one chunk, written as <dump>.hlod_<view>.bmp (albedo, normal,
 	// surface). The log has the timing and the mean colour of each picture.
+	// HE_DUMP_RVTTEST_LIT (Thema 333 step 3d): what the HLODBAKE block leaves for the live-world comparison after it.
+	struct { bool ready = false; HE::UUID consumer; } rvtLive;
 	if (const char* hb = std::getenv("HE_DUMP_HLODBAKE"); hb && *hb && m_editorWorld && r)
 	{
 		unsigned side = 64, bcx = 0, bcz = 0;
@@ -10940,8 +10982,1108 @@ void EditorApplication::dumpFrameHeadless()
 					}
 				}
 			}
+
+			// HE_DUMP_RVTTEST=1 (Thema 333, step 2): the page producer against the readback path. Pages around the camera are
+			// painted into the renderer's RVT pool; each slice must equal bakeRect() of the same rectangle and size byte for
+			// byte (same renderer, same camera maths: what differs is only the GPU copy), a page's border texels must equal the
+			// neighbour's payload texels (same world positions, so the texel grid and the Y flip agree), and a second update
+			// with the camera where it was must ask for nothing.
+			if (const char* rv = std::getenv("HE_DUMP_RVTTEST"); rv && *rv && *rv != '0' && ok)
+			{
+				using namespace HE::rvt;
+				const uint32_t cps = baker.chunksPerSide();
+				HE::landscape::HlodChunkRect first, last;
+				baker.chunkRect(0, 0, first);
+				baker.chunkRect(cps - 1, cps - 1, last);
+				VolumeDesc vd;
+				vd.origin = first.min;
+				vd.sizeM  = last.min.x + last.size.x - first.min.x;
+				vd.finestMetersPerTexel = vd.sizeM / (4.0f * float(vd.pageSize));   // 4 x 4 pages at mip 0
+				if (const char* tx = std::getenv("HE_DUMP_RVTTEST_TEXEL"); tx && *tx)   // metres per texel at mip 0, e.g. 0.25 (32 m pages)
+					vd.finestMetersPerTexel = std::max(0.01f, static_cast<float>(std::atof(tx)));
+				RvtManager mgr(64, 64, 2);
+				const uint16_t vol = mgr.addVolume(vd);
+				const uint32_t px = static_cast<uint32_t>(mgr.layout(vol).physicalPageSize());
+				if (!r->CreateRvtPool(512, px))
+					HE_LOG_WARN(Editor, "EditorApplication: HE_DUMP_RVTTEST: CreateRvtPool failed on this backend");
+				else
+				{
+					ViewDesc view;
+					view.cameraXZ    = vd.origin + glm::vec2(vd.sizeM * 0.5f);
+					view.nearRadiusM = mgr.layout(vol).pageMeters(0) * 0.6f;
+					mgr.beginFrame();
+					const auto pages = mgr.update(vol, view);
+					const auto t0r = std::chrono::steady_clock::now();
+					const uint32_t painted = paintPages(baker, pages, px);
+					const auto t1r = std::chrono::steady_clock::now();
+					HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTTEST: %zu pages asked, %u painted, %.1f ms (%.1f ms/page), %u px pages",
+					            pages.size(), painted, std::chrono::duration<double, std::milli>(t1r - t0r).count(),
+					            pages.empty() ? 0.0 : std::chrono::duration<double, std::milli>(t1r - t0r).count() / double(pages.size()), px);
+
+					// 1) slice == readback path
+					unsigned checked = 0, exact = 0, worst = 0;
+					for (const PageRender& pr : pages)
+					{
+						HE::landscape::HlodChunkRect rect; rect.min = pr.rectMin; rect.size = pr.rectMax - pr.rectMin;
+						HE::landscape::HlodChunkImages ref;
+						if (!baker.bakeRect(rect, px, 1, ref)) continue;
+						const std::vector<uint8_t>* want[3] = { &ref.albedo, &ref.normal, &ref.surface };
+						for (int layer = 0; layer < 3; ++layer)
+						{
+							std::vector<uint8_t> got;
+							if (!r->ReadbackRvtSlot(layer, pr.slot, got) || got.size() != want[layer]->size()) continue;
+							unsigned d = 0;
+							const uint32_t keep = r->RvtLayerChannels(layer);   // a packed layer holds fewer channels: compare those
+							for (size_t i = 0; i < got.size(); ++i)
+								if ((keep >> (i % 4)) & 1u)
+									d = std::max(d, static_cast<unsigned>(std::abs(int(got[i]) - int((*want[layer])[i]))));
+							++checked; exact += d == 0 ? 1u : 0u; worst = std::max(worst, d);
+						}
+					}
+					HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTTEST slice vs readback: %u of %u slices byte-identical, worst difference %u /255",
+					            exact, checked, worst);
+
+					// 1b) the same pages inside an RVT bracket (one page set kept across the calls, the live viewport given back
+					// once): byte-identical to the per-call path above. They are painted into slots +100 (empty until now), so a
+					// bracket that painted nothing cannot pass by leaving the old pages in place.
+					{
+						std::vector<std::vector<uint8_t>> before;
+						for (const PageRender& pr : pages)
+							for (int layer = 0; layer < 3; ++layer)
+							{
+								std::vector<uint8_t> g;
+								r->ReadbackRvtSlot(layer, pr.slot, g);
+								before.push_back(std::move(g));
+							}
+						std::vector<PageRender> moved = pages;
+						for (PageRender& pr : moved) pr.slot += 100;
+						const auto b0 = std::chrono::steady_clock::now();
+						r->BeginRvtPages(px);
+						const uint32_t again = paintPages(baker, moved, px);
+						r->EndRvtPages();
+						const auto b1 = std::chrono::steady_clock::now();
+						unsigned n = 0, same = 0, differ = 0, blank = 0;
+						for (size_t k = 0; k < pages.size(); ++k)
+							for (int layer = 0; layer < 3; ++layer)
+							{
+								std::vector<uint8_t> g;
+								if (!r->ReadbackRvtSlot(layer, moved[k].slot, g)) continue;
+								const std::vector<uint8_t>& w = before[k * 3 + size_t(layer)];
+								++n;
+								if (g == w) ++same; else ++differ;
+								if (std::all_of(g.begin(), g.end(), [](uint8_t v) { return v == 0; })) ++blank;
+							}
+						HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTTEST bracket: %u pages in %.1f ms (%.1f ms/page; per call above %.1f), %u of %u slices byte-identical to the per-call path, %u differ, %u blank",
+						            again, std::chrono::duration<double, std::milli>(b1 - b0).count(),
+						            moved.empty() ? 0.0 : std::chrono::duration<double, std::milli>(b1 - b0).count() / double(moved.size()),
+						            pages.empty() ? 0.0 : std::chrono::duration<double, std::milli>(t1r - t0r).count() / double(pages.size()),
+						            same, n, differ, blank);
+					}
+
+					// 2) border == neighbour's payload: page (x,y) texel columns 128..135 are page (x+1,y) columns 0..7
+					for (const PageRender& a : pages)
+					{
+						if (a.key.mip != 0) continue;
+						for (const PageRender& b : pages)
+						{
+							if (b.key.mip != 0 || b.key.y != a.key.y || b.key.x != a.key.x + 1) continue;
+							const uint32_t ps = static_cast<uint32_t>(vd.pageSize);
+							for (int layer = 0; layer < 2; ++layer)
+							{
+								std::vector<uint8_t> ga, gb;
+								if (!r->ReadbackRvtSlot(layer, a.slot, ga) || !r->ReadbackRvtSlot(layer, b.slot, gb)) continue;
+								double sum = 0; unsigned mx = 0, n = 0;
+								for (uint32_t y = 0; y < px; ++y)
+									for (uint32_t i = ps; i < px; ++i)
+										for (int c = 0; c < 3; ++c)
+										{
+											const unsigned d = static_cast<unsigned>(std::abs(
+												int(ga[(size_t(y) * px + i) * 4 + size_t(c)]) - int(gb[(size_t(y) * px + (i - ps)) * 4 + size_t(c)])));
+											sum += d; mx = std::max(mx, d); ++n;
+										}
+								HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTTEST border seam page(%u,%u)|(%u,%u) layer %d: mean %.3f /255, max %u",
+								            a.key.x, a.key.y, b.key.x, b.key.y, layer, n ? sum / double(n) : 0.0, mx);
+							}
+							break;
+						}
+					}
+
+					// 3) nothing changed: nothing to paint
+					mgr.beginFrame();
+					const size_t again = mgr.update(vol, view).size();
+					HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTTEST second update: %zu pages (expected 0)", again);
+
+					// 3b) the page table the landscape shader reads: upload every mip, read it back, compare entry for entry
+					{
+						std::vector<std::vector<uint32_t>> up, back;
+						for (int m = 0; m < mgr.layout(vol).mipCount(); ++m) up.push_back(mgr.pageTable(vol, m));
+						const HE::UUID tableKey{ 1, 1 };                 // any key: one table, read back under the same name
+						const bool upOk = r->SetRvtPageTable(tableKey, up);
+						const bool rbOk = upOk && r->ReadbackRvtPageTable(tableKey, back);
+						size_t entries = 0, wrong = 0, valid = 0;
+						if (rbOk && back.size() == up.size())
+							for (size_t m = 0; m < up.size(); ++m)
+								for (size_t i = 0; i < up[m].size() && i < back[m].size(); ++i)
+								{
+									++entries; wrong += up[m][i] != back[m][i] ? 1u : 0u; valid += up[m][i] != HE::rvt::kPageTableInvalid ? 1u : 0u;
+								}
+						HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTTEST page table: upload %s, readback %s, %zu mips, %zu entries (%zu valid), %zu differ",
+						            upOk ? "ok" : "FAILED", rbOk ? "ok" : "FAILED", up.size(), entries, valid, wrong);
+					}
+					{
+						std::vector<uint8_t> dbg;
+						if (!pages.empty() && r->ReadbackRvtSlot(0, pages.front().slot, dbg))
+							writeBMP(m_dumpPath + ".rvt_page0.bmp", dbg, px, px);
+					}
+
+					// 4) position test (analytic): the three views are replaced by an unlit material whose colour is
+					// fract(worldPos * 1/period) and every texel of a page is compared with that value computed on the CPU at
+					// the texel's centre, rectMin + (i + 0.5) * texelM, row 0 = the min-Z edge. A flipped axis, the D3D Y flip,
+					// a half-texel offset or a misplaced border all show up as errors of many /255 (period 8 m, texel 0.5 m:
+					// one texel is 16/255, half a texel 8/255). R holds x, B holds z (G would be the terrain height).
+					{
+						constexpr float kPeriod = 8.0f;
+						HE::MaterialGraph g;
+						const int out = g.addNode(HE::MatNodeType::Output);
+						const int wp  = g.addNode(HE::MatNodeType::WorldPos);
+						const int sc  = g.addNode(HE::MatNodeType::ConstFloat);
+						const int mul = g.addNode(HE::MatNodeType::Multiply);
+						const int fr  = g.addNode(HE::MatNodeType::Fract);
+						g.findNode(out)->p[0] = 0.0f;                    // unlit
+						g.findNode(sc)->p[0]  = 1.0f / kPeriod;
+						g.connect(wp, 0, mul, 0);
+						g.connect(sc, 0, mul, 1);
+						g.connect(mul, 0, fr, 0);
+						g.connect(fr, 0, out, HE::kMatOutputBaseColorPin);
+						MaterialAsset am;
+						am.type = HE::AssetType::Material;
+						am.name = "RvtPositionWitness";
+						am.nodeGraphJson = HE::materialGraphToJson(g);
+						const HE::UUID mid = contentManager().registerMaterial(std::move(am));
+						contentManager().regenerateMaterialFromGraph(mid);
+						HE::UUID saved[3], mats[3] = { mid, mid, mid };
+						baker.viewMaterials(saved);
+						baker.setViewMaterials(mats);
+
+						RvtManager pm(64, 64, 0);   // every mip of the volume fits one update, mip 0 included
+						VolumeDesc pd = vd;
+						pd.finestMetersPerTexel = 0.5f;                   // an exact binary fraction: the texel centres are exact in float
+						const uint16_t pv = pm.addVolume(pd);
+						const uint32_t ppx = static_cast<uint32_t>(pm.layout(pv).physicalPageSize());
+						if (ppx != px) r->CreateRvtPool(8, ppx);
+						ViewDesc pview;
+						pview.cameraXZ = vd.origin + glm::vec2(vd.sizeM * 0.5f);
+						pview.nearRadiusM = 1.0f;
+						pm.beginFrame();
+						std::vector<PageRender> ppages = pm.update(pv, pview);
+						ppages.erase(std::remove_if(ppages.begin(), ppages.end(), [](const PageRender& pr) { return pr.key.mip != 0; }), ppages.end());
+						paintPages(baker, ppages, ppx);
+						const float tm = pm.layout(pv).texelMeters(0);
+						const auto srgbEnc = [](float v) { return v <= 0.0031308f ? v * 12.92f : 1.055f * std::pow(v, 1.0f / 2.4f) - 0.055f; };
+						const std::string fault = [] { const char* f = std::getenv("HE_DUMP_RVTTEST_FAULT"); return f ? std::string(f) : std::string(); }();
+						const auto circ = [](float a, float b) { float d = std::fabs(a - b); return std::min(d, 1.0f - d); };
+						for (int layer = 0; layer < 3; ++layer)
+						{
+							unsigned n = 0, bad = 0, worst = 0, skipped = 0;
+							for (const PageRender& pr : ppages)
+							{
+								std::vector<uint8_t> got;
+								if (!r->ReadbackRvtSlot(layer, pr.slot, got)) continue;
+								// HE_DUMP_RVTTEST_SLICES=<dir>: every position page as a PPM (a look at what a backend drew, when the numbers are wrong).
+								if (const char* sd = std::getenv("HE_DUMP_RVTTEST_SLICES"); sd && *sd)
+								{
+									char name[512];
+									std::snprintf(name, sizeof(name), "%s/pos_l%d_slot%u.ppm", sd, layer, pr.slot);
+									if (FILE* f = std::fopen(name, "wb"))
+									{
+										std::fprintf(f, "P6\n%u %u\n255\n", ppx, ppx);
+										for (size_t k = 0; k < size_t(ppx) * ppx; ++k) std::fwrite(&got[k * 4], 1, 3, f);
+										std::fclose(f);
+									}
+								}
+								for (uint32_t j = 0; j < ppx; ++j)
+									for (uint32_t i = 0; i < ppx; ++i)
+									{
+										// HE_DUMP_RVTTEST_FAULT=half|flipz|swapxz: the negative control, the expectation itself made wrong on purpose
+										// (the test must then report errors, or it would not see a real half-texel / flip / swap).
+										float wx = pr.rectMin.x + (float(i) + 0.5f) * tm, wz = pr.rectMin.y + (float(j) + 0.5f) * tm;
+										if (fault == "half") wx += 0.5f * tm;
+										else if (fault == "flipz") wz = pr.rectMin.y + (float(ppx - 1 - j) + 0.5f) * tm;
+										else if (fault == "swapxz") std::swap(wx, wz);
+										if (wx < vd.origin.x + 0.5f || wz < vd.origin.y + 0.5f ||
+										    wx > vd.origin.x + vd.sizeM - 0.5f || wz > vd.origin.y + vd.sizeM - 0.5f) { ++skipped; continue; }   // outside the landscape
+										float ex = wx / kPeriod, ez = wz / kPeriod;
+										ex -= std::floor(ex); ez -= std::floor(ez);
+										if (layer == 0) { ex = srgbEnc(ex); ez = srgbEnc(ez); }
+										const uint8_t* px4 = &got[(size_t(j) * ppx + i) * 4];
+										// 8 bit of the value; right at the wrap (0 / 1) the neighbouring texel decides, so compare circularly
+										const float gx = float(px4[0]) / 255.0f, gz = float(px4[2]) / 255.0f;
+										// A layer that keeps no blue (the packed surface: R and G) cannot show z; x still checks the columns.
+										const bool hasZ = (r->RvtLayerChannels(layer) & 4u) != 0;
+										const unsigned d = static_cast<unsigned>(std::lround((hasZ ? std::max(circ(gx, ex), circ(gz, ez)) : circ(gx, ex)) * 255.0f));
+										++n; worst = std::max(worst, d); bad += d > 3 ? 1u : 0u;
+									}
+							}
+							HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTTEST position layer %d: %u texels on %zu pages, %u wrong by > 3/255, worst %u /255 (%u outside the landscape skipped)",
+							            layer, n, ppages.size(), bad, worst, skipped);
+						}
+						baker.setViewMaterials(saved);
+					}
+
+					// 6) the consumer (Thema 333 step 3c): the landscape drawn from the page pool through the RvtSample node.
+					// Every page of a volume is painted with an analytic ramp, (u, v, 0) = ((x - ox) / ext, (z - oz) / ext, 0), in all
+					// three layers. A ramp is linear, so bilinear filtering of it is EXACT at any mip: the consumer must reproduce
+					// it at every pixel (within 8-bit rounding), through the page table, the effective-mip page cell, the border
+					// and the page seams. Two cases: every page resident (mip 0 is read), and only the top page resident (the
+					// table sends every lookup to a coarser page: the effective-mip math is the likeliest bug). Layers: 2 =
+					// (AO, roughness) carries u and v; 0 = the sRGB Load path; 1 = the normal, normalize(2 * (u, v, 0) - 1).
+					{
+						using HE::MatNodeType;
+						const std::string cfault = [] { const char* f = std::getenv("HE_DUMP_RVTTEST_FAULT"); return f ? std::string(f) : std::string(); }();
+						RvtManager cm(512, 512, 1);
+						VolumeDesc cd = vd;
+						cd.finestMetersPerTexel = 0.5f;
+						const uint16_t cvol = cm.addVolume(cd);
+						const VolumeLayout& cl = cm.layout(cvol);
+						const uint32_t cpx = static_cast<uint32_t>(cl.physicalPageSize());
+						const float ext = cl.extentM();
+						if (cpx != px) r->CreateRvtPool(512, cpx);
+
+						// the ramp view material: (u, 0, v) = WorldPos * K + C, then (u, v, 0)
+						HE::MaterialGraph rg;
+						{
+							const int out = rg.addNode(MatNodeType::Output);
+							const int wp  = rg.addNode(MatNodeType::WorldPos);
+							const int kk  = rg.addNode(MatNodeType::ConstColor);
+							const int cc  = rg.addNode(MatNodeType::ConstColor);
+							const int mul = rg.addNode(MatNodeType::Multiply);
+							const int add = rg.addNode(MatNodeType::Add);
+							const int spl = rg.addNode(MatNodeType::SplitRGBA);
+							const int zer = rg.addNode(MatNodeType::ConstFloat);
+							const int c3  = rg.addNode(MatNodeType::Combine3);
+							rg.findNode(out)->p[0] = 0.0f;
+							rg.findNode(kk)->p[0] = 1.0f / ext; rg.findNode(kk)->p[1] = 0.0f; rg.findNode(kk)->p[2] = 1.0f / ext;
+							rg.findNode(cc)->p[0] = -cd.origin.x / ext; rg.findNode(cc)->p[1] = 0.0f; rg.findNode(cc)->p[2] = -cd.origin.y / ext;
+							rg.findNode(zer)->p[0] = 0.0f;
+							rg.connect(wp, 0, mul, 0); rg.connect(kk, 0, mul, 1);
+							rg.connect(mul, 0, add, 0); rg.connect(cc, 0, add, 1);
+							rg.connect(add, 0, spl, 0);
+							rg.connect(spl, 0, c3, 0); rg.connect(spl, 2, c3, 1); rg.connect(zer, 0, c3, 2);
+							rg.connect(c3, 0, out, HE::kMatOutputBaseColorPin);
+						}
+						MaterialAsset ram;
+						ram.type = HE::AssetType::Material;
+						ram.name = "RvtRampWitness";
+						ram.nodeGraphJson = HE::materialGraphToJson(rg);
+						const HE::UUID rampId = contentManager().registerMaterial(std::move(ram));
+						contentManager().regenerateMaterialFromGraph(rampId);
+
+						// the consumers: kind 0 -> (AO, roughness, valid), 1 -> base colour, 2 -> normal * 0.5 + 0.5
+						HE::UUID consumer[3];
+						for (int kind = 0; kind < 3; ++kind)
+						{
+							HE::MaterialGraph g;
+							const int out = g.addNode(MatNodeType::Output);
+							const int pa  = g.addNode(MatNodeType::ParamVec4); g.findNode(pa)->s = "RvtVolumeA";
+							const int pb  = g.addNode(MatNodeType::ParamVec4); g.findNode(pb)->s = "RvtVolumeB";
+							const int rv  = g.addNode(MatNodeType::RvtSample);
+							g.findNode(out)->p[0] = 0.0f;
+							g.findNode(pa)->p[0] = cd.origin.x; g.findNode(pa)->p[1] = cd.origin.y;
+							g.findNode(pa)->p[2] = ext;         g.findNode(pa)->p[3] = cl.texelMeters(0);
+							g.findNode(pb)->p[0] = float(cd.pageSize); g.findNode(pb)->p[1] = float(cd.border);
+							g.findNode(pb)->p[2] = float(cl.pagesPerSide(0)); g.findNode(pb)->p[3] = float(cl.mipCount());
+							g.connect(pa, 0, rv, 0); g.connect(pb, 0, rv, 1);
+							if (kind == 0)
+							{
+								const int c3 = g.addNode(MatNodeType::Combine3);
+								g.connect(rv, 2, c3, 0); g.connect(rv, 3, c3, 1); g.connect(rv, 4, c3, 2);
+								g.connect(c3, 0, out, HE::kMatOutputBaseColorPin);
+							}
+							else if (kind == 1)
+								g.connect(rv, 0, out, HE::kMatOutputBaseColorPin);
+							else
+							{
+								const int h = g.addNode(MatNodeType::ConstFloat); g.findNode(h)->p[0] = 0.5f;
+								const int m = g.addNode(MatNodeType::Multiply);
+								const int a = g.addNode(MatNodeType::Add);
+								g.connect(rv, 1, m, 0); g.connect(h, 0, m, 1); g.connect(m, 0, a, 0); g.connect(h, 0, a, 1);
+								g.connect(a, 0, out, HE::kMatOutputBaseColorPin);
+							}
+							MaterialAsset ca;
+							ca.type = HE::AssetType::Material;
+							ca.name = "RvtConsumerWitness" + std::to_string(kind);
+							ca.nodeGraphJson = HE::materialGraphToJson(g);
+							consumer[kind] = contentManager().registerMaterial(std::move(ca));
+							contentManager().regenerateMaterialFromGraph(consumer[kind]);
+						}
+
+						// the fine pattern for the third case: fract(worldPos / 8 m), 16 texels per period at 0.5 m. A ramp is blind to
+						// a sub-texel shift (half a texel moves it by < 1/255); this one moves 8/255 for it.
+						HE::MaterialGraph fg;
+						{
+							const int out = fg.addNode(MatNodeType::Output);
+							const int wp  = fg.addNode(MatNodeType::WorldPos);
+							const int sc  = fg.addNode(MatNodeType::ConstFloat);
+							const int mul = fg.addNode(MatNodeType::Multiply);
+							const int fr  = fg.addNode(MatNodeType::Fract);
+							fg.findNode(out)->p[0] = 0.0f;
+							fg.findNode(sc)->p[0] = 1.0f / 8.0f;
+							fg.connect(wp, 0, mul, 0); fg.connect(sc, 0, mul, 1); fg.connect(mul, 0, fr, 0);
+							fg.connect(fr, 0, out, HE::kMatOutputBaseColorPin);
+						}
+						MaterialAsset fma;
+						fma.type = HE::AssetType::Material;
+						fma.name = "RvtFineWitness";
+						fma.nodeGraphJson = HE::materialGraphToJson(fg);
+						const HE::UUID fineId = contentManager().registerMaterial(std::move(fma));
+						contentManager().regenerateMaterialFromGraph(fineId);
+
+						HE::UUID savedC[3], rampMats[3] = { rampId, rampId, rampId }, fineMats[3] = { fineId, fineId, fineId };
+						baker.viewMaterials(savedC);
+
+						// the picture: the central part of the landscape, 0.5 m per pixel, at most 1024 px
+						const float shotM = std::min(cd.sizeM, 512.0f);
+						const uint32_t shotPx = static_cast<uint32_t>(shotM / 0.5f);
+						HE::landscape::HlodChunkRect shot;
+						shot.size = glm::vec2(shotM);
+						shot.min  = cd.origin + glm::vec2((cd.sizeM - shotM) * 0.5f);
+
+						// The consumers' pipelines build in the background on Metal and a draw whose pipeline is not ready is skipped:
+						// warm them and wait, or the first scenario would photograph an empty frame.
+						r->WarmupMaterials({ consumer[0], consumer[1], consumer[2], rampId, fineId });
+						for (int i = 0; i < 4000 && r->PumpShaderBuilds().pending != 0; ++i)
+							std::this_thread::sleep_for(std::chrono::milliseconds(5));
+
+						// scenarios: 0 = every page resident, ramp; 1 = only the top page, ramp; 2 = every page, the fine pattern
+						for (int scenario = 0; scenario < 3; ++scenario)
+						{
+							baker.setViewMaterials(scenario == 2 ? fineMats : rampMats);
+							RvtManager sm(512, 512, scenario == 1 ? 1 : 0);
+							const uint16_t sv = sm.addVolume(cd);
+							ViewDesc vw;
+							if (scenario != 1) { vw.cameraXZ = cd.origin + glm::vec2(cd.sizeM * 0.5f); vw.nearRadiusM = cd.sizeM; }   // every mip-0 page
+							else               { vw.cameraXZ = cd.origin - glm::vec2(1.0e6f); vw.nearRadiusM = 1.0f; }                  // only the pinned top page
+							sm.beginFrame();
+							const auto pg = sm.update(sv, vw);
+							paintPages(baker, pg, cpx);
+							std::vector<std::vector<uint32_t>> tbl;
+							for (int m = 0; m < sm.layout(sv).mipCount(); ++m) tbl.push_back(sm.pageTable(sv, m));
+							bool tblOk = true;
+							for (int k = 0; k < 3; ++k) tblOk = r->SetRvtPageTable(consumer[k], tbl) && tblOk;   // one table, read by three materials
+							const int topMip = sm.layout(sv).mipCount() - 1;
+							const float edge = (scenario != 1 ? 1.5f : 1.5f * sm.layout(sv).texelMeters(topMip));   // the first coarse texel at the volume edge mixes in the unpainted border
+
+							for (int kind = 0; kind < 3; ++kind)
+							{
+								if (scenario == 2 && kind != 1) continue;   // the fine pattern is read through the sRGB layer only
+								std::vector<uint8_t> img;
+								const bool imgOk = tblOk && baker.renderMaterialImage(consumer[kind], shot, shotPx, img) && img.size() == size_t(shotPx) * shotPx * 4;
+								unsigned n = 0, bad = 0, worst = 0;
+								if (imgOk)
+									for (uint32_t j = 0; j < shotPx; ++j)
+										for (uint32_t i = 0; i < shotPx; ++i)
+										{
+											float wx = shot.min.x + (float(i) + 0.5f) * (shotM / float(shotPx));
+											float wz = shot.min.y + (float(j) + 0.5f) * (shotM / float(shotPx));
+											if (cfault == "half") wx += 0.25f;
+											else if (cfault == "flipz") wz = shot.min.y + (float(shotPx - 1 - j) + 0.5f) * (shotM / float(shotPx));
+											else if (cfault == "swapxz") std::swap(wx, wz);
+											if (wx < cd.origin.x + edge || wz < cd.origin.y + edge ||
+											    wx > cd.origin.x + cd.sizeM - edge || wz > cd.origin.y + cd.sizeM - edge) continue;
+											const float u = (wx - cd.origin.x) / ext, v = (wz - cd.origin.y) / ext;
+											float ex[3];
+											if (scenario == 2)
+											{
+												// fract(x / 8), fract(z / 8) in R and B (G is the terrain height); the pixels next to a wrap of the
+												// sawtooth are skipped, where a texel pair straddles the jump and bilinear is not the analytic value
+												ex[0] = wx / 8.0f - std::floor(wx / 8.0f); ex[1] = 0.0f; ex[2] = wz / 8.0f - std::floor(wz / 8.0f);
+												if (ex[0] < 0.1f || ex[0] > 0.9f || ex[2] < 0.1f || ex[2] > 0.9f) continue;
+											}
+											else if (kind == 0) { ex[0] = u; ex[1] = v; ex[2] = 1.0f; }
+											else if (kind == 1) { ex[0] = u; ex[1] = v; ex[2] = 0.0f; }
+											else
+											{
+												const float nx = 2.0f * u - 1.0f, nz = -1.0f;
+												// A backend that packs the normal as x and z rebuilds y from the unit length (RvtLookup.h).
+												const float ny = r->RvtLayerChannels(1) != 0xFu ? std::sqrt(std::max(0.0f, 1.0f - nx * nx - nz * nz)) : 2.0f * v - 1.0f;
+												const float il = 1.0f / std::sqrt(nx * nx + ny * ny + nz * nz);
+												ex[0] = nx * il * 0.5f + 0.5f; ex[1] = ny * il * 0.5f + 0.5f; ex[2] = nz * il * 0.5f + 0.5f;
+											}
+											const uint8_t* px4 = &img[(size_t(j) * shotPx + i) * 4];
+											unsigned d = 0;
+											for (int c = 0; c < 3; ++c)
+											{
+												if (scenario == 2 && c == 1) continue;
+												d = std::max(d, static_cast<unsigned>(std::lround(std::fabs(float(px4[c]) / 255.0f - ex[c]) * 255.0f)));
+											}
+											++n; worst = std::max(worst, d); bad += d > 3 ? 1u : 0u;
+										}
+								HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTTEST consumer %s, view %s: %u pixels, %u wrong by > 3/255, worst %u /255 (%zu pages, table %s, image %s)",
+								            scenario == 0 ? "all pages" : scenario == 1 ? "top page only" : "all pages, fine pattern", kind == 0 ? "AO/rough/valid" : kind == 1 ? "base colour" : "normal",
+								            n, bad, worst, pg.size(), tblOk ? "ok" : "FAILED", imgOk ? "ok" : "FAILED");
+								if (imgOk && scenario == 1 && kind == 1) writeBMP(m_dumpPath + ".rvt_consumer_top.bmp", img, shotPx, shotPx);
+								if (imgOk && scenario == 0 && kind == 1) writeBMP(m_dumpPath + ".rvt_consumer_all.bmp", img, shotPx, shotPx);
+							}
+						}
+						baker.setViewMaterials(savedC);
+					}
+
+					// 5) HE_DUMP_RVTTEST_PERF=<reps>: the cost of painting a page. The pages of step 1 are painted again `reps`
+					// times (a stroke's repaint looks the same: the same slots, new content); CPU = until paintPages returns,
+					// total = until the GPU has finished (a readback of the last slice).
+					if (const char* pf = std::getenv("HE_DUMP_RVTTEST_PERF"); pf && *pf && !pages.empty())
+					{
+						const int reps = std::max(1, std::atoi(pf));
+						std::vector<uint8_t> sink;
+						paintPages(baker, pages, px);
+						r->ReadbackRvtSlot(0, pages.back().slot, sink);   // warm-up: pipelines built, GPU idle
+						const auto a = std::chrono::steady_clock::now();
+						for (int k = 0; k < reps; ++k) paintPages(baker, pages, px);
+						const auto b = std::chrono::steady_clock::now();
+						r->ReadbackRvtSlot(0, pages.back().slot, sink);
+						const auto c = std::chrono::steady_clock::now();
+						const double n = double(reps) * double(pages.size());
+						HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTTEST perf: %d x %zu pages of %u px: CPU %.3f ms/page, total %.3f ms/page (GPU wait after the CPU: %.2f ms)",
+						            reps, pages.size(), px, std::chrono::duration<double, std::milli>(b - a).count() / n,
+						            std::chrono::duration<double, std::milli>(c - a).count() / n, std::chrono::duration<double, std::milli>(c - b).count());
+					}
+					// 7a) HE_DUMP_RVTTEST_LIT=1: the REAL landscape's three views painted into every page of its volume (0.25 m per
+					// texel), the table uploaded, and a LIT consumer material (RvtSample -> base colour, normal, AO, roughness) made.
+					// The comparison with the direct material happens after baker.end(), in the live world (sun, sky, camera).
+					if (const char* lit = std::getenv("HE_DUMP_RVTTEST_LIT"); lit && *lit && *lit != '0')
+					{
+						RvtManager lm(512, 512, 0);
+						VolumeDesc ld = vd;
+						ld.finestMetersPerTexel = 0.25f;
+						const uint16_t lv = lm.addVolume(ld);
+						const VolumeLayout& ll = lm.layout(lv);
+						const uint32_t lpx = static_cast<uint32_t>(ll.physicalPageSize());
+						if (lpx != px) r->CreateRvtPool(512, lpx);
+						ViewDesc lw;
+						lw.cameraXZ = ld.origin + glm::vec2(ld.sizeM * 0.5f);
+						lw.nearRadiusM = ld.sizeM;
+						lm.beginFrame();
+						const auto lpg = lm.update(lv, lw);
+						const auto l0 = std::chrono::steady_clock::now();
+						const uint32_t lpainted = paintPages(baker, lpg, lpx);
+						std::vector<uint8_t> lsink;
+						r->ReadbackRvtSlot(0, lpg.back().slot, lsink);   // wait for the GPU
+						const auto l1 = std::chrono::steady_clock::now();
+						std::vector<std::vector<uint32_t>> ltbl;
+						for (int m = 0; m < ll.mipCount(); ++m) ltbl.push_back(lm.pageTable(lv, m));
+						const bool lpainted_ok = lpainted == lpg.size();
+
+						using HE::MatNodeType;
+						HE::MaterialGraph g;
+						const int out = g.addNode(MatNodeType::Output);              // lit
+						const int pa  = g.addNode(MatNodeType::ParamVec4); g.findNode(pa)->s = "RvtVolumeA";
+						const int pb  = g.addNode(MatNodeType::ParamVec4); g.findNode(pb)->s = "RvtVolumeB";
+						const int rv  = g.addNode(MatNodeType::RvtSample);
+						g.findNode(pa)->p[0] = ld.origin.x; g.findNode(pa)->p[1] = ld.origin.y;
+						g.findNode(pa)->p[2] = ll.extentM(); g.findNode(pa)->p[3] = ll.texelMeters(0);
+						g.findNode(pb)->p[0] = float(ld.pageSize); g.findNode(pb)->p[1] = float(ld.border);
+						g.findNode(pb)->p[2] = float(ll.pagesPerSide(0)); g.findNode(pb)->p[3] = float(ll.mipCount());
+						g.connect(pa, 0, rv, 0); g.connect(pb, 0, rv, 1);
+						g.connect(rv, 0, out, HE::kMatOutputBaseColorPin);
+						g.connect(rv, 1, out, HE::kMatOutputNormalPin);
+						g.connect(rv, 2, out, HE::kMatOutputAOPin);
+						g.connect(rv, 3, out, HE::kMatOutputRoughnessPin);
+						MaterialAsset ca;
+						ca.type = HE::AssetType::Material;
+						ca.name = "RvtLitConsumer";
+						ca.nodeGraphJson = HE::materialGraphToJson(g);
+						rvtLive.consumer = contentManager().registerMaterial(std::move(ca));
+						contentManager().regenerateMaterialFromGraph(rvtLive.consumer);
+						rvtLive.ready = lpainted_ok && r->SetRvtPageTable(rvtLive.consumer, ltbl);
+						const bool lok = rvtLive.ready;
+						HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTTEST lit: %zu pages of the real landscape painted in %.1f ms (%u painted), table %s",
+						            lpg.size(), std::chrono::duration<double, std::milli>(l1 - l0).count(), lpainted, lok ? "ok" : "FAILED");
+					}
+					if (!rvtLive.ready) r->DestroyRvtPool();
+				}
+			}
 		}
 		baker.end();
+	}
+	// 7b) the live world, back after baker.end(): the landscape drawn lit with its direct material and with the RVT consumer,
+	// from one camera above it. Differences are expected (the pages hold the view graphs at 0.25 m, the direct material
+	// computes per pixel): the numbers say how big, the pictures where. Then the cost: alternating full-frame captures
+	// (each waits for the GPU through its readback, the same in both), median of N.
+	if (rvtLive.ready && m_editorWorld && r)
+	{
+		auto& wreg = m_editorWorld->registry();
+		entt::entity land = entt::null;
+		for (auto [e, tc] : wreg.view<TerrainComponent>().each())
+			if (!wreg.all_of<TerrainChunkComponent>(e)) { land = e; break; }
+		if (land != entt::null && wreg.all_of<MaterialComponent>(land))
+		{
+			const HE::UUID directMat = wreg.get<MaterialComponent>(land).materialAssetId;
+			const auto setMaterial = [&](const HE::UUID& id) {
+				wreg.get<MaterialComponent>(land).materialAssetId = id;
+				for (auto [ce, cc, mc] : wreg.view<TerrainChunkComponent, MaterialComponent>().each()) mc.materialAssetId = id;
+				r->InvalidateMaterial(id);
+			};
+			const glm::vec3 centre = HE::worldPositionOf(*m_editorWorld, land);
+			EditorCameraOverride cam;
+			cam.active = true;
+			cam.editorIcons = false;
+			cam.fovDegrees = 60.0f;
+			cam.nearPlane = 0.1f;
+			cam.farPlane = 2000.0f;
+			const glm::vec3 eye = centre + glm::vec3(0.0f, 110.0f, 0.0f);
+			cam.position = eye;
+			cam.view = glm::lookAt(eye, eye + glm::vec3(0.0f, -1.0f, 0.0f), glm::vec3(0.0f, 0.0f, -1.0f));
+			constexpr uint32_t W = 1280, H = 720;
+			std::vector<uint8_t> direct, rvt;
+			const auto capture = [&](std::vector<uint8_t>& img) { return r->RenderSceneImage(cam, W, H, img) && img.size() == size_t(W) * H * 4; };
+			// A backend that builds material pipelines in the background (Metal) skips a draw whose pipeline is not ready: warm
+			// both materials and wait, or both pictures would be the empty frame and the comparison a perfect 0.
+			r->WarmupMaterials({ directMat, rvtLive.consumer });
+			for (int i = 0; i < 4000 && r->PumpShaderBuilds().pending != 0; ++i)
+				std::this_thread::sleep_for(std::chrono::milliseconds(5));
+			// A material's instanced twin and its textures arrive a few frames after the first draw (Metal): capture until two
+			// pictures in a row are identical (at most 60), and keep pumping the builds in between.
+			const auto settle = [&](std::vector<uint8_t>& img)
+			{
+				std::vector<uint8_t> prev;
+				for (int k = 0; k < 60; ++k)
+				{
+					if (!capture(img)) return false;
+					if (k > 0 && img == prev) return true;
+					prev = img;
+					r->PumpShaderBuilds();
+					std::this_thread::sleep_for(std::chrono::milliseconds(20));
+				}
+				return true;
+			};
+			bool ok = settle(direct);                       // first: builds the pipelines, uploads the textures
+			setMaterial(rvtLive.consumer);
+			ok = ok && settle(rvt);
+			setMaterial(directMat);
+			ok = ok && settle(direct);
+			if (!ok) HE_LOG_WARN(Editor, "EditorApplication: HE_DUMP_RVTTEST lit: a capture failed");
+			else
+			{
+				std::vector<uint8_t> diff(direct.size(), 255);
+				double sum = 0; size_t big = 0, n = 0; unsigned mx = 0;
+				for (size_t i = 0; i < direct.size(); i += 4)
+				{
+					unsigned d = 0;
+					for (size_t c = 0; c < 3; ++c) d = std::max(d, static_cast<unsigned>(std::abs(int(direct[i + c]) - int(rvt[i + c]))));
+					sum += d; mx = std::max(mx, d); big += d > 16 ? 1u : 0u; ++n;
+					for (size_t c = 0; c < 3; ++c) diff[i + c] = static_cast<uint8_t>(std::min(255u, d * 4u));
+				}
+				HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTTEST lit compare %ux%u: mean |direct - rvt| %.2f /255, max %u, %.2f %% of the pixels differ by more than 16",
+				            W, H, sum / double(n), mx, 100.0 * double(big) / double(n));
+				writeBMP(m_dumpPath + ".rvt_lit_direct.bmp", direct, W, H);
+				writeBMP(m_dumpPath + ".rvt_lit_rvt.bmp", rvt, W, H);
+				writeBMP(m_dumpPath + ".rvt_lit_diffx4.bmp", diff, W, H);
+
+				// the cost: alternate, median
+				const int N = std::max(5, std::atoi(std::getenv("HE_DUMP_RVTTEST_LIT_REPS") ? std::getenv("HE_DUMP_RVTTEST_LIT_REPS") : "15"));
+				std::vector<double> td, tr, gd, gr;   // wall ms per capture, and the GPU's own frame ms where the backend measures it
+				std::vector<uint8_t> sink;
+				for (int k = 0; k < N; ++k)
+				{
+					setMaterial(directMat);
+					const auto a = std::chrono::steady_clock::now(); capture(sink); const auto b = std::chrono::steady_clock::now();
+					gd.push_back(r->GetFrameGpuStats().gpuFrameMs);
+					setMaterial(rvtLive.consumer);
+					capture(sink); const auto c = std::chrono::steady_clock::now();
+					gr.push_back(r->GetFrameGpuStats().gpuFrameMs);
+					td.push_back(std::chrono::duration<double, std::milli>(b - a).count());
+					tr.push_back(std::chrono::duration<double, std::milli>(c - b).count());
+				}
+				std::sort(td.begin(), td.end()); std::sort(tr.begin(), tr.end());
+				std::sort(gd.begin(), gd.end()); std::sort(gr.begin(), gr.end());
+				HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTTEST lit cost (%d alternating full-frame captures, readback included in both): direct median %.2f ms (min %.2f), rvt median %.2f ms (min %.2f)",
+				            N, td[td.size() / 2], td.front(), tr[tr.size() / 2], tr.front());
+				HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTTEST lit GPU frame ms (the backend's own timestamps, -1 = not measured): direct median %.2f (min %.2f), rvt median %.2f (min %.2f)",
+				            gd[gd.size() / 2], gd.front(), gr[gr.size() / 2], gr.front());
+			}
+			setMaterial(directMat);
+		}
+		r->DestroyRvtPool();
+	}
+	// HE_DUMP_RVTDRIVER=1 (Thema 333 step 4): the per-frame driver on the live AUTOLAND landscape, the way the application
+	// runs it (terrain update, then RvtLandscape::tick). Checks, in order: the first fill; an idle frame paints nothing and
+	// uploads nothing; a sculpt stroke marks exactly the resident pages its bordered rect touches and repaints exactly those;
+	// a paint stroke the same; a camera move paints only new pages; a change of the landscape material's parameters re-attaches.
+	// After each edit the landscape is drawn lit from the pages and from its own material, and the picture of the pages BEFORE
+	// the driver caught up is the control: a stale scratch copy or stale pages passes every counter and fails only there.
+	// A backend without Runtime Virtual Textures (Software, Metal until it is ported, a GL context with too few texture units,
+	// a Vulkan device at the sampler minimum) has nothing to witness: say so instead of driving a pool that cannot exist.
+	if (r && !r->GetCapabilities().supportsRvt)
+		for (const char* name : { "HE_DUMP_RVTDRIVER", "HE_DUMP_RVTTILES" })
+			if (const char* v = std::getenv(name); v && *v && *v != '0')
+				HE_LOG_WARN(Editor, "EditorApplication: %s: this backend has no Runtime Virtual Textures (Capabilities::supportsRvt), witness skipped", name);
+	if (const char* dv = std::getenv("HE_DUMP_RVTDRIVER"); dv && *dv && *dv != '0' && m_editorWorld && r && r->GetCapabilities().supportsRvt)
+	{
+		auto& wreg = m_editorWorld->registry();
+		entt::entity land = entt::null;
+		for (auto [e, tc] : wreg.view<TerrainComponent>().each())
+			if (!wreg.all_of<TerrainChunkComponent>(e)) { land = e; break; }
+		if (land == entt::null || !wreg.all_of<MaterialComponent>(land))
+			HE_LOG_WARN(Editor, "EditorApplication: HE_DUMP_RVTDRIVER: no landscape with a material");
+		else
+		{
+			HE::landscape::RvtLandscape drv(contentManager(), *r);
+			HE::landscape::RvtLandscape::Settings cfg;
+			// every mip-0 page of the 128 m landscape is wanted; on a bigger one the ring is a part of it (the camera test needs that)
+			cfg.nearRadiusM = wreg.get<TerrainComponent>(land).sizeX > 200.0f ? 48.0f : 160.0f;
+			drv.setSettings(cfg);
+			const glm::vec3 centre = HE::worldPositionOf(*m_editorWorld, land);
+			glm::vec3 camPos = centre + glm::vec3(0.0f, 110.0f, 0.0f);
+			const HE::UUID directMat = wreg.get<MaterialComponent>(land).materialAssetId;
+			const auto sceneTick = [&]() {
+				TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);       // the world tick's terrain update
+				return drv.tick(*m_editorWorld, camPos);
+			};
+			const auto lookDown = [&]() {
+				EditorCameraOverride cam;
+				cam.active = true; cam.editorIcons = false; cam.fovDegrees = 60.0f; cam.nearPlane = 0.1f; cam.farPlane = 2000.0f;
+				cam.position = centre + glm::vec3(0.0f, 110.0f, 0.0f);
+				cam.view = glm::lookAt(cam.position, cam.position + glm::vec3(0.0f, -1.0f, 0.0f), glm::vec3(0.0f, 0.0f, -1.0f));
+				return cam;
+			};
+			constexpr uint32_t W = 1280, H = 720;
+			const auto capture = [&](std::vector<uint8_t>& img) { return r->RenderSceneImage(lookDown(), W, H, img) && img.size() == size_t(W) * H * 4; };
+			// the landscape drawn from its own material: the swap off for one capture, then on again
+			const auto captureDirect = [&](std::vector<uint8_t>& img) {
+				drv.pauseSwap(true);
+				const bool ok = capture(img);
+				drv.pauseSwap(false);
+				return ok;
+			};
+			// mean |a - b| over the whole picture and over the pixels where the control differs from the reference (the stroke)
+			const auto diffStats = [&](const std::vector<uint8_t>& a, const std::vector<uint8_t>& b, double& mean, unsigned& mx) {
+				double sum = 0; mx = 0; size_t n = 0;
+				for (size_t i = 0; i < a.size(); i += 4)
+				{
+					unsigned d = 0;
+					for (size_t c = 0; c < 3; ++c) d = std::max(d, static_cast<unsigned>(std::abs(int(a[i + c]) - int(b[i + c]))));
+					sum += d; mx = std::max(mx, d); ++n;
+				}
+				mean = sum / double(n);
+			};
+			// the same, only over the box of a stroke (terrain-local centre and radius), where a stale page shows
+			const auto regionMean = [&](const std::vector<uint8_t>& a, const std::vector<uint8_t>& b, float lx, float lz, float rad) {
+				const float mpp = 2.0f * 110.0f * std::tan(glm::radians(30.0f)) / float(H);   // metres per pixel of lookDown()
+				const int x0 = std::clamp(int(float(W) * 0.5f + (lx - rad) / mpp), 0, int(W) - 1), x1 = std::clamp(int(float(W) * 0.5f + (lx + rad) / mpp), 0, int(W) - 1);
+				const int y0 = std::clamp(int(float(H) * 0.5f + (lz - rad) / mpp), 0, int(H) - 1), y1 = std::clamp(int(float(H) * 0.5f + (lz + rad) / mpp), 0, int(H) - 1);
+				double sum = 0; size_t n = 0;
+				for (int y = y0; y <= y1; ++y)
+					for (int x = x0; x <= x1; ++x)
+					{
+						const size_t i = (size_t(y) * W + size_t(x)) * 4;
+						unsigned d = 0;
+						for (size_t c = 0; c < 3; ++c) d = std::max(d, static_cast<unsigned>(std::abs(int(a[i + c]) - int(b[i + c]))));
+						sum += d; ++n;
+					}
+				return n ? sum / double(n) : 0.0;
+			};
+			// how many resident pages' bordered rect touches a world rect: the independent count the journal path must match
+			const auto residentTouching = [&](glm::vec2 mn, glm::vec2 mx) {
+				uint32_t n = 0;
+				const HE::rvt::RvtManager& m = *drv.manager();
+				const HE::rvt::VolumeLayout& L = m.layout(drv.volumeOf(land));
+				for (int mip = 0; mip < L.mipCount(); ++mip)
+					for (int y = 0; y < L.pagesPerSide(mip); ++y)
+						for (int x = 0; x < L.pagesPerSide(mip); ++x)
+						{
+							glm::vec2 a, b;
+							L.pageRect(mip, x, y, a, b, true);
+							if (m.isResident(HE::rvt::PageKey{ drv.volumeOf(land), uint8_t(mip), uint16_t(x), uint16_t(y) }) &&
+							    !(b.x <= mn.x || a.x >= mx.x || b.y <= mn.y || a.y >= mx.y)) ++n;
+						}
+				return n;
+			};
+
+			// HE_DUMP_RVTDRIVER_FRAMES=<n>: n NORMAL frames (driver tick + Render, 50 ms apart), the live loop the other steps skip:
+			// what only real frames do (the idle release of big texture arrays on Metal, the ageing of retired textures) happens here.
+			// Run before the sculpt stroke (so the strokes after it repaint pages whose arrays had to be reloaded) and again at the end.
+			const auto normalFrames = [&](const char* when) {
+				const char* nf = std::getenv("HE_DUMP_RVTDRIVER_FRAMES");
+				if (!nf || !*nf) return;
+				const int n = std::clamp(std::atoi(nf), 1, 5000);
+				double worst = 0.0, sum = 0.0;
+				for (int i = 0; i < n; ++i)
+				{
+					const auto f0 = std::chrono::steady_clock::now();
+					sceneTick();
+					r->Render();
+					const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - f0).count();
+					worst = std::max(worst, ms); sum += ms;
+					std::this_thread::sleep_for(std::chrono::milliseconds(50));
+				}
+				HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTDRIVER normal frames (%s): %d frames, mean %.2f ms, worst %.2f ms (driver tick + Render)", when, n, sum / n, worst);
+			};
+			// A) the first fill
+			HE::landscape::RvtLandscape::FrameStats st;
+			int frames = 0; uint32_t filled = 0;
+			for (; frames < 300 && !drv.active(); ++frames) { st = sceneTick(); filled += st.pagesPainted; }
+			HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTDRIVER fill: active after %d frames, %u pages painted (%u at most per frame)", frames, filled, cfg.maxPagesPerFrame);
+
+			// B) idle
+			uint32_t idlePainted = 0; int idleUploads = 0;
+			for (int i = 0; i < 10; ++i) { st = sceneTick(); idlePainted += st.pagesPainted; idleUploads += st.tablesUploaded; }
+			HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTDRIVER idle: 10 frames, %u pages painted, %d table uploads (expected 0, 0)", idlePainted, idleUploads);
+
+			std::vector<uint8_t> direct, pages, stale, ref;
+			bool ok = capture(ref);
+			double meanBase = 0; unsigned maxBase = 0;
+			ok = ok && captureDirect(direct) && capture(pages);
+			if (ok) diffStats(direct, pages, meanBase, maxBase);
+			HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTDRIVER baseline pages vs own material: mean %.2f /255, max %u", meanBase, maxBase);
+
+			// The same comparison on the OTHER render path (the game defaults to deferred): the consumer's G-buffer tail binds the
+			// same table and pool, and a draw in the G-buffer pass skips the shader-key fast path.
+			{
+				const HE::RenderPath livePath = r->GetRenderPath();
+				for (const HE::RenderPath rp : { HE::RenderPath::Forward, HE::RenderPath::Deferred })
+				{
+					r->SetRenderPath(rp);
+					std::vector<uint8_t> d2, p2;
+					double m2 = 0; unsigned x2 = 0;
+					const bool ok2 = captureDirect(d2) && capture(p2) && capture(p2);
+					if (ok2) diffStats(d2, p2, m2, x2);
+					HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTDRIVER render path %s: pages vs own material mean %.2f /255, max %u (%s)",
+					            rp == HE::RenderPath::Forward ? "forward" : "deferred", m2, x2, ok2 ? "ok" : "capture FAILED");
+					if (ok2 && rp == HE::RenderPath::Deferred) writeBMP(m_dumpPath + ".rvt_drv_deferred_pages.bmp", p2, W, H);
+				}
+				r->SetRenderPath(livePath);
+			}
+
+			normalFrames("after the idle step");
+			// C) a sculpt stroke: a bump of 8 m, 14 m wide, the way a brush edits (heights, then the dirty rect, then the tick)
+			{
+				TerrainComponent& tc = wreg.get<TerrainComponent>(land);
+				TerrainSculpt::ensureHeights(tc);
+				const float cx = 20.0f, cz = -15.0f, rad = 14.0f;
+				const float step = tc.sizeX / float(tc.resolution - 1);
+				for (uint32_t zi = 0; zi < tc.resolution; ++zi)
+					for (uint32_t xi = 0; xi < tc.resolution; ++xi)
+					{
+						const float x = -tc.sizeX * 0.5f + float(xi) * step, z = -tc.sizeZ * 0.5f + float(zi) * step;
+						const float d = std::sqrt((x - cx) * (x - cx) + (z - cz) * (z - cz)) / rad;
+						if (d < 1.0f) tc.sculptHeights[size_t(zi) * tc.resolution + xi] += 8.0f * 0.5f * (1.0f + std::cos(d * 3.14159265f));
+					}
+				TerrainSculpt::markRegionDirty(tc, cx - rad - step, cz - rad - step, cx + rad + step, cz + rad + step);
+				TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);       // the tool's own immediate update
+				const uint32_t expect = residentTouching(glm::vec2(centre.x + cx - rad - step, centre.z + cz - rad - step),
+				                                         glm::vec2(centre.x + cx + rad + step, centre.z + cz + rad + step));
+				ok = capture(stale);                                                         // the pages BEFORE the driver ran: the control
+				st = drv.tick(*m_editorWorld, camPos);                                       // (the tick after the terrain update)
+				uint32_t painted = st.pagesPainted;
+				for (int i = 0; i < 40 && drv.manager()->stats().dirty > 0; ++i) painted += sceneTick().pagesPainted;
+				HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTDRIVER sculpt stroke: %u pages marked stale (independent count %u), %u repainted, %u still dirty, journal %s",
+				            st.pagesStale, expect, painted, drv.manager()->stats().dirty, wreg.get<TerrainComponent>(land).rvtJournal.any ? "NOT drained" : "drained");
+				std::vector<uint8_t> after, afterDirect;
+				ok = ok && capture(after) && captureDirect(afterDirect);
+				double mStale = 0, mFresh = 0; unsigned xs = 0, xf = 0;
+				if (ok) { diffStats(afterDirect, stale, mStale, xs); diffStats(afterDirect, after, mFresh, xf); }
+				HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTDRIVER sculpt stroke picture: own material vs stale pages mean %.2f (max %u), vs repainted pages mean %.2f (max %u); inside the stroke: stale %.2f, repainted %.2f  [the control must be clearly worse]",
+				            mStale, xs, mFresh, xf, ok ? regionMean(afterDirect, stale, 20.0f, -15.0f, 14.0f) : 0.0, ok ? regionMean(afterDirect, after, 20.0f, -15.0f, 14.0f) : 0.0);
+				writeBMP(m_dumpPath + ".rvt_drv_sculpt_stale.bmp", stale, W, H);
+				writeBMP(m_dumpPath + ".rvt_drv_sculpt_after.bmp", after, W, H);
+			}
+
+			// D) a paint stroke on layer 2, 10 m radius
+			{
+				TerrainComponent& tc = wreg.get<TerrainComponent>(land);
+				TerrainPaint::ensureWeightmap(tc);
+				for (int i = 0; i < 3; ++i) sceneTick();      // the allocation of a weightmap is itself a change (all): let it settle
+				for (int i = 0; i < 60 && drv.manager()->stats().dirty > 0; ++i) sceneTick();
+				const float px_ = -25.0f, pz_ = 20.0f, prad = 10.0f, pfall = 4.0f;
+				TerrainPaint::paint(tc, px_, pz_, 2, prad, pfall, 1.0f);
+				TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
+				const float reach = prad + pfall + tc.sizeX / float(tc.weightRes) * 2.0f;
+				const uint32_t expect = residentTouching(glm::vec2(centre.x + px_ - reach, centre.z + pz_ - reach), glm::vec2(centre.x + px_ + reach, centre.z + pz_ + reach));
+				std::vector<uint8_t> staleP, afterP, afterDirectP;
+				bool okP = capture(staleP);
+				st = drv.tick(*m_editorWorld, camPos);
+				uint32_t painted = st.pagesPainted;
+				for (int i = 0; i < 40 && drv.manager()->stats().dirty > 0; ++i) painted += sceneTick().pagesPainted;
+				HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTDRIVER paint stroke: %u pages marked stale (independent count about %u), %u repainted, %u still dirty",
+				            st.pagesStale, expect, painted, drv.manager()->stats().dirty);
+				okP = okP && capture(afterP) && captureDirect(afterDirectP);
+				double mStale = 0, mFresh = 0; unsigned xs = 0, xf = 0;
+				if (okP) { diffStats(afterDirectP, staleP, mStale, xs); diffStats(afterDirectP, afterP, mFresh, xf); }
+				HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTDRIVER paint stroke picture: own material vs stale pages mean %.2f (max %u), vs repainted pages mean %.2f (max %u); inside the stroke: stale %.2f, repainted %.2f",
+				            mStale, xs, mFresh, xf, okP ? regionMean(afterDirectP, staleP, -25.0f, 20.0f, 14.0f) : 0.0, okP ? regionMean(afterDirectP, afterP, -25.0f, 20.0f, 14.0f) : 0.0);
+			}
+
+			// E) the camera moves 30 m with a 40 m near radius: only pages that came into view are painted, none are stale, never more
+			// than the budget in one frame
+			{
+				cfg.nearRadiusM = wreg.get<TerrainComponent>(land).sizeX > 200.0f ? 48.0f : 40.0f;
+				drv.setSettings(cfg);
+				uint32_t settle = 0;
+				for (int i = 0; i < 30; ++i) settle += sceneTick().pagesPainted;      // the ring around the start position
+				const uint32_t resident0 = drv.manager()->stats().resident;
+				camPos.x += 30.0f;
+				uint32_t painted = 0, stale0 = 0, perFrame = 0;
+				for (int i = 0; i < 30; ++i) { st = sceneTick(); painted += st.pagesPainted; stale0 += st.pagesStale; perFrame = std::max(perFrame, st.pagesPainted); }
+				HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTDRIVER camera +30 m (near radius 40 m): %u pages to settle the start, then %u painted for the move (at most %u in one frame, budget %u), %u marked stale (expected 0), resident %u -> %u",
+				            settle, painted, perFrame, cfg.maxPagesPerFrame, stale0, resident0, drv.manager()->stats().resident);
+			}
+
+			// F) a change of the landscape material's parameters: the view graphs cannot be patched, the driver starts over
+			{
+				// the snow line: the slot of the parameter by NAME (a sync lays the block out like the parent's, slot 0 is not it)
+				MaterialAsset* ma = contentManager().getMaterialMutable(directMat);
+				size_t snowSlot = ~size_t(0);
+				if (ma)
+					for (size_t i = 0; i < ma->graphParamNames.size(); ++i)
+						if (ma->graphParamNames[i] == HE::kAutoLandscapeParamSnowHeight) snowSlot = i * 4;
+				if (ma && snowSlot < ma->shaderParamData.size())
+				{
+					const float before = ma->shaderParamData[snowSlot];
+					ma->shaderParamData[snowSlot] += 15.0f;
+					contentManager().syncMaterialInstance(directMat);
+					HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTDRIVER material: snow line %.1f -> %.1f, after sync %.1f (slot %zu of %zu floats, parent '%s')", before, before + 15.0f, ma->shaderParamData[snowSlot], snowSlot, ma->shaderParamData.size(), ma->parentMaterialPath.c_str());
+					r->InvalidateMaterial(directMat);
+					bool rescanned = false; uint32_t painted = 0; int refill = 0;
+					for (; refill < 300; ++refill)
+					{
+						st = sceneTick(); rescanned = rescanned || st.rescanned; painted += st.pagesPainted;
+						if (refill > 2 && drv.active() && drv.manager() && drv.manager()->stats().wantedMissing == 0 && drv.manager()->stats().dirty == 0) break;
+					}
+					std::vector<uint8_t> a, b;
+					bool okF = captureDirect(a) && capture(b);
+					double mF = 0; unsigned xF = 0;
+					if (okF) diffStats(a, b, mF, xF);
+					HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTDRIVER material parameter change: re-attached %s, %u pages painted over %d frames, pages vs own material mean %.2f (max %u)",
+					            rescanned ? "yes" : "NO", painted, refill, mF, xF);
+				}
+			}
+			drv.detach();
+			normalFrames("end");
+			HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTDRIVER done: %llu pages painted in total, detached", static_cast<unsigned long long>(drv.pagesPaintedTotal()));
+		}
+	}
+	// HE_DUMP_RVTTILES=1 (Thema 333 step 5, with HE_DUMP_AUTOLAND=1 and HE_DUMP_AUTOLANDSIZE=128): four 128 m landscapes side by side
+	// (2 x 2, one smooth ground across them) as a STAND-IN for the tiles of a tiled landscape, each its own volume in one pool.
+	// (The real tiles of Thema 326, LandscapeStore and kLandscapeFS, are not on this branch.) Checks: all four fill from the
+	// one pool, one attach per frame; the lit picture against the landscapes' own material, seam strips against the interior;
+	// a stroke inside one tile repaints only that tile's pages, a stroke across a border both tiles'; destroying one tile frees
+	// exactly its volume; walking away and back registers no material; a pool that is too small settles instead of thrashing.
+	if (const char* tv = std::getenv("HE_DUMP_RVTTILES"); tv && *tv && *tv != '0' && m_editorWorld && r && r->GetCapabilities().supportsRvt)
+	{
+		auto& wreg = m_editorWorld->registry();
+		entt::entity land = entt::null;
+		for (auto [e, tc] : wreg.view<TerrainComponent>().each())
+			if (!wreg.all_of<TerrainChunkComponent>(e)) { land = e; break; }
+		if (land == entt::null || !wreg.all_of<MaterialComponent>(land))
+			HE_LOG_WARN(Editor, "EditorApplication: HE_DUMP_RVTTILES: no landscape with a material");
+		else
+		{
+			constexpr float kTile = 128.0f;
+			const auto groundAt = [](float x, float z) { return 5.0f * std::sin(x * 0.045f) * std::cos(z * 0.038f) + 3.0f * std::sin(0.11f * x + 0.09f * z); };
+			std::vector<entt::entity> tiles{ land };
+			for (int k = 1; k < 4; ++k)
+			{
+				const entt::entity e = m_editorWorld->createEntity("Tile");
+				wreg.emplace<TransformComponent>(e, wreg.get<TransformComponent>(land));
+				TerrainComponent copy = wreg.get<TerrainComponent>(land);
+				copy.builtRes = 0; copy.builtChunksPerSide = 0; copy.weightmapTextureId = HE::UUID{}; copy.rvtJournal.clear();
+				wreg.emplace<TerrainComponent>(e, std::move(copy));
+				wreg.emplace<MaterialComponent>(e, wreg.get<MaterialComponent>(land));
+				tiles.push_back(e);
+			}
+			const HE::UUID directMat = wreg.get<MaterialComponent>(land).materialAssetId;
+			const float baseY = wreg.get<TransformComponent>(land).position.y;
+			const auto centreOf = [&](int k) { return glm::vec2((float(k % 2) - 0.5f) * kTile, (float(k / 2) - 0.5f) * kTile); };
+			for (int k = 0; k < 4; ++k)
+			{
+				TransformComponent& tf = wreg.get<TransformComponent>(tiles[size_t(k)]);
+				tf.position = glm::vec3(centreOf(k).x, baseY, centreOf(k).y);
+				tf.dirty = true;
+				TerrainComponent& tc = wreg.get<TerrainComponent>(tiles[size_t(k)]);
+				tc.sizeX = tc.sizeZ = kTile;
+				tc.resolution = 129;
+				tc.heightScale = 0.0f;
+				tc.sculptHeights.assign(size_t(129) * 129, 0.0f);
+				for (uint32_t zi = 0; zi < 129; ++zi)
+					for (uint32_t xi = 0; xi < 129; ++xi)
+						tc.sculptHeights[size_t(zi) * 129 + xi] = groundAt(centreOf(k).x - kTile * 0.5f + float(xi), centreOf(k).y - kTile * 0.5f + float(zi));
+				tc.dirty = true;
+			}
+			HE::propagateTransformsFull(*m_editorWorld);
+			TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
+			TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
+
+			HE::landscape::RvtLandscape drv(contentManager(), *r);
+			HE::landscape::RvtLandscape::Settings cfg;
+			cfg.nearRadiusM = 160.0f;
+			cfg.activationRadiusM = 400.0f;
+			drv.setSettings(cfg);
+			glm::vec3 camPos(0.0f, baseY + 225.0f, 0.0f);
+			const auto sceneTick = [&]() {
+				TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
+				return drv.tick(*m_editorWorld, camPos);
+			};
+			constexpr uint32_t W = 1024, H = 1024;
+			const auto lookDown = [&]() {
+				EditorCameraOverride cam;
+				cam.active = true; cam.editorIcons = false; cam.fovDegrees = 60.0f; cam.nearPlane = 0.1f; cam.farPlane = 3000.0f;
+				cam.position = glm::vec3(0.0f, baseY + 225.0f, 0.0f);
+				cam.view = glm::lookAt(cam.position, cam.position + glm::vec3(0.0f, -1.0f, 0.0f), glm::vec3(0.0f, 0.0f, -1.0f));
+				return cam;
+			};
+			const float mpp = 2.0f * 225.0f * std::tan(glm::radians(30.0f)) / float(H);   // metres per pixel of lookDown()
+			const auto capture = [&](std::vector<uint8_t>& img) { return r->RenderSceneImage(lookDown(), W, H, img) && img.size() == size_t(W) * H * 4; };
+			const auto residentOf = [&](uint16_t vol, glm::vec2 mn, glm::vec2 mx) {
+				uint32_t n = 0;
+				const HE::rvt::RvtManager& m = *drv.manager();
+				if (!m.hasVolume(vol)) return n;
+				const HE::rvt::VolumeLayout& L = m.layout(vol);
+				for (int mip = 0; mip < L.mipCount(); ++mip)
+					for (int y = 0; y < L.pagesPerSide(mip); ++y)
+						for (int x = 0; x < L.pagesPerSide(mip); ++x)
+						{
+							glm::vec2 a, b;
+							L.pageRect(mip, x, y, a, b, true);
+							if (m.isResident(HE::rvt::PageKey{ vol, uint8_t(mip), uint16_t(x), uint16_t(y) }) &&
+							    !(b.x <= mn.x || a.x >= mx.x || b.y <= mn.y || a.y >= mx.y)) ++n;
+						}
+				return n;
+			};
+			const glm::vec2 everything(-1.0e6f), everywhere(1.0e6f);
+
+			// A) the fill: one attach per frame, nearest first, one pool
+			HE::landscape::RvtLandscape::FrameStats st;
+			int frames = 0; uint32_t maxAttach = 0, totalAttach = 0, painted = 0;
+			const auto activeCount = [&]() { uint32_t a = 0; for (auto t : tiles) a += drv.active(t) ? 1u : 0u; return a; };
+			for (; frames < 600; ++frames)
+			{
+				if (frames > 0 && activeCount() == 4u) break;
+				st = sceneTick();
+				maxAttach = std::max(maxAttach, st.attaches); totalAttach += st.attaches; painted += st.pagesPainted;
+			}
+			uint32_t activeTiles = 0; for (auto t : tiles) activeTiles += drv.active(t) ? 1u : 0u;
+			HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTTILES fill: %u of 4 tiles drawn from pages after %d frames, %u attaches (at most %u in a frame), %u pages painted, %u resident in one pool of %u, %u materials registered",
+			            activeTiles, frames, totalAttach, maxAttach, painted, drv.manager()->stats().resident, drv.settings().poolSlots, drv.materialsRegistered());
+			for (int k = 0; k < 4; ++k)
+				HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTTILES   tile %d: volume %u, %u pages resident", k, unsigned(drv.volumeOf(tiles[size_t(k)])), residentOf(drv.volumeOf(tiles[size_t(k)]), everything, everywhere));
+
+			// B) the picture, with seam strips: |world x| < 1 or |world z| < 1 is where tiles meet (the ground is continuous there)
+			std::vector<uint8_t> direct, pages;
+			drv.pauseSwap(true);
+			bool ok = capture(direct);
+			drv.pauseSwap(false);
+			ok = ok && capture(pages) && capture(pages);
+			if (ok)
+			{
+				double sumAll = 0, sumSeam = 0, sumInner = 0; size_t nAll = 0, nSeam = 0, nInner = 0; unsigned mx = 0;
+				for (uint32_t py = 0; py < H; ++py)
+					for (uint32_t pxl = 0; pxl < W; ++pxl)
+					{
+						const float wx = (float(pxl) + 0.5f - float(W) * 0.5f) * mpp, wz = (float(py) + 0.5f - float(H) * 0.5f) * mpp;
+						if (std::fabs(wx) > kTile - 2.0f || std::fabs(wz) > kTile - 2.0f) continue;     // the outer edge of the 2 x 2 area
+						const size_t i = (size_t(py) * W + pxl) * 4;
+						unsigned d = 0;
+						for (size_t c = 0; c < 3; ++c) d = std::max(d, static_cast<unsigned>(std::abs(int(direct[i + c]) - int(pages[i + c]))));
+						sumAll += d; ++nAll; mx = std::max(mx, d);
+						if (std::fabs(wx) < 1.0f || std::fabs(wz) < 1.0f) { sumSeam += d; ++nSeam; }
+						else if (std::fabs(wx) > 8.0f && std::fabs(wz) > 8.0f) { sumInner += d; ++nInner; }
+					}
+				HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTTILES picture %ux%u of the 2 x 2 area (%.2f m per pixel): own material vs pages mean %.2f /255 (max %u); inside the tiles %.2f, in the seam strips (+-1 m at the borders) %.2f",
+				            W, H, mpp, sumAll / double(nAll), mx, nInner ? sumInner / double(nInner) : 0.0, nSeam ? sumSeam / double(nSeam) : 0.0);
+				writeBMP(m_dumpPath + ".rvt_tiles_pages.bmp", pages, W, H);
+				writeBMP(m_dumpPath + ".rvt_tiles_direct.bmp", direct, W, H);
+			}
+
+			// C) a stroke: a bump of 8 m, radius 12 m, at a WORLD position; every tile it reaches edits its own heights
+			const auto stroke = [&](glm::vec2 c, float rad, std::vector<int>& touched) {
+				touched.clear();
+				for (int k = 0; k < 4; ++k)
+				{
+					TerrainComponent& tc = wreg.get<TerrainComponent>(tiles[size_t(k)]);
+					const glm::vec2 o = centreOf(k);
+					if (c.x + rad < o.x - kTile * 0.5f || c.x - rad > o.x + kTile * 0.5f || c.y + rad < o.y - kTile * 0.5f || c.y - rad > o.y + kTile * 0.5f) continue;
+					TerrainSculpt::ensureHeights(tc);
+					for (uint32_t zi = 0; zi < tc.resolution; ++zi)
+						for (uint32_t xi = 0; xi < tc.resolution; ++xi)
+						{
+							const float wx = o.x - kTile * 0.5f + float(xi), wz = o.y - kTile * 0.5f + float(zi);
+							const float d = std::sqrt((wx - c.x) * (wx - c.x) + (wz - c.y) * (wz - c.y)) / rad;
+							if (d < 1.0f) tc.sculptHeights[size_t(zi) * tc.resolution + xi] += 8.0f * 0.5f * (1.0f + std::cos(d * 3.14159265f));
+						}
+					TerrainSculpt::markRegionDirty(tc, c.x - o.x - rad - 1.0f, c.y - o.y - rad - 1.0f, c.x - o.x + rad + 1.0f, c.y - o.y + rad + 1.0f);
+					touched.push_back(k);
+				}
+				TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
+			};
+			for (int pass = 0; pass < 2; ++pass)
+			{
+				const glm::vec2 c = pass == 0 ? glm::vec2(-90.0f, -90.0f) : glm::vec2(0.0f, -60.0f);      // inside tile 0 / across the border of tiles 0 and 1
+				std::vector<int> touched;
+				for (int i = 0; i < 40 && drv.manager()->stats().dirty > 0; ++i) sceneTick();
+				stroke(c, 12.0f, touched);
+				uint32_t expect = 0;
+				for (int k : touched)
+				{
+					const glm::vec2 o = centreOf(k);
+					(void)o;
+					expect += residentOf(drv.volumeOf(tiles[size_t(k)]), c - glm::vec2(12.0f + 1.0f), c + glm::vec2(12.0f + 1.0f));
+				}
+				st = drv.tick(*m_editorWorld, camPos);
+				uint32_t repainted = st.pagesPainted;
+				for (int i = 0; i < 40 && drv.manager()->stats().dirty > 0; ++i) repainted += sceneTick().pagesPainted;
+				HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTTILES stroke %s: reached %zu tile(s), %u pages marked stale (independent count over those tiles %u), %u repainted, %u still stale",
+				            pass == 0 ? "inside tile 0" : "across the border of tiles 0 and 1", touched.size(), st.pagesStale, expect, repainted, drv.manager()->stats().dirty);
+			}
+
+			// D) one tile is destroyed: exactly its volume goes
+			{
+				const uint16_t vol3 = drv.volumeOf(tiles[3]);
+				const uint32_t own = residentOf(vol3, everything, everywhere);
+				const uint32_t before = drv.manager()->stats().resident;
+				m_editorWorld->destroyEntity(tiles[3]);
+				st = sceneTick();
+				HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTTILES tile 3 destroyed: %u pages resident before (tile 3 held %u), %u after (expected %u), %zu segment(s), %u drawn from pages, free slots %u",
+				            before, own, drv.manager()->stats().resident, before - own, drv.segmentCount(), st.activeSegments, drv.manager()->freeSlots());
+			}
+
+			// E) walking away and back: pages and tables come and go, materials do not
+			{
+				const uint32_t mats0 = drv.materialsRegistered();
+				const glm::vec3 camHome = camPos;
+				camPos.x = 5000.0f;                                                       // beyond every activation radius
+				for (int i = 0; i < 5; ++i) st = sceneTick();
+				const uint32_t resAway = drv.manager()->stats().resident;
+				const uint32_t activeAway = st.activeSegments;
+				camPos = camHome;
+				int back = 0;
+				for (; back < 600; ++back)
+				{
+					st = sceneTick();
+					uint32_t a = 0; for (int k = 0; k < 3; ++k) a += drv.active(tiles[size_t(k)]) ? 1u : 0u;
+					if (a == 3) break;
+				}
+				HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTTILES away and back: %u pages resident and %u tile(s) drawn from pages while away, 3 tiles drawn again after %d frames, materials registered %u -> %u (expected equal)",
+				            resAway, activeAway, back, mats0, drv.materialsRegistered());
+			}
+			drv.detach();
+
+			// F) a pool that is too tinyDrv: it fills, says so, and a static view then paints nothing
+			{
+				HE::landscape::RvtLandscape tinyDrv(contentManager(), *r);
+				HE::landscape::RvtLandscape::Settings sc = cfg;
+				sc.poolSlots = 40;
+				tinyDrv.setSettings(sc);
+				const auto tick2 = [&]() { TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r); return tinyDrv.tick(*m_editorWorld, camPos); };
+				for (int i = 0; i < 40; ++i) tick2();
+				const HE::rvt::Stats before = tinyDrv.manager() ? tinyDrv.manager()->stats() : HE::rvt::Stats{};
+				uint32_t paintedLater = 0;
+				for (int i = 0; i < 30; ++i) paintedLater += tick2().pagesPainted;
+				const HE::rvt::Stats after = tinyDrv.manager() ? tinyDrv.manager()->stats() : HE::rvt::Stats{};
+				HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTTILES pool of 40 pages for 3 tiles: %u resident, %u evictions after the fill, then %u pages painted in 30 static frames and %u more evictions (expected 0 and 0), starved %u",
+				            before.resident, before.evictions, paintedLater, after.evictions - before.evictions, after.starved);
+				tinyDrv.detach();
+			}
+		}
 	}
 	// HE_DUMP_AUTOLANDSAVE=<file.hescene> (Thema 228): the HE_DUMP_AUTOLAND witness world written out as a scene, so a
 	// scratch project can hold an Auto Landscape for HE_DUMP_HLODEXPORT and a real export (the water witness has its own
@@ -13561,6 +14703,9 @@ AppContext EditorApplication::makeContext()
 				m_physicsWorld->setBudget({ physics.budgetMs, static_cast<uint32_t>(physics.eventsPerPoll) });
 			}
 		},
+		.rvtDebugInfo = [this]() -> HE::landscape::RvtLandscape::DebugInfo {
+			return m_rvtLandscape ? m_rvtLandscape->debugInfo() : HE::landscape::RvtLandscape::DebugInfo{};
+		},
 		.propScriptEngine    = m_propScriptEngine.get(),
 		.editorCamera        = &m_editorCamera,
 		.selection           = m_selection,
@@ -14510,6 +15655,10 @@ void EditorApplication::setPlayMode(bool play)
 		// The streamed cells go first, while the physics world their bodies are in
 		// still stands; the snapshot below brings back the base the split left.
 		if (m_playCells) m_playCells->end(*m_editorWorld);
+		// Segments are keyed by entt::entity of the outgoing world; clear() recycles
+		// those ids, so a stale segment would alias an unrelated entity in the restored
+		// snapshot (same reason GameApplication::loadScene detaches before its clear()).
+		if (m_rvtLandscape) m_rvtLandscape->detach();
 		m_editorWorld->clear();
 		if (!serializer.load(*m_editorWorld, snapshot, SerializeFormat::Binary))
 		{
@@ -15263,6 +16412,9 @@ bool EditorApplication::restoreRecoveredScene()
 	m_undo.snapshotNow("Restore Recovered Scene");   // the file's state; Undo brings it back
 
 	SceneSerializer serializer;
+	// See openScene: clear() recycles entt ids, so a segment from the scene opened
+	// above would alias an unrelated entity in the snapshot loaded over it.
+	if (m_rvtLandscape) m_rvtLandscape->detach();
 	m_editorWorld->clear();
 	m_levelScriptMirror = {};   // as in openScene: another scene, another level script
 	if (!serializer.load(*m_editorWorld, pending->snapshotPath, SerializeFormat::JSON))
@@ -15405,6 +16557,10 @@ bool EditorApplication::openScene(const std::string& path)
 	if (m_isPlaying) setPlayMode(false); // leave play mode before switching scenes
 
 	SceneSerializer serializer;
+	// Segments are keyed by entt::entity; clear() recycles those ids, so a segment
+	// from the old scene would alias an unrelated entity in the new one (same
+	// reason GameApplication::loadScene detaches before its clear()).
+	if (m_rvtLandscape) m_rvtLandscape->detach();
 	m_editorWorld->clear();
 	// A different scene brings a different level script — see onWorldReplaced.
 	m_levelScriptMirror = {};
@@ -15492,6 +16648,9 @@ void EditorApplication::newScene()
 
 	if (m_isPlaying) setPlayMode(false);
 
+	// See openScene: clear() recycles entt ids, so a segment from the old scene
+	// would alias an unrelated entity in the new empty one.
+	if (m_rvtLandscape) m_rvtLandscape->detach();
 	m_editorWorld->clear(); // keeps the root entity, drops all children
 	m_currentScenePath.clear();
 	m_selection.clear();
@@ -15622,6 +16781,9 @@ bool EditorApplication::reloadGameLogic()
 
 void EditorApplication::OnShutdown()
 {
+	// The virtual texture driver gives its pool back to the renderer, so it must go while the renderer still exists: left to
+	// the destructor it would call into a renderer that has been shut down and crash on the way out.
+	m_rvtLandscape.reset();
 	ProjectPreflight::shutdown();   // joins a still-running engine-content check
 	// Give the network back what a session took, FIRST and synchronously: the
 	// UPnP port forward, the IPv6 pinhole, the directory entry. A user who quits

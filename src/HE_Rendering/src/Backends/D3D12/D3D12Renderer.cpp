@@ -26,6 +26,13 @@
 #include <ContentManager/DefaultAssets.h>    // GI: default-cube occluder fallback
 #include <material/MaterialShaderLibrary.h> // A4: shared cross-backend material shader layer (unguarded, like Vulkan/GL)
 #include <MaterialGraph/MaterialGraph.h>     // kMatMaxGraphTextures (heTexP0..3)
+#include <MaterialGraph/RvtLookup.h>        // kRvtTableBinding (t40..t43), kRvtAlbedoColdBinding (t44..t46)
+#include <ContentManager/BlockEncode.h>     // RVT cold pages: BC7 encode on a worker thread (Thema 333 step 9)
+#include <chrono>
+#include <condition_variable>
+#include <deque>
+#include <mutex>
+#include <thread>
 // ── Cross-backend renderer helpers (audit 1a) ────────────────────────────────
 // Each of these replaced a private copy that every backend carried; the copies
 // were byte-identical by contract (the GPU reads the packed bytes positionally),
@@ -3795,6 +3802,25 @@ struct D3D12RendererImpl
     bool m_tessSupported = false;
     std::unordered_map<uint64_t, std::string> m_tessDispByKey;
     std::unordered_set<ID3D12PipelineState*>  m_tessPSOs;
+    // The graph material's resolved key (hash with the displacement folded in, fragment source, vertex body), made ONCE per
+    // DrawScene call per material: resolveShaders copies the whole fragment source and hashes it, and a landscape drawn as
+    // dozens of chunk draws paid that for every one of them (D3D11 found the same, see matKeyCache there). Trusted only within
+    // one DrawScene (drawSceneSerial): the Material Editor assigns an edited source into the same string without telling the
+    // renderer, so nothing longer-lived may be assumed. Null = the material has no graph shader.
+    struct MatKey { uint64_t serial = 0; bool ok = false; uint64_t hash = 0; uint32_t texArrays = 0; std::string frag, vert; };
+    std::unordered_map<HE::UUID, MatKey> m_matKeys;
+    uint64_t drawSceneSerial = 0;
+    const MatKey* resolveMatKey(const ContentManager& cm, const HE::UUID& materialId)
+    {
+        MatKey& k = m_matKeys[materialId];
+        if (k.serial != drawSceneSerial)
+        {
+            k.serial = drawSceneSerial;
+            k.ok = m_matShaderLib.resolveShaders(cm, materialId, k.hash, k.frag, k.vert);
+            if (k.ok) { foldDisplacement(cm, materialId, k.hash); k.texArrays = HE::matGlslTextureArrayMask(k.frag); }
+        }
+        return k.ok ? &k : nullptr;
+    }
     void foldDisplacement(const ContentManager& cm, const HE::UUID& materialId, uint64_t& hash)
     {
         if (!m_tessSupported) return;
@@ -3848,6 +3874,139 @@ struct D3D12RendererImpl
         h.ptr += static_cast<SIZE_T>(slot) * m_matSrvInc;
         return h;
     }
+    // ── Runtime Virtual Texture (Thema 333, docs/rvt-design-2026-11-04.md) ──────────────────────────────────────────
+    // The pool: three RGBA8 arrays (BaseColor read through an sRGB view, Normal, Surface), one slice per pool slot, in
+    // PIXEL_SHADER_RESOURCE between copies; their views live in the material template (slots kSlotRvtAlbedo..), so every
+    // draw block inherits them. The page tables are per CONSUMER material (one volume each): R32_UINT, one mip per table
+    // mip, their SRV in a CPU-only heap and copied into the draw's block (slot kSlotRvtTable) when the draw's material is
+    // that consumer. A page is RenderSceneImage's raw frame copied into a slice (RenderSceneImage, rvtSlot >= 0).
+    static_assert(HE::kRvtTableBinding == 40 && HE::kRvtSurfaceBinding == 43, "the root table's t40..t43 are the RVT registers");
+    ComPtr<ID3D12Resource> rvtPool[3];
+    uint32_t               rvtSlots = 0, rvtPagePx = 0;   // rvtSlots: the manager's ceiling
+    uint32_t               rvtAlloc = 0;                  // slices the arrays hold now (they start small and grow with the pages in use)
+    // HE_RVT_PACK (Thema 333 step 10, counterpart of Metal 6k / D3D11's step 10): layers 1/2 hold two channels
+    // (R8G8_UNORM) instead of four. A page can't get there with CopyTextureRegion (the format changes), so a tiny
+    // fullscreen draw — recorded into the SAME command list as the page copy it replaces — reads the just-drawn page
+    // (viewportRT, RGBA8, via a one-slot SRV heap made fresh each page) and writes the two kept channels into a
+    // one-slice RTV of the destination array.
+    bool                           rvtPack = false;
+    bool                           rvtPackTried = false;
+    ComPtr<ID3D12RootSignature>    rvtPackRootSig;
+    ComPtr<ID3D12PipelineState>    rvtPackPSO;
+    ComPtr<ID3D12DescriptorHeap>   rvtPackSrvHeap;   // 1 slot, SHADER_VISIBLE: the source page (viewportRT)
+    ComPtr<ID3D12DescriptorHeap>   rvtPackRtvHeap;   // 1 slot, not shader-visible: the destination slice
+    struct RvtTable
+    {
+        ComPtr<ID3D12Resource> tex; uint32_t side = 0, mips = 0; UINT heapIndex = 0;
+        std::vector<std::vector<uint32_t>> src;   // the manager's own form (ReadbackRvtPageTable's answer)
+        uint64_t                            stateVer = 0;
+    };
+    std::unordered_map<HE::UUID, RvtTable> rvtTables;
+    // ── Cold pages (Thema 333 step 9, counterpart of Metal 6j / D3D11's identical scheme): a page not repainted for
+    // HE_RVT_COLD_AFTER real frames is read back from its hot slice, BC7-encoded on a worker thread and kept in a
+    // second, slot-indexed array set; its hot slice returns to the free list. Readback here is SYNCHRONOUS
+    // (rvtBegin/rvtEnd already wait for every frame for any RVT admin op on this backend; rate-limited to bound the stall).
+    ComPtr<ID3D12Resource>           rvtCold[3];      // BC7_UNORM_SRGB (albedo) / BC7_UNORM (normal, surface), slice = slot
+    uint32_t                         rvtColdAlloc = 0;
+    std::vector<int32_t>             rvtSlotHot;
+    std::vector<uint8_t>             rvtSlotCold;
+    std::vector<uint32_t>            rvtSlotVer;
+    std::vector<uint64_t>            rvtSlotPainted;
+    std::vector<uint32_t>            rvtHotFree;
+    uint64_t                         rvtStateVer   = 1;
+    uint64_t                         rvtRealFrames = 0;
+    bool                             rvtColdOn     = false;
+    struct RvtColdWork;              // the encoder thread and its result queue (defined near D3D12Renderer::CreateRvtPool)
+    RvtColdWork* rvtWork = nullptr;
+    ~D3D12RendererImpl();
+    ComPtr<ID3D12DescriptorHeap>           rvtTableHeap;     // CPU-only, one SRV per table
+    std::vector<UINT>                      rvtTableFree;
+    static constexpr UINT                  kRvtMaxTables = 256;
+    struct RvtSwap { HE::UUID landscapeMat, consumerMat; };
+    std::unordered_map<uint32_t, RvtSwap>  rvtSwaps;         // per landscape entity
+    // The live state a still sets aside (RenderSceneImage): everything its frame reads that the request changes.
+    struct RvtStill
+    {
+        bool active = false;     // a still's set is in place, the live one is in the members below
+        bool kept   = false;     // ... and it is held ACROSS calls by an RVT bracket (BeginRvtPages)
+        UINT w = 0, h = 0;       // the still's size
+        ComPtr<ID3D12Resource>       liveRT, liveDepth, liveReadback;
+        ComPtr<ID3D12DescriptorHeap> liveRtvHeap, liveDsvHeap;
+        UINT liveW = 0, liveH = 0, liveReqW = 0, liveReqH = 0;
+        D3D12_RESOURCE_STATES liveState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        bool liveResChanged = false, liveUsingHDR = false;
+        EditorCameraOverride liveCam;
+        uint32_t liveDraws = 0, liveTris = 0, liveVisible = 0, liveTotal = 0;
+        bool liveRaw = false, liveSrgb = false, liveBloom = false, liveSsao = false, liveSsr = false, liveGi = false, liveGiRefl = false;
+        HE::AAMethod   liveAa   = HE::AAMethod::Off;
+        HE::RenderPath livePath = HE::RenderPath::Forward;
+    };
+    RvtStill rvtStill;
+    UINT     rvtBracketPx = 0;       // BeginRvtPages: the page size whose set is kept across calls (0 = no bracket open)
+    // Inside a bracket the page layers are submitted WITHOUT waiting, each on its own frame slot (the per-frame rings, the
+    // descriptor blocks, the lighting buffer are all indexed by frameIndex, which is what lets the real frames overlap): the
+    // k-th unwaited layer runs on slot (rvtBaseFrame + k) % kFramesInFlight, and the GPU is waited for once the slots are used
+    // up or the bracket closes. The shared target set needs nothing: one queue executes the lists in the order they were made.
+    UINT     rvtPending   = 0;       // layers submitted since the last wait
+    UINT     rvtBaseFrame = 0;       // the frame slot the first of them used
+    D3D12_CPU_DESCRIPTOR_HANDLE rvtTableCpu(UINT i) const
+    {
+        D3D12_CPU_DESCRIPTOR_HANDLE h = rvtTableHeap->GetCPUDescriptorHandleForHeapStart();
+        h.ptr += static_cast<SIZE_T>(i) * m_matSrvInc;
+        return h;
+    }
+    // The template's RVT slots hold null views of the dimension the shader declares (a null view of the wrong dimension is
+    // undefined, not zero) until a pool is there. A null table reads entry 0 = slot 0, mip 0: the first-fill latch of the
+    // driver keeps such a draw from ever being the consumer (the same as D3D11's null SRV).
+    void writeRvtNullViews()
+    {
+        if (!m_matSrvStaging) return;
+        D3D12_SHADER_RESOURCE_VIEW_DESC nv{};
+        nv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        nv.Format                  = DXGI_FORMAT_R32_UINT;
+        nv.ViewDimension           = D3D12_SRV_DIMENSION_TEXTURE2D;
+        nv.Texture2D.MipLevels     = 1;
+        device->CreateShaderResourceView(nullptr, &nv, matSrvStagingCpu(HE::d3d12mat::kSlotRvtTable));
+        nv.Format                       = DXGI_FORMAT_R8G8B8A8_UNORM;
+        nv.ViewDimension                = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+        nv.Texture2DArray.MipLevels     = 1;
+        nv.Texture2DArray.ArraySize     = 1;
+        for (UINT k = 0; k < 3; ++k)
+            device->CreateShaderResourceView(nullptr, &nv, matSrvStagingCpu(HE::d3d12mat::kSlotRvtAlbedo + k));
+        // Cold (BC7) pages, step 9: same null-view shape, read with Load like the hot three — the format only matters
+        // for a real view, so a BC7 null view is unnecessary; the hot format is already a legal placeholder dimension.
+        for (UINT k = 0; k < 3; ++k)
+            device->CreateShaderResourceView(nullptr, &nv, matSrvStagingCpu(HE::d3d12mat::kSlotRvtAlbedoCold + k));
+    }
+    // A one-shot command list between two full flushes (the CaptureViewport pattern): everything of earlier frames is done
+    // before it records, and done again before it returns, so a resource it touches is idle on both sides.
+    ID3D12GraphicsCommandList* rvtBegin()
+    {
+        waitForAllFrames();
+        cmdAllocators[0]->Reset();
+        cmdList->Reset(cmdAllocators[0].Get(), nullptr);
+        return cmdList.Get();
+    }
+    void rvtEnd()
+    {
+        cmdList->Close();
+        ID3D12CommandList* lists[] = { cmdList.Get() };
+        cmdQueue->ExecuteCommandLists(1, lists);
+        waitForAllFrames();
+    }
+    // A READBACK buffer of `bytes`.
+    ComPtr<ID3D12Resource> rvtReadbackBuffer(UINT64 bytes)
+    {
+        D3D12_HEAP_PROPERTIES hp{}; hp.Type = D3D12_HEAP_TYPE_READBACK;
+        D3D12_RESOURCE_DESC rd{};
+        rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER; rd.Width = bytes; rd.Height = 1; rd.DepthOrArraySize = 1;
+        rd.MipLevels = 1; rd.SampleDesc.Count = 1; rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        ComPtr<ID3D12Resource> res;
+        if (FAILED(device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                                   IID_PPV_ARGS(&res)))) return nullptr;
+        return res;
+    }
+
     // A Texture2D view over a texture uploaded by uploadTexture2D: its own format
     // (the _SRGB twin included) and its whole mip chain.
     // asArray (Thema 158) = a Texture2DArray view over every slice, for a
@@ -3932,7 +4091,7 @@ struct D3D12RendererImpl
     bool                         m_matReady      = false;            // true once createMaterialResources() succeeded
     bool                         m_matHlslLogged = false;            // one-time dump of generated HLSL for HW verify
     static constexpr UINT        k_matMaxDraws   = 1024;             // U/HeParams ring slots per frame
-    static constexpr UINT        k_matSlot       = 256;              // 256-B stride/slot (U=176, HeParams=256)
+    static constexpr UINT        k_matSlot       = HE::kMatParamBytes; // stride/slot of the U and HeParams rings (U=176, HeParams=kMatParamBytes)
 
     // Image-based-ambient sky cube for graph materials (heSkyEnv, t15 = SRV block
     // slot kSlotSkyEnv, static sampler s15) — Thema 126. The SAME
@@ -10572,6 +10731,8 @@ void D3D12RendererImpl::createMaterialResources()
             }
             device->CreateShaderResourceView(nullptr, &nv, h); h.ptr += inc;
         }
+        // [18..24]: the Runtime Virtual Texture's table and pool (Thema 333), null until CreateRvtPool.
+        writeRvtNullViews();
     }
 
     // Per-frame rings: HeLighting (once/frame) + U ring + HeParams ring (per draw, 256-B slots).
@@ -12006,6 +12167,7 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
     if (!m_world || !m_impl->pso || width <= 0 || height <= 0) return;
     auto& p = *m_impl;
     auto* cl = static_cast<ID3D12GraphicsCommandList*>(cmdListPtr);
+    ++p.drawSceneSerial;   // the material keys made by an earlier call are not trusted by this one
 
     // Drop caches for materials/meshes edited since last frame (before the mesh-resolve
     // pre-pass below re-creates them fresh). Safe here: render thread, no draws recorded yet.
@@ -12045,6 +12207,25 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
     // call every UI pass below sees an empty list and draws nothing.
     p.m_extractor.extractUI(*m_world, static_cast<float>(width), static_cast<float>(height),
                             p.m_renderWorld);
+    // A virtual texture page (RenderSceneImage with rvtSlot >= 0): the layer's view material replaces every object's own,
+    // after the walk. Section lists would override it; terrain has none.
+    if (m_editorCamera.rvtMaterial != HE::UUID{})
+        for (RenderObject& o : p.m_renderWorld.objects)
+        {
+            o.materialAssetId = m_editorCamera.rvtMaterial;
+            o.sections.clear();
+        }
+    // The landscape drawn from the virtual texture (SetRvtLandscape): its terrain chunks take the consumer material, and
+    // not the object's own parameter block (laid out for the old material; it would overwrite RvtVolumeA/B).
+    else if (!p.rvtSwaps.empty() && p.rvtPool[0])
+        for (RenderObject& o : p.m_renderWorld.objects)
+            if (o.terrainChunk)
+                if (const auto sw = p.rvtSwaps.find(o.terrainEntity); sw != p.rvtSwaps.end() && o.materialAssetId == sw->second.landscapeMat)
+                {
+                    o.materialAssetId = sw->second.consumerMat;
+                    o.paramOverride.clear();
+                    o.sections.clear();
+                }
 
     // ── TAA: this frame's jitter (A2) ───────────────────────────────────────
     // Chosen BEFORE anything builds a matrix, because every rasterising pass of
@@ -12895,11 +13076,11 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
             // through unchanged when the material has no graph shader OR resources are down.
             if (p.m_matReady && m_contentManager)
             {
-                uint64_t matHash = 0; std::string matFrag, matVertBody;
-                if (p.m_matShaderLib.resolveShaders(*m_contentManager, dc.materialAssetId,
-                                                    matHash, matFrag, matVertBody))
+                if (const D3D12RendererImpl::MatKey* matKey = p.resolveMatKey(*m_contentManager, dc.materialAssetId))
                 {
-                    p.foldDisplacement(*m_contentManager, dc.materialAssetId, matHash);
+                    const uint64_t     matHash     = matKey->hash;
+                    const std::string& matFrag     = matKey->frag;
+                    const std::string& matVertBody = matKey->vert;
                     // Transparent graph materials get a blend-on / depth-write-off PSO
                     // variant. MUST use the same predicate the opaque/blended partition
                     // above used, or a draw lands in the blended pass with a
@@ -13000,7 +13181,7 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                             size_t nTex = 0;
                             if (const MaterialAsset* ma0 = m_contentManager->getMaterial(dc.materialAssetId))
                             {
-                                heTexPArrays = HE::matGlslTextureArrayMask(ma0->customShaderFragGlsl);
+                                heTexPArrays = matKey->texArrays;   // the mask of this very source, scanned once per DrawScene
                                 nTex = std::min<size_t>(HE::kMatMaxGraphTextures,
                                     std::max(ma0->graphTexturePaths.size(), ma0->graphTextureIds.size()));
                                 for (size_t i = 0; i < nTex; ++i)
@@ -13055,6 +13236,13 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                                                            (heTexPArrays >> k) & 1u);
                         if (heWeights)
                             p.srvForTexture(heWeights, p.matSrvCpu(blk + HE::d3d12mat::kSlotLandscapeWeights));
+                        // The consumer's page table (Thema 333): a draw whose material owns a table reads it at t40; the
+                        // pool is in the template already. Anything else keeps the template's null view (never sampled).
+                        if (!p.rvtTables.empty())
+                            if (const auto tb = p.rvtTables.find(dc.materialAssetId); tb != p.rvtTables.end())
+                                p.device->CopyDescriptorsSimple(1, p.matSrvCpu(blk + HE::d3d12mat::kSlotRvtTable),
+                                                                p.rvtTableCpu(tb->second.heapIndex),
+                                                                D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
                         // heSkyEnv (t15) + heAO (t16) (Thema 126): the baked sky cube and
                         // this frame's blurred SSAO (the image the built-in shader reads at
                         // t2, in PIXEL_SHADER_RESOURCE after the blur pass), each under the
@@ -13122,10 +13310,10 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                                 std::memcpy(p.m_matObjPtr[p.frameIndex] + static_cast<size_t>(i) * D3D12RendererImpl::k_matSlot,
                                             &u, sizeof(u));
                             // HeParams (16 vec4 = 64 floats = 256 B) into param-ring slot i, zero-padded.
-                            float padded[64] = { 0.0f };
+                            float padded[HE::kMatParamFloats] = { 0.0f };
                             if (params)
                                 std::memcpy(padded, params->data(),
-                                            std::min(params->size(), size_t(64)) * sizeof(float));
+                                            std::min(params->size(), size_t(HE::kMatParamFloats)) * sizeof(float));
                             if (p.m_matParamPtr[p.frameIndex])
                                 std::memcpy(p.m_matParamPtr[p.frameIndex] + static_cast<size_t>(i) * D3D12RendererImpl::k_matSlot,
                                             padded, sizeof(padded));
@@ -13901,7 +14089,9 @@ static void reapExpired(std::vector<std::pair<T, int>>& items)
 void D3D12Renderer::Render()
 {
     auto& p = *m_impl;
+    if (p.rvtStill.kept) rvtStillLeave();   // a bracket nobody closed: the live viewport comes back before it is drawn
     p.m_wallTime = static_cast<float>(SDL_GetTicks()) * 0.001f;
+    UpdateRvtCold();   // RVT cold pages (Thema 333 step 9): a real frame only, never RenderSceneImage's still
 
     // Free retired viewport RTs once enough frames have passed that the GPU is done
     // with them (countdown set when the RT was retired on resize).
@@ -14201,6 +14391,7 @@ IRenderer::Capabilities D3D12Renderer::GetCapabilities() const
     // and the world previews stay forward.
     c.supportsDeferredRendering = m_impl->postFxReady && m_impl->deferredReady;
     c.supportsRawCapture        = m_impl->postFxReady;   // RenderSceneImage's rawOutput rides the tonemap pass
+    c.supportsRvt               = m_impl->postFxReady && m_impl->m_matReady;   // a page is that raw capture copied into the pool
     // Froxel volumetric fog (Thema 225 step 9): Inject/Integrate/Apply built at Initialize. It
     // draws on the HDR viewport frame only; every other frame keeps the analytic height fog.
     c.supportsVolumetricFog     = m_impl->fogPipelinesOk;
@@ -14288,6 +14479,7 @@ void D3D12Renderer::SetSwapchainPostProcessing(bool enabled)
 bool D3D12Renderer::CaptureViewport(std::vector<uint8_t>& rgba, uint32_t& outW, uint32_t& outH)
 {
     auto& p = *m_impl;
+    if (p.rvtStill.kept) rvtStillLeave();   // an outside caller wants the LIVE viewport, not a bracket's page set
     if (!p.viewportRT || !p.viewportReadback || p.viewportW == 0 || p.viewportH == 0)
         return false;
 
@@ -14348,6 +14540,781 @@ bool D3D12Renderer::CaptureViewport(std::vector<uint8_t>& rgba, uint32_t& outW, 
     return true;
 }
 
+// ─── Runtime Virtual Texture (Thema 333, docs/rvt-design-2026-11-04.md) ───────────────────────────────────────
+// The contract is in IRenderer.h; D3D11's is the reference (D3D11Renderer.cpp). Everything here runs between frames, on the
+// CaptureViewport pattern (one-shot command list between two flushes): tables change when a page comes or goes, a few KB.
+
+// mode 1 = normal (x, z = R, B of the page), mode 2 = surface (AO, roughness = R, G of the page) — same convention as
+// D3D11's kRvtPackHLSL. Shares D3D_Shared's kFSTriangleVS for the vertex stage (SV_VertexID, no vertex buffer).
+static const char* kRvtPackHLSL12 = R"(
+Texture2D rvtPackSrc : register(t0);
+cbuffer RvtPackCB : register(b0) { uint rvtPackMode; }
+float2 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD0) : SV_Target
+{
+    float4 c = rvtPackSrc.Load(int3(pos.xy, 0));
+    return rvtPackMode == 1u ? c.rb : c.rg;
+}
+)";
+
+// Built lazily, once (a failure sticks — RenderSceneImage's page copy falls back to "page not packed, not written"
+// rather than retrying every page). Root signature: one 32-bit constant (mode) + one SRV descriptor table (t0, the
+// source page); no sampler, the shader only Loads.
+static bool ensureRvtPackPipeline12(D3D12RendererImpl& p)
+{
+    if (p.rvtPackPSO) return true;
+    if (p.rvtPackTried) return false;
+    p.rvtPackTried = true;
+    if (!p.device) return false;
+    {
+        D3D12_DESCRIPTOR_RANGE r0{}; r0.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV; r0.NumDescriptors = 1; r0.BaseShaderRegister = 0;
+        D3D12_ROOT_PARAMETER params[2]{};
+        params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+        params[0].Constants = { 0, 0, 1 };
+        params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+        params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        params[1].DescriptorTable = { 1, &r0 };
+        params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+        D3D12_ROOT_SIGNATURE_DESC rsd{};
+        rsd.NumParameters = 2; rsd.pParameters = params;
+        ComPtr<ID3DBlob> sig, err;
+        if (FAILED(D3D12SerializeRootSignature(&rsd, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &err)) ||
+            FAILED(p.device->CreateRootSignature(0, sig->GetBufferPointer(), sig->GetBufferSize(),
+                                                 IID_PPV_ARGS(&p.rvtPackRootSig))))
+        {
+            HE_LOG_ERROR(RHI, "%s", "D3D12Renderer: RVT page pack root signature failed");
+            return false;
+        }
+    }
+    ComPtr<ID3DBlob> vsB, psB, err;
+    if (FAILED(D3DCompile(kFSTriangleVS, strlen(kFSTriangleVS), "rvtPackVS", nullptr, nullptr, "main", "vs_5_0", 0, 0, &vsB, &err)))
+    {
+        HE_LOG_ERROR(RHI, "%s", (std::string("D3D12Renderer: RVT page pack VS compile failed: ")
+            + (err ? static_cast<const char*>(err->GetBufferPointer()) : "")).c_str());
+        return false;
+    }
+    if (FAILED(D3DCompile(kRvtPackHLSL12, strlen(kRvtPackHLSL12), "rvtPackPS", nullptr, nullptr, "main", "ps_5_0", 0, 0, &psB, &err)))
+    {
+        HE_LOG_ERROR(RHI, "%s", (std::string("D3D12Renderer: RVT page pack PS compile failed: ")
+            + (err ? static_cast<const char*>(err->GetBufferPointer()) : "")).c_str());
+        return false;
+    }
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC pd{};
+    pd.pRootSignature = p.rvtPackRootSig.Get();
+    pd.VS = { vsB->GetBufferPointer(), vsB->GetBufferSize() };
+    pd.PS = { psB->GetBufferPointer(), psB->GetBufferSize() };
+    pd.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    pd.SampleMask = UINT_MAX;
+    pd.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    pd.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    pd.DepthStencilState.DepthEnable = FALSE;
+    pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    pd.NumRenderTargets = 1; pd.RTVFormats[0] = DXGI_FORMAT_R8G8_UNORM;
+    pd.SampleDesc.Count = 1;
+    if (FAILED(p.device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&p.rvtPackPSO))))
+    {
+        HE_LOG_ERROR(RHI, "%s", "D3D12Renderer: RVT page pack PSO creation failed");
+        return false;
+    }
+    D3D12_DESCRIPTOR_HEAP_DESC sd{}; sd.NumDescriptors = 1; sd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+    sd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    if (FAILED(p.device->CreateDescriptorHeap(&sd, IID_PPV_ARGS(&p.rvtPackSrvHeap)))) { p.rvtPackPSO.Reset(); return false; }
+    D3D12_DESCRIPTOR_HEAP_DESC rd2{}; rd2.NumDescriptors = 1; rd2.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+    if (FAILED(p.device->CreateDescriptorHeap(&rd2, IID_PPV_ARGS(&p.rvtPackRtvHeap)))) { p.rvtPackPSO.Reset(); return false; }
+    return true;
+}
+
+// The pack draw itself, recorded into `cl` — the SAME command list RenderSceneImage's page copy uses, right where
+// the CopyTextureRegion it replaces would have gone. `src` is the just-drawn page (viewportRT, already transitioned
+// to PIXEL_SHADER_RESOURCE by the caller); `dst` is the pool array for this layer, one slice (hotSlice) of it.
+static void packRvtPage12(D3D12RendererImpl& p, ID3D12GraphicsCommandList* cl, ID3D12Resource* src, int layer,
+                          ID3D12Resource* dst, UINT hotSlice, UINT px)
+{
+    D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
+    sv.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    sv.Texture2D.MipLevels = 1;
+    p.device->CreateShaderResourceView(src, &sv, p.rvtPackSrvHeap->GetCPUDescriptorHandleForHeapStart());
+
+    D3D12_RENDER_TARGET_VIEW_DESC rv{};
+    rv.Format = DXGI_FORMAT_R8G8_UNORM;
+    rv.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2DARRAY;
+    rv.Texture2DArray.MipSlice = 0;
+    rv.Texture2DArray.FirstArraySlice = hotSlice;
+    rv.Texture2DArray.ArraySize = 1;
+    const D3D12_CPU_DESCRIPTOR_HANDLE rtv = p.rvtPackRtvHeap->GetCPUDescriptorHandleForHeapStart();
+    p.device->CreateRenderTargetView(dst, &rv, rtv);
+
+    p.barrier12(cl, dst, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+    cl->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+    D3D12_VIEWPORT vp{}; vp.Width = vp.Height = static_cast<float>(px); vp.MaxDepth = 1.0f;
+    D3D12_RECT sr{ 0, 0, static_cast<LONG>(px), static_cast<LONG>(px) };
+    cl->RSSetViewports(1, &vp);
+    cl->RSSetScissorRects(1, &sr);
+    cl->SetPipelineState(p.rvtPackPSO.Get());
+    cl->SetGraphicsRootSignature(p.rvtPackRootSig.Get());
+    const uint32_t mode = layer == 1 ? 1u : 2u;
+    cl->SetGraphicsRoot32BitConstants(0, 1, &mode, 0);
+    ID3D12DescriptorHeap* heaps[] = { p.rvtPackSrvHeap.Get() };
+    cl->SetDescriptorHeaps(1, heaps);
+    cl->SetGraphicsRootDescriptorTable(1, p.rvtPackSrvHeap->GetGPUDescriptorHandleForHeapStart());
+    cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    cl->DrawInstanced(3, 1, 0, 0);
+    p.barrier12(cl, dst, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+}
+
+// One layer of the pool as `count` slices (Thema 333): the resource (made in `state`) and the staging descriptor the material draws copy from.
+// `rg` (Thema 333 step 10, layer 1/2 only, HE_RVT_PACK): two channels instead of four, RENDER_TARGET-capable (the pack
+// pass is the only way data gets into it; a format change rules out CopyTextureRegion).
+static bool makeRvtPoolLayer12(D3D12RendererImpl& p, UINT layer, UINT count, UINT pagePx, bool rg, D3D12_RESOURCE_STATES state, ComPtr<ID3D12Resource>& out)
+{
+    D3D12_HEAP_PROPERTIES hp{}; hp.Type = D3D12_HEAP_TYPE_DEFAULT;
+    D3D12_RESOURCE_DESC rd{};
+    rd.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    rd.Width = rd.Height = pagePx;
+    rd.DepthOrArraySize = static_cast<UINT16>(count);
+    rd.MipLevels = 1;
+    rd.Format = rg ? DXGI_FORMAT_R8G8_UNORM : (layer == 0 ? DXGI_FORMAT_R8G8B8A8_TYPELESS : DXGI_FORMAT_R8G8B8A8_UNORM);   // BaseColor is read through an sRGB view
+    rd.Flags  = rg ? D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET : D3D12_RESOURCE_FLAG_NONE;   // the pack pass renders into it
+    rd.SampleDesc.Count = 1;
+    rd.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+    return SUCCEEDED(p.device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd, state, nullptr, IID_PPV_ARGS(&out)));
+}
+
+static void writeRvtPoolSrv12(D3D12RendererImpl& p, UINT layer, UINT count)
+{
+    D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
+    sv.Format = (p.rvtPack && layer > 0) ? DXGI_FORMAT_R8G8_UNORM
+              : layer == 0 ? DXGI_FORMAT_R8G8B8A8_UNORM_SRGB : DXGI_FORMAT_R8G8B8A8_UNORM;
+    sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+    sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    sv.Texture2DArray.MipLevels = 1;
+    sv.Texture2DArray.ArraySize = count;
+    p.device->CreateShaderResourceView(p.rvtPool[layer].Get(), &sv, p.matSrvStagingCpu(HE::d3d12mat::kSlotRvtAlbedo + layer));
+}
+
+// The arrays hold `rvtAlloc` slices; a page for a slot beyond that grows them: a new array, the old slices copied across on the GPU,
+// the old array dropped once the GPU is idle (rvtBegin/rvtEnd wait for every frame, so nothing in flight still reads it). Called
+// BEFORE the page's own command list is recorded. The manager hands out slots from 0 upwards and reuses freed ones (the highest slot in use never exceeds the peak page count), so a scene that needs 70 pages
+// holds ~100 instead of the configured 512. HE_RVT_GROW=0 allocates the whole pool at once.
+static bool growRvtPool12(D3D12RendererImpl& p, uint32_t slot)
+{
+    if (slot < p.rvtAlloc) return true;
+    if (slot >= p.rvtSlots) return false;
+    const uint32_t grown = std::min(p.rvtSlots, std::max((slot + 32u) & ~31u, p.rvtAlloc + p.rvtAlloc / 2));
+    ComPtr<ID3D12Resource> fresh[3];
+    for (UINT layer = 0; layer < 3; ++layer)
+        if (!makeRvtPoolLayer12(p, layer, grown, p.rvtPagePx, p.rvtPack && layer > 0, D3D12_RESOURCE_STATE_COPY_DEST, fresh[layer])) return false;
+    ID3D12GraphicsCommandList* cl = p.rvtBegin();
+    for (UINT layer = 0; layer < 3; ++layer)
+    {
+        p.barrier12(cl, p.rvtPool[layer].Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        for (UINT i = 0; i < p.rvtAlloc; ++i)
+        {
+            D3D12_TEXTURE_COPY_LOCATION src{}, dst{};
+            src.pResource = p.rvtPool[layer].Get(); src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; src.SubresourceIndex = i;
+            dst.pResource = fresh[layer].Get();     dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; dst.SubresourceIndex = i;
+            cl->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+        }
+        p.barrier12(cl, fresh[layer].Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    }
+    p.rvtEnd();
+    p.rvtPending = 0;   // rvtEnd waited for every frame, the pipelined layers included
+    for (UINT layer = 0; layer < 3; ++layer)
+    {
+        p.rvtPool[layer] = std::move(fresh[layer]);
+        writeRvtPoolSrv12(p, layer, grown);
+    }
+    HE_LOG_INFO(RHI, "D3D12Renderer: RVT pool grew %u -> %u of %u pages (%.0f MB, %s)", p.rvtAlloc, grown, p.rvtSlots,
+                double(grown) * p.rvtPagePx * p.rvtPagePx * (p.rvtPack ? 8.0 : 12.0) / (1024.0 * 1024.0),
+                p.rvtPack ? "RGBA8 + RG8 + RG8" : "RGBA8 x 3");
+    p.rvtAlloc = grown;
+    return true;
+}
+
+// ── Cold pages (Thema 333 step 9, counterpart of Metal 6j / D3D11's step 9): BC7 arrays, slice = slot (no further
+// decoupling — three small BC7 arrays cost little next to the hot ones). Growth mirrors growRvtPool12/makeRvtPoolLayer12
+// but the format is BC7 and the SRV lands on the cold slots (44..46).
+static bool makeRvtColdLayer12(D3D12RendererImpl& p, UINT layer, UINT count, UINT pagePx, D3D12_RESOURCE_STATES state, ComPtr<ID3D12Resource>& out)
+{
+    D3D12_HEAP_PROPERTIES hp{}; hp.Type = D3D12_HEAP_TYPE_DEFAULT;
+    D3D12_RESOURCE_DESC rd{};
+    rd.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    rd.Width = rd.Height = pagePx;
+    rd.DepthOrArraySize = static_cast<UINT16>(count);
+    rd.MipLevels = 1;
+    rd.Format = layer == 0 ? DXGI_FORMAT_BC7_UNORM_SRGB : DXGI_FORMAT_BC7_UNORM;
+    rd.SampleDesc.Count = 1;
+    rd.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+    return SUCCEEDED(p.device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd, state, nullptr, IID_PPV_ARGS(&out)));
+}
+
+static void writeRvtColdSrv12(D3D12RendererImpl& p, UINT layer, UINT count)
+{
+    D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
+    sv.Format = layer == 0 ? DXGI_FORMAT_BC7_UNORM_SRGB : DXGI_FORMAT_BC7_UNORM;
+    sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+    sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    sv.Texture2DArray.MipLevels = 1;
+    sv.Texture2DArray.ArraySize = count;
+    p.device->CreateShaderResourceView(p.rvtCold[layer].Get(), &sv, p.matSrvStagingCpu(HE::d3d12mat::kSlotRvtAlbedoCold + layer));
+}
+
+static bool growRvtCold12(D3D12RendererImpl& p, uint32_t slot)
+{
+    if (slot < p.rvtColdAlloc) return true;
+    if (slot >= p.rvtSlots) return false;
+    const uint32_t grown = std::min(p.rvtSlots, std::max((slot + 32u) & ~31u, p.rvtColdAlloc + std::max(32u, p.rvtColdAlloc / 2)));
+    ComPtr<ID3D12Resource> fresh[3];
+    for (UINT layer = 0; layer < 3; ++layer)
+        if (!makeRvtColdLayer12(p, layer, grown, p.rvtPagePx, D3D12_RESOURCE_STATE_COPY_DEST, fresh[layer])) return false;
+    ID3D12GraphicsCommandList* cl = p.rvtBegin();
+    for (UINT layer = 0; layer < 3; ++layer)
+    {
+        if (p.rvtColdAlloc)
+        {
+            p.barrier12(cl, p.rvtCold[layer].Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_SOURCE);
+            for (UINT i = 0; i < p.rvtColdAlloc; ++i)
+            {
+                D3D12_TEXTURE_COPY_LOCATION src{}, dst{};
+                src.pResource = p.rvtCold[layer].Get(); src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; src.SubresourceIndex = i;
+                dst.pResource = fresh[layer].Get();     dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; dst.SubresourceIndex = i;
+                cl->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+            }
+        }
+        p.barrier12(cl, fresh[layer].Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    }
+    p.rvtEnd();
+    p.rvtPending = 0;
+    for (UINT layer = 0; layer < 3; ++layer)
+    {
+        p.rvtCold[layer] = std::move(fresh[layer]);
+        writeRvtColdSrv12(p, layer, grown);
+    }
+    HE_LOG_INFO(RHI, "D3D12Renderer: RVT cold pool grew %u -> %u of %u pages (%.1f MB, BC7)", p.rvtColdAlloc, grown, p.rvtSlots,
+                double(grown) * HE::blockEncodedBytes(p.rvtPagePx, p.rvtPagePx) * 3.0 / (1024.0 * 1024.0));
+    p.rvtColdAlloc = grown;
+    return true;
+}
+
+// The hot slice of a manager slot, taking one from the free list (or growing the hot arrays) when it has none.
+static uint32_t rvtHotFor12(D3D12RendererImpl& p, uint32_t slot)
+{
+    if (p.rvtSlotHot[slot] >= 0) return uint32_t(p.rvtSlotHot[slot]);
+    if (p.rvtHotFree.empty())
+    {
+        const uint32_t before = p.rvtAlloc;
+        if (!growRvtPool12(p, before) || p.rvtAlloc <= before) return 0xFFFFFFFFu;
+        for (uint32_t i = p.rvtAlloc; i-- > before;) p.rvtHotFree.push_back(i);
+    }
+    const uint32_t hot = p.rvtHotFree.back();
+    p.rvtHotFree.pop_back();
+    p.rvtSlotHot[slot] = int32_t(hot);
+    ++p.rvtStateVer;
+    return hot;
+}
+
+// The table the shader reads: the manager's entries with each slot rewritten to hot slice or bit 23 + slot (same
+// contract as D3D11/Metal). Unlike D3D11, D3D12's existing RVT path is entirely synchronous (rvtBegin/rvtEnd wait for
+// every frame already, for ANY table/pool admin op on this backend) — an upload here pays that same cost, not a new one.
+static void uploadRvtTable12(D3D12RendererImpl& p, D3D12RendererImpl::RvtTable& t)
+{
+    if (t.src.empty() || !t.tex) return;
+    const D3D12_RESOURCE_DESC rd = t.tex->GetDesc();
+    std::vector<D3D12_PLACED_SUBRESOURCE_FOOTPRINT> fp(t.src.size());
+    std::vector<UINT> rows(t.src.size());
+    std::vector<UINT64> rowBytes(t.src.size());
+    UINT64 total = 0;
+    p.device->GetCopyableFootprints(&rd, 0, static_cast<UINT>(t.src.size()), 0, fp.data(), rows.data(), rowBytes.data(), &total);
+    void* mapped = nullptr;
+    ComPtr<ID3D12Resource> up = p.createUploadBuffer(total, &mapped);
+    if (!up || !mapped) return;
+    std::vector<uint32_t> row;
+    for (size_t m = 0; m < t.src.size(); ++m)
+    {
+        const std::vector<uint32_t>& in = t.src[m];
+        row.resize(in.size());
+        for (size_t i = 0; i < in.size(); ++i)
+        {
+            const uint32_t e = in[i];
+            if (e == 0xFFFFFFFFu) { row[i] = e; continue; }
+            const uint32_t slot = e & 0xFFFFFFu, eff = e >> 24;
+            if (slot >= p.rvtSlots)           row[i] = 0xFFFFFFFFu;
+            else if (p.rvtSlotCold[slot])     row[i] = (eff << 24) | 0x800000u | slot;
+            else if (p.rvtSlotHot[slot] >= 0) row[i] = (eff << 24) | uint32_t(p.rvtSlotHot[slot]);
+            else                               row[i] = 0xFFFFFFFFu;
+        }
+        const uint32_t ms = t.side >> m;
+        for (uint32_t y = 0; y < ms; ++y)
+            std::memcpy(static_cast<uint8_t*>(mapped) + fp[m].Offset + size_t(y) * fp[m].Footprint.RowPitch,
+                        &row[size_t(y) * ms], size_t(ms) * sizeof(uint32_t));
+    }
+    up->Unmap(0, nullptr);
+    ID3D12GraphicsCommandList* cl = p.rvtBegin();
+    p.barrier12(cl, t.tex.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
+    for (size_t m = 0; m < t.src.size(); ++m)
+    {
+        D3D12_TEXTURE_COPY_LOCATION src{}, dst{};
+        src.pResource = up.Get();    src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT; src.PlacedFootprint = fp[m];
+        dst.pResource = t.tex.Get(); dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; dst.SubresourceIndex = static_cast<UINT>(m);
+        cl->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+    }
+    p.barrier12(cl, t.tex.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    p.rvtEnd();
+    t.stateVer = p.rvtStateVer;
+}
+
+// The encoder thread (CPU only — D3D12's own synchronisation is the caller's rvtBegin/rvtEnd, not this thread's
+// problem). A readback for D3D12 is already a full GPU flush (rvtBegin/rvtEnd), so unlike D3D11 there is no async
+// query to poll: the RGBA bytes are ready to hand to the worker the moment the synchronous copy below returns.
+struct D3D12RendererImpl::RvtColdWork
+{
+    struct Todo { uint32_t slot, ver; std::vector<uint8_t> rgba[3]; };
+    struct Done { uint32_t slot, ver; std::vector<uint8_t> blocks[3]; };
+    std::mutex              mutex;
+    std::condition_variable cv;
+    std::deque<Todo>        todo;
+    std::deque<Done>        done;
+    std::thread             worker;
+    bool                    quit = false;
+    uint32_t                pagePx = 0;
+
+    void start(uint32_t px)
+    {
+        pagePx = px;
+        worker = std::thread([this] {
+            for (;;)
+            {
+                Todo job;
+                {
+                    std::unique_lock<std::mutex> lock(mutex);
+                    if (!cv.wait_for(lock, std::chrono::seconds(3), [this] { return quit || !todo.empty(); }))
+                    {
+                        lock.unlock();
+                        HE::releaseBlockEncoderCache();
+                        lock.lock();
+                        cv.wait(lock, [this] { return quit || !todo.empty(); });
+                    }
+                    if (quit) return;
+                    job = std::move(todo.front());
+                    todo.pop_front();
+                }
+                Done out; out.slot = job.slot; out.ver = job.ver;
+                bool ok = true;
+                for (int layer = 0; layer < 3 && ok; ++layer)
+                    ok = HE::encodeBlocks(HE::BlockFormat::Bc7, job.rgba[layer].data(), pagePx, pagePx, false, 0, out.blocks[layer]);
+                if (!ok) out.blocks[0].clear();
+                std::lock_guard<std::mutex> lock(mutex);
+                done.push_back(std::move(out));
+            }
+        });
+    }
+    void stop()
+    {
+        { std::lock_guard<std::mutex> lock(mutex); quit = true; }
+        cv.notify_all();
+        if (worker.joinable()) worker.join();
+    }
+    ~RvtColdWork() { stop(); }
+};
+
+D3D12RendererImpl::~D3D12RendererImpl() { delete rvtWork; }
+
+bool D3D12Renderer::CreateRvtPool(uint32_t slots, uint32_t pagePx)
+{
+    auto& p = *m_impl;
+    DestroyRvtPool();
+    if (!p.device || !p.m_matReady || !p.postFxReady || slots == 0 || slots > 2048 || pagePx < 8 || pagePx > 1024) return false;
+    p.waitForAllFrames();
+    static const bool s_grow = [] { const char* e = std::getenv("HE_RVT_GROW"); return !(e && *e == '0'); }();
+    const uint32_t first = s_grow ? std::min(slots, 64u) : slots;
+    static const bool packWanted = [] { const char* e = std::getenv("HE_RVT_PACK"); return !(e && *e == '0'); }();
+    p.rvtPack = packWanted;
+    for (UINT layer = 0; layer < 3; ++layer)
+    {
+        if (!makeRvtPoolLayer12(p, layer, first, pagePx, p.rvtPack && layer > 0, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, p.rvtPool[layer]))
+        {
+            DestroyRvtPool();
+            return false;
+        }
+        writeRvtPoolSrv12(p, layer, first);
+    }
+    p.rvtSlots  = slots;
+    p.rvtAlloc  = first;
+    p.rvtPagePx = pagePx;
+    p.rvtSlotHot.assign(slots, -1);
+    p.rvtSlotCold.assign(slots, 0);
+    p.rvtSlotVer.assign(slots, 0);
+    p.rvtSlotPainted.assign(slots, 0);
+    p.rvtHotFree.clear();
+    for (uint32_t i = first; i-- > 0;) p.rvtHotFree.push_back(i);
+    p.rvtColdOn = false;
+    return true;
+}
+
+void D3D12Renderer::DestroyRvtPool()
+{
+    auto& p = *m_impl;
+    if (!p.device) return;
+    const bool any = p.rvtPool[0] || p.rvtPool[1] || p.rvtPool[2] || !p.rvtTables.empty() || !p.rvtSwaps.empty();
+    if (any) p.waitForAllFrames();     // frames in flight read the pool and the tables
+    if (p.rvtWork) { p.rvtWork->stop(); delete p.rvtWork; p.rvtWork = nullptr; }
+    p.rvtSwaps.clear();                // the pool the consumers read is gone: draw the landscapes themselves again
+    for (auto& kv : p.rvtTables) p.rvtTableFree.push_back(kv.second.heapIndex);
+    p.rvtTables.clear();
+    for (auto& r : p.rvtPool) r.Reset();
+    for (auto& r : p.rvtCold) r.Reset();
+    p.rvtSlots = p.rvtAlloc = p.rvtPagePx = p.rvtColdAlloc = 0;
+    p.rvtColdOn = false;
+    p.rvtPack = false;   // the pack pipeline itself (rvtPackPSO/RootSig/heaps) is renderer-lifetime, not pool-lifetime
+    p.rvtStateVer = 1;
+    p.rvtRealFrames = 0;
+    p.rvtSlotHot.clear(); p.rvtSlotCold.clear(); p.rvtSlotVer.clear(); p.rvtSlotPainted.clear(); p.rvtHotFree.clear();
+    p.writeRvtNullViews();
+}
+
+void D3D12Renderer::SetRvtLandscape(uint32_t terrainEntity, const HE::UUID& landscapeMaterial, const HE::UUID& consumerMaterial)
+{
+    if (consumerMaterial == HE::UUID{}) m_impl->rvtSwaps.erase(terrainEntity);
+    else                               m_impl->rvtSwaps[terrainEntity] = { landscapeMaterial, consumerMaterial };
+}
+
+void D3D12Renderer::ReleaseRvtConsumer(const HE::UUID& consumerMaterial)
+{
+    auto& p = *m_impl;
+    for (auto it = p.rvtSwaps.begin(); it != p.rvtSwaps.end();)
+        it = it->second.consumerMat == consumerMaterial ? p.rvtSwaps.erase(it) : std::next(it);
+    const auto t = p.rvtTables.find(consumerMaterial);
+    if (t == p.rvtTables.end()) return;
+    p.waitForAllFrames();              // a recorded frame may still read this table
+    p.rvtTableFree.push_back(t->second.heapIndex);
+    p.rvtTables.erase(t);
+}
+
+bool D3D12Renderer::SetRvtPageTable(const HE::UUID& consumerMaterial, const std::vector<std::vector<uint32_t>>& mips)
+{
+    auto& p = *m_impl;
+    if (!p.device || !p.rvtSlots || mips.empty() || mips.size() > 12) return false;
+    uint32_t side = 1;
+    while (uint64_t(side) * side < mips[0].size()) ++side;
+    if (uint64_t(side) * side != mips[0].size() || (side & (side - 1)) != 0 || side > 4096) return false;   // a power of two
+    for (size_t m = 0; m < mips.size(); ++m)
+    {
+        const uint32_t ms = side >> m;
+        if (ms == 0 || mips[m].size() != size_t(ms) * ms) return false;
+    }
+    if (!p.rvtTableHeap)
+    {
+        D3D12_DESCRIPTOR_HEAP_DESC hd{};
+        hd.NumDescriptors = D3D12RendererImpl::kRvtMaxTables;
+        hd.Type  = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+        hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;      // a copy SOURCE: CPU-only
+        if (FAILED(p.device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&p.rvtTableHeap)))) return false;
+        for (UINT i = D3D12RendererImpl::kRvtMaxTables; i > 0; --i) p.rvtTableFree.push_back(i - 1);
+    }
+    p.waitForAllFrames();              // a recorded frame may still read the old table
+    auto found = p.rvtTables.find(consumerMaterial);
+    if (found == p.rvtTables.end())
+    {
+        if (p.rvtTableFree.empty()) return false;
+        found = p.rvtTables.emplace(consumerMaterial, D3D12RendererImpl::RvtTable{}).first;
+        found->second.heapIndex = p.rvtTableFree.back();
+        p.rvtTableFree.pop_back();
+    }
+    D3D12RendererImpl::RvtTable& t = found->second;
+    if (!t.tex || t.side != side || t.mips != mips.size())
+    {
+        t.tex.Reset();
+        D3D12_HEAP_PROPERTIES hp{}; hp.Type = D3D12_HEAP_TYPE_DEFAULT;
+        D3D12_RESOURCE_DESC rd{};
+        rd.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        rd.Width = rd.Height = side;
+        rd.DepthOrArraySize = 1;
+        rd.MipLevels = static_cast<UINT16>(mips.size());
+        rd.Format = DXGI_FORMAT_R32_UINT;
+        rd.SampleDesc.Count = 1;
+        rd.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+        if (FAILED(p.device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                                                     nullptr, IID_PPV_ARGS(&t.tex))))
+        {
+            p.rvtTableFree.push_back(t.heapIndex);
+            p.rvtTables.erase(found);
+            return false;
+        }
+        D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
+        sv.Format = DXGI_FORMAT_R32_UINT;
+        sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        sv.Texture2D.MipLevels = static_cast<UINT>(mips.size());
+        p.device->CreateShaderResourceView(t.tex.Get(), &sv, p.rvtTableCpu(t.heapIndex));
+        t.side = side;
+        t.mips = static_cast<uint32_t>(mips.size());
+    }
+    t.src = mips;
+    uploadRvtTable12(p, t);
+    return true;
+}
+
+bool D3D12Renderer::ReadbackRvtPageTable(const HE::UUID& consumerMaterial, std::vector<std::vector<uint32_t>>& mips)
+{
+    auto& p = *m_impl;
+    const auto found = p.rvtTables.find(consumerMaterial);
+    if (found == p.rvtTables.end() || !found->second.tex) return false;
+    mips = found->second.src;   // the manager's form; the GPU texture holds the rewritten one (hot slice / cold bit)
+    return true;
+}
+
+bool D3D12Renderer::ReadbackRvtSlot(int layer, uint32_t slot, std::vector<uint8_t>& rgba)
+{
+    auto& p = *m_impl;
+    // A cold page lives as BC7 blocks only: the witnesses read pages straight after painting them, hot.
+    if (layer < 0 || layer >= 3 || !p.rvtPool[layer] || slot >= p.rvtSlots || slot >= p.rvtSlotHot.size() || p.rvtSlotHot[slot] < 0)
+        return false;
+    const UINT hotSlice = UINT(p.rvtSlotHot[slot]);
+    const bool rg = p.rvtPack && layer > 0;
+    const UINT rowPitch = alignUp(p.rvtPagePx * (rg ? 2u : 4u), D3D12_TEXTURE_DATA_PITCH_ALIGNMENT);
+    ComPtr<ID3D12Resource> rb = p.rvtReadbackBuffer(static_cast<UINT64>(rowPitch) * p.rvtPagePx);
+    if (!rb) return false;
+    ID3D12GraphicsCommandList* cl = p.rvtBegin();
+    ID3D12Resource* res = p.rvtPool[layer].Get();
+    p.barrier12(cl, res, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    D3D12_TEXTURE_COPY_LOCATION src{}, dst{};
+    src.pResource = res;      src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; src.SubresourceIndex = hotSlice;
+    dst.pResource = rb.Get(); dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    dst.PlacedFootprint.Footprint.Format   = rg ? DXGI_FORMAT_R8G8_UNORM : DXGI_FORMAT_R8G8B8A8_UNORM;
+    dst.PlacedFootprint.Footprint.Width    = p.rvtPagePx;
+    dst.PlacedFootprint.Footprint.Height   = p.rvtPagePx;
+    dst.PlacedFootprint.Footprint.Depth    = 1;
+    dst.PlacedFootprint.Footprint.RowPitch = rowPitch;
+    cl->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+    p.barrier12(cl, res, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    p.rvtEnd();
+    void* mapped = nullptr;
+    D3D12_RANGE readRange{ 0, static_cast<SIZE_T>(rowPitch) * p.rvtPagePx };
+    if (FAILED(rb->Map(0, &readRange, &mapped))) return false;
+    const uint8_t* src2 = static_cast<const uint8_t*>(mapped);
+    if (rg)
+    {
+        // Two channels in the pool: normal (x, z) comes back as R and B, the surface as R and G, the rest zero
+        // (RvtLayerChannels: layer 1 = 0x5, layer 2 = 0x3).
+        rgba.assign(static_cast<size_t>(p.rvtPagePx) * p.rvtPagePx * 4, 0);
+        const int gDst = layer == 1 ? 2 : 1;
+        for (uint32_t y = 0; y < p.rvtPagePx; ++y)
+        {
+            const uint8_t* row = src2 + static_cast<size_t>(y) * rowPitch;
+            for (uint32_t x = 0; x < p.rvtPagePx; ++x)
+            {
+                const size_t di = (static_cast<size_t>(y) * p.rvtPagePx + x) * 4;
+                rgba[di + 0] = row[x * 2 + 0];
+                rgba[di + gDst] = row[x * 2 + 1];
+                rgba[di + 3] = 255;
+            }
+        }
+    }
+    else
+    {
+        rgba.resize(static_cast<size_t>(p.rvtPagePx) * p.rvtPagePx * 4);
+        for (uint32_t y = 0; y < p.rvtPagePx; ++y)
+            std::memcpy(rgba.data() + static_cast<size_t>(y) * p.rvtPagePx * 4, src2 + size_t(y) * rowPitch,
+                        static_cast<size_t>(p.rvtPagePx) * 4);
+    }
+    D3D12_RANGE noWrite{ 0, 0 };
+    rb->Unmap(0, &noWrite);
+    return true;
+}
+
+uint32_t D3D12Renderer::RvtLayerChannels(int layer) const
+{
+    auto& p = *m_impl;
+    if (!p.rvtPack) return 0xFu;
+    return layer == 1 ? 0x5u : layer == 2 ? 0x3u : 0xFu;   // normal: R and B (x, z); surface: R and G; albedo: all
+}
+
+// Once per real frame (Render(), never RenderSceneImage): ages pages, harvests finished BC7 encodes, synchronously
+// reads back ONE page that has stood still (rvtBegin/rvtEnd — a full GPU flush, like every other RVT admin op on this
+// backend; one per frame bounds how often that flush happens), re-uploads tables whose entries changed temperature.
+// Mirrors D3D11Renderer::UpdateRvtCold / MetalRenderer::UpdateRvtCold (step 6j); this backend has no async query to
+// poll, so there is no "flight" list — the readback is synchronous and its bytes go straight to the worker thread.
+void D3D12Renderer::UpdateRvtCold()
+{
+    auto& p = *m_impl;
+    if (!p.rvtSlots || !p.rvtPool[0]) return;
+    ++p.rvtRealFrames;
+
+    static const bool coldWanted = [] { const char* e = std::getenv("HE_RVT_COLD"); return !(e && *e == '0'); }();
+    if (!p.rvtColdOn && coldWanted)
+    {
+        std::vector<uint8_t> probe(16 * 16 * 4, 128), blocks;
+        p.rvtColdOn = HE::encodeBlocks(HE::BlockFormat::Bc7, probe.data(), 16, 16, false, 0, blocks);
+    }
+    if (!p.rvtColdOn) return;
+
+    // bc7enc's tables are a few KB (bc7enc_compress_block_init), nowhere near astcenc's ~40 MB context, so there is no
+    // Metal-style reason to wait for a big working set before compression starts.
+    static const uint32_t coldMin = [] { const char* e = std::getenv("HE_RVT_COLD_MIN"); return e && *e ? uint32_t(std::max(0, std::atoi(e))) : 0u; }();
+    const uint32_t hotUsed = p.rvtAlloc - uint32_t(p.rvtHotFree.size());
+    if (!p.rvtWork && hotUsed >= coldMin)
+    {
+        p.rvtWork = new D3D12RendererImpl::RvtColdWork();
+        p.rvtWork->start(p.rvtPagePx);
+        HE_LOG_INFO(RHI, "D3D12Renderer: RVT cold pool: %u hot pages in use, compressing the pages that stand still", hotUsed);
+    }
+    if (p.rvtWork)
+    {
+        static const uint64_t coldAfter = [] { const char* e = std::getenv("HE_RVT_COLD_AFTER"); return e && *e ? uint64_t(std::max(1, std::atoi(e))) : 120ull; }();
+        auto& w = *p.rvtWork;
+        const uint32_t px = p.rvtPagePx;
+        const size_t pageBytes = size_t(px) * px * 4;
+
+        // 1. Encodes that came back. Capped at one landed page (one rvtBegin/rvtEnd GPU flush) per real frame, like
+        // the readback below — a worker that falls behind and returns several finished encodes in the same frame
+        // must not turn into N consecutive full-pipeline stalls; whatever is left over waits for the next call.
+        std::deque<D3D12RendererImpl::RvtColdWork::Done> finished;
+        { std::lock_guard<std::mutex> lock(w.mutex); finished.swap(w.done); }
+        while (!finished.empty())
+        {
+            D3D12RendererImpl::RvtColdWork::Done d = std::move(finished.front());
+            finished.pop_front();
+            if (d.blocks[0].empty() || d.ver != p.rvtSlotVer[d.slot] || p.rvtSlotHot[d.slot] < 0 || p.rvtSlotCold[d.slot]) continue;
+            if (!growRvtCold12(p, d.slot)) continue;
+            // The block data from BlockEncode.h is tightly packed (bx*16 bytes/row = 544 for 136 px); D3D12's placed
+            // footprint needs the row pitch padded to D3D12_TEXTURE_DATA_PITCH_ALIGNMENT (256) = 768, or
+            // CopyTextureRegion reads/writes outside what it declared (a GPU page fault / TDR, not a clean failure).
+            const uint32_t bx = (px + 3) / 4, tightPitch = bx * 16;
+            const uint32_t rowPitch = alignUp(tightPitch, D3D12_TEXTURE_DATA_PITCH_ALIGNMENT);
+            // The three upload buffers must outlive rvtEnd() (it submits and waits for THIS command list, not the one
+            // that built them): a ComPtr scoped to the loop body below released its buffer the moment the next layer's
+            // iteration started, while the GPU still read it when the list finally closed (a real TDR, caught on hardware).
+            ComPtr<ID3D12Resource> ups[3];
+            ID3D12GraphicsCommandList* cl = p.rvtBegin();
+            // All 3 layers must land, or the page keeps its hot slot and retries next time it stands still
+            // (HotFree'ing the slot and marking the page cold on a partial upload leaves whichever layer
+            // failed pointing at a never-written cold slice forever, with nothing left to trigger a retry).
+            bool allOk = true;
+            for (int layer = 0; layer < 3; ++layer)
+            {
+                void* mapped = nullptr;
+                ups[layer] = p.createUploadBuffer(static_cast<UINT64>(rowPitch) * bx, &mapped);
+                if (!ups[layer] || !mapped) { allOk = false; continue; }
+                for (uint32_t row = 0; row < bx; ++row)
+                    std::memcpy(static_cast<uint8_t*>(mapped) + size_t(row) * rowPitch,
+                                d.blocks[layer].data() + size_t(row) * tightPitch, tightPitch);
+                ups[layer]->Unmap(0, nullptr);
+                p.barrier12(cl, p.rvtCold[layer].Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
+                D3D12_TEXTURE_COPY_LOCATION src{}, dst{};
+                src.pResource = ups[layer].Get(); src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+                src.PlacedFootprint.Footprint.Format   = layer == 0 ? DXGI_FORMAT_BC7_UNORM_SRGB : DXGI_FORMAT_BC7_UNORM;
+                src.PlacedFootprint.Footprint.Width    = px;
+                src.PlacedFootprint.Footprint.Height   = px;
+                src.PlacedFootprint.Footprint.Depth    = 1;
+                src.PlacedFootprint.Footprint.RowPitch = rowPitch;
+                dst.pResource = p.rvtCold[layer].Get(); dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; dst.SubresourceIndex = d.slot;
+                cl->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+                p.barrier12(cl, p.rvtCold[layer].Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            }
+            p.rvtEnd();
+            if (allOk)
+            {
+                p.rvtHotFree.push_back(uint32_t(p.rvtSlotHot[d.slot]));
+                p.rvtSlotHot[d.slot] = -1;
+                p.rvtSlotCold[d.slot] = 1;
+                ++p.rvtStateVer;
+            }
+            break;   // at most one landed encode (one GPU flush) per real frame
+        }
+        if (!finished.empty())
+        {
+            // Give back what did not land yet, ahead of anything the worker queued meanwhile, so order is preserved.
+            std::lock_guard<std::mutex> lock(w.mutex);
+            for (auto it = finished.rbegin(); it != finished.rend(); ++it)
+                w.done.push_front(std::move(*it));
+        }
+
+        // 2. One page that has stood still long enough: read it back now (synchronous) and queue it for encoding.
+        for (uint32_t slot = 0; slot < p.rvtSlots; ++slot)
+        {
+            if (p.rvtSlotHot[slot] < 0 || p.rvtSlotCold[slot]) continue;
+            if (p.rvtRealFrames - p.rvtSlotPainted[slot] < coldAfter) continue;
+            const UINT hotSlice = UINT(p.rvtSlotHot[slot]);
+            // Per-layer row pitch (Thema 333 step 10): layers 1/2 are RG8 when packed, half the row bytes of RGBA8 —
+            // a single shared pitch (the pre-step-10 shape) would misread them. One buffer, one offset per layer.
+            UINT rowPitch[3]; UINT64 offset[3], total = 0;
+            for (int layer = 0; layer < 3; ++layer)
+            {
+                const bool rg = p.rvtPack && layer > 0;
+                rowPitch[layer] = alignUp(px * (rg ? 2u : 4u), D3D12_TEXTURE_DATA_PITCH_ALIGNMENT);
+                // D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT (512): a placed footprint's offset, not just its row pitch,
+                // must be aligned, or CopyTextureRegion's destination is undefined (the unaligned-pitch D3D12 trap
+                // from step 9, same family — see the BC7 upload buffer above).
+                total = (total + D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT - 1) & ~UINT64(D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT - 1);
+                offset[layer] = total;
+                total += UINT64(rowPitch[layer]) * px;
+            }
+            ComPtr<ID3D12Resource> rb = p.rvtReadbackBuffer(total);
+            if (!rb) break;
+            ID3D12GraphicsCommandList* cl = p.rvtBegin();
+            for (int layer = 0; layer < 3; ++layer)
+            {
+                const bool rg = p.rvtPack && layer > 0;
+                ID3D12Resource* res = p.rvtPool[layer].Get();
+                p.barrier12(cl, res, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_SOURCE);
+                D3D12_TEXTURE_COPY_LOCATION src{}, dst{};
+                src.pResource = res; src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; src.SubresourceIndex = hotSlice;
+                dst.pResource = rb.Get(); dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+                dst.PlacedFootprint.Footprint.Format   = rg ? DXGI_FORMAT_R8G8_UNORM : DXGI_FORMAT_R8G8B8A8_UNORM;
+                dst.PlacedFootprint.Footprint.Width    = px;
+                dst.PlacedFootprint.Footprint.Height   = px;
+                dst.PlacedFootprint.Footprint.Depth    = 1;
+                dst.PlacedFootprint.Footprint.RowPitch = rowPitch[layer];
+                dst.PlacedFootprint.Offset = offset[layer];
+                cl->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+                p.barrier12(cl, res, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            }
+            p.rvtEnd();
+            void* mapped = nullptr;
+            D3D12_RANGE readRange{ 0, static_cast<SIZE_T>(total) };
+            if (SUCCEEDED(rb->Map(0, &readRange, &mapped)))
+            {
+                D3D12RendererImpl::RvtColdWork::Todo job; job.slot = slot; job.ver = p.rvtSlotVer[slot];
+                for (int layer = 0; layer < 3; ++layer)
+                {
+                    job.rgba[layer].resize(pageBytes);
+                    const uint8_t* base = static_cast<const uint8_t*>(mapped) + offset[layer];
+                    if (p.rvtPack && layer > 0)
+                    {
+                        // RG8: expand to RGBA for the BC7 encoder input (R, G; B, A fixed) — matches RvtLookup.h's cold
+                        // branch, which reads t.xy under HE_RVT_RGNORMAL regardless of hot or cold.
+                        for (uint32_t y = 0; y < px; ++y)
+                        {
+                            const uint8_t* row = base + size_t(y) * rowPitch[layer];
+                            uint8_t* d = job.rgba[layer].data() + size_t(y) * px * 4;
+                            for (uint32_t x = 0; x < px; ++x)
+                            {
+                                d[x * 4 + 0] = row[x * 2 + 0];
+                                d[x * 4 + 1] = row[x * 2 + 1];
+                                d[x * 4 + 2] = 0;
+                                d[x * 4 + 3] = 255;
+                            }
+                        }
+                    }
+                    else
+                        for (uint32_t y = 0; y < px; ++y)
+                            std::memcpy(job.rgba[layer].data() + size_t(y) * px * 4, base + size_t(y) * rowPitch[layer], size_t(px) * 4);
+                }
+                D3D12_RANGE noWrite2{ 0, 0 };
+                rb->Unmap(0, &noWrite2);
+                { std::lock_guard<std::mutex> lock(w.mutex); w.todo.push_back(std::move(job)); }
+                w.cv.notify_one();
+            }
+            break;   // at most one synchronous readback (one GPU flush) per real frame
+        }
+    }
+
+    // 3. Tables whose entries are out of date (a page changed temperature or got a hot slice since the last upload).
+    for (auto& kv : p.rvtTables)
+        if (kv.second.stateVer != p.rvtStateVer) uploadRvtTable12(p, kv.second);
+}
+
 // ─── One still from somebody else's camera ────────────────────────────────────
 // The contract is in IRenderer.h; the shape is D3D11's (D3D11Renderer.cpp,
 // RenderSceneImage), which is Metal's without the flag: the live viewport set is
@@ -14395,6 +15362,103 @@ bool D3D12Renderer::CaptureViewport(std::vector<uint8_t>& rgba, uint32_t& outW, 
 //
 // Not run: the retire sweeps, the timestamp query pair, the counter reset, the
 // overlay, Present — those belong to REAL frames. Per-request path, not per-frame.
+void D3D12Renderer::rvtStillEnter(uint32_t width, uint32_t height)
+{
+    auto& p = *m_impl;
+    auto& st = p.rvtStill;
+    st = D3D12RendererImpl::RvtStill{};
+    // Everything the frame reads that the request changes, saved by value.
+    st.liveRT         = std::move(p.viewportRT);
+    st.liveDepth      = std::move(p.viewportDepth);
+    st.liveReadback   = std::move(p.viewportReadback);
+    st.liveRtvHeap    = std::move(p.viewportRtvHeap);
+    st.liveDsvHeap    = std::move(p.viewportDsvHeap);
+    st.liveW          = p.viewportW;
+    st.liveH          = p.viewportH;
+    st.liveReqW       = p.viewportReqW;
+    st.liveReqH       = p.viewportReqH;
+    st.liveState      = p.viewportState;
+    st.liveResChanged = p.viewportResChanged;
+    st.liveUsingHDR   = p.usingHDR;
+    st.liveCam        = m_editorCamera;
+    // The counters are the profiler's picture of the last real frame; the
+    // screenshot's draws would sit there until the next Render() otherwise.
+    st.liveDraws = p.statDraws; st.liveTris = p.statTris; st.liveVisible = p.statVisible; st.liveTotal = p.statTotal;
+    // A raw capture is the materials' own colour: every effect that would change it is off for the frame
+    // and back afterwards (members the frame reads, saved by value like the camera above).
+    st.liveRaw = p.rawCapture; st.liveSrgb = p.rawSrgb;
+    st.liveBloom = p.bloomEnabled; st.liveSsao = p.ssaoEnabled; st.liveSsr = p.ssrEnabled;
+    st.liveGi = p.giEnabled; st.liveGiRefl = p.giReflEnabled;
+    st.liveAa = p.aaMethod;
+    st.livePath = m_renderPath;
+    st.active = true;
+    st.w = width; st.h = height;
+
+    p.viewportW    = 0;
+    p.viewportH    = 0;
+    p.viewportReqW = static_cast<UINT>(width);
+    p.viewportReqH = static_cast<UINT>(height);
+    // Fresh set at the request (plus HDR & co. at that size; SSR history gone).
+    // Flushes the GPU first, so the slot used below is idle.
+    p.createViewportRT(static_cast<UINT>(width), static_cast<UINT>(height));
+}
+
+void D3D12Renderer::rvtStillLeave()
+{
+    auto& p = *m_impl;
+    auto& st = p.rvtStill;
+    if (!st.active) return;
+    // Nothing of the screenshot may still be in flight when its set goes away.
+    p.waitForAllFrames();
+    p.viewportRT.Reset(); p.viewportDepth.Reset(); p.viewportReadback.Reset();
+    p.viewportRtvHeap.Reset(); p.viewportDsvHeap.Reset();
+    p.viewportRT         = std::move(st.liveRT);
+    p.viewportDepth      = std::move(st.liveDepth);
+    p.viewportReadback   = std::move(st.liveReadback);
+    p.viewportRtvHeap    = std::move(st.liveRtvHeap);
+    p.viewportDsvHeap    = std::move(st.liveDsvHeap);
+    p.viewportW          = st.liveW;
+    p.viewportH          = st.liveH;
+    p.viewportReqW       = st.liveReqW;
+    p.viewportReqH       = st.liveReqH;
+    p.viewportState      = st.liveState;
+    p.viewportResChanged = st.liveResChanged;
+    p.usingHDR           = st.liveUsingHDR;
+    m_editorCamera       = st.liveCam;
+    p.rawCapture = st.liveRaw; p.rawSrgb = st.liveSrgb;
+    p.bloomEnabled = st.liveBloom; p.ssaoEnabled = st.liveSsao; p.ssrEnabled = st.liveSsr;
+    p.giEnabled = st.liveGi; p.giReflEnabled = st.liveGiRefl;
+    p.aaMethod = st.liveAa;
+    m_renderPath = st.livePath;
+    p.statDraws = st.liveDraws; p.statTris = st.liveTris;
+    p.statVisible = st.liveVisible; p.statTotal = st.liveTotal;
+    // The decal pass's viewport-depth SRV back to the live depth (null view
+    // when there is no live viewport; the table is bound regardless).
+    p.createDepthSrv(p.viewportDepth.Get(), D3D12RendererImpl::k_decalViewportDepthSlot);
+    // Intermediates back to the live size (see above). No live viewport (the
+    // direct-to-swapchain path) means nothing reads them; leave them.
+    if (st.liveW && st.liveH && (st.liveW != st.w || st.liveH != st.h))
+        p.createPostFXResources(st.liveW, st.liveH);
+    // The SSR history is the screenshot camera's now (a same-size request kept
+    // the targets, and the frame just captured into them). So is TAA's: the
+    // still's resolve marked it valid.
+    p.ssrColorHistValid = false;
+    p.ssrHistValid      = false;
+    p.taaHistoryValid   = false;
+    p.rvtPending = 0;        // the wait at the top of this function covered every layer still in flight
+    st.active = false;
+    st.kept   = false;
+}
+
+void D3D12Renderer::BeginRvtPages(uint32_t pagePx) { m_impl->rvtBracketPx = pagePx; }
+
+void D3D12Renderer::EndRvtPages()
+{
+    auto& p = *m_impl;
+    p.rvtBracketPx = 0;
+    if (p.rvtStill.kept) rvtStillLeave();
+}
+
 bool D3D12Renderer::RenderSceneImage(const EditorCameraOverride& camera, uint32_t width,
                                      uint32_t height, std::vector<uint8_t>& rgba)
 {
@@ -14402,45 +15466,18 @@ bool D3D12Renderer::RenderSceneImage(const EditorCameraOverride& camera, uint32_
     if (!p.device || !p.cmdQueue || !p.cmdList) return false;
     if (width == 0 || height == 0) return false;
 
-    // Everything the frame reads that the request changes, saved by value.
-    ComPtr<ID3D12Resource>       liveRT         = std::move(p.viewportRT);
-    ComPtr<ID3D12Resource>       liveDepth      = std::move(p.viewportDepth);
-    ComPtr<ID3D12Resource>       liveReadback   = std::move(p.viewportReadback);
-    ComPtr<ID3D12DescriptorHeap> liveRtvHeap    = std::move(p.viewportRtvHeap);
-    ComPtr<ID3D12DescriptorHeap> liveDsvHeap    = std::move(p.viewportDsvHeap);
-    const UINT                   liveW          = p.viewportW;
-    const UINT                   liveH          = p.viewportH;
-    const UINT                   liveReqW       = p.viewportReqW;
-    const UINT                   liveReqH       = p.viewportReqH;
-    const D3D12_RESOURCE_STATES  liveState      = p.viewportState;
-    const bool                   liveResChanged = p.viewportResChanged;
-    const bool                   liveUsingHDR   = p.usingHDR;
-    const EditorCameraOverride   liveCam        = m_editorCamera;
-    // The counters are the profiler's picture of the last real frame; the
-    // screenshot's draws would sit there until the next Render() otherwise.
-    const uint32_t liveDraws = p.statDraws, liveTris = p.statTris,
-                   liveVisible = p.statVisible, liveTotal = p.statTotal;
-
-    p.viewportW    = 0;
-    p.viewportH    = 0;
-    p.viewportReqW = static_cast<UINT>(width);
-    p.viewportReqH = static_cast<UINT>(height);
+    // Inside an RVT bracket (BeginRvtPages) the page-size set is built once and kept from one page to the next: it is the
+    // creation (a GPU flush plus the post-FX targets) and the repair at the live size afterwards that cost milliseconds
+    // per page in the editor. Anything else closes a kept set first and runs the one-call path.
+    const bool page = camera.rvtSlot >= 0;
+    const bool keep = page && p.rvtBracketPx != 0 && width == p.rvtBracketPx && height == p.rvtBracketPx;
+    if (p.rvtStill.active && !(keep && p.rvtStill.w == width && p.rvtStill.h == height)) rvtStillLeave();
+    if (!p.rvtStill.active) rvtStillEnter(width, height);
+    p.rvtStill.kept = keep;
     m_editorCamera = camera;
-
-    // Fresh set at the request (plus HDR & co. at that size; SSR history gone).
-    // Flushes the GPU first, so the slot used below is idle.
-    p.createViewportRT(static_cast<UINT>(width), static_cast<UINT>(height));
-
-    // A raw capture is the materials' own colour: every effect that would change it is off for this frame
-    // and back afterwards (members the frame reads, saved by value like the camera above). Forward, because
-    // the deferred resolve lights the G-buffer.
-    const bool  liveRaw = p.rawCapture, liveSrgb = p.rawSrgb;
-    const bool  liveBloom = p.bloomEnabled, liveSsao = p.ssaoEnabled, liveSsr = p.ssrEnabled;
-    const bool  liveGi = p.giEnabled, liveGiRefl = p.giReflEnabled;
-    const HE::AAMethod   liveAa   = p.aaMethod;
-    const HE::RenderPath livePath = m_renderPath;
     if (camera.rawOutput)
     {
+        // Forward, because the deferred resolve lights the G-buffer.
         p.rawCapture = true;
         p.rawSrgb    = camera.rawSrgb;
         p.bloomEnabled = p.ssaoEnabled = p.ssrEnabled = false;
@@ -14451,60 +15488,99 @@ bool D3D12Renderer::RenderSceneImage(const EditorCameraOverride& camera, uint32_
 
     bool ok = p.viewportRT && p.viewportDepth && p.viewportReadback
            && p.viewportRtvHeap && p.viewportDsvHeap;
+    // The page's hot slice (Thema 333 step 9: a manager slot is no longer the same thing as a hot array index), taken
+    // before the page's own command list is recorded — rvtHotFor12 may grow the pool, which is its own flush.
+    uint32_t hotSlice = 0xFFFFFFFFu;
+    if (ok && page && camera.rvtLayer >= 0 && camera.rvtLayer < 3 && p.rvtPool[camera.rvtLayer] && camera.rvtSlot >= 0
+        && width == p.rvtPagePx && height == p.rvtPagePx && uint32_t(camera.rvtSlot) < p.rvtSlots)
+    {
+        const uint32_t slot = uint32_t(camera.rvtSlot);
+        if (camera.rvtLayer == 0)
+        {
+            // A new picture of this page: an encode of the old one is stale, a cold page is hot again.
+            ++p.rvtSlotVer[slot];
+            p.rvtSlotPainted[slot] = p.rvtRealFrames;
+            if (p.rvtSlotCold[slot]) { p.rvtSlotCold[slot] = 0; ++p.rvtStateVer; }
+        }
+        hotSlice = rvtHotFor12(p, slot);
+    }
+    // A kept page layer is not waited for: the next one rotates to the next frame slot (see rvtPending).
+    // HE_RVT_PIPELINE=0 waits after every layer again (the A/B guard and the reference of the cross-check).
+    static const bool s_pipeline = []() { const char* e = std::getenv("HE_RVT_PIPELINE"); return !(e && *e == '0'); }();
+    const bool pipelined = ok && keep && s_pipeline;
+    UINT baseFrame = p.frameIndex;
+    if (pipelined)
+    {
+        if (p.rvtPending >= k_frameCount) { p.waitForAllFrames(); p.rvtPending = 0; }
+        if (p.rvtPending == 0) p.rvtBaseFrame = p.frameIndex;
+        baseFrame = p.rvtBaseFrame;
+        p.frameIndex = (p.rvtBaseFrame + p.rvtPending) % k_frameCount;
+    }
     if (ok)
     {
+        // A virtual texture page (Thema 333) goes into its pool slice on the GPU and nothing is read back.
+        const bool pageOk = page && camera.rvtLayer >= 0 && camera.rvtLayer < 3 && p.rvtPool[camera.rvtLayer]
+                         && hotSlice != 0xFFFFFFFFu && width == p.rvtPagePx && height == p.rvtPagePx;
         p.cmdAllocators[p.frameIndex]->Reset();
         p.cmdList->Reset(p.cmdAllocators[p.frameIndex].Get(), nullptr);
         DrawViewportFrame();
+        if (pageOk)
+        {
+            // The copy rides in the frame's own list: one submit, one wait. A packed layer (Thema 333 step 10, HE_RVT_PACK)
+            // cannot take that copy — the format changes — so a tiny fullscreen draw (packRvtPage12) takes its place,
+            // recorded into the same list right here.
+            ID3D12GraphicsCommandList* cl = p.cmdList.Get();
+            ID3D12Resource* dstRes = p.rvtPool[camera.rvtLayer].Get();
+            const bool packed = p.rvtPack && camera.rvtLayer > 0;
+            if (!packed)
+            {
+                p.barrier12(cl, p.viewportRT.Get(), p.viewportState, D3D12_RESOURCE_STATE_COPY_SOURCE);
+                p.barrier12(cl, dstRes, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
+                D3D12_TEXTURE_COPY_LOCATION src{}, dst{};
+                src.pResource = p.viewportRT.Get(); src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; src.SubresourceIndex = 0;
+                dst.pResource = dstRes;             dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; dst.SubresourceIndex = hotSlice;
+                cl->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+                p.barrier12(cl, dstRes, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+                p.barrier12(cl, p.viewportRT.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+                p.viewportState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+            }
+            else if (ensureRvtPackPipeline12(p))
+            {
+                p.barrier12(cl, p.viewportRT.Get(), p.viewportState, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+                p.viewportState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+                packRvtPage12(p, cl, p.viewportRT.Get(), camera.rvtLayer, dstRes, hotSlice, width);
+            }
+            else
+                HE_LOG_WARN(RHI, "D3D12Renderer: RVT page pack unavailable, slot %d layer %d not written this paint",
+                            camera.rvtSlot, camera.rvtLayer);
+        }
         p.cmdList->Close();
         ID3D12CommandList* lists[] = { p.cmdList.Get() };
         p.cmdQueue->ExecuteCommandLists(1, lists);
-        // CaptureViewport flushes, copies to the readback buffer, flushes again
-        // and maps; no world → the cleared target, honestly black, which is what
-        // the viewport would show too.
-        uint32_t gotW = 0, gotH = 0;
-        ok = CaptureViewport(rgba, gotW, gotH) && gotW == width && gotH == height;
+        if (pipelined)
+        {
+            rgba.clear();
+            ++p.rvtPending;           // the next layer rotates to the next frame slot; the wait comes with the slots used up or the close
+            ok = pageOk;
+        }
+        else if (page)
+        {
+            rgba.clear();
+            p.waitForAllFrames();     // the upload rings are rewritten by the next page: it must have run
+            ok = pageOk;
+        }
+        else
+        {
+            // CaptureViewport flushes, copies to the readback buffer, flushes again
+            // and maps; no world → the cleared target, honestly black, which is what
+            // the viewport would show too.
+            uint32_t gotW = 0, gotH = 0;
+            ok = CaptureViewport(rgba, gotW, gotH) && gotW == width && gotH == height;
+        }
     }
 
-    // Nothing of the screenshot may still be in flight when its set goes away
-    // (cheap: the capture already flushed; this also covers the failure paths).
-    p.waitForAllFrames();
-    p.viewportRT.Reset(); p.viewportDepth.Reset(); p.viewportReadback.Reset();
-    p.viewportRtvHeap.Reset(); p.viewportDsvHeap.Reset();
-    p.viewportRT         = std::move(liveRT);
-    p.viewportDepth      = std::move(liveDepth);
-    p.viewportReadback   = std::move(liveReadback);
-    p.viewportRtvHeap    = std::move(liveRtvHeap);
-    p.viewportDsvHeap    = std::move(liveDsvHeap);
-    p.viewportW          = liveW;
-    p.viewportH          = liveH;
-    p.viewportReqW       = liveReqW;
-    p.viewportReqH       = liveReqH;
-    p.viewportState      = liveState;
-    p.viewportResChanged = liveResChanged;
-    p.usingHDR           = liveUsingHDR;
-    m_editorCamera       = liveCam;
-    p.rawCapture = liveRaw; p.rawSrgb = liveSrgb;
-    p.bloomEnabled = liveBloom; p.ssaoEnabled = liveSsao; p.ssrEnabled = liveSsr;
-    p.giEnabled = liveGi; p.giReflEnabled = liveGiRefl;
-    p.aaMethod = liveAa;
-    m_renderPath = livePath;
-    p.statDraws = liveDraws; p.statTris = liveTris;
-    p.statVisible = liveVisible; p.statTotal = liveTotal;
-    // The decal pass's viewport-depth SRV back to the live depth (null view
-    // when there is no live viewport; the table is bound regardless).
-    p.createDepthSrv(p.viewportDepth.Get(), D3D12RendererImpl::k_decalViewportDepthSlot);
-    // Intermediates back to the live size (see above). No live viewport (the
-    // direct-to-swapchain path) means nothing reads them; leave them.
-    if (liveW && liveH && (liveW != width || liveH != height))
-        p.createPostFXResources(liveW, liveH);
-    // The SSR history is the screenshot camera's now (a same-size request kept
-    // the targets, and the frame just captured into them). So is TAA's: the
-    // still's resolve marked it valid.
-    p.ssrColorHistValid = false;
-    p.ssrHistValid      = false;
-    p.taaHistoryValid   = false;
-
+    if (pipelined) p.frameIndex = baseFrame;   // the real frames and the next call see the slot they expect
+    if (!keep || !ok) rvtStillLeave();
     if (!ok) rgba.clear();
     return ok;
 }

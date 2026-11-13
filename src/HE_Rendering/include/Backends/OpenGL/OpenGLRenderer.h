@@ -2,6 +2,7 @@
 #include <chrono>
 #include <cstdint>
 #include <Renderer/IRenderer.h>
+#include <MaterialGraph/MaterialParamLimits.h> // kMatParamFloats / kMatParamBytes
 #include "OpenGLShaderManager.h"
 #include <HorizonRendering/RenderWorld.h>
 #include <HorizonRendering/RenderExtractor.h>
@@ -49,6 +50,19 @@ public:
 	void  SetViewportSize(uint32_t width, uint32_t height) override;
 	void* GetViewportTexture() override;
 	bool  CaptureViewport(std::vector<uint8_t>& rgba, uint32_t& width, uint32_t& height) override;
+	// Runtime Virtual Texture (Thema 333, docs/rvt-design-2026-11-04.md): the page pool, one page table per consumer
+	// material, the per-landscape material swap. A page is RenderSceneImage's raw frame blitted (flipped: GL stores the
+	// picture bottom-row-first, the pool top-row-first) into a pool slice.
+	bool  CreateRvtPool(uint32_t slots, uint32_t pagePx) override;
+	void  DestroyRvtPool() override;
+	bool  ReadbackRvtSlot(int layer, uint32_t slot, std::vector<uint8_t>& rgba) override;
+	// HE_RVT_PACK (Thema 333 step 10): the hot pool's normal/surface layers hold two channels, not four. 0xFu once
+	// CreateRvtPool never set it (A/B switch HE_RVT_PACK=0, or before the pool exists).
+	uint32_t RvtLayerChannels(int layer) const override;
+	bool  SetRvtPageTable(const HE::UUID& consumerMaterial, const std::vector<std::vector<uint32_t>>& mips) override;
+	bool  ReadbackRvtPageTable(const HE::UUID& consumerMaterial, std::vector<std::vector<uint32_t>>& mips) override;
+	void  SetRvtLandscape(uint32_t terrainEntity, const HE::UUID& landscapeMaterial, const HE::UUID& consumerMaterial) override;
+	void  ReleaseRvtConsumer(const HE::UUID& consumerMaterial) override;
 	bool  RenderSceneImage(const EditorCameraOverride& camera, uint32_t width, uint32_t height,
 	                       std::vector<uint8_t>& rgba) override;
 	void  InvalidateMaterial(const HE::UUID& materialId) override;
@@ -325,7 +339,7 @@ private:
 	// frame), and HeParams rarely changes (upload only when its 64 floats differ from
 	// what the UBO already holds — still correct for per-entity param overrides).
 	bool         m_matLightUploadedThisFrame = false;
-	float        m_lastMatParams[64] = { 0 };
+	float        m_lastMatParams[HE::kMatParamFloats] = { 0 };
 	bool         m_haveMatParams = false;
 
 	// Skeletal-mesh-preview target (RenderSkeletalPreview) — own dedicated FBO,
@@ -463,6 +477,27 @@ private:
 	// before WarmupMaterials can build a program — and then forward graph-material
 	// programs are GLSL 4.30 from fragmentClustered. macOS (GL 4.1) never gets here.
 	bool         m_forwardClustered = false;
+	// Runtime Virtual Texture (Thema 333): units 22..25 are the table and the three pool arrays (the material programs'
+	// heRvtTable/Albedo/Normal/Surface; unit 21 is heFogVolume's), so a context needs 26 fragment texture units; macOS GL (16) does not have them.
+	bool         m_rvtSupported = false;
+	unsigned int m_rvtPool[3] = { 0, 0, 0 };   // GL_TEXTURE_2D_ARRAY: BaseColor SRGB8_ALPHA8, Normal / Surface RGBA8
+	uint32_t     m_rvtSlots = 0, m_rvtPagePx = 0;   // m_rvtSlots: the manager's ceiling
+	uint32_t     m_rvtAlloc = 0;                    // slices the arrays hold now: they start small and grow with the pages in use
+	bool         rvtGrowPool(uint32_t slot);
+	// HE_RVT_PACK (Thema 333 step 10, counterpart of Metal 6k / D3D11/D3D12/Vulkan's step 10): layers 1/2 hold two
+	// channels (GL_RG8) instead of four. A page can't get there with glBlitFramebuffer (RGBA8 -> RG8 is a different
+	// component count, not a legal blit conversion), so a tiny fullscreen draw takes its place — the same transient
+	// FBO RenderSceneImage already builds for the (unpacked) blit, just drawn into instead of blitted into.
+	bool         m_rvtPack = false;
+	bool         m_rvtPackTried = false;
+	unsigned int m_rvtPackProgram = 0;
+	int          m_uRvtPackTex = -1, m_uRvtPackMode = -1, m_uRvtPackSize = -1;
+	bool         ensureRvtPackPipeline();
+	struct RvtTable { unsigned int tex = 0; uint32_t side = 0, mips = 0; };
+	std::unordered_map<HE::UUID, RvtTable> m_rvtTables;   // per consumer material
+	struct RvtSwap { HE::UUID landscapeMat, consumerMat; };
+	std::unordered_map<uint32_t, RvtSwap>  m_rvtSwaps;    // per landscape entity
+	void         BindRvtForDraw(const HE::UUID& material);
 	unsigned int m_clusterSSBO[3]   = { 0, 0, 0 }; // lights, grid, index list
 	void         CreateClusterSSBOs();
 	void         UploadClusterLists(const HE::ClusterLightBuild& build);

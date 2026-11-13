@@ -61,7 +61,8 @@ struct LayerReads { int albedo = 0, normal = 0, mask = 0, height = 0; };
 const char* const kMixArrays[3] = { kAutoLandscapeMixAlbedoArray, kAutoLandscapeMixNormalArray, kAutoLandscapeMixMaskArray };
 } // namespace
 
-AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view, AutoLandscapeGroupId groupId, bool mixed)
+AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view, AutoLandscapeGroupId groupId, bool mixed,
+                                           bool displacement)
 {
     const AutoLandscapeGroup& group = autoLandscapeGroup(groupId);
     AutoLandscapeGraph r;
@@ -641,6 +642,22 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view, AutoLandscape
         r.graph.connect(mSplit, 0, r.output, kMatOutputAOPin);
         const int metal = w.constF(0.0f, 8);
         r.graph.connect(metal, 0, r.output, kMatOutputMetallicPin);
+        if (displacement)
+        {
+            // The relief of the blended texture, in metres, along the surface normal. The domain stage
+            // reads the arrays at mip 0 (no derivatives there), like every texture node in it.
+            const int mid    = w.constF(0.5f, 8);
+            const int metres = w.constF(kAutoLandscapeDisplacementMetres, 8);
+            const int rel    = w.op(T::Subtract, 8, { { mSplit, 2 }, { mid } });
+            const int disp   = w.op(T::Multiply, 8, { { rel }, { metres } });
+            r.graph.connect(disp, 0, r.output, kMatOutputDisplacementPin);
+            MatTessSettings tess;
+            tess.maxFactor       = 8.0f;
+            tess.fadeNear        = 15.0f;
+            tess.fadeFar         = 90.0f;
+            tess.maxDisplacement = kAutoLandscapeDisplacementMetres * 0.5f;
+            r.graph.findNode(r.output)->tess = tess;
+        }
     }
     else if (view == AutoLandscapeView::BaseColor)
     {

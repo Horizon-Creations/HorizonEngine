@@ -50,6 +50,11 @@ bool paint(TerrainComponent& tc, float localX, float localZ,
 {
     if (layer < 0 || layer >= kTerrainMaxLayers) return false;
     if (isReservedLayer(tc, layer)) return false;   // a group share: paintGroup() writes it
+    // Whether an unannounced weight change (a fill, an undo) is NOT already pending from
+    // earlier in this same undrained tick — captured before ensureWeightmap can itself set
+    // weightsDirty. A stroke on top of one must leave it unannounced, or the wide edit's
+    // extent shrinks to just this stroke's rect (Thema 333 step 29).
+    const bool announced = !tc.weightsDirty || tc.weightsDirtyFromStroke;
     ensureWeightmap(tc);
     if (tc.layerWeights.empty()) return false;
 
@@ -164,6 +169,10 @@ bool paint(TerrainComponent& tc, float localX, float localZ,
     }
 
     tc.weightsDirty = true;
+    tc.weightsDirtyFromStroke = announced;   // stays unannounced if it already was; else this rect is the whole of it
+    // The texels this stroke may have changed, as a terrain-local rect (the Runtime Virtual Texture pages under it).
+    tc.rvtJournal.noteRect(-halfX + static_cast<float>(x0) * texelX, -halfZ + static_cast<float>(z0) * texelZ,
+                           -halfX + static_cast<float>(x1 + 1) * texelX, -halfZ + static_cast<float>(z1 + 1) * texelZ);
     return true;
 }
 
@@ -185,6 +194,7 @@ bool fillLayer(TerrainComponent& tc, int layer)
         std::vector<uint8_t>& page = weightPage(tc, layer / 4);
         for (size_t i = static_cast<size_t>(layer % 4); i < bytes; i += 4) page[i] = 255;
         tc.weightsDirty = true;
+        tc.weightsDirtyFromStroke = false;   // the whole terrain was re-filled, not a local stroke
         return true;
     }
     std::fill(tc.layerWeights.begin(), tc.layerWeights.end(), uint8_t{ 0 });
@@ -199,6 +209,7 @@ bool fillLayer(TerrainComponent& tc, int layer)
     std::vector<uint8_t>& page = weightPage(tc, layer / 4);
     for (size_t i = static_cast<size_t>(layer % 4); i < bytes; i += 4) page[i] = 255;
     tc.weightsDirty = true;
+    tc.weightsDirtyFromStroke = false;   // the whole terrain was re-filled, not a local stroke
     return true;
 }
 
@@ -270,6 +281,7 @@ bool enableGroupMix(TerrainComponent& tc, int baseGroup)
     tc.groupMix = true;
     tc.baseGroup = baseGroup;
     tc.weightsDirty = true;
+    tc.weightsDirtyFromStroke = false;   // every texel's group share just moved, not a local stroke
     return true;
 }
 
@@ -279,6 +291,7 @@ bool disableGroupMix(TerrainComponent& tc)
     tc.groupMix = false;
     std::fill(tc.layerWeights3.begin(), tc.layerWeights3.end(), uint8_t{ 0 });
     tc.weightsDirty = true;
+    tc.weightsDirtyFromStroke = false;   // every texel's group share just moved, not a local stroke
     return true;
 }
 
@@ -300,6 +313,8 @@ bool paintGroup(TerrainComponent& tc, float localX, float localZ,
                 int group, float radius, float falloff, float strength)
 {
     if (group < 0 || group >= kGroupCount || !tc.groupMix) return false;
+    // See paint(): captured before ensureWeightmap can itself set weightsDirty.
+    const bool announced = !tc.weightsDirty || tc.weightsDirtyFromStroke;
     ensureWeightmap(tc);
     if (tc.layerWeights.empty()) return false;
     if (tc.sizeX <= 0.0f || tc.sizeZ <= 0.0f) return false;
@@ -360,6 +375,10 @@ bool paintGroup(TerrainComponent& tc, float localX, float localZ,
         }
     }
     tc.weightsDirty = true;
+    tc.weightsDirtyFromStroke = announced;   // stays unannounced if it already was; else this rect is the whole of it
+    // The texels this stroke may have changed, as a terrain-local rect (the Runtime Virtual Texture pages under it).
+    tc.rvtJournal.noteRect(-halfX + static_cast<float>(x0) * texelX, -halfZ + static_cast<float>(z0) * texelZ,
+                           -halfX + static_cast<float>(x1 + 1) * texelX, -halfZ + static_cast<float>(z1 + 1) * texelZ);
     return true;
 }
 
@@ -372,6 +391,7 @@ bool fillGroup(TerrainComponent& tc, int group)
     for (size_t i = 0; i < tc.layerWeights3.size(); i += 4)
         for (int g = 0; g < kGroupCount; ++g) tc.layerWeights3[i + g] = g == group ? 255 : 0;
     tc.weightsDirty = true;
+    tc.weightsDirtyFromStroke = false;   // the whole terrain was re-filled, not a local stroke
     return true;
 }
 

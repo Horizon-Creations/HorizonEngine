@@ -1,5 +1,6 @@
 #include "HorizonScene/LandscapeHlodBaker.h"
 #include "HorizonScene/HorizonWorld.h"
+#include "HorizonScene/TerrainSculpt.h"
 #include "HorizonScene/TerrainSystem.h"
 #include "HorizonScene/TransformHierarchy.h"
 #include "HorizonScene/Components/LODComponent.h"
@@ -19,6 +20,8 @@
 #include <cmath>
 #include <limits>
 #include <thread>
+#include <unordered_map>
+#include <cstdlib>
 
 namespace HE::landscape
 {
@@ -95,7 +98,71 @@ namespace HE::landscape
 
     HlodBaker::~HlodBaker() { end(); }
 
-    bool HlodBaker::begin(entt::entity terrain, std::string* why)
+    bool HlodBaker::addSharedChunks()
+    {
+        auto& reg  = m_live.registry();
+        auto& sreg = m_scratch->registry();
+        // Drop what an earlier call made.
+        std::vector<entt::entity> old;
+        for (auto [ce, cc] : sreg.view<TerrainChunkComponent>().each()) old.push_back(ce);
+        for (entt::entity e : old) m_scratch->destroyEntity(e);
+
+        struct Live { TerrainChunkComponent cc; TransformComponent tf; HE::UUID mesh; };
+        std::vector<Live> live;
+        uint32_t maxC = 0;
+        for (auto [e, cc] : reg.view<TerrainChunkComponent>().each())
+        {
+            if (cc.terrain != m_liveTerrain) continue;
+            const auto* lod = reg.try_get<LODComponent>(e);
+            const auto* tf  = reg.try_get<TransformComponent>(e);
+            if (!lod || lod->levels.empty() || !tf || lod->levels.front().meshId == HE::UUID{}) return false;
+            if (m_cm.getStaticMesh(lod->levels.front().meshId) == nullptr) return false;   // not resident: build our own
+            Live l; l.cc = cc; l.tf = *tf; l.mesh = lod->levels.front().meshId;
+            live.push_back(std::move(l));
+            maxC = std::max(maxC, std::max(cc.cx, cc.cz));
+        }
+        const size_t side = static_cast<size_t>(maxC) + 1;
+        if (live.empty() || live.size() != side * side) return false;   // a partial grid
+
+        for (const Live& l : live)
+        {
+            const entt::entity ce = m_scratch->createEntity("TerrainChunk");
+            m_scratch->reparentEntity(ce, m_terrain);
+            TerrainChunkComponent tcc;                  // fresh: none of the live chunk's tessellation or stitch state
+            tcc.terrain = m_terrain; tcc.cx = l.cc.cx; tcc.cz = l.cc.cz;
+            sreg.emplace<TerrainChunkComponent>(ce, tcc);
+            TransformComponent tf = l.tf;
+            tf.dirty = true;
+            sreg.emplace_or_replace<TransformComponent>(ce, tf);
+            sreg.emplace_or_replace<MaterialComponent>(ce, MaterialComponent{ m_viewMat[0] });
+            MeshComponent mc;
+            mc.meshAssetId = l.mesh;
+            mc.dirty       = true;
+            sreg.emplace_or_replace<MeshComponent>(ce, mc);
+        }
+        return true;
+    }
+
+    void HlodBaker::refreshSharedMeshes()
+    {
+        auto& reg  = m_live.registry();
+        auto& sreg = m_scratch->registry();
+        std::unordered_map<uint64_t, HE::UUID> byCoord;
+        for (auto [e, cc] : reg.view<TerrainChunkComponent>().each())
+        {
+            if (cc.terrain != m_liveTerrain) continue;
+            if (const auto* lod = reg.try_get<LODComponent>(e); lod && !lod->levels.empty())
+                byCoord[(static_cast<uint64_t>(cc.cz) << 32) | cc.cx] = lod->levels.front().meshId;
+        }
+        for (auto [ce, cc, mesh] : sreg.view<TerrainChunkComponent, MeshComponent>().each())
+            if (const auto it = byCoord.find((static_cast<uint64_t>(cc.cz) << 32) | cc.cx); it != byCoord.end() && it->second != mesh.meshAssetId)
+            {
+                mesh.meshAssetId = it->second;   // a rebuild that kept no id: follow it
+                mesh.dirty = true;
+            }
+    }
+
+    bool HlodBaker::begin(entt::entity terrain, std::string* why, bool switchRenderer)
     {
         auto fail = [&](const char* msg) { if (why) *why = msg; return false; };
         end();
@@ -127,9 +194,26 @@ namespace HE::landscape
         }
         else
             return fail("material not resident");
+        // The landscape's OWN parameter overrides (MaterialComponent::paramOverrides, what the Inspector writes per entity):
+        // the live draw merges them into the object's block (RenderExtractor), so the pages must be painted with them too, or a
+        // landscape with an override (a raised snow line, say) shows another picture from its pages than from its material.
+        for (const MaterialParamOverride& ov : mc->paramOverrides)
+        {
+            const auto it = std::find(names.begin(), names.end(), ov.name);
+            if (it == names.end()) continue;
+            const size_t slot = static_cast<size_t>(it - names.begin());
+            if (data.size() < slot * 4 + 4) data.resize(slot * 4 + 4, 0.0f);
+            for (int c = 0; c < 4; ++c) data[slot * 4 + static_cast<size_t>(c)] = ov.value[c];
+            if (std::find(overridden.begin(), overridden.end(), ov.name) == overridden.end()) overridden.push_back(ov.name);
+        }
         HE::UUID baseId = matId;
         if (!parentPath.empty()) baseId = m_cm.loadAsset(parentPath);
-        m_group = autoLandscapeGroupOfMaterial(baseId);
+        // The mix material (Thema 233) names no group of its own: the terrain's baseGroup gives the parameter
+        // defaults, and the three views are built "mixed", so they read the same shares (weight layers 8..11,
+        // copied with the TerrainComponent into the scratch world) and the same fat arrays as the live material.
+        // Without this a mixed landscape was refused here and kept its full per-pixel shader (Thema 333 step 8b).
+        const bool mixed = isAutoLandscapeMixMaterial(baseId);
+        m_group = mixed ? std::clamp(tc->baseGroup, 0, kAutoLandscapeGroupCount - 1) : autoLandscapeGroupOfMaterial(baseId);
         if (m_group < 0) return fail("the landscape material is not an Auto Landscape material");
 
         // The three views, with this landscape's parameters.
@@ -137,7 +221,7 @@ namespace HE::landscape
         const char* viewNames[3] = { "HlodBakeBaseColor", "HlodBakeNormal", "HlodBakeSurface" };
         for (int v = 0; v < 3; ++v)
         {
-            AutoLandscapeGraph built = buildAutoLandscapeGraph(views[v], static_cast<AutoLandscapeGroupId>(m_group));
+            AutoLandscapeGraph built = buildAutoLandscapeGraph(views[v], static_cast<AutoLandscapeGroupId>(m_group), mixed);
             applyInstanceOverrides(built.graph, names, data, overridden, swNames, swValues);
             MaterialAsset am;
             am.type = HE::AssetType::Material;
@@ -159,6 +243,19 @@ namespace HE::landscape
         copy.dirty = true;
         sreg.emplace<TerrainComponent>(m_terrain, std::move(copy));
         sreg.emplace<MaterialComponent>(m_terrain, MaterialComponent{ m_viewMat[0] });
+        m_liveTerrain = terrain;
+        static const bool shareWanted = [] { const char* e = std::getenv("HE_RVT_SHARE_MESHES"); return !(e && *e == '0'); }();
+        m_shared = shareWanted && addSharedChunks();
+        HE_LOG_INFO(Scene, "HlodBaker: the scratch landscape %s", m_shared ? "draws the live landscape's chunk meshes (no second copy)"
+                                                                          : (shareWanted ? "builds its own chunk meshes (the live chunks are not all resident)" : "builds its own chunk meshes (HE_RVT_SHARE_MESHES=0)"));
+        if (m_shared)
+        {
+            // Nothing to build: the chunks exist and draw the live meshes. updateTerrains below only keeps the weight texture
+            // and the material of the chunks in step, so the landscape must not look dirty to it.
+            auto& stc0 = sreg.get<TerrainComponent>(m_terrain);
+            stc0.dirty = false; stc0.regionDirty = false;
+            stc0.sculptHeights.clear(); stc0.sculptHeights.shrink_to_fit();   // geometry comes from the live meshes
+        }
         TerrainSystem::updateTerrains(*m_scratch, m_cm, &m_renderer);
         HE::propagateTransformsFull(*m_scratch);
 
@@ -199,15 +296,27 @@ namespace HE::landscape
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }
 
-        m_renderer.SetWorld(m_scratch.get());
+        m_pos = stf.position;
+        if (switchRenderer) m_renderer.SetWorld(m_scratch.get());
         m_active = true;
         return true;
+    }
+
+    void HlodBaker::setViewMaterials(const HE::UUID (&mats)[3])
+    {
+        for (int i = 0; i < 3; ++i) { m_viewMat[i] = mats[i]; m_rvtSeen[i] = false; }
+        if (!m_active) return;
+        m_renderer.WarmupMaterials({ m_viewMat[0], m_viewMat[1], m_viewMat[2] });
+        const auto t0 = std::chrono::steady_clock::now();
+        while (m_renderer.PumpShaderBuilds().pending != 0 && std::chrono::steady_clock::now() - t0 < std::chrono::seconds(60))
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
 
     void HlodBaker::end()
     {
         if (m_active) m_renderer.SetWorld(&m_restore);
         m_active = false;
+        if (m_scratch) TerrainSystem::releaseWorld(*m_scratch, m_cm, &m_renderer);   // its chunk meshes go back (renderer + content)
         m_scratch.reset();
         m_terrain = entt::null;
         m_rects.clear();
@@ -222,13 +331,18 @@ namespace HE::landscape
     }
 
     bool HlodBaker::renderView(const HE::UUID& material, const HlodChunkRect& rect, uint32_t px, bool srgb,
-                               std::vector<uint8_t>& rgba)
+                               std::vector<uint8_t>& rgba, int rvtSlot, int rvtLayer, bool invalidate)
     {
-        auto& reg = m_scratch->registry();
-        reg.get<MaterialComponent>(m_terrain).materialAssetId = material;
-        for (auto [ce, cc, mc] : reg.view<TerrainChunkComponent, MaterialComponent>().each())
-            mc.materialAssetId = material;
-        m_renderer.InvalidateMaterial(material);
+        // A page (rvtSlot >= 0) names the material in the camera and leaves the world alone, so its three views extract one
+        // identical scene; the readback views put the material into the landscape's components.
+        if (rvtSlot < 0)
+        {
+            auto& reg = m_scratch->registry();
+            reg.get<MaterialComponent>(m_terrain).materialAssetId = material;
+            for (auto [ce, cc, mc] : reg.view<TerrainChunkComponent, MaterialComponent>().each())
+                mc.materialAssetId = material;
+        }
+        if (invalidate) m_renderer.InvalidateMaterial(material);
 
         EditorCameraOverride cam;
         cam.active          = true;
@@ -242,6 +356,10 @@ namespace HE::landscape
         cam.view      = glm::lookAt(eye, eye + glm::vec3(0.0f, -1.0f, 0.0f), glm::vec3(0.0f, 0.0f, -1.0f));
         cam.nearPlane = 0.1f;
         cam.farPlane  = (m_topY - m_bottomY) + 30.0f;
+        cam.rvtSlot   = rvtSlot;
+        if (rvtSlot >= 0) cam.rvtMaterial = material;
+        cam.rvtLayer  = rvtLayer;
+        if (rvtSlot >= 0) return m_renderer.RenderSceneImage(cam, px, px, rgba);   // the picture went into the pool
         return m_renderer.RenderSceneImage(cam, px, px, rgba) && rgba.size() == static_cast<size_t>(px) * px * 4;
     }
 
@@ -250,6 +368,126 @@ namespace HE::landscape
         HlodChunkRect rect;
         if (!chunkRect(cx, cz, rect)) return false;
         return bakeRect(rect, side, supersample, out);
+    }
+
+    void HlodBaker::paintBegin()
+    {
+        if (m_active) m_renderer.SetWorld(m_scratch.get());
+    }
+
+    void HlodBaker::paintEnd()
+    {
+        if (m_active) m_renderer.SetWorld(&m_restore);
+    }
+
+    uint32_t HlodBaker::releaseIdleMeshes()
+    {
+        if (!m_active || !m_scratch) return 0;
+        auto& reg  = m_live.registry();
+        auto& sreg = m_scratch->registry();
+        // The chunks the live landscape draws at LOD0 itself keep their mesh: dropping it would only make the main draw upload it again.
+        std::unordered_map<uint64_t, bool> liveDrawsLod0;
+        if (m_shared)
+            for (auto [e, cc] : reg.view<TerrainChunkComponent>().each())
+            {
+                if (cc.terrain != m_liveTerrain) continue;
+                const auto* lod = reg.try_get<LODComponent>(e);
+                liveDrawsLod0[(static_cast<uint64_t>(cc.cz) << 32) | cc.cx] = !lod || lod->levels.empty() || lod->current == 0;
+            }
+        uint32_t dropped = 0;
+        for (auto [ce, cc, mesh] : sreg.view<TerrainChunkComponent, MeshComponent>().each())
+        {
+            if (mesh.meshAssetId == HE::UUID{}) continue;
+            if (m_shared)
+                if (const auto it = liveDrawsLod0.find((static_cast<uint64_t>(cc.cz) << 32) | cc.cx); it == liveDrawsLod0.end() || it->second) continue;
+            m_renderer.InvalidateMesh(mesh.meshAssetId);
+            ++dropped;
+        }
+        return dropped;
+    }
+
+    void HlodBaker::syncTerrain(const TerrainComponent& live, bool all, glm::vec2 mn, glm::vec2 mx)
+    {
+        if (!m_active) return;
+        auto& sreg = m_scratch->registry();
+        auto& tc = sreg.get<TerrainComponent>(m_terrain);
+        if (m_shared)
+        {
+            // The live landscape already rebuilt its chunk meshes this tick (same ids, replaced in place): the scratch chunks
+            // draw them as they are. A full change may have made new chunks, so those are taken again; and if that cannot be
+            // done any more, the scratch world carries on with meshes of its own.
+            if (all)
+            {
+                TerrainComponent copy = live;
+                copy.dirty = false; copy.regionDirty = false;
+                copy.rvtJournal.clear();
+                copy.sculptHeights.clear(); copy.sculptHeights.shrink_to_fit();
+                tc = std::move(copy);
+                if (!addSharedChunks())
+                {
+                    m_shared = false;
+                    tc = TerrainComponent(live);
+                    tc.dirty = true; tc.regionDirty = false; tc.rvtJournal.clear();
+                }
+            }
+            else
+                refreshSharedMeshes();
+        }
+        else if (all)
+        {
+            TerrainComponent copy = live;
+            copy.dirty = true;
+            copy.regionDirty = false;
+            copy.rvtJournal.clear();
+            tc = std::move(copy);
+        }
+        else
+        {
+            tc.sculptHeights = live.sculptHeights;
+            TerrainSculpt::markRegionDirty(tc, mn.x, mn.y, mx.x, mx.y);
+        }
+        TerrainSystem::updateTerrains(*m_scratch, m_cm, &m_renderer);
+        tc.rvtJournal.clear();
+
+        // The page camera looks from above the highest ground to below the lowest: widen it by what the rebuilt chunks hold
+        // (a full rebuild measures them all again).
+        float bot = all ? std::numeric_limits<float>::max() : m_bottomY - m_pos.y;
+        float top = all ? std::numeric_limits<float>::lowest() : m_topY - m_pos.y;
+        for (auto [ce, cc, mesh] : sreg.view<TerrainChunkComponent, MeshComponent>().each())
+        {
+            if (!all)
+            {
+                const size_t at = static_cast<size_t>(cc.cz) * m_chunksPerSide + cc.cx;
+                if (at >= m_rects.size()) continue;
+                const HlodChunkRect& r = m_rects[at];
+                const glm::vec2 lo(r.min.x - m_pos.x, r.min.y - m_pos.z), hi = lo + r.size;
+                if (hi.x < mn.x || lo.x > mx.x || hi.y < mn.y || lo.y > mx.y) continue;
+            }
+            float lo = std::numeric_limits<float>::max(), hi = std::numeric_limits<float>::lowest();
+            meshHeightRange(m_cm, mesh.meshAssetId, lo, hi);
+            if (lo <= hi) { bot = std::min(bot, lo); top = std::max(top, hi); }
+        }
+        if (bot <= top) { m_bottomY = m_pos.y + bot; m_topY = m_pos.y + top; }
+    }
+
+    bool HlodBaker::renderMaterialImage(const HE::UUID& material, const HlodChunkRect& rect, uint32_t px, std::vector<uint8_t>& rgba)
+    {
+        if (!m_active || px == 0 || std::fabs(rect.size.x - rect.size.y) > 1e-3f) return false;
+        return renderView(material, rect, px, /*srgb=*/false, rgba);
+    }
+
+    bool HlodBaker::renderRvtPage(const HlodChunkRect& rect, uint32_t px, uint32_t slot)
+    {
+        if (!m_active || px == 0 || std::fabs(rect.size.x - rect.size.y) > 1e-3f) return false;
+        // The renderer is told about a view material once; asking again for every page would drop what it remembers of it
+        // (its shader key, its textures) and make the next page start from scratch.
+        std::vector<uint8_t> none;
+        for (int v = 0; v < 3; ++v)
+        {
+            if (!renderView(m_viewMat[v], rect, px, /*srgb=*/v == 0, none, int(slot), v, /*invalidate=*/!m_rvtSeen[v])) return false;
+            m_rvtSeen[v] = true;
+        }
+        return true;
     }
 
     bool HlodBaker::bakeRect(const HlodChunkRect& rect, uint32_t side, uint32_t supersample, HlodChunkImages& out)
