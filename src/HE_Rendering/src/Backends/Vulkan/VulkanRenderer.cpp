@@ -6974,6 +6974,7 @@ void VulkanRenderer::DestroyRvtPool()
     const bool any = m_rvtPool[0].image || m_rvtPool[1].image || m_rvtPool[2].image || !m_rvtTables.empty() || !m_rvtSwaps.empty()
                    || m_rvtPackLastView || m_rvtPackLastFb;
     if (any) deviceWaitIdle();         // frames in flight read the pool and the tables
+    rvtDrainPending();                 // a bracket's command buffers are done too: free them before the pool goes
     rvtPackReleaseTransient();         // the pack pipeline itself (PSO/RenderPass/layouts/pool) is renderer-lifetime, kept
     if (m_rvtWork) { m_rvtWork->stop(); delete m_rvtWork; m_rvtWork = nullptr; }
     m_rvtSwaps.clear();                // the pool the consumers read is gone: draw the landscapes themselves again
