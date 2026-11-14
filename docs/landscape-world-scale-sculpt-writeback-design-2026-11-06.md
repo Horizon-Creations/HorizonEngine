@@ -1,6 +1,6 @@
 # Tile landscape: sculpt/paint that writes back (design, Thema 326)
 
-Status: **design only, nothing built.** Written 06.11.2026 after reading the code listed under "What I read". Decisions are marked *taken* (by me, reversible) or *open* (the owner decides).
+Status: **design, plus step 1 built** (`LandscapeStore::invalidate`, `LandscapeRuntime::tileChanged`; nothing calls `tileChanged` outside the tests yet, a brush stroke still changes no tile). Steps 2 to 7 are not built. Written 06.11.2026 after reading the code listed under "What I read". Decisions are marked *taken* (by me, reversible) or *open* (the owner decides).
 
 ## The problem
 
@@ -73,7 +73,7 @@ The Landscape mode (`TerrainTools.cpp`) is built around a `TerrainComponent` on 
 
 ## Steps, in order
 
-1. `LandscapeStore::invalidate` + `tileChanged` fan-out for one consumer at a time (atlas first, it is visible), tests with `ProceduralLandscapeSource` and a counting source.
+1. **Done (step 14, bc8e56a41).** `LandscapeStore::invalidate` + `tileChanged` fan-out for one consumer at a time (atlas first, it is visible), tests with `ProceduralLandscapeSource` and a counting source. Only the atlas consumer is wired, and it needed no runtime code (see the table in section 4). Physics, foliage, navigation, water are still open (item 7).
 2. `landscapeWriteRegionTerrain` (inverse) with a round-trip test: region terrain -> tiles -> region terrain is bit-equal for an untouched region and shared borders agree after a dab.
 3. `LandscapeEditSource` (overlay, coarse patch) + test that base tiles are never read for an edited key and the coarse sample matches `landscapeCoarseSampleOf`.
 4. Sidecar format + reader/writer + crash test (truncated record ignored).
@@ -91,8 +91,11 @@ Water edited together with the ground (`water::Field` of a migrated terrain is n
 
 ## Handoff
 
-- **Topic / step:** 326, "Sculpt/paint write-back on tiles" (step 1 of the editor doc's open list).
-- **Branch:** `claude/landscape-weltmassstab-100km`; this doc only, no code.
-- **Verified:** by reading only (list above). One fact checked against code: n = 3 regions do not fit `ensureHeights`' 2^n + 1 snap.
+- **Topic / step:** 326, "Sculpt/paint write-back on tiles" (step 1 of the editor doc's open list). Board step 14 built only design item 1; step 20 (this edit) corrected the doc after the gate. The write-back is **not** delivered: a brush stroke still changes no tile. The queen should split the rest into its own steps (items 2, 3, 6 are the minimum for one stroke to reach a tile). The release notes already list the full write-back as follow-up work, not part of 0.8.0.
+- **Branch:** `claude/landscape-weltmassstab-100km`.
+- **Done (item 1, bc8e56a41):** `LandscapeStore::invalidate(keys)` (`LandscapeStore.h:121`, `.cpp`) drops the resident or loading entry at once, bumps a per-tile `revision(key)` that outlives eviction, and a load in flight is cancelled; a late result is discarded by the existing ticket check in `drain()`. `LandscapeRuntime::tileChanged(keys)` (`LandscapeRuntime.h:167`) forwards to it and ignores a runtime that has not begun.
+- **Atlas is the consumer:** `invalidate()` makes the tile non-resident, `LandscapeAtlas::sync()` releases the slot and re-takes it once the tile reloads. No backend code. Covered by `test_landscape_store.cpp` ("invalidate drops a resident tile, bumps its revision, and the next update loads it again"; "invalidating a tile mid-load cancels or discards it...") and `test_landscape_runtime.cpp` ("tileChanged drops a tile so the atlas gives its slot back and takes it up again, without touching the coarse generation"). The tests were written in step 14; this step changed the doc only and did not re-run them.
+- **Trap (coarse world):** do **not** bump `LandscapeRuntime::m_generation` / `coarseGeneration` to say "a tile changed". Every backend's `*Landscape.cpp/.mm` wipes `tileHeights`/weights/slot table to empty on a generation change and `sync()` only re-sends tiles that were not resident, so the whole landscape except the edited tile would go blank. The far levels (coarse world) stay stale after an edit until item 3 / step 15 adds a coarse-only revision plus a refresh path per backend that leaves the atlas textures alone.
+- **Not verified:** nothing outside the tests calls `tileChanged`; no editor run, no screenshot, no real backend (GL/D3D/Vulkan/Metal) saw an invalidated tile. Performance: **not measured**.
 - **Decisions taken:** overlay source, inverse of the region terrain with region following the brush, commit on stroke end, undo by blobs. **Open for the owner:** height quantisation (a vs b), sidecar vs other persistence, tool target abstraction vs separate tile tools, whether water tiles are editable in the first version.
-- **Next steps:** the list above, starting with `LandscapeStore::invalidate`; read `TerrainTools.cpp` (sculpt stroke handling) and the atlas upload before step 6.
+- **Next steps, in order:** (1) `landscapeWriteRegionTerrain` (item 2) with the round-trip test, in `LandscapeTileTerrain.h` next to `landscapeRegionTerrain`; (2) `LandscapeEditSource` with the coarse patch (item 3), which calls `tileChanged` after a commit and adds the coarse-only revision; (3) read `TerrainTools.cpp` (sculpt stroke handling), then the target abstraction plus undo plus help entries (item 6); (4) sidecar, bake and export hook (items 4, 5); (5) physics, foliage, navigation and water fan-out, then a visual check on a screen (item 7).
