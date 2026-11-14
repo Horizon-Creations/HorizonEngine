@@ -202,7 +202,6 @@ TEST_CASE("landscape runtime: tileChanged drops a tile so the atlas gives its sl
 	const uint16_t oldSlot = rt.atlas()->slotOf(key);
 
 	rt.tileChanged({ key });
-	CHECK(rt.store()->revision(key) == 1);
 	CHECK_FALSE(rt.store()->isResident(key));              // gone at once
 
 	rt.updateAt(cam, glm::vec3(0.0f), 1.0);                // the atlas notices the store dropped it on the very next sync

@@ -726,7 +726,7 @@ TEST_CASE("landscape coarse world: a pack without one, a version 1 pack, and a c
 }
 
 // ── invalidate (Thema 326, step 14: sculpt/paint write-back) ──────────────────
-TEST_CASE("landscape store: invalidate drops a resident tile, bumps its revision, and the next update loads it again")
+TEST_CASE("landscape store: invalidate drops a resident tile and the next update loads it again")
 {
 	auto src = std::make_shared<ProceduralLandscapeSource>(smallWorld(40));
 	LandscapeStoreConfig cfg;
@@ -736,29 +736,25 @@ TEST_CASE("landscape store: invalidate drops a resident tile, bumps its revision
 	REQUIRE(settleStore(store, anchors));
 	const LandscapeTileKey key{ 20, 20 };
 	REQUIRE(store.isResident(key));
-	CHECK(store.revision(key) == 0);
 	const uint64_t startedBefore = store.stats().loadsStarted;
 
 	store.invalidate({ key });
-	CHECK(store.revision(key) == 1);
 	CHECK_FALSE(store.isResident(key));              // gone at once, not next frame
 
 	REQUIRE(settleStore(store, anchors));
 	CHECK(store.isResident(key));                     // reloaded
 	CHECK(store.stats().loadsStarted == startedBefore + 1);
 
-	// a second invalidation of the same key bumps the revision again
+	// a second invalidation of the same key drops it and loads it again
 	store.invalidate({ key });
-	CHECK(store.revision(key) == 2);
+	CHECK_FALSE(store.isResident(key));
 	REQUIRE(settleStore(store, anchors));
+	CHECK(store.isResident(key));
 
-	// a key never seen, and one that is not resident any more: no crash, nothing scheduled, revision still counts
+	// a key never seen, and one that is not resident any more: no crash, nothing scheduled
 	const LandscapeTileKey never{ 39, 39 }, farAway{ 0, 0 };
-	CHECK(store.revision(never) == 0);
 	const uint64_t startedBefore2 = store.stats().loadsStarted;
 	store.invalidate({ never, farAway });
-	CHECK(store.revision(never) == 1);
-	CHECK(store.revision(farAway) == 1);
 	CHECK(store.stats().loadsStarted == startedBefore2);          // neither was resident or loading: nothing to reload
 }
 
@@ -780,7 +776,6 @@ TEST_CASE("landscape store: invalidating a tile mid-load cancels or discards it 
 	const uint64_t startedBefore = store.stats().loadsStarted;
 
 	store.invalidate({ key });
-	CHECK(store.revision(key) == 1);
 	CHECK_FALSE(store.isLoading(key));                // the old entry is gone at once
 
 	src->open = true;                                 // let the gated loads (old and new) through

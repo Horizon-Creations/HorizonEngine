@@ -116,10 +116,9 @@ public:
 
 	// An edit committed to the source changed these tiles: drop the resident entry (the next update() loads it again) and cancel a
 	// load in flight (its result, if one still arrives, carries the old ticket and is thrown away like any other stale one, see
-	// drain()). A key never in the map is a no-op. revision() counts invalidations since construction, kept past eviction so a
-	// consumer that cached a TilePtr can tell its copy is now stale even though the key itself was never resident again yet.
-	void     invalidate(const std::vector<LandscapeTileKey>& keys);
-	uint32_t revision(LandscapeTileKey key) const;
+	// drain()). A key never in the map is a no-op. There is no per-tile revision yet: add one with the first consumer that caches a
+	// TilePtr past an eviction and needs to tell it went stale (foliage or physics fan-out).
+	void invalidate(const std::vector<LandscapeTileKey>& keys);
 
 private:
 	struct Entry
@@ -165,7 +164,6 @@ private:
 	std::unordered_map<LandscapeTileKey, Entry, LandscapeTileKeyHash> m_tiles;
 	std::unordered_set<LandscapeTileKey, LandscapeTileKeyHash>        m_keep;
 	std::vector<LandscapeTileKey>                                     m_wanted;   // nearest first
-	std::unordered_map<LandscapeTileKey, uint32_t, LandscapeTileKeyHash> m_revision;   // only invalidated keys; outlives eviction
 
 	std::vector<LandscapeAnchor> m_planAnchors;
 	bool     m_havePlan = false;

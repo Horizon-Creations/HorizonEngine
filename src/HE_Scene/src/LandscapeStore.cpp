@@ -99,18 +99,11 @@ void LandscapeStore::invalidate(const std::vector<LandscapeTileKey>& keys)
 {
 	for (const LandscapeTileKey& key : keys)
 	{
-		++m_revision[key];
 		const auto it = m_tiles.find(key);
 		if (it == m_tiles.end()) continue;
 		if (it->second.state == Entry::State::Loading) it->second.job.cancel();   // stops it if it has not started; drain() discards a stale result either way
 		dropEntry(it);
 	}
-}
-
-uint32_t LandscapeStore::revision(LandscapeTileKey key) const
-{
-	const auto it = m_revision.find(key);
-	return it == m_revision.end() ? 0 : it->second;
 }
 
 LandscapeStore::TilePtr LandscapeStore::tile(LandscapeTileKey key) const
