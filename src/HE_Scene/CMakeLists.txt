@@ -25,6 +25,7 @@ add_library(HorizonScene SHARED
     src/SceneJsonParse.cpp
     src/EntityVisibility.cpp
     src/EntityActive.cpp
+    src/CookAnalysis.cpp
     src/Components/TransformComponent.cpp
     src/TerrainMeshGenerator.cpp
     src/TerrainSystem.cpp

@@ -24,6 +24,7 @@
 #include "HorizonScene/Components/StreamingComponent.h"
 #include "HorizonScene/Components/EditorLockComponent.h"   // the Outliner's lock, an entity-level field
 #include "HorizonScene/Components/InactiveComponent.h"     // the "Active" switch, a component like any other
+#include "HorizonScene/Components/MobilityComponent.h"    // the author's Static/Movable choice (entity cooking)
 #include "HorizonScene/Components/PrefabInstanceComponent.h"
 #include "HorizonScene/Components/EnvironmentComponent.h"
 #include "HorizonScene/Components/EnvironmentLightComponent.h"
@@ -1171,6 +1172,10 @@ namespace
 		// when set; see InactiveComponent.h.
 		if (registry.all_of<InactiveComponent>(entity))
 			comps["inactive"] = json::object();
+		// Static/Movable, only when the author decided; no component means "derived
+		// by CookAnalysis", which is what every older scene loads as.
+		if (const auto* mob = registry.try_get<MobilityComponent>(entity))
+			comps["mobility"] = mob->mode == MobilityComponent::Mode::Static ? "static" : "movable";
 		return comps;
 	}
 
@@ -2396,6 +2401,13 @@ namespace
 		}
 		if (comps.contains("inactive"))
 			registry.emplace_or_replace<InactiveComponent>(entity);
+		if (comps.contains("mobility"))
+		{
+			MobilityComponent mob;
+			if (comps["mobility"].is_string() && comps["mobility"].get<std::string>() == "static")
+				mob.mode = MobilityComponent::Mode::Static;
+			registry.emplace_or_replace<MobilityComponent>(entity, mob);
+		}
 	}
 #undef HE_NAVCFG_FIELDS
 
@@ -2993,7 +3005,8 @@ namespace
 	X("uitext",              UITextComponent) \
 	X("uiimage",             UIImageComponent) \
 	X("uibutton",            UIButtonComponent) \
-	X("inactive",            InactiveComponent)
+	X("inactive",            InactiveComponent) \
+	X("mobility",            MobilityComponent)
 
 	bool removeComponentForKey(entt::registry& registry, Entity entity, const std::string& key)
 	{
@@ -3247,6 +3260,8 @@ bool SceneSerializer::isKnownComponentKey(const std::string& key)
 		"uiimage", "uitext", "weather",
 		// The "Active" switch, off (InactiveComponent) — an empty object.
 		"inactive",
+		// Static/Movable (MobilityComponent) — "static" or "movable".
+		"mobility",
 		// Not a component: serializeEntityComponents carries the display name
 		// in the same object, because a rename would otherwise be the one edit
 		// the component-sync path drops.

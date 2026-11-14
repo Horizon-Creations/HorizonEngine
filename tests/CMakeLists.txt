@@ -15,6 +15,7 @@ add_executable(he_tests
     test_particle_graph.cpp
     test_animator_state_machine_graph.cpp
     test_scene_serializer.cpp
+    test_cook_analysis.cpp
     test_collab_docsync.cpp
     test_scene_entity_ids.cpp
     test_level_script.cpp
