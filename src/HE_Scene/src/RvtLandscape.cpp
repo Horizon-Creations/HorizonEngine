@@ -58,6 +58,14 @@ namespace
         const float dz = std::max({ mn.y - p.y, 0.0f, p.y - mx.y });
         return std::sqrt(dx * dx + dz * dz);
     }
+
+    // Brings a scratch copy up to date with what the journal says changed in the live landscape (the journal is not cleared here).
+    void syncScratch(HlodBaker& baker, const TerrainComponent& tc)
+    {
+        const TerrainComponent::RvtJournal& j = tc.rvtJournal;
+        if (j.all) baker.syncTerrain(tc, true, glm::vec2(0.0f), glm::vec2(0.0f));
+        else       baker.syncTerrain(tc, false, glm::vec2(j.minX, j.minZ), glm::vec2(j.maxX, j.maxZ));
+    }
 }
 
 RvtLandscape::RvtLandscape(ContentManager& cm, IRenderer& renderer) : m_cm(cm), m_renderer(renderer) {}
@@ -127,7 +135,14 @@ bool RvtLandscape::attach(HorizonWorld& live, entt::entity terrain, Segment& seg
 {
     if (!ensurePool()) return false;
     const auto t0 = std::chrono::steady_clock::now();
-    if (!seg.baker || !seg.attached)
+    TerrainComponent& liveTc = live.registry().get<TerrainComponent>(terrain);
+    if (seg.baker && seg.attached)
+    {
+        // Re-attach after deactivate(): the scratch copy is from before the edits made while this segment was out of range
+        // (tick() only drains the journal of live segments), so it takes them now. The fresh volume has no pages to make stale.
+        if (liveTc.rvtJournal.any) syncScratch(*seg.baker, liveTc);
+    }
+    else
     {
         auto baker = std::make_unique<HlodBaker>(live, m_cm, m_renderer);
         std::string why;
@@ -139,7 +154,7 @@ bool RvtLandscape::attach(HorizonWorld& live, entt::entity terrain, Segment& seg
         seg.baker = std::move(baker);
         m_materialsRegistered += 3;                // the three view materials HlodBaker::begin registers (never unregistered)
     }
-    const TerrainComponent& tc = live.registry().get<TerrainComponent>(terrain);
+    const TerrainComponent& tc = liveTc;
     HlodChunkRect r0;
     seg.baker->chunkRect(0, 0, r0);
 
@@ -172,7 +187,7 @@ bool RvtLandscape::attach(HorizonWorld& live, entt::entity terrain, Segment& seg
     seg.uploadedVersion = ~0ull;
     seg.filled = false;
     seg.attached = true;
-    live.registry().get<TerrainComponent>(terrain).rvtJournal.clear();   // the scratch copy was made from the ground as it is now
+    liveTc.rvtJournal.clear();   // the scratch copy is the ground as it is now (made from it, or synced above)
     HE_LOG_INFO(Scene, "RvtLandscape: segment %u attached in %.0f ms: %.0f m landscape, %d mips, %zu segment(s)",
                 static_cast<unsigned>(entt::to_integral(terrain)),
                 std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count(),
@@ -369,14 +384,10 @@ RvtLandscape::FrameStats RvtLandscape::tick(HorizonWorld& live, const glm::vec3&
         if (!tc.rvtJournal.any) continue;
         const TerrainComponent::RvtJournal j = tc.rvtJournal;
         const glm::vec3 pos = HE::worldPositionOf(live, kv.first);
-        if (j.all)
-        {
-            seg.baker->syncTerrain(tc, true, glm::vec2(0.0f), glm::vec2(0.0f));
-            st.pagesStale += m_manager->invalidateVolume(seg.volume);
-        }
+        syncScratch(*seg.baker, tc);
+        if (j.all) st.pagesStale += m_manager->invalidateVolume(seg.volume);
         else
         {
-            seg.baker->syncTerrain(tc, false, glm::vec2(j.minX, j.minZ), glm::vec2(j.maxX, j.maxZ));
             st.pagesStale += m_manager->invalidateRect(seg.volume, glm::vec2(pos.x + j.minX, pos.z + j.minZ),
                                                        glm::vec2(pos.x + j.maxX, pos.z + j.maxZ));
         }
