@@ -57,6 +57,7 @@
 #include "Backends/D3D_Shared/D3DStartupTiming.h" // [startup] phase/compile timing (Thema 196)
 #include "Backends/D3D_Shared/DxgiAdapterLog.h"   // names the GPU in the log
 #include "Backends/D3D11/D3D11MaterialBindings.h" // A4: heLandscapeWeights t14/s0 per draw, shared with he_tests (Thema 57)
+#include "Backends/D3D11/D3D11Landscape.h"        // the world-scale landscape (Thema 326)
 #include <SDL3/SDL.h>
 #include <d3d11.h>
 #include <d3dcompiler.h>
@@ -1753,6 +1754,13 @@ struct D3D11RendererImpl
     // True when skyPS is the GL sky cross-compiled through he::shaderc (skyCB is
     // then a whole HE::SkyFrameParams); false on the kSkyPSHLSL fallback (SkyCB).
     bool skyFullModel = false;
+    // ── World-scale landscape (Thema 326, step 2 part B) ──────────────────
+    // DrawScene asks the application's provider (IRenderer::SetLandscapeProvider) once per scene frame, executes the frame's uploads at
+    // once and keeps the frame until the opaque pass draws it. Not in the G-buffer: no shadows, SSAO or GI.
+    D3D11Landscape           landscape;
+    bool                     landscapeFailed = false;   // init failed once: not tried again
+    bool                     landscapeFrameLive = false; // landscapeFrame belongs to the scene frame in progress
+    HE::LandscapeRenderFrame landscapeFrame;
     // ── Debug line pipeline ───────────────────────────────────────────────
     ComPtr<ID3D11VertexShader>  debugVS;
     ComPtr<ID3D11PixelShader>   debugPS;
@@ -7523,6 +7531,9 @@ void D3D11Renderer::Shutdown()
     m_impl->giReflCB.Reset(); m_impl->giReflBlurCB.Reset(); m_impl->giReflMixCB.Reset();
     m_impl->giReflPipesTried = false;
     m_impl->giReflReady = false;
+    m_impl->landscape.shutdown();   // its images and shaders, before the device goes
+    m_impl->landscapeFrame = HE::LandscapeRenderFrame{};
+    m_impl->landscapeFrameLive = false;
     m_impl->rtv.Reset();
     m_impl->dsv.Reset();
     m_impl->depthSRV.Reset();
@@ -7600,9 +7611,57 @@ void D3D11Renderer::DrawScene(int width, int height)
                   p.m_renderWorld.camera.position, p.m_wallTime);
     }
 
+    // ── World-scale landscape (Thema 326): the provider is asked HERE, before the early returns below, and its uploads executed at once.
+    // A frame the runtime built has to be executed whether or not the scene has objects: the runtime counts its uploads as done. It is
+    // drawn later (opaque pass, after the G-buffer resolve), or right here on the two paths that leave before the pass.
+    p.landscapeFrameLive = false;
+    if (m_landscapeProvider && !p.landscapeFailed)
+    {
+        p.landscapeFrame = HE::LandscapeRenderFrame{};
+        m_landscapeProvider(glm::dmat4(viewProj), /*zeroToOne=*/false, p.landscapeFrame);   // viewProj is origin-relative, GL clip (the scene pass does not fix the depth)
+        if (p.landscapeFrame.active)
+        {
+            if (!p.landscape.ready())
+            {
+                std::string err;
+                if (!p.landscape.init(p.device.Get(), &err))
+                {
+                    HE_LOG_WARN(RHI, "D3D11Renderer: the world-scale landscape is off: %s", err.c_str());
+                    p.landscapeFailed = true;
+                }
+            }
+            if (p.landscape.ready())
+            {
+                p.landscape.upload(p.context.Get(), p.landscapeFrame);
+                p.landscapeFrameLive = true;
+            }
+        }
+    }
+    // The sun the lit shaders use: the scene's dominant directional light (colour x intensity), else a neutral one.
+    auto drawLandscape = [&]()
+    {
+        if (!p.landscapeFrameLive) return;
+        D3D11Landscape::Shading sh;
+        sh.sunDir = glm::normalize(p.m_renderWorld.sunDirection);
+        sh.ambient = p.m_renderWorld.ambient;
+        for (const LightData& l : p.m_renderWorld.lights)
+            if (l.type == static_cast<uint8_t>(HE::LightType::Directional)) { sh.sunColor = l.color * l.intensity; break; }
+        if (p.landscapeFrame.world && !p.landscapeFrame.world->albedoArrayPath.empty())
+        {
+            // The texture group's albedo array (the world-UV ground), resolved like a material's texture array; not loaded (yet) = null = flat colours.
+            sh.albedoArray = p.resolveGraphTexture(HE::UUID{}, p.landscapeFrame.world->albedoArrayPath, m_contentManager, /*array=*/true);
+            // Its normal and mask arrays, the same way; only resolved once the albedo array is there, like GL/Vulkan/Metal.
+            if (sh.albedoArray && !p.landscapeFrame.world->normalArrayPath.empty())
+                sh.normalArray = p.resolveGraphTexture(HE::UUID{}, p.landscapeFrame.world->normalArrayPath, m_contentManager, /*array=*/true);
+            if (sh.albedoArray && !p.landscapeFrame.world->maskArrayPath.empty())
+                sh.maskArray = p.resolveGraphTexture(HE::UUID{}, p.landscapeFrame.world->maskArrayPath, m_contentManager, /*array=*/true);
+        }
+        p.landscape.draw(p.context.Get(), p.landscapeFrame, viewProj, sh);
+    };
+
     // Trails live in their own per-frame band list, not in `objects`, so a scene
     // that has nothing BUT a trail still has something to draw past here.
-    if (p.m_renderWorld.objects.empty() && p.m_renderWorld.ribbonBatches.empty()) return;
+    if (p.m_renderWorld.objects.empty() && p.m_renderWorld.ribbonBatches.empty()) { drawLandscape(); return; }
 
     const uint64_t walk = p.m_extractor.fullExtractCount();
     {
@@ -7633,7 +7692,7 @@ void D3D11Renderer::DrawScene(int width, int height)
     }
     p.counters.total   = static_cast<uint32_t>(p.m_renderWorld.objects.size());
     p.counters.visible = static_cast<uint32_t>(p.m_sortedIndices.size());
-    if (p.m_sortedIndices.empty() && p.m_renderWorld.ribbonBatches.empty()) return;
+    if (p.m_sortedIndices.empty() && p.m_renderWorld.ribbonBatches.empty()) { drawLandscape(); return; }
 
     if (p.m_renderGraph.empty())
     {
@@ -9136,6 +9195,10 @@ void D3D11Renderer::DrawScene(int width, int height)
             ctx->VSSetShader(p.vs.Get(), nullptr, 0);
             ctx->IASetInputLayout(p.inputLayout.Get());
         }
+
+        // ── World-scale landscape (Thema 326): after the opaque geometry (and, on a deferred frame, the resolve), depth-tested into the same
+        // target. Puts every piece of context state it sets back, so the transparent pass and the decals find what they expect.
+        drawLandscape();
 
         // ── TAA velocity (A2): screen-space motion of the opaque geometry, right
         // after the passes whose depth it tests against and before the decals

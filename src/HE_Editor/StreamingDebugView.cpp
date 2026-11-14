@@ -8,6 +8,7 @@
 #include <HorizonScene/CellSplit.h>
 #include <HorizonScene/CellStreamer.h>
 #include <HorizonScene/HorizonWorld.h>
+#include <HorizonScene/LandscapeRuntime.h>   // the tile landscape's store and atlas
 #include <HorizonScene/SceneSerializer.h>
 #include <JobSystem/JobSystem.h>
 #include <ContentManager/ContentManager.h>
@@ -15,6 +16,7 @@
 #include <glm/glm.hpp>
 #include <algorithm>
 #include <chrono>
+#include <cfloat>
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
@@ -544,6 +546,73 @@ void drawCells(AppContext& ctx)
 	ImGui::EndTable();
 }
 
+// The world-scale tile landscape (Thema 326, step 6): what its store holds and how it is doing, and a map of the tiles around the editor camera.
+// Nothing at all for a scene without one (or one whose pack did not open: the log says why).
+void drawLandscape(AppContext& ctx)
+{
+	const HE::LandscapeRuntime* rt = ctx.world ? ctx.world->landscapeRuntime() : nullptr;
+	if (!rt || !rt->active() || !rt->store()) return;
+	const HE::LandscapeStore& store = *rt->store();
+	const HE::LandscapeStoreStats& s = store.stats();
+	const HE::LandscapeTileSource& src = store.source();
+	const HE::LandscapeGeometry& g = src.geometry();
+	ImGui::SeparatorText("Tile landscape");
+	EditorWidgets::WrapText wrap;
+	constexpr double kMB = 1024.0 * 1024.0;
+	ImGui::Text("World %.1f x %.1f km: %d x %d tiles of %.0f m (%.0f m raster, %d weight channels).",
+	            src.tilesX() * static_cast<double>(g.tileM) / 1000.0, src.tilesZ() * static_cast<double>(g.tileM) / 1000.0, src.tilesX(), src.tilesZ(),
+	            static_cast<double>(g.tileM), static_cast<double>(g.tileM) / g.hCells, static_cast<int>(g.channels));
+	ImGui::Text("Tiles: %zu resident, %zu loading, %zu failed, %zu wanted within %.0f m (keep to %.0f m).", s.resident, s.loading, s.failed, s.wanted,
+	            static_cast<double>(store.config().loadRadius), static_cast<double>(store.config().loadRadius * store.config().keepFactor));
+	// Memory: what the decoded tiles take against the budget, with the highest it has been.
+	const double budget = static_cast<double>(store.config().byteBudget);
+	char overlay[96];
+	std::snprintf(overlay, sizeof overlay, "%.0f of %.0f MB (peak %.0f MB, %.1f MB a tile)", static_cast<double>(s.residentBytes) / kMB, budget / kMB,
+	              static_cast<double>(s.peakBytes) / kMB, static_cast<double>(store.tileBytes()) / kMB);
+	ImGui::ProgressBar(budget > 0.0 ? static_cast<float>(std::min(1.0, static_cast<double>(s.residentBytes) / budget)) : 0.0f, ImVec2(-FLT_MIN, 0.0f), overlay);
+	if (s.budgetClamped)
+		ImGui::TextColored(ImVec4(0.95f, 0.75f, 0.35f, 1.0f), "The memory budget cuts the load radius to %zu tiles.", s.maxTiles);
+	ImGui::Text("Streaming: %llu loaded, %llu failed, %llu cancelled, %llu discarded, %llu evicted; update %.2f ms (avg %.2f, max %.2f).",
+	            static_cast<unsigned long long>(s.loadsFinished), static_cast<unsigned long long>(s.loadsFailed), static_cast<unsigned long long>(s.loadsCancelled),
+	            static_cast<unsigned long long>(s.loadsDiscarded), static_cast<unsigned long long>(s.evictions), s.lastUpdateMs, s.avgUpdateMs, s.maxUpdateMs);
+	if (const HE::LandscapeAtlas* atlas = rt->atlas())
+		ImGui::Text("GPU atlas: %zu of %zu slots, %llu uploads, %llu releases%s.", atlas->stats().used, atlas->capacity(),
+		            static_cast<unsigned long long>(atlas->stats().uploads), static_cast<unsigned long long>(atlas->stats().releases),
+		            atlas->stats().full || atlas->stats().aliased ? " (FULL or aliased: raise the slot count)" : "");
+	ImGui::Text("Ground: %zu physics fields, %zu foliage scatters (%zu plants), GI clipmap %s.", rt->ground().stats().fields, rt->foliage().stats().scattered,
+	            rt->foliage().stats().instances, rt->giHeightfield().active() ? "active" : "not built");
+
+	// The map: tiles around the camera, one square each. Dark = outside the kept ring, blue = kept but not in memory, green = resident,
+	// yellow = loading; the white frame is the tile under the camera.
+	if (!ctx.editorCamera) return;
+	const glm::dvec3 cam = glm::dvec3(ctx.editorCamera->position()) + (ctx.world ? ctx.world->origin() : glm::dvec3(0.0));
+	const int camX = static_cast<int>(std::floor(cam.x / g.tileM)), camZ = static_cast<int>(std::floor(cam.z / g.tileM));
+	constexpr int kHalf = 12;          // 25 x 25 tiles
+	const float cell = 9.0f;
+	const ImVec2 origin = ImGui::GetCursorScreenPos();
+	ImDrawList* dl = ImGui::GetWindowDrawList();
+	for (int dz = -kHalf; dz <= kHalf; ++dz)
+		for (int dx = -kHalf; dx <= kHalf; ++dx)
+		{
+			const HE::LandscapeTileKey key{ camX + dx, camZ + dz };
+			const bool inWorld = key.x >= 0 && key.z >= 0 && key.x < src.tilesX() && key.z < src.tilesZ();
+			ImU32 col = IM_COL32(24, 26, 30, 255);
+			if (inWorld)
+			{
+				if (store.isResident(key)) col = IM_COL32(70, 170, 90, 255);
+				else if (store.isLoading(key)) col = IM_COL32(220, 190, 70, 255);
+				else if (store.inKeptRing(key)) col = IM_COL32(60, 90, 150, 255);
+				else col = IM_COL32(48, 52, 60, 255);
+			}
+			const ImVec2 a(origin.x + static_cast<float>(dx + kHalf) * cell, origin.y + static_cast<float>(dz + kHalf) * cell);
+			dl->AddRectFilled(a, ImVec2(a.x + cell - 1.0f, a.y + cell - 1.0f), col);
+		}
+	const ImVec2 c(origin.x + static_cast<float>(kHalf) * cell, origin.y + static_cast<float>(kHalf) * cell);
+	dl->AddRect(c, ImVec2(c.x + cell - 1.0f, c.y + cell - 1.0f), IM_COL32(255, 255, 255, 255));
+	ImGui::Dummy(ImVec2(static_cast<float>(2 * kHalf + 1) * cell, static_cast<float>(2 * kHalf + 1) * cell));
+	ImGui::TextDisabled("Camera over tile %d, %d. Green resident, yellow loading, blue kept.", camX, camZ);
+}
+
 void drawWorldSize(AppContext& ctx)
 {
 	ImGui::SeparatorText("World size");
@@ -582,6 +651,7 @@ void draw(AppContext& ctx)
 	if (ctx.contentManager) drawAssets(*ctx.contentManager);
 	drawScene(ctx);
 	drawCells(ctx);
+	drawLandscape(ctx);
 	drawWorldSize(ctx);
 #else
 	(void)ctx;

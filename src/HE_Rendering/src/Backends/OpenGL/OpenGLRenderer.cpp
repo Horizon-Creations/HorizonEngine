@@ -11373,6 +11373,8 @@ void OpenGLRenderer::Shutdown()
 	if (m_primarySdlWindow && m_glContext)
 		SDL_GL_MakeCurrent(m_primarySdlWindow, static_cast<SDL_GLContext>(m_glContext));
 
+	m_landscape.shutdown();   // its images and program, with the context current
+
 	for (auto& [id, mesh] : m_meshCache)
 	{
 		if (mesh.vao)     glDeleteVertexArrays(1, &mesh.vao);
@@ -11847,6 +11849,45 @@ void OpenGLRenderer::BindSceneLighting(const SceneLightingLocs& L, const SceneSh
 // `allowLowResClouds` is false for previews: the quarter-res pre-pass rebinds
 // its own FBO and viewport, which a small offscreen render has no business
 // doing mid-pass.
+void OpenGLRenderer::DrawLandscape(const glm::mat4& viewProj)
+{
+	if (!m_landscapeProvider || m_landscapeFailed) return;
+	HE::LandscapeRenderFrame frame;
+	m_landscapeProvider(glm::dmat4(viewProj), /*zeroToOne=*/false, frame);   // viewProj is origin-relative, in GL clip space (-1..1)
+	if (!frame.active) return;                                                // no landscape in this scene: nothing is compiled, nothing drawn
+	if (!m_landscape.ready())
+	{
+		std::string err;
+		if (!m_landscape.init(&err))
+		{
+			HE_LOG_WARN(RHI, "OpenGLRenderer: the world-scale landscape is off: %s", err.c_str());
+			m_landscapeFailed = true;
+			return;
+		}
+	}
+
+	// The sun the lit shaders use: the scene's dominant directional light (colour x intensity), else a neutral one.
+	OpenGLLandscape::Shading sh;
+	sh.sunDir = glm::normalize(m_renderWorld.sunDirection);
+	sh.ambient = m_renderWorld.ambient;
+	for (const LightData& l : m_renderWorld.lights)
+		if (l.type == static_cast<uint8_t>(HE::LightType::Directional)) { sh.sunColor = l.color * l.intensity; break; }
+	if (frame.world && !frame.world->albedoArrayPath.empty())
+	{
+		// The texture group's albedo array (World-UV ground). A missing one resolves to the white array: flat colours then.
+		const unsigned int tex = ResolveGraphTexture(HE::UUID{}, frame.world->albedoArrayPath, /*array=*/true);
+		sh.albedoArray = (tex != 0 && tex != m_whiteArrayTex) ? tex : 0;
+		const auto optional = [&](const std::string& path) -> unsigned int {
+			if (path.empty()) return 0u;
+			const unsigned int t = ResolveGraphTexture(HE::UUID{}, path, /*array=*/true);
+			return (t != 0 && t != m_whiteArrayTex) ? t : 0u;
+		};
+		sh.normalArray = optional(frame.world->normalArrayPath);
+		sh.maskArray = optional(frame.world->maskArrayPath);
+	}
+	m_landscape.draw(frame, viewProj, sh);
+}
+
 void OpenGLRenderer::DrawSkyFullscreen(const glm::mat4& invViewProj, const glm::vec3& sunDir,
                                        const glm::vec3& camPos,
                                        const IRenderer::EnvironmentSettings& env,
@@ -13909,6 +13950,8 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 
 			glUseProgram(m_unlitProgram); // restore for the sky + transparent passes
 		}
+		// ── World-scale landscape (Thema 326): after the opaque geometry, before the sky, depth-tested into the same target ──
+		DrawLandscape(viewProj);
 		GpuTimerEndPass();                 // end "Opaque"
 
 		// ── TAA velocity (A2): screen-space motion of the opaque geometry, right
