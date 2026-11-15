@@ -19235,7 +19235,8 @@ vertex VOut particleVertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     float3 worldPos;
     if (u.snow.x > 0.5) {
         float s = 0.16;
-        float3 right = normalize(cross(float3(0.0, 1.0, 0.0), look));
+        float3 rightCross = cross(float3(0.0, 1.0, 0.0), look);
+        float3 right = (length(rightCross) > 1e-4) ? normalize(rightCross) : float3(1.0, 0.0, 0.0);
         float3 up    = cross(look, right);
         worldPos = ppos + (right * c.x + up * c.y) * s;
     } else {
