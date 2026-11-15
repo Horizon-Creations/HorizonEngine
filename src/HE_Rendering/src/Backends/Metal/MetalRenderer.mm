@@ -7503,6 +7503,7 @@ void MetalRenderer::CollectRibbonDraws(std::vector<TPDraw>& out, const glm::mat4
                                        const glm::vec3& cameraPos)
 {
 	if (m_renderWorld.ribbonBatches.empty()) return;
+	HE_PROFILE_SCOPE_N("Metal::CollectRibbonDraws");
 	// Last frame's staging buffers go now, not at the end of the frame that used
 	// them: the draws below hold bare pointers and are replayed much later.
 	ReleaseRibbonBuffers();
@@ -8889,6 +8890,7 @@ int MetalRenderer::BuildGILandscapeTable(std::vector<void*>& outWeightTex)
 
 void MetalRenderer::EncodeGIAccelBuild(void* cmdBufPtr, float aspect)
 {
+	HE_PROFILE_SCOPE_N("Metal::EncodeGIAccelBuild");
 	// GI reflections reuse the acceleration structures without the probe/
 	// shadow passes, so the build also runs when ONLY they are enabled
 	// (either path — the reflection kernel has HW and SW-BVH variants).
@@ -9297,6 +9299,7 @@ void MetalRenderer::DestroyGIShadowTargets()
 void MetalRenderer::EncodeGIShadowRays(void* cmdBufPtr, int width, int height)
 {
 	if (!m_giEnabled || !m_giSupported || !m_world) return;
+	HE_PROFILE_SCOPE_N("Metal::EncodeGIShadowRays");
 	// The active path's acceleration structure must exist (built this frame by
 	// EncodeGIAccelBuild): HW = TLAS, SW = CPU-BVH buffers + at least 1 instance.
 	if (m_giHwRt ? !m_giTlas
@@ -9661,6 +9664,7 @@ void MetalRenderer::EncodeGIProbeUpdate(void* cmdBufPtr)
 		return;
 	EnsureGIProbeGrid();
 	if (!m_giProbeGridBuilt || m_giProbeCount <= 0) return;
+	HE_PROFILE_SCOPE_N("Metal::EncodeGIProbeUpdate");
 	EnsureGIProbePipeline();
 	if (m_giHwRt ? !m_giProbeUpdatePipeline : !m_giProbeUpdateSwPipeline) return;
 	if (!m_giIrradianceAtlas || !m_giVisibilityAtlas) return;
@@ -12540,6 +12544,7 @@ void MetalRenderer::SetAntiAliasingSettings(const AntiAliasingSettings& s)
 void* MetalRenderer::EncodeBloom(void* cmdBufPtr, void* sourceHdr, int fullW, int fullH)
 {
 	if (!m_bloomBrightPipeline || !m_blurPipeline || !sourceHdr) return nullptr;
+	HE_PROFILE_SCOPE_N("Metal::EncodeBloom");
 	id<MTLCommandBuffer> cmdBuf = (__bridge id<MTLCommandBuffer>)cmdBufPtr;
 	EnsureBloomTargets(fullW / 2, fullH / 2);
 	if (!m_bloomColor[0]) return nullptr;
@@ -13338,6 +13343,7 @@ bool MetalRenderer::EncodeWaterReflPrepass(void* cmdBufPtr, int width, int heigh
                                            const std::vector<TPDraw>& draws)
 {
 	if (!m_reflPosPipeline || !m_skyDepthState || !m_hdrDepth) return false;
+	HE_PROFILE_SCOPE_N("Metal::EncodeWaterReflPrepass");
 	size_t graphDraws = 0;
 	for (const TPDraw& d : draws) graphDraws += d.pipeline ? 1 : 0;
 	if (graphDraws == 0) return false;
@@ -14162,6 +14168,7 @@ void MetalRenderer::EncodeTonemap(void* renderEncoderPtr, void* sourceHdr, bool 
 {
 	void* hdr = sourceHdr ? sourceHdr : m_hdrColor;
 	if (!m_tonemapPipeline || !hdr) return;
+	HE_PROFILE_SCOPE_N("Metal::EncodeTonemap");
 	id<MTLRenderCommandEncoder> enc = (__bridge id<MTLRenderCommandEncoder>)renderEncoderPtr;
 	[enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_tonemapPipeline];
 	[enc setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_noDepthState];
@@ -14215,6 +14222,7 @@ void MetalRenderer::DestroyLdrTarget()
 void MetalRenderer::EncodeVelocity(void* cmdBufPtr, int width, int height)
 {
 	if (!TemporalActive() || !m_velocityTex || m_sortedIndices.empty()) return;
+	HE_PROFILE_SCOPE_N("Metal::EncodeVelocity");
 	id<MTLCommandBuffer> cmdBuf = (__bridge id<MTLCommandBuffer>)cmdBufPtr;
 
 	MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
@@ -14401,6 +14409,7 @@ void* MetalRenderer::EncodeMetalFX(void* cmdBufPtr, void* sourceHdr, int inW, in
 	if (!MetalFxActive() || !sourceHdr || !m_hdrDepth || !m_velocityTex) return nullptr;
 	EnsureMetalFX(inW, inH, outW, outH);
 	if (!m_mfxScaler || !m_mfxOutput) return nullptr;
+	HE_PROFILE_SCOPE_N("Metal::EncodeMetalFX");
 	if (@available(macOS 13.0, *))
 	{
 		id<MTLFXTemporalScaler> scaler = (__bridge id<MTLFXTemporalScaler>)m_mfxScaler;
@@ -14519,6 +14528,7 @@ void MetalRenderer::EncodeFxaa(void* renderEncoderPtr, int width, int height)
 	               : (method == HE::AAMethod::SMAA)                 ? m_smaaPipeline
 	                                                                : m_fxaaPipeline;
 	if (!pipeline || !m_ldrColor) return;
+	HE_PROFILE_SCOPE_N("Metal::EncodeFxaa");
 	// The TAA slot reads its own output, everything else the tonemapped LDR.
 	void* source = (pipeline == m_taaSharpenPipeline) ? m_taaResolved : m_ldrColor;
 	id<MTLRenderCommandEncoder> enc = (__bridge id<MTLRenderCommandEncoder>)renderEncoderPtr;
@@ -14687,6 +14697,7 @@ void* MetalRenderer::EncodeUIPass(void* renderEncoderPtr, int width, int height,
                                   void* cmdBufPtr, void* passDescPtr)
 {
 	if (!m_uiPipeline || m_renderWorld.uiObjects.empty()) return renderEncoderPtr;
+	HE_PROFILE_SCOPE_N("Metal::EncodeUIPass");
 	id<MTLRenderCommandEncoder> enc = (__bridge id<MTLRenderCommandEncoder>)renderEncoderPtr;
 	const simd::float2 vp = { (float)std::max(1, width), (float)std::max(1, height) };
 
@@ -16446,6 +16457,7 @@ void MetalRenderer::EncodeClusterData(void* renderEncoder, const HE::ClusterLigh
 void MetalRenderer::EncodeDeferredResolveTile(void* renderEncoder, int width, int height)
 {
 	if (!m_deferredResolveTilePipeline) return;
+	HE_PROFILE_SCOPE_N("Metal::EncodeDeferredResolveTile");
 	id<MTLRenderCommandEncoder> encoder = (__bridge id<MTLRenderCommandEncoder>)renderEncoder;
 
 	// Same gates EncodeScene computes for its binds — m_renderWorld is current
@@ -16588,6 +16600,7 @@ bool MetalRenderer::EnsureDecalPipeline()
 void MetalRenderer::EncodeDecals(void* renderEncoder, int width, int height)
 {
 	if (m_renderWorld.decals.empty() || !EnsureDecalPipeline()) return;
+	HE_PROFILE_SCOPE_N("Metal::EncodeDecals");
 	id<MTLRenderCommandEncoder> encoder = (__bridge id<MTLRenderCommandEncoder>)renderEncoder;
 
 	const glm::mat4 viewProj =
@@ -16769,6 +16782,7 @@ void MetalRenderer::DestroySSRTarget()
 void MetalRenderer::EncodeSSRPasses(void* cmdBufPtr, int width, int height)
 {
 	if (!m_ssrCompositePipeline || !m_gbStored) return;
+	HE_PROFILE_SCOPE_N("Metal::EncodeSSRPasses");
 	const bool ssrOn    = m_ssrFrameActive && m_ssrTracePipeline;
 	const bool giReflOn = m_giReflFrameActive && m_giReflTex;
 	if (!ssrOn && !giReflOn) return;
@@ -17532,6 +17546,7 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 	if (!m_world || !m_gbufferPipeline || width <= 0 || height <= 0)
 		return;
 
+	HE_PROFILE_SCOPE_N("Metal::EncodeGBuffer");
 	id<MTLRenderCommandEncoder> encoder = (__bridge id<MTLRenderCommandEncoder>)renderEncoder;
 
 	const IRenderer::EnvironmentSettings& env = GetEnvironment();
@@ -19335,6 +19350,7 @@ void MetalRenderer::SimulateGpuParticles(void* cmdBuf)
 	if (!p.enabled || !m_particleSimPipeline) return;
 	const int count = std::clamp(p.count, 0, kParticleMax);
 	if (count <= 0) return;
+	HE_PROFILE_SCOPE_N("Metal::SimulateGpuParticles");
 	EnsureParticleBuffer(count);
 	if (!m_particleSeeded) SeedParticleBuffer(count);
 
@@ -19380,6 +19396,7 @@ void MetalRenderer::DrawGpuParticles(void* renderEncoder, const glm::mat4& viewP
 void MetalRenderer::DrawParticleGraphBatches(void* renderEncoder, const glm::mat4& viewProj, const glm::mat4& view)
 {
 	if (m_renderWorld.particleBatches.empty()) return;
+	HE_PROFILE_SCOPE_N("Metal::DrawParticleGraphBatches");
 	id<MTLRenderCommandEncoder> enc = (__bridge id<MTLRenderCommandEncoder>)renderEncoder;
 	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
 
