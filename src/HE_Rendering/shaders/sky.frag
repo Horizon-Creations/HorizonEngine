@@ -75,13 +75,12 @@ layout(set = 0, binding = 1) uniform sampler2D uMoonTex;
 layout(set = 0, binding = 2) uniform sampler3D uNoise;
 
 // ── Procedural sky ────────────────────────────────────────────────────────────
-vec3 skyColor(vec3 dir, vec3 sunDir)
+// sunDir comes in already normalized; day/dusk come from main(), which is uniform
+// across the draw.
+vec3 skyColor(vec3 dir, vec3 sunDir, float day, float dusk)
 {
     dir    = normalize(dir);
-    sunDir = normalize(sunDir);
     float sunY = clamp(sunDir.y, -0.2, 1.0);
-    float day  = smoothstep(-0.10, 0.10, sunY);
-    float dusk = smoothstep(-0.06, 0.05, sunY) * (1.0 - smoothstep(0.05, 0.28, sunY));
     vec3 zenithDay  = vec3(0.08, 0.28, 0.72);
     vec3 horizDay   = vec3(0.42, 0.62, 0.88);
     vec3 zenithNite = vec3(0.003, 0.005, 0.015);
@@ -169,9 +168,8 @@ float galacticBand(vec3 cd)
     float d=dot(normalize(cd),gN); return exp(-d*d*7.0);
 }
 
-vec3 starField(vec3 dir, vec3 cdir, vec3 sunDir, float t, float mw)
+vec3 starField(vec3 dir, vec3 cdir, float t, float mw, float night)
 {
-    float night=1.0-smoothstep(-0.10,0.10,clamp(sunDir.y,-0.2,1.0));
     if(night<=0.0||dir.y<=0.0) return vec3(0.0);
     float band=galacticBand(cdir), mwc=clamp(mw,0.0,1.0);
     float thresh=mix(0.92,mix(0.86,0.72,mwc),band);
@@ -194,10 +192,9 @@ vec3 starField(vec3 dir, vec3 cdir, vec3 sunDir, float t, float mw)
     return tint*(shape*mag*tw*horizon*night*bandDim);
 }
 
-vec3 aurora(vec3 dir, vec3 sunDir, float t, float intensity, vec3 auroraCol)
+vec3 aurora(vec3 dir, float t, float intensity, vec3 auroraCol, float night)
 {
     if(intensity<=0.0) return vec3(0.0);
-    float night=1.0-smoothstep(-0.10,0.10,clamp(sunDir.y,-0.2,1.0));
     if(night<=0.0||dir.y<=0.04) return vec3(0.0);
     vec2 P=dir.xz/(dir.y+0.45);
     float along=P.x, across=P.y;
@@ -215,9 +212,8 @@ vec3 aurora(vec3 dir, vec3 sunDir, float t, float intensity, vec3 auroraCol)
     return col*(curtain*patches*fade*intensity*night*5.0);
 }
 
-vec3 moonDisk(vec3 dir, vec3 sunDir)
+vec3 moonDisk(vec3 dir, vec3 sunDir, float night)
 {
-    float day=smoothstep(-0.10,0.10,clamp(sunDir.y,-0.2,1.0)), night=1.0-day;
     if(night<=0.0) return vec3(0.0);
     vec3 moonDir2=normalize(vec3(-sunDir.x,-sunDir.y,sunDir.z));
     if(dot(dir,moonDir2)<=0.0) return vec3(0.0);
@@ -285,11 +281,12 @@ float cloudShadowDensity(vec3 pos, float time, float coverage, vec3 wind)
     float lo     = mix(0.70, 0.22, clamp(coverage, 0.0, 1.0));
     return smoothstep(lo, lo + 0.13, base) * hgrad;
 }
-vec3 applyClouds(vec3 baseSky, vec3 dir, vec3 sunDir, float time, float coverage, vec3 sunColor, vec3 wind)
+// sunDir comes in already normalized; day/dusk come from main(), which is uniform
+// across the draw.
+vec3 applyClouds(vec3 baseSky, vec3 dir, vec3 sunDir, float time, float coverage, vec3 sunColor, vec3 wind, float day, float dusk)
 {
     if (coverage <= 0.0) return baseSky;          // clear sky → skip the whole raymarch
     dir    = normalize(dir);
-    sunDir = normalize(sunDir);
     if (dir.y < 0.02) return baseSky;             // no clouds at/below the horizon
 
     // March the view ray through the cloud slab between base and top heights.
@@ -298,11 +295,6 @@ vec3 applyClouds(vec3 baseSky, vec3 dir, vec3 sunDir, float time, float coverage
     const int N = 16;
     float ds = (s1 - s0) / float(N);
     float jitter = cloudHash(dir.xz * 173.3 + vec2(dir.y * 37.1, dir.y * 19.7));
-
-    // Day/night/dusk drive the cloud colour (independent of the drift clock).
-    float sunY = clamp(sunDir.y, -0.2, 1.0);
-    float day  = smoothstep(-0.10, 0.10, sunY);
-    float dusk = smoothstep(-0.06, 0.05, sunY) * (1.0 - smoothstep(0.05, 0.28, sunY));
 
     // Forward-scatter phase (view vs. sun) — constant along the ray, so compute once.
     float costh = max(dot(dir, sunDir), 0.0);
@@ -359,12 +351,10 @@ vec3 applyClouds(vec3 baseSky, vec3 dir, vec3 sunDir, float time, float coverage
 
 // Space nebula — drifting coloured emission clouds gathered toward the galactic
 // band. Sampled as 3D blobs on the celestial sphere (rotates with the stars).
-vec3 nebula(vec3 dir, vec3 cdir, vec3 sunDir, float intensity, vec3 nebColor)
+vec3 nebula(vec3 dir, vec3 cdir, float intensity, vec3 nebColor, float night)
 {
     if (intensity <= 0.0) return vec3(0.0);
     dir    = normalize(dir);
-    sunDir = normalize(sunDir);
-    float night = 1.0 - smoothstep(-0.10, 0.10, clamp(sunDir.y, -0.2, 1.0));
     if (night <= 0.0 || dir.y <= 0.0) return vec3(0.0);
 
     vec3  cN   = normalize(cdir);
@@ -419,16 +409,27 @@ void main()
     // coordinates where the hash loses float precision → stars flicker/vanish on rotate.
     vec3 dir = normalize(wp1.xyz / wp1.w - wp0.xyz / wp0.w);
 
-    vec3 col = skyColor(dir, sky.sunDir);
-    float nightF = 1.0 - smoothstep(-0.10, 0.10, clamp(normalize(sky.sunDir).y, -0.2, 1.0));
-    if (nightF > 0.0) {
+    // sky.sunDir is uniform across the draw: normalize it and derive day/dusk/night
+    // once instead of once per function per pixel. starField/aurora/moonDisk take
+    // their night factor from the CPU-normalized uniform directly; re-normalizing it
+    // on the GPU (as `sunDirN` below does) can shift sunDir.y by a few ULP, so that
+    // path keeps its own `nightRaw` instead of sharing `night`.
+    vec3  sunDirN  = normalize(sky.sunDir);
+    float sunY     = clamp(sunDirN.y, -0.2, 1.0);
+    float day      = smoothstep(-0.10, 0.10, sunY);
+    float dusk     = smoothstep(-0.06, 0.05, sunY) * (1.0 - smoothstep(0.05, 0.28, sunY));
+    float night    = 1.0 - day;
+    float nightRaw = 1.0 - smoothstep(-0.10, 0.10, clamp(sky.sunDir.y, -0.2, 1.0));
+
+    vec3 col = skyColor(dir, sunDirN, day, dusk);
+    if (night > 0.0) {
         vec3 cdir = celestialDir(dir, sky.timeOfDay);
-        col += starField(dir, cdir, sky.sunDir, sky.time, sky.milkyWay);
-        col += nebula(dir, cdir, sky.sunDir, sky.nebula, sky.nebulaColor);
-        col += aurora(dir, sky.sunDir, sky.time, sky.aurora, sky.auroraColor);
-        col += moonDisk(dir, sky.sunDir);
+        col += starField(dir, cdir, sky.time, sky.milkyWay, nightRaw);
+        col += nebula(dir, cdir, sky.nebula, sky.nebulaColor, night);
+        col += aurora(dir, sky.time, sky.aurora, sky.auroraColor, nightRaw);
+        col += moonDisk(dir, sky.sunDir, nightRaw);
     }
-    col = applyClouds(col, dir, sky.sunDir, sky.time, sky.cloudCoverage, sky.sunColor, sky.wind);
+    col = applyClouds(col, dir, sunDirN, sky.time, sky.cloudCoverage, sky.sunColor, sky.wind, day, dusk);
     col += sky.flash * vec3(0.85, 0.90, 1.0);
     FragColor = vec4(col, 1.0);
 }
