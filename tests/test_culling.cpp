@@ -43,6 +43,7 @@
 #include <filesystem>
 #include <fstream>
 #include <map>
+#include <random>
 #include <regex>
 #include <set>
 #include <sstream>
@@ -596,6 +597,104 @@ TEST_CASE("AABB transform")
 	CHECK(moved.min.x == doctest::Approx(8.0f));
 	CHECK(moved.max.x == doctest::Approx(12.0f));
 	CHECK(moved.min.y == doctest::Approx(-2.0f));
+}
+
+// Reference 8-corner implementation AABB::transformed() used to use, kept here only to
+// characterize the center/extent form (finding 482) against it: transform all 8 corners
+// and expand min/max over them. Any affine `m` must give the same box (within float
+// rounding) from both, and every transformed corner must lie inside the new box.
+static HE::AABB referenceTransformed8Corner(const HE::AABB& box, const glm::mat4& m)
+{
+	HE::AABB out;
+	if (!box.isValid()) return out;
+	for (int i = 0; i < 8; ++i)
+	{
+		const glm::vec3 corner{
+			(i & 1) ? box.max.x : box.min.x,
+			(i & 2) ? box.max.y : box.min.y,
+			(i & 4) ? box.max.z : box.min.z,
+		};
+		out.expand(glm::vec3(m * glm::vec4(corner, 1.0f)));
+	}
+	return out;
+}
+
+TEST_CASE("AABB transform matches the 8-corner reference under affine transforms")
+{
+	const float eps = 1e-3f;
+	auto checkAgainstReference = [&](const HE::AABB& box, const glm::mat4& m)
+	{
+		const HE::AABB got  = box.transformed(m);
+		const HE::AABB want = referenceTransformed8Corner(box, m);
+		CHECK(got.isValid() == want.isValid());
+		if (!want.isValid()) return;
+		CHECK(got.min.x == doctest::Approx(want.min.x).epsilon(eps));
+		CHECK(got.min.y == doctest::Approx(want.min.y).epsilon(eps));
+		CHECK(got.min.z == doctest::Approx(want.min.z).epsilon(eps));
+		CHECK(got.max.x == doctest::Approx(want.max.x).epsilon(eps));
+		CHECK(got.max.y == doctest::Approx(want.max.y).epsilon(eps));
+		CHECK(got.max.z == doctest::Approx(want.max.z).epsilon(eps));
+
+		// Culling relies on every corner of the source box landing inside the
+		// transformed box, not just on the extreme-corner box matching.
+		for (int i = 0; i < 8; ++i)
+		{
+			const glm::vec3 corner{
+				(i & 1) ? box.max.x : box.min.x,
+				(i & 2) ? box.max.y : box.min.y,
+				(i & 4) ? box.max.z : box.min.z,
+			};
+			const glm::vec3 world = glm::vec3(m * glm::vec4(corner, 1.0f));
+			CHECK(world.x >= got.min.x - eps); CHECK(world.x <= got.max.x + eps);
+			CHECK(world.y >= got.min.y - eps); CHECK(world.y <= got.max.y + eps);
+			CHECK(world.z >= got.min.z - eps); CHECK(world.z <= got.max.z + eps);
+		}
+	};
+
+	// Invalid box stays invalid regardless of the transform.
+	checkAgainstReference(HE::AABB{}, glm::mat4(1.0f));
+
+	// Flat box (zero extent on one axis) and a point box.
+	HE::AABB flat;  flat.expand({ -2, 0, -3 }); flat.expand({ 2, 0, 3 });
+	HE::AABB point; point.expand({ 1, 2, 3 });
+	const glm::mat4 rot45 = glm::rotate(glm::mat4(1.0f), glm::radians(45.0f), glm::vec3(0, 1, 0));
+	checkAgainstReference(flat, rot45);
+	checkAgainstReference(point, rot45);
+
+	std::mt19937 rng(482);
+	std::uniform_real_distribution<float> extentDist(0.1f, 50.0f);
+	std::uniform_real_distribution<float> translateDist(-1.0e5f, 1.0e5f);   // the 100 km world
+	std::uniform_real_distribution<float> angleDist(0.0f, 360.0f);
+	std::uniform_real_distribution<float> scaleDist(0.05f, 20.0f);
+	std::uniform_real_distribution<float> axisDist(-1.0f, 1.0f);
+	std::uniform_int_distribution<int> signDist(0, 1);
+
+	for (int i = 0; i < 1000; ++i)
+	{
+		HE::AABB box;
+		const glm::vec3 half{ extentDist(rng), extentDist(rng), extentDist(rng) };
+		const glm::vec3 c{ translateDist(rng) * 0.01f, translateDist(rng) * 0.01f, translateDist(rng) * 0.01f };
+		box.expand(c - half);
+		box.expand(c + half);
+
+		glm::vec3 axis{ axisDist(rng), axisDist(rng), axisDist(rng) };
+		if (glm::length(axis) < 1e-5f) axis = glm::vec3(0, 1, 0);
+
+		// Non-uniform scale, including negative (mirroring) on some axes — the
+		// kind of transform FoliageExtract/RenderExtractor feed in with real
+		// object transforms.
+		const glm::vec3 scale{
+			scaleDist(rng) * (signDist(rng) ? 1.0f : -1.0f),
+			scaleDist(rng) * (signDist(rng) ? 1.0f : -1.0f),
+			scaleDist(rng) * (signDist(rng) ? 1.0f : -1.0f),
+		};
+
+		glm::mat4 m = glm::translate(glm::mat4(1.0f), { translateDist(rng), translateDist(rng), translateDist(rng) });
+		m = glm::rotate(m, glm::radians(angleDist(rng)), axis);
+		m = glm::scale(m, scale);
+
+		checkAgainstReference(box, m);
+	}
 }
 
 TEST_CASE("Frustum culls boxes outside the view")
