@@ -253,20 +253,13 @@ vec3 sampleDDGIIrradiance(vec3 P, vec3 N)
 }
 
 // ── Procedural sky ────────────────────────────────────────────────────────────
-vec3 skyColor(vec3 dir, vec3 sunDir)
+// Sun-only terms (sunY, day, dusk, zenith, horizon, sunTint, moonDir, sunAz)
+// are frame-uniform — they depend on sunDir alone, not the per-call dir — so
+// main() computes them once and passes them in (finding 507).
+vec3 skyColor(vec3 dir, vec3 sunDirNorm, float sunY, float day, float dusk,
+              vec3 zenith, vec3 horizon, vec3 sunTint, vec3 moonDir, vec2 sunAz)
 {
-    dir    = normalize(dir);
-    sunDir = normalize(sunDir);
-    float sunY = clamp(sunDir.y, -0.2, 1.0);
-    float day  = smoothstep(-0.10, 0.10, sunY);
-    float dusk = smoothstep(-0.06, 0.05, sunY) * (1.0 - smoothstep(0.05, 0.28, sunY));
-    vec3 zenithDay  = vec3(0.08, 0.28, 0.72);
-    vec3 horizDay   = vec3(0.42, 0.62, 0.88);
-    vec3 zenithNite = vec3(0.003, 0.005, 0.015);
-    vec3 horizNite  = vec3(0.006, 0.009, 0.024);
-    vec3 zenith  = mix(zenithNite, zenithDay, day);
-    vec3 horizon = mix(horizNite,  horizDay,  day);
-    vec2  sunAz  = normalize(sunDir.xz + vec2(1e-5));
+    dir = normalize(dir);
     float toward = dot(normalize(dir.xz + vec2(1e-5)), sunAz) * 0.5 + 0.5;
     toward = pow(clamp(toward, 0.0, 1.0), 1.5);
     vec3  duskHoriz = mix(vec3(0.52, 0.30, 0.52), vec3(1.20, 0.50, 0.16), toward);
@@ -279,16 +272,14 @@ vec3 skyColor(vec3 dir, vec3 sunDir)
     sky += vec3(1.25, 0.62, 0.26) * (band * dusk * 0.8);
     vec3 ground = mix(vec3(0.02, 0.02, 0.03), vec3(0.24, 0.23, 0.21), day);
     sky = mix(sky, ground, smoothstep(0.0, -0.25, dir.y));
-    vec3  sunTint = mix(vec3(1.0, 0.42, 0.20), vec3(1.0, 0.96, 0.88), smoothstep(0.0, 0.25, sunY));
-    float s = max(dot(dir, sunDir), 0.0);
+    float s = max(dot(dir, sunDirNorm), 0.0);
     float sunVis = max(day, dusk);
     sky += sunTint * (pow(s, 1800.0) * 14.0) * day;
     sky += sunTint * (pow(s, 180.0)  * 2.2) * sunVis;
     sky += sunTint * (pow(s, 22.0)   * 0.7) * sunVis;
     sky += vec3(1.0, 0.5, 0.25) * (pow(s, 5.0) * 0.5) * dusk;
-    float night   = 1.0 - day;
-    vec3  moonDir = normalize(vec3(-sunDir.x, -sunDir.y, sunDir.z));
-    float m       = max(dot(dir, moonDir), 0.0);
+    float night = 1.0 - day;
+    float m     = max(dot(dir, moonDir), 0.0);
     sky += vec3(0.80, 0.86, 1.00) * (pow(m, 60.0) * 0.05) * night;
     sky += vec3(0.015, 0.018, 0.030) * night;
     return sky;
@@ -453,7 +444,18 @@ void main()
     vec3 Rrough = normalize(mix(reflect(-V, N), N, rough));
     vec3 F0     = mix(vec3(0.04), base, met);
     vec3 kd     = (1.0 - F0) * (1.0 - met);
-    vec3 ambDiff = skyColor(Nup,    uf.sunDir.xyz) * base * kd;
+    // Precomputed once for the skyColor() calls below (ambDiff, envSpec,
+    // fogCol) instead of redoing it per call — see skyColor's own banner.
+    vec3  sunDirNorm = normalize(uf.sunDir.xyz);
+    float sunY       = clamp(sunDirNorm.y, -0.2, 1.0);
+    float day        = smoothstep(-0.10, 0.10, sunY);
+    float dusk       = smoothstep(-0.06, 0.05, sunY) * (1.0 - smoothstep(0.05, 0.28, sunY));
+    vec3  zenith     = mix(vec3(0.003, 0.005, 0.015), vec3(0.08, 0.28, 0.72), day);
+    vec3  horizon    = mix(vec3(0.006, 0.009, 0.024), vec3(0.42, 0.62, 0.88), day);
+    vec2  sunAz      = normalize(sunDirNorm.xz + vec2(1e-5));
+    vec3  sunTint    = mix(vec3(1.0, 0.42, 0.20), vec3(1.0, 0.96, 0.88), smoothstep(0.0, 0.25, sunY));
+    vec3  moonDir    = normalize(vec3(-sunDirNorm.x, -sunDirNorm.y, sunDirNorm.z));
+    vec3 ambDiff = skyColor(Nup, sunDirNorm, sunY, day, dusk, zenith, horizon, sunTint, moonDir, sunAz) * base * kd;
     // FORWARD reflection cascade (sky → SSR). SYNC: this is the heLitP twin in
     // MaterialShaderLibrary.cpp and the same stage GL's kUnlitFS and Metal's
     // fragmentMain carry — a graph material next to a built-in one must mix the
@@ -463,7 +465,7 @@ void main()
     // The trace carries no per-pixel roughness (the half-res pre-pass has no
     // material data), so the roughness fade lives HERE, with the exact shading
     // value.
-    vec3 envSpec = skyColor(Rrough, uf.sunDir.xyz);
+    vec3 envSpec = skyColor(Rrough, sunDirNorm, sunY, day, dusk, zenith, horizon, sunTint, moonDir, sunAz);
     if (uf.ssrParams.x > 0.5)
     {
         vec4  sr   = texture(uSSRFwd, gl_FragCoord.xy / uf.viewport.xy);
@@ -598,7 +600,7 @@ void main()
         float ta   = abs(k) > 1e-4 ? (1.0 - exp(-k)) / k : 1.0;
         float opt  = uf.fog.x * dist * exp(-uf.fog.y * uf.cameraPos.y) * ta;
         float f    = 1.0 - exp(-opt);
-        vec3  fogCol = skyColor(ray/dist, uf.sunDir.xyz);
+        vec3  fogCol = skyColor(ray/dist, sunDirNorm, sunY, day, dusk, zenith, horizon, sunTint, moonDir, sunAz);
         result = mix(result, fogCol, clamp(f, 0.0, 1.0));
     }
     // Debug: tint each fragment by its shadow cascade (red / green / blue /
