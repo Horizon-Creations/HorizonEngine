@@ -638,9 +638,24 @@ void render(AppContext& ctx)
             // Rows directly under this one, as listed (the hidden built-ins are
             // not counted) — what a folded row says is inside it.
             int         childCount        = 0;
+            // Index into s_outlinerCache of this row's parent, or -1 for the
+            // World root — set at rebuild time (structural, like childCount),
+            // so a frame that already knows a row is on screen can walk
+            // straight to its open ancestors instead of visiting every row
+            // between here and the top of the tree.
+            int         parentIndex       = -1;
         };
         static std::vector<OutlinerNode> s_outlinerCache;
         static HorizonWorld*             s_lastWorld = nullptr;
+        // Cache indices of rows visible under the current FOLD state (not the
+        // filter — the filtered path keeps its own full walk), in the same
+        // order as s_outlinerCache. Refreshed as a side effect of any frame
+        // that already walks every row (dirty, or the row heights are not
+        // measured yet); stale otherwise. What lets a later frame jump
+        // straight to the rows on screen instead of visiting every cached
+        // node for them (Hive finding 535).
+        static std::vector<size_t> s_visibleRowIndices;
+        static bool                s_visibleRowIndicesDirty = true;
 
         // Rebuild cache only when the hierarchy changed or the world switched
         bool cacheRebuilt = false;
@@ -649,6 +664,8 @@ void render(AppContext& ctx)
             cacheRebuilt = true;
             s_lastWorld = ctx.world;
             s_outlinerCache.clear();
+            s_visibleRowIndices.clear();
+            s_visibleRowIndicesDirty = true;
 
             auto& registry = ctx.world->registry();
             Entity root    = ctx.world->rootEntity();
@@ -656,8 +673,8 @@ void render(AppContext& ctx)
             // `underInstance`: some ancestor is a placement root; `parentAdded`:
             // the parent is itself added here, so this row is inside an added
             // subtree rather than the top of one.
-            std::function<bool(Entity, int, bool, bool)> collect =
-                [&](Entity entity, int depth, bool underInstance, bool parentAdded) -> bool
+            std::function<bool(Entity, int, bool, bool, int)> collect =
+                [&](Entity entity, int depth, bool underInstance, bool parentAdded, int parentIdx) -> bool
             {
                 if (!registry.valid(entity)) return false;
                 // The built-in environment sun/moon lights belong to the World's
@@ -683,18 +700,19 @@ void render(AppContext& ctx)
                 bool added = false;
                 if (underInstance && !isInstance)
                     added = SceneSerializer::prefabInstancesBinding(*ctx.world, entity).empty();
-                node.addedHere = added && !parentAdded;
+                node.addedHere   = added && !parentAdded;
+                node.parentIndex = parentIdx;
                 const size_t self = s_outlinerCache.size();
                 s_outlinerCache.push_back(std::move(node));
                 int shownChildren = 0;
                 if (hier)
                     for (Entity child : hier->children)
-                        if (collect(child, depth + 1, underInstance || isInstance, added))
+                        if (collect(child, depth + 1, underInstance || isInstance, added, static_cast<int>(self)))
                             ++shownChildren;
                 s_outlinerCache[self].childCount = shownChildren;
                 return true;
             };
-            collect(root, 0, false, false);
+            collect(root, 0, false, false, -1);
 
             char buf[96];
             std::snprintf(buf, sizeof(buf), "[Outliner] rebuilt: %zu nodes", s_outlinerCache.size());
@@ -1147,7 +1165,72 @@ void render(AppContext& ctx)
         }
         const std::string_view searchNeedle = s_searchText;
 
-        for (size_t nodeIndex = 0; nodeIndex < s_outlinerCache.size(); ++nodeIndex)
+        // ── Jump straight to the rows that can be on screen ────────────────
+        // Walking every cached node just to throw away all but ~40 of them was
+        // 11% of the entities scene's CPU frame (Hive finding 535, this loop).
+        // With the row heights known and nothing folded differently since the
+        // last full walk, a row's on-screen position follows from its rank
+        // among visible rows alone (root first, then one `rowStep` apart): the
+        // first row that can possibly be on screen is found without visiting
+        // the rows above it, and the scan below stops once nothing further
+        // down can be on screen either. The filtered path is unaffected — it
+        // keeps doing a full walk — and so does a frame where Shift needs
+        // every visible row in order, or where the row heights are not
+        // measured yet (rowStep <= 0): both of those already walk every row,
+        // so they also refresh the mapping below for free, which is what
+        // keeps it honest against a fold state that changed without this
+        // loop seeing the click (there is no such write in this file today —
+        // grepped for GetStateStorage/SetInt — so this is a safety margin,
+        // not a known case).
+        const bool rebuildVisibleRows = !filterActive &&
+                                        (s_visibleRowIndicesDirty || rowStep <= 0.0f);
+        const bool fastRowJump        = !filterActive && !collectVisibleRows &&
+                                        rowStep > 0.0f && rootStep > 0.0f &&
+                                        !s_visibleRowIndicesDirty;
+        if (rebuildVisibleRows) s_visibleRowIndices.clear();
+
+        size_t startVisRank = 0;
+        if (fastRowJump && s_visibleRowIndices.size() > 1)
+        {
+            const float firstRowTop = ImGui::GetCursorScreenPos().y;
+            const float above       = rowClip.Min.y - firstRowTop - rootStep;
+            if (above > 0.0f)
+            {
+                // floor(), then two rows of margin: a wrong estimate is only
+                // ever early, never late — starting a row or two before the
+                // true first one just means the clip test a few lines below
+                // discards it the way it already discards any out-of-view row.
+                const float approx = above / rowStep - 2.0f;
+                if (approx > 0.0f)
+                    startVisRank = 1 + static_cast<size_t>(approx);
+            }
+            startVisRank = std::min(startVisRank, s_visibleRowIndices.size() - 1);
+        }
+        size_t nodeIndexStart = 0;
+        if (startVisRank > 0)
+        {
+            const size_t startCacheIndex = s_visibleRowIndices[startVisRank];
+            // The ancestor chain, root-most last; walked once (O(depth)), not
+            // by visiting every row between here and the top of the tree.
+            std::vector<int> ancestors;
+            for (int p = s_outlinerCache[startCacheIndex].parentIndex; p >= 0;
+                 p = s_outlinerCache[static_cast<size_t>(p)].parentIndex)
+                ancestors.push_back(p);
+            // Every ancestor of a row this frame still counts as visible was
+            // found open the last time the full walk ran — otherwise this row
+            // would not be in s_visibleRowIndices — so none of them sets
+            // skipBelowDepth here.
+            for (auto it = ancestors.rbegin(); it != ancestors.rend(); ++it)
+            {
+                const auto& anc = s_outlinerCache[static_cast<size_t>(*it)];
+                enterPath(anc.depth, rowId(anc.entity, anc.depth), anc.entity);
+            }
+            skipped        = rootStep + static_cast<float>(startVisRank - 1) * rowStep;
+            nodeIndexStart = startCacheIndex;
+        }
+        size_t visRankCounter = startVisRank;
+
+        for (size_t nodeIndex = nodeIndexStart; nodeIndex < s_outlinerCache.size(); ++nodeIndex)
         {
             const auto& node = s_outlinerCache[nodeIndex];
             // If a parent was closed, skip all its children
@@ -1168,6 +1251,8 @@ void render(AppContext& ctx)
             // a hit whose children all fell away is a leaf, arrow and all.
             const bool hasChildren = filterActive ? shown[nodeIndex].childShown
                                                   : node.hasChildren;
+            const size_t visRank = visRankCounter++;
+            if (rebuildVisibleRows) s_visibleRowIndices.push_back(nodeIndex);
             if (collectVisibleRows) visibleRows.push_back(node.entity);
 
             // Close tree levels we've left: on the path, and in ImGui as far
@@ -1196,6 +1281,17 @@ void render(AppContext& ctx)
                 skipped += step;
                 if (open) enterPath(node.depth, id, node.entity);
                 else      skipBelowDepth = node.depth;
+                // Below the viewport, with the visible-row mapping still the
+                // one nothing folded away this frame: every row left is one
+                // `rowStep` tall and none of them can be on screen either, so
+                // their total reaches the scrollbar in one step instead of
+                // one row at a time.
+                if (fastRowJump && !s_visibleRowIndicesDirty && rowTop > rowClip.Max.y)
+                {
+                    const size_t remaining = s_visibleRowIndices.size() - 1 - visRank;
+                    skipped += static_cast<float>(remaining) * rowStep;
+                    break;
+                }
                 continue;
             }
             // In view: first the clipped run above it, then the levels it opened.
@@ -1316,6 +1412,12 @@ void render(AppContext& ctx)
             ImGui::PopStyleVar(2);
 
             if (pushedText) ImGui::PopStyleColor();
+
+            // This row's fold just changed — the visible-row mapping above no
+            // longer matches reality below it and has to be rebuilt before it
+            // is trusted to skip anything again.
+            if (ImGui::IsItemToggledOpen())
+                s_visibleRowIndicesDirty = true;
 
             // Alt on the arrow opens (or closes) the whole branch under it, the
             // way a file manager does: the fold state of every descendant is set
@@ -1820,6 +1922,7 @@ void render(AppContext& ctx)
             else
                 skipBelowDepth = node.depth; // don't enter children
         }
+        if (rebuildVisibleRows) s_visibleRowIndicesDirty = false;
         // The clipped run at the bottom still counts towards the scroll range.
         if (skipped > 0.0f)
             skippedRun(skipped);
