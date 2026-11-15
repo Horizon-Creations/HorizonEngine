@@ -2769,7 +2769,7 @@ TEST_CASE("GI kernels: the constants the hand-kept copies must share")
 			{ "B3 weights",        { R"(h\[5\] = (?:float\[5\]\(|\{ ?)([0-9./ ,]+?)(?:\)| ?\});)" } },
 			{ "kernel taps",       { R"(h\[x \+ (\d+)\] \* h\[y \+ (\d+)\])" } },
 			{ "plane stop",        { R"(exp\(-abs\(dot\(n, q\.xyz - pv\.xyz\)\) / \(([0-9.]+) \* fp\)\))" } },
-			{ "normal power",      { R"(pow\(max\(dot\(n, normalize\([^;]*?\.xyz\)\), ([0-9.]+)\), ([0-9.]+)\);)" } },
+			{ "normal power",      { R"(nd = max\(dot\(n, normalize\([^;]*?\.xyz\)\), ([0-9.]+)\);\s*float nd2 = nd \* nd, nd4 = nd2 \* nd2, nd8 = nd4 \* nd4, nd16 = nd8 \* nd8;\s*w \*= nd16 \* nd16;)" } },
 			{ "value stop",        { R"(exp\(-abs\(v - c\) / \(([0-9.]+) \* sig \+ ([0-9.e+-]+)\)\))" } },
 			{ "Bernoulli sigma",   { R"(sig\s*= sqrt\(max\(c \* \(1\.0 - c\), ([0-9.]+)\) / max\([\w.]+, ([0-9.]+)\)\))" } },
 			{ "footprint",         { R"(fp\s*= max\(max\(min\(length\(gxp - pv\.xyz\), length\(gxm - pv\.xyz\)\),\s*min\(length\(gyp - pv\.xyz\), length\(gym - pv\.xyz\)\)\), ([0-9.e+-]+)\))" } },

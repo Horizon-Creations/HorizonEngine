@@ -2333,7 +2333,9 @@ void main()
 			float v = atrousValue(tap(uSrc, uv));
 			float w = h[x + 2] * h[y + 2];
 			w *= exp(-abs(dot(n, q.xyz - pv.xyz)) / (1.0 * fp));
-			w *= pow(max(dot(n, normalize(tap(uGNorm, uv).xyz)), 0.0), 32.0);
+			float nd = max(dot(n, normalize(tap(uGNorm, uv).xyz)), 0.0);
+			float nd2 = nd * nd, nd4 = nd2 * nd2, nd8 = nd4 * nd4, nd16 = nd8 * nd8;
+			w *= nd16 * nd16;
 			w *= exp(-abs(v - c) / (2.0 * sig + 1e-3));
 			sum += v * w; wsum += w;
 		}
