@@ -40,20 +40,21 @@ struct AABB
 		return box;
 	}
 
-	// World-space AABB of this box under an affine transform (8-corner method).
+	// World-space AABB of this box under an affine transform. Center/extent form
+	// (Arvo 1990): exact for any affine map, about 1/8th the arithmetic of
+	// transforming all 8 corners and expanding min/max over them.
 	AABB transformed(const glm::mat4& m) const
 	{
 		AABB out;
 		if (!isValid()) return out;
-		for (int i = 0; i < 8; ++i)
-		{
-			const glm::vec3 corner{
-				(i & 1) ? max.x : min.x,
-				(i & 2) ? max.y : min.y,
-				(i & 4) ? max.z : min.z,
-			};
-			out.expand(glm::vec3(m * glm::vec4(corner, 1.0f)));
-		}
+		const glm::vec3 c = center();
+		const glm::vec3 e = extents();
+		const glm::vec3 newCenter = glm::vec3(m * glm::vec4(c, 1.0f));
+		const glm::vec3 newExtent = glm::abs(glm::vec3(m[0])) * e.x
+		                           + glm::abs(glm::vec3(m[1])) * e.y
+		                           + glm::abs(glm::vec3(m[2])) * e.z;
+		out.min = newCenter - newExtent;
+		out.max = newCenter + newExtent;
 		return out;
 	}
 

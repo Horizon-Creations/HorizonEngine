@@ -645,9 +645,14 @@ TEST_CASE("AABB transform matches the 8-corner reference under affine transforms
 				(i & 4) ? box.max.z : box.min.z,
 			};
 			const glm::vec3 world = glm::vec3(m * glm::vec4(corner, 1.0f));
-			CHECK(world.x >= got.min.x - eps); CHECK(world.x <= got.max.x + eps);
-			CHECK(world.y >= got.min.y - eps); CHECK(world.y <= got.max.y + eps);
-			CHECK(world.z >= got.min.z - eps); CHECK(world.z <= got.max.z + eps);
+			// Absolute eps is too tight once coordinates reach the 1e5 (100 km world)
+			// range float rounding alone can exceed it; scale the tolerance with magnitude.
+			const float tolX = eps * std::max(1.0f, std::abs(world.x));
+			const float tolY = eps * std::max(1.0f, std::abs(world.y));
+			const float tolZ = eps * std::max(1.0f, std::abs(world.z));
+			CHECK(world.x >= got.min.x - tolX); CHECK(world.x <= got.max.x + tolX);
+			CHECK(world.y >= got.min.y - tolY); CHECK(world.y <= got.max.y + tolY);
+			CHECK(world.z >= got.min.z - tolZ); CHECK(world.z <= got.max.z + tolZ);
 		}
 	};
 
