@@ -305,11 +305,12 @@ namespace
     }
 
     // The height scale of plant `i` of a block (the stored matrix's Y axis, under the parent's when that
-    // is a general matrix): what the plant's pixel height is proportional to.
-    float plantScaleOf(const InstanceBlock& b, uint32_t i)
+    // is a general matrix): what the plant's pixel height is proportional to. `parentYScaleVal` is
+    // parentYScale(b), passed in because it is loop-invariant over every plant of the same block.
+    float plantScaleOf(const InstanceBlock& b, uint32_t i, float parentYScaleVal)
     {
         const glm::mat4& m = (*b.matrices)[static_cast<size_t>(b.first) + i];
-        return glm::length(glm::vec3(m[1])) * parentYScale(b);
+        return glm::length(glm::vec3(m[1])) * parentYScaleVal;
     }
 
     // `parentScale` is parentYScale() of the layer's InstanceBlock: factorLo/factorHi bound
@@ -366,7 +367,7 @@ namespace
     // to refine — what extractFoliage did before clusters (HE_FOLIAGE_CLUSTERS=0).
     // Detail levels by the plant's screen size alone (no hysteresis), the same thinning as the clusters.
     void extractPerInstance(const FoliageLayer& fol, const Levels& L, entt::entity e, const InstanceBlock& all,
-                            const glm::vec3& cam, RenderWorld& out)
+                            const glm::vec3& cam, RenderWorld& out, float parentYScaleVal)
     {
         const FoliageStore& store = *fol.store;
         const float dd2 = fol.drawDistance * fol.drawDistance;
@@ -377,7 +378,7 @@ namespace
                 const float dx = wp.x - cam.x;
                 const float dz = wp.z - cam.z;
                 if (dx * dx + dz * dz > dd2) continue;
-                const int level = L.n > 1 ? L.plain(L.seen(std::sqrt(dx * dx + dz * dz), plantScaleOf(all, i))) : 0;
+                const int level = L.n > 1 ? L.plain(L.seen(std::sqrt(dx * dx + dz * dz), plantScaleOf(all, i, parentYScaleVal))) : 0;
                 if (i - b.first >= keptOf(L.lv[level].density, b.count)) { ++t_stats.thinnedInstances; continue; }
                 ++t_stats.levelInstances[level];
                 const glm::mat4 inst = all.world(i);
@@ -402,7 +403,7 @@ namespace
     // material over the frame's scratch. Levels by screen size alone, as the per-instance path.
     void extractOrdered(const FoliageLayer& fol, const Levels& L, entt::entity e, const InstanceBlock& all,
                         const glm::vec3& cam, RenderWorld& out,
-                        std::shared_ptr<std::vector<glm::mat4>>& scratch)
+                        std::shared_ptr<std::vector<glm::mat4>>& scratch, float parentYScaleVal)
     {
         const FoliageStore& store = *fol.store;
         const float dd2 = fol.drawDistance * fol.drawDistance;
@@ -415,7 +416,7 @@ namespace
                 const glm::vec3 wp = all.position(i);
                 const float dx = wp.x - cam.x, dz = wp.z - cam.z;
                 if (dx * dx + dz * dz > dd2) continue;
-                const int level = L.n > 1 ? L.plain(L.seen(std::sqrt(dx * dx + dz * dz), plantScaleOf(all, i))) : 0;
+                const int level = L.n > 1 ? L.plain(L.seen(std::sqrt(dx * dx + dz * dz), plantScaleOf(all, i, parentYScaleVal))) : 0;
                 if (i - b.first >= keptOf(L.lv[level].density, b.count)) { ++t_stats.thinnedInstances; continue; }
                 ++t_stats.levelInstances[level];
                 const glm::vec3 d = wp - cam;
@@ -479,6 +480,7 @@ namespace
         InstanceBlock          layer;          // the layer's stored matrices under the terrain's pose
         bool                   leveled = false;
         float                  dd2 = 0.0f, sd2 = 0.0f;
+        float                  parentYScaleVal = 0.0f;   // parentYScale(layer), loop-invariant over every plant
         FoliageLodMemory::Layer* mem = nullptr;
         std::vector<Whole>     wholes;
         std::vector<uint32_t>  straddlers;     // bucket indices
@@ -595,7 +597,7 @@ namespace
                 continue;
             }
             bool held = false;
-            const float seen = L.seen(std::sqrt(d2), plantScaleOf(layer, b.first + j));
+            const float seen = L.seen(std::sqrt(d2), plantScaleOf(layer, b.first + j, P.parentYScaleVal));
             const int level = had ? L.choose(seen, had[j], held) : L.plain(seen);
             if (had) had[j] = static_cast<uint8_t>(level);
             if (held) ++r.held;
@@ -893,17 +895,18 @@ void extractFoliage(entt::registry& reg, RenderWorld& out, const ContentManager*
             layer.parent   = parent;
             layer.kind     = InstanceBlock::classify(parent);
 
-            const Levels L       = levelsOf(fol, cm, parentYScale(layer));
-            const bool   leveled = L.n > 1;
+            const float  parentScale = parentYScale(layer);
+            const Levels L           = levelsOf(fol, cm, parentScale);
+            const bool   leveled     = L.n > 1;
 
             if (mode == FoliageMode::PerInstance)
             {
-                extractPerInstance(fol, L, e, layer, cam, out);
+                extractPerInstance(fol, L, e, layer, cam, out, parentScale);
                 continue;
             }
             if (mode == FoliageMode::Ordered)
             {
-                extractOrdered(fol, L, e, layer, cam, out, scratch);
+                extractOrdered(fol, L, e, layer, cam, out, scratch, parentScale);
                 continue;
             }
 
@@ -913,6 +916,7 @@ void extractFoliage(entt::registry& reg, RenderWorld& out, const ContentManager*
             P.L       = L;
             P.layer   = layer;
             P.leveled = leveled;
+            P.parentYScaleVal = parentScale;
             P.dd2     = fol.drawDistance * fol.drawDistance;
             const float sd = fol.shadowDistance > 0.0f ? fol.shadowDistance : fol.drawDistance;
             P.sd2     = sd * sd;
