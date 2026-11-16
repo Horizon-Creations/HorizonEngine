@@ -11,6 +11,7 @@
 #include <HorizonScene/EnvironmentPush.h>   // the ONE EnvironmentComponent → settings map
 #include <HorizonScene/Components/EnvironmentComponent.h>
 #include <HorizonScene/TransformHierarchy.h>
+#include <HorizonScene/CookedStatic.h>           // flat rows of the static meshes (entity cooking)
 #include <HorizonScene/EntityActive.h>            // the "Active" switch, inherited down the tree
 #include <HorizonScene/Components/TransformComponent.h>
 #include <HorizonScene/Components/MeshComponent.h>
@@ -323,8 +324,10 @@ void windWaterParams(const MaterialAsset& ma, const MaterialComponent* mc,
 	// parallel AABB/transform computation (pure math, no registry access).
 	// KEEP THE PHASES APART: every registry / ContentManager read belongs in the
 	// gather loop, the parallel_for must stay pure maths over `items`.
+	// `cooked` (null = off) is the static-mesh block (HorizonScene/CookedStatic.h): its settled rows
+	// are copied in phase 2, in the same slot the walk would give them, instead of being rebuilt.
 	void extractMeshes(entt::registry& reg, RenderWorld& out, ContentManager* contentManager,
-	                   std::unordered_set<std::string>& sectionMaterialMissing)
+	                   std::unordered_set<std::string>& sectionMaterialMissing, HE::CookedStatic* cooked)
 	{
 
 		// ── Landscape table (GI reflection paint sampling) ───────────────────
@@ -482,6 +485,21 @@ void windWaterParams(const MaterialAsset& ma, const MaterialComponent* mc,
 				const entt::entity e    = ents[blk.keep[j]];
 				const size_t       slot = blk.first + j;
 				RenderObject&      obj  = out.objects[slot];
+				// A settled row of the cooked block: its object is what the full path below wrote
+				// the first time, so it is copied, not rebuilt. (visible / Active were decided in phase 1.)
+				const int32_t row = cooked ? cooked->rowOf(e) : -1;
+				if (row >= 0 && cooked->state[row] == HE::CookedStatic::State::Ready)
+				{
+					obj.meshAssetId     = cooked->meshId[row];
+					obj.materialAssetId = cooked->materialId[row];
+					obj.transform       = cooked->world[row];
+					obj.worldBounds     = cooked->worldBounds[row];
+					obj.entityId        = static_cast<uint32_t>(e);
+					obj.lod             = cooked->lod[row];
+					obj.castsShadow     = cooked->castsShadow[row] != 0;
+					obj.receivesShadow  = cooked->receivesShadow[row] != 0;
+					continue;
+				}
 				auto [t, mesh] = meshView.get<TransformComponent, MeshComponent>(e);
 				obj.meshAssetId    = mesh.meshAssetId;
 				obj.transform      = t.worldMatrix;
@@ -575,6 +593,28 @@ void windWaterParams(const MaterialAsset& ma, const MaterialComponent* mc,
 				else if (kind == Kind::Sections) blk.needSections.push_back(static_cast<uint32_t>(slot));
 				obj.materialAssetId = matId;
 				obj.worldBounds     = local.isValid() ? local.transformed(t.worldMatrix) : HE::AABB{};
+				// Settle the entity's row (each entity is in one block, so a row has one writer).
+				// Not resolved yet (mesh not resident) stays Pending and is walked again next frame. A final
+				// one-section result with nothing that varies per frame is kept; the rest is walked for good:
+				// own params, the engine water's wind-driven ones, and terrain chunks (landscapeIndex points
+				// into this frame's out.landscapes).
+				if (row >= 0 && kind != Kind::Unresolved)
+				{
+					const bool fixed = kind == Kind::OneSection && !obj.terrainChunk
+					                && !(matComp && !matComp->paramOverrides.empty())
+					                && matId != HE::kEngineWaterMaterialId;
+					cooked->state[row] = fixed ? HE::CookedStatic::State::Ready : HE::CookedStatic::State::Walk;
+					if (fixed)
+					{
+						cooked->meshId[row]         = obj.meshAssetId;
+						cooked->materialId[row]     = obj.materialAssetId;
+						cooked->world[row]          = obj.transform;
+						cooked->worldBounds[row]    = obj.worldBounds;
+						cooked->lod[row]            = obj.lod;
+						cooked->castsShadow[row]    = obj.castsShadow ? 1 : 0;
+						cooked->receivesShadow[row] = obj.receivesShadow ? 1 : 0;
+					}
+				}
 			}
 		}, "ExtractMeshes", 1);
 
@@ -1461,7 +1501,13 @@ float fogWaterlineBand(float signedDepth)
 } // namespace HE
 
 // Out-of-line on purpose (see the header): the one definition the DLL exports.
-RenderExtractor::RenderExtractor()  = default;
+RenderExtractor::RenderExtractor()
+{
+	// HE_COOK_STATIC=1: the same-binary A/B switch for the cooked block (off by default until a write to
+	// a cooked entity un-cooks it; today such a write would render stale).
+	const char* v = std::getenv("HE_COOK_STATIC");
+	m_cookStatic  = v && v[0] == '1';
+}
 RenderExtractor::~RenderExtractor() = default;
 
 void RenderExtractor::setContentManager(ContentManager* cm)
@@ -1606,7 +1652,16 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 	out.underwaterCamera = HE::queryUnderwaterCamera(world, out.camera.position, renderWaveClock());
 	// Renderables. Everything that ends up in out.objects must run before the
 	// shadow fit below, which fits its frustum around their union.
-	{ HE_PROFILE_SCOPE_N("Extract::meshes"); extractMeshes(reg, out, m_contentManager, m_sectionMaterialMissing); }
+	// The cooked block follows the structure epoch (the same number the frame key holds, so a reused
+	// walk and the block can never disagree about which entities exist) and the content epoch.
+	HE::CookedStatic* cooked = nullptr;
+	if (m_cookStatic)
+	{
+		HE::refreshCookedStatic(reg, world.structureEpoch());
+		cooked = &HE::cookedStaticOf(reg);
+		cooked->syncContent(m_contentManager, m_sectionMaterialEpoch);
+	}
+	{ HE_PROFILE_SCOPE_N("Extract::meshes"); extractMeshes(reg, out, m_contentManager, m_sectionMaterialMissing, cooked); }
 	extractParticleBatches(reg, out);
 	extractPrecipitation(reg, out);
 	if (!m_foliageLod) m_foliageLod = std::make_unique<HE::FoliageLodMemory>();

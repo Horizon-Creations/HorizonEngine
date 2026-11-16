@@ -330,7 +330,17 @@ public:
         m_shadowMapRes   = std::max(resolution, 1);
     }
 
+    // Static meshes the cooking analysis cleared are extracted from a flat block
+    // (HorizonScene/CookedStatic.h) instead of rebuilt from the registry each walk.
+    // Off by default (HE_COOK_STATIC=1 turns it on at construction): the block is a
+    // read-only mirror, and a value written to a cooked entity is not seen until
+    // un-cooking exists. Needs no FrameKey field: the block follows the structure
+    // epoch and the content epoch the key already holds, and a reused walk reads no row.
+    void setCookStatic(bool on) { m_cookStatic = on; }
+
 private:
+    bool m_cookStatic = false;
+
     // Overwrites the extracted sun/moon directional lights (and out.ambient /
     // out.sunDirection) from the day-night state pushed via setDayNight.
     // A member because that state lives on the extractor; every other extract()
