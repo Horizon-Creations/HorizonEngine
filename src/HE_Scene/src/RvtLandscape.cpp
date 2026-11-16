@@ -111,6 +111,9 @@ uint64_t RvtLandscape::stateHash(HorizonWorld& live, entt::entity terrain) const
     {
         const glm::vec3 pos = HE::worldPositionOf(live, terrain);
         mix(h, tc->sizeX); mix(h, tc->sizeZ); mix(h, pos.x); mix(h, pos.z);
+        // A mixed landscape binds one shared mix material, so the group whose parameter defaults the views start from comes
+        // from the terrain (HlodBaker::begin reads baseGroup), not from the material id above.
+        mix(h, tc->groupMix); mix(h, tc->baseGroup);
     }
     return h;
 }
