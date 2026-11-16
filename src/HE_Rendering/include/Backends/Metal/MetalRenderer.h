@@ -7,6 +7,7 @@
 #include "MetalLandscape.h"   // the world-scale landscape (Thema 326)
 #include <HorizonRendering/RenderWorld.h>
 #include <HorizonRendering/RenderExtractor.h>
+#include <HorizonRendering/FrameCull.h>
 #include <HorizonRendering/FrustumCuller.h>
 #include <HorizonRendering/OcclusionCuller.h>
 #include <HorizonRendering/RenderSorter.h>
@@ -680,16 +681,12 @@ private:
 	// before any layer is encoded (EncodeShadowMap): its own cull, sort and runs, so the
 	// layers prepare side by side, then per run the mesh and the ring slice its products
 	// went into (mvp null = the per-caster loop, mesh null = skipped).
-	struct ShadowView
+	// The CPU half (viewProj, skip, visible, sorted, sorter, batches) is FrameCull::prepareShadowViews'.
+	struct ShadowView : ShadowViewCpu
 	{
 		void*      target = nullptr;
 		int        layer = 0, size = 0;
-		glm::mat4  viewProj{ 1.0f }, lightClip{ 1.0f };
-		uint32_t   skip = 0;
-		std::vector<uint8_t>         visible;
-		std::vector<uint32_t>        sorted;
-		RenderSorter                 sorter;
-		RenderSorter::DepthBatchList batches;
+		glm::mat4  lightClip{ 1.0f };
 		struct Draw { const GpuMesh* mesh = nullptr; glm::mat4* mvp = nullptr; void* instBuf = nullptr; size_t instOff = 0; };
 		std::vector<Draw>            draws;
 	};
@@ -724,21 +721,9 @@ private:
 	// guarantee that the bounds are real and finds it done. A new walk or a different object
 	// array starts over (Thema 162, step 4).
 	void  RefineObjectBounds();
-	uint64_t            m_refinedWalk    = ~uint64_t(0); // RenderExtractor::fullExtractCount() it last ran for
-	const RenderObject* m_refinedObjects = nullptr;      // the object array and size it ran over
-	size_t              m_refinedCount   = 0;
-	// The union of every object's refined bound, gathered in the same loop: EncodeCloudShadow
-	// needs it for its ground height and used to walk all objects again for it (1.9 ms at 50k).
-	HE::AABB            m_refinedSceneBox{};
-	// Every object's refined bound, in object order, from the same loop: what the frustum
-	// culls read (FrustumCuller's compact overload) instead of the ~280-byte RenderObjects.
-	std::vector<HE::AABB> m_refinedBounds;
-	// The frustum cull of every pass (cascades, local layers, the camera): over m_refinedBounds
-	// when they belong to the walk in m_renderWorld, otherwise over the objects themselves.
-	void  CullObjects(const glm::mat4& viewProj, std::vector<uint8_t>& outVisible);
-	// The scene box of the walk m_renderWorld holds: the one RefineObjectBounds gathered when it
-	// ran for this walk, otherwise a loop of its own (a frame whose passes never refined).
-	HE::AABB FrameSceneBox() const;
+	// The walk's refined bounds (a compact copy in object order), the culls over them and the
+	// scene box for the cloud shadow's ground height (FrameCull.h).
+	FrameCull m_frameCull;
 	void  EncodeShadowMap(void* cmdBuf, float aspect); // CSM depth maps; aspect MUST match the scene extract
 
 	// ── HDR scene color + tonemap (PostProcessPass) ─────────────────────────
