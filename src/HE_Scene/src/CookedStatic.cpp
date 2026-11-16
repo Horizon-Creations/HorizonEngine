@@ -1,6 +1,31 @@
 #include "HorizonScene/CookedStatic.h"
 #include "HorizonScene/CookAnalysis.h"
+#include "HorizonScene/Components/AnimationLayerComponent.h"
+#include "HorizonScene/Components/AnimatorBlendComponent.h"
+#include "HorizonScene/Components/AnimatorComponent.h"
+#include "HorizonScene/Components/AnimatorStateMachineComponent.h"
+#include "HorizonScene/Components/CharacterControllerComponent.h"
+#include "HorizonScene/Components/HierarchyComponent.h"
+#include "HorizonScene/Components/InactiveComponent.h"
+#include "HorizonScene/Components/IkComponent.h"
+#include "HorizonScene/Components/LODComponent.h"
+#include "HorizonScene/Components/MaterialComponent.h"
 #include "HorizonScene/Components/MeshComponent.h"
+#include "HorizonScene/Components/MobilityComponent.h"
+#include "HorizonScene/Components/MovementComponent.h"
+#include "HorizonScene/Components/NavAgentComponent.h"
+#include "HorizonScene/Components/NetworkComponent.h"
+#include "HorizonScene/Components/ParticleSystemComponent.h"
+#include "HorizonScene/Components/PropertyAnimatorComponent.h"
+#include "HorizonScene/Components/ReplicatedVarsComponent.h"
+#include "HorizonScene/Components/RigidBodyComponent.h"
+#include "HorizonScene/Components/RootMotionComponent.h"
+#include "HorizonScene/Components/RopeComponent.h"
+#include "HorizonScene/Components/SaveStateComponent.h"
+#include "HorizonScene/Components/ScriptComponent.h"
+#include "HorizonScene/Components/SequencePlayerComponent.h"
+#include "HorizonScene/Components/StreamingComponent.h"
+#include "HorizonScene/Components/TrailComponent.h"
 #include "HorizonScene/Components/TransformComponent.h"
 #include <algorithm>
 
@@ -15,17 +40,60 @@ void CookedStatic::syncContent(const void* manager, uint64_t epoch)
 	std::fill(state.begin(), state.end(), State::Pending);
 }
 
+void CookedStatic::onVerdictChanged(entt::registry& reg, entt::entity e)
+{
+	if (stale) return;   // a rebuild is already due: the rest of this frame's changes ride along
+	// The entity is a row, or a parent whose new blocker passes down to its children (rule 10).
+	// An entity with neither is not in the block and cannot take anything with it.
+	if (rowOf(e) >= 0) { stale = true; return; }
+	if (const auto* h = reg.try_get<HierarchyComponent>(e); h && !h->children.empty()) stale = true;
+}
+
+namespace
+{
+	// The components analyzeCookability reads (CookAnalysis.cpp ownBlockers, rules 1 to 12 and the
+	// author's mobility): one of them appearing or going on a row's entity changes the verdict.
+	// Keep in step with ownBlockers; test_cooked_static adds each of them to a cooked entity.
+	using VerdictComponents = entt::type_list<
+		ScriptComponent, AnimatorComponent, AnimationLayerComponent, AnimatorBlendComponent,
+		AnimatorStateMachineComponent, RootMotionComponent, IkComponent, PropertyAnimatorComponent,
+		SequencePlayerComponent, RigidBodyComponent, CharacterControllerComponent, NavAgentComponent,
+		MovementComponent, ParticleSystemComponent, NetworkComponent, ReplicatedVarsComponent,
+		SaveStateComponent, LODComponent, TrailComponent, RopeComponent, StreamingComponent,
+		InactiveComponent, MobilityComponent>;
+	// What a Ready row copies besides the world matrix and the ids it already holds.
+	using OutputComponents = entt::type_list<MeshComponent, MaterialComponent>;
+
+	template<auto Handler, typename... T>
+	void watch(entt::registry& reg, CookedStatic& c, entt::type_list<T...>)
+	{
+		(reg.on_construct<T>().template connect<Handler>(c), ...);
+		(reg.on_update<T>().template connect<Handler>(c), ...);
+		(reg.on_destroy<T>().template connect<Handler>(c), ...);
+	}
+}
+
 CookedStatic& cookedStaticOf(entt::registry& reg)
 {
 	if (CookedStatic* c = reg.ctx().find<CookedStatic>()) return *c;
-	return reg.ctx().emplace<CookedStatic>();
+	CookedStatic& c = reg.ctx().emplace<CookedStatic>();
+	// Not scoped connections: the block lives exactly as long as the registry (see TransformHierarchy's State).
+	watch<&CookedStatic::onVerdictChanged>(reg, c, VerdictComponents{});
+	watch<&CookedStatic::onOutputChanged>(reg, c, OutputComponents{});
+	return c;
+}
+
+void uncookEntity(entt::registry& reg, entt::entity e)
+{
+	if (CookedStatic* c = reg.ctx().find<CookedStatic>()) c->uncook(e);
 }
 
 void refreshCookedStatic(entt::registry& reg, uint64_t structureEpoch)
 {
 	CookedStatic& c = cookedStaticOf(reg);
-	if (c.structureEpoch == structureEpoch) return;
+	if (c.structureEpoch == structureEpoch && !c.stale) return;
 	c.structureEpoch = structureEpoch;
+	c.stale          = false;
 
 	const size_t slots = reg.storage<entt::entity>().size();
 	std::vector<uint8_t> cookable(slots, 0);

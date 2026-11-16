@@ -9,6 +9,7 @@
 #include "HcEditorUtil.h"                // HorizonCode class listing (Script slot)
 #include "TerrainTools.h"                // the Terrain section's Heightmap block
 #include <HorizonScene/HorizonScene.h>
+#include <HorizonScene/CookedStatic.h>   // an entity under edit leaves the cooked block
 #include <HorizonScene/EntityActive.h>   // the "Active" switch at the top of the panel
 #include <HorizonScene/Components/NetworkComponent.h> // not in HorizonScene.h: the Network section
 #include <HorizonScene/FoliagePaint.h>   // density-mask coverage + reset
@@ -875,6 +876,11 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 	auto& registry = world.registry();
 	const bool quiet = (collect != nullptr) || removeMatching;
 	bool structuralChange = false;
+
+	// The controls below write the entity's fields raw (mesh, material, shadows), which nothing
+	// can observe. An entity in front of the inspector is being edited: it leaves the cooked block
+	// (a no-op unless cooking is on) and is walked like any entity, this frame's edit included.
+	HE::uncookEntity(registry, entity);
 
 	// Which placed prefabs this entity belongs to — drawn as a section under
 	// the name and as a marker on every component header that has an override.

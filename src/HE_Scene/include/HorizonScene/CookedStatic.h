@@ -4,6 +4,7 @@
 #include <Math/AABB.h>
 #include <Types/UUID.h>
 #include <cstdint>
+#include <cstring>
 #include <vector>
 
 // ── The cooked block of a static mesh ────────────────────────────────────────
@@ -14,9 +15,10 @@
 //
 // A READ-ONLY MIRROR. The registry entity stays, with all its components, and
 // its handle (entt::entity) keeps working for every reader. Nothing writes the
-// block but the extract itself; a value written to the entity afterwards (a
-// moved transform, a swapped material) is NOT seen by the rows until the
-// entity is un-cooked (the next step) or the world's structure changes.
+// block but the extract itself, and the un-cook functions below, which only ever
+// send a row back to Pending: a value written to the entity afterwards (a moved
+// transform, a component added by a script) takes it out of the block before the
+// next extract reads it, so the walk shows the entity as it is now.
 // What is read live on purpose, never cached here: MeshComponent::visible and
 // the Active switch, because several call sites write the first one raw.
 //
@@ -42,6 +44,10 @@ namespace HE
 
 		// 0 = never built. HorizonWorld::structureEpoch() starts at 1.
 		uint64_t structureEpoch = 0;
+		// Set when a component that decides cookability (or what an ancestor passes on) was added to,
+		// changed on or removed from a row's entity or a parent: the next refresh rebuilds, like an epoch
+		// change would. Components come and go without the epoch moving (a script adds one).
+		bool     stale = false;
 		// What the Ready rows were resolved against; a different manager or epoch resets them.
 		const void* content      = nullptr;
 		uint64_t    contentEpoch = 0;
@@ -72,6 +78,42 @@ namespace HE
 		}
 		size_t size() const { return entity.size(); }
 
+		// ── Un-cooking: every way an entity leaves the block ───────────────────
+		// A row goes back to Pending: the next walk reads the entity as it is now (and may settle it
+		// again). All of these run on the thread that writes the world, before the extract, so the
+		// frame that follows a mutation already shows it.
+
+		// The entity's own row, for a write nothing else can see (the editor's inspector writes
+		// fields raw). No row: nothing to do.
+		void uncook(entt::entity e)
+		{
+			const int32_t r = rowOf(e);
+			if (r >= 0) state[static_cast<size_t>(r)] = State::Pending;
+		}
+
+		// A world matrix was just written for `e` (propagateTransforms, the one writer): a Ready row that
+		// holds another matrix is out of date. This is what catches every transform write at once, the
+		// engine API, Lua/Python/HorizonCode, the gizmo, collaboration and a parent that moved, because
+		// propagateTransforms notices a changed position/rotation/scale by value, whoever wrote it.
+		void worldWritten(entt::entity e, const glm::mat4& w)
+		{
+			const int32_t r = rowOf(e);
+			if (r >= 0 && state[static_cast<size_t>(r)] == State::Ready &&
+			    std::memcmp(&world[static_cast<size_t>(r)], &w, sizeof(glm::mat4)) != 0)
+				state[static_cast<size_t>(r)] = State::Pending;
+		}
+
+		// entt listeners (connected once, in cookedStaticOf). A component that changes the verdict
+		// (the CookBlocker ones, Mobility) arrived on / left / was replaced on `e` or on a parent of
+		// children: the block is rebuilt by the next refresh. Only the way OUT is watched: an entity that
+		// left the block (a blocker came) is not looked for again when the blocker goes, it is walked as any
+		// entity until the structure changes. Never stale, at worst not cooked; and a removal on every
+		// uncooked entity would otherwise cost a rebuild. Raw writes through a pointer fire nothing;
+		// those are covered by worldWritten and uncook.
+		void onVerdictChanged(entt::registry& reg, entt::entity e);
+		// A component the extract copies from (mesh, material) came, went or was replaced on a row.
+		void onOutputChanged(entt::registry&, entt::entity e) { uncook(e); }
+
 		// Every row Pending again, content bookkeeping updated. A no-op when the
 		// manager and its epoch are the ones the rows were resolved against.
 		void syncContent(const void* manager, uint64_t epoch);
@@ -81,8 +123,12 @@ namespace HE
 	// extractor that reads it). Created empty on first use.
 	CookedStatic& cookedStaticOf(entt::registry& reg);
 
+	// Un-cooks `e` if the registry has a block with a row for it. For a writer that changes an
+	// entity's fields raw and has no way to tell anyone (the editor's inspector).
+	void uncookEntity(entt::registry& reg, entt::entity e);
+
 	// Refills the block from analyzeCookability(reg) when `structureEpoch` is not the
-	// one it was built for: a row for every cookable entity with a TransformComponent
+	// one it was built for, or `stale` is set: a row for every cookable entity with a TransformComponent
 	// and a MeshComponent, all Pending. Costs nothing when the epoch matches.
 	void refreshCookedStatic(entt::registry& reg, uint64_t structureEpoch);
 }

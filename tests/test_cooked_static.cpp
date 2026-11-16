@@ -3,9 +3,36 @@
 #include <HorizonRendering/RenderWorld.h>
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/CookedStatic.h>
+#include <HorizonScene/EngineApi.h>
+#include <HorizonScene/ScriptApi.h>
+#include <HorizonScene/ScriptContext.h>
+#include <HorizonScene/TransformHierarchy.h>
+#include <HorizonCode/HorizonCodeRuntime.h>
+#include <HorizonScene/Components/AnimationLayerComponent.h>
+#include <HorizonScene/Components/AnimatorBlendComponent.h>
+#include <HorizonScene/Components/AnimatorComponent.h>
+#include <HorizonScene/Components/AnimatorStateMachineComponent.h>
+#include <HorizonScene/Components/CharacterControllerComponent.h>
+#include <HorizonScene/Components/InactiveComponent.h>
+#include <HorizonScene/Components/IkComponent.h>
+#include <HorizonScene/Components/LODComponent.h>
+#include <HorizonScene/Components/MaterialComponent.h>
 #include <HorizonScene/Components/MeshComponent.h>
 #include <HorizonScene/Components/MobilityComponent.h>
+#include <HorizonScene/Components/MovementComponent.h>
+#include <HorizonScene/Components/NavAgentComponent.h>
+#include <HorizonScene/Components/NetworkComponent.h>
+#include <HorizonScene/Components/ParticleSystemComponent.h>
+#include <HorizonScene/Components/PropertyAnimatorComponent.h>
+#include <HorizonScene/Components/ReplicatedVarsComponent.h>
+#include <HorizonScene/Components/RigidBodyComponent.h>
+#include <HorizonScene/Components/RootMotionComponent.h>
+#include <HorizonScene/Components/RopeComponent.h>
+#include <HorizonScene/Components/SaveStateComponent.h>
 #include <HorizonScene/Components/ScriptComponent.h>
+#include <HorizonScene/Components/SequencePlayerComponent.h>
+#include <HorizonScene/Components/StreamingComponent.h>
+#include <HorizonScene/Components/TrailComponent.h>
 #include <HorizonScene/Components/TransformComponent.h>
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
@@ -217,4 +244,344 @@ TEST_CASE("CookedStatic: a mesh that becomes resident later, and a content chang
 	CHECK(c.state[static_cast<size_t>(c.rowOf(e))] == HE::CookedStatic::State::Pending);
 	cook.extract(s.world, rw, 1.0f);
 	CHECK(c.state[static_cast<size_t>(c.rowOf(e))] == HE::CookedStatic::State::Ready);   // settled again, by that walk
+}
+
+// ── Step 4: every mutation takes the entity out of the block ─────────────────
+// A row is Ready (the extract copies it) before each mutation; the first extract after it must show
+// the new value, with no frame in between, and must agree with an extractor that has cooking off.
+
+namespace
+{
+	const HE::CookedStatic& block(Scene& s) { return HE::cookedStaticOf(s.world.registry()); }
+
+	HE::CookedStatic::State stateOf(Scene& s, Entity e)
+	{
+		const HE::CookedStatic& c = block(s);
+		const int32_t r = c.rowOf(e);
+		REQUIRE(r >= 0);
+		return c.state[static_cast<size_t>(r)];
+	}
+
+	// Two extracts: the first settles the rows, the second runs on them.
+	void warm(Scene& s, RenderExtractor& cook, RenderWorld& rw)
+	{
+		cook.extract(s.world, rw, 1.0f);
+		cook.extract(s.world, rw, 1.0f);
+		const HE::CookedStatic& c = block(s);
+		size_t ready = 0;
+		for (const auto st : c.state) ready += st == HE::CookedStatic::State::Ready;
+		REQUIRE(ready == c.size());
+		REQUIRE(ready > 5);
+	}
+
+	const RenderObject* objectOf(const RenderWorld& rw, Entity e)
+	{
+		for (const RenderObject& o : rw.objects)
+			if (o.entityId == static_cast<uint32_t>(e)) return &o;
+		return nullptr;
+	}
+
+	// The cooked extract right after a mutation: `e` sits where the hierarchy says, and the whole
+	// result equals the walk's.
+	void checkShowsNow(Scene& s, RenderExtractor& cook, RenderWorld& rw, Entity e)
+	{
+		RenderExtractor walk; setUp(walk, s.cm, false);
+		RenderWorld ref;
+		walk.extract(s.world, ref, 1.0f);
+		cook.extract(s.world, rw, 1.0f);
+		checkSameObjects(rw, ref);
+		const RenderObject* o = objectOf(rw, e);
+		REQUIRE(o != nullptr);
+		const glm::vec3 where = HE::worldPositionOf(s.world, e);
+		CHECK(o->transform[3].x == doctest::Approx(where.x));
+		CHECK(o->transform[3].y == doctest::Approx(where.y));
+		CHECK(o->transform[3].z == doctest::Approx(where.z));
+	}
+
+	HE::api::Ctx apiCtx(Scene& s) { HE::api::Ctx c; c.world = &s.world; c.content = &s.cm; return c; }
+}
+
+TEST_CASE("CookedStatic un-cook: a transform write, by whichever way, shows in the next extract")
+{
+	Scene s;
+	s.build(40);
+	RenderExtractor cook; setUp(cook, s.cm, true);
+	RenderWorld rw;
+	warm(s, cook, rw);
+	const Entity e     = s.statics[2];
+	const Entity other = s.statics[3];
+	HE::api::Ctx c = apiCtx(s);
+
+	SUBCASE("a raw write through the component pointer (inspector, gizmo, collaboration)")
+	{
+		s.world.registry().get<TransformComponent>(e).position = { 40.0f, 1.0f, 2.0f };
+	}
+	SUBCASE("ScriptApi, the one writer under Lua, Python and HorizonCode")
+	{
+		ScriptApi::setPosition(s.world, static_cast<uint32_t>(e), { 41.0f, 1.0f, 2.0f });
+	}
+	SUBCASE("HE::api::transform::setPosition")
+	{
+		HE::api::transform::setPosition(c, static_cast<uint32_t>(e), { 42.0f, 1.0f, 2.0f });
+	}
+	SUBCASE("HE::api::transform::setWorldPosition")
+	{
+		HE::api::transform::setWorldPosition(c, static_cast<uint32_t>(e), { 43.0f, 1.0f, 2.0f });
+	}
+	SUBCASE("HE::api::transform::setRotation")
+	{
+		HE::api::transform::setRotation(c, static_cast<uint32_t>(e), { 0.0f, 90.0f, 0.0f });
+	}
+	SUBCASE("HE::api::transform::setScale")
+	{
+		HE::api::transform::setScale(c, static_cast<uint32_t>(e), { 2.0f, 3.0f, 4.0f });
+	}
+	SUBCASE("the registry row a HorizonCode node calls")
+	{
+		const HE::api::ApiFn* fn = HE::api::find("transform.setPosition");
+		REQUIRE(fn != nullptr);
+		fn->invoke(c, { HorizonCode::Value::ofInt(static_cast<int>(e)), HorizonCode::Value::ofVec3({ 44.0f, 1.0f, 2.0f }) });
+	}
+	SUBCASE("a Lua script")
+	{
+		ScriptContext lua(s.world);
+		REQUIRE(lua.engine().exec("horizon.setPosition(" + std::to_string(static_cast<uint32_t>(e)) + ", 45, 1, 2)"));
+	}
+
+	CHECK(stateOf(s, other) == HE::CookedStatic::State::Ready);   // the rows of other entities are not touched
+	checkShowsNow(s, cook, rw, e);
+	CHECK(stateOf(s, e) == HE::CookedStatic::State::Ready);       // and the moved one is a row again, settled on the new value
+	CHECK(block(s).world[static_cast<size_t>(block(s).rowOf(e))][3].x ==
+	      doctest::Approx(HE::worldPositionOf(s.world, e).x));
+}
+
+TEST_CASE("CookedStatic un-cook: a write of the value the row already has leaves it cooked")
+{
+	Scene s;
+	s.build(30);
+	RenderExtractor cook; setUp(cook, s.cm, true);
+	RenderWorld rw;
+	warm(s, cook, rw);
+	const Entity e = s.statics[1];
+	auto& t = s.world.registry().get<TransformComponent>(e);
+	const glm::vec3 same = t.position;
+	t.position = { 9.0f, 9.0f, 9.0f };
+	t.position = same;   // moved and put back between two extracts
+	cook.extract(s.world, rw, 1.0f);
+	CHECK(stateOf(s, e) == HE::CookedStatic::State::Ready);
+}
+
+TEST_CASE("CookedStatic un-cook: moving a transform back and forth keeps the rows equal to the registry")
+{
+	Scene s;
+	s.build(40);
+	RenderExtractor cook; setUp(cook, s.cm, true);
+	RenderWorld rw;
+	warm(s, cook, rw);
+	const Entity a = s.statics[0];
+	const Entity b = s.statics[4];
+	const glm::vec3 homeA = s.world.registry().get<TransformComponent>(a).position;
+	const glm::vec3 homeB = s.world.registry().get<TransformComponent>(b).position;
+
+	for (int i = 0; i < 8; ++i)
+	{
+		const bool away = (i % 2) == 0;
+		s.world.registry().get<TransformComponent>(a).position = away ? glm::vec3(100.0f + i, 3.0f, 0.0f) : homeA;
+		// b through the API, on the odd rounds only: a is moved every frame, b only now and then
+		if (i % 3 == 0)
+		{
+			HE::api::Ctx c = apiCtx(s);
+			HE::api::transform::setPosition(c, static_cast<uint32_t>(b), away ? glm::vec3(-50.0f, 1.0f, 1.0f) : homeB);
+		}
+		checkShowsNow(s, cook, rw, a);
+		checkShowsNow(s, cook, rw, b);
+
+		// Every row agrees with the hierarchy, not only the two that moved.
+		const HE::CookedStatic& blk = block(s);
+		for (size_t r = 0; r < blk.size(); ++r)
+			if (blk.state[r] == HE::CookedStatic::State::Ready)
+			{
+				const glm::mat4 w = HE::worldMatrixOf(s.world, blk.entity[r]);
+				CHECK(std::memcmp(&blk.world[r], &w, sizeof(w)) == 0);
+			}
+		CHECK(stateOf(s, a) == HE::CookedStatic::State::Ready);
+	}
+}
+
+TEST_CASE("CookedStatic un-cook: moving a group moves the cooked meshes under it in the same frame")
+{
+	Scene s;
+	s.build(20);
+	const Entity group = s.world.createEntity("Group");
+	s.world.registry().emplace<TransformComponent>(group);
+	const Entity child = s.statics[1];
+	REQUIRE(s.world.reparentEntity(child, group));   // epoch moves: the block rebuilds under it
+
+	RenderExtractor cook; setUp(cook, s.cm, true);
+	RenderWorld rw;
+	warm(s, cook, rw);
+
+	for (int i = 0; i < 4; ++i)
+	{
+		s.world.registry().get<TransformComponent>(group).position = { 10.0f * (i % 2), 5.0f, 0.0f };   // back and forth
+		checkShowsNow(s, cook, rw, child);
+		CHECK(stateOf(s, child) == HE::CookedStatic::State::Ready);
+	}
+}
+
+TEST_CASE("CookedStatic un-cook: a parent change takes effect in the next extract")
+{
+	Scene s;
+	s.build(20);
+	const Entity group = s.world.createEntity("Group");
+	s.world.registry().emplace<TransformComponent>(group).position = { 30.0f, 0.0f, 0.0f };
+	const Entity e = s.statics[2];
+
+	RenderExtractor cook; setUp(cook, s.cm, true);
+	RenderWorld rw;
+	warm(s, cook, rw);
+
+	REQUIRE(s.world.reparentEntity(e, group));
+	checkShowsNow(s, cook, rw, e);
+	REQUIRE(s.world.reparentEntity(e, s.world.rootEntity()));
+	checkShowsNow(s, cook, rw, e);
+	REQUIRE(s.world.reparentEntity(e, group));
+	checkShowsNow(s, cook, rw, e);
+}
+
+namespace
+{
+	// Adds a default T to a cooked entity and reports whether the block noticed.
+	template<typename T>
+	void addAndCheck(const char* what, bool blocks)
+	{
+		INFO(what);
+		Scene s;
+		s.build(20);
+		RenderExtractor cook; setUp(cook, s.cm, true);
+		RenderWorld rw;
+		warm(s, cook, rw);
+		const Entity e = s.statics[1];
+		REQUIRE_FALSE(block(s).stale);
+		const uint64_t epoch = s.world.structureEpoch();
+
+		s.world.registry().emplace<T>(e);                       // what a script / the editor does: no epoch change
+		CHECK(s.world.structureEpoch() == epoch);
+		CHECK(block(s).stale);                                  // the block knows
+		cook.extract(s.world, rw, 1.0f);
+		CHECK_FALSE(block(s).stale);                            // and rebuilt before this extract
+		CHECK((block(s).rowOf(e) < 0) == blocks);
+		RenderExtractor walk; setUp(walk, s.cm, false);
+		RenderWorld ref;
+		walk.extract(s.world, ref, 1.0f);
+		checkSameObjects(rw, ref);                              // an uncooked entity renders as any entity does
+
+		// Taking it off again: an entity that has left the block stays out until the structure changes
+		// (always correct, never stale); a row that stayed is looked at again.
+		s.world.registry().remove<T>(e);
+		CHECK(block(s).stale == !blocks);
+		cook.extract(s.world, rw, 1.0f);
+		CHECK((block(s).rowOf(e) >= 0) == !blocks);
+		walk.extract(s.world, ref, 1.0f);
+		checkSameObjects(rw, ref);
+	}
+}
+
+TEST_CASE("CookedStatic un-cook: a component added to a live cooked entity un-cooks it")
+{
+	addAndCheck<ScriptComponent>("Script", true);
+	addAndCheck<AnimatorComponent>("Animator", true);
+	addAndCheck<AnimationLayerComponent>("AnimationLayer", true);
+	addAndCheck<AnimatorBlendComponent>("AnimatorBlend", true);
+	addAndCheck<AnimatorStateMachineComponent>("AnimatorStateMachine", true);
+	addAndCheck<RootMotionComponent>("RootMotion", true);
+	addAndCheck<IkComponent>("Ik", true);
+	addAndCheck<PropertyAnimatorComponent>("PropertyAnimator", true);
+	addAndCheck<SequencePlayerComponent>("SequencePlayer", true);
+	addAndCheck<CharacterControllerComponent>("CharacterController", true);
+	addAndCheck<NavAgentComponent>("NavAgent", true);
+	addAndCheck<MovementComponent>("Movement", true);
+	addAndCheck<ParticleSystemComponent>("ParticleSystem", true);
+	addAndCheck<SaveStateComponent>("SaveState", true);
+	addAndCheck<TrailComponent>("Trail", true);
+	addAndCheck<RopeComponent>("Rope", true);
+	addAndCheck<InactiveComponent>("Inactive", true);
+	addAndCheck<MobilityComponent>("Mobility (default Movable)", true);
+	addAndCheck<NetworkComponent>("Network (replicates by default)", true);
+	// Present but harmless by default (a static body, no LOD levels, no declared vars, resident
+	// streaming): the block still looks again, and the verdict keeps the row.
+	addAndCheck<RigidBodyComponent>("RigidBody (Static)", false);
+	addAndCheck<LODComponent>("LOD (no levels)", false);
+	addAndCheck<ReplicatedVarsComponent>("ReplicatedVars (empty)", false);
+	addAndCheck<StreamingComponent>("Streaming (resident)", false);
+}
+
+TEST_CASE("CookedStatic un-cook: a blocker on a parent takes the cooked children with it")
+{
+	Scene s;
+	s.build(20);
+	const Entity group = s.world.createEntity("Group");
+	s.world.registry().emplace<TransformComponent>(group);
+	const Entity child = s.statics[1];
+	REQUIRE(s.world.reparentEntity(child, group));
+
+	RenderExtractor cook; setUp(cook, s.cm, true);
+	RenderWorld rw;
+	warm(s, cook, rw);
+	REQUIRE(block(s).rowOf(child) >= 0);
+
+	s.world.registry().emplace<ScriptComponent>(group);          // the parent now has a script: it may move
+	cook.extract(s.world, rw, 1.0f);
+	CHECK(block(s).rowOf(child) < 0);
+	s.world.registry().get<TransformComponent>(group).position = { 0.0f, 7.0f, 0.0f };
+	checkShowsNow(s, cook, rw, child);
+}
+
+TEST_CASE("CookedStatic un-cook: a material or mesh swap on a cooked entity shows in the next extract")
+{
+	Scene s;
+	s.build(20);
+	RenderExtractor cook; setUp(cook, s.cm, true);
+	RenderWorld rw;
+	warm(s, cook, rw);
+	const Entity e = s.statics[2];
+	const HE::UUID mat = HE::UUID::generate();
+
+	MaterialComponent mc;
+	mc.materialAssetId = mat;
+	s.world.registry().emplace_or_replace<MaterialComponent>(e, mc);   // added: a signal, no raw write
+	CHECK(stateOf(s, e) == HE::CookedStatic::State::Pending);
+	checkShowsNow(s, cook, rw, e);
+	CHECK(objectOf(rw, e)->materialAssetId == mat);
+
+	const HE::UUID mat2 = HE::UUID::generate();
+	mc.materialAssetId = mat2;
+	s.world.registry().emplace_or_replace<MaterialComponent>(e, mc);   // replaced: on_update
+	checkShowsNow(s, cook, rw, e);
+	CHECK(objectOf(rw, e)->materialAssetId == mat2);
+
+	MeshComponent m = s.world.registry().get<MeshComponent>(e);
+	m.castsShadow = !m.castsShadow;
+	s.world.registry().emplace_or_replace<MeshComponent>(e, m);
+	checkShowsNow(s, cook, rw, e);
+}
+
+TEST_CASE("CookedStatic un-cook: uncookEntity covers a raw field write nothing can observe")
+{
+	Scene s;
+	s.build(20);
+	RenderExtractor cook; setUp(cook, s.cm, true);
+	RenderWorld rw;
+	warm(s, cook, rw);
+	const Entity e = s.statics[2];
+	const bool shadow = s.world.registry().get<MeshComponent>(e).castsShadow;
+
+	s.world.registry().get<MeshComponent>(e).castsShadow = !shadow;   // an inspector checkbox
+	cook.extract(s.world, rw, 1.0f);
+	CHECK(objectOf(rw, e)->castsShadow == shadow);                    // positive control: a raw write alone is not seen
+
+	HE::uncookEntity(s.world.registry(), e);                          // what the inspector does for the entity it shows
+	checkShowsNow(s, cook, rw, e);
+	CHECK(objectOf(rw, e)->castsShadow == !shadow);
+	HE::uncookEntity(s.world.registry(), entt::null);                 // a null or unknown entity is fine
 }
