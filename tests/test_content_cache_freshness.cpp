@@ -108,3 +108,44 @@ TEST_CASE("CacheFreshness: a remembered hash does not outlive a replaced file")
 	CHECK_FALSE(fs::exists(cache / "x.hasset"));
 	he_test::removeAllQuiet(cache);
 }
+
+TEST_CASE("CacheFreshness: fnv1a64File agrees with the manifest's own hash of the same bytes")
+{
+	const fs::path cache = fs::temp_directory_path() / "he_cache_fresh_fnv";
+	he_test::removeAllQuiet(cache);
+
+	const auto bytes = pattern(5000, 7);
+	writeFile(cache / "f.hasset", bytes);
+
+	std::uint64_t h = 0;
+	REQUIRE(HE::Cs::fnv1a64File(cache / "f.hasset", h));
+	CHECK(h == Hpak::fnv1a64Bytes(bytes.data(), bytes.size()));
+	CHECK_FALSE(HE::Cs::fnv1a64File(cache / "missing.hasset", h));
+	he_test::removeAllQuiet(cache);
+}
+
+TEST_CASE("CacheFreshness: a download records the hash of what actually landed, not what the manifest promised")
+{
+	// Mirrors the one real caller, EngineContentSync::drainQueue after a "successful" download: it
+	// hashes the bytes that landed on disk (fnv1a64File) and records THAT, never a hash taken on
+	// faith from the manifest entry. A corrupted/truncated transfer, or a manifest that is stale
+	// relative to what the server actually served, must not get locked in as "fresh" forever.
+	const fs::path cache = fs::temp_directory_path() / "he_cache_fresh_landed";
+	he_test::removeAllQuiet(cache);
+
+	const auto correct = pattern(3000, 11);
+	auto corrupted = correct; corrupted[100] ^= 0xFF;   // what actually landed, not what was promised
+	writeFile(cache / "z.hasset", corrupted);
+
+	std::uint64_t landedHash = 0;
+	REQUIRE(HE::Cs::fnv1a64File(cache / "z.hasset", landedHash));
+	HE::Cs::recordCachedFile(cache, "z.hasset", landedHash);
+
+	HE::Cs::EngineContentManifest m;
+	m.entries.push_back(entryFor("z.hasset", correct));   // what the server says this name should be
+	// Recording the promised hash instead would have made this record match the manifest and kept
+	// the corrupted bytes forever; recording the landed hash catches the mismatch here.
+	CHECK(HE::Cs::discardStaleCachedFiles(cache, m) == 1);
+	CHECK_FALSE(fs::exists(cache / "z.hasset"));
+	he_test::removeAllQuiet(cache);
+}
