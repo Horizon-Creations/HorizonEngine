@@ -15504,9 +15504,15 @@ bool D3D12Renderer::RenderSceneImage(const EditorCameraOverride& camera, uint32_
             // A new picture of this page: an encode of the old one is stale, a cold page is hot again.
             ++p.rvtSlotVer[slot];
             p.rvtSlotPainted[slot] = p.rvtRealFrames;
-            if (p.rvtSlotCold[slot]) { p.rvtSlotCold[slot] = 0; ++p.rvtStateVer; }
         }
         hotSlice = rvtHotFor12(p, slot);
+        // Only clear the cold flag once a hot slice actually backs the slot — if the pool is full,
+        // the slot's BC7 data in rvtCold[] is still the last-known-good page and must stay readable.
+        if (camera.rvtLayer == 0 && hotSlice != 0xFFFFFFFFu && p.rvtSlotCold[slot])
+        {
+            p.rvtSlotCold[slot] = 0;
+            ++p.rvtStateVer;
+        }
     }
     // A kept page layer is not waited for: the next one rotates to the next frame slot (see rvtPending).
     // HE_RVT_PIPELINE=0 waits after every layer again (the A/B guard and the reference of the cross-check).
