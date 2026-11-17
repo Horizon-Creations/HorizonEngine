@@ -319,6 +319,68 @@ void windWaterParams(const MaterialAsset& ma, const MaterialComponent* mc,
 		return HE::meshSectionsOf(*m0);
 	}
 
+	// The mesh's object-space box, INVALID (= never culled) for a mesh registered without one. Require a
+	// real, non-degenerate box: a mesh registered without a computed AABB leaves boundsMin==boundsMax=={0,0,0}
+	// — "valid" but a zero-volume point, and culling against it drops the object the moment its pivot exits
+	// the view.
+	HE::AABB localBoundsOf(const StaticMeshAsset& m)
+	{
+		HE::AABB b;
+		b.min = { m.boundsMin[0], m.boundsMin[1], m.boundsMin[2] };
+		b.max = { m.boundsMax[0], m.boundsMax[1], m.boundsMax[2] };
+		return (b.isValid() && b.max != b.min) ? b : HE::AABB{};
+	}
+
+	// Settles a LOD row of the cooked block (CookedStatic::lodFirst): what the walk builds for EACH level,
+	// resolved once, so the fast path indexes the table by LODSystem's live choice. Serial: resolving a
+	// slot may load an asset, which moves every mesh pointer, so each level is looked up fresh.
+	//   Ready   every level is a resident one-section mesh that draws whole (the walk gives each an empty
+	//           section list), the table holds the level's mesh, whole-draw material and world bounds.
+	//   Pending a level is not resident yet: the walk draws it as it is and the next frame tries again.
+	//   Walk    never fast: a level with several sections or no mesh id, a refined / stitched copy hooked in.
+	// The caller has ruled out per-entity params, terrain chunks and the engine water.
+	HE::CookedStatic::State settleLodRow(entt::registry& reg, HE::CookedStatic& c, int32_t row, entt::entity e,
+	                                     const LODComponent& lod, HE::UUID drawn, const MaterialComponent* matComp,
+	                                     const glm::mat4& world, ContentManager& cm,
+	                                     std::unordered_set<std::string>& missing)
+	{
+		using State = HE::CookedStatic::State;
+		const size_t n = lod.levels.size();
+		if (n > 255 || lod.refinedMeshId != HE::UUID{} || lod.stitchedMeshId != HE::UUID{}) return State::Walk;
+		// The level table slot, once per row: a retry (a level not resident yet) or a content change
+		// rewrites it in place.
+		if (c.lodFirst[row] < 0 || c.lodCount[row] != n)
+		{
+			c.lodFirst[row] = static_cast<int32_t>(c.levelMeshId.size());
+			c.lodCount[row] = static_cast<uint8_t>(n);
+			c.levelMeshId.resize(c.levelMeshId.size() + n);
+			c.levelMaterialId.resize(c.levelMaterialId.size() + n);
+			c.levelBounds.resize(c.levelBounds.size() + n);
+		}
+		const size_t first = static_cast<size_t>(c.lodFirst[row]);
+		bool drawnIsLevel = false;
+		for (size_t i = 0; i < n; ++i)
+		{
+			const HE::UUID id = lod.levels[i].meshId;
+			if (id == HE::UUID{}) return State::Walk;
+			const StaticMeshAsset* m = cm.getStaticMesh(id);
+			if (!m) return State::Pending;
+			if (m->sections.size() > 1) return State::Walk;
+			const HE::AABB local = localBoundsOf(*m);
+			std::vector<MeshSection> table = m->sections;   // `m` is dead once the slots resolve
+			HE::UUID whole;
+			if (!resolveEntitySlots(std::move(table), lod0SectionsOf(reg, e, id, cm), matComp, cm, missing, whole).empty())
+				return State::Walk;
+			c.levelMeshId[first + i]     = id;
+			c.levelMaterialId[first + i] = whole;
+			c.levelBounds[first + i]     = local.isValid() ? local.transformed(world) : HE::AABB{};
+			drawnIsLevel |= id == drawn;
+		}
+		// The entity draws a mesh that is none of its levels (LODSystem has not picked one yet, or something else
+		// owns the mesh id): the fast path would never match it, so the row is walked rather than re-settled each frame.
+		return drawnIsLevel ? State::Ready : State::Walk;
+	}
+
 	// ── Renderables ─────────────────────────────────────────────────────────
 	// Two-phase build: sequential ECS read (no EnTT concurrency guarantees), then
 	// parallel AABB/transform computation (pure math, no registry access).
@@ -453,6 +515,7 @@ void windWaterParams(const MaterialAsset& ma, const MaterialComponent* mc,
 		{
 			std::vector<uint32_t> keep;          // indices into `ents` of the entities that draw
 			std::vector<uint32_t> needSections;  // out.objects slots of the multi-section / foreign-LOD0 ones
+			std::vector<uint32_t> settleLod;     // out.objects slots of the cooked LOD rows to settle (serial)
 			size_t                first = 0;     // slot of keep[0]
 		};
 		std::vector<Block> blocks(nBlocks);
@@ -490,15 +553,41 @@ void windWaterParams(const MaterialAsset& ma, const MaterialComponent* mc,
 				const int32_t row = cooked ? cooked->rowOf(e) : -1;
 				if (row >= 0 && cooked->state[row] == HE::CookedStatic::State::Ready)
 				{
-					obj.meshAssetId     = cooked->meshId[row];
-					obj.materialAssetId = cooked->materialId[row];
-					obj.transform       = cooked->world[row];
-					obj.worldBounds     = cooked->worldBounds[row];
-					obj.entityId        = static_cast<uint32_t>(e);
-					obj.lod             = cooked->lod[row];
-					obj.castsShadow     = cooked->castsShadow[row] != 0;
-					obj.receivesShadow  = cooked->receivesShadow[row] != 0;
-					continue;
+					const HE::UUID* meshId = &cooked->meshId[row];
+					const HE::UUID* matId  = &cooked->materialId[row];
+					const HE::AABB* bounds = &cooked->worldBounds[row];
+					bool            hit    = true;
+					if (const int32_t first = cooked->lodFirst[row]; first >= 0)
+					{
+						// A LOD row: LODSystem already picked the level (lod.current, with its hysteresis) and
+						// wrote that mesh into the entity, so the row only looks up what that level builds.
+						// A different mesh than the level's (a swap nothing reported) is walked and re-settled.
+						hit = false;
+						if (lodPool && lodPool->contains(e))
+						{
+							const uint8_t cur = lodPool->get(e).current;
+							const size_t  at  = static_cast<size_t>(first) + cur;
+							if (cur < cooked->lodCount[row] && meshView.get<MeshComponent>(e).meshAssetId == cooked->levelMeshId[at])
+							{
+								meshId = &cooked->levelMeshId[at];
+								matId  = &cooked->levelMaterialId[at];
+								bounds = &cooked->levelBounds[at];
+								hit    = true;
+							}
+						}
+					}
+					if (hit)
+					{
+						obj.meshAssetId     = *meshId;
+						obj.materialAssetId = *matId;
+						obj.transform       = cooked->world[row];
+						obj.worldBounds     = *bounds;
+						obj.entityId        = static_cast<uint32_t>(e);
+						obj.lod             = cooked->lod[row];
+						obj.castsShadow     = cooked->castsShadow[row] != 0;
+						obj.receivesShadow  = cooked->receivesShadow[row] != 0;
+						continue;
+					}
 				}
 				auto [t, mesh] = meshView.get<TransformComponent, MeshComponent>(e);
 				obj.meshAssetId    = mesh.meshAssetId;
@@ -570,13 +659,7 @@ void windWaterParams(const MaterialAsset& ma, const MaterialComponent* mc,
 				else if (contentManager)
 					if (const StaticMeshAsset* m = contentManager->getStaticMesh(mesh.meshAssetId))
 					{
-						HE::AABB b;
-						b.min = { m->boundsMin[0], m->boundsMin[1], m->boundsMin[2] };
-						b.max = { m->boundsMax[0], m->boundsMax[1], m->boundsMax[2] };
-						// Require a real, non-degenerate box. A mesh registered without a computed
-						// AABB leaves boundsMin==boundsMax=={0,0,0} — "valid" but a zero-volume point,
-						// and culling against it drops the object the moment its pivot exits the view.
-						if (b.isValid() && b.max != b.min) local = b;
+						local = localBoundsOf(*m);
 						if (m->sections.size() <= 1) { memoSlot.id = mesh.meshAssetId; memoSlot.bounds = local; memoSlot.valid = true; }
 						// A one-section mesh with no other LOD0 to map its slot through needs no table:
 						// resolveEntitySlots answers it with an empty list and the whole draw's material
@@ -598,12 +681,19 @@ void windWaterParams(const MaterialAsset& ma, const MaterialComponent* mc,
 				// one-section result with nothing that varies per frame is kept; the rest is walked for good:
 				// own params, the engine water's wind-driven ones, and terrain chunks (landscapeIndex points
 				// into this frame's out.landscapes).
-				if (row >= 0 && kind != Kind::Unresolved)
+				// A LOD row is settled for all its levels at once in phase 3, whatever level this frame drew.
+				const bool lodRow = lodComp && lodComp->levels.size() > 1;
+				if (row >= 0 && (kind != Kind::Unresolved || lodRow))
 				{
-					const bool fixed = kind == Kind::OneSection && !obj.terrainChunk
-					                && !(matComp && !matComp->paramOverrides.empty())
-					                && matId != HE::kEngineWaterMaterialId;
-					cooked->state[row] = fixed ? HE::CookedStatic::State::Ready : HE::CookedStatic::State::Walk;
+					const bool steady = !obj.terrainChunk && !(matComp && !matComp->paramOverrides.empty())
+					                 && matId != HE::kEngineWaterMaterialId;
+					const bool fixed = kind == Kind::OneSection && steady && !lodRow;
+					if (lodRow && steady && contentManager)
+					{
+						cooked->state[row] = HE::CookedStatic::State::Pending;
+						blk.settleLod.push_back(static_cast<uint32_t>(slot));
+					}
+					else cooked->state[row] = fixed ? HE::CookedStatic::State::Ready : HE::CookedStatic::State::Walk;
 					if (fixed)
 					{
 						cooked->meshId[row]         = obj.meshAssetId;
@@ -638,6 +728,27 @@ void windWaterParams(const MaterialAsset& ma, const MaterialComponent* mc,
 				// The param block was merged for the whole-mesh material; a whole draw that a slot
 				// override redirected elsewhere draws that material plain.
 				if (matComp && obj.materialAssetId != matComp->materialAssetId) obj.paramOverride.clear();
+			}
+
+		// The cooked LOD rows, after their objects are final: every level's object is resolved and kept, the
+		// row goes Ready (or Walk / stays Pending, see settleLodRow). Serial, in slot order.
+		for (const Block& blk : blocks)
+			for (const uint32_t slot : blk.settleLod)
+			{
+				const RenderObject&      obj     = out.objects[slot];
+				const entt::entity       e       = static_cast<entt::entity>(obj.entityId);
+				const int32_t            row     = cooked->rowOf(e);
+				const MaterialComponent* matComp = (matPool && matPool->contains(e)) ? &matPool->get(e) : nullptr;
+				const auto state = settleLodRow(reg, *cooked, row, e, lodPool->get(e), obj.meshAssetId, matComp, obj.transform,
+				                                *contentManager, sectionMaterialMissing);
+				cooked->state[row] = state;
+				if (state == HE::CookedStatic::State::Ready)
+				{
+					cooked->world[row]          = obj.transform;
+					cooked->lod[row]            = obj.lod;
+					cooked->castsShadow[row]    = obj.castsShadow ? 1 : 0;
+					cooked->receivesShadow[row] = obj.receivesShadow ? 1 : 0;
+				}
 			}
 	}
 

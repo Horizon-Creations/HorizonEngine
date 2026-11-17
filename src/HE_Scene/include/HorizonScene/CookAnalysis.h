@@ -33,7 +33,7 @@ namespace HE
 		Locomotion      = 1 << 4,   // 5  CharacterController, NavAgent, Movement, ParticleSystem
 		Replication     = 1 << 5,   // 6  NetworkComponent::replicates, declared replicated vars
 		SaveState       = 1 << 6,   // 7  SaveStateComponent
-		Lod             = 1 << 7,   // 8  LOD with more than one level, or a refined mesh
+		Lod             = 1 << 7,   // 8  LOD with a refined mesh (several levels cook: CookedStatic holds each)
 		Geometry        = 1 << 8,   // 9  Trail, Rope
 		Ancestor        = 1 << 9,   // 10 an ancestor has a blocker of its own
 		Switchable      = 1 << 11,  // 12 InactiveComponent, or a hidden mesh

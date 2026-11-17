@@ -4,6 +4,7 @@
 #include <HorizonScene/CellSplit.h>
 #include <HorizonScene/CellStreamer.h>
 #include <HorizonScene/HorizonWorld.h>
+#include <HorizonScene/LODSystem.h>
 #include <HorizonScene/CookedStatic.h>
 #include <HorizonScene/EngineApi.h>
 #include <HorizonScene/SceneSerializer.h>
@@ -801,7 +802,13 @@ TEST_CASE("CookedStatic cells: a streamed cell is cooked, leaves with its cell a
 	const HE::CookedStatic& c = HE::cookedStaticOf(game.registry());
 
 	// Loaded: the cell's meshes, the Auto-marked ones among them, are rows and draw as the walk does.
-	streamUntil(streamer, game, 5.0, [&] { return streamer.isLoaded(0, 0); });
+	// Until the neighbouring cells in range are in as well (they stream on the pool: counting rows while
+	// one is still on its way made this test race).
+	const auto streamIdle = [&] {
+		const HE::CellStreamer::Stats& st = streamer.stats();
+		return streamer.isLoaded(0, 0) && st.inFlight + st.ready + st.building == 0;
+	};
+	streamUntil(streamer, game, 5.0, streamIdle);
 	REQUIRE(streamer.isLoaded(0, 0));
 	checkCookedEqualsWalk(game, ed.cm, cook, rw);
 	const std::vector<Entity> marked = autoStreamed(game);
@@ -821,7 +828,7 @@ TEST_CASE("CookedStatic cells: a streamed cell is cooked, leaves with its cell a
 	CHECK(c.analysedBuilds > analysedLoaded);   // a rebuild followed the unload
 
 	// Loaded again: new handles, the same ids, the Auto-marked meshes cooked again.
-	streamUntil(streamer, game, 5.0, [&] { return streamer.isLoaded(0, 0); });
+	streamUntil(streamer, game, 5.0, streamIdle);
 	REQUIRE(streamer.isLoaded(0, 0));
 	checkCookedEqualsWalk(game, ed.cm, cook, rw);
 	const std::vector<Entity> markedAgain = autoStreamed(game);
@@ -833,4 +840,156 @@ TEST_CASE("CookedStatic cells: a streamed cell is cooked, leaves with its cell a
 	}
 	CHECK(c.size() == rowsLoaded);
 	streamer.clear(game);
+}
+
+// ── LOD rows (survey rule 8) ─────────────────────────────────────────────────
+// A mesh with several levels is cooked: the row holds what the walk builds for EACH level and the fast path
+// indexes it by LODSystem's live choice. Every frame is compared with an extractor that has cooking off,
+// while the camera sweeps across the level boundaries, hysteresis band included.
+
+namespace
+{
+	// A box mesh of `half` extent, optionally with two sections (a multi-section level is never fast).
+	HE::UUID registerBox(Scene& s, float half, bool twoSections = false)
+	{
+		StaticMeshAsset mesh; mesh.type = HE::AssetType::StaticMesh; mesh.name = "lodbox";
+		mesh.indices = { 0, 1, 2, 0, 2, 3 };
+		mesh.boundsMin[0] = mesh.boundsMin[1] = mesh.boundsMin[2] = -half;
+		mesh.boundsMax[0] = mesh.boundsMax[1] = mesh.boundsMax[2] =  half;
+		if (twoSections)
+		{
+			MeshSection a; a.indexOffset = 0; a.indexCount = 3;
+			MeshSection b; b.indexOffset = 3; b.indexCount = 3;
+			mesh.sections = { a, b };
+		}
+		return s.cm.registerStaticMesh(mesh);
+	}
+
+	struct LodScene
+	{
+		Scene              s;
+		HE::UUID           level[3];
+		std::vector<Entity> ents;
+
+		explicit LodScene(int count, bool secondLevelMultiSection = false)
+		{
+			level[0] = registerBox(s, 1.0f);
+			level[1] = registerBox(s, 2.0f, secondLevelMultiSection);
+			level[2] = registerBox(s, 4.0f);
+			for (int i = 0; i < count; ++i)
+			{
+				const Entity e = s.addMesh("L", { 3.0f * static_cast<float>(i), 0.5f, 1.0f });
+				LODComponent lod;
+				lod.levels = { { level[0], 15.0f }, { level[1], 40.0f }, { level[2], 1e9f } };
+				s.world.registry().emplace<LODComponent>(e, lod);
+				s.world.registry().get<MeshComponent>(e).meshAssetId = level[0];
+				ents.push_back(e);
+			}
+		}
+	};
+
+	// One frame of a sweep: the tick's LOD pick for `cam`, then both extractors.
+	void lodFrame(LodScene& l, RenderExtractor& walk, RenderExtractor& cook, const glm::vec3& cam,
+	              RenderWorld& rwWalk, RenderWorld& rwCook)
+	{
+		LODSystem::update(l.s.world, cam);
+		walk.extract(l.s.world, rwWalk, 1.0f);
+		cook.extract(l.s.world, rwCook, 1.0f);
+		checkSameObjects(rwCook, rwWalk);
+	}
+
+	size_t readyRows(Scene& s)
+	{
+		size_t ready = 0;
+		for (const auto st : block(s).state) ready += st == HE::CookedStatic::State::Ready;
+		return ready;
+	}
+}
+
+TEST_CASE("CookedStatic LOD: a cooked LOD row draws the level LODSystem picked, to the bit, across a camera sweep")
+{
+	LodScene l(12);
+	RenderExtractor walk; setUp(walk, l.s.cm, false);
+	RenderExtractor cook; setUp(cook, l.s.cm, true);
+	RenderWorld rwWalk, rwCook;
+
+	lodFrame(l, walk, cook, { 0.0f, 0.5f, 0.0f }, rwWalk, rwCook);   // settles the rows
+	lodFrame(l, walk, cook, { 0.0f, 0.5f, 0.0f }, rwWalk, rwCook);   // runs on them
+	REQUIRE(block(l.s).size() == 12);
+	CHECK(readyRows(l.s) == 12);   // positive control: the sweep below is served from the rows
+	for (const Entity e : l.ents) CHECK(block(l.s).lodFirst[static_cast<size_t>(block(l.s).rowOf(e))] >= 0);
+
+	// Out and back through every boundary (15 and 40, and the 5 % band under them), in steps small
+	// enough to land inside the band.
+	bool seen[3] = { false, false, false };
+	for (int pass = 0; pass < 2; ++pass)
+		for (int i = 0; i <= 90; ++i)
+		{
+			const float x = pass == 0 ? 1.7f * static_cast<float>(i) - 40.0f : 113.0f - 1.7f * static_cast<float>(i);
+			lodFrame(l, walk, cook, { x, 0.5f, 0.0f }, rwWalk, rwCook);
+			for (const RenderObject& o : rwCook.objects)
+				for (int k = 0; k < 3; ++k) seen[k] |= o.meshAssetId == l.level[k];
+		}
+	CHECK(seen[0]);
+	CHECK(seen[1]);
+	CHECK(seen[2]);
+	CHECK(readyRows(l.s) == 12);   // no frame of the sweep sent a row back to the walk
+}
+
+TEST_CASE("CookedStatic LOD: a level that is not resident keeps the row pending, a multi-section level walks it")
+{
+	SUBCASE("a level that is not resident yet")
+	{
+		LodScene l(6);
+		l.s.world.registry().get<LODComponent>(l.ents[2]).levels[2].meshId = HE::UUID::generate();
+		RenderExtractor walk; setUp(walk, l.s.cm, false);
+		RenderExtractor cook; setUp(cook, l.s.cm, true);
+		RenderWorld rwWalk, rwCook;
+		for (int i = 0; i < 3; ++i) lodFrame(l, walk, cook, { 0.0f, 0.5f, 0.0f }, rwWalk, rwCook);
+		CHECK(block(l.s).state[static_cast<size_t>(block(l.s).rowOf(l.ents[2]))] == HE::CookedStatic::State::Pending);
+		CHECK(readyRows(l.s) == 5);
+	}
+	SUBCASE("a level with several sections")
+	{
+		LodScene l(6, true);
+		RenderExtractor walk; setUp(walk, l.s.cm, false);
+		RenderExtractor cook; setUp(cook, l.s.cm, true);
+		RenderWorld rwWalk, rwCook;
+		for (int i = 0; i < 3; ++i) lodFrame(l, walk, cook, { 0.0f, 0.5f, 0.0f }, rwWalk, rwCook);
+		CHECK(readyRows(l.s) == 0);
+		for (const auto st : block(l.s).state) CHECK(st == HE::CookedStatic::State::Walk);
+		lodFrame(l, walk, cook, { 30.0f, 0.5f, 0.0f }, rwWalk, rwCook);   // the multi-section level is drawn
+	}
+}
+
+TEST_CASE("CookedStatic LOD: a refined mesh is not cooked, a moved LOD entity and a swapped mesh show at once")
+{
+	LodScene l(8);
+	RenderExtractor walk; setUp(walk, l.s.cm, false);
+	RenderExtractor cook; setUp(cook, l.s.cm, true);
+	RenderWorld rwWalk, rwCook;
+
+	const Entity refined = l.ents[0];
+	l.s.world.registry().get<LODComponent>(refined).refinedMeshId = l.level[2];
+	lodFrame(l, walk, cook, { 0.0f, 0.5f, 0.0f }, rwWalk, rwCook);
+	lodFrame(l, walk, cook, { 0.0f, 0.5f, 0.0f }, rwWalk, rwCook);
+	CHECK(block(l.s).rowOf(refined) < 0);   // rule 8: the terrain's refined mesh comes and goes at runtime
+	CHECK(readyRows(l.s) == 7);
+
+	const Entity moved = l.ents[3];
+	l.s.world.registry().get<TransformComponent>(moved).position = { 90.0f, 0.5f, 1.0f };   // out to the far level
+	lodFrame(l, walk, cook, { 0.0f, 0.5f, 0.0f }, rwWalk, rwCook);
+	CHECK(objectOf(rwCook, moved)->meshAssetId == l.level[2]);
+	lodFrame(l, walk, cook, { 0.0f, 0.5f, 0.0f }, rwWalk, rwCook);
+
+	// A mesh id that none of the levels holds (written raw, nothing reported): the guard sends the row to the
+	// walk, which draws what the entity says.
+	const Entity swapped = l.ents[5];
+	l.s.world.registry().get<MeshComponent>(swapped).meshAssetId = l.s.meshId;
+	walk.extract(l.s.world, rwWalk, 1.0f);
+	cook.extract(l.s.world, rwCook, 1.0f);
+	checkSameObjects(rwCook, rwWalk);
+	CHECK(objectOf(rwCook, swapped)->meshAssetId == l.s.meshId);
+	cook.extract(l.s.world, rwCook, 1.0f);
+	CHECK(block(l.s).state[static_cast<size_t>(block(l.s).rowOf(swapped))] == HE::CookedStatic::State::Walk);
 }

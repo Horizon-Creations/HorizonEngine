@@ -137,6 +137,11 @@ void refreshCookedStatic(entt::registry& reg, uint64_t structureEpoch)
 	c.lod.assign(rows, 0);
 	c.castsShadow.assign(rows, 1);
 	c.receivesShadow.assign(rows, 1);
+	c.lodFirst.assign(rows, -1);
+	c.lodCount.assign(rows, 0);
+	c.levelMeshId.clear();
+	c.levelMaterialId.clear();
+	c.levelBounds.clear();
 }
 
 void seedCookedStatic(entt::registry& reg, std::vector<entt::entity>&& cookable, uint64_t structureEpoch)

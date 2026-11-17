@@ -81,6 +81,20 @@ namespace HE
 		std::vector<uint8_t>      castsShadow;
 		std::vector<uint8_t>      receivesShadow;
 
+		// LOD rows (survey rule 8): a mesh with several LOD levels draws another mesh by the camera's
+		// distance. LODSystem stays the ONE place that picks the level (it holds the hysteresis in
+		// LODComponent::current and writes the entity's MeshComponent for every other reader); the row
+		// holds what the walk would build for EACH level, so the extract indexes the table by the live
+		// lod.current instead of resolving the level's mesh, material slots and bounds every frame.
+		// A level table entry is the same triple a plain row holds, with the row's `world` applied.
+		// -1 = not a settled LOD row (the plain fields above apply). Re-settling a row with the same
+		// number of levels rewrites its entries in place, so the table does not grow with content changes.
+		std::vector<int32_t>      lodFirst;
+		std::vector<uint8_t>      lodCount;
+		std::vector<HE::UUID>     levelMeshId;
+		std::vector<HE::UUID>     levelMaterialId;
+		std::vector<HE::AABB>     levelBounds;
+
 		// The row of `e`, or -1. The entity itself is compared as well: an index
 		// reused by a younger entity must not read an older one's row.
 		int32_t rowOf(entt::entity e) const
