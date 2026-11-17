@@ -27,6 +27,7 @@
 #include "HorizonScene/Components/StreamingComponent.h"
 #include "HorizonScene/Components/TrailComponent.h"
 #include "HorizonScene/Components/TransformComponent.h"
+#include <Diagnostics/Log.h>
 #include <algorithm>
 
 namespace HE
@@ -45,7 +46,9 @@ void CookedStatic::onVerdictChanged(entt::registry& reg, entt::entity e)
 	if (stale) return;   // a rebuild is already due: the rest of this frame's changes ride along
 	// The entity is a row, or a parent whose new blocker passes down to its children (rule 10).
 	// An entity with neither is not in the block and cannot take anything with it.
-	if (rowOf(e) >= 0) { stale = true; return; }
+	// Before the first build there are no rows to look for, so a packed verdict (CookedStatic::seed) is only as
+	// good as nothing having changed: any verdict component coming or going on any entity puts the analysis back.
+	if (structureEpoch == 0 || rowOf(e) >= 0) { stale = true; return; }
 	if (const auto* h = reg.try_get<HierarchyComponent>(e); h && !h->children.empty()) stale = true;
 }
 
@@ -92,13 +95,26 @@ void refreshCookedStatic(entt::registry& reg, uint64_t structureEpoch)
 {
 	CookedStatic& c = cookedStaticOf(reg);
 	if (c.structureEpoch == structureEpoch && !c.stale) return;
+	const bool seeded = !c.stale && !c.seed.empty() && c.seedEpoch == structureEpoch;
 	c.structureEpoch = structureEpoch;
 	c.stale          = false;
 
 	const size_t slots = reg.storage<entt::entity>().size();
 	std::vector<uint8_t> cookable(slots, 0);
-	for (const CookEntry& ce : analyzeCookability(reg))
-		if (ce.verdict.cookable()) cookable[static_cast<size_t>(entt::to_entity(ce.entity))] = 1;
+	if (seeded)
+	{
+		for (const entt::entity e : c.seed) cookable[static_cast<size_t>(entt::to_entity(e))] = 1;
+		++c.seededBuilds;
+		HE_LOG_INFO(Scene, "Cooked block: %zu cookable entity/-ies taken from the packed scene, analysis skipped", c.seed.size());
+	}
+	else
+	{
+		for (const CookEntry& ce : analyzeCookability(reg))
+			if (ce.verdict.cookable()) cookable[static_cast<size_t>(entt::to_entity(ce.entity))] = 1;
+		++c.analysedBuilds;
+	}
+	// One shot: whatever the seed said holds for this epoch only, and the next rebuild is a new question.
+	std::vector<entt::entity>().swap(c.seed);
 
 	c.rowOfIndex.assign(slots, -1);
 	c.entity.clear();
@@ -122,6 +138,16 @@ void refreshCookedStatic(entt::registry& reg, uint64_t structureEpoch)
 	c.lod.assign(rows, 0);
 	c.castsShadow.assign(rows, 1);
 	c.receivesShadow.assign(rows, 1);
+}
+
+void seedCookedStatic(entt::registry& reg, std::vector<entt::entity>&& cookable, uint64_t structureEpoch)
+{
+	CookedStatic& c = cookedStaticOf(reg);
+	c.seed           = std::move(cookable);
+	c.seedEpoch      = structureEpoch;
+	c.structureEpoch = 0;       // never built: the first refresh takes the seed
+	c.stale          = false;
+	c.enabled        = true;
 }
 
 }

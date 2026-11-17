@@ -48,6 +48,20 @@ namespace HE
 		// changed on or removed from a row's entity or a parent: the next refresh rebuilds, like an epoch
 		// change would. Components come and go without the epoch moving (a script adds one).
 		bool     stale = false;
+		// The packed verdict of a scene that was exported with cooking on (SceneSerializer::saveToMemory,
+		// the project setting): the entities analyzeCookability() cleared at export, as this load made them.
+		// The first rebuild at `seedEpoch` takes them instead of analysing the world again, then drops them.
+		// Rows born from it are Pending like any other: no matrix, no bounds, nothing a walk has not seen.
+		// Any other epoch, or a verdict component changing before that rebuild, and the world is analysed as
+		// ever. `enabled` rides along: a world loaded from such a scene asks its extractors to use the block
+		// (RenderExtractor reads it next to HE_COOK_STATIC), so an old pack, which has no seed, draws as before.
+		std::vector<entt::entity> seed;
+		uint64_t seedEpoch = 0;
+		bool     enabled   = false;
+		// Rebuilds that took the seed / ran the analysis: a test and the log say which one a load got.
+		uint32_t seededBuilds = 0;
+		uint32_t analysedBuilds = 0;
+
 		// What the Ready rows were resolved against; a different manager or epoch resets them.
 		const void* content      = nullptr;
 		uint64_t    contentEpoch = 0;
@@ -131,4 +145,9 @@ namespace HE
 	// one it was built for, or `stale` is set: a row for every cookable entity with a TransformComponent
 	// and a MeshComponent, all Pending. Costs nothing when the epoch matches.
 	void refreshCookedStatic(entt::registry& reg, uint64_t structureEpoch);
+
+	// Hands the block the cookable set a packed scene carried (see CookedStatic::seed), valid for
+	// `structureEpoch`, which is the world's epoch right after the load. Creates the block, so its
+	// listeners hear everything that happens to the world from here on.
+	void seedCookedStatic(entt::registry& reg, std::vector<entt::entity>&& cookable, uint64_t structureEpoch);
 }

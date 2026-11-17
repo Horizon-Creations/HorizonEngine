@@ -4,6 +4,8 @@
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/CookedStatic.h>
 #include <HorizonScene/EngineApi.h>
+#include <HorizonScene/SceneSerializer.h>
+#include <HorizonScene/SceneJsonParse.h>
 #include <HorizonScene/ScriptApi.h>
 #include <HorizonScene/ScriptContext.h>
 #include <HorizonScene/TransformHierarchy.h>
@@ -36,6 +38,7 @@
 #include <HorizonScene/Components/TransformComponent.h>
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
+#include <nlohmann/json.hpp>
 #include <cstring>
 #include <vector>
 
@@ -584,4 +587,133 @@ TEST_CASE("CookedStatic un-cook: uncookEntity covers a raw field write nothing c
 	checkShowsNow(s, cook, rw, e);
 	CHECK(objectOf(rw, e)->castsShadow == !shadow);
 	HE::uncookEntity(s.world.registry(), entt::null);                 // a null or unknown entity is fine
+}
+
+// ── Export: the packed verdict (project setting "Cook static entities") ──────────────────────────────────
+namespace
+{
+	// Saved the way the export saves a scene, with or without the verdict.
+	std::vector<uint8_t> pack(Scene& s, bool withVerdict)
+	{
+		std::vector<uint8_t> bytes;
+		REQUIRE(SceneSerializer().saveToMemory(s.world, bytes, withVerdict));
+		return bytes;
+	}
+
+	void load(HorizonWorld& w, const std::vector<uint8_t>& bytes)
+	{
+		REQUIRE(SceneSerializer().loadFromMemory(w, bytes));
+	}
+
+	// The rows a cooked extract of `w` holds, and the output of an extractor that never cooks one
+	// loaded from the same scene without the verdict (the pack an older export wrote).
+	void checkDrawsLikeOldPack(Scene& s, HorizonWorld& packed, RenderWorld& got)
+	{
+		HorizonWorld old;
+		load(old, pack(s, false));
+		RenderExtractor walk; setUp(walk, s.cm, false);
+		RenderWorld ref;
+		walk.extract(old, ref, 1.0f);
+		checkSameObjects(got, ref);
+	}
+}
+
+TEST_CASE("CookedStatic pack: a scene saved with the verdict loads it, skips the analysis and draws like an old pack")
+{
+	Scene s;
+	s.build(60);
+	const std::vector<uint8_t> bytes = pack(s, true);
+
+	HorizonWorld w;
+	load(w, bytes);
+	const HE::CookedStatic* c = w.registry().ctx().find<HE::CookedStatic>();
+	REQUIRE(c != nullptr);
+	CHECK(c->enabled);                          // a pack exported with the setting on is cooked without HE_COOK_STATIC
+	CHECK(c->seed.size() == s.statics.size());
+	CHECK(c->seededBuilds == 0u);               // nothing has asked for the block yet
+	CHECK(c->analysedBuilds == 0u);
+
+	RenderExtractor ex; setUp(ex, s.cm, false);   // the env switch is off: the world's own flag does it
+	RenderWorld rw;
+	ex.extract(w, rw, 1.0f);
+	CHECK(c->seededBuilds == 1u);
+	CHECK(c->analysedBuilds == 0u);             // analyzeCookability never ran for this load
+	CHECK(c->size() == s.statics.size());
+	CHECK(c->seed.empty());                     // one shot
+	for (const Entity e : s.statics) CHECK(c->rowOf(w.findByEntityId(s.world.registry().get<EntityIdComponent>(e).id)) >= 0);
+	size_t ready = 0;
+	for (const auto st : c->state) ready += st == HE::CookedStatic::State::Ready;
+	CHECK(ready == s.statics.size());           // positive control: the rows really serve the draw
+
+	checkDrawsLikeOldPack(s, w, rw);
+	ex.extract(w, rw, 1.0f);                    // second frame, from the rows
+	checkDrawsLikeOldPack(s, w, rw);
+}
+
+TEST_CASE("CookedStatic pack: a scene without the verdict (an older export) loads and cooks nothing")
+{
+	Scene s;
+	s.build(30);
+	HorizonWorld w;
+	load(w, pack(s, false));
+	CHECK(w.registry().ctx().find<HE::CookedStatic>() == nullptr);
+
+	RenderExtractor ex; setUp(ex, s.cm, false);
+	RenderWorld rw;
+	ex.extract(w, rw, 1.0f);
+	CHECK(w.registry().ctx().find<HE::CookedStatic>() == nullptr);   // no block was even made
+	RenderExtractor walk; setUp(walk, s.cm, false);
+	RenderWorld ref;
+	walk.extract(s.world, ref, 1.0f);
+	CHECK(rw.objects.size() == ref.objects.size());   // every visible mesh, as the original world draws it
+}
+
+TEST_CASE("CookedStatic pack: a verdict component added before the first extract puts the analysis back")
+{
+	Scene s;
+	s.build(40);
+	HorizonWorld w;
+	load(w, pack(s, true));
+	const Entity victim = w.findByEntityId(s.world.registry().get<EntityIdComponent>(s.statics[3]).id);
+	REQUIRE((victim != entt::null));
+	w.registry().emplace<ScriptComponent>(victim);   // a Start() script attaching one, on the entity the pack called static
+
+	RenderExtractor ex; setUp(ex, s.cm, false);
+	RenderWorld rw;
+	ex.extract(w, rw, 1.0f);
+	const HE::CookedStatic& c = HE::cookedStaticOf(w.registry());
+	CHECK(c.seededBuilds == 0u);
+	CHECK(c.analysedBuilds == 1u);
+	CHECK(c.rowOf(victim) < 0);                       // not cooked: the verdict the pack carried is stale
+	CHECK(c.size() == s.statics.size() - 1);
+}
+
+TEST_CASE("CookedStatic pack: a change of structure after the load, or a verdict that names nothing, is analysed")
+{
+	Scene s;
+	s.build(40);
+	const std::vector<uint8_t> bytes = pack(s, true);
+	RenderExtractor ex; setUp(ex, s.cm, false);
+	RenderWorld rw;
+
+	{   // an entity spawned between the load and the first extract moves the epoch
+		HorizonWorld w;
+		load(w, bytes);
+		w.createEntity("Spawned");
+		ex.extract(w, rw, 1.0f);
+		const HE::CookedStatic& c = HE::cookedStaticOf(w.registry());
+		CHECK(c.seededBuilds == 0u);
+		CHECK(c.analysedBuilds == 1u);
+		CHECK(c.size() == s.statics.size());
+	}
+	{   // a scene whose entity the verdict lists was edited away by something that did not know it
+		nlohmann::json j = HE::parseSceneCbor(bytes);
+		REQUIRE(j.contains("cookedStatic"));
+		j["entities"].erase(j["entities"].begin());
+		HorizonWorld w;
+		load(w, nlohmann::json::to_cbor(j));
+		const HE::CookedStatic* c = w.registry().ctx().find<HE::CookedStatic>();
+		CHECK((c == nullptr || !c->enabled));         // dropped as a whole: no seed, no cooking asked for
+		CHECK((c == nullptr || c->seed.empty()));
+	}
 }

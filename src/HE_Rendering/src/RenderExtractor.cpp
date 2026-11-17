@@ -1655,7 +1655,9 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 	// The cooked block follows the structure epoch (the same number the frame key holds, so a reused
 	// walk and the block can never disagree about which entities exist) and the content epoch.
 	HE::CookedStatic* cooked = nullptr;
-	if (m_cookStatic)
+	// HE_COOK_STATIC=1, or a world loaded from a scene exported with the project's cooking setting on.
+	const HE::CookedStatic* packedCook = reg.ctx().find<HE::CookedStatic>();
+	if (m_cookStatic || (packedCook && packedCook->enabled))
 	{
 		HE::refreshCookedStatic(reg, world.structureEpoch());
 		cooked = &HE::cookedStaticOf(reg);
