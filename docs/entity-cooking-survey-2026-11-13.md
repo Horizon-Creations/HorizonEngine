@@ -380,6 +380,23 @@ Mittel über 50 Aufrufe, gegen (b) eine reine Schleife über dieselben Entities,
 `HE::worldMatrixOf(world, e)` aufruft (gleicher View, gleiche Aufrufzahl). Eigener Build
 (`C:/hwtp9`, Release/Ninja, Thema-343-Branch @ `8ef96a4c9`).
 
+**Korrektur nach einem ersten, verworfenen Lauf:** `worldMatrixOf` ruft `cachedLocalMatrix` auf,
+das `TransformComponent::localCache` nur zurückgibt, wenn `localCacheValid` gesetzt ist
+(`TransformHierarchy.cpp:351-354`) — gesetzt wird das ausschließlich vom Propagate-Pass
+(`TransformHierarchy.cpp:58-64`). `reg.emplace` kopiert die frisch gebaute `TransformComponent`
+in die Registry, und `TransformCacheFlag`s Kopie-Konstruktor setzt den Flag dabei absichtlich auf
+"ungültig" zurück (§1-Kommentar, `TransformComponent.h:10`). Der erste Benchmark-Versuch rief
+`ParticleSystem::update` nie über `HE::propagateTransforms` vorgewärmt auf — jeder der
+50 × 20 000 `worldMatrixOf`-Aufrufe baute die Lokalmatrix (Quaternion aus Euler-Winkeln, drei
+sin/cos-Paare, `mat4_cast`, `translate`, `scale`) jedes Mal neu, statt (wie in einem echten
+Frame, wo die Welt schon mindestens einmal propagiert wurde) den Cache-Hit zu nehmen. Das maß die
+Kosten eines KALTEN Caches, nicht die eines bereits mindestens einmal propagierten, statischen
+Emitters. Behoben: ein einmaliger `HE::propagateTransforms(world)`-Aufruf nach dem Setup, vor der
+Zeitmessung — genau das, was in einem echten Frame vor dem ersten `ParticleSystem::update` dieser
+Entity bereits passiert ist. Die Zahlen unten sind die KORRIGIERTEN (warmen); die ursprünglichen
+kalten Zahlen (70,3/51,1/65,0/67,3/60,2 % über 5 Läufe, 1,4–2,5 ms/Aufruf) sind verworfen, nicht
+Teil des Ergebnisses — hier nur genannt, damit der Fehler nachvollziehbar bleibt.
+
 **Falle dabei:** der Build schlug zunächst mit `error C2026: Zeichenfolge zu lang` in
 `MaterialShaderLibrary.cpp` fehl, wenn `vcvars64.bat` aus der
 "Visual Studio 2022\Community"-Installation (MSVC 14.44.35207) kommt — derselbe, unveränderte
@@ -388,25 +405,42 @@ ein früherer Schritt dieses Themas schon benutzt hatte (bestätigt gegen `C:/hw
 Als Lektion gemeldet (`hive_lesson` #640) — nicht Teil dieses Codepfads, nur ein Build-Trap auf
 diesem Gerät.
 
-### 11.3 Ergebnis
+### 11.3 Ergebnis (mit warmem Lokalmatrix-Cache)
 
-5 Läufe, je 50 Aufrufe gemittelt:
+5 Läufe, je 50 Aufrufe gemittelt, 20 000 Emitter:
 
 | Lauf | `ParticleSystem::update`, µs/Aufruf | `worldMatrixOf`-only, µs/Aufruf | Anteil |
 |---|---|---|---|
-| 1 | 1541,8 | 1084,4 | 70,3 % |
-| 2 | 2035,6 | 1039,6 | 51,1 % |
-| 3 | 1423,6 | 925,4 | 65,0 % |
-| 4 | 1387,0 | 933,4 | 67,3 % |
-| 5 | 2491,3 | 1499,5 | 60,2 % |
+| 1 | 907,2 | 463,9 | 51,1 % |
+| 2 | 912,9 | 470,1 | 51,5 % |
+| 3 | 903,7 | 466,3 | 51,6 % |
+| 4 | 904,2 | 476,0 | 52,6 % |
+| 5 | 892,9 | 464,8 | 52,1 % |
 
-Spannweite 51–70 %, kein Lauf unter der Hälfte. Pro Emitter (20 000 Emitter/Aufruf):
-`ParticleSystem::update` insgesamt 69–125 ns, davon `worldMatrixOf` allein 46–75 ns. **Das ist ein
-echter, deutlicher Anteil** — bei 5 000 statischen Emittern (plausible Größenordnung für Fackeln/
-Glühwürmchen/Staub in einer großen Szene, eher als die 20 000 des Microbenchmarks) wären das
-überschlägig 0,23–0,38 ms/Frame allein für `worldMatrixOf`, in der gleichen Größenordnung wie
-`Transforms::scan` (0,088 ms bei 50 000 Mesh-Entities, §4.2) oder `RefineBounds` (0,448 ms bei
-50 000, §4.2).
+Deutlich enger als der erste (verworfene) Lauf — 51,1–52,6 % über alle 5 Läufe, Median ≈ 51,6 %.
+Pro Emitter: `ParticleSystem::update` insgesamt ≈ 45 ns, davon `worldMatrixOf` allein ≈ 23,4 ns
+(Median der 5 Läufe). Auch mit warmem Cache bleiben zwei `try_get`-Aufrufe, der Wertevergleich in
+`localCacheMatches` und eine `mat4`-Multiplikation (`m(identity) * cachedLocal`, trotz trivialem
+`m`, da `glm` keine Identitäts-Sonderfälle kennt) übrig — das ist mehr als die Hälfte von
+`ParticleSystem::update`s eigener Zeit, auch wenn die absoluten Zahlen klein sind.
+
+**Anteil an der Frame-Zeit, nicht nur an `ParticleSystem::update`s eigener Zeit** (Umrechnung der
+gemessenen Pro-Emitter-Rate von 23,4 ns/Emitter für `worldMatrixOf` allein auf andere
+Emitter-Zahlen — **nur die 20 000er-Zeile ist gemessen**, die anderen sind Hochrechnungen aus
+dieser Rate, als solche markiert):
+
+| Emitter-Zahl | `worldMatrixOf` ges., ms/Frame | Anteil an 16,7 ms (60 fps) | Anteil an §4.2s 5,756 ms CPU/Frame (50k Mesh-Entities) |
+|---|---|---|---|
+| 20 000 (**gemessen**) | 0,467 | 2,8 % | 8,1 % |
+| 5 000 (hochgerechnet, plausiblere Größenordnung für Fackeln/Glühwürmchen/Staub) | 0,117 | 0,7 % | 2,0 % |
+| 1 000 (hochgerechnet) | 0,023 | 0,14 % | 0,4 % |
+
+Einordnung: bei 20 000 Emittern (eine sehr partikelreiche Szene) ist `worldMatrixOf` allein ein
+spürbarer, aber kein dominanter Posten (2,8 % des 60-fps-Budgets). Bei einer eher typischen
+Partikel-Dichte (1 000–5 000 Emitter) ist der absolute Beitrag klein (0,02–0,12 ms/Frame). **Der
+Befund ist trotzdem kein "nicht messbar"**: innerhalb von `ParticleSystem::update` selbst ist der
+Anteil mit > 50 % robust und wiederholbar gemessen — die Funktion verdoppelt ihre eigene Laufzeit
+für etwas, das sich bei einem echten statischen Emitter nie ändert.
 
 ### 11.4 Warum trotzdem kein Cache in diesem Schritt
 
@@ -428,28 +462,40 @@ kein reiner Performance-Gewinn, und es gibt für `ParticleSystemComponent`-Entit
 "entkoche zuerst"-Mechanismus (§8), der das abfangen würde — Regel 5 schließt sie ja gerade
 pauschal vom Cooking-Zustand aus.
 
-**Konkreter, sicherer Entwurf für einen künftigen Schritt** (hier nur vorgeschlagen, nicht gebaut):
+**Konkreter Entwurf für einen künftigen Schritt** (hier nur vorgeschlagen, nicht gebaut):
 `HE::CookAnalysis::analyzeCookability(reg, e)` (`CookAnalysis.h`, aus Schritt 2) liefert pro Entity
-ein Bitfeld von `CookBlocker`s; für eine Emitter-Entity ist `CookBlocker::Locomotion` (Bit 4, "5
-... ParticleSystem") IMMER gesetzt — das ist exakt die Regel-5-Ausnahme, nicht aber die Aussage,
-ob die Entity SELBST sich bewegt. `(verdict.blockers & ~uint16_t(CookBlocker::Locomotion)) == 0`
-ist genau die Bedingung aus der Schrittbeschreibung: "keine der Regeln 1–4/9/10 trifft auf die
-Entity selbst zu". Nur wenn das gilt, dürfte `ParticleSystem::update` nach einem einmaligen
-`worldMatrixOf`-Aufruf (ein neues, nicht serialisiertes `bool` auf `ParticleSystemComponent`, nach
-demselben Muster wie `configDirty`) auf `tc.worldMatrix[3]` umschalten. Zwei Gründe, das nicht in
-diesem Schritt zu bauen: (1) `CookAnalysis.h`/`MobilityComponent.h` stehen nicht in den "Files that
-matter" dieses Schritts — die Regel "kleiner Diff" verbietet, sie hier anzufassen; (2)
-`analyzeCookability` ist laut eigenem Kommentar für "einmal, beim Laden/Export, nie pro Frame"
-gedacht — es gibt noch keinen Ort, der das Verdikt pro Entity zwischenspeichert, und das selbst zu
-bauen wäre mehr als dieser Messschritt rechtfertigt. Das rohe `MobilityComponent::mode` ungeprüft
-zu vertrauen wäre dagegen UNSICHER: es ist laut eigenem Header nur "des Autors Aussage", von
-`analyzeCookability` erst gegen echte Blocker geprüft (ein fälschlich auf `Static` gesetzter,
-aber per Skript bewegter Emitter würde denselben Lag-Fehler reproduzieren, nur stiller).
+ein Bitfeld von `CookBlocker`s; für eine Emitter-Entity ist `CookBlocker::Locomotion` (Bit 4) IMMER
+gesetzt. **Wichtig, erst beim Gegenlesen aufgefallen:** `CookBlocker::Locomotion` ist EIN Bit für
+`CharacterControllerComponent`, `NavAgentComponent`, `MovementComponent` UND
+`ParticleSystemComponent` zusammen (`CookAnalysis.h:32`, Kommentar "5 ... ParticleSystem" listet
+alle vier). `(verdict.blockers & ~uint16_t(CookBlocker::Locomotion)) == 0` allein reicht deshalb
+NICHT — ein Emitter, der zusätzlich ein `MovementComponent` trägt (von einem Script bewegt),
+hätte exakt denselben Verdikt-Wert wie ein rein statischer Emitter, weil beide Komponenten in
+dasselbe Bit fallen. Der Gate müsste also zusätzlich **direkt** prüfen, dass die Entity selbst
+kein `CharacterControllerComponent`, `NavAgentComponent` oder `MovementComponent` trägt (z. B.
+`!reg.any_of<CharacterControllerComponent, NavAgentComponent, MovementComponent>(e)`), nicht nur
+über das gemeinsame Bit — erst `(verdict.blockers & ~Locomotion) == 0` UND diese drei
+Komponenten fehlen zusammen ist die Bedingung "keine der Regeln 1–4/9/10 trifft auf die Entity
+selbst zu, und auch keiner der drei anderen Locomotion-Bit-Mitbewohner". Drei Gründe, das nicht in
+diesem Schritt zu bauen: (1) `CookAnalysis.h`/`MobilityComponent.h`/die drei Locomotion-Komponenten
+stehen nicht in den "Files that matter" dieses Schritts — die Regel "kleiner Diff" verbietet, sie
+hier anzufassen; (2) `analyzeCookability` ist laut eigenem Kommentar für "einmal, beim
+Laden/Export, nie pro Frame" gedacht — es gibt noch keinen Ort, der das Verdikt pro Entity
+zwischenspeichert, und das selbst zu bauen wäre mehr als dieser Messschritt rechtfertigt; (3) die
+Bit-Verwechslung oben zeigt, dass der Gate selbst noch einmal gegengelesen werden muss, bevor er
+gebaut wird — das rohe `MobilityComponent::mode` ungeprüft zu vertrauen wäre ebenso UNSICHER: es
+ist laut eigenem Header nur "des Autors Aussage", von `analyzeCookability` erst gegen echte
+Blocker geprüft (ein fälschlich auf `Static` gesetzter, aber per Skript bewegter Emitter würde
+denselben Lag-Fehler reproduzieren, nur stiller).
 
-**Fazit:** Der Anteil ist real und deutlich (51–70 % von `ParticleSystem::update`s Zeit bei
-ausschließlich statischen Emittern) — kein "nicht messbar"-Ergebnis. Trotzdem **kein Code in
-diesem Schritt geändert**: ein sicherer Cache braucht das Schritt-2-Cookability-Verdikt als Gate,
-und dessen Zwischenspeicherung existiert noch nicht. Empfehlung an die Queen: ein eigener,
+**Fazit:** Der Anteil ist real und wiederholbar gemessen (51,1–52,6 % von `ParticleSystem::update`s
+eigener Zeit bei ausschließlich statischen Emittern, warmer Lokalmatrix-Cache) — kein "nicht
+messbar"-Ergebnis innerhalb der Funktion selbst, auch wenn der absolute Beitrag zur Frame-Zeit bei
+realistischen Emitter-Zahlen (1 000–5 000) klein bleibt (§11.3). Trotzdem **kein Code in diesem
+Schritt geändert**: ein sicherer Cache braucht sowohl das Schritt-2-Cookability-Verdikt als Gate
+(dessen Zwischenspeicherung existiert noch nicht) als auch eine direkte Prüfung auf die drei
+anderen Locomotion-Bit-Komponenten (die der Verdikt allein nicht unterscheidet, §11.4 oben).
+Empfehlung an die Queen: ein eigener,
 kleiner Folgeschritt ("Emitter-Transform-Cache, gegated auf CookAnalysis ohne Locomotion-Bit") statt
 hier einen ungegateten Cache zu riskieren, der bewegte Emitter lautlos falsch macht.
 
