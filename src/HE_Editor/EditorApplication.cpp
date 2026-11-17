@@ -1136,6 +1136,8 @@ void EditorApplication::OnInit()
 		}
 	});
 
+	// Same reason as openScene: clear() recycles entt ids, so an RVT segment would alias the snapshot's entities.
+	m_collab.onWorldReplacing([this] { if (m_rvtLandscape) m_rvtLandscape->detach(); });
 	m_collab.onWorldReplaced([this] {
 		// Wire identity is each entity's uuid, which the snapshot carried — so
 		// seeding just warms the uuid↔handle cache (deletions need it, see

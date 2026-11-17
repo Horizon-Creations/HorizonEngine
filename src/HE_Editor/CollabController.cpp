@@ -158,6 +158,9 @@ public:
 	{
 		if (!m_owner.m_world) return false;
 
+		// Before the ids are recycled: see onWorldReplacing.
+		if (m_owner.m_onWorldReplacing) m_owner.m_onWorldReplacing();
+
 		// loadFromMemory MERGES — it does not clear first. Without this the
 		// host's scene would be added on top of whatever the joiner already had
 		// open, silently duplicating everything.
