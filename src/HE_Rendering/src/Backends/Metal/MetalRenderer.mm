@@ -433,15 +433,18 @@ vertex float4 vertexShadow(uint vid [[vertex_id]],
 }
 
 // Instanced twin for a run of same-mesh casters (RenderSorter::batchDepthCasters):
-// one lightVP * model per instance at buffer 5, indexed by [[instance_id]]. Depth
-// needs nothing but the clip transform, so the stride is a single float4x4 (64
-// bytes) rather than the scene pass's {mvp, model} pair.
+// one world matrix per instance at buffer 5, indexed by [[instance_id]], and the
+// view's lightClip as a uniform at buffer 1. The GPU forms lightClip * model
+// instead of the CPU writing that product for every instance of every cascade
+// and local-light view (Metal::ShadowInstanceMvp used to do exactly that); the
+// CPU now only copies the model matrices into the instance buffer.
 vertex float4 vertexShadowInstanced(uint vid [[vertex_id]],
                                     uint iid [[instance_id]],
-                                    const device VertexIn* verts [[buffer(0)]],
-                                    const device float4x4* mvps  [[buffer(5)]])
+                                    const device VertexIn*  verts     [[buffer(0)]],
+                                    constant float4x4&      lightClip [[buffer(1)]],
+                                    const device float4x4*  models    [[buffer(5)]])
 {
-	return mvps[iid] * float4(float3(verts[vid].position), 1.0);
+	return lightClip * (models[iid] * float4(float3(verts[vid].position), 1.0));
 }
 
 // Linear blend-skinning vertex shader. Bone matrices arrive in a dedicated buffer
@@ -8488,8 +8491,10 @@ void MetalRenderer::EncodeShadowMap(void* cmdBufPtr, float aspect)
 			else for (size_t t = 0; t < tasks; ++t) task(t);
 		}
 		const bool canInstance = m_shadowInstancedPipeline && metalInstancingEnabled();
+		// Only the model matrix goes into the ring now; lightClip*model moved to the
+		// GPU (vertexShadowInstanced), so there is no per-view lightClip left to carry here.
 		struct Fill { const RenderSorter::DepthBatchList* list; const RenderSorter::DepthBatch* b;
-		              glm::mat4* mvp; glm::mat4 lightClip; };
+		              glm::mat4* model; };
 		std::vector<Fill> fills;
 		for (int v = 0; v < nViews; ++v)
 		{
@@ -8505,8 +8510,8 @@ void MetalRenderer::EncodeShadowMap(void* cmdBufPtr, float aspect)
 				{
 					// A slice of the frame's upload ring (UploadTransient), released when this
 					// frame's command buffer completes; filled in step 3.
-					d.mvp = static_cast<glm::mat4*>(UploadTransient(b.count * sizeof(glm::mat4), d.instBuf, d.instOff));
-					if (d.mvp) fills.push_back({ &sv.batches, &b, d.mvp, sv.lightClip });
+					d.model = static_cast<glm::mat4*>(UploadTransient(b.count * sizeof(glm::mat4), d.instBuf, d.instOff));
+					if (d.model) fills.push_back({ &sv.batches, &b, d.model });
 					else d.mesh = nullptr;
 				}
 				sv.draws.push_back(d);
@@ -8517,10 +8522,9 @@ void MetalRenderer::EncodeShadowMap(void* cmdBufPtr, float aspect)
 			auto fillOne = [&fills](size_t f)
 			{
 				const Fill& x = fills[f];
-				glm::mat4* mvp = x.mvp;
-				const glm::mat4 lightClip = x.lightClip;
+				glm::mat4* model = x.model;
 				forBatchInstances(*x.list, *x.b,
-					[mvp, lightClip](size_t k, const glm::mat4& m) { mvp[k] = lightClip * m; },
+					[model](size_t k, const glm::mat4& m) { model[k] = m; },
 					"ShadowInstanceMvp");
 			};
 			if (parallelViews && fills.size() > 1) parallel_for(fills.size(), fillOne, "ShadowFills", 1);
@@ -8569,7 +8573,7 @@ void MetalRenderer::EncodeShadowMap(void* cmdBufPtr, float aspect)
 				NSUInteger    ic   = (NSUInteger)d.mesh->indexCount;
 				[enc setVertexBuffer:vbuf offset:0 atIndex:0];
 
-				if (d.mvp)
+				if (d.model)
 				{
 					if (boundPipeline != m_shadowInstancedPipeline)
 					{
@@ -8586,6 +8590,10 @@ void MetalRenderer::EncodeShadowMap(void* cmdBufPtr, float aspect)
 						HE_LOG_INFO(RHI, "MetalRenderer: shadow pass instanced (first run: %u casters)",
 						            static_cast<unsigned>(b.count));
 					}
+					// lightClip*model used to be baked in on the CPU (Metal::ShadowInstanceMvp);
+					// now the view's lightClip rides as a small uniform and the vertex shader
+					// forms the product once per vertex instead.
+					[enc setVertexBytes:&lightClip length:sizeof(lightClip) atIndex:1];
 					[enc setVertexBuffer:(__bridge id<MTLBuffer>)d.instBuf offset:d.instOff atIndex:5];
 					[enc drawIndexedPrimitives:MTLPrimitiveTypeTriangle
 					                indexCount:ic

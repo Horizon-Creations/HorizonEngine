@@ -725,13 +725,14 @@ private:
 	// ── Shadow map (cascaded; directional light) ────────────────────────────
 	void* m_shadowDepthTex = nullptr;  // id<MTLTexture>, Depth32Float 2D ARRAY (one layer/cascade)
 	void* m_shadowPipeline = nullptr;  // id<MTLRenderPipelineState>, depth-only
-	// Instanced twin (vertexShadowInstanced: one lightVP*model per instance at
-	// buffer 5). Optional — null sends every same-mesh run through the loop.
+	// Instanced twin (vertexShadowInstanced: one model matrix per instance at
+	// buffer 5, lightClip as a uniform at buffer 1 — the GPU forms lightClip*model).
+	// Optional — null sends every same-mesh run through the loop.
 	void* m_shadowInstancedPipeline = nullptr; // id<MTLRenderPipelineState>
 	// One depth layer of the shadow pass (a cascade or a local light's view), prepared
 	// before any layer is encoded (EncodeShadowMap): its own cull, sort and runs, so the
-	// layers prepare side by side, then per run the mesh and the ring slice its products
-	// went into (mvp null = the per-caster loop, mesh null = skipped).
+	// layers prepare side by side, then per run the mesh and the ring slice its model
+	// matrices went into (model null = the per-caster loop, mesh null = skipped).
 	struct ShadowView
 	{
 		void*      target = nullptr;
@@ -742,7 +743,7 @@ private:
 		std::vector<uint32_t>        sorted;
 		RenderSorter                 sorter;
 		RenderSorter::DepthBatchList batches;
-		struct Draw { const GpuMesh* mesh = nullptr; glm::mat4* mvp = nullptr; void* instBuf = nullptr; size_t instOff = 0; };
+		struct Draw { const GpuMesh* mesh = nullptr; glm::mat4* model = nullptr; void* instBuf = nullptr; size_t instOff = 0; };
 		std::vector<Draw>            draws;
 	};
 	std::vector<ShadowView> m_shadowViews;
