@@ -44,6 +44,11 @@ struct LandscapeExportOptions
 
 using LandscapeExportLog = std::function<void(int level, const std::string& text)>;   // 0 info, 1 warning (Build::log)
 
+// The file `pack` means: absolute as given, else under `projectRoot` (a project-relative pack, as LandscapeWorldComponent::pack documents),
+// else as given (the runtime's working directory, or a tool/test path that is already correct). Empty `projectRoot` skips the middle try.
+// Returns an empty path if none of the three names a regular file. Shared by the exporter below and LandscapeRuntime::beginFromPack.
+std::filesystem::path findLandscapePack(const std::string& pack, const std::filesystem::path& projectRoot);
+
 // For every enabled LandscapeWorldComponent of `world` that names a pack: finds the file (absolute, else under `projectRoot`, else as given),
 // adds it to `plan` (once per source, whatever the number of scenes) and rewrites the component's path to the destination so the scene that is
 // serialized next names the shipped copy. With `options.bakeHlod` and a cell manifest in the world, bakes the cell proxies through the cell

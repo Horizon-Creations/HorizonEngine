@@ -9,6 +9,16 @@
 namespace HE
 {
 
+std::filesystem::path findLandscapePack(const std::string& pack, const std::filesystem::path& projectRoot)
+{
+	std::error_code ec;
+	const std::filesystem::path p(pack);
+	if (p.is_absolute()) return std::filesystem::is_regular_file(p, ec) ? p : std::filesystem::path{};
+	if (!projectRoot.empty())
+		if (const std::filesystem::path q = projectRoot / p; std::filesystem::is_regular_file(q, ec)) return q;
+	return std::filesystem::is_regular_file(p, ec) ? p : std::filesystem::path{};
+}
+
 namespace
 {
 	bool readFile(const std::filesystem::path& file, std::vector<uint8_t>& out)
@@ -21,18 +31,6 @@ namespace
 		in.seekg(0);
 		if (size > 0) in.read(reinterpret_cast<char*>(out.data()), size);
 		return static_cast<bool>(in);
-	}
-
-	// The file the scene means. The runtime opens the string as it is (the editor's working directory), the editor stores whatever the
-	// author picked, so an absolute path, one under the project and one as given are all tried, in that order of how likely they are meant.
-	std::filesystem::path findPack(const std::string& pack, const std::filesystem::path& projectRoot)
-	{
-		std::error_code ec;
-		const std::filesystem::path p(pack);
-		if (p.is_absolute()) return std::filesystem::is_regular_file(p, ec) ? p : std::filesystem::path{};
-		if (!projectRoot.empty())
-			if (const std::filesystem::path q = projectRoot / p; std::filesystem::is_regular_file(q, ec)) return q;
-		return std::filesystem::is_regular_file(p, ec) ? p : std::filesystem::path{};
 	}
 
 	std::string sameFile(const std::filesystem::path& p)
@@ -84,7 +82,7 @@ size_t prepareLandscapePacksForExport(HorizonWorld& world, const std::filesystem
 		LandscapeWorldComponent& lw = reg.get<LandscapeWorldComponent>(e);
 		if (!lw.enabled || lw.pack.empty()) continue;
 
-		const std::filesystem::path source = findPack(lw.pack, projectRoot);
+		const std::filesystem::path source = findLandscapePack(lw.pack, projectRoot);
 		if (source.empty())
 		{
 			say(1, "Landscape pack '" + lw.pack + "' was not found (beside the project or as written): the scene keeps naming it and the game will "

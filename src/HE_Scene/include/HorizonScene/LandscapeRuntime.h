@@ -16,6 +16,7 @@
 #include <glm/mat4x4.hpp>
 #include <glm/vec3.hpp>
 
+#include <filesystem>
 #include <functional>
 #include <memory>
 #include <string>
@@ -99,6 +100,11 @@ public:
 	bool begin(std::shared_ptr<const LandscapeTileSource> source, const LandscapeRuntimeConfig& config, std::string* error = nullptr);
 	bool beginFromPack(const std::string& path, const LandscapeRuntimeConfig& config, std::string* error = nullptr);
 	void reset();
+
+	// What a pack path naming something other than an absolute file means (LandscapeWorldComponent::pack: "project-relative or absolute").
+	// Set once by the owner (EditorApplication, GameApplication) from its ContentManager's project; empty (the default) tries a relative
+	// path only against the working directory, as before this existed — what tools and tests that already hand in a resolved path want.
+	void setProjectRoot(std::filesystem::path root) { m_projectRoot = std::move(root); }
 	bool active() const { return m_store != nullptr; }
 	// The source's baked HLOD proxies of the entity cells (LandscapeCellHlod.h), null when it has none; and the camera the last update streamed around.
 	const LandscapeHlodTable* hlod() const { return m_source ? m_source->hlod() : nullptr; }
@@ -177,6 +183,7 @@ private:
 	bool beginWith(std::shared_ptr<const LandscapeTileSource> source, const LandscapeRuntimeConfig& config, std::string* error);
 
 	std::shared_ptr<const LandscapeTileSource> m_source;
+	std::filesystem::path          m_projectRoot;
 	LandscapeRuntimeConfig         m_config;
 	LandscapeQuadtreeConfig        m_quadtree;
 	std::unique_ptr<LandscapeStore> m_store;
@@ -189,6 +196,7 @@ private:
 	std::shared_ptr<const LandscapeRenderStatic> m_renderStatic;   // for m_generation
 	std::string m_pack;
 	std::string m_failedPack;   // a pack that could not start: not tried again until the component names another
+	std::filesystem::path m_failedProjectRoot;   // m_projectRoot at that failed try: a changed root is also a new try
 	int         m_beginAttempts = 0;
 	PhysicsWorld*                            m_physics = nullptr;
 	LandscapePhysics                         m_ground;

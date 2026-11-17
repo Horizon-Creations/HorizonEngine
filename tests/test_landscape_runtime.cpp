@@ -433,6 +433,49 @@ TEST_CASE("landscape runtime: the scene's LandscapeWorldComponent starts it from
 	CHECK(rt.beginAttempts() == attempts + 2);                    // another path is a new try
 }
 
+TEST_CASE("landscape runtime: setProjectRoot resolves a project-relative LandscapeWorldComponent::pack")
+{
+	const auto src = smallRealWorld(8);
+	const std::filesystem::path root =
+		std::filesystem::temp_directory_path() / ("he_landscape_runtime_root_" + std::to_string(std::random_device{}()));
+	const std::filesystem::path rel = std::filesystem::path("Content") / "Landscape" / "test.bin";
+	std::filesystem::create_directories(root / rel.parent_path());
+	{
+		LandscapePackWriter w;
+		REQUIRE(w.begin((root / rel).string(), src->geometry(), 8, 8));
+		for (int z = 0; z < 8; ++z)
+			for (int x = 0; x < 8; ++x) REQUIRE(w.add({ x, z }, encodeLandscapeTile(src->generate({ x, z }))));
+		REQUIRE(w.finish());
+	}
+
+	HorizonWorld world;
+	LandscapeRuntime rt;
+	const Entity landscape = world.createEntity("Landscape");
+	auto& comp = world.registry().emplace<LandscapeWorldComponent>(landscape);
+	comp.pack = rel.generic_string();                             // "Content/Landscape/test.bin", as the editor would store it
+	const Entity cam = world.createEntity("Camera");
+	world.registry().get_or_emplace<TransformComponent>(cam).position = { 2000.0f, 600.0f, 2000.0f };
+	world.registry().emplace<CameraComponent>(cam);
+
+	// No project root set: the path is CWD-relative, as before this existed, and "Content/Landscape/test.bin" is not under the test binary.
+	rt.update(world, 0.016f);
+	CHECK_FALSE(rt.active());
+	const int failedAttempt = rt.beginAttempts();
+	CHECK(failedAttempt > 0);
+
+	rt.setProjectRoot(root);
+	rt.update(world, 0.016f);
+	REQUIRE(rt.active());                                         // same component path, now found under the project root
+	CHECK(rt.beginAttempts() == failedAttempt + 1);                // the failed try above does not count again
+
+	// not re-opened every frame: the component's path string did not change
+	rt.update(world, 0.016f);
+	rt.update(world, 0.016f);
+	CHECK(rt.beginAttempts() == failedAttempt + 1);
+
+	std::filesystem::remove_all(root);
+}
+
 TEST_CASE("landscape runtime: beyond the tile levels the patches read the coarse world's grids")
 {
 	auto src = smallRealWorld();                       // 6.1 km

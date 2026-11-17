@@ -1683,6 +1683,12 @@ void GameApplication::updateLandscape(float dt)
 		m_landscape.setNavigation(&nav);
 		m_landscapeNavigation = true;
 	}
+	if (contentManager().contentRoot() != m_landscapeContentRoot)
+	{
+		m_landscapeContentRoot = contentManager().contentRoot();
+		m_landscape.setProjectRoot(m_landscapeContentRoot.empty() ? std::filesystem::path{}
+		                                                          : std::filesystem::path(m_landscapeContentRoot).parent_path());
+	}
 	// An exported scene names its pack relative to the data folder (LandscapeExport.h); the runtime opens a path as it is.
 	if (m_world) HE::resolveLandscapePacks(*m_world, HE::GameLayout::dataDir());
 	m_landscape.update(*m_world, dt);

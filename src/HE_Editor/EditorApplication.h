@@ -780,6 +780,7 @@ private:
 	HE::LandscapeRuntime m_landscape;
 	PhysicsWorld* m_landscapePhysics = nullptr;   // the physics world the landscape gives its ground to (detached BEFORE that world is destroyed)
 	bool m_landscapeNavigation = false;
+	std::string m_landscapeContentRoot;   // ContentManager::contentRoot() last given to m_landscape.setProjectRoot(), to skip repeating it
 	HE::LandscapeWorldProxies m_landscapeProxies;   // its foliage and water as entities the renderers draw already
 	bool m_landscapeBound = false;
 	// The headless dump's rings (HE_DUMP_WATERRIPPLE): no physics runs there, so the witness

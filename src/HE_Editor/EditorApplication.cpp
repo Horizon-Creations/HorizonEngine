@@ -4138,6 +4138,12 @@ void EditorApplication::OnRender(float dt)
 			// shadow kernel's height clipmap (step 4).
 			m_editorWorld->setLandscapeRuntime(&m_landscape);
 			LandscapeWorldTools::pump(*m_editorWorld);   // before the update: a rebuilt pack is opened again this frame
+			if (contentManager().contentRoot() != m_landscapeContentRoot)
+			{
+				m_landscapeContentRoot = contentManager().contentRoot();
+				m_landscape.setProjectRoot(m_landscapeContentRoot.empty() ? std::filesystem::path{}
+				                                                          : std::filesystem::path(m_landscapeContentRoot).parent_path());
+			}
 			if (!m_landscapeBound && renderer())
 			{
 				renderer()->SetLandscapeProvider([this](const glm::dmat4& vp, bool zeroToOne, HE::LandscapeRenderFrame& out) {

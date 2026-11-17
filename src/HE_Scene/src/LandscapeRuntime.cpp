@@ -10,6 +10,7 @@
 #include "HorizonScene/Components/NavMeshComponent.h"
 #include "HorizonScene/Components/TransformComponent.h"
 #include "HorizonScene/HorizonWorld.h"
+#include "HorizonScene/LandscapeExport.h"
 #include "HorizonScene/PhysicsWorld.h"
 #include "HorizonScene/TransformHierarchy.h"
 
@@ -80,7 +81,11 @@ bool LandscapeRuntime::begin(std::shared_ptr<const LandscapeTileSource> source, 
 bool LandscapeRuntime::beginFromPack(const std::string& path, const LandscapeRuntimeConfig& config, std::string* error)
 {
 	std::string err;
-	auto pack = LandscapePackSource::open(path, &err);
+	// `path` is what the component names (LandscapeWorldComponent::pack): project-relative or absolute. findLandscapePack resolves it
+	// against m_projectRoot; a path it cannot find (no project root set, or none of the three tries is a file) is opened exactly as
+	// written, so a tool or test that already hands in a resolved/CWD-relative path keeps working.
+	const std::filesystem::path resolved = findLandscapePack(path, m_projectRoot);
+	auto pack = LandscapePackSource::open(resolved.empty() ? path : resolved.string(), &err);
 	if (!pack) return (reset(), fail(error, "landscape pack '" + path + "': " + err));
 	const bool ok = begin(std::move(pack), config, error);
 	if (ok) m_pack = path;
@@ -162,7 +167,9 @@ void LandscapeRuntime::update(HorizonWorld& world, float dt, double budgetMs, co
 		if (c.enabled && !c.pack.empty()) { comp = &c; m_landscapeEntity = static_cast<uint32_t>(e); break; }
 	}
 	if (!comp) { if (active()) reset(); m_failedPack.clear(); return; }
-	if (!active() && comp->pack == m_failedPack) return;       // it failed before; a changed path is a new try
+	// It failed before with the same path AND the same project root (beginFromPack resolves a relative path against m_projectRoot): a
+	// changed path, or a project root that now resolves it differently, is a new try.
+	if (!active() && comp->pack == m_failedPack && m_projectRoot == m_failedProjectRoot) return;
 	if (!active() || m_pack != comp->pack)
 	{
 		LandscapeRuntimeConfig cfg;
@@ -178,6 +185,7 @@ void LandscapeRuntime::update(HorizonWorld& world, float dt, double budgetMs, co
 		{
 			HE_LOG_WARN(World, "Landscape: %s", err.c_str());
 			m_failedPack = comp->pack;
+			m_failedProjectRoot = m_projectRoot;
 			return;
 		}
 		m_failedPack.clear();
