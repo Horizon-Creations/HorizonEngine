@@ -571,6 +571,7 @@ private:
 	uint32_t    m_rvtColdAlloc = 0;
 	std::vector<int32_t>  m_rvtSlotHot;
 	std::vector<uint8_t>  m_rvtSlotCold;
+	std::vector<uint8_t>  m_rvtSlotBusy;     // a readback or encode of this slot is in flight
 	std::vector<uint32_t> m_rvtSlotVer;
 	std::vector<uint64_t> m_rvtSlotPainted;
 	std::vector<uint32_t> m_rvtHotFree;

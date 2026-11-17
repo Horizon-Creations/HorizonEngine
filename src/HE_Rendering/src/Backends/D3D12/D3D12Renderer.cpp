@@ -3910,6 +3910,7 @@ struct D3D12RendererImpl
     uint32_t                         rvtColdAlloc = 0;
     std::vector<int32_t>             rvtSlotHot;
     std::vector<uint8_t>             rvtSlotCold;
+    std::vector<uint8_t>             rvtSlotBusy;      // a readback or encode of this slot is in flight
     std::vector<uint32_t>            rvtSlotVer;
     std::vector<uint64_t>            rvtSlotPainted;
     std::vector<uint32_t>            rvtHotFree;
@@ -14944,6 +14945,7 @@ bool D3D12Renderer::CreateRvtPool(uint32_t slots, uint32_t pagePx)
     p.rvtPagePx = pagePx;
     p.rvtSlotHot.assign(slots, -1);
     p.rvtSlotCold.assign(slots, 0);
+    p.rvtSlotBusy.assign(slots, 0);
     p.rvtSlotVer.assign(slots, 0);
     p.rvtSlotPainted.assign(slots, 0);
     p.rvtHotFree.clear();
@@ -14969,7 +14971,7 @@ void D3D12Renderer::DestroyRvtPool()
     p.rvtPack = false;   // the pack pipeline itself (rvtPackPSO/RootSig/heaps) is renderer-lifetime, not pool-lifetime
     p.rvtStateVer = 1;
     p.rvtRealFrames = 0;
-    p.rvtSlotHot.clear(); p.rvtSlotCold.clear(); p.rvtSlotVer.clear(); p.rvtSlotPainted.clear(); p.rvtHotFree.clear();
+    p.rvtSlotHot.clear(); p.rvtSlotCold.clear(); p.rvtSlotBusy.clear(); p.rvtSlotVer.clear(); p.rvtSlotPainted.clear(); p.rvtHotFree.clear();
     p.writeRvtNullViews();
 }
 
@@ -15175,6 +15177,7 @@ void D3D12Renderer::UpdateRvtCold()
         {
             D3D12RendererImpl::RvtColdWork::Done d = std::move(finished.front());
             finished.pop_front();
+            p.rvtSlotBusy[d.slot] = 0;
             if (d.blocks[0].empty() || d.ver != p.rvtSlotVer[d.slot] || p.rvtSlotHot[d.slot] < 0 || p.rvtSlotCold[d.slot]) continue;
             if (!growRvtCold12(p, d.slot)) continue;
             // The block data from BlockEncode.h is tightly packed (bx*16 bytes/row = 544 for 136 px); D3D12's placed
@@ -15233,7 +15236,7 @@ void D3D12Renderer::UpdateRvtCold()
         // 2. One page that has stood still long enough: read it back now (synchronous) and queue it for encoding.
         for (uint32_t slot = 0; slot < p.rvtSlots; ++slot)
         {
-            if (p.rvtSlotHot[slot] < 0 || p.rvtSlotCold[slot]) continue;
+            if (p.rvtSlotHot[slot] < 0 || p.rvtSlotCold[slot] || p.rvtSlotBusy[slot]) continue;
             if (p.rvtRealFrames - p.rvtSlotPainted[slot] < coldAfter) continue;
             const UINT hotSlice = UINT(p.rvtSlotHot[slot]);
             // Per-layer row pitch (Thema 333 step 10): layers 1/2 are RG8 when packed, half the row bytes of RGBA8 —
@@ -15305,6 +15308,7 @@ void D3D12Renderer::UpdateRvtCold()
                 rb->Unmap(0, &noWrite2);
                 { std::lock_guard<std::mutex> lock(w.mutex); w.todo.push_back(std::move(job)); }
                 w.cv.notify_one();
+                p.rvtSlotBusy[slot] = 1;
             }
             break;   // at most one synchronous readback (one GPU flush) per real frame
         }

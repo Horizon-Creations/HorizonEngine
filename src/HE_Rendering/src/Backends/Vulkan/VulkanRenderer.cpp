@@ -6958,6 +6958,7 @@ bool VulkanRenderer::CreateRvtPool(uint32_t slots, uint32_t pagePx)
     m_rvtPagePx = pagePx;
     m_rvtSlotHot.assign(slots, -1);
     m_rvtSlotCold.assign(slots, 0);
+    m_rvtSlotBusy.assign(slots, 0);
     m_rvtSlotVer.assign(slots, 0);
     m_rvtSlotPainted.assign(slots, 0);
     m_rvtHotFree.clear();
@@ -7062,7 +7063,7 @@ void VulkanRenderer::DestroyRvtPool()
     m_rvtPack = false;
     m_rvtStateVer = 1;
     m_rvtRealFrames = 0;
-    m_rvtSlotHot.clear(); m_rvtSlotCold.clear(); m_rvtSlotVer.clear(); m_rvtSlotPainted.clear(); m_rvtHotFree.clear();
+    m_rvtSlotHot.clear(); m_rvtSlotCold.clear(); m_rvtSlotBusy.clear(); m_rvtSlotVer.clear(); m_rvtSlotPainted.clear(); m_rvtHotFree.clear();
 }
 
 void VulkanRenderer::SetRvtLandscape(uint32_t terrainEntity, const HE::UUID& landscapeMaterial, const HE::UUID& consumerMaterial)
@@ -7220,6 +7221,7 @@ void VulkanRenderer::UpdateRvtCold()
         { std::lock_guard<std::mutex> lock(w.mutex); finished.swap(w.done); }
         for (auto& d : finished)
         {
+            m_rvtSlotBusy[d.slot] = 0;
             if (d.blocks[0].empty() || d.ver != m_rvtSlotVer[d.slot] || m_rvtSlotHot[d.slot] < 0 || m_rvtSlotCold[d.slot]) continue;
             if (!rvtGrowCold(d.slot)) continue;
             VkDeviceSize blockBytes = 0;
@@ -7261,7 +7263,7 @@ void VulkanRenderer::UpdateRvtCold()
         // 2. One page that has stood still long enough: read it back now (synchronous) and queue it for encoding.
         for (uint32_t slot = 0; slot < m_rvtSlots; ++slot)
         {
-            if (m_rvtSlotHot[slot] < 0 || m_rvtSlotCold[slot]) continue;
+            if (m_rvtSlotHot[slot] < 0 || m_rvtSlotCold[slot] || m_rvtSlotBusy[slot]) continue;
             if (m_rvtRealFrames - m_rvtSlotPainted[slot] < coldAfter) continue;
             const uint32_t hotSlice = uint32_t(m_rvtSlotHot[slot]);
             // Per-layer byte size (Thema 333 step 10): layers 1/2 are RG8 when packed, half the bytes of RGBA8 — a
@@ -7322,6 +7324,7 @@ void VulkanRenderer::UpdateRvtCold()
             vkFreeMemory(m_device, mem, nullptr);
             { std::lock_guard<std::mutex> lock(w.mutex); w.todo.push_back(std::move(job)); }
             w.cv.notify_one();
+            m_rvtSlotBusy[slot] = 1;
             break;   // at most one synchronous readback (one device idle) per real frame
         }
     }
