@@ -53,13 +53,16 @@ struct Pg
 };
 
 // The curtain: a sheet of streaks that leaves the lip along the current and falls for the fall's time, spreading as
-// it drops; thin at the lip (it fades in), white below.
+// it drops; thin at the lip (it fades in), white below. A streak lives AT MOST the fall's time (the modifiers scale
+// the life by it): one that lived longer would fall on through the foot, below the pool and on past where the
+// water lands (1.3 s of a 1 s fall dropped the curtain 70% of its height under the ground). The little spread in the
+// life is the bottom edge: the streaks end within the last 8% of the height, in the foot's spray.
 ParticleGraph curtain()
 {
     Pg p;
     p.f (kParticleEmitRatePin, 160.0f);
-    p.f (kParticleLifetimeMinPin, 0.95f);
-    p.f (kParticleLifetimeMaxPin, 1.3f);
+    p.f (kParticleLifetimeMinPin, 0.96f);
+    p.f (kParticleLifetimeMaxPin, 1.0f);
     p.f (kParticleStartSizePin, 0.28f);
     p.f (kParticleEndSizePin, 0.5f);
     p.v3(kParticleStartColorPin, 1.0f, 1.0f, 1.0f, true);

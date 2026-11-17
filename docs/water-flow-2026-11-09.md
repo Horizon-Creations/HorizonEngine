@@ -679,3 +679,29 @@ Plan in Phasen (jede baut und testet): 1. Sortier-Priorität als Material-Einste
   schon bei einer knöcheltiefen Pfütze den ganzen Schirm einfärbt (Thema 185, `RenderExtractor.cpp queryUnderwaterCamera`, `fogWaterlineBand`/`underwaterShallowFactor`) —
   die beiden sehen für einen Menschen gleich aus, sind aber getrennte Systeme. 2. Falls Fog gemeint ist: eigener Schwellenwert/Dämpfung für sehr flache Stream-Filme statt
   des pauschalen `signedDepth >= 0`-Schnitts. 3. Sauberer Screenshot, der die zwei Mechanismen trennt (z. B. `HE_DUMP_NOSKY` + Fog-Dichte 0, nur das Material betrachten).
+
+### Schritt 25 (Hive-Schritt 16: Gischt-/Vorhang-Emitter an der falschen Stelle; Bug-Report des Menschen)
+
+- **Messung zuerst:** `HE_DUMP_WATERLAKE` loggt jetzt je Spray-Emitter seine Lage und den Kasten seiner Partikel (terrain-lokal, EditorApplication.cpp, Zeile „emitter …").
+  Die Platzierung selbst stimmt: Vorhang-Emitter genau auf der Oberkante (`fall`: Linie x = 3,99 = Plateaurand 4, Höhe = Wasser dort), Tropfen/Nebel genau auf `Fall::foot`
+  (= `FallLine::landing`, 6,2 m hinter der Kante, 0,6 m hinter dem Fuß der Wand). Auch Rotation/Skalierung der Landschaft sind kein Thema (Position lokal, Richtung per `streamTurnOf`).
+- **Ursache:** nicht der Emitter, sondern seine Teilchen. `fx_gen curtain()` hatte Lebensdauer 0,95–1,3 (× Fallzeit, `curtainMods`) bei Schwerkraft −9,8: ein Strich, der länger
+  als die Fallzeit lebt, fällt durch den Fuß. Gemessen im `fall`-Zeugen: Partikel-Kasten y −10,85..13,97 bei Landung y −0,8 (11 m UNTER dem Boden) und x bis 12,0 bei Landung 10,2; im
+  `crest`-Zeugen 6 m unter dem Fuß und 1–2 m hinter dem Landepunkt, als zerfranste Unterkante über dem Becken (Bild vorher). Der alte Test sah nur Teilchen mit Alter ≈ Fallzeit (162/162).
+- **Fix:** Vorhang-Lebensdauer 0,96–1,0 (`FxGen/main.cpp`), `WaterCurtain.hasset` neu erzeugt (`fx_gen`; Drops/Mist md5-gleich). Kein Strich überlebt die Fallzeit: Unterkante = Landepunkt,
+  die Spreizung 0,96 lässt sie in den letzten 8 % der Höhe enden, im Gischt des Fußes. Kein Code in WaterSpray/WaterSurface geändert.
+- **Test:** `test_water_stream` „the curtain's water comes down on its own foot": kein Vorhang-Teilchen unter dem Wasser seines Fußes (−0,8 m) oder > `run` + 1 m hinter der Kante.
+  Mit dem alten Hasset 155 von 2176 verletzt (rot), mit dem neuen 0 von 1921. `ctest -R test_water` 12/12, `test_engine_materials`/`test_particles`/`editor_help_audit` grün.
+- **Bilder (OpenGL, Mac, `HE_DUMP_WATERLAKE`, Kopfzeile des Zeugen):** `img-water-stream/spray_crest_before_gl.png` / `spray_crest_after_gl.png` (Front, `crest`, CAM 30,304,0 pitch 10 yaw −90),
+  `spray_fall_front_after_gl.png` (Front, `fall`), `spray_fall_side_after_gl.png` (Seite, `fall`, CAM 7,307,−30 pitch 2 yaw 180: sauberer Bogen von der Kante zum Fuß, Nebel am Fuß).
+  Der Zeuge ist der Headless-Dump, nicht der interaktive Editor (nicht erreichbar).
+
+## Handoff (Schritt 25)
+
+- **Verifiziert:** Zahlen oben (Emitter vs. Teilchenkasten, vorher/nachher), Test rot→grün, 4 Bilder (OpenGL/macOS). Mit Metal im Dump erscheinen KEINE Spray-Partikel (Wasserfläche schon):
+  Metal-Partikelweg in diesem Zeugen ungeprüft, nicht Teil des Schritts.
+- **Nicht verifiziert:** interaktiver Editor beim Pinseln; D3D/Vulkan/Metal für diesen Schritt (kein Code, nur das Asset).
+- **Entschieden:** nur das Asset korrigiert (die Graphen sind das Aussehen, die Modifikatoren die Geometrie).
+- **Offen / Vorschlag, nicht gebaut:** 1. Tropfen (`drops()` 0,4–0,8 × (1+0,5 s) bei Anfangs-Aufwärtsgeschwindigkeit 1,5·(1+1,2 s)) sinken bis ~4 m unter den Wasserspiegel (vom Boden verdeckt) —
+  Lebensdauer an die Rückkehrzeit 2·vy/g binden. 2. An einer runden Wand liegt der Landepunkt dort, wo die Neigung < `kFallSlope` fällt (`crest`: 2,2 m über dem Becken), nicht am Becken selbst;
+  der Nebel schwebt dort an der Wand. 3. Metal-Dump ohne Spray-Partikel prüfen.

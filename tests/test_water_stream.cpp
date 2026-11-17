@@ -865,7 +865,7 @@ TEST_CASE("Water falls: the curtain's water comes down on its own foot")
     for (int i = 0; i < 240; ++i) ParticleSystem::update(world, cm, 1.0f / 60.0f, nullptr);
 
     // The drops of each curtain at the end of their fall (the fall's time old) are over that fall's foot.
-    size_t checked = 0, onFoot = 0;
+    size_t checked = 0, onFoot = 0, pastFoot = 0, all = 0;
     for (auto [en, ws, ps] : world.registry().view<WaterSurfaceComponent, ParticleSystemComponent>().each())
     {
         if (!ws.spray || ps.particleAssetId != field.fallCurtain) continue;
@@ -878,6 +878,11 @@ TEST_CASE("Water falls: the curtain's water comes down on its own foot")
         const float fallTime = std::sqrt(2.0f * std::max(fall->line.height, 0.5f) / 9.8f);
         for (const Particle& p : ps.particles)
         {
+            // No streak of the curtain outlives the fall: none is below the water of its foot or on past where it lands
+            // (a longer life dropped it through the pool, up to 70% of the fall's height under the ground).
+            ++all;
+            const glm::vec2 q = glm::vec2(p.position.x, p.position.z) - fall->line.center;
+            if (p.position.y < fall->foot.surfaceY - 0.8f || glm::dot(q, fall->line.dir) > fall->line.run + 1.0f) ++pastFoot;
             const float age = p.maxLifetime - p.lifetime;
             if (age < 0.95f * fallTime || age > 1.05f * fallTime) continue;
             ++checked;
@@ -889,6 +894,9 @@ TEST_CASE("Water falls: the curtain's water comes down on its own foot")
     MESSAGE(onFoot << " of " << checked << " drops at the end of their fall are over their foot");
     REQUIRE(checked > 20u);
     CHECK(static_cast<double>(onFoot) >= 0.9 * static_cast<double>(checked));
+    MESSAGE(pastFoot << " of " << all << " curtain particles are below their foot's water or past where it lands");
+    REQUIRE(all > 100u);
+    CHECK(pastFoot == 0u);
 #endif
 }
 

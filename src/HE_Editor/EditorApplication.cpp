@@ -8585,6 +8585,19 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 				if (pws.spray) { ++emitters; particles += pps.particles.size(); }
 			HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_WATERLAKE spray: %zu emitter(s), %zu particle(s) after %.1f s",
 			            emitters, particles, secs);
+			// Where each emitter stands and where its particles are (world metres): the twin of the image for "does the
+			// spray sit where the water falls". The landscape is at ltf.position, so subtract it for terrain-local.
+			for (auto [pe, pws, pps] : reg.view<WaterSurfaceComponent, ParticleSystemComponent>().each())
+			{
+				if (!pws.spray || pps.particles.empty()) continue;
+				glm::vec3 lo(1e30f), hi(-1e30f);
+				for (const auto& pt : pps.particles) { lo = glm::min(lo, pt.position); hi = glm::max(hi, pt.position); }
+				const glm::vec3 at = glm::vec3(HE::worldMatrixOf(*m_editorWorld, pe)[3]) - ltf.position;
+				const glm::vec3 l2 = lo - ltf.position, h2 = hi - ltf.position;
+				HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_WATERLAKE emitter %016llx at local (%.2f, %.2f, %.2f), %zu particle(s) in "
+				            "(%.2f..%.2f, %.2f..%.2f, %.2f..%.2f)", static_cast<unsigned long long>(pps.particleAssetId.hi),
+				            at.x, at.y, at.z, pps.particles.size(), l2.x, h2.x, l2.y, h2.y, l2.z, h2.z);
+			}
 			// The falls' edges as the spray sees them: every lip, and the lines they were merged into.
 			if (const auto* ltcNow = reg.try_get<TerrainComponent>(land))
 			{
