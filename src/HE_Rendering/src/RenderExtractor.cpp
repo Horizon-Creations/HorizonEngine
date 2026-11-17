@@ -690,8 +690,13 @@ void windWaterParams(const MaterialAsset& ma, const MaterialComponent* mc,
 					const bool fixed = kind == Kind::OneSection && steady && !lodRow;
 					if (lodRow && steady && contentManager)
 					{
-						cooked->state[row] = HE::CookedStatic::State::Pending;
-						blk.settleLod.push_back(static_cast<uint32_t>(slot));
+						// Walk is settleLodRow's final verdict: not settled again (each settle copies the sections) until
+						// an un-cook, a rebuild or a content change sends the row back to Pending.
+						if (cooked->state[row] != HE::CookedStatic::State::Walk)
+						{
+							cooked->state[row] = HE::CookedStatic::State::Pending;
+							blk.settleLod.push_back(static_cast<uint32_t>(slot));
+						}
 					}
 					else cooked->state[row] = fixed ? HE::CookedStatic::State::Ready : HE::CookedStatic::State::Walk;
 					if (fixed)

@@ -962,6 +962,39 @@ TEST_CASE("CookedStatic LOD: a level that is not resident keeps the row pending,
 	}
 }
 
+TEST_CASE("CookedStatic LOD: a row settled to Walk is not settled again every frame, an un-cook settles it anew")
+{
+	LodScene l(4);
+	RenderExtractor walk; setUp(walk, l.s.cm, false);
+	RenderExtractor cook; setUp(cook, l.s.cm, true);
+	RenderWorld rwWalk, rwCook;
+	const Entity e = l.ents[1];
+	auto& reg = l.s.world.registry();
+	const auto stateOf = [&] { return block(l.s).state[static_cast<size_t>(block(l.s).rowOf(e))]; };
+
+	// A drawn mesh that is none of the levels settles Walk (see settleLodRow).
+	reg.get<MeshComponent>(e).meshAssetId = l.s.meshId;
+	walk.extract(l.s.world, rwWalk, 1.0f);
+	cook.extract(l.s.world, rwCook, 1.0f);
+	REQUIRE(stateOf() == HE::CookedStatic::State::Walk);
+
+	// The mesh is a level again, as LODSystem would write it. A settle would make the row Ready; Walk stays.
+	reg.get<MeshComponent>(e).meshAssetId = l.level[0];
+	for (int i = 0; i < 3; ++i)
+	{
+		walk.extract(l.s.world, rwWalk, 1.0f);
+		cook.extract(l.s.world, rwCook, 1.0f);
+		checkSameObjects(rwCook, rwWalk);
+		CHECK(stateOf() == HE::CookedStatic::State::Walk);
+	}
+
+	// An un-cook sends it back to Pending, and the next walk settles it again.
+	HE::uncookEntity(reg, e);
+	cook.extract(l.s.world, rwCook, 1.0f);
+	CHECK(stateOf() == HE::CookedStatic::State::Ready);
+	CHECK(readyRows(l.s) == 4);
+}
+
 TEST_CASE("CookedStatic LOD: a refined mesh is not cooked, a moved LOD entity and a swapped mesh show at once")
 {
 	LodScene l(8);
