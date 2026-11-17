@@ -344,6 +344,115 @@ pro Instanz, und sind von diesem Walk nicht betroffen), Editor-Verhalten editier
 5. Schritt 4 (Entkochen) braucht die Liste aus §8 als Eintrittspunkte, plus Reparenting
    (`HorizonWorld::reparentEntity`) und Cell-Streaming-Zerstörung (§7) als weitere Trigger.
 
+## 11. Schritt 9 (17.11.2026): Emitter-eigener Transform in `ParticleSystem::update` — gemessen, nicht umgesetzt
+
+Frage (Thema 343, Schritt 9): `extractParticleBatches` (`RenderExtractor.cpp:485-509`) liest
+`TransformComponent` nur über den `view`, ohne es im Funktionskörper zu benutzen — Partikel
+kommen bereits weltraum-aufgelöst aus `ps.particles`. Die eigentliche Transform-Auflösung für
+einen Emitter passiert stattdessen in `ParticleSystem::update` (`ParticleSystem.cpp:267`):
+`HE::worldMatrixOf(world, e)` wird für **jede** Entity mit `ParticleSystemComponent` **jeden
+Frame** neu aufgelöst, unabhängig davon, ob sich der Transform der Entity selbst je ändert. Die
+Partikel-Simulation selbst bleibt davon unberührt (nicht Teil dieses Schritts) — es geht nur um
+die Position des Emitters.
+
+### 11.1 Warum die Schritt-1-Baseline hier nicht reicht
+
+Die Schritt-1-Tabelle (§4.2) weist `ParticleSystem` mit "< 0,002 ms/Frame bei 50k Entities" aus.
+Das ist **keine Messung der Emitter-Transform-Kosten**: `scripts/perf/gen_reference_world.py`
+erzeugt keine `ParticleSystemComponent`-Entities (geprüft per `grep -n particle
+scripts/perf/gen_reference_world.py` — kein Treffer), die Zahl misst nur eine `entt::view`-
+Iteration über null passende Entities.
+
+### 11.2 Messaufbau
+
+Kein vorhandenes Werkzeug erzeugt Partikel-Emitter in einer `.hescene` (gleiche Lücke wie oben).
+Statt die Szenen-Generierung zu erweitern, ein Scratch-Microbenchmark direkt in
+`tests/test_particles.cpp` (TEST_CASE "SCRATCH perf: emitter worldMatrixOf share of
+ParticleSystem::update", **nicht eingecheckt** — nach der Messung per `git checkout --` wieder
+entfernt, siehe Handoff dieses Schritts): 20 000 Entities mit `TransformComponent` +
+`ParticleSystemComponent`, `maxParticles=0` (per `ParticleGraphAsset`, über den bereits
+bestehenden `makeConfiguredParticleAsset`-Helfer aus demselben Testfile) — `stepPool`s
+Emissions-Schleife läuft dann nie an (`particles.size() < maxParticles` ist mit `maxParticles=0`
+nie wahr), sodass nur der View-Walk + `resolveConfig`-Cache-Hit + `worldMatrixOf` + eine leere
+`stepPool`-Integration übrigbleiben — genau der Teil, um den es hier geht, isoliert von der
+Partikel-Simulation selbst. Verglichen: (a) `ParticleSystem::update` über alle 20 000 Emitter,
+Mittel über 50 Aufrufe, gegen (b) eine reine Schleife über dieselben Entities, die nur
+`HE::worldMatrixOf(world, e)` aufruft (gleicher View, gleiche Aufrufzahl). Eigener Build
+(`C:/hwtp9`, Release/Ninja, Thema-343-Branch @ `8ef96a4c9`).
+
+**Falle dabei:** der Build schlug zunächst mit `error C2026: Zeichenfolge zu lang` in
+`MaterialShaderLibrary.cpp` fehl, wenn `vcvars64.bat` aus der
+"Visual Studio 2022\Community"-Installation (MSVC 14.44.35207) kommt — derselbe, unveränderte
+Code baut fehlerfrei mit der "Visual Studio 18\Community"-Installation (MSVC 14.51.36231), die
+ein früherer Schritt dieses Themas schon benutzt hatte (bestätigt gegen `C:/hwec1/CMakeCache.txt`).
+Als Lektion gemeldet (`hive_lesson` #640) — nicht Teil dieses Codepfads, nur ein Build-Trap auf
+diesem Gerät.
+
+### 11.3 Ergebnis
+
+5 Läufe, je 50 Aufrufe gemittelt:
+
+| Lauf | `ParticleSystem::update`, µs/Aufruf | `worldMatrixOf`-only, µs/Aufruf | Anteil |
+|---|---|---|---|
+| 1 | 1541,8 | 1084,4 | 70,3 % |
+| 2 | 2035,6 | 1039,6 | 51,1 % |
+| 3 | 1423,6 | 925,4 | 65,0 % |
+| 4 | 1387,0 | 933,4 | 67,3 % |
+| 5 | 2491,3 | 1499,5 | 60,2 % |
+
+Spannweite 51–70 %, kein Lauf unter der Hälfte. Pro Emitter (20 000 Emitter/Aufruf):
+`ParticleSystem::update` insgesamt 69–125 ns, davon `worldMatrixOf` allein 46–75 ns. **Das ist ein
+echter, deutlicher Anteil** — bei 5 000 statischen Emittern (plausible Größenordnung für Fackeln/
+Glühwürmchen/Staub in einer großen Szene, eher als die 20 000 des Microbenchmarks) wären das
+überschlägig 0,23–0,38 ms/Frame allein für `worldMatrixOf`, in der gleichen Größenordnung wie
+`Transforms::scan` (0,088 ms bei 50 000 Mesh-Entities, §4.2) oder `RefineBounds` (0,448 ms bei
+50 000, §4.2).
+
+### 11.4 Warum trotzdem kein Cache in diesem Schritt
+
+`ParticleSystem.cpp:260-266` begründet die aktuelle Lösung ausdrücklich: `tc.worldMatrix`
+(die von `propagateTransforms` gepflegte, bereits dirty-flag-gecachte Weltmatrix, siehe §1) wird
+bewusst **nicht** gelesen, weil die Transform-Propagierung **später im selben Frame** läuft als
+`ParticleSystem::update` (`SceneSystems.cpp:153` vs. die spätere Propagierung) — auf dem ersten
+Tick nach Spawn/Laden ist `tc.worldMatrix` noch Identität bzw. veraltet. Dafür existiert ein
+eigener Regressionstest (`test_particles.cpp`: "a freshly placed emitter emits where it stands",
+MUTATION-Kommentar verlangt explizit `worldMatrixOf`, nicht `tc.worldMatrix[3]`).
+
+Ein naiver Cache ("nach dem ersten Tick `tc.worldMatrix` statt `worldMatrixOf` lesen") trifft
+denselben Fehler in einer zweiten Form: er wäre korrekt für einen Emitter, der sich nie bewegt,
+aber führt für JEDEN Emitter, dessen Transform sich doch einmal ändert (Script, Reparenting,
+Attachment an einen bewegten Knochen — Regel 5 schließt nur die Partikel-SIMULATION vom Cooking
+aus, nicht die Möglichkeit, dass die EMITTER-Entity selbst bewegt wird), einen dauerhaften
+Ein-Frame-Lag ein, nicht nur einen falschen ersten Frame. Das wäre eine stille Verhaltensänderung,
+kein reiner Performance-Gewinn, und es gibt für `ParticleSystemComponent`-Entities keinen
+"entkoche zuerst"-Mechanismus (§8), der das abfangen würde — Regel 5 schließt sie ja gerade
+pauschal vom Cooking-Zustand aus.
+
+**Konkreter, sicherer Entwurf für einen künftigen Schritt** (hier nur vorgeschlagen, nicht gebaut):
+`HE::CookAnalysis::analyzeCookability(reg, e)` (`CookAnalysis.h`, aus Schritt 2) liefert pro Entity
+ein Bitfeld von `CookBlocker`s; für eine Emitter-Entity ist `CookBlocker::Locomotion` (Bit 4, "5
+... ParticleSystem") IMMER gesetzt — das ist exakt die Regel-5-Ausnahme, nicht aber die Aussage,
+ob die Entity SELBST sich bewegt. `(verdict.blockers & ~uint16_t(CookBlocker::Locomotion)) == 0`
+ist genau die Bedingung aus der Schrittbeschreibung: "keine der Regeln 1–4/9/10 trifft auf die
+Entity selbst zu". Nur wenn das gilt, dürfte `ParticleSystem::update` nach einem einmaligen
+`worldMatrixOf`-Aufruf (ein neues, nicht serialisiertes `bool` auf `ParticleSystemComponent`, nach
+demselben Muster wie `configDirty`) auf `tc.worldMatrix[3]` umschalten. Zwei Gründe, das nicht in
+diesem Schritt zu bauen: (1) `CookAnalysis.h`/`MobilityComponent.h` stehen nicht in den "Files that
+matter" dieses Schritts — die Regel "kleiner Diff" verbietet, sie hier anzufassen; (2)
+`analyzeCookability` ist laut eigenem Kommentar für "einmal, beim Laden/Export, nie pro Frame"
+gedacht — es gibt noch keinen Ort, der das Verdikt pro Entity zwischenspeichert, und das selbst zu
+bauen wäre mehr als dieser Messschritt rechtfertigt. Das rohe `MobilityComponent::mode` ungeprüft
+zu vertrauen wäre dagegen UNSICHER: es ist laut eigenem Header nur "des Autors Aussage", von
+`analyzeCookability` erst gegen echte Blocker geprüft (ein fälschlich auf `Static` gesetzter,
+aber per Skript bewegter Emitter würde denselben Lag-Fehler reproduzieren, nur stiller).
+
+**Fazit:** Der Anteil ist real und deutlich (51–70 % von `ParticleSystem::update`s Zeit bei
+ausschließlich statischen Emittern) — kein "nicht messbar"-Ergebnis. Trotzdem **kein Code in
+diesem Schritt geändert**: ein sicherer Cache braucht das Schritt-2-Cookability-Verdikt als Gate,
+und dessen Zwischenspeicherung existiert noch nicht. Empfehlung an die Queen: ein eigener,
+kleiner Folgeschritt ("Emitter-Transform-Cache, gegated auf CookAnalysis ohne Locomotion-Bit") statt
+hier einen ungegateten Cache zu riskieren, der bewegte Emitter lautlos falsch macht.
+
 ## Handoff
 
 - **Topic / step:** Thema 343, Schritt 1 von 5 (Bestandsaufnahme/Baseline), Device NN-WS03.
