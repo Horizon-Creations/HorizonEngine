@@ -646,3 +646,36 @@ Plan in Phasen (jede baut und testet): 1. Sortier-Priorität als Material-Einste
 - **Verhaltensänderung:** keine Gischt mehr bei < 1,5 m Fall ohne Kante; Gischt-Emitter pro Fall breiter (mehr Partikel, Budget 30000 greift).
 - **Nicht verifiziert:** andere Backends für Schritt 23 (nur D3D12 gerendert); Aussehen im echten Editor beim Pinseln; Metal.
 - **Nächste Schritte:** 1. Aussehen mit dem Menschen (Vorhang-Dichte an runden Wänden, harte Unterkante, wo der Vorhang die Wand trifft). 2. Wie oben.
+
+### Schritt 24 (Hive-Schritt 15: Teal-Unterseite am Wasserfall-Vorhang trotz Kamera außerhalb; Bug-Report des Menschen)
+
+- **Ursache:** Schritt 13 setzte `Flow.z` statisch beim Mesh-Bau auf `SurfaceMesh::deepest` (die tiefste Stelle DIESES Meshes). Schritt 16 ersetzte das durch einen
+  per-Frame-Knopf (`RenderExtractor.cpp waterCameraKnob`): ist die Kamera (`UnderwaterCameraData::wet/terrainEntity/bodyId`) IM Körper, bekommt `Flow.z` **unbegrenzt**
+  (`1e4`) statt `deepest`, sonst `-10`. Für einen See mit kleinem Höhenbereich macht das keinen Unterschied; ein Stream/Wasserfall-Körper ist aber EIN zusammenhängender
+  Körper vom Fuß-Becken bis zur Falllinie oben (teils zehn-plus Meter Höhenunterschied). Eine Kamera, die nur knöcheltief im Fuß-Becken steht, ist „im Körper" — und bekam
+  damit auch für JEDEN Vorhang-Fragment weit über ihr (dessen Ebene die Kamera ebenfalls „unterschreitet", `under.below`) die Unterseite, statt die Reichweite auf die
+  tatsächliche Wassertiefe zu begrenzen. `WaterSurfaceComponent::deepest` (vom Mesh-Bau) trug den richtigen Wert schon immer, wurde vom Schritt-16-Knopf aber nie gelesen.
+- **Fix (`RenderExtractor.cpp waterCameraKnob`):** zusätzlicher Parameter `deepest` (= `wsurf->deepest`); ist die Kamera im Körper, `Flow.z = deepest` (bekannt) statt
+  `1e4`, sonst wie vorher der alte `1e4`-Fallback (unbekannte Tiefe, z. B. See ohne Ufer-Clipping). Kamera NICHT im Körper: unverändert `-10`. Veraltete Kommentare in
+  `MatGen/main.cpp` (verwiesen noch auf die Schritt-13/14-Terrassen-„Wasserfall-Bänder", die Schritt 14 entfernt hat) korrigiert — keine Shader-/Graph-Änderung, `Water.hasset`
+  bytes unverändert.
+- **Tests:** `tests/test_water_stream.cpp` neu — `cliffLand(8)` + `paintAcross` (derselbe Zeuge wie der Spray-Test), Kamera knöcheltief im Fuß-Becken via echtem
+  `RenderExtractor::extract`: `Flow.z == ws.deepest` (≈0,45 m) statt `1e4`; Kontrolle trocken daneben bleibt `-10`. Am ungefixten Code (per `git stash` verifiziert, nicht
+  committet) schlägt genau diese Assertion fehl (`z == 10000`). `tests/test_engine_materials.cpp`: Stream+Flow-Permutation behält den Flow-Knopf (15/16 Slots) — die
+  Schritt-16-Garantie „Flow in JEDER Variante" gilt auch für Stream.
+- **Screenshot (`HE_DUMP_WATERLAKE=fall`, derselbe Zeuge wie Schritt 18, `HE_DUMP_SKYTEST=1` zusätzlich nötig — das ist der eigentliche Kamera-/Himmel-Schalter, nicht nur für
+  Sky-Tests): CAMX=18 CAMY=298.6 CAMZ=-0.26 PITCH=20 YAW=-90, Fuß-Becken des 8-m-Falls.** Vor dem Fix und nach dem Fix sehen an DIESER Position identisch aus (voll teal) —
+  **ehrlich zugegeben:** an dieser Stelle ist die Kamera tief genug im Becken, dass der globale Unterwasser-Fog-Postprozess (Thema 185, eigener Mechanismus, hängt an
+  derselben `wet`-Flagge) den ganzen Schirm einfärbt und die Material-Änderung dadurch optisch verdeckt. Bei CAMX=26 CAMY=300.05 (praktisch trocken) zeigen beide Builds
+  korrekt normales blaues Oberflächenwasser (kein Unterschied, weil dort `cameraInThisBody` in beiden Fällen falsch ist). Die eigentliche, scharfe Verifikation ist der
+  Unit-Test oben (exakte Zahl, nicht Pixel) — ein Foto, das NUR die Material-Fläche zeigt und NICHT den globalen Fog, habe ich in der verbleibenden Zeit nicht sauber
+  hinbekommen (die beiden Mechanismen hängen an derselben `wet`-Flagge, siehe „Offen"). Bilder liegen unter `out/step15_fall_footpool_before.png` /
+  `_after.png` / `step15_diff_heat.png` im Worktree (nicht eingecheckt).
+- **Verifiziert:** `ctest -R test_water` 12/12 grün; `test_engine_materials` grün; HorizonEditor + he_tests mit dem Fix gebaut und deployed (`out/deploy/Editor`, lokaler
+  Worktree-Deploy, nicht der Haupt-Checkout).
+- **Nicht verifiziert:** Metal/OpenGL/Vulkan/D3D12 für diesen Schritt (nur D3D11); ob der global-Fog-Schwellenwert für eine knöcheltiefe Pfütze (Thema 185) selbst zu
+  aggressiv ist — siehe „Offen".
+- **Offen / nächste Schritte:** 1. Prüfen, ob der VOM MENSCHEN gemeinte Bug tatsächlich die Material-Fläche ist (wie hier gefixt) oder der globale Unterwasser-Fog, der
+  schon bei einer knöcheltiefen Pfütze den ganzen Schirm einfärbt (Thema 185, `RenderExtractor.cpp queryUnderwaterCamera`, `fogWaterlineBand`/`underwaterShallowFactor`) —
+  die beiden sehen für einen Menschen gleich aus, sind aber getrennte Systeme. 2. Falls Fog gemeint ist: eigener Schwellenwert/Dämpfung für sehr flache Stream-Filme statt
+  des pauschalen `signedDepth >= 0`-Schnitts. 3. Sauberer Screenshot, der die zwei Mechanismen trennt (z. B. `HE_DUMP_NOSKY` + Fog-Dichte 0, nur das Material betrachten).

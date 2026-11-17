@@ -722,11 +722,13 @@ Mb waterMaterial()
         "further out it blends to the assumed depth (Turbidity.y). "
         "z = opacity floor (0..1): the share of Opacity left at no depth at all. "
         "w = reserved, no effect yet.", 7);
-    // The current (Thema 232 step 3). Only read while the "Flow" Static Switch is on, which the
-    // engine turns on per instance for a body whose BodyPhysics::flow is not zero (WaterSurface.cpp);
-    // x, y = the flow's X and Z in WORLD axes, m/s; z = the body's deepest water (m), w = 1 when z is
-    // set (Schritt 13, see "Top or underside"). Like TessWaves it exists only in that permutation:
-    // the plain water has no such slot and is the water it always was.
+    // The current (Thema 232 step 3). x, y only move with the Flow Static Switch on (a body with a
+    // current, set by the Landscape tool or water.setFlow); z, w are read in EVERY permutation (Schritt
+    // 16: the renderer sets them per frame and per surface, waterCameraKnob in RenderExtractor.cpp) —
+    // z = the mesh's own deepest water (m, WaterSurfaceComponent::deepest, -1 = unknown), w = 1 when z
+    // is known: a camera further below a fragment's plane than that is not in this water (even when the
+    // camera is wet elsewhere in the same body — a tall stream's foot pool and its cliff curtain far
+    // overhead are the same body, Schritt 15) and sees the top side, not the underside.
     const int flowKnob = m.param(T::ParamVec4, "Flow", { 0.0f, 0.0f, 0.0f, 0.0f }, "Flow",
         "Only with the Flow switch on (a water body with a current, set by the Landscape tool or "
         "water.setFlow). x, y = the current's X and Z in world axes (m/s): the ripples, the foam lace "
@@ -1317,13 +1319,16 @@ Mb waterMaterial()
     // `under.below` is a PLANE test: the camera under the plane of this fragment. That is everyone
     // under the water, but also a camera beside a stream on a hillside, which is under the plane of
     // every pool above it without being in any of them: each such pool drew as the underside's opaque
-    // teal mirror, the blocky corner of the hill close-up (Thema 232 Schritt 13). The surface pass
-    // knows how deep a flowing body's water is anywhere (Flow.z, metres; Flow.w = 1 when set; a
-    // waterfall band says 0): a camera deeper below the plane than that, plus a margin, is not in this
-    // water and gets the top look, which from below at a grazing angle is the sky's Fresnel, the way
-    // the pools under the camera look. Over the margin the underside fades out first, so nothing
-    // pops. Only with the Flow switch on: the still water is the old water, and a camera that can be
-    // in the body (the diver) is never past its depth, so it sees exactly what it saw.
+    // teal mirror, the blocky corner of the hill close-up (Thema 232 Schritt 13). A tall stream has the
+    // same failure the other way round: a camera wet ankle-deep in the foot pool is genuinely IN that
+    // body, but its cliff curtain can reach many metres overhead — every fragment of it is still "under
+    // the camera's plane" there too (Schritt 15). Flow.z/w close both: z is the mesh's own deepest water
+    // (metres), w = 1 when set (both per surface, per frame, RenderExtractor.cpp waterCameraKnob): a
+    // camera deeper below the plane than that, plus a margin, is not in this water and gets the top
+    // look, which from below at a grazing angle is the sky's Fresnel, the way the pools under the
+    // camera look. Over the margin the underside fades out first, so nothing pops. Only with the Flow
+    // switch on: the still water is the old water, and a camera that can be in the body (the diver) is
+    // never past its depth, so it sees exactly what it saw.
     constexpr float kUndersideMargin = 0.25f;     // m: the depth is read at the lattice's corners
     const int camDepth = m.op(T::Multiply, belowDot, m.k(-1.0f, 70, 8), 71, 8);
     const int reachD   = m.op(T::Add, Pin{ flowS, 2 }, m.k(kUndersideMargin, 70, 9), 71, 9);
@@ -1334,8 +1339,10 @@ Mb waterMaterial()
     const int keepU    = m.op3(T::If, depthSet, fadeOut, m.k(1.0f, 73, 10), 74, 10);
     // The test reads the Flow knob in EVERY variant (z = the water's depth the camera can be in, w = 1 when that is set): the
     // renderer sets it per frame (RenderExtractor.cpp): a camera that is not in THIS body of water gets z = -10, so it never
-    // sees the underside of a pool above it (the teal slab over a hillside); the camera IN the body gets z large. A mesh nobody
-    // set it for (w = 0: a plane, another material user) keeps the plain plane test.
+    // sees the underside of a pool above it (the teal slab over a hillside); the camera IN the body gets z = the mesh's own
+    // deepest water (or unlimited when that is unknown) — bounded, so a tall stream's curtain far over the camera's actual
+    // depth still reads as "not reachable" (Schritt 15). A mesh nobody set it for (w = 0: a plane, another material user)
+    // keeps the plain plane test.
     m.comment("From below: only a camera that is in this water (Flow.z/w)", 70, 8, 7, 4);
     const int below  = belowIn;
     const int baseO  = m.op3(T::If, below, m.k(0.0f, 76, 0), base, 77, 0);

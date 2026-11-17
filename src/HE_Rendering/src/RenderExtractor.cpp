@@ -161,9 +161,14 @@ void windWaterParams(const MaterialAsset& ma, const MaterialComponent* mc,
 
 
 	// The water material's Flow knob z/w for a landscape surface (Thema 232): z = how deep a camera can be below the surface plane and still
-	// be IN this water, w = 1 (set). The camera in THIS body: no limit; anywhere else: -10, so the material never shows the underside of a
-	// pool the camera merely stands under (a perched lake over a hillside). `block` starts from the material's own values when empty.
-	void waterCameraKnob(const MaterialAsset& ma, std::vector<float>& block, bool cameraInThisBody)
+	// be IN this water, w = 1 (set). The camera NOT in this body: -10, so the material never shows the underside of a pool the camera
+	// merely stands under (a perched lake over a hillside, Schritt 13/16). The camera IN this body: `deepest` (WaterSurfaceComponent::deepest,
+	// the mesh's own deepest water, -1 = unknown) rather than an unlimited bound — a stream body can span a cliff's whole height, and a
+	// camera wet ankle-deep in the foot pool is still "in this body"; without the cap every fragment of the curtain far overhead (well past
+	// any depth the camera could possibly be submerged to) read as "below the camera's plane AND in reach", the teal underside at the base
+	// of a waterfall looking up (Thema 232 Schritt 15) even though the camera never left dry ground. Unknown depth keeps the old unlimited
+	// bound (a lake with no shore clipping has no sensible cap either). `block` starts from the material's own values when empty.
+	void waterCameraKnob(const MaterialAsset& ma, std::vector<float>& block, bool cameraInThisBody, float deepest)
 	{
 		for (size_t k = 0; k < ma.graphParamNames.size() && k < 16; ++k)
 		{
@@ -174,7 +179,7 @@ void windWaterParams(const MaterialAsset& ma, const MaterialComponent* mc,
 				const size_t n = std::min(ma.shaderParamData.size(), size_t(64));
 				std::copy(ma.shaderParamData.begin(), ma.shaderParamData.begin() + n, block.begin());
 			}
-			block[k * 4 + 2] = cameraInThisBody ? 1.0e4f : -10.0f;
+			block[k * 4 + 2] = cameraInThisBody ? (deepest >= 0.0f ? deepest : 1.0e4f) : -10.0f;
 			block[k * 4 + 3] = 1.0f;
 			return;
 		}
@@ -607,7 +612,8 @@ void windWaterParams(const MaterialAsset& ma, const MaterialComponent* mc,
 							if (const MaterialAsset* ma = contentManager->getMaterial(matId))
 								waterCameraKnob(*ma, obj.paramOverride,
 								                out.underwaterCamera.wet && out.underwaterCamera.terrainEntity == static_cast<uint32_t>(wsurf->terrain) &&
-								                out.underwaterCamera.bodyId == wsurf->body);
+								                out.underwaterCamera.bodyId == wsurf->body,
+								                wsurf->deepest);
 				}
 				// A far LOD level that carries a material of its own (the baked far landscape) is drawn with it,
 				// whatever the entity's material is, while that level is the chosen one.

@@ -17,6 +17,9 @@
 #include <HorizonScene/Components/MaterialComponent.h>
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/DefaultAssets.h>
+#include <HorizonRendering/RenderExtractor.h>
+#include <HorizonRendering/RenderWorld.h>
+#include <glm/gtc/matrix_transform.hpp>
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
@@ -961,4 +964,83 @@ TEST_CASE("Water stream: over the edge of a plateau the water goes down with the
         CHECK(v.y - terrainHeightAt(tc, v.x, v.z) < 0.6f);
     }
 }
+
+#ifdef HE_EDITOR_DEPS_DIR
+// Thema 232 Schritt 15: a camera standing wet, ankle-deep, in the calm pool at the FOOT of a fall is
+// genuinely "in" that stream body — but the SAME body also carries the fall's curtain, which can reach
+// many metres over the camera's head. Before this step the renderer's per-frame knob
+// (RenderExtractor.cpp waterCameraKnob) gave such a camera an unlimited reach (z = 1e4) into its own
+// body, so every fragment of the curtain far overhead still read as "within reach" and drew the opaque
+// teal underside — even though the camera never left the shallow foot pool, let alone the curtain
+// itself. The fix bounds it by the mesh's own deepest water (WaterSurfaceComponent::deepest).
+TEST_CASE("Water stream underside: a camera wet at the foot of an 8 m fall does not reach the curtain overhead")
+{
+    HorizonWorld world;
+    ContentManager cm{ "." };
+    cm.setEngineContentRoot((std::filesystem::path(HE_EDITOR_DEPS_DIR) / "EngineContent").string());
+    REQUIRE(cm.loadAsset("Engine/Materials/Water.hasset") == HE::kEngineWaterMaterialId);
+
+    Entity landscape = world.createEntity("Landscape");
+    world.addComponent(landscape, TransformComponent{});
+    TerrainComponent tc = cliffLand(8.0f);          // plateau at y = 20 falling to y = 12 over x in [0, 4]
+    tc.dirty = true;
+    const uint16_t body = paintAcross(tc, -10.0f, 22.0f);   // one stream: plateau -> curtain -> foot pool
+    world.addComponent(landscape, tc);
+    TerrainSystem::updateTerrains(world, cm);
+
+    Entity surfaceE = entt::null;
+    for (auto [e, ws] : world.registry().view<WaterSurfaceComponent>().each())
+        if (ws.body == body && !ws.spray) surfaceE = e;
+    REQUIRE((surfaceE != entt::null));
+    const WaterSurfaceComponent& ws = world.registry().get<WaterSurfaceComponent>(surfaceE);
+    // A stream's film/pool, nowhere near the fall's own height: the bound this test is really about.
+    REQUIRE(ws.deepest >= 0.0f);
+    CHECK(ws.deepest < 2.0f);
+
+    const MaterialAsset* mat = cm.getMaterial(world.registry().get<MaterialComponent>(surfaceE).materialAssetId);
+    REQUIRE(mat);
+    int flowIdx = -1;
+    for (size_t k = 0; k < mat->graphParamNames.size(); ++k)
+        if (mat->graphParamNames[k] == "Flow") { flowIdx = static_cast<int>(k); break; }
+    REQUIRE(flowIdx >= 0);
+
+    const water::WaterIndex idx = water::WaterIndex::build(world);
+    water::Surface footSurface;
+    REQUIRE(idx.surfaceAt(20.0f, 0.0f, 0.0, footSurface));   // flat foot plain, well into the painted stream
+
+    RenderExtractor ex;
+    ex.setContentManager(&cm);
+    const auto flowZW = [&](const glm::vec3& camPos) {
+        RenderWorld rw;
+        EditorCameraOverride cam;
+        cam.active   = true;
+        cam.position = camPos;
+        cam.view     = glm::lookAt(cam.position, cam.position + glm::vec3(0, 1, 0.001f), glm::vec3(0, 0, 1));
+        ex.extract(world, rw, 16.0f / 9.0f, &cam);
+        const RenderObject* obj = nullptr;
+        for (const RenderObject& o : rw.objects)
+            if (o.entityId == static_cast<uint32_t>(surfaceE)) obj = &o;
+        REQUIRE(obj != nullptr);
+        REQUIRE(obj->paramOverride.size() >= static_cast<size_t>(flowIdx) * 4 + 4);
+        return std::make_tuple(rw.underwaterCamera.wet, obj->paramOverride[flowIdx * 4 + 2], obj->paramOverride[flowIdx * 4 + 3]);
+    };
+
+    // Ankle-deep in the foot pool: wet, and in this body — but bounded by the mesh's own depth, not unlimited.
+    {
+        const auto [wet, z, w] = flowZW(glm::vec3(20.0f, footSurface.height - 0.02f, 0.0f));
+        REQUIRE(wet);
+        CHECK(w == 1.0f);
+        CHECK(z == doctest::Approx(ws.deepest));
+        CHECK(z < 2.0f);     // not the old unlimited 1e4 — nowhere near the fall's own 8 m
+    }
+    // The same spot, standing beside the pool rather than in it: dry, so the renderer keeps it at -10
+    // (never in reach) exactly as it did before this step.
+    {
+        const auto [wet, z, w] = flowZW(glm::vec3(20.0f, footSurface.height + 2.0f, 0.0f));
+        CHECK_FALSE(wet);
+        CHECK(w == 1.0f);
+        CHECK(z == -10.0f);
+    }
+}
+#endif // HE_EDITOR_DEPS_DIR
 

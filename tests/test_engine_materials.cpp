@@ -1580,4 +1580,10 @@ TEST_CASE("Engine water material: Flow is a Static Switch, off by default, that 
 	const HE::MatShaderGen tessOnly = HE::generateFragment(g, {}, &tessOn);
 	CHECK(hasParam(tessOnly, "Flow"));
 	CHECK(static_cast<int>(tessOnly.params.size()) <= HE::kMatMaxParams);
+	// The Stream permutation (waterMaterialFor always sets Flow=1 alongside Stream=1, WaterSurface.cpp)
+	// keeps Flow too — it needs the knob for the same underside test as every other variant.
+	const std::map<std::string, bool> streamOn{ { "Flow", true }, { "Stream", true } };
+	const HE::MatShaderGen stream = HE::generateFragment(g, {}, &streamOn);
+	CHECK(hasParam(stream, "Flow"));
+	CHECK(static_cast<int>(stream.params.size()) <= HE::kMatMaxParams);
 }
