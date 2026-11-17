@@ -175,8 +175,15 @@ bool RvtLandscape::attach(HorizonWorld& live, entt::entity terrain, Segment& seg
         return false;
     }
 
-    if (seg.consumer == HE::UUID{})
+    // The consumer has the volume's origin, extent and page counts baked in, so a landscape that moved or was resized (the volume
+    // is rebuilt by remove()+attach() then) needs a new one; the old one is already out of the renderer (deactivate) and its id is
+    // simply not used again, like every material this driver makes.
+    const rvt::VolumeDesc& cd = seg.consumerDesc;
+    const bool consumerStale = seg.consumer != HE::UUID{} &&
+        (cd.origin != vd.origin || cd.sizeM != vd.sizeM || cd.finestMetersPerTexel != vd.finestMetersPerTexel);
+    if (seg.consumer == HE::UUID{} || consumerStale)
     {
+        seg.consumerDesc = vd;
         MaterialAsset ca;
         ca.type = HE::AssetType::Material;
         ca.name = "RvtLandscapeConsumer";
