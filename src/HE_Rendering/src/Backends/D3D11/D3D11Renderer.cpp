@@ -1349,7 +1349,7 @@ struct D3D11RendererImpl
 {
     struct RvtColdWork;   // Thema 333 step 9, defined near D3D11Renderer::CreateRvtPool
     // Not reached via DestroyRvtPool() alone: the renderer's own destructor just drops this struct, and a raw rvtWork
-    // left pointing at a joinable std::thread would terminate the process on exit (~thread() on a still-joinable thread).
+    // would leave encode jobs on the pool that still write into it.
     ~D3D11RendererImpl();
 
     ComPtr<ID3D11Device>           device;
@@ -1722,7 +1722,7 @@ struct D3D11RendererImpl
     uint64_t                         rvtStateVer   = 1; // bumped when a slot's temperature or hot slice changes
     uint64_t                         rvtRealFrames = 0;
     bool                             rvtColdOn     = false; // HE_RVT_COLD on and bc7enc built into this binary
-    RvtColdWork* rvtWork = nullptr;                         // the encoder thread and the readbacks in flight (defined below)
+    RvtColdWork* rvtWork = nullptr;                         // the encode jobs and the readbacks in flight (defined below)
     // SetRvtLandscape: per landscape entity, the material its chunks are drawn with now and the consumer that replaces it
     struct RvtSwap { HE::UUID landscapeMat, consumerMat; };
     std::unordered_map<uint32_t, RvtSwap> rvtSwaps;
@@ -10211,61 +10211,52 @@ static void uploadRvtTable(D3D11RendererImpl& p, D3D11RendererImpl::RvtTable& t)
     t.stateVer = p.rvtStateVer;
 }
 
-// The encoder thread and the readbacks still on their way to it. A readback in flight is a STAGING texture per layer
+// The encode jobs and the readbacks still on their way to them. A readback in flight is a STAGING texture per layer
 // plus an EVENT query: D3D11's immediate-context Map() blocks until the GPU catches up, so the render thread polls the
 // query (GetData with DONOTFLUSH) instead of mapping right away — the same page-fence idea Metal's completion handler
-// gives for free.
+// gives for free. The BC7 encode of a mapped page runs as a Low-priority job on the engine's pool (JobSystem.h), so it
+// shares the cores with the frame's other work instead of a thread of its own, and the pool's Low cap keeps workers
+// free for the frame.
 struct D3D11RendererImpl::RvtColdWork
 {
     struct Todo   { uint32_t slot, ver; std::vector<uint8_t> rgba[3]; };
     struct Done   { uint32_t slot, ver; std::vector<uint8_t> blocks[3]; };
     struct Flight { uint32_t slot, ver; ComPtr<ID3D11Texture2D> staging[3]; ComPtr<ID3D11Query> query; };
-    std::mutex              mutex;
-    std::condition_variable cv;
-    std::deque<Todo>        todo;
+    std::mutex              mutex;   // guards `done`, the only thing a pool worker touches
     std::deque<Done>        done;
     std::vector<Flight>     flights;
-    std::thread             worker;
-    bool                    quit = false;
+    std::vector<HE::JobHandle> jobs;   // render thread only: the encodes not yet pruned, so stop() can cancel and join them
     uint32_t                pagePx = 0;
 
-    void start(uint32_t px)
+    void start(uint32_t px) { pagePx = px; }
+
+    void submit(Todo&& todo)
     {
-        pagePx = px;
-        worker = std::thread([this] {
-            for (;;)
-            {
-                Todo job;
-                {
-                    std::unique_lock<std::mutex> lock(mutex);
-                    // Idle for a few seconds: give the encoder's tables back, the next page makes new ones.
-                    if (!cv.wait_for(lock, std::chrono::seconds(3), [this] { return quit || !todo.empty(); }))
-                    {
-                        lock.unlock();
-                        HE::releaseBlockEncoderCache();
-                        lock.lock();
-                        cv.wait(lock, [this] { return quit || !todo.empty(); });
-                    }
-                    if (quit) return;
-                    job = std::move(todo.front());
-                    todo.pop_front();
-                }
-                Done out; out.slot = job.slot; out.ver = job.ver;
-                bool ok = true;
-                for (int layer = 0; layer < 3 && ok; ++layer)
-                    ok = HE::encodeBlocks(HE::BlockFormat::Bc7, job.rgba[layer].data(), pagePx, pagePx, /*srgb=*/false,
-                                          /*quality=*/0, out.blocks[layer]);
-                if (!ok) out.blocks[0].clear();   // an empty result: the page stays hot
-                std::lock_guard<std::mutex> lock(mutex);
-                done.push_back(std::move(out));
-            }
-        });
+        HE::JobDesc desc;
+        desc.name = "D3D11::RvtColdEncode";
+        desc.priority = HE::JobPriority::Low;
+        jobs.push_back(globalPool().schedule([this, job = std::move(todo)] {
+            Done out; out.slot = job.slot; out.ver = job.ver;
+            bool ok = true;
+            for (int layer = 0; layer < 3 && ok; ++layer)
+                ok = HE::encodeBlocks(HE::BlockFormat::Bc7, job.rgba[layer].data(), pagePx, pagePx, /*srgb=*/false,
+                                      /*quality=*/0, out.blocks[layer]);
+            if (!ok) out.blocks[0].clear();   // an empty result: the page stays hot
+            std::lock_guard<std::mutex> lock(mutex);
+            done.push_back(std::move(out));
+        }, std::move(desc)));
+    }
+    // Drops the handles of encodes that have finished (their result is in `done` or was cancelled).
+    void pruneJobs()
+    {
+        std::erase_if(jobs, [](const HE::JobHandle& h) { return h.finished(); });
     }
     void stop()
     {
-        { std::lock_guard<std::mutex> lock(mutex); quit = true; }
-        cv.notify_all();
-        if (worker.joinable()) worker.join();
+        // The jobs capture `this`: nothing may still run when it goes. A queued one ends Cancelled, a running one is waited for.
+        for (HE::JobHandle& h : jobs) h.cancel();
+        for (HE::JobHandle& h : jobs) h.wait();
+        jobs.clear();
         flights.clear();   // ComPtr releases the staging textures/queries
     }
     ~RvtColdWork() { stop(); }
@@ -10583,6 +10574,7 @@ void D3D11Renderer::UpdateRvtCold()
         // 1. Encodes that came back: the page goes cold if it was not painted again meanwhile.
         std::deque<D3D11RendererImpl::RvtColdWork::Done> finished;
         { std::lock_guard<std::mutex> lock(w.mutex); finished.swap(w.done); }
+        w.pruneJobs();
         for (auto& d : finished)
         {
             p.rvtSlotBusy[d.slot] = 0;
@@ -10598,7 +10590,7 @@ void D3D11Renderer::UpdateRvtCold()
             ++p.rvtStateVer;
         }
 
-        // 2. Readbacks whose GPU copy has finished (polled, never blocked): map, hand the RGBA bytes to the encoder thread.
+        // 2. Readbacks whose GPU copy has finished (polled, never blocked): map, hand the RGBA bytes to an encode job.
         for (auto it = w.flights.begin(); it != w.flights.end();)
         {
             if (p.context->GetData(it->query.Get(), nullptr, 0, D3D11_ASYNC_GETDATA_DONOTFLUSH) != S_OK) { ++it; continue; }
@@ -10633,7 +10625,7 @@ void D3D11Renderer::UpdateRvtCold()
                         std::memcpy(job.rgba[layer].data() + size_t(y) * px * 4, s + size_t(y) * mp.RowPitch, size_t(px) * 4);
                 p.context->Unmap(it->staging[layer].Get(), 0);
             }
-            if (ok) { std::lock_guard<std::mutex> lock(w.mutex); w.todo.push_back(std::move(job)); w.cv.notify_one(); }
+            if (ok) w.submit(std::move(job));
             else p.rvtSlotBusy[it->slot] = 0;
             it = w.flights.erase(it);
         }
