@@ -125,7 +125,8 @@ namespace HE::landscape
             std::unique_ptr<HlodBaker> baker;     // the scratch copy; null before the first attach
             uint16_t   volume = 0;
             HE::UUID   landscapeMaterial;         // what the chunks are drawn with without the swap
-            HE::UUID   consumer;                  // registered once per segment, kept across deactivations
+            HE::UUID   consumer;                  // kept across deactivations; made anew when the volume it was baked for moved or resized
+            rvt::VolumeDesc consumerDesc;         // the origin/extent/texel size baked into the consumer's parameter defaults
             uint64_t   stateHash = 0;             // what the view graphs and the volume were built from
             uint64_t   uploadedVersion = ~0ull;
             bool       attached = false;          // scratch copy + volume exist
