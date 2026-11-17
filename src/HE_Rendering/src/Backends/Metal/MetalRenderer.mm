@@ -772,6 +772,10 @@ fragment float4 fragmentMain(VSOut in [[stage_in]],
 		return float4(albedo * diff, in.opacity);
 	}
 
+	// Screen-space UV of this fragment — loop-invariant, reused by every
+	// reflection/shadow-mask sample below instead of recomputing per site.
+	float2 screenUV = in.position.xy / max(scene.viewport.xy, float2(1.0));
+
 	// Metallic-roughness split (matches the GL backend).
 	float3 diffuseColor = albedo * (1.0 - in.metallic);
 	float3 specColor    = mix(float3(0.04), albedo, in.metallic);
@@ -796,13 +800,13 @@ fragment float4 fragmentMain(VSOut in [[stage_in]],
 	float3 envSpec = skyEnv.sample(skyEnvSmp, Rrough).rgb;
 	if (scene.reflCfg.w > 0.5)
 	{
-		float4 rr = giReflTex.sample(giReflSmp, in.position.xy / max(scene.viewport.xy, float2(1.0)));
+		float4 rr = giReflTex.sample(giReflSmp, screenUV);
 		float fade = 1.0 - smoothstep(scene.reflCfg2.y * 0.7, scene.reflCfg2.y, wRough);
 		envSpec = mix(envSpec, rr.rgb, rr.a * scene.reflCfg2.x * fade);
 	}
 	if (scene.reflCfg.x > 0.5)
 	{
-		float4 r = ssrTex.sample(ssrSmp, in.position.xy / max(scene.viewport.xy, float2(1.0)));
+		float4 r = ssrTex.sample(ssrSmp, screenUV);
 		float fade = 1.0 - smoothstep(scene.reflCfg.z * 0.7, scene.reflCfg.z, wRough);
 		envSpec = mix(envSpec, r.rgb, r.a * scene.reflCfg.y * fade);
 	}
@@ -815,7 +819,7 @@ fragment float4 fragmentMain(VSOut in [[stage_in]],
 	// Screen-space ambient occlusion darkens only the IBL indirect term in
 	// crevices; the direct lighting added below is left untouched. 1.0 = fully lit.
 	float ao = (scene.viewport.z > 0.5)
-		? aoTex.sample(aoSmp, in.position.xy / scene.viewport.xy).r : 1.0;
+		? aoTex.sample(aoSmp, screenUV).r : 1.0;
 	// Flat ambient fill (never-black floor + overcast replacement) kept outside AO
 	// so grazing-angle SSAO over-darkening cannot zero it out.
 	// GI (Checkpoint C) replaces the AO-gated IBL term with probe-sampled
@@ -873,7 +877,7 @@ fragment float4 fragmentMain(VSOut in [[stage_in]],
 		if (type == 0)
 		{
 			sh = (gi.enabled != 0
-				? giShadowTex.sample(giShadowSmp, in.position.xy / scene.viewport.xy).r
+				? giShadowTex.sample(giShadowSmp, screenUV).r
 				: shadowFactor(scene, in.worldPos, N, L, viewZ, shadowMap, shadowSmp, dbgCascade));
 			// Cloud shadows multiply on top of both shadow sources — the
 			// geometry shadow and the cloud layer occlude independently.
@@ -887,7 +891,7 @@ fragment float4 fragmentMain(VSOut in [[stage_in]],
 			// is combined in via min() — the map covers lights the mask can't.
 			sh = localShadowFactor(scene, l, in.worldPos, N, localShadowMap, shadowSmp);
 			if (gi.enabled != 0 && giLocalIdx < 4)
-				sh = min(sh, giLocalMask.sample(giLocalSmp, in.position.xy / scene.viewport.xy)[giLocalIdx]);
+				sh = min(sh, giLocalMask.sample(giLocalSmp, screenUV)[giLocalIdx]);
 			giLocalIdx++;
 		}
 		// "Receives Shadow" off: the object is lit as if nothing occluded it.
@@ -908,7 +912,7 @@ fragment float4 fragmentMain(VSOut in [[stage_in]],
 	// heFwdClusterLights.
 	if (clustered)
 	{
-		float2 cuv   = in.position.xy / max(scene.viewport.xy, float2(1.0));
+		float2 cuv   = screenUV;
 		float  nearZ = max(scene.clusterCamFwd.w, 1e-4);
 		float  viewZ = max(dot(in.worldPos - scene.cameraPos.xyz, scene.clusterCamFwd.xyz), nearZ);
 		int gx = int(scene.clusterParams.x);
@@ -946,7 +950,7 @@ fragment float4 fragmentMain(VSOut in [[stage_in]],
 				// first-4 channels (giLocalIdx above), only while the mask is live.
 				int ch = int(params.z) - 1;
 				if (gi.enabled != 0 && ch >= 0)
-					sh = min(sh, giLocalMask.sample(giLocalSmp, in.position.xy / scene.viewport.xy)[ch]);
+					sh = min(sh, giLocalMask.sample(giLocalSmp, screenUV)[ch]);
 				if (in.noShadow > 0.5) sh = 1.0;
 				float diff = max(dot(N, L), 0.0);
 				float3 H   = normalize(L + V);
