@@ -8338,46 +8338,28 @@ void MetalRenderer::RefineObjectBounds()
 	// keeps the bound the walk gave it for the rest of the walk, invalid at worst, and an object
 	// with an invalid bound is never culled: the conservative side, the draw loops resolve the
 	// mesh on their own.
-	const uint64_t      walk    = m_extractor.fullExtractCount();
-	const RenderObject* objects = m_renderWorld.objects.data();
-	const size_t        count   = m_renderWorld.objects.size();
-	if (walk == m_refinedWalk && objects == m_refinedObjects && count == m_refinedCount) return;
-	HE::AABB sceneBox;
+	// FrameCull (the same helper OpenGL/Vulkan/D3D11/D3D12 refine through) resolves each distinct
+	// mesh once, serially — ResolveMesh mutates m_meshCache and uploads on a miss, so that part
+	// stays single-threaded — then runs the per-object refine and bound copy wide on the job
+	// system from 4096 objects on; the AABB union FrameSceneBox reads is order-independent, so
+	// chunking does not change the result.
+	if (m_frameCull.holds(m_renderWorld, m_extractor.fullExtractCount())) return;
+	HE_PROFILE_SCOPE_N("Metal::RefineBounds");
+	m_frameCull.refine(m_renderWorld, m_extractor.fullExtractCount(), [this](const RenderObject& obj) -> const HE::AABB*
 	{
-		HE_PROFILE_SCOPE_N("Metal::RefineBounds");
-		m_refinedBounds.resize(count);
-		size_t i = 0;
-		for (RenderObject& obj : m_renderWorld.objects)
-		{
-			if (const GpuMesh* mesh = ResolveMesh(obj.meshAssetId))
-				obj.refineWorldBounds(mesh->localBounds);
-			sceneBox.expand(obj.worldBounds);
-			m_refinedBounds[i++] = obj.worldBounds;
-		}
-	}
-	m_refinedWalk     = walk;
-	m_refinedObjects  = objects;
-	m_refinedCount    = count;
-	m_refinedSceneBox = sceneBox;
+		const GpuMesh* mesh = ResolveMesh(obj.meshAssetId);
+		return mesh ? &mesh->localBounds : nullptr;
+	});
 }
 
 void MetalRenderer::CullObjects(const glm::mat4& viewProj, std::vector<uint8_t>& outVisible)
 {
-	if (m_refinedWalk == m_extractor.fullExtractCount() && m_refinedObjects == m_renderWorld.objects.data()
-	    && m_refinedCount == m_renderWorld.objects.size())
-		m_culler.cull(m_refinedBounds, viewProj, outVisible);
-	else
-		m_culler.cull(m_renderWorld, viewProj, outVisible);
+	m_frameCull.cull(m_culler, m_renderWorld, m_extractor.fullExtractCount(), viewProj, outVisible);
 }
 
-HE::AABB MetalRenderer::FrameSceneBox() const
+HE::AABB MetalRenderer::FrameSceneBox()
 {
-	if (m_refinedWalk == m_extractor.fullExtractCount() && m_refinedObjects == m_renderWorld.objects.data()
-	    && m_refinedCount == m_renderWorld.objects.size())
-		return m_refinedSceneBox;
-	HE::AABB sceneBox;
-	for (const RenderObject& o : m_renderWorld.objects) sceneBox.expand(o.worldBounds);
-	return sceneBox;
+	return m_frameCull.sceneBox(m_renderWorld, m_extractor.fullExtractCount());
 }
 
 // The point/spot lights whose shadow comes from the GI ray mask instead of the local shadow
@@ -20211,8 +20193,7 @@ void MetalRenderer::CullCameraObjects()
 	const glm::mat4 vp        = m_renderWorld.camera.projection * m_renderWorld.camera.view;
 	const bool      occlusion = m_occlusionCuller.settings().enabled;
 	CameraCullCache& c = m_cameraCull;
-	const bool refined = m_refinedWalk == walk && m_refinedObjects == m_renderWorld.objects.data()
-	                  && m_refinedCount == m_renderWorld.objects.size();
+	const bool refined = m_frameCull.holds(m_renderWorld, walk);
 	if (refined && c.stamp == m_frameStamp && c.walk == walk && c.objects == m_renderWorld.objects.data()
 	    && c.count == m_renderWorld.objects.size() && c.viewProj == vp
 	    && c.camPos == m_renderWorld.camera.position && c.occlusion == occlusion)
