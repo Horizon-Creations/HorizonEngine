@@ -133,17 +133,21 @@ TEST_CASE("cook analysis: every survey rule makes an entity uncookable")
 		blockedBy<ReplicatedVarsComponent>(CookBlocker::Replication, vars);
 	}
 	SUBCASE("7 save state") { blockedBy<SaveStateComponent>(CookBlocker::SaveState); }
-	SUBCASE("8 LOD with several levels or a refined mesh")
+	SUBCASE("8 LOD: the distance switch between levels cooks, a refined mesh does not")
 	{
 		LODComponent lod;
 		lod.levels.resize(1);
 		CHECK(withComponent<LODComponent>(lod).cookable());
+		// Several levels only swap the drawn mesh by distance: the cooked row holds every level.
 		lod.levels.resize(2);
-		blockedBy<LODComponent>(CookBlocker::Lod, lod);
+		CHECK(withComponent<LODComponent>(lod).cookable());
 
+		// A refined mesh is hooked in at runtime (terrain tessellation), nothing a row can hold.
 		LODComponent refined;
 		refined.levels.resize(1);
 		refined.refinedMeshId = HE::UUID::generate();
+		blockedBy<LODComponent>(CookBlocker::Lod, refined);
+		refined.levels.resize(2);
 		blockedBy<LODComponent>(CookBlocker::Lod, refined);
 	}
 	SUBCASE("9 trail and rope")
@@ -151,12 +155,13 @@ TEST_CASE("cook analysis: every survey rule makes an entity uncookable")
 		blockedBy<TrailComponent>(CookBlocker::Geometry);
 		blockedBy<RopeComponent>(CookBlocker::Geometry);
 	}
-	SUBCASE("11 streaming Auto")
+	SUBCASE("11 streaming: no longer a blocker, either mode")
 	{
+		// A cell's entities go with it and come back as new entities; the block is rebuilt from the
+		// live registry on every structure change (test_cooked_static, "cell unload and reload").
 		StreamingComponent s;
 		s.mode = StreamingComponent::Mode::Auto;
-		blockedBy<StreamingComponent>(CookBlocker::Streaming, s);
-		// Resident stays in the base for good.
+		CHECK(withComponent<StreamingComponent>(s).cookable());
 		s.mode = StreamingComponent::Mode::Resident;
 		CHECK(withComponent<StreamingComponent>(s).cookable());
 	}

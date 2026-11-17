@@ -332,7 +332,8 @@ public:
 
     // Static meshes the cooking analysis cleared are extracted from a flat block
     // (HorizonScene/CookedStatic.h) instead of rebuilt from the registry each walk.
-    // Off by default (HE_COOK_STATIC=1 turns it on at construction): the block is a
+    // Off by default (HE_COOK_STATIC=1 turns it on at construction; a world loaded from a scene
+    // exported with the project's cooking setting on asks for it itself, CookedStatic::enabled): the block is a
     // read-only mirror, and a value written to a cooked entity is not seen until
     // un-cooking exists. Needs no FrameKey field: the block follows the structure
     // epoch and the content epoch the key already holds, and a reused walk reads no row.

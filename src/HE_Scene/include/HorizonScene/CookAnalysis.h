@@ -18,9 +18,10 @@
 // Not decided here, on purpose:
 //  * Targets of a joint or rope (survey §6): needs the reverse index, built
 //    together with the freeze.
-//  * Cell membership: a split scene's entities carry no marker of the cell they
-//    came from. Only an explicit StreamingComponent::Mode::Auto is seen (rule
-//    11); how a cooked block follows its cell's unload is the freeze's problem.
+//  * Cell membership (survey rule 11, dropped): a cell's entities are created and destroyed
+//    with it, and every create or destroy moves HorizonWorld::structureEpoch, which rebuilds
+//    the cooked block from the live registry (entt handles do not survive an unload and a
+//    load, the block never keeps one past a rebuild). Nothing is left for a verdict to say.
 namespace HE
 {
 	enum class CookBlocker : uint16_t
@@ -32,10 +33,9 @@ namespace HE
 		Locomotion      = 1 << 4,   // 5  CharacterController, NavAgent, Movement, ParticleSystem
 		Replication     = 1 << 5,   // 6  NetworkComponent::replicates, declared replicated vars
 		SaveState       = 1 << 6,   // 7  SaveStateComponent
-		Lod             = 1 << 7,   // 8  LOD with more than one level, or a refined mesh
+		Lod             = 1 << 7,   // 8  LOD with a refined mesh (several levels cook: CookedStatic holds each)
 		Geometry        = 1 << 8,   // 9  Trail, Rope
 		Ancestor        = 1 << 9,   // 10 an ancestor has a blocker of its own
-		Streaming       = 1 << 10,  // 11 StreamingComponent::Mode::Auto
 		Switchable      = 1 << 11,  // 12 InactiveComponent, or a hidden mesh
 		MarkedMovable   = 1 << 12,  // the author's MobilityComponent::Mode::Movable
 	};

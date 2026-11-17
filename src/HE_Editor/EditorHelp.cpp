@@ -4709,6 +4709,18 @@ namespace
 	  "the engine's own wordmark, and the engine does not advertise itself "
 	  "inside your game. Saved to Config/ProjectSettings.json.",
 	  "", "export#overview" },
+	{ "Project General/Cook static entities", "Cook static entities",
+	  "When on, the export finds the meshes that never change while the game runs "
+	  "(no script, animation, physics body, replication or level of detail, and no "
+	  "such parent) and ships that list inside each scene. The game then draws them "
+	  "from a flat block of ready data instead of walking every entity each frame, "
+	  "and skips the analysis at load. A scene exported without it loads and draws "
+	  "exactly as before.\n\n"
+	  "An entity that a script or the engine API changes afterwards, or that gets a "
+	  "script, an animator or a body, falls back to normal handling on its own. "
+	  "Saved to Config/ProjectSettings.json as game.cookStaticEntities. The editor "
+	  "viewport is not affected; HE_COOK_STATIC=1 is the editor's switch.",
+	  "", "export#overview" },
 	{ "Project General/Splash image", "Splash image",
 	  "A PNG the splash shows, project-relative (Content/Splash.png). The export "
 	  "copies it beside project.hcfg as Splash.png; the game reads it from "

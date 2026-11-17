@@ -225,7 +225,12 @@ Eine Entity ist **nicht** kochbar, wenn mindestens eine davon zutrifft:
    ist "THE switch") oder `ReplicatedVarsComponent` mit deklarierten Variablen.
 7. Trägt `SaveStateComponent` — `entity.applySavedState` kann jederzeit ein Savegame über die
    Entity schreiben, außerhalb von Skript/Engine-API im engeren Sinn.
-8. Trägt `LODComponent` mit mehr als einem Level (`levels.size() > 1`) ODER mit gesetztem
+8. **Präzisiert in Schritt 8 (17.11.2026):** blockiert ist nur noch `LODComponent` mit gesetztem
+   `refinedMeshId`. Mehrere Level (`levels.size() > 1`) kochen: der reine Distanzwechsel schreibt nur eine
+   von N bekannten Mesh-Ids, die gekochte Zeile hält das aufgelöste Objekt je Level
+   (`CookedStatic::lodFirst`, `docs/entity-cooking-lod-2026-11-17.md`); `LODSystem` bleibt die einzige Stelle, die
+   das Level wählt. Der Ursprungstext der Regel (vor Schritt 8) folgt:
+   Trägt `LODComponent` mit mehr als einem Level (`levels.size() > 1`) ODER mit gesetztem
    `refinedMeshId` (`refinedMeshId != UUID{}`) — `LODSystem::update` (`LODSystem.cpp:29`) schreibt
    `MeshComponent::meshAssetId` abhängig von der Kameradistanz jeden Frame neu. Der Skip bei :32
    prüft nur `levels.empty()`; ein `LODComponent` mit nur einem Level, aber gesetztem
@@ -247,9 +252,10 @@ Eine Entity ist **nicht** kochbar, wenn mindestens eine davon zutrifft:
 10. Ist unter einem Vorfahren, der eine dieser Regeln erfüllt, oder dessen `HierarchyComponent`-
     Parent sich je ändern kann (`HorizonWorld::reparentEntity`) — eine gekochte Entity mit
     beweglichem Vorfahren hätte eine falsche Weltmatrix, sobald der Vorfahr sich bewegt.
-11. Ist Ziel eines `StreamingComponent`-gesteuerten Cell-Streamings, dessen Zelle entladen werden
-    kann (§7) — die Entity wird zerstört/neu erzeugt, ein gekochter Block müsste an den
-    Zell-Lebenszyklus gebunden sein (offene Frage für Schritt 3/5).
+11. ~~Ist Ziel eines `StreamingComponent`-gesteuerten Cell-Streamings, dessen Zelle entladen werden
+    kann (§7)~~ — **entfallen (Schritt 7, `docs/entity-cooking-streaming-2026-11-17.md`)**: der
+    Block wird bei jeder Strukturänderung aus der lebenden Registry neu gebaut, eine Zell-Entity
+    braucht keine eigenen Kochdaten.
 12. Trägt `InactiveComponent`, oder ihr `MeshComponent::visible` ist `false` — beides wird über
     `entity::setVisible` (§8) jederzeit umschaltbar geschrieben, und der Extract-Walk filtert
     genau danach (`RenderExtractor.cpp:463-464`, §3).
@@ -264,7 +270,7 @@ API-Aufruf, keine Vorab-Ausschlussregel hier.
 
 Kochbar (keine der obigen Regeln): nur `TransformComponent` + `MeshComponent` + optional
 `MaterialComponent`, `ColliderComponent` + `RigidBodyComponent{type=Static}`,
-`LODComponent` mit einem Level UND ohne `refinedMeshId`, `HierarchyComponent` (wenn Vorfahren ebenfalls kochbar sind),
+`LODComponent` ohne `refinedMeshId` (auch mit mehreren Leveln, seit Schritt 8), `HierarchyComponent` (wenn Vorfahren ebenfalls kochbar sind),
 `EntityIdComponent`/`NameComponent` (reine Metadaten, keine Laufzeitwirkung).
 
 ## 6. Querverweise: eine Entity ohne jede "ausschließende" Komponente kann trotzdem Ziel sein

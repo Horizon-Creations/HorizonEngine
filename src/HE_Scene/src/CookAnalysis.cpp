@@ -23,7 +23,6 @@
 #include "HorizonScene/Components/SaveStateComponent.h"
 #include "HorizonScene/Components/ScriptComponent.h"
 #include "HorizonScene/Components/SequencePlayerComponent.h"
-#include "HorizonScene/Components/StreamingComponent.h"
 #include "HorizonScene/Components/TrailComponent.h"
 #include "HorizonScene/Components/TransformComponent.h"
 #include <Diagnostics/Log.h>
@@ -62,14 +61,12 @@ namespace
 		if (const auto* v = reg.try_get<ReplicatedVarsComponent>(e); v && !v->entries.empty())
 			b |= bit(CookBlocker::Replication);
 		if (reg.all_of<SaveStateComponent>(e)) b |= bit(CookBlocker::SaveState);
-		// LODSystem::update rewrites the mesh id every frame for more than one
-		// level, and for a refined mesh even with one level (terrain tessellation).
-		if (const auto* lod = reg.try_get<LODComponent>(e);
-		    lod && (lod->levels.size() > 1 || lod->refinedMeshId != HE::UUID{}))
+		// LODSystem::update swaps the mesh id by distance among the levels, which the cooked row holds
+		// one by one (CookedStatic::lodFirst), so several levels no longer block. A refined mesh does:
+		// TerrainSystem hooks it in and out at runtime (terrain tessellation), nothing a row can hold.
+		if (const auto* lod = reg.try_get<LODComponent>(e); lod && lod->refinedMeshId != HE::UUID{})
 			b |= bit(CookBlocker::Lod);
 		if (reg.all_of<TrailComponent>(e) || reg.all_of<RopeComponent>(e)) b |= bit(CookBlocker::Geometry);
-		if (const auto* s = reg.try_get<StreamingComponent>(e); s && s->mode == StreamingComponent::Mode::Auto)
-			b |= bit(CookBlocker::Streaming);
 		if (reg.all_of<InactiveComponent>(e)) b |= bit(CookBlocker::Switchable);
 		if (const auto* m = reg.try_get<MeshComponent>(e); m && !m->visible)
 			b |= bit(CookBlocker::Switchable);

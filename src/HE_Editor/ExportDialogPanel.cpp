@@ -1403,6 +1403,10 @@ void startExport(AppContext& ctx)
                                       + " placed prefab(s) point at an asset that is gone; "
                                       "shipped as they were last saved");
                 };
+                // Project Settings ▸ General ▸ Cook static entities: each scene carries its cookable set,
+                // so the game skips the analysis at load (SceneSerializer::saveToMemory).
+                const bool packCookVerdict =
+                    ctx.projectManager->currentProject().settings.game.cookStaticEntities;
                 std::vector<uint8_t> sceneBinary;
                 bool sceneOk = true;
                 if (!scenePath.empty())
@@ -1412,7 +1416,7 @@ void startExport(AppContext& ctx)
                     if (ser.load(sceneWorld, scenePath, SerializeFormat::JSON))
                     {
                         syncPrefabsForExport(sceneWorld, sceneName);
-                        ser.saveToMemory(sceneWorld, sceneBinary);
+                        ser.saveToMemory(sceneWorld, sceneBinary, packCookVerdict);
                     }
                     else
                         sceneOk = false;
@@ -1444,7 +1448,7 @@ void startExport(AppContext& ctx)
                                 sit->path().lexically_relative(projectRoot).generic_string();
                             const bool loaded = ser2.load(w2, sit->path(), SerializeFormat::JSON);
                             if (loaded) syncPrefabsForExport(w2, rel);
-                            if (loaded && ser2.saveToMemory(w2, bytes))
+                            if (loaded && ser2.saveToMemory(w2, bytes, packCookVerdict))
                             {
                                 // Level script → codegen source, keyed by the scene's
                                 // pak UUID (the same key the runtime derives, §9.1).
