@@ -2163,6 +2163,9 @@ void EditorApplication::OnInit()
 	setWorld(m_editorWorld.get());
 	m_propScriptEngine = std::make_unique<ScriptEngine>();
 	m_undo.setWorld(m_editorWorld.get());
+	// Same reason as openScene/m_collab.onWorldReplacing: restore()'s clear()
+	// recycles entt ids, so an RVT segment would alias the loaded snapshot's entities.
+	m_undo.onWorldReplacing([this] { if (m_rvtLandscape) m_rvtLandscape->detach(); });
 
 	if (!m_audioEngine.init())
 		HE_LOG_WARN(Editor, "%s", "EditorApplication: audio engine init failed (no audio playback)");
