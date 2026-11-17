@@ -638,6 +638,10 @@ void render(AppContext& ctx)
             // Rows directly under this one, as listed (the hidden built-ins are
             // not counted) — what a folded row says is inside it.
             int         childCount        = 0;
+            // One past the last index of this node's whole subtree (DFS
+            // pre-order, so it is contiguous): a closed row jumps straight
+            // here instead of stepping over every descendant one at a time.
+            size_t      subtreeEndIndex   = 0;
         };
         static std::vector<OutlinerNode> s_outlinerCache;
         static HorizonWorld*             s_lastWorld = nullptr;
@@ -691,7 +695,8 @@ void render(AppContext& ctx)
                     for (Entity child : hier->children)
                         if (collect(child, depth + 1, underInstance || isInstance, added))
                             ++shownChildren;
-                s_outlinerCache[self].childCount = shownChildren;
+                s_outlinerCache[self].childCount      = shownChildren;
+                s_outlinerCache[self].subtreeEndIndex = s_outlinerCache.size();
                 return true;
             };
             collect(root, 0, false, false);
@@ -1032,8 +1037,6 @@ void render(AppContext& ctx)
         }
 
         // ── Render from cache ─────────────────────────────────────────────
-        int skipBelowDepth = INT_MAX; // skip children of closed nodes
-
         // While a filter is on, the tree's open/closed state lives in its own
         // ID namespace, and every branch on the way to a hit is forced open
         // there: a hit under a folded parent is a hit nobody sees. Doing it in
@@ -1150,11 +1153,6 @@ void render(AppContext& ctx)
         for (size_t nodeIndex = 0; nodeIndex < s_outlinerCache.size(); ++nodeIndex)
         {
             const auto& node = s_outlinerCache[nodeIndex];
-            // If a parent was closed, skip all its children
-            if (node.depth > skipBelowDepth)
-                continue;
-            skipBelowDepth = INT_MAX; // back at or above the closed level → reset
-
             // Filtered out. Skipped BEFORE this row counts as visible, so a
             // Shift-range never spans rows the user cannot see — and before
             // the depth bookkeeping, which is safe because the filter result
@@ -1194,8 +1192,13 @@ void render(AppContext& ctx)
                 const bool open = !hasChildren || filterActive
                                || ImGui::GetStateStorage()->GetInt(id, 1) != 0;   // 1: DefaultOpen
                 skipped += step;
-                if (open) enterPath(node.depth, id, node.entity);
-                else      skipBelowDepth = node.depth;
+                if (open)
+                    enterPath(node.depth, id, node.entity);
+                else
+                    // Closed and off-screen: nothing under it will ever be
+                    // visited either, so jump straight past its whole
+                    // subtree instead of stepping over every descendant.
+                    nodeIndex = node.subtreeEndIndex - 1;
                 continue;
             }
             // In view: first the clipped run above it, then the levels it opened.
@@ -1818,7 +1821,9 @@ void render(AppContext& ctx)
                 pushedDepth = node.depth;
             }
             else
-                skipBelowDepth = node.depth; // don't enter children
+                // Closed: its children are never visited, so jump straight
+                // past the whole subtree (see the off-screen case above).
+                nodeIndex = node.subtreeEndIndex - 1;
         }
         // The clipped run at the bottom still counts towards the scroll range.
         if (skipped > 0.0f)
