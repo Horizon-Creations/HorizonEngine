@@ -5234,7 +5234,7 @@ namespace
 	  "a sculpt or paint stroke, an edited parameter. A frame in which nothing changed paints nothing.\n\n"
 	  "Off by default: with it off the landscape draws exactly what it always drew. Saved to Config/ProjectSettings.json and "
 	  "read as you edit, by the editor and by the exported game. Needs a graphics backend that supports it (D3D11, D3D12, "
-	  "Vulkan and OpenGL do; Metal and the software renderer do not yet) — the page above says so where it does not. The "
+	  "Vulkan, OpenGL and Metal do; the software renderer does not yet) — the page above says so where it does not. The "
 	  "environment variable HE_RVT=1 or 0 forces it on or off over this switch.",
 	  "", "rendering#performance" },
 	{ "Virtual Texture/Pool size", "Pool size",

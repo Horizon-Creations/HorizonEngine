@@ -857,7 +857,7 @@ void drawVirtualTexturePage(AppContext& ctx)
 	settingsFileHint(nullptr);
 	const bool supported = ctx.renderer && ctx.renderer->GetCapabilities().supportsRvt;
 	if (!supported)
-		hint("This graphics backend cannot draw from virtual texture pages (Metal and the software renderer do not yet; "
+		hint("This graphics backend cannot draw from virtual texture pages (the software renderer does not; "
 		     "OpenGL needs 25 texture units, Vulkan a device that allows 21 samplers per stage). The setting is saved with "
 		     "the project and ignored here: the landscape keeps drawing its own material.");
 	{
