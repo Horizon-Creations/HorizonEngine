@@ -151,12 +151,13 @@ TEST_CASE("cook analysis: every survey rule makes an entity uncookable")
 		blockedBy<TrailComponent>(CookBlocker::Geometry);
 		blockedBy<RopeComponent>(CookBlocker::Geometry);
 	}
-	SUBCASE("11 streaming Auto")
+	SUBCASE("11 streaming: no longer a blocker, either mode")
 	{
+		// A cell's entities go with it and come back as new entities; the block is rebuilt from the
+		// live registry on every structure change (test_cooked_static, "cell unload and reload").
 		StreamingComponent s;
 		s.mode = StreamingComponent::Mode::Auto;
-		blockedBy<StreamingComponent>(CookBlocker::Streaming, s);
-		// Resident stays in the base for good.
+		CHECK(withComponent<StreamingComponent>(s).cookable());
 		s.mode = StreamingComponent::Mode::Resident;
 		CHECK(withComponent<StreamingComponent>(s).cookable());
 	}

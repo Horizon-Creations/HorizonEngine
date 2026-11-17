@@ -1,6 +1,8 @@
 #include "doctest.h"
 #include <HorizonRendering/RenderExtractor.h>
 #include <HorizonRendering/RenderWorld.h>
+#include <HorizonScene/CellSplit.h>
+#include <HorizonScene/CellStreamer.h>
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/CookedStatic.h>
 #include <HorizonScene/EngineApi.h>
@@ -39,7 +41,11 @@
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
 #include <nlohmann/json.hpp>
+#include <chrono>
 #include <cstring>
+#include <map>
+#include <string>
+#include <thread>
 #include <vector>
 
 // Entity cooking, step 3: static meshes extracted from the flat block. The block may
@@ -511,12 +517,11 @@ TEST_CASE("CookedStatic un-cook: a component added to a live cooked entity un-co
 	addAndCheck<InactiveComponent>("Inactive", true);
 	addAndCheck<MobilityComponent>("Mobility (default Movable)", true);
 	addAndCheck<NetworkComponent>("Network (replicates by default)", true);
-	// Present but harmless by default (a static body, no LOD levels, no declared vars, resident
-	// streaming): the block still looks again, and the verdict keeps the row.
+	// Present but harmless by default (a static body, no LOD levels, no declared vars): the block
+	// still looks again, and the verdict keeps the row.
 	addAndCheck<RigidBodyComponent>("RigidBody (Static)", false);
 	addAndCheck<LODComponent>("LOD (no levels)", false);
 	addAndCheck<ReplicatedVarsComponent>("ReplicatedVars (empty)", false);
-	addAndCheck<StreamingComponent>("Streaming (resident)", false);
 }
 
 TEST_CASE("CookedStatic un-cook: a blocker on a parent takes the cooked children with it")
@@ -716,4 +721,116 @@ TEST_CASE("CookedStatic pack: a change of structure after the load, or a verdict
 		CHECK((c == nullptr || !c->enabled));         // dropped as a whole: no seed, no cooking asked for
 		CHECK((c == nullptr || c->seed.empty()));
 	}
+}
+
+// ─── Streamed cells (step 7) ──────────────────────────────────────────────────
+// A cell's entities are destroyed with it and built again from its file on the next load: new
+// entt handles, the same UUIDs. The block holds handles, and a structure change rebuilds it from
+// the live registry, so a cell needs no cook data of its own. These tests run the real splitter
+// and streamer, with the Auto streaming mark (the one rule 11 used to refuse) on part of the cell.
+
+namespace
+{
+	using CellFiles = std::map<std::string, std::string>;
+
+	// One gameplay frame of streaming at `at`, until `done` holds or a few seconds have passed.
+	template<class Done>
+	void streamUntil(HE::CellStreamer& st, HorizonWorld& w, double x, Done done)
+	{
+		for (int i = 0; i < 3000 && !done(); ++i)
+		{
+			st.update(w, glm::dvec3(x, 1.7, 0.0), glm::vec3(0.0f), 4.0);
+			std::this_thread::sleep_for(std::chrono::milliseconds(1));
+		}
+	}
+
+	void checkCookedEqualsWalk(HorizonWorld& w, ContentManager& cm, RenderExtractor& cook, RenderWorld& rw)
+	{
+		cook.extract(w, rw, 1.0f);
+		cook.extract(w, rw, 1.0f);   // the second frame runs on settled rows
+		RenderExtractor walk; setUp(walk, cm, false);
+		RenderWorld ref;
+		walk.extract(w, ref, 1.0f);
+		checkSameObjects(rw, ref);
+	}
+
+	std::vector<Entity> autoStreamed(HorizonWorld& w)
+	{
+		std::vector<Entity> out;
+		for (auto [e, st] : w.registry().view<StreamingComponent>().each())
+			if (st.mode == StreamingComponent::Mode::Auto) out.push_back(e);
+		return out;
+	}
+}
+
+TEST_CASE("CookedStatic cells: a streamed cell is cooked, leaves with its cell and comes back cooked")
+{
+	Scene ed;
+	ed.build(30);   // x = 0..29 along a row, a cell is 10 m wide: three cells
+	for (size_t i = 0; i < 4; ++i)
+		ed.world.registry().emplace<StreamingComponent>(ed.statics[i], StreamingComponent{ StreamingComponent::Mode::Auto });
+
+	CellFiles files;
+	HE::CellSplitOptions opt;
+	opt.cellSize = 10.0f;
+	opt.dir      = "Content/T.cells";
+	const HE::CellSplitResult split = HE::splitWorldIntoCells(ed.world, opt,
+		[&](const std::string& path, const std::string& text) { files[path] = text; return true; });
+	REQUIRE(split.error.empty());
+	REQUIRE(split.moved > 10);
+
+	HorizonWorld game;
+	{
+		std::vector<uint8_t> bytes;
+		REQUIRE(SceneSerializer().saveToMemory(ed.world, bytes));
+		REQUIRE(SceneSerializer().loadFromMemory(game, bytes));
+	}
+	HE::CellManifest manifest;
+	REQUIRE(HE::CellManifest::parse(game.cellManifestJson(), manifest));
+	HE::CellStreamer streamer;
+	streamer.begin(manifest, [&files](const std::string& path) -> std::function<bool(std::vector<uint8_t>&)>
+	{
+		const auto it = files.find(path);
+		if (it == files.end()) return {};
+		const std::string bytes = it->second;
+		return [bytes](std::vector<uint8_t>& out) { out.assign(bytes.begin(), bytes.end()); return true; };
+	}, {});
+
+	RenderExtractor cook; setUp(cook, ed.cm, true);
+	RenderWorld rw;
+	const HE::CookedStatic& c = HE::cookedStaticOf(game.registry());
+
+	// Loaded: the cell's meshes, the Auto-marked ones among them, are rows and draw as the walk does.
+	streamUntil(streamer, game, 5.0, [&] { return streamer.isLoaded(0, 0); });
+	REQUIRE(streamer.isLoaded(0, 0));
+	checkCookedEqualsWalk(game, ed.cm, cook, rw);
+	const std::vector<Entity> marked = autoStreamed(game);
+	REQUIRE_FALSE(marked.empty());
+	for (const Entity e : marked) CHECK(c.rowOf(e) >= 0);
+	const size_t rowsLoaded = c.size();
+	REQUIRE(rowsLoaded > 0);
+	const uint32_t analysedLoaded = c.analysedBuilds;
+
+	// Unloaded: the entities are gone, so are their rows, and no row points at a dead entity.
+	streamUntil(streamer, game, 500.0, [&] { return !streamer.isLoaded(0, 0); });
+	REQUIRE_FALSE(streamer.isLoaded(0, 0));
+	checkCookedEqualsWalk(game, ed.cm, cook, rw);
+	for (const Entity e : marked) CHECK(c.rowOf(e) < 0);
+	for (const Entity e : c.entity) CHECK(game.registry().valid(e));
+	CHECK(c.size() < rowsLoaded);
+	CHECK(c.analysedBuilds > analysedLoaded);   // a rebuild followed the unload
+
+	// Loaded again: new handles, the same ids, the Auto-marked meshes cooked again.
+	streamUntil(streamer, game, 5.0, [&] { return streamer.isLoaded(0, 0); });
+	REQUIRE(streamer.isLoaded(0, 0));
+	checkCookedEqualsWalk(game, ed.cm, cook, rw);
+	const std::vector<Entity> markedAgain = autoStreamed(game);
+	CHECK(markedAgain.size() == marked.size());
+	for (const Entity e : markedAgain)
+	{
+		REQUIRE(c.rowOf(e) >= 0);
+		CHECK(c.state[static_cast<size_t>(c.rowOf(e))] == HE::CookedStatic::State::Ready);
+	}
+	CHECK(c.size() == rowsLoaded);
+	streamer.clear(game);
 }

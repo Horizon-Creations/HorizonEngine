@@ -247,9 +247,10 @@ Eine Entity ist **nicht** kochbar, wenn mindestens eine davon zutrifft:
 10. Ist unter einem Vorfahren, der eine dieser Regeln erfüllt, oder dessen `HierarchyComponent`-
     Parent sich je ändern kann (`HorizonWorld::reparentEntity`) — eine gekochte Entity mit
     beweglichem Vorfahren hätte eine falsche Weltmatrix, sobald der Vorfahr sich bewegt.
-11. Ist Ziel eines `StreamingComponent`-gesteuerten Cell-Streamings, dessen Zelle entladen werden
-    kann (§7) — die Entity wird zerstört/neu erzeugt, ein gekochter Block müsste an den
-    Zell-Lebenszyklus gebunden sein (offene Frage für Schritt 3/5).
+11. ~~Ist Ziel eines `StreamingComponent`-gesteuerten Cell-Streamings, dessen Zelle entladen werden
+    kann (§7)~~ — **entfallen (Schritt 7, `docs/entity-cooking-streaming-2026-11-17.md`)**: der
+    Block wird bei jeder Strukturänderung aus der lebenden Registry neu gebaut, eine Zell-Entity
+    braucht keine eigenen Kochdaten.
 12. Trägt `InactiveComponent`, oder ihr `MeshComponent::visible` ist `false` — beides wird über
     `entity::setVisible` (§8) jederzeit umschaltbar geschrieben, und der Extract-Walk filtert
     genau danach (`RenderExtractor.cpp:463-464`, §3).

@@ -23,7 +23,6 @@
 #include "HorizonScene/Components/SaveStateComponent.h"
 #include "HorizonScene/Components/ScriptComponent.h"
 #include "HorizonScene/Components/SequencePlayerComponent.h"
-#include "HorizonScene/Components/StreamingComponent.h"
 #include "HorizonScene/Components/TrailComponent.h"
 #include "HorizonScene/Components/TransformComponent.h"
 #include <Diagnostics/Log.h>
@@ -68,8 +67,6 @@ namespace
 		    lod && (lod->levels.size() > 1 || lod->refinedMeshId != HE::UUID{}))
 			b |= bit(CookBlocker::Lod);
 		if (reg.all_of<TrailComponent>(e) || reg.all_of<RopeComponent>(e)) b |= bit(CookBlocker::Geometry);
-		if (const auto* s = reg.try_get<StreamingComponent>(e); s && s->mode == StreamingComponent::Mode::Auto)
-			b |= bit(CookBlocker::Streaming);
 		if (reg.all_of<InactiveComponent>(e)) b |= bit(CookBlocker::Switchable);
 		if (const auto* m = reg.try_get<MeshComponent>(e); m && !m->visible)
 			b |= bit(CookBlocker::Switchable);
