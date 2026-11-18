@@ -1674,11 +1674,13 @@ private:
 		// invTransform's row 3 (the [0..3].w lane) is (0,0,0,1) for any affine
 		// transform and none of gi_refl.comp/gi_refl_hw.comp's reads of it
 		// ((M*vec4(o,1)).xyz, mat3(M), transpose(mat3(M))) ever touch that row —
-		// so in m_giReflInstanceBuf only, updateGiAccel repurposes it to carry a
+		// so in every instance list (m_giInstanceBuf, m_giShadowInstanceBuf,
+		// m_giReflInstanceBuf) updateGiAccel repurposes it to carry a
 		// world-space bounding sphere (center.xyz, radius) of the traced BLAS
-		// root, which gi_refl.comp's instance loop uses to reject an instance
-		// before the matrix transform and the BLAS walk (Finding 561). Same 96
-		// bytes, same stride — gi_shadow.comp/gi_probe.comp's copy is untouched.
+		// root, which gi_refl.comp's and gi_shadow.comp's instance loops use to
+		// reject an instance before the matrix transform and the BLAS walk
+		// (Findings 561, 563, 572). Same 96 bytes, same stride. gi_probe.comp
+		// and the HW kernels never read that row.
 	};
 	static_assert(sizeof(GIInstanceGpu) == 96, "gi_*.comp's GiInst is 96 bytes (invTransform + baseColor + offsets)");
 	struct GiBuffer // host-visible, persistently mapped

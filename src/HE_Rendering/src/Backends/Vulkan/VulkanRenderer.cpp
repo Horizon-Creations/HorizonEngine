@@ -12795,6 +12795,32 @@ void VulkanRenderer::updateGiAccel()
         if (const GIBlasRange* r = m_giBlas.find(id)) return *r;
         return m_giBlas.add(id, BuildGIBvh(id));
     };
+    // World-space bounding sphere of the BLAS actually traced (`range`'s root, which may be the
+    // default-cube fallback, NOT obj.worldBounds) into invTransform's otherwise-constant row 3 (see the
+    // GIInstanceGpu comment) — gi_refl.comp's and gi_shadow.comp's instance loops use it to reject an
+    // instance before the transform/BLAS walk (Findings 561, 563, 572). Corners, not a single scaled
+    // radius: a sheared transform can stretch a direction no column measures alone.
+    auto writeWorldSphere = [](GIInstanceGpu& inst, const HE::GiBvhNode& root, const glm::mat4& objToWorld)
+    {
+        glm::vec3 wMin, wMax;
+        for (int c = 0; c < 8; ++c)
+        {
+            const glm::vec3 corner((c & 1) ? root.boundsMax.x : root.boundsMin.x,
+                                   (c & 2) ? root.boundsMax.y : root.boundsMin.y,
+                                   (c & 4) ? root.boundsMax.z : root.boundsMin.z);
+            const glm::vec3 w = glm::vec3(objToWorld * glm::vec4(corner, 1.0f));
+            if (c == 0) wMin = wMax = w;
+            else { wMin = glm::min(wMin, w); wMax = glm::max(wMax, w); }
+        }
+        const glm::vec3 center = (wMin + wMax) * 0.5f;
+        // A small conservative pad over the exact circumscribing radius: rounding in the
+        // shader's ray-sphere test must stay on the side of "kept", never "wrongly rejected".
+        const float radius = glm::length(wMax - wMin) * 0.5f * 1.001f + 1e-3f;
+        inst.invTransform[0][3] = center.x;
+        inst.invTransform[1][3] = center.y;
+        inst.invTransform[2][3] = center.z;
+        inst.invTransform[3][3] = radius;
+    };
     // HW path: build a VkAccelerationStructureInstanceKHR array in EXACTLY the
     // giInsts order (the kernels index giInsts by InstanceId). Any mesh whose
     // HW BLAS can't be built breaks that 1:1 mapping → SW kernels this frame.
@@ -12840,6 +12866,7 @@ void VulkanRenderer::updateGiAccel()
         inst.baseColor    = glm::vec4(obj.baseColor, 1.0f);
         inst.nodeOffset   = range.nodeOffset;
         inst.triOffset    = range.triOffset;
+        writeWorldSphere(inst, m_giBlas.nodes()[static_cast<size_t>(range.nodeOffset)], obj.transform);
         if (shadowFilter.keeps(obj) && !(m_giHfActive && obj.terrainChunk)) shadowInstances.push_back(inst);
         if (!casterFilter.keeps(obj)) continue;
         instances.push_back(inst);
@@ -12864,32 +12891,6 @@ void VulkanRenderer::updateGiAccel()
                 glm::packHalf2x16(glm::vec2(surf.emissive.r, surf.emissive.g)));
             reflInst.emissiveB  = static_cast<int32_t>(
                 glm::packHalf2x16(glm::vec2(surf.emissive.b, 0.0f)));
-            // World-space bounding sphere of the BLAS actually traced (`range`, which may be the
-            // default-cube fallback, NOT obj.worldBounds) into invTransform's otherwise-constant row
-            // 3 (see the GIInstanceGpu comment) — gi_refl.comp's instance loop uses it to reject the
-            // instance before the transform/BLAS walk (Finding 561). Corners, not a single scaled
-            // radius: a sheared transform can stretch a direction no column measures alone.
-            {
-                const HE::GiBvhNode& root = m_giBlas.nodes()[static_cast<size_t>(range.nodeOffset)];
-                glm::vec3 wMin, wMax;
-                for (int c = 0; c < 8; ++c)
-                {
-                    const glm::vec3 corner((c & 1) ? root.boundsMax.x : root.boundsMin.x,
-                                           (c & 2) ? root.boundsMax.y : root.boundsMin.y,
-                                           (c & 4) ? root.boundsMax.z : root.boundsMin.z);
-                    const glm::vec3 w = glm::vec3(obj.transform * glm::vec4(corner, 1.0f));
-                    if (c == 0) wMin = wMax = w;
-                    else { wMin = glm::min(wMin, w); wMax = glm::max(wMax, w); }
-                }
-                const glm::vec3 center = (wMin + wMax) * 0.5f;
-                // A small conservative pad over the exact circumscribing radius: rounding in the
-                // shader's ray-sphere test must stay on the side of "kept", never "wrongly rejected".
-                const float radius = glm::length(wMax - wMin) * 0.5f * 1.001f + 1e-3f;
-                reflInst.invTransform[0][3] = center.x;
-                reflInst.invTransform[1][3] = center.y;
-                reflInst.invTransform[2][3] = center.z;
-                reflInst.invTransform[3][3] = radius;
-            }
             reflInstances.push_back(reflInst);
         }
         if (logInst)

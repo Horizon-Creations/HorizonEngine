@@ -180,6 +180,29 @@ bool hfAnyHit(vec3 o, vec3 d, float tMin, float tMax)
 	return false;
 }
 
+// Findings 563/572: most instances are nowhere near a given shadow ray (up to
+// spp sun rays + 4 local rays per pixel, each walking every instance).
+// invTransform's row 3 carries a world-space bounding sphere of the traced BLAS
+// root (VulkanRenderer.h's GIInstanceGpu comment) — reject on it in WORLD space
+// before the matrix transform and the BLAS entry. Written so a degenerate/NaN
+// sphere never counts as a miss: every compare is the way round that is false
+// under NaN, so such a ray falls through to the normal, slower test unchanged.
+// Same test as gi_refl.comp's giInstSphereMiss (no #include in GLSL).
+bool giInstSphereMiss(mat4 invT, vec3 o, vec3 d, float tMin, float tMax)
+{
+    vec3  c    = vec3(invT[0].w, invT[1].w, invT[2].w);
+    float r    = invT[3].w;
+    vec3  oc   = o - c;
+    float a    = dot(d, d);
+    float b    = dot(oc, d);
+    float disc = b * b - a * (dot(oc, oc) - r * r);
+    if (disc < 0.0) return true;
+    float s  = sqrt(disc);
+    float t0 = (-b - s) / a;
+    float t1 = (-b + s) / a;
+    return t1 < tMin || t0 > tMax;
+}
+
 // TLAS analogue: linear instance loop; object-space ray with UNNORMALISED
 // direction keeps t world-comparable.
 bool giSceneAnyHit(vec3 o, vec3 d, float tMin, float tMax)
@@ -187,6 +210,7 @@ bool giSceneAnyHit(vec3 o, vec3 d, float tMin, float tMax)
     int instCount = int(uFrame.w);
     for (int i = 0; i < instCount; ++i)
     {
+        if (giInstSphereMiss(giInsts[i].invTransform, o, d, tMin, tMax)) continue;
         vec3 oL = (giInsts[i].invTransform * vec4(o, 1.0)).xyz;
         vec3 dL = mat3(giInsts[i].invTransform) * d;
         if (giBlasAnyHit(giInsts[i].offsets.x, giInsts[i].offsets.y, oL, dL, tMin, tMax))
