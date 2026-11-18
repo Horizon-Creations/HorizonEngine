@@ -452,6 +452,71 @@ float streamFillAt(const TerrainComponent& tc, float x, float z)
     return std::max(0.0f, brushDugAt(tc, x, z) - kStreamFreeboard);
 }
 
+namespace
+{
+    // Fills pool.line (streamLineSlopeAt): per wet cell the window's mean ground gradient g and the principal axis t of the
+    // wet cells in the window (the line's direction, from their covariance); on a line (coherence near 1) the slope is
+    // t (t . g), on a blob g. The window sums come from summed-area tables, so the cost is the cells', not the window's.
+    void fillLineSlope(StreamPool& pool, const TerrainComponent& tc)
+    {
+        const int w = pool.w, h = pool.h;
+        const glm::vec2 cell = cellSize(tc);
+        const int rx = std::clamp(static_cast<int>(std::ceil(kStreamLineReach / cell.x)), 1, 64);
+        const int rz = std::clamp(static_cast<int>(std::ceil(kStreamLineReach / cell.y)), 1, 64);
+        using Sums = std::array<double, 8>;                       // n, gx, gz, x, z, xx, xz, zz
+        const size_t stride = static_cast<size_t>(w) + 1;
+        std::vector<Sums> table(stride * (static_cast<size_t>(h) + 1), Sums{});
+        std::vector<uint8_t> valid(pool.wet.size(), 0);
+        for (int j = 0; j < h; ++j)
+            for (int i = 0; i < w; ++i)
+            {
+                const size_t k = static_cast<size_t>(j) * w + i;
+                Sums s{};
+                if (pool.wet[k])
+                {
+                    const glm::vec2 c = cellCenter(tc, pool.box.x0 + i, pool.box.z0 + j);
+                    const float hx = terrainHeightAt(tc, c.x + cell.x, c.y) - terrainHeightAt(tc, c.x - cell.x, c.y);
+                    const float hz = terrainHeightAt(tc, c.x, c.y + cell.y) - terrainHeightAt(tc, c.x, c.y - cell.y);
+                    if (std::isfinite(hx) && std::isfinite(hz))
+                    {
+                        const double x = i * static_cast<double>(cell.x), z = j * static_cast<double>(cell.y);
+                        s = { 1.0, hx / (2.0 * cell.x), hz / (2.0 * cell.y), x, z, x * x, x * z, z * z };
+                        valid[k] = 1;
+                    }
+                }
+                const Sums& l = table[(j + 1) * stride + i], &u = table[static_cast<size_t>(j) * stride + i + 1],
+                          & d = table[static_cast<size_t>(j) * stride + i];
+                Sums& out = table[(j + 1) * stride + i + 1];
+                for (size_t q = 0; q < out.size(); ++q) out[q] = s[q] + l[q] + u[q] - d[q];
+            }
+        pool.line.assign(pool.wet.size(), glm::vec2(0.0f));
+        for (int j = 0; j < h; ++j)
+            for (int i = 0; i < w; ++i)
+            {
+                const size_t k = static_cast<size_t>(j) * w + i;
+                if (!valid[k]) { pool.wet[k] = 0; continue; }
+                const int i0 = std::max(0, i - rx), i1 = std::min(w - 1, i + rx), j0 = std::max(0, j - rz), j1 = std::min(h - 1, j + rz);
+                Sums s{};
+                for (size_t q = 0; q < s.size(); ++q)
+                    s[q] = table[(j1 + 1) * stride + i1 + 1][q] - table[(j1 + 1) * stride + i0][q] -
+                           table[static_cast<size_t>(j0) * stride + i1 + 1][q] + table[static_cast<size_t>(j0) * stride + i0][q];
+                const double n = s[0];
+                if (!(n > 0.5)) { pool.wet[k] = 0; continue; }
+                const glm::dvec2 g(s[1] / n, s[2] / n);
+                const double mx = s[3] / n, mz = s[4] / n;
+                const double cxx = s[5] / n - mx * mx, cxz = s[6] / n - mx * mz, czz = s[7] / n - mz * mz;
+                const double half = 0.5 * (cxx + czz), spread = std::sqrt(0.25 * (cxx - czz) * (cxx - czz) + cxz * cxz);
+                // 0 for a round patch (or one cell), 1 for a line; a few channel widths of ribbon in the window is ~0.8.
+                const double coherence = half > 1e-9 ? spread / half : 0.0;
+                const double lineness = std::clamp((coherence - 0.25) / 0.35, 0.0, 1.0);
+                const double angle = 0.5 * std::atan2(2.0 * cxz, cxx - czz);
+                const glm::dvec2 t(std::cos(angle), std::sin(angle));
+                const glm::dvec2 along = t * glm::dot(t, g);
+                pool.line[k] = glm::vec2(along * lineness + g * (1.0 - lineness));
+            }
+    }
+}
+
 std::shared_ptr<const StreamPool> streamPoolOf(const TerrainComponent& tc, uint16_t body)
 {
     struct Entry { const TerrainComponent* tc; uint16_t body; uint64_t revision, ground; const float* heights; size_t count;
@@ -521,6 +586,8 @@ std::shared_ptr<const StreamPool> streamPoolOf(const TerrainComponent& tc, uint1
         }
         for (size_t k = 0; k < ground.size(); ++k)
             if (wet[k] && seen[k]) pool->depth[k] = std::max(0.0f, level[k] - ground[k]);
+        pool->wet = std::move(wet);
+        fillLineSlope(*pool, tc);
     }
     std::lock_guard<std::mutex> lock(mutex);
     if (cache.size() >= 16) cache.erase(cache.begin());

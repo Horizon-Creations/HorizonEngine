@@ -104,8 +104,8 @@ namespace HE::water
     // WITH the ground, `streamDepth` metres over it and thinning to nothing at its edge, no steps and no
     // falls. The ground is read per vertex (terrainHeightAt), so the sheet follows a sculpt; between two
     // vertices it is a straight line, which is why the mesh is cut down to the terrain's own grid size
-    // (buildSurface). The current is the ground's downhill direction at every point, not one number per
-    // body: a stream that meanders runs along its own bends.
+    // (buildSurface). The current is read at every point, not one number per body, and runs along the
+    // stream's own line, down it (streamLineSlopeAt): a stream that meanders runs along its own bends.
     //
     // The slope at which water starts to run, and where it runs at full speed: Physics/WaterWaves.h
     // kStreamStillSlope .. kStreamFallSlope (candidates from docs/water-flow-2026-11-09.md section 5, kept
@@ -141,15 +141,24 @@ namespace HE::water
     // its edge). A stream painted over a basin is therefore a flat lake in the basin with its waterline at the rim, and runs
     // on as a film where it spills over; on a plain slope there is no hollow and nothing changes. `depth` is per water cell
     // of `box`: the flood level minus the ground (>= 0). Cached per landscape, body, water revision and ground version.
+    //
+    // The same cache holds the stream's slope along its own line (streamLineSlopeAt), cut from the same box.
     struct StreamPool
     {
         CellRect box;
         int w = 0, h = 0;
         std::vector<float> depth;
+        std::vector<glm::vec2> line;   // per cell of `box`: the slope along the stream's line, see streamLineSlopeAt
+        std::vector<uint8_t>   wet;    // per cell of `box`: 1 where `line` has a value (the body's wet cell)
     };
     std::shared_ptr<const StreamPool> streamPoolOf(const TerrainComponent& tc, uint16_t body);
     // The pool's depth at terrain-local (x, z), bilinear between cell centres; 0 off the pool.
     float streamPoolAt(const StreamPool& pool, const TerrainComponent& tc, float x, float z);
+
+    // How far (m) the stream's own line is read around a cell: its direction from the shape of the water's cells within this
+    // reach, its fall from the ground's mean slope there. Several channel widths, so a bend and the bumps of the ground
+    // within a stretch do not decide one cell's current.
+    inline constexpr float kStreamLineReach = 6.0f;
     // A pool deeper than this is still water: no current, no lean, no spray from it.
     inline constexpr float kStreamPoolStill = 0.1f;
 
@@ -161,6 +170,15 @@ namespace HE::water
     // steepest way DOWN over a small circle (kStreamGradientStep / 2) cannot. Returned like a gradient (pointing uphill, its
     // length the steepest descent in m/m), so slopeToFlow and the mesh's UV read it unchanged.
     glm::vec2 streamSlopeAt(const TerrainComponent& tc, float x, float z);
+    // The slope of the ground a stream's water feels at (x, z) ALONG THE STREAM'S OWN LINE, returned like streamSlopeAt
+    // (pointing uphill, its length the descent in m/m). streamSlopeAt reads the ground at the point alone: in a bend that
+    // is the hillside's own fall, across the channel and bump by bump, and a stream dug on a gentle slope runs in the
+    // wrong direction or stands where it should run along its channel. This one takes the direction of the line from the
+    // shape of the stream's wet cells around the point (their principal axis, kStreamLineReach) and the fall from the
+    // ground's mean gradient over those cells projected on it: the water runs the way the painted line goes DOWN, at the
+    // pace of the line's overall descent. Where the cells do not form a line (a wide pond-like patch) it is the mean
+    // gradient over them. `pool` is the stream's streamPoolOf; without it, or off its cells, it is streamSlopeAt.
+    glm::vec2 streamLineSlopeAt(const TerrainComponent& tc, const StreamPool* pool, float x, float z);
     // The current for a ground gradient: downhill, at kStreamMaxSpeed * smoothstep(still, fall, |g|).
     glm::vec2 slopeToFlow(const glm::vec2& gradient);
     // Terrain-local Y of the stream's surface at (x, z) with no edge thinning: the ground + the film's depth, or the filled

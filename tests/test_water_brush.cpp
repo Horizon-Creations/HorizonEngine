@@ -1604,3 +1604,37 @@ TEST_CASE("Water brush streams + Dig Bed: the channel is dug under the stream an
     // The water is lifted from the DUG ground: it lies in the channel.
     CHECK(water::streamSurfaceAt(tc, *b, 0.0f, 0.0f) >= terrainHeightAt(tc, 0.0f, 0.0f) + b->streamDepth - 1e-4f);
 }
+
+TEST_CASE("EXPERIMENT curved river")
+{
+    for (const float tilt : { 0.05f, 0.10f })
+    {
+        TerrainComponent tc = makeLand(10.0f, tilt);          // rising toward +X
+        for (uint32_t z = 0; z < 65; ++z)
+            for (uint32_t x = 0; x < 65; ++x)
+                tc.sculptHeights[static_cast<size_t>(z) * 65 + x] += 0.15f * std::sin(1.7f * x) * std::cos(2.3f * z);
+        tc.water.res = 128;
+        brush::Params p = followParams();
+        brush::Stroke s;
+        const int N = 160;
+        // meandering line, overall from +X (high) to -X (low), with a sideways swing that even runs back a little
+        auto pt = [&](int i) { const float u = static_cast<float>(i) / N; return glm::vec2(24.0f - 48.0f * u + 7.0f * std::sin(u * 6.2831853f * 3.0f), 12.0f * std::sin(u * 6.2831853f * 1.5f)); };
+        brush::begin(s, tc, pt(0).x, pt(0).y, p);
+        for (int i = 0; i <= N; ++i) brush::dab(s, tc, pt(i).x, pt(i).y, p);
+        const uint16_t id = s.body;
+        brush::end(s, tc);
+        const water::Body* b = tc.water.findBody(id);
+        printf("tilt %.2f body flow (%.3f,%.3f)\n", tilt, b->physics.flow.x, b->physics.flow.y);
+        int pos = 0, neg = 0, zero = 0;
+        for (int i = 4; i <= N - 4; i += 2)
+        {
+            const glm::vec2 q = pt(i), t = glm::normalize(pt(i + 2) - pt(i - 2));
+            const glm::vec2 f = water::streamFlowAt(tc, q.x, q.y);
+            const float a = glm::dot(f, t);
+            const float h0 = terrainHeightAt(tc, pt(i - 2).x, pt(i - 2).y), h1 = terrainHeightAt(tc, pt(i + 2).x, pt(i + 2).y);
+            if (i % 8 == 0) printf("  i=%3d p=(%6.2f,%6.2f) t(%5.2f,%5.2f) flow(%5.2f,%5.2f) along=%5.2f |f|=%.2f lineDropAhead=%.2f\n", i, q.x, q.y, t.x, t.y, f.x, f.y, a, glm::length(f), h0 - h1);
+            if (glm::length(f) < 0.02f) ++zero; else if (a > 0) ++pos; else ++neg;
+        }
+        printf("  along>0: %d  along<0: %d  still: %d\n", pos, neg, zero);
+    }
+}
