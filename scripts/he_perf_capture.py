@@ -92,7 +92,7 @@ def write_config(cfg_dir: Path, project: Path, sets, cam, rhi="Metal"):
         "LastProjectPath": str(project),
         "RHI": RHI[rhi],
     }
-    (cfg_dir / "config.json").write_text(json.dumps(cfg, indent=4))
+    (cfg_dir / "config.json").write_text(json.dumps(cfg, indent=4), encoding="utf-8")
 
 
 def pct(values, p):
@@ -101,7 +101,7 @@ def pct(values, p):
 
 
 def summarise(dump: Path):
-    d = json.loads(dump.read_text())
+    d = json.loads(dump.read_text(encoding="utf-8", errors="replace"))
     s, sess = d["summary"], d["session"]
     st = s.get("stats", {})
     frames = d.get("frames", [])
@@ -187,7 +187,7 @@ def main():
 
     project = Path(a.project).resolve()
     if a.scene:
-        heproj = json.loads(project.read_text())
+        heproj = json.loads(project.read_text(encoding="utf-8", errors="replace"))
         dst = project.parent / heproj["startupScene"]
         shutil.copyfile(a.scene, dst)
     write_config(Path(a.cfgdir), project, a.set, a.cam, a.rhi)
@@ -248,7 +248,7 @@ def main():
                       "sets": a.set, "cam": a.cam, "scene": a.scene, "warmup": a.warmup,
                       "frames": a.frames, "detailed": a.detailed, "counters": not a.no_counters,
                       "vsync": a.vsync, "rhi": a.rhi, "env": a.env}
-    (outdir / f"{a.label}.summary.json").write_text(json.dumps(summ, indent=2))
+    (outdir / f"{a.label}.summary.json").write_text(json.dumps(summ, indent=2), encoding="utf-8")
     fps = (summ.get("fps") or {}).get("avg")
     cpu = (summ.get("cpuMs") or {}).get("p50")
     gpu = (summ.get("gpuMs") or {}).get("p50")
