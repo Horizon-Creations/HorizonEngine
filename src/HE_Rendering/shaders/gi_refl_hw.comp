@@ -24,6 +24,8 @@ struct GiTri  { vec4 v0; vec4 v1; vec4 v2; };
 // read them.
 // baseColor.a = the instance's landscape index + 1 (0 = not a landscape chunk) — written by the host into the
 // reflection-only copy, where the shadow/probe kernels never look.
+// invTransform's row 3 ([0..3].w) carries gi_refl.comp's SW instance-loop culling sphere (Finding
+// 561) — the TLAS ray query here replaces that loop, so this kernel never reads that row.
 struct GiInst { mat4 invTransform; vec4 baseColor; ivec4 offsets; };
 // Painted / auto landscape — HE::GiLandscape (GiLandscape.h), host mirror VulkanRenderer::GILandGpu (192 bytes).
 // cfg: xy = 1/(sizeX,sizeZ), z = uvTiling, w = layer count (< 0 = auto landscape: layer = Grass/Dirt/Rock/Snow

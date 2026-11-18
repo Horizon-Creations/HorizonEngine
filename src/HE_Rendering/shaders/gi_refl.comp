@@ -29,6 +29,9 @@ struct GiTri  { vec4 v0; vec4 v1; vec4 v2; };
 // read them.
 // baseColor.a = the instance's landscape index + 1 (0 = not a landscape chunk) — written by the host into the
 // reflection-only copy, where the shadow/probe kernels never look.
+// invTransform's row 3 ([0..3].w) carries a world-space bounding sphere (center.xyz, radius) of the
+// traced BLAS root in this reflection-only copy — giInstSphereMiss() below reads it; see the
+// GIInstanceGpu comment in VulkanRenderer.h for why that row was free (Finding 561).
 struct GiInst { mat4 invTransform; vec4 baseColor; ivec4 offsets; };
 // Painted / auto landscape — HE::GiLandscape (GiLandscape.h), host mirror VulkanRenderer::GILandGpu (192 bytes).
 // cfg: xy = 1/(sizeX,sizeZ), z = uvTiling, w = layer count (< 0 = auto landscape: layer = Grass/Dirt/Rock/Snow
@@ -129,6 +132,30 @@ bool giBlasHitTri(int nodeOfs, int triOfs, vec3 o, vec3 d, float tMin, float tMa
     return hit;
 }
 
+// Finding 561: instCount grows with the scene (every GI-shadow-casting
+// instance, a few per ray/hit); most of them are nowhere near a given ray.
+// invTransform's row 3 carries a world-space bounding sphere of the traced
+// BLAS root (VulkanRenderer.h's GIInstanceGpu comment) — reject on it in
+// WORLD space, before the matrix transform and the BLAS entry giBlasHitTri
+// would otherwise always pay for. Written so a degenerate/NaN sphere (an
+// instance this field was never written for) never counts as a miss: every
+// compare is the way round that is false under NaN, so such a ray falls
+// through to the normal, slower test unchanged, same as before this existed.
+bool giInstSphereMiss(mat4 invT, vec3 o, vec3 d, float tMin, float tMax)
+{
+    vec3  c    = vec3(invT[0].w, invT[1].w, invT[2].w);
+    float r    = invT[3].w;
+    vec3  oc   = o - c;
+    float a    = dot(d, d);
+    float b    = dot(oc, d);
+    float disc = b * b - a * (dot(oc, oc) - r * r);
+    if (disc < 0.0) return true;
+    float s  = sqrt(disc);
+    float t0 = (-b - s) / a;
+    float t1 = (-b + s) / a;
+    return t1 < tMin || t0 > tMax;
+}
+
 int giSceneClosestHitTri(vec3 o, vec3 d, float tMin, float tMax, out float tOut, out int triOut)
 {
     int   bestInst = -1;
@@ -137,6 +164,7 @@ int giSceneClosestHitTri(vec3 o, vec3 d, float tMin, float tMax, out float tOut,
     int instCount = int(uRays.y);
     for (int i = 0; i < instCount; ++i)
     {
+        if (giInstSphereMiss(giInsts[i].invTransform, o, d, tMin, best)) continue;
         vec3 oL = (giInsts[i].invTransform * vec4(o, 1.0)).xyz;
         vec3 dL = mat3(giInsts[i].invTransform) * d;
         float t; int tri;
@@ -192,6 +220,7 @@ bool giSceneAnyHit(vec3 o, vec3 d, float tMin, float tMax)
     int instCount = int(uRays.y);
     for (int i = 0; i < instCount; ++i)
     {
+        if (giInstSphereMiss(giInsts[i].invTransform, o, d, tMin, tMax)) continue;
         vec3 oL = (giInsts[i].invTransform * vec4(o, 1.0)).xyz;
         vec3 dL = mat3(giInsts[i].invTransform) * d;
         if (giBlasAnyHit(giInsts[i].offsets.x, giInsts[i].offsets.y, oL, dL, tMin, tMax))
