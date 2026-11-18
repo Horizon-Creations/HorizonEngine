@@ -57,11 +57,6 @@ std::filesystem::path findLandscapePack(const std::string& pack, const std::file
 size_t prepareLandscapePacksForExport(HorizonWorld& world, const std::filesystem::path& projectRoot, ContentManager& content,
                                       const LandscapeExportOptions& options, LandscapeExportPlan& plan, const LandscapeExportLog& log = {});
 
-// The game's half: a relative pack path that names a file in `dataDir` becomes the absolute path of that file, so the runtime opens it whatever
-// the working directory is. Paths that are absolute, or that name nothing in `dataDir`, are left alone (the editor's own scenes, a developer
-// build run from the project). Returns the number of components changed; cheap enough for every frame (one stat per unresolved relative path).
-size_t resolveLandscapePacks(HorizonWorld& world, const std::filesystem::path& dataDir);
-
 // The step the exporter runs on the shipped copy: appends the baked table (a null or empty one writes nothing). Defined here because the pack
 // format lives here and the exporter (HE_Core) cannot see it.
 bool finishExportedPack(const LandscapeExportPack& pack, const std::filesystem::path& copied, std::string* error);

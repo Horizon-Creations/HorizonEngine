@@ -132,26 +132,6 @@ size_t prepareLandscapePacksForExport(HorizonWorld& world, const std::filesystem
 	return rewritten;
 }
 
-size_t resolveLandscapePacks(HorizonWorld& world, const std::filesystem::path& dataDir)
-{
-	if (dataDir.empty()) return 0;
-	size_t changed = 0;
-	auto& reg = world.registry();
-	for (auto e : reg.view<LandscapeWorldComponent>())
-	{
-		LandscapeWorldComponent& lw = reg.get<LandscapeWorldComponent>(e);
-		if (lw.pack.empty()) continue;
-		const std::filesystem::path p(lw.pack);
-		if (p.is_absolute()) continue;
-		std::error_code ec;
-		const std::filesystem::path inData = dataDir / p;
-		if (!std::filesystem::is_regular_file(inData, ec)) continue;
-		lw.pack = inData.string();
-		++changed;
-	}
-	return changed;
-}
-
 bool finishExportedPack(const LandscapeExportPack& pack, const std::filesystem::path& copied, std::string* error)
 {
 	if (!pack.hlod || pack.hlod->cellCount() == 0) return true;

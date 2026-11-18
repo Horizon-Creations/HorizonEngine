@@ -51,7 +51,6 @@
 #include <HorizonScene/CameraRigController.h>  // first/third person rig (shared with the editor's PIE)
 #include <HorizonScene/TransformHierarchy.h>   // worldPositionOf — the camera position fed to tickWorld
 #include <HorizonScene/FloatingOrigin.h>
-#include <HorizonScene/LandscapeExport.h>      // resolveLandscapePacks: the exported pack path is relative to the data folder
 #include <HorizonScene/LandscapeCellRegions.h> // the region gate for the entity cells of a tile landscape
 #include <Scripting/ScriptTypes.h>
 #include <HorizonScene/Components/CameraComponent.h>
@@ -1689,8 +1688,6 @@ void GameApplication::updateLandscape(float dt)
 		m_landscape.setProjectRoot(m_landscapeContentRoot.empty() ? std::filesystem::path{}
 		                                                          : std::filesystem::path(m_landscapeContentRoot).parent_path());
 	}
-	// An exported scene names its pack relative to the data folder (LandscapeExport.h); the runtime opens a path as it is.
-	if (m_world) HE::resolveLandscapePacks(*m_world, HE::GameLayout::dataDir());
 	m_landscape.update(*m_world, dt);
 	// The entity cells follow the landscape's residency: their region gate takes the tile size and the store's radii, and is off again for a
 	// scene without a tile landscape (the streamer keeps its config across scenes).

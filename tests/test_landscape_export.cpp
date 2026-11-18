@@ -189,23 +189,3 @@ TEST_CASE("prepareLandscapePacksForExport: a pack two scenes share ships and bak
 	fs::remove_all(root);
 }
 
-TEST_CASE("resolveLandscapePacks: a relative pack that is in the data folder becomes its absolute path, anything else stays")
-{
-	const fs::path data = tempDir("data");
-	fs::create_directories(data / "Landscape");
-	writePack(data / "Landscape" / "world.pack");
-
-	HorizonWorld w;
-	addLandscape(w, "Landscape/world.pack");
-	CHECK(HE::resolveLandscapePacks(w, data) == 1);
-	CHECK(fs::path(packOf(w)).is_absolute());
-	CHECK(fs::exists(packOf(w)));
-	CHECK(HE::resolveLandscapePacks(w, data) == 0);   // already absolute
-
-	HorizonWorld missing;
-	addLandscape(missing, "Landscape/gone.pack");
-	CHECK(HE::resolveLandscapePacks(missing, data) == 0);
-	CHECK(packOf(missing) == "Landscape/gone.pack");
-	CHECK(HE::resolveLandscapePacks(w, fs::path{}) == 0);   // no data folder known (the editor)
-	fs::remove_all(data);
-}
