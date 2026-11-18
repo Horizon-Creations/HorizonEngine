@@ -742,25 +742,43 @@ void render(AppContext& ctx)
         // exists to avoid. A small scene is counted in its first frame.
         static std::vector<int> s_kindCounts;
         static std::vector<int> s_kindSweep;
-        static size_t           s_sweepAt = 0;
+        static size_t           s_sweepAt    = 0;
+        static bool             s_sweepIdle   = false;   // a full pass published, nothing pending
+        static int              s_idleFrames  = 0;
         {
             const size_t kinds = static_cast<size_t>(OutlinerFilter::kindCount());
-            if (s_kindCounts.size() != kinds) { s_kindCounts.assign(kinds, 0); s_kindSweep.assign(kinds, 0); s_sweepAt = 0; }
-            if (cacheRebuilt) { std::fill(s_kindSweep.begin(), s_kindSweep.end(), 0); s_sweepAt = 0; }
-            constexpr size_t kSlice = 2048;
-            const size_t end = std::min(s_outlinerCache.size(), s_sweepAt + kSlice);
-            const auto& reg = ctx.world->registry();
-            for (; s_sweepAt < end; ++s_sweepAt)
+            if (s_kindCounts.size() != kinds)
             {
-                const Entity e = s_outlinerCache[s_sweepAt].entity;
-                if (e != ctx.world->rootEntity() && reg.valid(e))
-                    OutlinerFilter::tally(reg, e, s_kindSweep.data());
+                s_kindCounts.assign(kinds, 0); s_kindSweep.assign(kinds, 0);
+                s_sweepAt = 0; s_sweepIdle = false; s_idleFrames = 0;
             }
-            if (s_sweepAt >= s_outlinerCache.size())
+            // A slow timer re-arms the sweep even while idle: Details can add a
+            // component without dirtying the hierarchy, so the counts would
+            // otherwise never notice. cacheRebuilt re-arms it immediately.
+            constexpr int kIdleRecheckFrames = 30;
+            if (cacheRebuilt || (s_sweepIdle && ++s_idleFrames >= kIdleRecheckFrames))
             {
-                s_kindCounts = s_kindSweep;
                 std::fill(s_kindSweep.begin(), s_kindSweep.end(), 0);
-                s_sweepAt = 0;
+                s_sweepAt    = 0;
+                s_sweepIdle  = false;
+                s_idleFrames = 0;
+            }
+            if (!s_sweepIdle)
+            {
+                constexpr size_t kSlice = 2048;
+                const size_t end = std::min(s_outlinerCache.size(), s_sweepAt + kSlice);
+                const auto& reg = ctx.world->registry();
+                for (; s_sweepAt < end; ++s_sweepAt)
+                {
+                    const Entity e = s_outlinerCache[s_sweepAt].entity;
+                    if (e != ctx.world->rootEntity() && reg.valid(e))
+                        OutlinerFilter::tally(reg, e, s_kindSweep.data());
+                }
+                if (s_sweepAt >= s_outlinerCache.size())
+                {
+                    s_kindCounts = s_kindSweep;
+                    s_sweepIdle  = true;
+                }
             }
         }
 
