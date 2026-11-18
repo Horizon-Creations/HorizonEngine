@@ -64,7 +64,10 @@ def log(*parts):
 
 def run(command, **kwargs):
     log("+", " ".join(str(c) for c in command))
-    done = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, **kwargs)
+    # UTF-8 both ways: on Windows the default is cp1252, and the build, the editor and the profile dump write UTF-8.
+    env = dict(os.environ, PYTHONUTF8="1", PYTHONIOENCODING="utf-8")
+    done = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8",
+                          errors="replace", env=env, **kwargs)
     sys.stderr.write(done.stdout[-4000:] if done.stdout else "")
     if done.returncode != 0:
         sys.exit(f"command failed ({done.returncode}): {' '.join(str(c) for c in command)}")
@@ -171,8 +174,8 @@ def main():
         if a.project == "generated" and a.scene in CAMERAS:
             command += ["--cam", CAMERAS[a.scene]]
         run(command, cwd=REPO)
-        summary = json.loads((work / "out" / "hive.summary.json").read_text())
-        dump = json.loads((work / "out" / "hive.profile.json").read_text())
+        summary = json.loads((work / "out" / "hive.summary.json").read_text(encoding="utf-8", errors="replace"))
+        dump = json.loads((work / "out" / "hive.profile.json").read_text(encoding="utf-8", errors="replace"))
     result = result_of(summary, dump)
     if not result["scopes"]:
         sys.exit("the capture holds no scopes")

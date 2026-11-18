@@ -81,7 +81,7 @@ def main():
 
     rng = random.Random(a.seed)
     off = [float(v) for v in a.offset.split(",")]
-    tpl = json.loads(Path(a.template).read_text())
+    tpl = json.loads(Path(a.template).read_text(encoding="utf-8"))
 
     roots = [e for e in tpl["entities"] if e.get("parent") is None]
     if len(roots) != 1:
@@ -184,7 +184,7 @@ def main():
     out = {"entities": entities, "levelScript": tpl.get("levelScript", {}),
            "version": tpl.get("version", "1.1")}
     Path(a.out).parent.mkdir(parents=True, exist_ok=True)
-    Path(a.out).write_text(json.dumps(out))
+    Path(a.out).write_text(json.dumps(out), encoding="utf-8")
     print(f"wrote {a.out}: {len(entities)} entities ({a.count} meshes, {a.lights} lights, "
           f"{n_phys} physics, {a.groups} groups, {n_foliage} foliage instances), "
           f"extent {a.extent} m, offset {off}")
