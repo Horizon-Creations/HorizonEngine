@@ -237,7 +237,7 @@ bool WaterIndex::entryAt(const Entry& e, float x, float z, double t, Surface& ou
     {
         const auto pool = streamPoolOf(tc, body->id);
         const float poolHere = pool ? streamPoolAt(*pool, tc, lx, lz) : 0.0f;
-        lflow = poolHere > kStreamPoolStill ? glm::vec2(0.0f) : streamFlowAt(tc, lx, lz);
+        lflow = poolHere > kStreamPoolStill ? glm::vec2(0.0f) : slopeToFlow(streamLineSlopeAt(tc, pool.get(), lx, lz));
     }
     out.flow    = e.rotation * glm::vec3(lflow.x, 0.0f, lflow.y);
     out.physics = body->physics;

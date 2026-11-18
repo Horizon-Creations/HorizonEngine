@@ -1604,3 +1604,109 @@ TEST_CASE("Water brush streams + Dig Bed: the channel is dug under the stream an
     // The water is lifted from the DUG ground: it lies in the channel.
     CHECK(water::streamSurfaceAt(tc, *b, 0.0f, 0.0f) >= terrainHeightAt(tc, 0.0f, 0.0f) + b->streamDepth - 1e-4f);
 }
+
+// ── A river with bends (Thema 232 Schritt 17) ────────────────────────────────
+
+namespace
+{
+    constexpr int kRiverDabs = 160;
+
+    // A stream painted along line(i), i = 0..kRiverDabs, and what its current does along that line: for every sample
+    // where the line really descends over the next stretch (the ground at line(i - 12) minus at line(i + 12), more than
+    // `minDrop` m) the water must run along the line the way it goes down, which is with the painted direction for a
+    // positive drop and against it for a negative one. Returns how many samples had such a stretch, and fills `worst`
+    // with the smallest agreement (the cosine between the current and the line's downhill direction) among them,
+    // `slowest` with the lowest speed and `share` with the part of them that agree by more than 0.5.
+    template <class Line>
+    int riverAgreement(TerrainComponent& tc, const Line& line, float minDrop, float& worst, float& slowest, float& share)
+    {
+        tc.water.res = 128;
+        const brush::Params p = followParams();
+        brush::Stroke s;
+        brush::begin(s, tc, line(0).x, line(0).y, p);
+        for (int i = 0; i <= kRiverDabs; ++i) brush::dab(s, tc, line(i).x, line(i).y, p);
+        const uint16_t id = s.body;
+        brush::end(s, tc);
+        const auto pool = water::streamPoolOf(tc, id);
+        int checked = 0, agreeing = 0;
+        worst = 1.0f; slowest = 1e9f;
+        for (int i = 12; i <= kRiverDabs - 12; i += 3)
+        {
+            const glm::vec2 here = line(i), way = glm::normalize(line(i + 3) - line(i - 3));
+            const float drop = terrainHeightAt(tc, line(i - 12).x, line(i - 12).y) - terrainHeightAt(tc, line(i + 12).x, line(i + 12).y);
+            if (!(std::fabs(drop) > minDrop)) continue;
+            const glm::vec2 f = water::slopeToFlow(water::streamLineSlopeAt(tc, pool.get(), here.x, here.y));
+            const float speed = glm::length(f);
+            ++checked;
+            slowest = std::min(slowest, speed);
+            const float agree = speed > 0.0f ? glm::dot(f / speed, way) * (drop > 0.0f ? 1.0f : -1.0f) : -1.0f;
+            worst = std::min(worst, agree);
+            agreeing += agree > 0.5f ? 1 : 0;
+        }
+        share = checked > 0 ? static_cast<float>(agreeing) / static_cast<float>(checked) : 0.0f;
+        return checked;
+    }
+
+    // From +X (high) to -X (low), once through three bends: the line is never level for long, and always descends.
+    glm::vec2 riverS(int i)
+    {
+        const float u = static_cast<float>(i) / kRiverDabs;
+        return { 24.0f - 48.0f * u, 10.0f * std::sin(u * 6.2831853f * 1.5f) };
+    }
+    // The same river with a loop in it: the line doubles back up the hill for a stretch, like a river that
+    // winds round a spur. There the water runs AGAINST the painted direction, still down the line.
+    glm::vec2 riverLoop(int i)
+    {
+        const float u = static_cast<float>(i) / kRiverDabs;
+        return { 20.0f - 40.0f * u + 7.0f * std::sin(u * 6.2831853f * 3.0f), 12.0f * std::sin(u * 6.2831853f * 1.5f) };
+    }
+    void bumpGround(TerrainComponent& tc, float amount)
+    {
+        for (uint32_t z = 0; z < 65; ++z)
+            for (uint32_t x = 0; x < 65; ++x)
+                tc.sculptHeights[static_cast<size_t>(z) * 65 + x] += amount * std::sin(1.7f * static_cast<float>(x)) * std::cos(2.3f * static_cast<float>(z));
+    }
+}
+
+TEST_CASE("Water brush streams: a river with bends runs down its own line, at every bend, not down the hillside")
+{
+    SUBCASE("smooth hillside")
+    {
+        TerrainComponent tc = makeLand(10.0f, 0.3f);
+        float worst = 0.0f, slowest = 0.0f, share = 0.0f;
+        CHECK(riverAgreement(tc, riverS, 1.0f, worst, slowest, share) >= 15);
+        CHECK(worst > 0.9f);          // along the line wherever the line descends, round the bends too
+        CHECK(slowest > 0.1f);        // and never standing
+    }
+    SUBCASE("rough ground: the bumps of the ground do not turn the current")
+    {
+        TerrainComponent tc = makeLand(10.0f, 0.3f);
+        bumpGround(tc, 0.15f);
+        float worst = 0.0f, slowest = 0.0f, share = 0.0f;
+        CHECK(riverAgreement(tc, riverS, 1.0f, worst, slowest, share) >= 15);
+        CHECK(worst > 0.9f);
+        CHECK(slowest > 0.1f);
+    }
+    SUBCASE("a river that doubles back up the hill: the current follows the line down, against the way it was painted")
+    {
+        TerrainComponent tc = makeLand(10.0f, 0.3f);
+        float worst = 0.0f, slowest = 0.0f, share = 0.0f;
+        CHECK(riverAgreement(tc, riverLoop, 1.0f, worst, slowest, share) >= 15);
+        // At the turn of a hairpin the line's direction is the chord of the bend and the two ways it could go down
+        // cancel: those few samples may point either way. Everywhere else the current runs down the line.
+        CHECK(share > 0.8f);
+    }
+}
+
+TEST_CASE("Water brush streams: without the stream's cells the current is the ground's own, as before")
+{
+    TerrainComponent tc = rampLand();
+    for (const glm::vec2 q : { glm::vec2(3.0f, 2.0f), glm::vec2(-8.0f, 5.0f) })
+        CHECK(water::streamLineSlopeAt(tc, nullptr, q.x, q.y) == water::streamSlopeAt(tc, q.x, q.y));
+    // A straight stream down the fall line: the same current as the ground's.
+    const brush::Stroke s = drag(tc, { 18.0f, 0.0f }, { -18.0f, 0.0f }, followParams(), 90);
+    const auto pool = water::streamPoolOf(tc, s.body);
+    const glm::vec2 g = water::streamLineSlopeAt(tc, pool.get(), 0.0f, 0.0f);
+    CHECK(g.x == doctest::Approx(1.0f).epsilon(0.05));     // 45 degrees rising toward +X
+    CHECK(std::fabs(g.y) < 0.05f);
+}
