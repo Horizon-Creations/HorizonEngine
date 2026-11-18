@@ -7560,9 +7560,15 @@ bool VulkanRenderer::RenderSceneImage(const EditorCameraOverride& camera, uint32
                 // A new picture of this page: an encode of the old one is stale, a cold page is hot again.
                 ++m_rvtSlotVer[slot];
                 m_rvtSlotPainted[slot] = m_rvtRealFrames;
-                if (m_rvtSlotCold[slot]) { m_rvtSlotCold[slot] = 0; ++m_rvtStateVer; }
             }
             hotSlice = rvtHotFor(slot);
+            // Only clear the cold flag once a hot slice actually backs the slot — if the pool is full,
+            // the slot's BC7 data is still the last-known-good page and must stay readable.
+            if (camera.rvtLayer == 0 && hotSlice != 0xFFFFFFFFu && m_rvtSlotCold[slot])
+            {
+                m_rvtSlotCold[slot] = 0;
+                ++m_rvtStateVer;
+            }
         }
         // A kept page layer is not waited for: it rotates to the next frame slot (see m_rvtPending).
         if (pipe)
