@@ -1,6 +1,6 @@
 {
   "project": "horizon-creations-horizonengine",
-  "rev": 22,
+  "rev": 23,
   "releases": [
     {
       "version": "0.9.0",
@@ -204,10 +204,54 @@
           },
           "339": {
             "wave": 1
+          },
+          "342": {
+            "role": "UI-Widget-System-Ausbau (mehr Controls, Custom-Material pro Element, Themes nur fuer App-Projekte) - eigenstaendig, beruehrt nur HE_Core/UIWidget und HE_Editor UI-Panels, keine Ueberschneidung mit den Landscape/RVT/Wasser-Dateien der anderen Wave-2-Themen.",
+            "depends_on": [],
+            "touches": [
+              "src/HE_Core/include/UIWidget/UIElement.h",
+              "src/HE_Core/include/UIWidget/UITheme.h",
+              "src/HE_Core/src/UIWidget/WidgetManager.cpp",
+              "src/HE_Core/src/UIWidget/UITheme.cpp",
+              "src/HE_Editor/UIEditorPanel.cpp",
+              "src/HE_Editor/ThemeAssetPanel.cpp"
+            ],
+            "risk": "low",
+            "size": "M",
+            "wave": 2
+          },
+          "343": {
+            "role": "Entity-Cooking: unveraenderliche Entities (statische Meshes) zur Laufzeit auf flache Render-/Physikdaten reduzieren, weniger CPU-Zeit in Extract/Update. Eigenstaendig, kein Dateikonflikt mit den anderen Wave-2-Themen.",
+            "depends_on": [],
+            "touches": [
+              "src/HE_Scene/src/TransformHierarchy.cpp",
+              "src/HE_Rendering/src/RenderExtractor.cpp",
+              "src/HE_Scene/include/HorizonScene/FrameCull.h",
+              "src/HE_Scene/src/FrustumCuller.cpp",
+              "src/HE_Scene/src/HorizonWorld.cpp"
+            ],
+            "risk": "medium",
+            "size": "L",
+            "wave": 2
+          },
+          "348": {
+            "role": "Editor-Live-Ansicht (Profiler-Tab und Scene-Overlay) fuer das Tile-Streaming aus 326, rein lesend; darf die Residency-API aus IF-1 nicht veraendern.",
+            "depends_on": [
+              326
+            ],
+            "touches": [
+              "src/HE_Editor/StreamingDebugView.cpp",
+              "src/HE_Editor/ProfilerPanel.cpp",
+              "src/HE_Editor/EditorApplication.cpp",
+              "src/HE_Scene/include/HorizonScene/LandscapeRuntime.h (nur ein Lese-Snapshot ergaenzen)"
+            ],
+            "risk": "low",
+            "size": "M",
+            "wave": 3
           }
         },
         "delta": null,
-        "updated_at": 1794384613.6713617,
+        "updated_at": 1795009334.7875228,
         "agreements": [
           {
             "id": "IF-1",
@@ -226,7 +270,7 @@
             "title": "AutoLandscapeMaterial.cpp graphs are capped at 4 distinct textures — reuse a slot, don't add one",
             "text": "src/HE_Core/src/MaterialGraph/AutoLandscapeMaterial.cpp (`buildAutoLandscapeGraph`) is shared by topics 335 (RVT 2.0 Write/Read nodes), 329 (Path-Layer, procedural snow/sand, water-kiesel) and 330 (seasons), run in that order (waves 3/4/5, never concurrently per the release plan). The graph is capped at `kMatMaxGraphTextures` (4, src/HE_Core/include/MaterialGraph/MaterialGraph.h:521): the three per-group arrays (albedo/normal/mask) already take three slots. Topic 329's Path layer already hit this and resolved it by giving Path its own standalone albedo (the 4th slot) but reusing Dirt's existing array slot for its normal instead of requesting a 5th texture — prefer that first, it is free. Checked: the cap is not a sampler limit. All five backends already bind ONE shared sampler across the whole heTexP0..3 block (D3D11 `p.m_matSampler` x4 via `PSSetSamplers`, Vulkan `m_albedoSampler` reused per slot, D3D12/Metal/GL the same pattern) — raising `kMatMaxGraphTextures` costs no extra samplers, only wider SRV/binding-slot arrays (t4..t7 etc.), a few more shader registers, and updating the `static_assert(kMatMaxGraphTextures == 4, ...)` guards in D3D11Renderer.cpp and D3D12Renderer.cpp (Vulkan/GL have no hard assert, just comments). So: reuse an existing slot when a channel can plausibly share one (normal/mask, as 329 did); but if a feature genuinely needs a distinct 5th (or 6th...) texture, raising `kMatMaxGraphTextures` across the 5 backends is an accepted, deliberate option, not a last resort — it is cheap precisely because the sampler is already shared. Either way, raise it as a question/step before writing the code, not after, since it touches 5 renderer files at once.",
             "owner": 335,
-            "status": "proposed",
+            "status": "rejected",
             "version": 2,
             "by": "queen",
             "at": 1794384613.671358,
@@ -246,9 +290,18 @@
         ],
         "gate": null,
         "checks": {
-          "wave_1": 1794299142.7332685
+          "wave_1": 1794299142.7332685,
+          "assign_342": 1794571114.1010425,
+          "assign_343": 1794581546.3452728,
+          "assign_348": 1795009325.0456636
         },
-        "wave_notes": {}
+        "wave_notes": {
+          "1": "Fertiggestellte Grundlagen: Nebel/Wolken 2.0, Landscape-3.0-Textur-Layer, Auto-LOD, Quality-Nodes, Hardware-Erkennung, View-Mode-Parity - alles bereits gemergt, nichts offen.",
+          "3": "RVT 2.0 als Material-Feature, haengt an beiden Welle-2-Fundamenten (326+333) und ist bis zu deren Merge blockiert.",
+          "4": "Landscape-3.0-Folge (Path-Layer, Wasser-Kiesel) - laeuft erst nach Wasser-Tool UND RVT 2.0, da beide dieselben Dateien (WaterBrush.cpp, AutoLandscapeMaterial.cpp) anfassen.",
+          "5": "Jahreszeiten, braucht die fertige Material-Struktur aus Welle 4 (Path-Layer, Schnee/Sand).",
+          "2": "Die beiden riskanten Fundamente (Landscape 100km, RVT-Basis) sind fertig und warten nur auf Merge - der Flaschenhals des Plans. Daneben unabhaengige Themen ohne Dateikonflikt."
+        }
       }
     }
   ]
