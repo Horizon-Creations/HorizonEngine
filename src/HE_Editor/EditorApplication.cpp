@@ -139,6 +139,8 @@ static void onProjectWriteRefused(const char* what);   // ProjectWriteGate handl
 #include <HorizonScene/FlyCameraController.h>  // free-fly PIE camera (shared with the game runtime)
 #include <HorizonScene/CameraRigController.h>  // first/third person rig (shared with the game runtime)
 #include <HorizonScene/Components/ScriptComponent.h>
+#include <HorizonScene/Components/CameraRigComponent.h>  // HE_DUMP_COOKTEST witness
+#include <HorizonScene/Components/SaveStateComponent.h>  // HE_DUMP_COOKTEST witness
 #include <ContentManager/Assets.h>
 #include <Renderer/RendererFactory.h>
 #include <DebugDraw/DebugDraw.h>
@@ -9875,6 +9877,56 @@ void EditorApplication::dumpFrameHeadless()
 		}
 		HE_LOG_INFO(Editor, "%s",
 			"EditorApplication: HE_DUMP_ROPETEST tube + ribbon rope and a swept trail added");
+	}
+
+	// ── Entity-cooking witness (HE_DUMP_COOKTEST=1, Thema 343 Schritt 14): the
+	// three cases Schritt 13 changed, in one scene — compare a dump with
+	// HE_COOK_STATIC=0 against one with =1, the pixels must match.
+	//   • CookTestRopeChild, a mesh CHILD of a RopeComponent parent: the parent's
+	//     Geometry blocker does not pass to the child (kAncestorIgnored in
+	//     CookAnalysis.cpp), so the child still cooks.
+	//   • CookTestRig, a mesh entity carrying CameraRigComponent itself: the
+	//     Locomotion blocker keeps it OUT of the cooked block (no row at all).
+	//   • CookTestSaveState, a mesh entity carrying SaveStateComponent: Regel 7
+	//     is gone, so it cooks like any other static mesh.
+	// The rope parent's own geometry is not driven through RopeTrailSystem here
+	// — it draws through RopeComponent::runtimeMeshId, a path cooking never
+	// touches, so it adds nothing to this check and is left out.
+	if (const char* ct = std::getenv("HE_DUMP_COOKTEST"); ct && *ct && m_editorWorld)
+	{
+		auto& reg = m_editorWorld->registry();
+		const float cp = std::cos(m_editorCamera.pitch()), sp = std::sin(m_editorCamera.pitch());
+		const float cy = std::cos(m_editorCamera.yaw()),   sy = std::sin(m_editorCamera.yaw());
+		const glm::vec3 camFwd(cp * sy, sp, -cp * cy);
+		const glm::vec3 right = glm::normalize(glm::cross(camFwd, glm::vec3(0.0f, 1.0f, 0.0f)));
+		const glm::vec3 origin = m_editorCamera.position() + camFwd * 10.0f;
+
+		auto makeCube = [&](const char* name, const glm::vec3& pos) {
+			auto e = m_editorWorld->createEntity(name);
+			TransformComponent tc; tc.position = pos; tc.scale = glm::vec3(0.8f);
+			reg.emplace<TransformComponent>(e, tc);
+			reg.emplace<MeshComponent>(e, MeshComponent{ HE::kDefaultCubeMeshId });
+			return e;
+		};
+
+		auto ropeParent = m_editorWorld->createEntity("CookTestRopeParent");
+		TransformComponent rtc; rtc.position = origin - right * 4.0f;
+		reg.emplace<TransformComponent>(ropeParent, rtc);
+		RopeComponent rope;
+		rope.controlPoints = { { 0.0f, 0.0f, 0.0f }, { 1.0f, 0.5f, 0.0f } };
+		reg.emplace<RopeComponent>(ropeParent, rope);
+		const Entity ropeChild = makeCube("CookTestRopeChild", glm::vec3(0.0f, 1.2f, 0.0f));
+		m_editorWorld->reparentEntity(ropeChild, ropeParent);
+		reg.get<TransformComponent>(ropeChild).position = glm::vec3(0.0f, 1.2f, 0.0f);
+
+		const Entity rig = makeCube("CookTestRig", origin);
+		reg.emplace<CameraRigComponent>(rig, CameraRigComponent{});
+
+		const Entity saved = makeCube("CookTestSaveState", origin + right * 4.0f);
+		reg.emplace<SaveStateComponent>(saved, SaveStateComponent{});
+
+		HE_LOG_INFO(Editor, "%s",
+			"EditorApplication: HE_DUMP_COOKTEST rope+child / camera-rig / save-state entities added");
 	}
 
 	// ── Selection / collider witness (HE_DUMP_SELBOXTEST=1): entities that sit
