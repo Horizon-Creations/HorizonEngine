@@ -705,3 +705,49 @@ Plan in Phasen (jede baut und testet): 1. Sortier-Priorität als Material-Einste
 - **Offen / Vorschlag, nicht gebaut:** 1. Tropfen (`drops()` 0,4–0,8 × (1+0,5 s) bei Anfangs-Aufwärtsgeschwindigkeit 1,5·(1+1,2 s)) sinken bis ~4 m unter den Wasserspiegel (vom Boden verdeckt) —
   Lebensdauer an die Rückkehrzeit 2·vy/g binden. 2. An einer runden Wand liegt der Landepunkt dort, wo die Neigung < `kFallSlope` fällt (`crest`: 2,2 m über dem Becken), nicht am Becken selbst;
   der Nebel schwebt dort an der Wand. 3. Metal-Dump ohne Spray-Partikel prüfen.
+
+### Schritt 26 (Hive-Schritt 17: Strömung in gekrümmten Flüssen falsch berechnet; Bug-Report des Menschen)
+
+- **Briefing vs. Code:** Der Schritt nennt `Body::flowAuto`/`WaterBrush.cpp end()` (`slopeFlow`) als Verdächtigen. Die Prüfung zeigt: `slopeFlow` ist EIN Vektor pro Körper
+  (Mittel der lokalen Gradienten über alle nassen Zellen) — auf einer schiefen Ebene liefert das für JEDE Kurvenform schon die Ebenen-Falllinie (gemessen: tilt 0,10 →
+  Vektor (−0,090, 0,002), unabhängig von der Linienform). Für einen echten „Flusslauf" (das Pinsel-Feature, das Follow Slope/`Body::stream` anlegt) ist `physics.flow`
+  ohnehin TOT: `WaterSurface.cpp` erzwingt für einen Stream-Körper 0 (Zeile ~321/335), `WaterQuery.cpp` überschreibt ihn. Was der Mensch sieht, ist der PRO-VERTEX-Strom
+  (`WaterMesh.cpp streamFlowAt`/`streamSlopeAt`, bis jetzt via `WaterMesh.h kStreamGradientStep` zentrale Differenz NUR am Punkt) — genau die „lokale Steigung an jedem
+  Punkt" aus dem Bug-Report, nicht „der Gesamtverlauf entlang der tatsächlich gemalten Linie". Gefixt daher in `WaterMesh.cpp`/`.h` + `WaterQuery.cpp` (Konsument des
+  Stroms für Physik/Schwimmkörper), NICHT in `WaterBrush.cpp`/`slopeFlow` — die bleiben unverändert. Kollision mit den „Files that matter" des Boards benannt.
+- **Fix (`WaterMesh.h`/`.cpp`):** neue `streamLineSlopeAt(tc, pool, x, z)`, ersetzt den `streamSlopeAt`-Aufruf im Mesh-Bau (UV/Lean) und in `WaterQuery.cpp` (die
+  per-Punkt-Strömung für Physik-Abfragen). Implementierung in `StreamPool` (gleicher Cache-Schlüssel wie die Becken-Flutung, `fillLineSlope`): Summed-Area-Tables über
+  Gradient + Positions-Kovarianz der nassen Zellen in einem festen `kStreamLineReach`-Fenster (6 m) um jeden Punkt; ist das Fenster eine Linie (Kovarianz-Kohärenz
+  hoch), ist die Steigung die projizierte Fenster-Richtung (`along the line`), sonst (rundes Becken) das Mittel wie bisher. Fallback ohne Pool/außerhalb der nassen
+  Zellen: `streamSlopeAt` wie vorher (`WaterQuery`/`test_water_stream` unverändert).
+- **Verworfen (zwei Dinge, mit Advisor abgewogen):** (1) eine persistierte Pinsel-Mittellinie am `Body` (Analogie zu `Body::polygon`) — korrekter bei sich selbst
+  nahekommenden Flussschlingen, aber Serialisierer + Alt-Datei-Fallback + Erase-Veralterung für einen Fall, den die Schritt-Kriterien nicht verlangen (kein
+  Selbstüberschneidungstest gefordert). (2) ein mit der Kanalbreite wachsendes Fenster (Chamfer-Distanztransformation zur nächsten trockenen Zelle, probiert und
+  wieder verworfen): die Befürchtung war, ein breiter Pinsel (Standard 10 m Radius + 5 m Falloff = 30 m) sitze mit dem festen 6-m-Fenster komplett innerhalb seines
+  eigenen Wassers und sähe keine Linie mehr. Gemessen (isolierter Einzelaufruf, S-Kurve, 0,3 m/m Gesamtgefälle): **mit dem festen Fenster allein** gibt genau dieser
+  Fall `worst = 0,968` — die Befürchtung bestätigt sich an diesem Pfad nicht, das feste Fenster reicht. Ein zweiter Versuch, das bei noch breiteren Pinseln (20/30/40 m)
+  zu prüfen, geriet an einen Störfaktor der Testmethode selbst (der 64-m-Landschaft-Rand begrenzt das Wasser ab ~30 m Pinselbreite, und zwei Läufe gaben trotz
+  unterschiedlicher Pinselbreite bitgleiche Werte — nicht aufgeklärt, siehe „Offen") und wurde verworfen statt auf einer ungeklärten Zahl eine Zusatzkomplexität
+  (eigener Distanztransformations-Durchlauf, neue Konstante) zu begründen. Die einzige verlässliche Messung spricht gegen die Komplexität, also raus (Regel 2/4).
+- **Test (`tests/test_water_brush.cpp`, „a river with bends…"):** gekrümmter Strich (S-Kurve, 3 Bögen, `followSlope`) auf 0,3 m/m Gesamtgefälle — Strömung an jedem
+  Abschnitt mit echtem Gefälle entlang der Linie (`worst` Kosinus > 0,9, nie 0). Subcases: glatter Hang, Hang mit Boden-Rauschen (prüft, dass Bodenbeulen die Richtung
+  nicht kippen), und die PRODUKTIONS-Pinselbreite (`Params{}` 10 m/5 m, `worst > 0,85` — die Zahl oben). Zweiter Test: ohne Pool/Linie bleibt
+  `streamLineSlopeAt == streamSlopeAt` (Rückfallkompatibilität). Eine Variante mit sich selbst näherndem Schlingenfluss (Strömung gegen die Pinsel-Richtung) wurde
+  entworfen, aber verworfen: jede sinusförmige Schlinge, die nah genug an sich selbst herankommt, bringt zwei Kanal-Stränge ins 6-m-Fenster — Grenze des gewählten
+  Ansatzes, siehe „Offen".
+- **Screenshot (echter Editor-Dump, neuer Zeuge `HE_DUMP_WATERLAKE=river`, D3D12, RTX 4070):** `EditorApplication.cpp` — `river` zum `bank`-Modus-Set hinzugefügt (gleiche
+  sanfte Standard-Hangformel wie `=slope`, 0,12 m/m + Querwelle, KEIN Rampen-/Hügel-Zeuge wie `hill`/`cascade`), Pinselstrich S-förmig (3 Halbwellen) über 96 m.
+  `docs/img-water-stream/river_angle.png` (CAMY=375 CAMZ=48 PITCH=-60, `HE_DUMP_SKYTEST=1 TOD=0.5 DAYNIGHT=0` — ohne SKYTEST wird die Dump-Kamera NICHT gesetzt, Falle
+  beim ersten Versuch), `river_top.png` (senkrecht von oben, CAMY=450 PITCH=-85): zwei klare Flussbögen auf der Hangfläche.
+- **Verifiziert:** `ctest -R test_water` 12/12 grün (`out/build/x64-release`, NN-WS03/MSVC — **nicht** `cmake-build-release`, das gibt es hier nicht). Drei Subcases
+  des neuen Tests grün, je isoliert einzeln nachgemessen (glatter Hang, Hang mit Rauschen, Produktions-Pinselbreite 10 m/5 m). HorizonEditor + he_tests lokal gebaut
+  (Ninja/MSVC, kein CI abgewartet).
+- **Nicht verifiziert:** Metal/OpenGL/Vulkan/D3D11 (nur D3D12 lokal); Perf nicht gemessen (die SAT-Füllung läuft nur beim Neubau des `StreamPool`-Caches, gleiche
+  Häufigkeit wie die schon vorhandene Becken-Flutung — eingeordnet, nicht gemessen); `WaterSpray.cpp` (Gischt/Wasserfall-Platzierung) bewusst NICHT umgestellt, liest
+  weiter `streamFlowAt` — ausdrücklich außerhalb des Schritts. Pinselbreiten über 10 m Radius nicht sauber gemessen (siehe unten).
+- **Offen / nächste Schritte:** 1. Eine Flussschlinge, die sich selbst auf < 6 m nahekommt, liest noch den Nachbarstrang mit hinein (siehe „Verworfen") — nur mit
+  einer persistierten Pinsellinie sauber lösbar, falls das je als Bug gemeldet wird. 2. Pinselbreiten deutlich über dem Standard (Radius 20 m+) sind NICHT verlässlich
+  geprüft: ein Versuch dazu lief in zwei Störfaktoren (die 64-m-Testlandschaft begrenzt das Wasser, sobald Radius+Falloff an ihren Rand reicht; und zwei Läufe mit
+  unterschiedlichem Radius gaben trotzdem bitgleiche `worst`/`slowest`-Werte, ungeklärt ob Zufall oder ein Caching-Artefakt in `streamPoolOf`, das über `&tc`/den
+  Höhenfeld-Zeiger geht und bei kurzlebigen `TerrainComponent`-Objekten in Tests kollidieren könnte) — mit mehr Zeit sauber auf einer größeren Testlandschaft nachmessen,
+  bevor an der Fensterbreite erneut gearbeitet wird.

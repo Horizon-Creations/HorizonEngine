@@ -457,6 +457,9 @@ namespace
     // Fills pool.line (streamLineSlopeAt): per wet cell the window's mean ground gradient g and the principal axis t of the
     // wet cells in the window (the line's direction, from their covariance); on a line (coherence near 1) the slope is
     // t (t . g), on a blob g. The window sums come from summed-area tables, so the cost is the cells', not the window's.
+    // Measured against the editor's own default brush (radius 10 m, falloff 5 m — a 30 m-wide river) on a bending
+    // stroke: the fixed kStreamLineReach window already finds the line there (see docs/water-flow-2026-11-09.md
+    // Schritt 26); a window that grows with the channel's own width was tried and dropped, see that doc's "Offen".
     void fillLineSlope(StreamPool& pool, const TerrainComponent& tc)
     {
         const int w = pool.w, h = pool.h;
@@ -595,21 +598,51 @@ std::shared_ptr<const StreamPool> streamPoolOf(const TerrainComponent& tc, uint1
     return pool;
 }
 
+namespace
+{
+    // The four cells of `pool` a point lies between, and where between them (cell centres sit at (index + 0.5) cells
+    // from the terrain's corner).
+    struct PoolTap { int i0, j0; float tx, tz; };
+    PoolTap poolTap(const StreamPool& pool, const TerrainComponent& tc, float x, float z)
+    {
+        const glm::vec2 cell = cellSize(tc);
+        const float fx = (x + tc.sizeX * 0.5f) / cell.x - 0.5f - static_cast<float>(pool.box.x0);
+        const float fz = (z + tc.sizeZ * 0.5f) / cell.y - 0.5f - static_cast<float>(pool.box.z0);
+        const int i0 = static_cast<int>(std::floor(fx)), j0 = static_cast<int>(std::floor(fz));
+        return { i0, j0, fx - static_cast<float>(i0), fz - static_cast<float>(j0) };
+    }
+}
+
 float streamPoolAt(const StreamPool& pool, const TerrainComponent& tc, float x, float z)
 {
     if (pool.depth.empty() || !hasArea(tc)) return 0.0f;
-    const glm::vec2 cell = cellSize(tc);
-    // Cell centres sit at (index + 0.5) cells from the terrain's corner.
-    const float fx = (x + tc.sizeX * 0.5f) / cell.x - 0.5f - static_cast<float>(pool.box.x0);
-    const float fz = (z + tc.sizeZ * 0.5f) / cell.y - 0.5f - static_cast<float>(pool.box.z0);
-    const int i0 = static_cast<int>(std::floor(fx)), j0 = static_cast<int>(std::floor(fz));
-    const float tx = fx - static_cast<float>(i0), tz = fz - static_cast<float>(j0);
+    const auto [i0, j0, tx, tz] = poolTap(pool, tc, x, z);
     auto at = [&](int i, int j) -> float {
         i = std::clamp(i, 0, pool.w - 1); j = std::clamp(j, 0, pool.h - 1);
         return pool.depth[static_cast<size_t>(j) * pool.w + i];
     };
     const float d = (at(i0, j0) * (1.0f - tx) + at(i0 + 1, j0) * tx) * (1.0f - tz) + (at(i0, j0 + 1) * (1.0f - tx) + at(i0 + 1, j0 + 1) * tx) * tz;
     return std::isfinite(d) ? std::max(0.0f, d) : 0.0f;
+}
+
+glm::vec2 streamLineSlopeAt(const TerrainComponent& tc, const StreamPool* pool, float x, float z)
+{
+    if (!pool || pool->line.empty() || !hasArea(tc) || !std::isfinite(x) || !std::isfinite(z)) return streamSlopeAt(tc, x, z);
+    const auto [i0, j0, tx, tz] = poolTap(*pool, tc, x, z);
+    // Bilinear over the wet cells only, so a vertex on the film's rim (half a cell past the last wet centre) still reads its neighbours.
+    glm::vec2 sum(0.0f);
+    float weight = 0.0f;
+    for (int n = 0; n < 4; ++n)
+    {
+        const int i = i0 + (n & 1), j = j0 + (n >> 1);
+        if (i < 0 || j < 0 || i >= pool->w || j >= pool->h) continue;
+        const size_t k = static_cast<size_t>(j) * pool->w + i;
+        if (!pool->wet[k]) continue;
+        const float wt = ((n & 1) ? tx : 1.0f - tx) * ((n >> 1) ? tz : 1.0f - tz);
+        sum += pool->line[k] * wt;
+        weight += wt;
+    }
+    return weight > 1e-3f ? sum / weight : streamSlopeAt(tc, x, z);
 }
 
 float streamSurfaceAt(const TerrainComponent& tc, const Body& body, float x, float z)
@@ -1228,7 +1261,7 @@ bool buildSurface(const TerrainComponent& tc, const Lattice& lattice, const Cell
                         y = std::max(ground + kStreamLift - level, std::min(y, ob->level - 0.03f - level));
                 // The ground's slope in WORLD axes (dimensionless): the material draws the sheet's lean from
                 // it and runs the current down it. The landscape's turn, then its y/x scale.
-                const glm::vec2 gl = streamSlopeAt(tc, lx, lz);
+                const glm::vec2 gl = streamLineSlopeAt(tc, meshPool.get(), lx, lz);
                 uv = glm::vec2((opt.streamTurn.x * gl.x + opt.streamTurn.z * gl.y) * opt.shoreTiltScale,
                                (opt.streamTurn.y * gl.x + opt.streamTurn.w * gl.y) * opt.shoreTiltScale);
                 // A pool is still and level: no current, no lean (fading in over its first decimetres).
