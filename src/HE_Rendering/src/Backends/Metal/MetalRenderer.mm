@@ -20083,7 +20083,6 @@ void MetalRenderer::DrawParticleGraphBatches(void* renderEncoder, const glm::mat
 {
 	if (m_renderWorld.particleBatches.empty()) return;
 	id<MTLRenderCommandEncoder> enc = (__bridge id<MTLRenderCommandEncoder>)renderEncoder;
-	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
 
 	// Camera-facing basis for billboard expansion — same convention as RenderParticlePreview.
 	// vec4, not vec3: heParticleGraphVertex reads `constant float3&` = 16 bytes
@@ -20114,16 +20113,23 @@ void MetalRenderer::DrawParticleGraphBatches(void* renderEncoder, const glm::mat
 		void* matTex = nullptr;
 		const bool hasTex = ResolveMaterialTexture(batch.materialAssetId, matTex);
 
-		std::vector<float> inst;
-		inst.reserve(batch.instances.size() * 5);
+		// Five floats per instance (position, size, t01), written straight into the
+		// frame's upload ring.
+		void*  instBuf = nullptr;
+		size_t instOff = 0;
+		float* inst = static_cast<float*>(
+			UploadTransient(batch.instances.size() * 5 * sizeof(float), instBuf, instOff));
+		if (!inst) continue;
 		for (const ParticleInstance& p : batch.instances)
-			inst.insert(inst.end(), { p.position.x, p.position.y, p.position.z, p.size, p.t01 });
-		id<MTLBuffer> instBuf = [device newBufferWithBytes:inst.data()
-			length:inst.size() * sizeof(float) options:MTLResourceStorageModeShared];
+		{
+			inst[0] = p.position.x; inst[1] = p.position.y; inst[2] = p.position.z;
+			inst[3] = p.size;       inst[4] = p.t01;
+			inst += 5;
+		}
 
 		glm::mat4 vp = viewProj;
 		[enc setRenderPipelineState:pso];
-		[enc setVertexBuffer:instBuf offset:0 atIndex:0];
+		[enc setVertexBuffer:(__bridge id<MTLBuffer>)instBuf offset:instOff atIndex:0];
 		[enc setVertexBytes:&vp       length:sizeof(vp)       atIndex:1];
 		[enc setVertexBytes:&camRight length:sizeof(camRight) atIndex:2];
 		[enc setVertexBytes:&camUp    length:sizeof(camUp)    atIndex:3];
