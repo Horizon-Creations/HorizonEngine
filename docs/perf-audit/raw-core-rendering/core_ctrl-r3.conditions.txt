@@ -1,0 +1,15 @@
+== core_ctrl-r3 15:31:13
+15:31  up 2 days,  3:41, 1 user, load averages: 3.09 3.32 4.33
+Now drawing from 'AC Power'
+lowpowermode 0
+"Device Utilization %"=21
+locked: 1
+foreign: 
+load before start (1 min): 3.09
+15:31  up 2 days,  3:41, 1 user, load averages: 3.60 3.44 4.35
+Now drawing from 'AC Power'
+lowpowermode 0
+"Device Utilization %"=88
+locked: 1
+foreign: 
+[core_ctrl-r3] rc=0 wall=18s fps=59.34463326301676 cpu_p50=16.650083 gpu_p50=14.415916637517512 modes={'detailed': 400} size=2840x1528

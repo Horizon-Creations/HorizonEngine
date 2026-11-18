@@ -1,0 +1,15 @@
+== mat_pbr-cpu-r1 15:34:40
+15:34  up 2 days,  3:45, 1 user, load averages: 3.62 3.28 4.08
+Now drawing from 'Battery Power'
+lowpowermode 0
+"Device Utilization %"=28
+locked: 0
+foreign: 
+load before start (1 min): 3.62
+15:34  up 2 days,  3:45, 1 user, load averages: 5.53 3.70 4.21
+Now drawing from 'Battery Power'
+lowpowermode 0
+"Device Utilization %"=80
+locked: 0
+foreign: 
+[mat_pbr-cpu-r1] rc=0 wall=16s fps=59.85463847886372 cpu_p50=16.655292 gpu_p50=13.91562499338761 modes={'whole-frame': 400} size=2840x1528

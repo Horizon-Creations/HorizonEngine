@@ -1,0 +1,15 @@
+== mat_pbr-r2 15:29:45
+15:29  up 2 days,  3:40, 1 user, load averages: 3.90 3.51 4.50
+Now drawing from 'AC Power'
+lowpowermode 0
+"Device Utilization %"=36
+locked: 0
+foreign: 
+load before start (1 min): 3.9
+15:30  up 2 days,  3:40, 1 user, load averages: 3.36 3.41 4.44
+Now drawing from 'AC Power'
+lowpowermode 0
+"Device Utilization %"=84
+locked: 0
+foreign: 
+[mat_pbr-r2] rc=0 wall=18s fps=44.39282886818248 cpu_p50=21.651916999999997 gpu_p50=17.117916664574295 modes={'detailed': 400} size=2840x1528

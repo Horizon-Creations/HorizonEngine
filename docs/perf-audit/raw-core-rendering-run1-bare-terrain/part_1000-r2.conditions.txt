@@ -1,0 +1,15 @@
+== part_1000-r2 15:14:28
+15:14  up 2 days,  3:24, 1 user, load averages: 2.35 4.60 6.77
+Now drawing from 'AC Power'
+lowpowermode 0
+"Device Utilization %"=0
+locked: 0
+foreign: 
+load before start (1 min): 2.35
+15:15  up 2 days,  3:25, 1 user, load averages: 2.19 4.14 6.45
+Now drawing from 'AC Power'
+lowpowermode 0
+"Device Utilization %"=46
+locked: 0
+foreign: 
+[part_1000-r2] rc=0 wall=56s fps=27.476970957854622 cpu_p50=35.28825 gpu_p50=12.93954165885225 modes={'detailed': 400} size=2840x1528

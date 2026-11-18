@@ -1,0 +1,15 @@
+== mat_disp-cpu-r1 15:35:12
+15:35  up 2 days,  3:45, 1 user, load averages: 4.82 3.63 4.18
+Now drawing from 'Battery Power'
+lowpowermode 0
+"Device Utilization %"=26
+locked: 0
+foreign: 
+load before start (1 min): 4.82
+15:35  up 2 days,  3:45, 1 user, load averages: 4.20 3.55 4.14
+Now drawing from 'Battery Power'
+lowpowermode 0
+"Device Utilization %"=79
+locked: 0
+foreign: 
+[mat_disp-cpu-r1] rc=0 wall=16s fps=59.698385611051 cpu_p50=16.6675 gpu_p50=13.900000019930303 modes={'whole-frame': 400} size=2840x1528

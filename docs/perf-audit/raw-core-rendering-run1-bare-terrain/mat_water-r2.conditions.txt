@@ -1,0 +1,15 @@
+== mat_water-r2 15:12:22
+15:12  up 2 days,  3:22, 1 user, load averages: 2.50 5.85 7.51
+Now drawing from 'AC Power'
+lowpowermode 0
+"Device Utilization %"=0
+locked: 0
+foreign: 
+load before start (1 min): 2.5
+15:13  up 2 days,  3:23, 1 user, load averages: 2.37 5.17 7.14
+Now drawing from 'AC Power'
+lowpowermode 0
+"Device Utilization %"=79
+locked: 0
+foreign: 
+[mat_water-r2] rc=0 wall=56s fps=31.8284768778827 cpu_p50=31.505083 gpu_p50=22.220083366846666 modes={'detailed': 400} size=2840x1528

@@ -1,0 +1,15 @@
+== land512-tex2k-r1 15:22:40
+15:22  up 2 days,  3:33, 1 user, load averages: 4.46 3.93 5.36
+Now drawing from 'AC Power'
+lowpowermode 0
+"Device Utilization %"=37
+locked: 0
+foreign: 
+load before start (1 min): 4.46
+15:23  up 2 days,  3:33, 1 user, load averages: 3.63 3.79 5.22
+Now drawing from 'AC Power'
+lowpowermode 0
+"Device Utilization %"=76
+locked: 0
+foreign: 
+[land512-tex2k-r1] rc=0 wall=52s fps=48.26803426302305 cpu_p50=20.16125 gpu_p50=16.382916655857116 modes={'detailed': 400} size=2840x1528

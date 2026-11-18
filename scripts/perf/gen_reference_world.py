@@ -32,6 +32,22 @@ foliage alone.
       --template docs/perf-audit/scenes/landscape_noclouds.hescene \
       --out /tmp/fol/fol_100k.hescene [--foliage-extent 400] [--foliage-distance 1e6] \
       [--foliage-mesh cube|sphere] [--foliage-scale 0.5,1.0]
+
+--particles N (Thema 349) adds N entity-bound particle emitters on a square grid of
+--particle-extent metres (default 60) around the origin, the template's terrain stays. The
+emitters use the pre-asset inline format (no "particleAsset" key), which
+ParticleSystem::update migrates into an in-memory graph asset per emitter on the first tick, so
+no project content is needed. Steady state is about emit-rate x mean lifetime live particles per
+emitter (--emit-rate 100, --particle-life 1.5 gives ~150), --particle-max is the pool cap and
+must stay above that or the emitter saturates (log warning 'particle pool saturated'). The
+profiler counters 'emitters' / 'particles' in the dump are the witness. The legacy format has no
+collision flag, so collision cost is not reachable from a generated scene.
+
+  python3 scripts/perf/gen_reference_world.py --count 0 --particles 1000 --emit-rate 100 \
+      --template docs/perf-audit/scenes/landscape_noclouds.hescene --out /tmp/p/p1000.hescene
+
+--material HI,LO puts that material asset on every mesh entity (default: none = built-in PBR).
+Engine materials: Water 1536,1 (0x600), DisplacementDemo 1537,1 (0x601), Auto Landscape 1042,1 (0x412).
 """
 import argparse
 import json
@@ -74,13 +90,20 @@ def main():
     ap.add_argument("--foliage-mesh", choices=["cube", "sphere"], default="cube")
     ap.add_argument("--foliage-scale", default="0.5,1.0", help="min,max instance scale")
     ap.add_argument("--foliage-seed", type=int, default=42)
+    ap.add_argument("--particles", type=int, default=0, help="entity-bound particle emitters")
+    ap.add_argument("--particle-extent", type=float, default=60.0, help="side of the emitter grid, metres")
+    ap.add_argument("--emit-rate", type=float, default=100.0, help="particles per second per emitter")
+    ap.add_argument("--particle-life", default="1.0,2.0", help="min,max lifetime in seconds")
+    ap.add_argument("--particle-max", type=int, default=400, help="pool cap per emitter")
+    ap.add_argument("--material", help="HI,LO material asset on every mesh entity (default none)")
     ap.add_argument("--template", required=True, help="scene providing World root + environment")
     ap.add_argument("--out", required=True)
     ap.add_argument("--seed", type=int, default=1)
     a = ap.parse_args()
 
     rng = random.Random(a.seed)
-    off = [float(v) for v in a.offset.split(",")]
+    material = [int(v) for v in a.material.split(",")] if a.material else NO_ASSET
+    off =[float(v) for v in a.offset.split(",")]
     tpl = json.loads(Path(a.template).read_text())
 
     roots = [e for e in tpl["entities"] if e.get("parent") is None]
@@ -115,7 +138,7 @@ def main():
         y = s * 0.5 + off[1]
         parent = mesh_parents[i % len(mesh_parents)]
         comps = {
-            "material": {"asset": NO_ASSET},
+            "material": {"asset": material},
             "mesh": {"asset": BUILTIN_CUBE if i % 4 else BUILTIN_SPHERE, "castsShadow": True,
                      "lodBias": 0, "receivesShadow": True, "visible": True},
             "transform": transform((x, y, z), (0.0, rng.uniform(0.0, 360.0), 0.0), (s, s, s)),
@@ -161,6 +184,27 @@ def main():
         }
         n_foliage = a.foliage
 
+    # Inline (pre-asset) emitter config, keys as SceneSerializer's legacy branch reads them.
+    life_min, _, life_max = a.particle_life.partition(",")
+    pside = max(1, math.ceil(math.sqrt(a.particles)))
+    pcell = a.particle_extent / pside
+    for i in range(a.particles):
+        x = -a.particle_extent / 2.0 + (i % pside + 0.5) * pcell
+        z = -a.particle_extent / 2.0 + (i // pside + 0.5) * pcell
+        e = {"children": [], "components": {
+                "particlesystem": {
+                    "visible": True, "playing": True, "destroyWhenFinished": False,
+                    "emitRate": a.emit_rate, "lifetimeMin": float(life_min),
+                    "lifetimeMax": float(life_max or life_min), "startSize": 0.3, "endSize": 0.0,
+                    "startColor": [1.0, 0.6, 0.2], "endColor": [1.0, 0.2, 0.1],
+                    "startAlpha": 1.0, "endAlpha": 0.0, "initialVelocity": [0.0, 2.0, 0.0],
+                    "velocitySpread": 0.5, "gravity": [0.0, -2.0, 0.0],
+                    "maxParticles": a.particle_max, "looping": True},
+                "transform": transform((x, 1.0, z))},
+             "name": f"Emitter {i}", "parent": world["uuid"], "uuid": make_uuid(rng)}
+        world["children"].append(e["uuid"])
+        entities.append(e)
+
     for i in range(a.lights):
         x = rng.uniform(-half, half) + off[0]
         z = rng.uniform(-half, half) + off[2]
@@ -178,7 +222,8 @@ def main():
     Path(a.out).parent.mkdir(parents=True, exist_ok=True)
     Path(a.out).write_text(json.dumps(out))
     print(f"wrote {a.out}: {len(entities)} entities ({a.count} meshes, {a.lights} lights, "
-          f"{n_phys} physics, {a.groups} groups, {n_foliage} foliage instances), "
+          f"{n_phys} physics, {a.groups} groups, {n_foliage} foliage instances, "
+          f"{a.particles} particle emitters), "
           f"extent {a.extent} m, offset {off}")
 
 

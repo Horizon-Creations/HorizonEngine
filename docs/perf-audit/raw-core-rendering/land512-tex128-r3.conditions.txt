@@ -1,0 +1,15 @@
+== land512-tex128-r3 15:22:19
+15:22  up 2 days,  3:32, 1 user, load averages: 4.92 3.96 5.41
+Now drawing from 'AC Power'
+lowpowermode 0
+"Device Utilization %"=34
+locked: 0
+foreign: 
+load before start (1 min): 4.92
+15:22  up 2 days,  3:33, 1 user, load averages: 4.33 3.90 5.36
+Now drawing from 'AC Power'
+lowpowermode 0
+"Device Utilization %"=90
+locked: 0
+foreign: 
+[land512-tex128-r3] rc=0 wall=20s fps=43.855533197681325 cpu_p50=22.492749999999997 gpu_p50=19.398541626287624 modes={'detailed': 400} size=2840x1528

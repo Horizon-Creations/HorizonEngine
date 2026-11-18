@@ -1,0 +1,15 @@
+== mat_water-cpu-r1 15:35:28
+15:35  up 2 days,  3:45, 1 user, load averages: 4.20 3.55 4.14
+Now drawing from 'Battery Power'
+lowpowermode 0
+"Device Utilization %"=28
+locked: 0
+foreign: 
+load before start (1 min): 4.2
+15:35  up 2 days,  3:46, 1 user, load averages: 4.31 3.60 4.15
+Now drawing from 'Battery Power'
+lowpowermode 0
+"Device Utilization %"=78
+locked: 0
+foreign: 
+[mat_water-cpu-r1] rc=0 wall=16s fps=59.99721276250913 cpu_p50=16.710583 gpu_p50=12.431250012014061 modes={'whole-frame': 400} size=2840x1528

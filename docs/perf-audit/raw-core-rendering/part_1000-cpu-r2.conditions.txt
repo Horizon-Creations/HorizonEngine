@@ -1,0 +1,15 @@
+== part_1000-cpu-r2 15:36:37
+15:36  up 2 days,  3:47, 1 user, load averages: 4.03 3.67 4.14
+Now drawing from 'Battery Power'
+lowpowermode 0
+"Device Utilization %"=29
+locked: 0
+foreign: 
+load before start (1 min): 4.03
+15:36  up 2 days,  3:47, 1 user, load averages: 3.79 3.64 4.12
+Now drawing from 'Battery Power'
+lowpowermode 0
+"Device Utilization %"=75
+locked: 0
+foreign: 
+[part_1000-cpu-r2] rc=0 wall=19s fps=40.40160656737802 cpu_p50=20.266208 gpu_p50=13.031624985160306 modes={'whole-frame': 400} size=2840x1528
