@@ -255,33 +255,6 @@ Die drei Entwürfe aus §1, §3 und §4 sind gebaut; Survey §5/§6 ist mitgezog
   (SaveState-Entity gekocht, `saveState` → Verschieben → `applySavedState` zeigt die gespeicherte Position und `applyState`
   mit `visible:false` blendet aus; CameraRig-Entity mit echtem Controller über vier Frames; `addAndCheck<CameraRigComponent>`).
 
-## Handoff
-
-- **Topic / step:** Thema 343, Schritt 11 von (aktuell) 11. Nur Dokumentation, kein Produktivcode
-  geändert. Branch `claude/entity-cooking-statische-entities-auf-daten-reduzieren` @ `f218b0f4a`
-  (Stand zu Schrittbeginn).
-- **Done:** Regeln 7, 8-Rest, 9 und das CameraRig-/Spline-Paar aus §5 je mit Code-Beleg geprüft
-  (Dateien/Zeilen oben); drei konkrete Folgeschritt-Entwürfe (Regel 7 entfernen, Regel 9
-  Ancestor-Entkopplung, `CameraRigComponent` als neuer Blocker), eine begründete Absage (Regel 8 Rest),
-  eine Bestätigung ohne Änderungsbedarf (`SplineComponent`), eine Korrektur einer bestehenden
-  Begründung ohne Verhaltensänderung (§6 CameraRig-Ziel).
-- **Files touched:** dieses Dokument. `docs/entity-cooking-survey-2026-11-13.md` bewusst NICHT
-  geändert in diesem Schritt (die drei Entwürfe sind noch nicht umgesetzt; ein Verweis dorthin ohne
-  Umsetzung wäre irreführend) — wer einen der drei Entwürfe umsetzt, sollte §5/§6 dort zusammen mit dem
-  Code ändern, wie Schritt 7/8 es vormachen.
-- **Verified:** alle zitierten Zeilennummern per Lesen der jeweiligen Datei bestätigt (nicht aus dem
-  Code-Map-Cache übernommen); `noteContentChanged()`/`contentEpoch` end-to-end gegen `replaceStaticMesh`/
-  `registerStaticMesh` geprüft (kein Aufruf); `classInstanceOf`/`ScriptComponent`-Kopplung gegen
-  `EntityHost.cpp:52` geprüft; `SplineComponent`-Schreibzugriffe in vier weiteren Systemdateien
-  gegengeprüft (kein Treffer).
-- **Not verified:** keiner der drei Entwürfe implementiert oder gebaut (Schritt verlangt das nicht);
-  kein Perf-Lauf (reiner Doku-Schritt); ob Regel 8/12 denselben Ancestor-Fund wie Regel 9 hätten, ist
-  benannt, aber nicht einzeln durch Lesen der jeweiligen Schreibpfade bestätigt.
-- **Next steps:** einen der drei Entwürfe als eigenen Schritt umsetzen — Regel 7 (SaveState) ist am
-  einfachsten und am nächsten an Schritt 7s bereits gelaufenem Muster; die Ancestor-Entkopplung (Regel 9)
-  und der neue `CameraRigComponent`-Blocker können im selben Schritt mit, da beide nur
-  `CookAnalysis.cpp`/`.h` und `CookedStatic.cpp` berühren.
-
 ## Pixel-A/B (Schritt 14, 18.11.2026)
 
 Done-Kriterium 4 aus dem Gate von Schritt 13 verlangt den `HE_COOK_STATIC=1`-Pixel-A/B auf einer Szene mit
@@ -290,50 +263,89 @@ Cooking geändert hat. Es gab dafür noch keine Dump-Szene; `scripts/perf/frame_
 macOS/Metal-only (zsh, `/sbin/md5`, `RHI=Metal` fest) und lief auf diesem NN-WS03-Windows-Rechner nicht.
 
 **Neue Witness-Szene:** `HE_DUMP_COOKTEST=1` in `EditorApplication.cpp` (neben `HE_DUMP_ROPETEST`,
-gleiches Muster: `createEntity`/`TransformComponent`/`MeshComponent{HE::kDefaultCubeMeshId}`), drei
-Würfel vor der Editor-Kamera:
-- `CookTestRopeChild`, Kind von `CookTestRopeParent` (trägt `RopeComponent`, kein eigenes `MeshComponent`
-  — das Rope-Geometrie selbst zeichnet über `RopeComponent::runtimeMeshId`, einen Pfad, den Cooking nicht
-  anfasst, deshalb hier nicht über `RopeTrailSystem::update` materialisiert). Prüft Regel 9
-  (Ancestor-Entkopplung, `kAncestorIgnored`): der Elternteil ist selbst blockiert (Geometry), das Kind
-  nicht.
+gleiches Muster: `createEntity`/`TransformComponent`/`MeshComponent{HE::kDefaultCubeMeshId}`):
+- `CookTestFloor`, eine flache Bodenplatte — fängt die Schatten der drei Test-Würfel auf, sonst hätte der
+  Schattenpfad (`fitDirectionalShadow`, liest `worldBounds`/`castsShadow` einer gekochten Zeile) nichts zu
+  zeigen.
+- `CookTestRopeChild0`/`CookTestRopeChild1`, zwei Mesh-**Kinder** (Mehrzahl, wie im Done-Kriterium) von
+  `CookTestRopeParent` (trägt `RopeComponent`, kein eigenes `MeshComponent` — die Rope-Geometrie selbst
+  zeichnet über `RopeComponent::runtimeMeshId`, einen Pfad, den Cooking nicht anfasst, deshalb hier nicht
+  über `RopeTrailSystem::update` materialisiert). Prüft Regel 9 (Ancestor-Entkopplung, `kAncestorIgnored`):
+  der Elternteil ist selbst blockiert (Geometry), die Kinder nicht.
 - `CookTestRig`, trägt `CameraRigComponent` direkt. Prüft den neuen CameraRig-Blocker (Locomotion): die
   Entity darf **keine** Zeile bekommen.
 - `CookTestSaveState`, trägt `SaveStateComponent`. Prüft Regel 7 (entfernt): die Entity kocht wie jedes
   andere statische Mesh.
 
-**Lauf:** `cmake --build C:\hwtp9 --target HorizonEditor -j 8` (HEAD zu Schrittbeginn, Scene-DLL frisch
-verlinkt, neuer als `11104a557`), dann `HorizonEditor.exe` dreimal direkt mit `HE_DUMP_PATH`/`HE_DUMP_QUIT`
-(kein `he_shot.py` — das Skript ist Metal/macOS-spezifisch und hätte für diesen Lauf erst umgeschrieben
-werden müssen, was außerhalb des Schritts liegt). Gemeinsame Flags: `HE_CONFIG_DIR`/`HE_COLLAB_OFFLINE=1`
-(privat), `HE_HIDDEN_WINDOW=1`, `HE_SKY_TIME=30`, `HE_DUMP_SKYTEST=1 HE_DUMP_COOKTEST=1`,
-`HE_DUMP_RHI=D3D11`, `HE_DUMP_AA=0`, `HE_DUMP_RENDERPATH=0`, `HE_DUMP_CAMY=2 HE_DUMP_CAMZ=2 HE_DUMP_PITCH=0`,
-`HE_DUMP_FRAMES=5` (Standard 3, hier 5 für mehr Sicherheitsabstand vor der Aufnahme).
-- Erster Versuch mit `HE_DUMP_TOD=0.5 HE_DUMP_COVERAGE=0.3` (wie `DC`/`SI` in `frame_pixel_ab.sh`) war auf
-  diesem D3D11-Build **nicht** reproduzierbar: zwei `HE_COOK_STATIC=0`-Läufe ohne jede Codeänderung
-  unterschieden sich in 222741 von 3686454 Bytes. Eingegrenzt per Ausschluss (`HE_DUMP_NOSKY=1
-  HE_DUMP_CLOUDMODE=0 HE_DUMP_COVERAGE=0`, zwei Läufe byte-gleich) auf Himmel/Wolken — deckungsgleich mit
-  dem Vorbehalt im Kommentarkopf von `frame_pixel_ab.sh` ("GI and the low-resolution clouds are NOT here:
-  they are not bit-reproducible"), hier nur für D3D11 statt Metal neu angetroffen. Nicht untersucht, WAS an
-  der Wolken-/Himmel-Berechnung auf D3D11 nicht an `HE_SKY_TIME` hängt — außerhalb dieses Schritts, da kein
-  Cooking-Code. Alle drei A/B-Läufe liefen deshalb mit `HE_DUMP_NOSKY=1 HE_DUMP_CLOUDMODE=0
-  HE_DUMP_COVERAGE=0`.
-- Ergebnis (md5 der BMPs): `off1` (`HE_COOK_STATIC` unset) `5d7eee88…`, `off2` (zweiter Lauf, Rauschboden)
-  `5d7eee88…`, `on1` (`HE_COOK_STATIC=1`) `5d7eee88…` — **alle drei identisch.** `off1`/`off2` gleich
-  bestätigt den Rauschboden (nichts an der Szene ändert sich zwischen zwei Läufen von selbst), `on1`
-  gleich `off1` ist der eigentliche Beleg: Cooking ändert in dieser Szene kein einziges Pixel.
-- Bildkontrolle (angehängt, `on1.png`): alle drei Würfel sichtbar und auseinanderzuhalten (links Rope-Kind,
-  Mitte Rig, rechts SaveState) — kein leeres oder schwarzes Bild, das die Gleichheit trivial gemacht hätte.
-- Log (`on1.log`): `EditorApplication: HE_DUMP_COOKTEST rope+child / camera-rig / save-state entities
-  added`, Session-Summary `0 warning(s), 0 error(s)` — die Szene baute ohne die Warnung aus
-  `CookAnalysis.cpp:168` ("marked Static but cannot be cooked"), was hier ohnehin nicht greift (keine der
-  drei Entities trägt `MobilityComponent`).
-- Zusätzlich `he_tests.exe --source-file=*test_cook_analysis.cpp,*test_cooked_static.cpp`: 35/35 Fälle,
-  56484/56484 Assertions grün (Build nach `he_tests`-Rebuild auf diesem HEAD). Das ist der
-  Ready/Pending-Zustandsbeleg auf Datenebene (Zeilen-Index, `rowOf`, Feld-für-Feld-Vergleich), den die
-  Editor-Dump-Szene selbst nicht ausgibt — es gibt keine Log-Zeile, die die Ready-Zeilen des laufenden
-  Editors zählt (geprüft: `grep -rn "State::Ready" src/HE_Rendering/src/RenderExtractor.cpp` — nur
-  Vergleiche im Code, keine `HE_LOG`-Ausgabe; eine neue hinzuzufügen wäre über den Schritt hinausgegangen).
+Zusätzlich, direkt vor dem BMP-Schreiben (nach den `HE_DUMP_FRAMES`-Settle-Frames, `EditorApplication.cpp`
+bei der Zeile `std::vector<uint8_t> rgba;`): ein Log pro `CookTest*`-Entity mit `rowOf`/`state`, über
+`reg.ctx().find<HE::CookedStatic>()` — **nicht** `cookedStaticOf`, das den Block anlegen und damit den
+`HE_COOK_STATIC=0`-Lauf durchs bloße Nachschauen kochen würde. Ohne diesen Zeilen-Beleg wäre ein
+Pixel-Gleichstand mehrdeutig: er würde genauso aussehen, wenn das Cooking in dieser Szene nie angesprungen
+wäre.
+
+**Lauf:** `cmake --build C:\hwtp9 --target HorizonEditor -j 8` (Scene-DLL frisch verlinkt, neuer als
+`11104a557`), dann `HorizonEditor.exe` direkt mit `HE_DUMP_PATH`/`HE_DUMP_QUIT` (kein `he_shot.py` — das
+Skript ist Metal/macOS-spezifisch und hätte für diesen Lauf erst umgeschrieben werden müssen, was außerhalb
+des Schritts liegt). Gemeinsame Flags: `HE_CONFIG_DIR`/`HE_COLLAB_OFFLINE=1` (privat), `HE_HIDDEN_WINDOW=1`,
+`HE_SKY_TIME=30`, `HE_DUMP_SKYTEST=1 HE_DUMP_COOKTEST=1`, `HE_DUMP_RHI=D3D11`, `HE_DUMP_AA=0`,
+`HE_DUMP_CAMY=2 HE_DUMP_CAMZ=2 HE_DUMP_PITCH=0`, `HE_DUMP_FRAMES=5` (Standard 3, hier mehr Abstand).
+
+*Himmel/Wolken sind auf diesem Build nicht reproduzierbar* — zwei `HE_COOK_STATIC=0`-Läufe mit
+`HE_DUMP_TOD=0.5 HE_DUMP_COVERAGE=0.3` (wie `DC`/`SI` in `frame_pixel_ab.sh`), sonst ohne jede
+Codeänderung, unterschieden sich in 222741 von 3686454 Bytes. Eingegrenzt in zwei Schritten:
+1. `HE_DUMP_NOSKY=1 HE_DUMP_CLOUDMODE=0 HE_DUMP_COVERAGE=0` (kein Himmel) — zwei Läufe byte-gleich.
+2. Himmel wieder an, nur Wolken aus (`HE_DUMP_COVERAGE=0 HE_DUMP_CLOUDMODE=0 HE_DUMP_TOD=0.35`, kein
+   `NOSKY`) — ebenfalls zwei Läufe byte-gleich. Also sind die Wolken (nicht der Himmel/die Sonne an sich)
+   die Quelle — deckungsgleich mit dem Vorbehalt im Kommentarkopf von `frame_pixel_ab.sh` ("GI and the
+   low-resolution clouds are NOT here: they are not bit-reproducible"), hier für D3D11 statt Metal neu
+   angetroffen. Nicht untersucht, WAS an der Wolkenberechnung auf D3D11 nicht an `HE_SKY_TIME` hängt —
+   außerhalb dieses Schritts, da kein Cooking-Code.
+
+Alle A/B-Läufe liefen deshalb mit Sonne an, Wolken aus (`HE_DUMP_COVERAGE=0 HE_DUMP_CLOUDMODE=0
+HE_DUMP_TOD=0.35`), damit der Schattenpfad (Sonne, nicht nur Ambient) tatsächlich mitläuft — zwei
+Render-Pfade, je mit Rauschboden:
+
+| Lauf | RENDERPATH | `HE_COOK_STATIC` | md5 |
+|---|---|---|---|
+| `fwd_off1` | 0 (forward) | unset | `02b09ca4…` |
+| `fwd_off2` | 0 (forward) | unset (Rauschboden) | `02b09ca4…` |
+| `fwd_on1`  | 0 (forward) | `1` | `02b09ca4…` |
+| `def_off1` | 1 (deferred) | unset | `45de121b…` |
+| `def_on1`  | 1 (deferred) | `1` | `45de121b…` |
+
+Jede Zeile einer Spalte ist identisch — der Rauschboden (`fwd_off1`/`fwd_off2`) UND der Cooking-Vergleich
+(`*_off*` gegen `*_on1`) auf beiden Pfaden.
+
+**Zeilen-Beleg (log, nicht nur Pixel):**
+```
+fwd_off1 (HE_COOK_STATIC unset — kein Block):
+  CookTestSaveState    row=-1  state=no row
+  CookTestRig          row=-1  state=no row
+  CookTestRopeChild1   row=-1  state=no row
+  CookTestRopeChild0   row=-1  state=no row
+  CookTestRopeParent   row=-1  state=no row
+  CookTestFloor        row=-1  state=no row
+
+fwd_on1 / def_on1 (HE_COOK_STATIC=1):
+  CookTestSaveState    row=0   state=Ready
+  CookTestRig          row=-1  state=no row   ← Locomotion-Blocker greift, keine Zeile
+  CookTestRopeChild1   row=1   state=Ready    ← Regel 9: Ancestor-Geometry geht nicht an das Kind
+  CookTestRopeChild0   row=2   state=Ready
+  CookTestRopeParent   row=-1  state=no row   ← Geometry-Blocker greift auf dem Parent selbst
+  CookTestFloor        row=3   state=Ready
+```
+Das belegt beide Seiten: der `off`-Lauf hatte überhaupt keinen Cooked-Block (`reg.ctx().find` fand nichts —
+echt uncooked, nicht nur zufällig gleich aussehend), der `on`-Lauf kochte genau die vier erwarteten Zeilen
+und ließ Rig/RopeParent korrekt aus. Zusammen mit den identischen md5 oben ist das der vollständige Beleg:
+Cooking griff, und es änderte kein Pixel.
+
+Bildkontrolle (angehängt, `fwd_on1.png`): alle vier Würfel samt Boden und Schatten sichtbar — kein leeres
+oder einfarbiges Bild, das die Gleichheit trivial gemacht hätte.
+
+**Zusätzlich** `he_tests.exe --source-file=*test_cook_analysis.cpp,*test_cooked_static.cpp`: 35/35 Fälle,
+56484/56484 Assertions grün (nach `he_tests`-Rebuild auf diesem HEAD) — der Ready/Pending-Zustandsbeleg auf
+Datenebene (Feld-für-Feld-Vergleich), unabhängig von der Editor-Dump-Szene oben.
 
 **Was das NICHT zeigt:** Der Editor-Dump ist Edit-Mode. `CameraRigController::update` und
 `applySavedState`/`saveState` (play-mode-gated, `EngineApi.cpp:416-418`) laufen hier nicht — dieser A/B
@@ -341,17 +353,32 @@ beweist Render-Gleichheit der STATISCHEN Konfiguration, nicht das Verhalten der 
 sind bereits über `test_cooked_static`s Feld-für-Feld-Fälle abgedeckt (Schritt 13: "CameraRig-Entity mit
 echtem Controller über vier Frames", "SaveState-Entity … `applySavedState`").
 
-**Handoff:**
-- **Done:** Done-Kriterium 4 erfüllt — Pixel-A/B auf einer Rig/Trail(Rope)/SaveState-Szene mit
-  `HE_COOK_STATIC=1` gegen `=0`, bit-identisch (md5), D3D11, Bild angehängt.
-- **Files touched:** `src/HE_Editor/EditorApplication.cpp` (neuer `HE_DUMP_COOKTEST`-Block + zwei
-  Includes), dieses Dokument.
-- **Verified:** Scene-DLL im Build neuer als `11104a557`; Rauschboden (zwei `HE_COOK_STATIC=0`-Läufe)
-  byte-gleich, bevor der eigentliche Vergleich gezogen wurde; Bild zeigt alle drei Subjekte; `he_tests`
-  Cook-Suiten grün.
+## Handoff
+
+- **Topic / step:** Thema 343, Schritt 14 von (aktuell) 14. Branch
+  `claude/entity-cooking-statische-entities-auf-daten-reduzieren`.
+- **Done:** Done-Kriterium 4 aus Schritt 13s Gate erfüllt — Pixel-A/B auf einer
+  Rig/Rope(-mit-zwei-Kindern)/SaveState-Szene mit `HE_COOK_STATIC=1` gegen `=0`, bit-identisch (md5), D3D11,
+  Forward UND Deferred, plus ein Zeilen-Log, das zeigt, dass die Zeilen wirklich `Ready` wurden statt dass
+  der Vergleich nur zufällig gleich aussah. Vorangegangene Schritt-11-Punkte (Regeln 7/9/CameraRig je mit
+  Code-Beleg, Regel-8-Rest-Absage, Spline-Bestätigung) waren schon vor diesem Schritt erledigt.
+- **Files touched:** `src/HE_Editor/EditorApplication.cpp` (neuer `HE_DUMP_COOKTEST`-Block, drei Includes,
+  ein Zeilen-Log nach den Settle-Frames), dieses Dokument.
+- **Verified:** Scene-DLL im Build neuer als `11104a557`; Rauschboden (je zwei `HE_COOK_STATIC=0`-Läufe,
+  Forward UND der Himmel/Wolken-Eingrenzungslauf) byte-gleich, bevor der eigentliche Vergleich gezogen
+  wurde; Zeilen-Log bestätigt, welche vier Entities kochten und welche zwei nicht; Bild zeigt alle vier
+  Subjekte plus Schatten; `he_tests`-Cook-Suiten (35/35) grün; voller `he_tests`-Lauf unter Scratch-APPDATA
+  (`C:\hwtp9\scratch_appdata`): 5983/5984 Fälle, 1952832/1952833 Assertions grün. Der eine Fehlschlag
+  (`test_game_build_config.cpp:156`, "GameBuildConfig: the generator writes the checked-in fixture header")
+  ist unabhängig von diesem Schritt — die Datei/der Generator (`GameBuildConfig`/`ProjectSettings`) wurde
+  hier nicht angefasst, der jüngste Commit auf dieser Historie, der sie berührt, ist Audio-Arbeit
+  (`5321d891d`, anderes Thema); die Checked-in-Fixture ist vermutlich nicht nachgezogen worden. Nicht
+  weiter verfolgt (außerhalb des Schritts).
 - **Not verified:** Play-mode-Pfade (CameraRig-Controller, SaveState-Apply) im Dump selbst — nicht nötig,
   s.o., von `test_cooked_static` abgedeckt. Die D3D11-Wolken-Nichtreproduzierbarkeit (Ursache) ist nicht
-  untersucht, nur umgangen (`NOSKY`/`CLOUDMODE=0`).
-- **Next steps:** keine offenen Entwürfe aus Schritt 11 mehr unverifiziert; falls die D3D11-Wolken-
-  Nichtreproduzierbarkeit für einen anderen Pixel-A/B-Schritt relevant wird, ist der Befund oben der
-  Startpunkt (nicht hier verfolgt, da kein Cooking-Bezug).
+  untersucht, nur eingegrenzt und umgangen. Aus Schritt 11 weiterhin offen: ob Regel 8/12 (`LOD`,
+  `Switchable`) denselben Ancestor-Fund wie Regel 9 hätten (§3, "Verwandter, hier nicht geprüfter Punkt") —
+  dieser Schritt hat nur Regel 9 behandelt, Regel 8/12 sind kein Teil von Done-Kriterium 4.
+- **Next steps:** Regel-8/12-Ancestor-Frage aus Schritt 11 ist der nächste Kandidat, falls das Thema
+  weitergeht. Die D3D11-Wolken-Nichtreproduzierbarkeit (Ursache, nicht nur Umgehung) wäre für einen anderen
+  Pixel-A/B-Schritt relevant, hier nicht verfolgt (kein Cooking-Bezug).
