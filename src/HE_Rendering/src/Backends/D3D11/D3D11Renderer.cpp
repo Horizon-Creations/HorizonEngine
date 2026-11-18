@@ -10392,9 +10392,15 @@ bool D3D11Renderer::RenderRvtPage(const EditorCameraOverride& camera, uint32_t p
             // A new picture of this page: an encode of the old one is stale, a cold page is hot again, its age starts over.
             ++p.rvtSlotVer[slot];
             p.rvtSlotPainted[slot] = p.rvtRealFrames;
-            if (p.rvtSlotCold[slot]) { p.rvtSlotCold[slot] = 0; ++p.rvtStateVer; }
         }
         const uint32_t hotSlice = rvtHotFor(p, slot);
+        // Only clear the cold flag once a hot slice actually backs the slot — if the pool is full,
+        // the slot's BC7 data in rvtCold[] is still the last-known-good page and must stay readable.
+        if (camera.rvtLayer == 0 && hotSlice != 0xFFFFFFFFu && p.rvtSlotCold[slot])
+        {
+            p.rvtSlotCold[slot] = 0;
+            ++p.rvtStateVer;
+        }
         if (hotSlice != 0xFFFFFFFFu)
         {
             const bool packed = p.rvtPack && camera.rvtLayer > 0;
