@@ -15931,7 +15931,6 @@ void MetalRenderer::EncodeSkinnedObjects(void* renderEncoder, const glm::mat4& v
 		return;
 
 	id<MTLRenderCommandEncoder> encoder = (__bridge id<MTLRenderCommandEncoder>)renderEncoder;
-	id<MTLDevice>               device  = (__bridge id<MTLDevice>)m_device;
 	const SceneUniforms& scene = *static_cast<const SceneUniforms*>(sceneUniformsPtr);
 
 	[encoder setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_skinnedPipeline];
@@ -15953,26 +15952,26 @@ void MetalRenderer::EncodeSkinnedObjects(void* renderEncoder, const glm::mat4& v
 	BindMaterialPreambleSlots(renderEncoder, /*frameState=*/true);
 	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:0];
 
-	constexpr int kMaxBones = 128;
-	std::vector<glm::mat4> boneScratch(kMaxBones, glm::mat4(1.0f));
+	constexpr size_t kMaxBones = 128;
 
 	for (const SkinnedRenderObject& obj : m_renderWorld.skinnedObjects)
 	{
 		const GpuSkeletalMesh* smesh = ResolveSkeletalMesh(obj.meshAssetId);
 		if (!smesh) continue;
 
-		// Upload bone matrices for this object — allocate a temporary buffer so
-		// each object gets its own range (the encoder retains it until GPU
-		// completion). One buffer serves every section of the object.
-		const int boneCount = static_cast<int>(
-		    std::min(obj.boneMatrices.size(), static_cast<size_t>(kMaxBones)));
-		std::fill(boneScratch.begin(), boneScratch.end(), glm::mat4(1.0f));
-		if (boneCount > 0)
-			std::copy_n(obj.boneMatrices.begin(), boneCount, boneScratch.begin());
-
-		id<MTLBuffer> boneBuf = [device newBufferWithBytes:boneScratch.data()
-		                                            length:kMaxBones * sizeof(glm::mat4)
-		                                           options:MTLResourceStorageModeShared];
+		// Bone matrices for this object: its own slice of the frame's upload ring
+		// (alive until GPU completion), so no MTLBuffer is created per object. The
+		// shader indexes up to 128 bones even for a weight of zero, and ring memory
+		// is recycled, so the tail past boneCount is written as identity.
+		// One slice serves every section of the object.
+		void*  boneBuf = nullptr;
+		size_t boneOff = 0;
+		auto*  bones = static_cast<glm::mat4*>(
+		    UploadTransient(kMaxBones * sizeof(glm::mat4), boneBuf, boneOff));
+		if (!bones) continue;
+		const size_t boneCount = std::min(obj.boneMatrices.size(), kMaxBones);
+		std::copy_n(obj.boneMatrices.begin(), boneCount, bones);
+		std::fill(bones + boneCount, bones + kMaxBones, glm::mat4(1.0f));
 
 		// One draw per material slot — or one over the whole mesh when the
 		// extractor left no table (a one-section asset, a whole-mesh override).
@@ -16007,7 +16006,7 @@ void MetalRenderer::EncodeSkinnedObjects(void* renderEncoder, const glm::mat4& v
 			[encoder setVertexBytes:&u length:sizeof(u) atIndex:1];
 			[encoder setVertexBuffer:(__bridge id<MTLBuffer>)smesh->boneIdBuf  offset:0 atIndex:2];
 			[encoder setVertexBuffer:(__bridge id<MTLBuffer>)smesh->boneWgtBuf offset:0 atIndex:3];
-			[encoder setVertexBuffer:boneBuf                                   offset:0 atIndex:4];
+			[encoder setVertexBuffer:(__bridge id<MTLBuffer>)boneBuf           offset:boneOff atIndex:4];
 			[encoder setFragmentTexture:(__bridge id<MTLTexture>)texPtr atIndex:0];
 			[encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle
 			                    indexCount:range.count
@@ -16017,7 +16016,6 @@ void MetalRenderer::EncodeSkinnedObjects(void* renderEncoder, const glm::mat4& v
 			++m_counters.draws;
 			m_counters.tris += static_cast<uint32_t>(range.count / 3);
 		}
-		// boneBuf is released here (ARC); the encoder holds its own strong reference
 	}
 
 	// Restore the regular scene pipeline for subsequent passes
