@@ -879,7 +879,7 @@ void drawVirtualTexturePage(AppContext& ctx)
 		static const int kPages[] = { 128, 256, 512, 1024, 2048 };
 		static const char* const kNames[] = { "128 pages  (27 MB)", "256 pages  (54 MB)", "512 pages  (108 MB)",
 		                                      "1024 pages  (216 MB)", "2048 pages  (432 MB)" };
-		int cur = 2;
+		int cur = 0;   // below the smallest preset the smallest entry shows
 		for (int i = 0; i < 5; ++i) if (s.poolPages >= kPages[i]) cur = i;   // a hand-edited value shows as the size below it
 		if (Row::combo("Pool size##rvtpool", &cur, kNames, 5))
 		{
@@ -890,7 +890,7 @@ void drawVirtualTexturePage(AppContext& ctx)
 	{
 		static const float kTexel[] = { 0.125f, 0.25f, 0.5f, 1.0f };
 		static const char* const kNames[] = { "0.125 m  (finest)", "0.25 m", "0.5 m", "1 m  (coarsest)" };
-		int cur = 1;
+		int cur = 0;
 		for (int i = 0; i < 4; ++i) if (s.metersPerTexel >= kTexel[i] - 0.001f) cur = i;
 		if (Row::combo("Texel size##rvttexel", &cur, kNames, 4))
 		{

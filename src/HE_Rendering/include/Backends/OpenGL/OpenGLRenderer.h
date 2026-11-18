@@ -479,6 +479,8 @@ private:
 	bool         m_forwardClustered = false;
 	// Runtime Virtual Texture (Thema 333): units 22..25 are the table and the three pool arrays (the material programs'
 	// heRvtTable/Albedo/Normal/Surface; unit 21 is heFogVolume's), so a context needs 26 fragment texture units; macOS GL (16) does not have them.
+	// By design OpenGL has no RVT cold/hot tier (no rvtSlotCold logic): the BC7 cold tier exists only on D3D11/D3D12/Vulkan,
+	// Metal has ASTC. Later RVT work (Thema 335) must not assume parity here.
 	bool         m_rvtSupported = false;
 	unsigned int m_rvtPool[3] = { 0, 0, 0 };   // GL_TEXTURE_2D_ARRAY: BaseColor SRGB8_ALPHA8, Normal / Surface RGBA8
 	uint32_t     m_rvtSlots = 0, m_rvtPagePx = 0;   // m_rvtSlots: the manager's ceiling
