@@ -312,6 +312,119 @@ TEST_CASE("Water stream: where it runs into a lake it reaches into the lake's fi
     CHECK(minX > -16.5f - 2.0f);                              // one cell, not a second lake
 }
 
+namespace
+{
+    // Wherever `mine`'s mesh lands on `otherId`'s own cells (the one-cell join strip, WaterMesh.h
+    // ShoreClip::joinBody), its vertices must not stand over that body's own surface there — the bug of
+    // Thema 232 Schritt 19 (a human screenshot: a joined body standing, angular and opaque, over the one
+    // it had joined). The oracle is `otherId`'s own surface, a lake's `level` or a stream's own
+    // ground-plus-depth (streamSurfaceAt) — the same value its own mesh is built from, so this does not
+    // just re-check the fix's own arithmetic. Returns how many vertices were actually on the strip (0 =
+    // the two bodies never touch, a setup bug, not a pass).
+    size_t checkJoinedUnder(const TerrainComponent& tc, const water::SurfaceMesh& mine, uint16_t otherId)
+    {
+        const water::Body* other = tc.water.findBody(otherId);
+        if (!other) return 0;
+        size_t onStrip = 0;
+        for (size_t i = 0; i < mine.mesh.vertices.size() / 3; ++i)
+        {
+            const glm::vec3 v = vertexOf(mine, i);
+            if (water::bodyAt(tc, v.x, v.z) != otherId) continue;
+            ++onStrip;
+            const float otherSurface = other->stream ? water::streamSurfaceAt(tc, *other, v.x, v.z) : other->level;
+            CAPTURE(i); CAPTURE(v.x); CAPTURE(v.z); CAPTURE(v.y); CAPTURE(otherSurface);
+            CHECK(v.y <= otherSurface + 1e-3f);
+        }
+        return onStrip;
+    }
+}
+
+TEST_CASE("Water joining: a stream that reaches into another stream lies under its surface, not through it")
+{
+    // Two streams down the same ramp, close enough in z that their painted strokes touch: the lower id
+    // (painted first) reaches into the higher id's first cell, the same rule a stream uses on a lake
+    // (WaterMesh.h joinReaches: "of two streams... the lower id reaches").
+    // A is the deeper one: unclamped, its own ground-plus-depth would poke up through B's shallower surface
+    // on the strip it reaches into — the exact shape of the bug. A depth this close to B's would pass even
+    // unclamped, by luck, and prove nothing.
+    TerrainComponent tc = rampLand(1.0f);
+    const uint16_t a = paintStream(tc, 0.8f);                 // z = 0, x from 16 down to -16
+    REQUIRE(tc.water.findBody(a)->stream);
+
+    brush::Params p;
+    p.radius = 1.0f; p.falloff = 1.0f; p.amount = 1.0f;
+    p.levelFromGround = true; p.levelOffset = 0.25f;          // shallower than A
+    p.followSlope = true;
+    brush::Stroke s;
+    brush::begin(s, tc, 16.0f, 1.3f, p);                      // beside A's line, close enough to touch its wet cells
+    for (int i = 0; i <= 60; ++i)
+        brush::dab(s, tc, 16.0f - 32.0f * static_cast<float>(i) / 60.0f, 1.3f, p);
+    const uint16_t b = s.body;
+    brush::end(s, tc);
+    REQUIRE(b != a);
+    REQUIRE(tc.water.findBody(b)->stream);
+
+    // A (the lower id, painted first) reaches into B, not the other way: confirms the setup exercises the
+    // direction joinReaches actually picks, before trusting the mesh check below to mean anything.
+    REQUIRE(water::joinReaches(*tc.water.findBody(a), *tc.water.findBody(b)));
+    REQUIRE_FALSE(water::joinReaches(*tc.water.findBody(b), *tc.water.findBody(a)));
+
+    water::SurfaceMesh sa, sb;
+    REQUIRE(water::buildSurface(tc, a, optionsFor(), sa));
+    REQUIRE(water::buildSurface(tc, b, optionsFor(), sb));
+    REQUIRE_FALSE(sa.empty());
+    REQUIRE_FALSE(sb.empty());
+
+    const size_t onAFromB = checkJoinedUnder(tc, sb, a);       // vertices of B's mesh on A's own cells
+    const size_t onBFromA = checkJoinedUnder(tc, sa, b);       // vertices of A's mesh (the reaching one) on B's own cells
+    MESSAGE("vertices of A on B's cells: " << onBFromA << ", of B on A's cells: " << onAFromB);
+    CHECK(onBFromA > 50u);                                      // A does meaningfully reach into B along the touching run
+    CHECK(onAFromB <= 5u);                                      // B does not: at most a boundary-rounding vertex, never a real reach
+}
+
+TEST_CASE("Water brush: a stroke started on an existing stream paints its own stream next to it, not over it")
+{
+    // WaterBrush.h: "A stroke that starts on water that is already there paints its own stream next to it,
+    // joined to that water, and leaves that water as it is." Thema 232 Schritt 19's case 4.
+    // A (the old stream, reaching into B per joinReaches below) is the deeper one, same reasoning as the
+    // stream-into-stream test above: unclamped, its own depth would poke up through B's shallower surface.
+    TerrainComponent tc = rampLand(1.0f);
+    const uint16_t a = paintStream(tc, 0.7f);                  // z = 0, x from 16 down to -16
+    REQUIRE(tc.water.findBody(a)->stream);
+
+    brush::Params p;
+    p.radius = 1.0f; p.falloff = 1.0f; p.amount = 1.0f;
+    p.levelFromGround = true; p.levelOffset = 0.2f;            // shallower than A
+    p.followSlope = true;
+    brush::Stroke s;
+    brush::begin(s, tc, 0.0f, 0.0f, p);                        // squarely on A's own wet centreline
+    REQUIRE(s.body != a);                                      // its own stream, not a continuation of A
+    REQUIRE(s.body != water::kNoBody);
+    for (int i = 0; i <= 40; ++i)
+        brush::dab(s, tc, 0.0f, 1.0f + 14.0f * static_cast<float>(i) / 40.0f, p);   // runs off sideways, away from A
+    const uint16_t b = s.body;
+    brush::end(s, tc);
+    REQUIRE(tc.water.findBody(b)->stream);
+
+    // A was painted first and kept its lower id, so joinReaches picks IT to reach into B (the same "lower id
+    // reaches" rule as two ordinary streams, Thema 232 Schritt 19's case 2) — the new stroke does not have to
+    // be the one that reaches for the two to join without a seam.
+    REQUIRE(water::joinReaches(*tc.water.findBody(a), *tc.water.findBody(b)));
+    REQUIRE_FALSE(water::joinReaches(*tc.water.findBody(b), *tc.water.findBody(a)));
+
+    water::SurfaceMesh sa, sb;
+    REQUIRE(water::buildSurface(tc, a, optionsFor(), sa));
+    REQUIRE(water::buildSurface(tc, b, optionsFor(), sb));
+    REQUIRE_FALSE(sa.empty());
+    REQUIRE_FALSE(sb.empty());
+
+    const size_t onBFromA = checkJoinedUnder(tc, sa, b);       // vertices of the old stream's mesh on the new one's cells
+    const size_t onAFromB = checkJoinedUnder(tc, sb, a);       // vertices of the new stream's mesh on the old one's cells
+    MESSAGE("vertices of the old stream on the new one's cells: " << onBFromA << ", of the new one on the old's: " << onAFromB);
+    CHECK(onBFromA > 10u);                                      // the two streams do touch, and A reaches into B
+    CHECK(onAFromB <= 5u);                                      // B never reaches into A (a few boundary-rounding vertices, not a real reach)
+}
+
 TEST_CASE("Water joining: two flat bodies of one level reach into each other's first cell, bodies of other levels do not")
 {
     auto twoBodies = [](float levelB)

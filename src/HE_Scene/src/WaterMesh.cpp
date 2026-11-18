@@ -1255,10 +1255,15 @@ bool buildSurface(const TerrainComponent& tc, const Lattice& lattice, const Cell
                 const float thick = std::max(poolHere + opt.streamDepth * t, streamFillAt(tc, lx, lz) * t);
                 deepestFill = std::max(deepestFill, thick);
                 y = ground + kStreamLift + thick - level;
-                // Over another body's cells (the lake it runs into) it lies just under that water's surface.
+                // Over another body's cells (the lake it runs into, or another stream it joins) it lies just
+                // under that water's own surface there, never through it: a lake has one level, a stream's
+                // surface is its own ground-plus-depth (streamSurfaceAt), the same thing its own mesh is built from.
                 if (const uint16_t other = bodyAt(tc, lx, lz); other != kNoBody && other != opt.streamBody)
-                    if (const Body* ob = tc.water.findBody(other); ob && !ob->stream)
-                        y = std::max(ground + kStreamLift - level, std::min(y, ob->level - 0.03f - level));
+                    if (const Body* ob = tc.water.findBody(other); ob)
+                    {
+                        const float otherSurface = ob->stream ? streamSurfaceAt(tc, *ob, lx, lz) : ob->level;
+                        y = std::max(ground + kStreamLift - level, std::min(y, otherSurface - kStreamJoinSink - level));
+                    }
                 // The ground's slope in WORLD axes (dimensionless): the material draws the sheet's lean from
                 // it and runs the current down it. The landscape's turn, then its y/x scale.
                 const glm::vec2 gl = streamLineSlopeAt(tc, meshPool.get(), lx, lz);

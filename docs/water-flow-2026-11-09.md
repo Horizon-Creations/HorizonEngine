@@ -751,3 +751,56 @@ Plan in Phasen (jede baut und testet): 1. Sortier-Priorität als Material-Einste
   unterschiedlichem Radius gaben trotzdem bitgleiche `worst`/`slowest`-Werte, ungeklärt ob Zufall oder ein Caching-Artefakt in `streamPoolOf`, das über `&tc`/den
   Höhenfeld-Zeiger geht und bei kurzlebigen `TerrainComponent`-Objekten in Tests kollidieren könnte) — mit mehr Zeit sauber auf einer größeren Testlandschaft nachmessen,
   bevor an der Fensterbreite erneut gearbeitet wird.
+
+### Schritt 27 (Hive-Schritt 19: angeschlossene Wasserkörper überlappen sichtbar statt nahtlos zu verbinden)
+
+- **Bug-Report vs. Befund:** Der Mensch meldete per Screenshot (Hive-Datei 240, 1.jpg: Schnee-Level, Nebel) eine eckige, teal Fläche, die über/in
+  einem anderen Wasserkörper steht. Visuell ist das EINE saubere Marching-Squares-Kontur (eine Polygon-Fläche, kein sichtbarer Doppel-Layer) —
+  das Bild deckt sich eher mit dem bereits abgenommenen Unterseiten-Effekt (Schritt 13/15: stilles Wasser ohne `flowAuto`, Kamera unter der
+  Blattebene) als mit einem echten Geometrie-Overlap. Trotzdem fand die Code-Prüfung einen echten, unabhängigen Bug derselben Kategorie
+  (zwei verbundene Körper überlappen statt sich nahtlos zu verbinden), siehe unten — beides getrennt gehalten, wie vom Schritt verlangt.
+- **Ursache (`WaterMesh.cpp buildSurface`, ca. Zeile 1258):** Eine Strömung, die in eine Nachbar-Zelle hineinreicht (`ShoreClip::joinBody`,
+  `joinReaches`), wurde nur unter das Nachbar-Niveau geklemmt, wenn der Nachbar KEIN Stream ist (`!ob->stream`). Bei Stream-in-Stream-Join
+  (zwei Streams berühren sich, oder ein Strich beginnt auf einem bereits existierenden Stream, `WaterBrush.h:116`) griff die Klemme nicht:
+  beide Netze zeichnen im gemeinsamen Join-Streifen unveränderte, potenziell unterschiedlich hohe Geometrie — die reichende Strömung kann
+  durch die Oberfläche der anderen stechen (gemessen: bis zu 0,49 m zu hoch, siehe Test unten).
+- **Fix:** Die Klemme gilt jetzt für jeden Nachbarn, nicht nur flache Körper: Ziel-Höhe ist `ob->level` für einen flachen Körper, sonst
+  `streamSurfaceAt(tc, *ob, x, z)` (die eigene Boden-plus-Tiefe-Fläche des Nachbar-Streams — dieselbe Größe, aus der sein eigenes Netz gebaut
+  wird). Neue Konstante `kStreamJoinSink` (`WaterMesh.h`) benennt den bisherigen Literal-Wert 0,03 m.
+- **Alle vier im Schritt genannten Fälle geprüft:**
+  1. **Stream in einen See:** bereits korrekt (die Klemme griff schon vorher für `!ob->stream`); bestehender Test
+     „Water stream: where it runs into a lake it reaches into the lake's first cell" deckt die Reichweite ab.
+  2. **Stream an Stream:** der Bug (siehe oben), neuer Test unten, rot vor dem Fix.
+  3. **Zwei flache Körper mit > 0,05 m Niveau-Unterschied:** reichen nie ineinander — `SurfaceOptions::joinBody` wird in `WaterSurface.cpp`
+     NUR für Streams gesetzt, nie für flache Körper; bestehender Test „Water joining: two flat bodies of one level reach into each other's
+     first cell, bodies of other levels do not" deckt das ab (begründet ausgenommen, kein neuer Code nötig).
+  4. **Strich beginnt auf vorhandenem Wasser (`WaterBrush.h:116`):** reduziert sich je nach vorhandenem Wasser auf Fall 1 (See) oder Fall 2
+     (Stream) — neuer Test unten deckt die Stream-Variante ab (die, die vorher brach).
+- **Test (`tests/test_water_stream.cpp`):** zwei neue Fälle, `checkJoinedUnder` prüft je Vertex der reichenden Strömung, der auf einer fremden
+  Zelle landet, gegen die unabhängig definierte Oberfläche des Nachbarn (`ob->level` bzw. `streamSurfaceAt`) — nicht gegen den Fix-Code selbst.
+  Die reichende Strömung ist bewusst TIEFER gewählt als die, in die sie hineinreicht (0,8 m vs. 0,25 m bzw. 0,7 m vs. 0,2 m): mit umgekehrter
+  Tiefe hätte der ungeklemmte Fall zufällig bestanden und nichts bewiesen. Vorher/nachher per Hand verifiziert: Fix testweise zurückgenommen
+  (`y = ... ob->level ...` ohne `ob->stream`-Fall) → 734 von 1893 Assertions rot, Höhen bis 0,49 m über der Nachbar-Fläche; Fix zurück → 0 rot.
+- **Bild (echter Editor-Dump, `HE_DUMP_WATERLAKE=join`, OpenGL, `HE_HIDDEN_WINDOW=1`, scratch-APPDATA, `HE_DUMP_SKYTEST=1 TOD=0.5 HE_SKY_TIME=12`
+  für eine reproduzierbare Welle ohne Uhr-Rauschen):** `EditorApplication.cpp`s bestehender `join`-Zeuge (Hügel-Stream + zwei flache Seen am
+  Fuß) um einen zweiten, parallelen Stream erweitert (1,3 m versetzt, 0,3 m tiefer als der erste — berührt den ersten fast über die ganze
+  Länge). `join_before_close2.png`/`join_after_close.png` (CAMX=25 CAMY=320 CAMZ=-18 PITCH=-20 YAW=180): visuell fast deckungsgleich — das
+  Wassermaterial blendet die Höhendifferenz weich, kein auffälliger Sprung wie im menschlichen Screenshot. `join_diff_heat2.png` (Pixel-Diff
+  ×4 verstärkt): 0,14 % der Pixel ändern sich, alle entlang der exakten Kante des Streams — bestätigt, dass der Fix genau dort und nur dort
+  etwas ändert. Das bestätigt die Lesart oben: der Bug ist real und behoben, aber nicht das, was im Screenshot zu sehen ist.
+- **Verifiziert:** `ctest -R test_water` 12/12 grün (`out/build/x64-release`, NN-WS03/MSVC). Beide neuen Testfälle einzeln rot→grün gefahren
+  (Fix von Hand raus/rein, siehe oben). `test_water_brush`/`test_water_surface`/`test_water_stream` komplett (84061+43382+2930 Assertions)
+  grün, keine Regression. HorizonEditor + he_tests lokal gebaut (Ninja/MSVC).
+- **Nicht verifiziert:** D3D11/D3D12/Vulkan/Metal (nur OpenGL lokal); Perf nicht gemessen (die geänderte Klemme ist ein zusätzlicher
+  `streamSurfaceAt`-Aufruf pro Vertex NUR im bereits-vorhandenen Join-Streifen, nicht im allgemeinen Pfad — eingeordnet, nicht gemessen).
+  Die tatsächliche Ursache des menschlichen Screenshots (Unterseiten-Effekt) wurde NICHT erneut angefasst (out of scope, Schritt 15 bereits
+  abgenommen).
+- **Entschieden:** Stein-Fix statt Sonderfall: ein gemeinsamer `otherSurface`-Ausdruck für beide Nachbar-Arten statt zwei getrennter Zweige.
+  Keine neue Serialisierung, kein neuer Parameter — `kStreamJoinSink` ersetzt nur den bisherigen Literal 0,03.
+- **Pending / Vorschlag, nicht gebaut:** Bei einem gruppierten flachen Nachbarn (zwei Seen gleichen Niveaus, `flatGroupLeads`) klemmt die
+  reichende Strömung gegen `ob->level` (das NICHT-führende Mitglied), während tatsächlich das FÜHRENDE Mitglied zeichnet — bis zu 0,05 m
+  (die Join-Toleranz) Differenz möglich. Vorbestehende Einschränkung (galt schon für den Lake-Zweig vor diesem Fix), hier nicht angefasst
+  (kein neuer Regressionspunkt, Regel 2: kein Scope-Creep).
+- **Nächste Schritte:** 1. Falls der menschliche Screenshot weiter aktuell ist, den Unterseiten-Pfad für STILLES Wasser ohne `flowAuto`
+  erneut prüfen (Schritt 13 nannte das offen: „Terraces WITHOUT Flow From Slope still show teal from below"). 2. Die gruppierte-Nachbar-Lücke
+  oben nur beheben, falls sie je sichtbar wird (5 cm Toleranzband, unwahrscheinlich sichtbar).

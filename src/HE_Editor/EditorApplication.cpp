@@ -8422,6 +8422,18 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 					for (int i = 0; i <= 12; ++i) brush::dab(ls, ltc, 47.0f + 4.0f * static_cast<float>(i) / 12.0f, zc, lp);
 					brush::end(ls, ltc);
 				}
+				// A second stream beside the main one, close enough to touch it: a stream joining a stream (Thema 232
+				// Schritt 19), the same one-cell reach as into a lake above, but deeper so an unclamped overlap shows.
+				brush::Params sp = p;
+				sp.levelOffset = p.levelOffset + 0.3f;
+				brush::Stroke s2;
+				brush::begin(s2, ltc, x0, zAt(0.0f) + 1.3f, sp);
+				for (int i = 0; i <= steps; ++i)
+				{
+					const float t = static_cast<float>(i) / static_cast<float>(steps);
+					brush::dab(s2, ltc, x0 + (x1 - x0) * t, zAt(t) + 1.3f, sp);
+				}
+				brush::end(s2, ltc);
 			}
 		}
 		else if (mode == "two")
