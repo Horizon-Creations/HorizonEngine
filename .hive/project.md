@@ -1,6 +1,6 @@
 ---
 project: horizon-creations-horizonengine
-rev: 23
+rev: 24
 ---
 # HorizonEngine
 
@@ -17,5 +17,6 @@ Fully featured modern game engine that supports all five major backends and run 
 - Clear APIs and design pattern  <!-- id: pt-2 -->
 - as little middleware as possible direct connections  <!-- id: pt-3 -->
 - In hot per-frame paths, do not reallocate (heap vectors/buffers) or recompute loop-invariant values (uniform/unchanged-this-frame state) inside the per-object or per-instance loop; hoist them once per frame/call and reuse a persistent buffer instead.  <!-- id: pt-4 -->
+- A step either meets each of its acceptance criteria or names, in the handoff, the one it did not meet and why; swapping in a weaker check (an equality test for a pixel A/B, a build for a run) must be said out loud.  <!-- id: pt-5 -->
 
 ## Look here {#notes}
