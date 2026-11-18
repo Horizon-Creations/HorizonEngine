@@ -17,6 +17,7 @@
 #include <Diagnostics/Profiler.h>
 #include <cfloat>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -702,6 +703,12 @@ void render(AppContext& ctx)
 
             ctx.world->clearHierarchyDirty();
         }
+        // Bumped on every rebuild, including ones that happen while the
+        // filter below is inactive — a single frame's `cacheRebuilt` flag
+        // cannot tell a later re-activation that the cache it last filtered
+        // is gone, but a running count can.
+        static uint64_t s_outlinerCacheVersion = 0;
+        if (cacheRebuilt) ++s_outlinerCacheVersion;
 
         // ── Inline rename state ───────────────────────────────────────────
         // A double-click on a name, F2 or the row menu's Rename turns that row's
@@ -962,31 +969,54 @@ void render(AppContext& ctx)
         const bool filterActive = !s_searchText.empty() ||
                                   s_typeFilter != OutlinerFilter::kAllKinds;
 
-        // Which rows survive, and as what. Run every frame while a filter is
-        // on: the type test reads components straight from the registry, and
-        // a component added in Details does not dirty the hierarchy cache.
-        // The World root is never a hit of its own — it is the tree's
-        // built-in top, not something the user placed — so it only ever
-        // appears as the dimmed path to whatever was found under it.
-        std::vector<OutlinerFilter::Shown> shown;
-        size_t hitCount = 0;
+        // Which rows survive, and as what. Recomputed only when the search
+        // text, the type chip or the cache changes — plus a slow timer like
+        // the kind-count sweep above, because the type test reads components
+        // straight from the registry and a component added in Details does
+        // not dirty the hierarchy cache. `shown` and the scratch `rows` stay
+        // static so their capacity survives between recomputes. The World
+        // root is never a hit of its own — it is the tree's built-in top,
+        // not something the user placed — so it only ever appears as the
+        // dimmed path to whatever was found under it.
+        static std::vector<OutlinerFilter::Shown> shown;
+        static std::vector<OutlinerFilter::Row>   rows;
+        static std::string                        s_filteredSearchText;
+        static int                                s_filteredTypeFilter  = OutlinerFilter::kAllKinds;
+        static size_t                             s_filteredHitCount    = 0;
+        static int                                s_filterIdleFrames    = 0;
+        static uint64_t                           s_filteredCacheVersion = 0;
         if (filterActive)
         {
-            std::vector<OutlinerFilter::Row> rows;
-            rows.reserve(s_outlinerCache.size());
-            const auto& reg = ctx.world->registry();
-            const OutlinerFilter::Kind& kind = OutlinerFilter::kindAt(s_typeFilter);
-            for (const auto& node : s_outlinerCache)
+            constexpr int kIdleRecheckFrames = 30;
+            const bool dirty = s_filteredCacheVersion != s_outlinerCacheVersion ||
+                               s_filteredSearchText != s_searchText ||
+                               s_filteredTypeFilter != s_typeFilter ||
+                               ++s_filterIdleFrames >= kIdleRecheckFrames;
+            if (dirty)
             {
-                const bool match = node.entity != ctx.world->rootEntity() &&
-                                   reg.valid(node.entity) &&
-                                   OutlinerFilter::nameMatches(node.name, s_searchText) &&
-                                   kind.test(reg, node.entity);
-                rows.push_back({ node.depth, match });
-                if (match) ++hitCount;
+                rows.clear();
+                rows.reserve(s_outlinerCache.size());
+                size_t hits = 0;
+                const auto& reg = ctx.world->registry();
+                const OutlinerFilter::Kind& kind = OutlinerFilter::kindAt(s_typeFilter);
+                for (const auto& node : s_outlinerCache)
+                {
+                    const bool match = node.entity != ctx.world->rootEntity() &&
+                                       reg.valid(node.entity) &&
+                                       OutlinerFilter::nameMatches(node.name, s_searchText) &&
+                                       kind.test(reg, node.entity);
+                    rows.push_back({ node.depth, match });
+                    if (match) ++hits;
+                }
+                shown = OutlinerFilter::apply(rows);
+                s_filteredSearchText   = s_searchText;
+                s_filteredTypeFilter   = s_typeFilter;
+                s_filteredHitCount     = hits;
+                s_filterIdleFrames     = 0;
+                s_filteredCacheVersion = s_outlinerCacheVersion;
             }
-            shown = OutlinerFilter::apply(rows);
         }
+        const size_t hitCount = filterActive ? s_filteredHitCount : 0;
 
         // ── Status line: how much is shown, and what is selected ──────────
         // Left, the count (of the whole scene while a filter narrows it); right,
