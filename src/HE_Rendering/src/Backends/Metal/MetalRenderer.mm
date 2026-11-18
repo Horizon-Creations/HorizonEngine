@@ -16452,6 +16452,11 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 		const std::vector<float>* cMaterialParams = nullptr; // HeParams data (buffer 2)
 		void* cGraphTex[HE::kMatMaxGraphTextures] = { nullptr }; // node-graph textures (units 1..4)
 		int   cGraphTexCount = 0;
+		// The layer-0 fallback weightmap is one fixed asset for the whole pass (every
+		// non-landscape graph-material draw falls back to it) — resolve it at most once
+		// here instead of a ResolveGraphTexture call (string-key build + cache lookup)
+		// per such draw.
+		void* cDefaultWeightTex = nullptr; bool cDefaultWeightResolved = false;
 		for (const DrawCall& dc : cmds.drawCalls())
 		{
 			UnlitUniforms u;
@@ -16659,7 +16664,15 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 					void* wm = dc.weightmapTextureId != HE::UUID{}
 						? ResolveGraphTexture(dc.weightmapTextureId, {})
 						: nullptr;
-					if (!wm) wm = ResolveGraphTexture(HE::kDefaultLayer0WeightTextureId, {});
+					if (!wm)
+					{
+						if (!cDefaultWeightResolved)
+						{
+							cDefaultWeightTex = ResolveGraphTexture(HE::kDefaultLayer0WeightTextureId, {});
+							cDefaultWeightResolved = true;
+						}
+						wm = cDefaultWeightTex;
+					}
 					if (wm)
 					{
 						[encoder setFragmentTexture:(__bridge id<MTLTexture>)wm atIndex:13];
@@ -18340,6 +18353,9 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 		const std::vector<float>* cMaterialParams = nullptr;
 		void* cGraphTex[HE::kMatMaxGraphTextures] = { nullptr };
 		int   cGraphTexCount = 0;
+		// Same per-pass fallback cache as the forward loop (EncodeScene): one fixed
+		// asset, resolved at most once instead of per draw.
+		void* cDefaultWeightTex = nullptr; bool cDefaultWeightResolved = false;
 		for (const DrawCall& dc : cmds.drawCalls())
 		{
 			UnlitUniforms u;
@@ -18529,7 +18545,15 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 					void* wm = dc.weightmapTextureId != HE::UUID{}
 						? ResolveGraphTexture(dc.weightmapTextureId, {})
 						: nullptr;
-					if (!wm) wm = ResolveGraphTexture(HE::kDefaultLayer0WeightTextureId, {});
+					if (!wm)
+					{
+						if (!cDefaultWeightResolved)
+						{
+							cDefaultWeightTex = ResolveGraphTexture(HE::kDefaultLayer0WeightTextureId, {});
+							cDefaultWeightResolved = true;
+						}
+						wm = cDefaultWeightTex;
+					}
 					if (wm)
 					{
 						[encoder setFragmentTexture:(__bridge id<MTLTexture>)wm atIndex:13];
