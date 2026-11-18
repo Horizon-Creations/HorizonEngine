@@ -47,6 +47,17 @@ SCENES = {
 }
 
 
+# Where the editor camera stands for each generated scene: above the field at its edge, looking across it (yaw 0 looks
+# along -z), so a good part of the props and lights is in view and nothing sits inside the terrain. Pinned, so every
+# run sees the same picture. The numbers follow the scenes' extents (docs/vulkan-material-draw-cpu-2026-10-28.md and
+# docs/render-extractor-shadow-pass-plan.md use the same overview cameras).
+CAMERAS = {
+    "entities_stress": "0,150,1150,0,-0.2",     # extent 1500 m
+    "lights_stress": "0,25,260,0,-0.25",        # extent 300 m
+    "physics_stress": "0,20,190,0,-0.25",       # extent 200 m
+}
+
+
 def log(*parts):
     print(*parts, file=sys.stderr, flush=True)
 
@@ -157,6 +168,8 @@ def main():
                    "--warmup", str(a.warmup), "--frames", str(a.frames), "--timeout", str(a.timeout), "--no-counters"]
         if scene is not None:
             command += ["--scene", str(scene)]
+        if a.project == "generated" and a.scene in CAMERAS:
+            command += ["--cam", CAMERAS[a.scene]]
         run(command, cwd=REPO)
         summary = json.loads((work / "out" / "hive.summary.json").read_text())
         dump = json.loads((work / "out" / "hive.profile.json").read_text())

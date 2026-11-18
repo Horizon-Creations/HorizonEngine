@@ -13,6 +13,8 @@
     "src/HE_Core/src/Renderer/**",
     "src/HE_Core/include/Renderer/**"
   ],
+  "tooling": ["scripts/perf/**"],
+  "tooling_ref": "release/0.8.0",
   "setup": "{python} scripts/perf/hive_capture.py --build",
   "capture": "{python} scripts/perf/hive_capture.py --project {project} --scene {scene}",
   "suite": [
