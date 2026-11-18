@@ -1693,6 +1693,34 @@ TEST_CASE("Water brush streams: a river with bends runs down its own line, at ev
     }
 }
 
+// streamPoolOf (WaterMesh.cpp) caches by {&tc, body, field revision, ground version, heights pointer+count}.
+// A TerrainComponent that goes out of scope (a SUBCASE's own `tc`, or one TEST_CASE's) can hand its stack
+// slot and its sculptHeights block's address straight to the next one built the same way - two separately-
+// scoped landscapes tried here ended up reading each other's pool byte for byte, not their own, with no
+// error raised (a real cache-correctness gap, left as a finding, not fixed here - outside this step; see
+// the handoff). So both landscapes below are alive at once (two named locals, never both equal to one
+// freed-and-reused slot), not one torn down before the other is built.
+TEST_CASE("Water brush streams: a river with bends still runs on a gentle overall slope, near kStreamStillSlope")
+{
+    TerrainComponent land08 = makeLand(10.0f, 0.08f);
+    TerrainComponent land12 = makeLand(10.0f, 0.12f);
+    float worst08 = 0.0f, slowest08 = 0.0f, worst12 = 0.0f, slowest12 = 0.0f;
+    const int checked08 = riverAgreement(land08, followParams(), riverS, 0.3f, worst08, slowest08);
+    const int checked12 = riverAgreement(land12, followParams(), riverS, 0.4f, worst12, slowest12);
+    SUBCASE("0.08 m/m: the line's own slope at the bends is only just over kStreamStillSlope")
+    {
+        CHECK(checked08 >= 15);
+        CHECK(worst08 > 0.9f);         // along the line, same as at the steep slope
+        CHECK(slowest08 > 0.0f);       // and running, not clamped still, this close to the threshold
+    }
+    SUBCASE("0.12 m/m: gentle, but clearly above kStreamStillSlope at every bend")
+    {
+        CHECK(checked12 >= 15);
+        CHECK(worst12 > 0.9f);
+        CHECK(slowest12 > 0.01f);
+    }
+}
+
 TEST_CASE("Water brush streams: without the stream's cells the current is the ground's own, as before")
 {
     TerrainComponent tc = rampLand();
