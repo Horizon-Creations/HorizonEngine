@@ -2506,21 +2506,29 @@ namespace
 	constexpr const char* kCookedStaticKey = "cookedStatic";
 	static_assert(sizeof(HE::UUID) == 2 * sizeof(uint64_t), "the packed verdict is the UUIDs' raw bytes");
 
-	void addCookedSeed(HorizonWorld& world, json& scene)
+	// `outSummary`, when given, gets the same population `ids` is drawn from, broken down
+	// by blocker reason (HE::summarizeCookability) — the export log's per-scene line
+	// (ExportDialogPanel.cpp). Built from this one analyzeCookability() pass, not a second walk.
+	void addCookedSeed(HorizonWorld& world, json& scene, HE::CookSummary* outSummary = nullptr)
 	{
 		auto& registry = world.registry();
+		const std::vector<HE::CookEntry> entries = HE::analyzeCookability(registry);
 		std::vector<HE::UUID> ids;
-		for (const HE::CookEntry& ce : HE::analyzeCookability(registry))
+		std::vector<HE::CookEntry> candidates;
+		if (outSummary) candidates.reserve(entries.size());
+		for (const HE::CookEntry& ce : entries)
 		{
 			// What buildSceneJson wrote is all the load can find again.
-			if (!ce.verdict.cookable() || !registry.all_of<MeshComponent, NameComponent>(ce.entity) ||
-			    isEngineGenerated(registry, ce.entity))
+			if (!registry.all_of<MeshComponent, NameComponent>(ce.entity) || isEngineGenerated(registry, ce.entity))
 				continue;
-			ids.push_back(entityUuid(registry, ce.entity));
+			if (outSummary) candidates.push_back(ce);
+			if (ce.verdict.cookable())
+				ids.push_back(entityUuid(registry, ce.entity));
 		}
 		scene[kCookedStaticKey] = {
 			{ "version",  1 },
 			{ "cookable", base64Encode(reinterpret_cast<const uint8_t*>(ids.data()), ids.size() * sizeof(HE::UUID)) } };
+		if (outSummary) *outSummary = HE::summarizeCookability(candidates, registry);
 	}
 
 	// Hands the block the verdict the scene carried. One UUID that does not name an entity of this load,
@@ -3695,10 +3703,11 @@ bool SceneSerializer::loadJSON(HorizonWorld& world, const std::filesystem::path&
 }
 
 // ── In-memory snapshots (CBOR) ────────────────────────────────────────────────
-bool SceneSerializer::saveToMemory(const HorizonWorld& world, std::vector<uint8_t>& out, bool packCookVerdict)
+bool SceneSerializer::saveToMemory(const HorizonWorld& world, std::vector<uint8_t>& out, bool packCookVerdict,
+                                    HE::CookSummary* outCookSummary)
 {
     json scene = buildSceneJson(const_cast<HorizonWorld&>(world));
-    if (packCookVerdict) addCookedSeed(const_cast<HorizonWorld&>(world), scene);
+    if (packCookVerdict) addCookedSeed(const_cast<HorizonWorld&>(world), scene, outCookSummary);
     out = json::to_cbor(scene);
     HE_LOG_DEBUG(Serialize, "Scene snapshot to memory: %zu entity/-ies, %zu byte(s)",
                  sceneEntityCount(scene), out.size());

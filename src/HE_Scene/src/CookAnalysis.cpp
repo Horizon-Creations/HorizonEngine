@@ -27,6 +27,7 @@
 #include "HorizonScene/Components/TransformComponent.h"
 #include <Diagnostics/Log.h>
 
+#include <iterator>
 #include <unordered_map>
 
 namespace HE
@@ -115,6 +116,37 @@ CookVerdict analyzeCookability(const entt::registry& reg, entt::entity e)
 	return analyze(reg, e, nullptr);
 }
 
+namespace
+{
+	// Every CookBlocker bit that exists today, in rule order (bits 6 and 10 are the
+	// retired rules 7 and 11, CookAnalysis.h:20-28, and stay out of this list).
+	constexpr CookBlocker kAllBlockers[] = {
+		CookBlocker::Script, CookBlocker::Animation, CookBlocker::PropertyPlayback,
+		CookBlocker::Physics, CookBlocker::Locomotion, CookBlocker::Replication,
+		CookBlocker::Lod, CookBlocker::Geometry, CookBlocker::Ancestor,
+		CookBlocker::Switchable, CookBlocker::MarkedMovable,
+	};
+
+	const char* blockerLabel(CookBlocker b)
+	{
+		switch (b)
+		{
+		case CookBlocker::Script:           return "Script";
+		case CookBlocker::Animation:        return "Animation";
+		case CookBlocker::PropertyPlayback: return "Property playback";
+		case CookBlocker::Physics:          return "Physics";
+		case CookBlocker::Locomotion:       return "Locomotion";
+		case CookBlocker::Replication:      return "Replication";
+		case CookBlocker::Lod:              return "LOD";
+		case CookBlocker::Geometry:         return "Geometry";
+		case CookBlocker::Ancestor:         return "Parent blocked";
+		case CookBlocker::Switchable:       return "Switchable";
+		case CookBlocker::MarkedMovable:    return "Movable";
+		}
+		return "?";
+	}
+}
+
 std::vector<CookEntry> analyzeCookability(const entt::registry& reg)
 {
 	const auto view = reg.view<const TransformComponent>();
@@ -138,6 +170,61 @@ std::vector<CookEntry> analyzeCookability(const entt::registry& reg)
 		}
 	}
 	return out;
+}
+
+CookSummary summarizeCookability(const std::vector<CookEntry>& entries, const entt::registry& reg, size_t maxExamples)
+{
+	CookSummary::Reason slots[std::size(kAllBlockers)];
+	for (size_t i = 0; i < std::size(kAllBlockers); ++i)
+		slots[i].blocker = kAllBlockers[i];
+
+	CookSummary out;
+	for (const CookEntry& ce : entries)
+	{
+		if (ce.verdict.cookable()) { ++out.cookable; continue; }
+		++out.blocked;
+		for (size_t i = 0; i < std::size(kAllBlockers); ++i)
+		{
+			if (!ce.verdict.has(kAllBlockers[i])) continue;
+			++slots[i].count;
+			if (slots[i].examples.size() < maxExamples)
+				if (const auto* name = reg.try_get<NameComponent>(ce.entity); name && !name->name.empty())
+					slots[i].examples.push_back(name->name);
+		}
+	}
+	out.reasons.reserve(std::size(kAllBlockers));
+	for (CookSummary::Reason& r : slots)
+		if (r.count) out.reasons.push_back(std::move(r));
+	return out;
+}
+
+std::string formatCookSummary(const CookSummary& summary)
+{
+	std::string line = std::to_string(summary.cookable) + " cookable, "
+	                  + std::to_string(summary.blocked) + " not";
+	if (summary.reasons.empty()) return line;
+	line += " (";
+	for (size_t i = 0; i < summary.reasons.size(); ++i)
+	{
+		const CookSummary::Reason& r = summary.reasons[i];
+		if (i) line += ", ";
+		line += std::string(blockerLabel(r.blocker)) + ": " + std::to_string(r.count);
+		if (!r.examples.empty())
+		{
+			line += " [";
+			for (size_t j = 0; j < r.examples.size(); ++j)
+			{
+				if (j) line += ", ";
+				line += r.examples[j];
+			}
+			line += "]";
+		}
+	}
+	line += ")";
+	// A blocked entity can carry several bits at once (e.g. Script AND Physics), so
+	// the reasons do not partition `blocked` and their counts can sum past it.
+	line += " — reasons can overlap";
+	return line;
 }
 
 }

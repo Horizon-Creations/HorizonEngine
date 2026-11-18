@@ -389,3 +389,67 @@ TEST_CASE("a scene written before MobilityComponent loads with the derived defau
 		CHECK_FALSE(HE::analyzeCookability(ref.registry()).empty());
 	}
 }
+
+namespace
+{
+	// Only the mesh entities, the population addCookedSeed (SceneSerializer.cpp) draws its
+	// seed and ExportDialogPanel.cpp's log summary from — not the world's own root/Sky/Weather.
+	std::vector<HE::CookEntry> meshEntries(HorizonWorld& world)
+	{
+		auto& reg = world.registry();
+		std::vector<HE::CookEntry> out;
+		for (const HE::CookEntry& ce : HE::analyzeCookability(reg))
+			if (reg.all_of<MeshComponent>(ce.entity)) out.push_back(ce);
+		return out;
+	}
+}
+
+TEST_CASE("cook summary: counts and the blocker breakdown match the verdicts, for the export log")
+{
+	HorizonWorld world;
+	auto& reg = world.registry();
+	makeMesh(world, "Rock");
+	const Entity door  = makeMesh(world, "Door");
+	const Entity lever = makeMesh(world, "Lever");
+	const Entity ball  = makeMesh(world, "Ball");
+	reg.emplace<ScriptComponent>(door, ScriptComponent{});
+	reg.emplace<ScriptComponent>(lever, ScriptComponent{});
+	RigidBodyComponent rb;
+	rb.type = RigidBodyType::Dynamic;
+	reg.emplace<RigidBodyComponent>(ball, rb);
+
+	const HE::CookSummary summary = HE::summarizeCookability(meshEntries(world), reg, /*maxExamples*/ 2);
+	CHECK(summary.cookable == 1);
+	CHECK(summary.blocked == 3);
+
+	const HE::CookSummary::Reason* script  = nullptr;
+	const HE::CookSummary::Reason* physics = nullptr;
+	for (const HE::CookSummary::Reason& r : summary.reasons)
+	{
+		if (r.blocker == CookBlocker::Script)  script  = &r;
+		if (r.blocker == CookBlocker::Physics) physics = &r;
+	}
+	REQUIRE(script);
+	CHECK(script->count == 2);
+	CHECK(script->examples.size() == 2);   // capped at maxExamples, both Door and Lever qualify
+	REQUIRE(physics);
+	CHECK(physics->count == 1);
+	REQUIRE(physics->examples.size() == 1);
+	CHECK(physics->examples[0] == "Ball");
+
+	const std::string text = HE::formatCookSummary(summary);
+	CHECK(text.find("1 cookable") != std::string::npos);
+	CHECK(text.find("3 not") != std::string::npos);
+	CHECK(text.find("Script: 2") != std::string::npos);
+	CHECK(text.find("Physics: 1") != std::string::npos);
+}
+
+TEST_CASE("cook summary: nothing blocked formats without a breakdown")
+{
+	HorizonWorld world;
+	makeMesh(world, "Rock");
+	const HE::CookSummary summary = HE::summarizeCookability(meshEntries(world), world.registry());
+	CHECK(summary.blocked == 0);
+	CHECK(summary.reasons.empty());
+	CHECK(HE::formatCookSummary(summary) == "1 cookable, 0 not");
+}

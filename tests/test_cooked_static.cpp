@@ -751,6 +751,43 @@ TEST_CASE("CookedStatic pack: a scene saved with the verdict loads it, skips the
 	checkDrawsLikeOldPack(s, w, rw);
 }
 
+TEST_CASE("CookedStatic pack: saveToMemory's cook summary matches the seed, for the export log")
+{
+	Scene s;
+	s.build(40);   // statics, movable, scripted, hidden, interleaved
+
+	std::vector<uint8_t> bytes;
+	HE::CookSummary summary;
+	REQUIRE(SceneSerializer().saveToMemory(s.world, bytes, /*packCookVerdict*/ true, &summary));
+
+	CHECK(summary.cookable == s.statics.size());
+	CHECK(summary.blocked == s.movable.size() + s.scripted.size() + s.hidden.size());
+
+	HorizonWorld w;
+	load(w, bytes);
+	const HE::CookedStatic* c = w.registry().ctx().find<HE::CookedStatic>();
+	REQUIRE(c != nullptr);
+	CHECK(c->seed.size() == summary.cookable);   // the summary counts exactly what the seed packs
+
+	size_t movableCount = 0, scriptCount = 0, switchableCount = 0;
+	for (const HE::CookSummary::Reason& r : summary.reasons)
+	{
+		if (r.blocker == HE::CookBlocker::MarkedMovable) movableCount = r.count;
+		if (r.blocker == HE::CookBlocker::Script)        scriptCount  = r.count;
+		if (r.blocker == HE::CookBlocker::Switchable)    switchableCount = r.count;
+	}
+	CHECK(movableCount == s.movable.size());
+	CHECK(scriptCount == s.scripted.size());
+	CHECK(switchableCount == s.hidden.size());
+
+	// A no-verdict save (the project setting off) does not run the analysis to report on it.
+	HE::CookSummary offSummary;
+	offSummary.cookable = 123;   // a caller must not trust a stale value either way
+	std::vector<uint8_t> offBytes;
+	REQUIRE(SceneSerializer().saveToMemory(s.world, offBytes, /*packCookVerdict*/ false, &offSummary));
+	CHECK(offSummary.cookable == 123);   // untouched: addCookedSeed was never called
+}
+
 TEST_CASE("CookedStatic pack: a scene without the verdict (an older export) loads and cooks nothing")
 {
 	Scene s;

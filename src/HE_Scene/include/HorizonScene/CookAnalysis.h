@@ -1,6 +1,7 @@
 #pragma once
 #include <entt/entt.hpp>
 #include <cstdint>
+#include <string>
 #include <vector>
 
 // ── Which entities may be cooked ─────────────────────────────────────────────
@@ -65,4 +66,30 @@ namespace HE
 	// marked Static that nevertheless carry a blocker are logged as a warning
 	// (once per entity, here, at analysis time) and stay uncooked.
 	std::vector<CookEntry> analyzeCookability(const entt::registry& reg);
+
+	// A breakdown of a batch of verdicts by blocker reason, for a human to read
+	// (the export log, ExportDialogPanel.cpp) rather than for a per-frame path.
+	// `entries` is whatever population the caller cares about (e.g. the mesh
+	// entities a scene export actually offers for cooking) — this does not walk
+	// the registry itself, so a caller that already has a CookEntry list from
+	// analyzeCookability() does not pay for a second pass.
+	struct CookSummary
+	{
+		struct Reason
+		{
+			CookBlocker               blocker;
+			uint32_t                  count = 0;
+			std::vector<std::string>  examples;   // up to maxExamples blocked entity names
+		};
+		uint32_t            cookable = 0;
+		uint32_t            blocked  = 0;
+		std::vector<Reason> reasons;              // only bits that occurred, in rule order
+
+		bool empty() const { return cookable == 0 && blocked == 0; }
+	};
+	CookSummary summarizeCookability(const std::vector<CookEntry>& entries,
+	                                  const entt::registry& reg, size_t maxExamples = 3);
+
+	// Renders a CookSummary as the one log line BuildProgressDialog shows per scene.
+	std::string formatCookSummary(const CookSummary& summary);
 }

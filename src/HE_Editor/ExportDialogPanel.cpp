@@ -1407,6 +1407,14 @@ void startExport(AppContext& ctx)
                 // so the game skips the analysis at load (SceneSerializer::saveToMemory).
                 const bool packCookVerdict =
                     ctx.projectManager->currentProject().settings.game.cookStaticEntities;
+                // Collected here and logged after Build::begin() below (not at the point each
+                // scene is packed): that begin() call clears the log Build::log would otherwise
+                // write into, same as every other line from this setup phase (see its :1642 summary).
+                std::vector<std::string> cookLogLines;
+                if (!packCookVerdict)
+                    cookLogLines.push_back(
+                        "Cooking: Project Settings ▸ General ▸ Performance ▸ "
+                        "\"Cook static entities\" is off — nothing packed as cooked");
                 std::vector<uint8_t> sceneBinary;
                 bool sceneOk = true;
                 if (!scenePath.empty())
@@ -1448,8 +1456,12 @@ void startExport(AppContext& ctx)
                                 sit->path().lexically_relative(projectRoot).generic_string();
                             const bool loaded = ser2.load(w2, sit->path(), SerializeFormat::JSON);
                             if (loaded) syncPrefabsForExport(w2, rel);
-                            if (loaded && ser2.saveToMemory(w2, bytes, packCookVerdict))
+                            HE::CookSummary cookSummary;
+                            if (loaded && ser2.saveToMemory(w2, bytes, packCookVerdict,
+                                                             packCookVerdict ? &cookSummary : nullptr))
                             {
+                                if (packCookVerdict)
+                                    cookLogLines.push_back(rel + ": " + HE::formatCookSummary(cookSummary));
                                 // Level script → codegen source, keyed by the scene's
                                 // pak UUID (the same key the runtime derives, §9.1).
                                 if (hcCompile)
@@ -1643,6 +1655,8 @@ void startExport(AppContext& ctx)
                               + (hasBuild ? ", " + std::to_string(hcSources.size())
                                             + " HorizonCode graph(s) collected"
                                           : std::string()));
+                for (const std::string& line : cookLogLines)
+                    Build::log(0, line);
                 BuildProgressDialog::requestOpen();
 
                 if (!sceneOk)
