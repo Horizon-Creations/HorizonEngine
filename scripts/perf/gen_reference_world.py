@@ -81,7 +81,7 @@ def main():
 
     rng = random.Random(a.seed)
     off = [float(v) for v in a.offset.split(",")]
-    tpl = json.loads(Path(a.template).read_text())
+    tpl = json.loads(Path(a.template).read_text(encoding="utf-8"))
 
     roots = [e for e in tpl["entities"] if e.get("parent") is None]
     if len(roots) != 1:
@@ -130,6 +130,14 @@ def main():
         parent["children"].append(e["uuid"])
         entities.append(e)
 
+    if a.foliage == 0:
+        # The template's terrain is hills (heightScale 20): props at y = scale/2 sit inside them and the camera of the
+        # capture can end up in one, so everything behind it is culled and the scene measures nothing. Flat ground
+        # keeps every prop above it and the picture the same for every seed.
+        for t in (e for e in entities if "terrain" in e.get("components", {})):
+            t["components"]["terrain"]["heightScale"] = 0.0
+            t["components"]["terrain"].pop("sculptHeightsB64", None)
+
     n_foliage = 0
     if a.foliage > 0:
         terrains = [e for e in entities if "terrain" in e.get("components", {})]
@@ -176,7 +184,7 @@ def main():
     out = {"entities": entities, "levelScript": tpl.get("levelScript", {}),
            "version": tpl.get("version", "1.1")}
     Path(a.out).parent.mkdir(parents=True, exist_ok=True)
-    Path(a.out).write_text(json.dumps(out))
+    Path(a.out).write_text(json.dumps(out), encoding="utf-8")
     print(f"wrote {a.out}: {len(entities)} entities ({a.count} meshes, {a.lights} lights, "
           f"{n_phys} physics, {a.groups} groups, {n_foliage} foliage instances), "
           f"extent {a.extent} m, offset {off}")
