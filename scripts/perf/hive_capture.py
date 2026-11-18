@@ -62,10 +62,10 @@ def log(*parts):
     print(*parts, file=sys.stderr, flush=True)
 
 
-def run(command, **kwargs):
+def run(command, extra_env=None, **kwargs):
     log("+", " ".join(str(c) for c in command))
     # UTF-8 both ways: on Windows the default is cp1252, and the build, the editor and the profile dump write UTF-8.
-    env = dict(os.environ, PYTHONUTF8="1", PYTHONIOENCODING="utf-8")
+    env = dict(os.environ, PYTHONUTF8="1", PYTHONIOENCODING="utf-8", **(extra_env or {}))
     done = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8",
                           errors="replace", env=env, **kwargs)
     sys.stderr.write(done.stdout[-4000:] if done.stdout else "")
@@ -173,7 +173,11 @@ def main():
             command += ["--scene", str(scene)]
         if a.project == "generated" and a.scene in CAMERAS:
             command += ["--cam", CAMERAS[a.scene]]
-        run(command, cwd=REPO)
+        # The editor runs hidden (no window, no Dock icon, no focus taken: docs/headless-runs.md). A hidden window is
+        # throttled to 15 FPS outside the recording, so the warmup would crawl and the temporal history settle differently:
+        # HE_BACKGROUND_FPS=0 keeps full frames. HE_PERF_SHOW=1 shows the window again (to look at what is measured).
+        hidden = {} if os.environ.get("HE_PERF_SHOW") == "1" else {"HE_HIDDEN_WINDOW": "1", "HE_BACKGROUND_FPS": "0"}
+        run(command, extra_env=hidden, cwd=REPO)
         summary = json.loads((work / "out" / "hive.summary.json").read_text(encoding="utf-8", errors="replace"))
         dump = json.loads((work / "out" / "hive.profile.json").read_text(encoding="utf-8", errors="replace"))
     result = result_of(summary, dump)
