@@ -237,6 +237,24 @@ Eine `SplineComponent`-Entity hat ohnehin kein `MeshComponent` (reine Autorendat
 ihre Kochbarkeit ist also wie bei Rope/Trail nur über Regel 10 für etwaige Kinder relevant — und da
 nichts sie zur Laufzeit schreibt, ist sie dort korrekt unblockiert. Keine Änderung nötig.
 
+## Umsetzung (Schritt 13, 18.11.2026)
+
+Die drei Entwürfe aus §1, §3 und §4 sind gebaut; Survey §5/§6 ist mitgezogen.
+
+- **Regel 7 entfernt:** `CookBlocker::SaveState` (`1 << 6`) gelöscht, Lücke bleibt; `SaveStateComponent` raus aus `ownBlockers`
+  und `VerdictComponents`. `CookAnalysis.h` nennt Regel 7 neben Regel 11 als entfallen.
+- **Regel 9, Vorfahren-Check:** `lineBlocked` blendet `Geometry` aus (`kAncestorIgnored`); die Entity selbst behält das Bit.
+  Rope/Trail über einem Kind: Kind kochbar, Rope/Trail blockiert, ein Script auf dem Rope/Trail gibt weiter `Ancestor` an die Kinder.
+- **CameraRig:** `CameraRigComponent` auf der Entity selbst setzt das Locomotion-Bit; `CameraRigComponent` ersetzt `SaveStateComponent`
+  in `VerdictComponents`. Beide Listen (`CookAnalysis.cpp` `ownBlockers`, `CookedStatic.cpp` `VerdictComponents`) sind synchron.
+- **Befund zur Fragestellung "rendert veraltet?":** nein. Ohne den Blocker bekam die Rig-Entity eine Zeile, der echte
+  `CameraRigController::update` schrieb die Transform, `propagateTransforms` erkannte das per Byte-Vergleich, und der Extract
+  war Feld für Feld gleich dem Walk (der Test lief rot nur an `rowOf(cam) < 0`, nicht an der Ausgabe). Der Blocker spart also
+  die Pending-Buchhaltung je Frame, korrigiert aber keinen falsch gezeichneten Frame.
+- **Tests:** `test_cook_analysis` (Regel 5 mit CameraRig, Regel 7 kochbar, neuer Fall Regel 9 Vorfahre), `test_cooked_static`
+  (SaveState-Entity gekocht, `saveState` → Verschieben → `applySavedState` zeigt die gespeicherte Position und `applyState`
+  mit `visible:false` blendet aus; CameraRig-Entity mit echtem Controller über vier Frames; `addAndCheck<CameraRigComponent>`).
+
 ## Handoff
 
 - **Topic / step:** Thema 343, Schritt 11 von (aktuell) 11. Nur Dokumentation, kein Produktivcode

@@ -3,6 +3,7 @@
 #include "HorizonScene/Components/AnimatorBlendComponent.h"
 #include "HorizonScene/Components/AnimatorComponent.h"
 #include "HorizonScene/Components/AnimatorStateMachineComponent.h"
+#include "HorizonScene/Components/CameraRigComponent.h"
 #include "HorizonScene/Components/CharacterControllerComponent.h"
 #include "HorizonScene/Components/HierarchyComponent.h"
 #include "HorizonScene/Components/InactiveComponent.h"
@@ -20,7 +21,6 @@
 #include "HorizonScene/Components/RigidBodyComponent.h"
 #include "HorizonScene/Components/RootMotionComponent.h"
 #include "HorizonScene/Components/RopeComponent.h"
-#include "HorizonScene/Components/SaveStateComponent.h"
 #include "HorizonScene/Components/ScriptComponent.h"
 #include "HorizonScene/Components/SequencePlayerComponent.h"
 #include "HorizonScene/Components/TrailComponent.h"
@@ -52,7 +52,8 @@ namespace
 		if (const auto* rb = reg.try_get<RigidBodyComponent>(e); rb && rb->type != RigidBodyType::Static)
 			b |= bit(CookBlocker::Physics);
 		if (reg.all_of<CharacterControllerComponent>(e) || reg.all_of<NavAgentComponent>(e) ||
-		    reg.all_of<MovementComponent>(e) || reg.all_of<ParticleSystemComponent>(e))
+		    reg.all_of<MovementComponent>(e) || reg.all_of<ParticleSystemComponent>(e) ||
+			    reg.all_of<CameraRigComponent>(e))   // CameraRigController writes the camera entity's own transform every frame
 			b |= bit(CookBlocker::Locomotion);
 		// The component alone is not the switch: NetworkComponent::replicates is,
 		// and declared variables are what a ReplicatedVarsComponent adds.
@@ -60,7 +61,6 @@ namespace
 			b |= bit(CookBlocker::Replication);
 		if (const auto* v = reg.try_get<ReplicatedVarsComponent>(e); v && !v->entries.empty())
 			b |= bit(CookBlocker::Replication);
-		if (reg.all_of<SaveStateComponent>(e)) b |= bit(CookBlocker::SaveState);
 		// LODSystem::update swaps the mesh id by distance among the levels, which the cooked row holds
 		// one by one (CookedStatic::lodFirst), so several levels no longer block. A refined mesh does:
 		// TerrainSystem hooks it in and out at runtime (terrain tessellation), nothing a row can hold.
@@ -81,12 +81,16 @@ namespace
 	// so a group of a hundred children is looked at once; null for a single query.
 	using AncestorMemo = std::unordered_map<entt::entity, bool>;
 
+	// Geometry (trail, rope) rebuilds the entity's OWN render content and never writes its
+	// TransformComponent (RopeTrailSystem), so it says nothing about a child's world matrix.
+	constexpr uint16_t kAncestorIgnored = bit(CookBlocker::Geometry);
+
 	bool lineBlocked(const entt::registry& reg, entt::entity e, AncestorMemo* memo)
 	{
 		if (e == entt::null || !reg.valid(e)) return false;
 		if (memo)
 			if (const auto it = memo->find(e); it != memo->end()) return it->second;
-		bool blocked = ownBlockers(reg, e) != 0;
+		bool blocked = (ownBlockers(reg, e) & ~kAncestorIgnored) != 0;
 		if (!blocked)
 		{
 			const auto* h = reg.try_get<HierarchyComponent>(e);

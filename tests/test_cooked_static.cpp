@@ -17,6 +17,9 @@
 #include <HorizonScene/Components/AnimatorBlendComponent.h>
 #include <HorizonScene/Components/AnimatorComponent.h>
 #include <HorizonScene/Components/AnimatorStateMachineComponent.h>
+#include <HorizonScene/CameraRigController.h>
+#include <HorizonScene/Components/CameraComponent.h>
+#include <HorizonScene/Components/CameraRigComponent.h>
 #include <HorizonScene/Components/CharacterControllerComponent.h>
 #include <HorizonScene/Components/InactiveComponent.h>
 #include <HorizonScene/Components/IkComponent.h>
@@ -41,9 +44,11 @@
 #include <HorizonScene/Components/TransformComponent.h>
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
+#include <Types/TypeRegistry.h>
 #include <nlohmann/json.hpp>
 #include <chrono>
 #include <cstring>
+#include <filesystem>
 #include <map>
 #include <string>
 #include <thread>
@@ -512,7 +517,7 @@ TEST_CASE("CookedStatic un-cook: a component added to a live cooked entity un-co
 	addAndCheck<NavAgentComponent>("NavAgent", true);
 	addAndCheck<MovementComponent>("Movement", true);
 	addAndCheck<ParticleSystemComponent>("ParticleSystem", true);
-	addAndCheck<SaveStateComponent>("SaveState", true);
+	addAndCheck<CameraRigComponent>("CameraRig", true);
 	addAndCheck<TrailComponent>("Trail", true);
 	addAndCheck<RopeComponent>("Rope", true);
 	addAndCheck<InactiveComponent>("Inactive", true);
@@ -544,6 +549,96 @@ TEST_CASE("CookedStatic un-cook: a blocker on a parent takes the cooked children
 	CHECK(block(s).rowOf(child) < 0);
 	s.world.registry().get<TransformComponent>(group).position = { 0.0f, 7.0f, 0.0f };
 	checkShowsNow(s, cook, rw, child);
+}
+
+TEST_CASE("CookedStatic un-cook: a SaveState entity is cooked, and applySavedState un-cooks it by what it writes")
+{
+	namespace save = HE::api::save;
+	Scene s;
+	s.build(20);
+	const Entity e = s.statics[2];
+	s.world.registry().emplace<SaveStateComponent>(e);
+	RenderExtractor cook; setUp(cook, s.cm, true);
+	RenderWorld rw;
+	warm(s, cook, rw);
+	REQUIRE(block(s).rowOf(e) >= 0);   // rule 7 is gone: the component alone says nothing about the matrix
+
+	const std::filesystem::path root = std::filesystem::temp_directory_path() / "he_cooked_savestate_test";
+	std::error_code ec;
+	std::filesystem::remove_all(root, ec);
+	HE::api::fs::setSandboxRoot(root.string());
+	save::close();
+	SaveGameTemplateAsset tplAsset;                      // a save needs a template; an empty one is enough here
+	tplAsset.name = "CookedTemplate";
+	tplAsset.path = "mem://cooked_save_template";
+	tplAsset.json = HE::TypeRegistry::structToJson(HE::StructDef{});
+	s.cm.registerSaveGameTemplate(std::move(tplAsset));
+	save::setDefaultTemplate("mem://cooked_save_template");
+	save::setPlayMode(true);
+	REQUIRE(save::create("cooked", &s.cm));
+	HE::api::Ctx c = apiCtx(s);
+	const uint32_t h = static_cast<uint32_t>(e);
+	const glm::vec3 saved = HE::worldPositionOf(s.world, e);
+	REQUIRE(HE::api::entity::saveState(c, h));
+
+	// Moved away and shown there, then put back by the save: the cooked row has to follow both ways.
+	s.world.registry().get<TransformComponent>(e).position = { 30.0f, 4.0f, 5.0f };
+	checkShowsNow(s, cook, rw, e);
+	CHECK(stateOf(s, e) == HE::CookedStatic::State::Ready);
+	REQUIRE(HE::api::entity::applySavedState(c, h));
+	checkShowsNow(s, cook, rw, e);
+	CHECK(HE::worldPositionOf(s.world, e).x == doctest::Approx(saved.x));
+	CHECK(objectOf(rw, e)->transform[3].x == doctest::Approx(saved.x));
+
+	// The visibility half of a restore is read live by the extract, cooked or not.
+	REQUIRE(HE::api::entity::applyState(c, h, R"({"visible":false})"));
+	RenderExtractor walk; setUp(walk, s.cm, false);
+	RenderWorld ref;
+	walk.extract(s.world, ref, 1.0f);
+	cook.extract(s.world, rw, 1.0f);
+	CHECK(objectOf(rw, e) == nullptr);
+	checkSameObjects(rw, ref);
+
+	save::close();
+	save::setDefaultTemplate("");
+	save::setPlayMode(false);
+	std::filesystem::remove_all(root, ec);
+}
+
+TEST_CASE("CookedStatic un-cook: a camera rig on a mesh entity is never cooked and shows the pose it wrote")
+{
+	Scene s;
+	s.build(20);
+	auto& reg = s.world.registry();
+	const Entity hero = s.world.createEntity("Hero");
+	reg.emplace<TransformComponent>(hero);
+	const Entity cam = s.statics[1];                    // a camera housing: a mesh with the rig on it
+	CameraComponent cc; cc.isMain = true;
+	reg.emplace<CameraComponent>(cam, cc);
+	CameraRigComponent rig;
+	rig.target      = s.world.entityId(hero);
+	rig.armLength   = 4.0f;
+	rig.armOffset   = {};
+	rig.pivotOffset = {};
+	rig.yaw         = 0.0f;
+	rig.pitch       = 0.0f;
+	reg.emplace<CameraRigComponent>(cam, rig);
+
+	RenderExtractor cook; setUp(cook, s.cm, true);
+	RenderWorld rw;
+	cook.extract(s.world, rw, 1.0f);
+	CHECK(block(s).rowOf(cam) < 0);                     // the rig writes this entity's own transform every frame
+
+	// The way the game loop does it: the rig moves the camera after the hero moved, then the frame extracts.
+	for (int i = 0; i < 4; ++i)
+	{
+		reg.get<TransformComponent>(hero).position = { 10.0f + float(i), 0.0f, -5.0f };
+		const auto f = HE::CameraRigController::update(s.world, HE::CameraLookInput{});
+		REQUIRE(f.driven);
+		checkShowsNow(s, cook, rw, cam);
+		CHECK(objectOf(rw, cam)->transform[3].x == doctest::Approx(10.0f + float(i)));
+		CHECK(block(s).rowOf(cam) < 0);
+	}
 }
 
 TEST_CASE("CookedStatic un-cook: a material or mesh swap on a cooked entity shows in the next extract")

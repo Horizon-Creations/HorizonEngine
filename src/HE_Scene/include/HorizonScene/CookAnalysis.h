@@ -22,6 +22,10 @@
 //    with it, and every create or destroy moves HorizonWorld::structureEpoch, which rebuilds
 //    the cooked block from the live registry (entt handles do not survive an unload and a
 //    load, the block never keeps one past a rebuild). Nothing is left for a verdict to say.
+//  * SaveStateComponent (survey rule 7, dropped): applySavedState only writes the transform (the
+//    byte compare in propagateTransforms un-cooks the row), visibility (the extract reads it live)
+//    and script variables (an entity with those carries a ScriptComponent, rule 1).
+// The bit numbers 6 (rule 7) and 10 (rule 11) stay unused: no renumbering.
 namespace HE
 {
 	enum class CookBlocker : uint16_t
@@ -30,11 +34,10 @@ namespace HE
 		Animation       = 1 << 1,   // 2  Animator, layers, blend, state machine, root motion, IK
 		PropertyPlayback= 1 << 2,   // 3  PropertyAnimator, SequencePlayer
 		Physics         = 1 << 3,   // 4  RigidBody that is not Static
-		Locomotion      = 1 << 4,   // 5  CharacterController, NavAgent, Movement, ParticleSystem
+		Locomotion      = 1 << 4,   // 5  CharacterController, NavAgent, Movement, ParticleSystem, CameraRig
 		Replication     = 1 << 5,   // 6  NetworkComponent::replicates, declared replicated vars
-		SaveState       = 1 << 6,   // 7  SaveStateComponent
 		Lod             = 1 << 7,   // 8  LOD with a refined mesh (several levels cook: CookedStatic holds each)
-		Geometry        = 1 << 8,   // 9  Trail, Rope
+		Geometry        = 1 << 8,   // 9  Trail, Rope (the entity itself; an ancestor's Geometry does not pass down)
 		Ancestor        = 1 << 9,   // 10 an ancestor has a blocker of its own
 		Switchable      = 1 << 11,  // 12 InactiveComponent, or a hidden mesh
 		MarkedMovable   = 1 << 12,  // the author's MobilityComponent::Mode::Movable

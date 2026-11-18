@@ -4,6 +4,7 @@
 #include "HorizonScene/Components/AnimatorBlendComponent.h"
 #include "HorizonScene/Components/AnimatorComponent.h"
 #include "HorizonScene/Components/AnimatorStateMachineComponent.h"
+#include "HorizonScene/Components/CameraRigComponent.h"
 #include "HorizonScene/Components/CharacterControllerComponent.h"
 #include "HorizonScene/Components/HierarchyComponent.h"
 #include "HorizonScene/Components/InactiveComponent.h"
@@ -21,7 +22,6 @@
 #include "HorizonScene/Components/RigidBodyComponent.h"
 #include "HorizonScene/Components/RootMotionComponent.h"
 #include "HorizonScene/Components/RopeComponent.h"
-#include "HorizonScene/Components/SaveStateComponent.h"
 #include "HorizonScene/Components/ScriptComponent.h"
 #include "HorizonScene/Components/SequencePlayerComponent.h"
 #include "HorizonScene/Components/TrailComponent.h"
@@ -61,7 +61,7 @@ namespace
 		AnimatorStateMachineComponent, RootMotionComponent, IkComponent, PropertyAnimatorComponent,
 		SequencePlayerComponent, RigidBodyComponent, CharacterControllerComponent, NavAgentComponent,
 		MovementComponent, ParticleSystemComponent, NetworkComponent, ReplicatedVarsComponent,
-		SaveStateComponent, LODComponent, TrailComponent, RopeComponent,
+		CameraRigComponent, LODComponent, TrailComponent, RopeComponent,
 		InactiveComponent, MobilityComponent>;
 	// What a Ready row copies besides the world matrix and the ids it already holds.
 	using OutputComponents = entt::type_list<MeshComponent, MaterialComponent>;

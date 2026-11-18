@@ -7,6 +7,7 @@
 #include <HorizonScene/Components/AnimatorBlendComponent.h>
 #include <HorizonScene/Components/AnimatorComponent.h>
 #include <HorizonScene/Components/AnimatorStateMachineComponent.h>
+#include <HorizonScene/Components/CameraRigComponent.h>
 #include <HorizonScene/Components/CharacterControllerComponent.h>
 #include <HorizonScene/Components/InactiveComponent.h>
 #include <HorizonScene/Components/IkComponent.h>
@@ -117,6 +118,7 @@ TEST_CASE("cook analysis: every survey rule makes an entity uncookable")
 		blockedBy<NavAgentComponent>(CookBlocker::Locomotion);
 		blockedBy<MovementComponent>(CookBlocker::Locomotion);
 		blockedBy<ParticleSystemComponent>(CookBlocker::Locomotion);
+		blockedBy<CameraRigComponent>(CookBlocker::Locomotion);   // writes the camera entity's own transform
 	}
 	SUBCASE("6 replication")
 	{
@@ -132,7 +134,12 @@ TEST_CASE("cook analysis: every survey rule makes an entity uncookable")
 		vars.entries.push_back({});
 		blockedBy<ReplicatedVarsComponent>(CookBlocker::Replication, vars);
 	}
-	SUBCASE("7 save state") { blockedBy<SaveStateComponent>(CookBlocker::SaveState); }
+	SUBCASE("7 save state: no longer a blocker")
+	{
+		// applySavedState writes the transform, the visibility and script vars, each covered elsewhere
+		// (test_cooked_static, "a SaveState entity is cooked").
+		CHECK(withComponent<SaveStateComponent>().cookable());
+	}
 	SUBCASE("8 LOD: the distance switch between levels cooks, a refined mesh does not")
 	{
 		LODComponent lod;
@@ -204,6 +211,38 @@ TEST_CASE("cook analysis: rule 10, a blocked ancestor blocks the whole subtree")
 	CHECK(HE::analyzeCookability(reg, leg).has(CookBlocker::Ancestor));
 
 	// The whole-world pass agrees with the single query for every entity.
+	for (const HE::CookEntry& entry : HE::analyzeCookability(reg))
+		CHECK(entry.verdict.blockers == HE::analyzeCookability(reg, entry.entity).blockers);
+}
+
+TEST_CASE("cook analysis: rule 9, a trail or rope blocks itself but not the children under it")
+{
+	HorizonWorld world;
+	auto& reg = world.registry();
+	const Entity chain = makeMesh(world, "Chain");
+	const Entity sign  = makeMesh(world, "Sign");
+	const Entity grand = makeMesh(world, "Grand");
+	world.reparentEntity(sign, chain);
+	world.reparentEntity(grand, sign);
+
+	SUBCASE("rope") { reg.emplace<RopeComponent>(chain); }
+	SUBCASE("trail") { reg.emplace<TrailComponent>(chain); }
+
+	CHECK(HE::analyzeCookability(reg, chain).has(CookBlocker::Geometry));
+	CHECK(HE::analyzeCookability(reg, sign).cookable());
+	CHECK(HE::analyzeCookability(reg, grand).cookable());
+
+	// A blocker that does move the transform still passes down, through the geometry parent.
+	reg.emplace<ScriptComponent>(chain);
+	CHECK(HE::analyzeCookability(reg, sign).has(CookBlocker::Ancestor));
+	CHECK(HE::analyzeCookability(reg, grand).has(CookBlocker::Ancestor));
+	reg.remove<ScriptComponent>(chain);
+
+	// Geometry on the middle node: its own child is free, the node itself stays blocked.
+	reg.emplace<TrailComponent>(sign);
+	CHECK(HE::analyzeCookability(reg, sign).has(CookBlocker::Geometry));
+	CHECK(HE::analyzeCookability(reg, grand).cookable());
+
 	for (const HE::CookEntry& entry : HE::analyzeCookability(reg))
 		CHECK(entry.verdict.blockers == HE::analyzeCookability(reg, entry.entity).blockers);
 }

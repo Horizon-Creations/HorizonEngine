@@ -218,13 +218,17 @@ Eine Entity ist **nicht** kochbar, wenn mindestens eine davon zutrifft:
    Sequence-Wiedergabe schreibt Felder direkt.
 4. Trägt `RigidBodyComponent` mit `type != RigidBodyType::Static` (`Dynamic` oder `Kinematic`,
    `Types/Enums.h:253-258`) — Jolt bewegt den Body.
-5. Trägt `CharacterControllerComponent`, `NavAgentComponent`, `MovementComponent` oder
-   `ParticleSystemComponent` — Bewegungs-/Partikel-Systeme schreiben Transform/State jeden Frame.
+5. Trägt `CharacterControllerComponent`, `NavAgentComponent`, `MovementComponent`,
+   `ParticleSystemComponent` oder `CameraRigComponent` (Schritt 13: der Rig schreibt jeden Frame
+   die eigene Transform der Kamera-Entity) — Bewegungs-/Partikel-Systeme schreiben Transform/State jeden Frame.
 6. Trägt `NetworkComponent` mit `replicates == true` (nicht: trägt die Komponente — ein
    abgeschaltetes `NetworkComponent` ist laut seinem eigenen Kommentar harmlos, `replicates`
    ist "THE switch") oder `ReplicatedVarsComponent` mit deklarierten Variablen.
-7. Trägt `SaveStateComponent` — `entity.applySavedState` kann jederzeit ein Savegame über die
-   Entity schreiben, außerhalb von Skript/Engine-API im engeren Sinn.
+7. ~~Trägt `SaveStateComponent` — `entity.applySavedState` kann jederzeit ein Savegame über die
+   Entity schreiben, außerhalb von Skript/Engine-API im engeren Sinn.~~ — **entfallen (Schritt 13,
+   `docs/entity-cooking-ausbau-2026-11-17.md` §1)**: `applySavedState` schreibt nur Transform (der
+   Byte-Vergleich in `propagateTransforms` entkocht die Zeile), Sichtbarkeit (der Extract liest
+   `MeshComponent::visible` jeden Frame live) und Skript-Variablen (nur mit `ScriptComponent`, Regel 1).
 8. **Präzisiert in Schritt 8 (17.11.2026):** blockiert ist nur noch `LODComponent` mit gesetztem
    `refinedMeshId`. Mehrere Level (`levels.size() > 1`) kochen: der reine Distanzwechsel schreibt nur eine
    von N bekannten Mesh-Ids, die gekochte Zeile hält das aufgelöste Objekt je Level
@@ -245,8 +249,16 @@ Eine Entity ist **nicht** kochbar, wenn mindestens eine davon zutrifft:
    damit der Joint etwas bewegt) — die eigentliche Pointe für `JointComponent`/`RopeComponent`
    steht in §6: eine ANDERE, selbst unauffällige Entity kann als Ziel/Attachment referenziert
    werden, ohne diese Komponenten selbst zu tragen.
-   `CameraRigComponent`-Ziele NICHT hier einsortieren — §6 zeigt, dass ein Rig sein Ziel nur
-   liest, nie schreibt; ein reines CameraRig-Ziel bleibt kochbar. `SplineComponent` ebenfalls
+   **Schritt 13:** das `Geometry`-Bit gilt nur für die Entity selbst, nicht für ihre Kinder (Regel 10):
+   `RopeTrailSystem` schreibt nie die `TransformComponent` der Rope/Trail-Entity, nur deren eigene
+   Geometrie — ein Kind unter ihr hat eine so stabile Weltmatrix wie jedes andere (`lineBlocked` in
+   `CookAnalysis.cpp` klammert `Geometry` beim Vorfahren-Walk aus).
+   `CameraRigComponent`-Ziele NICHT hier einsortieren — ein Rig schreibt am Ziel nur, was §6 nennt
+   (`targetYaw` Follow/FollowSmoothed: `rotation.y`; `hideTargetMesh`: `visible`), und beides fangen
+   Transform-Byte-Vergleich und Live-Sichtbarkeit ab; ein reines CameraRig-Ziel bleibt kochbar. Die
+   Rig-Entity SELBST schreibt dagegen jeden Frame ihre eigene Transform (`CameraRigController.cpp`
+   `ct.position`/`ct.rotation`) und zählt seit Schritt 13 zu Regel 5 (Locomotion-Bit).
+   `SplineComponent` ebenfalls
    NICHT — laut eigenem Header "renders nothing and builds nothing", reine Autorendaten ohne
    Laufzeitschreiber, der hier gefunden wurde.
 10. Ist unter einem Vorfahren, der eine dieser Regeln erfüllt, oder dessen `HierarchyComponent`-
@@ -286,8 +298,12 @@ Prefab-Instanziierung noch eine Collaboration-Session"), sondern über `HE::UUID
 - `SequencePlayerComponent`/Sequence-Asset-Actor-Bindings — "the actors themselves are the
   sequence's bindings, resolved by EntityIdComponent UUID when playback starts"
   (`SequencePlayerComponent.h`).
-- `CameraRigComponent::target` — **liest nur** die Zielposition (`pivot = targetWorldPosition +
-  pivotOffset`), schreibt sie nicht. Eine Entity, die nur CameraRig-Ziel ist, bleibt kochbar.
+- `CameraRigComponent::target` — liest die Zielposition (`pivot = targetWorldPosition +
+  pivotOffset`) und schreibt am Ziel nur bei `targetYaw` Follow/FollowSmoothed (`rotation.y`,
+  `CameraRigController.cpp:381-404`) und `hideTargetMesh` (`visible`, `:569-576`). Eine Entity, die nur
+  CameraRig-Ziel ist, bleibt kochbar: der Transform-Schreibzugriff läuft durch den Byte-Vergleich in
+  `propagateTransforms`, der Sichtbarkeits-Schreibzugriff durch den Live-Filter im Extract (Schritt 13
+  korrigiert hier die frühere Begründung "schreibt sie nicht").
 
 Für Schritt 2/3 heißt das: eine Entity, die statisch aussieht (keine der Regeln in §5), aber als
 `JointComponent::target` oder Rope-Attachment von einer ANDEREN, nicht-kochbaren Entity referenziert
@@ -296,7 +312,7 @@ mich") oder (b) eine gekochte Darstellung, die über `EntityIdComponent`-UUID we
 bleibt (ein Türrahmen, der ein `Fixed`-Joint-Anker ist, bewegt sich selbst nie — PhysicsWorld
 braucht nur seine `RigidBodyComponent`/`ColliderComponent`-Daten, keine volle ECS-Iteration). (b)
 ist der sauberere Weg, aber mehr Aufwand; (a) ist die sichere Standardregel für den ersten Wurf.
-Für CameraRig-Ziele ist kein Ausschluss nötig (reine Lesebeziehung).
+Für CameraRig-Ziele ist kein Ausschluss nötig (die beiden Schreibwege sind oben abgedeckt).
 
 ## 7. Cell-Streaming-Wechselwirkung (nur notiert, nicht gelöst)
 
