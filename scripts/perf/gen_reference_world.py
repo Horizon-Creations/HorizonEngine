@@ -130,6 +130,14 @@ def main():
         parent["children"].append(e["uuid"])
         entities.append(e)
 
+    if a.foliage == 0:
+        # The template's terrain is hills (heightScale 20): props at y = scale/2 sit inside them and the camera of the
+        # capture can end up in one, so everything behind it is culled and the scene measures nothing. Flat ground
+        # keeps every prop above it and the picture the same for every seed.
+        for t in (e for e in entities if "terrain" in e.get("components", {})):
+            t["components"]["terrain"]["heightScale"] = 0.0
+            t["components"]["terrain"].pop("sculptHeightsB64", None)
+
     n_foliage = 0
     if a.foliage > 0:
         terrains = [e for e in entities if "terrain" in e.get("components", {})]
