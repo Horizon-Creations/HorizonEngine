@@ -2,6 +2,7 @@
 #include "../HE_RENDERING_API.h"
 #include <Renderer/IRenderer.h>   // EditorCameraOverride, EnvironmentSettings
 #include "HorizonRendering/RenderConstants.h"   // kShadowMapResolution
+#include "HorizonRendering/FogVolume.h"          // FogVolumeData (Thema 225)
 #include <algorithm>
 #include <cstdint>
 #include <memory>
@@ -159,6 +160,25 @@ HE_RENDERING_API float underwaterShallowFactor(float waterDepthAtCamera);
 inline constexpr float kFogDryBandFull = 0.5f;
 inline constexpr float kFogDryBandEnd  = 1.0f;
 HE_RENDERING_API float fogWaterlineBand(float signedDepth);
+
+// Volumetric fog (Thema 225, plan §2.2): reads the world's EnvironmentComponent
+// (first Sky entity, like line ~299's puddleAmount walk — a world without one
+// keeps FogVolumeData's defaults, i.e. disabled), converts it through the same
+// EnvironmentSettings mapping the renderer push uses (HE::makeEnvironmentSettings),
+// and resolves `enabled` via HE::MakeFogVolumeData (FogVolume.h) against the three
+// things the component alone cannot know: backend capability, whether the camera
+// is underwater this frame, and the render target's aspect ratio. shadowDistance
+// clamps the volume's reach to the directional-shadow cascades it will sample.
+//
+// NOT called from RenderExtractor::extract() yet (plan step 2: host side only,
+// no backend reads FogVolumeData) — a standalone function so it is unit-testable
+// without a live HorizonWorld/registry walk. Wiring it into extract() and giving
+// backends a way to report cameraUnderwater/aspect there is plan step 3+.
+HE_RENDERING_API FogVolumeData ExtractFogVolumeData(HorizonWorld& world,
+                                                    bool  backendSupportsVolumetricFog,
+                                                    bool  cameraUnderwater,
+                                                    float aspectWidthOverHeight,
+                                                    float shadowDistance);
 
 } // namespace HE
 
@@ -330,6 +350,11 @@ public:
         m_shadowMapRes   = std::max(resolution, 1);
     }
 
+    // Whether the backend implements the volumetric fog passes (IRenderer::Capabilities::
+    // supportsVolumetricFog). The walk's RenderWorld::fogVolume.enabled is gated on it, so a
+    // backend that never calls this (default false) keeps the analytic fog everywhere.
+    void setVolumetricFogCapable(bool capable) { m_fogCapable = capable; }
+
 private:
     // Overwrites the extracted sun/moon directional lights (and out.ambient /
     // out.sunDirection) from the day-night state pushed via setDayNight.
@@ -355,6 +380,7 @@ private:
     std::unique_ptr<HE::FoliageLodMemory> m_foliageLod;
     // setShadowSettings() state; defaults = the historical fit constants.
     float     m_shadowDistance = 250.0f;
+    bool      m_fogCapable     = false; // setVolumetricFogCapable
     int       m_cascadeCount   = 3;
     float     m_splitLambda    = 0.5f;
     int       m_shadowMapRes   = HE::kShadowMapResolution;

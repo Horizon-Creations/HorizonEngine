@@ -1,0 +1,25 @@
+{
+  "name": "engine",
+  "platforms": ["macos", "windows"],
+  "tolerance_pct": 10,
+  "min_ms": 0.05,
+  "runs": 3,
+  "hot_paths": [
+    "src/HE_Rendering/src/**",
+    "src/HE_Rendering/include/**",
+    "src/HE_Rendering/shaders/**",
+    "src/HE_Scene/**",
+    "src/HE_Core/src/ContentManager/**",
+    "src/HE_Core/src/Renderer/**",
+    "src/HE_Core/include/Renderer/**"
+  ],
+  "setup": "{python} scripts/perf/hive_capture.py --build",
+  "capture": "{python} scripts/perf/hive_capture.py --project {project} --scene {scene}",
+  "suite": [
+    {"project": "Catania", "scene": "default", "feature": "reference"},
+    {"project": "generated", "scene": "entities_stress", "feature": "entities"},
+    {"project": "generated", "scene": "lights_stress", "feature": "lights"},
+    {"project": "generated", "scene": "physics_stress", "feature": "physics"},
+    {"project": "generated", "scene": "foliage_stress", "feature": "foliage"}
+  ]
+}

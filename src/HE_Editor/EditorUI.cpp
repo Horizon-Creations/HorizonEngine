@@ -72,6 +72,7 @@
 #include "ProjectLaunchOpen.h"            // a .heproj double-clicked in the file manager
 #include "SceneRecoveryDialog.h"          // startup "unsaved work found" offer
 #include "AssetRecoveryDialog.h"          // the same for asset tabs
+#include "AutoLodDialog.h"                // Generate LODs: Content Browser, Foliage levels, LOD component
 #include "TextureColourSpaceDialog.h"     // sRGB or linear, at import and after
 #include "ReportIssueDialog.h"           // Help > Report Issue (pre-filled GitHub issue)
 #include "SelfUpdateDialog.h"            // Help > Check for Updates (SFTP self-update)
@@ -826,6 +827,8 @@ void EditorUI::render(AppContext& ctx, float dt)
     SceneRecoveryDialog::Draw(ctx);
     // The asset tabs' copies, once the scene's offer is answered (it waits).
     AssetRecoveryDialog::Draw(ctx);
+    // Generate LODs, opened by the Content Browser, the Details panel (Foliage, LOD).
+    AutoLodDialog::draw(ctx);
 
     // ── Assets ▸ Publish Engine Content to Server… ───────────────────────────
     EngineContentPublishDialog::Draw(ctx);

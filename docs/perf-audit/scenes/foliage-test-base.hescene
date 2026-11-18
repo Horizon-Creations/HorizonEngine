@@ -1,0 +1,778 @@
+{
+  "version": "1.1",
+  "entities": [
+    {
+      "uuid": [
+        2845148526021469569,
+        5683824701656128689
+      ],
+      "name": "World",
+      "parent": null,
+      "children": [
+        [
+          1496262231885617359,
+          4929000219800831255
+        ],
+        [
+          8671037359502980175,
+          4669213904996379727
+        ],
+        [
+          4030203331788511589,
+          9160174848182333135
+        ],
+        [
+          7041537344606048875,
+          3195826510206334923
+        ],
+        [
+          8890385957605222709,
+          921950494030018443
+        ],
+        [
+          3401385152082317895,
+          3795256828764628909
+        ],
+        [
+          4966071933319112077,
+          2992033177200115971
+        ],
+        [
+          4159967529645049665,
+          6497612072124806421
+        ],
+        [
+          1134532700872793365,
+          4518319656582898861
+        ],
+        [
+          4610420609635141,
+          2315547606767930031
+        ],
+        [
+          159393692367205607,
+          6484341151198125869
+        ],
+        [
+          3132842260618855861,
+          256593991241742265
+        ],
+        [
+          1382746466831549561,
+          8463630271087733713
+        ],
+        [
+          4913373521821408055,
+          4888558544070000377
+        ]
+      ]
+    },
+    {
+      "uuid": [
+        1496262231885617359,
+        4929000219800831255
+      ],
+      "name": "Sky",
+      "parent": [
+        2845148526021469569,
+        5683824701656128689
+      ],
+      "children": [],
+      "components": {
+        "environment": {
+          "dayNightCycle": true,
+          "timeOfDay": 0.32,
+          "cloudMode": 1,
+          "cloudCoverage": 0.4
+        }
+      }
+    },
+    {
+      "uuid": [
+        8671037359502980175,
+        4669213904996379727
+      ],
+      "name": "Weather",
+      "parent": [
+        2845148526021469569,
+        5683824701656128689
+      ],
+      "children": [],
+      "components": {
+        "weather": {}
+      }
+    },
+    {
+      "uuid": [
+        4030203331788511589,
+        9160174848182333135
+      ],
+      "name": "Foliage fern_02",
+      "parent": [
+        2845148526021469569,
+        5683824701656128689
+      ],
+      "children": [],
+      "components": {
+        "transform": {
+          "position": [
+            -21.0,
+            0.0,
+            -14.0
+          ],
+          "rotation": [
+            0,
+            0,
+            0
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "terrain": {
+          "sizeX": 12.0,
+          "sizeZ": 12.0,
+          "resolution": 65,
+          "heightScale": 0.0,
+          "seed": 0
+        },
+        "foliage": {
+          "name": "fern_02",
+          "mesh": [
+            10853514752828916537,
+            13216519404674525244
+          ],
+          "material": [
+            13712701198183451488,
+            10675374790180969028
+          ],
+          "density": 0.5,
+          "seed": 42,
+          "minScale": 0.8,
+          "maxScale": 1.3,
+          "drawDistance": 60.0,
+          "maskRes": 128,
+          "visible": true
+        }
+      }
+    },
+    {
+      "uuid": [
+        7041537344606048875,
+        3195826510206334923
+      ],
+      "name": "Foliage grass_medium_01",
+      "parent": [
+        2845148526021469569,
+        5683824701656128689
+      ],
+      "children": [],
+      "components": {
+        "transform": {
+          "position": [
+            -7.0,
+            0.0,
+            -14.0
+          ],
+          "rotation": [
+            0,
+            0,
+            0
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "terrain": {
+          "sizeX": 12.0,
+          "sizeZ": 12.0,
+          "resolution": 65,
+          "heightScale": 0.0,
+          "seed": 0
+        },
+        "foliage": {
+          "name": "grass_medium_01",
+          "mesh": [
+            13871682076344601495,
+            13766965803085036732
+          ],
+          "material": [
+            16641531566027391192,
+            13741877013978771989
+          ],
+          "density": 3.0,
+          "seed": 43,
+          "minScale": 0.8,
+          "maxScale": 1.4,
+          "drawDistance": 40.0,
+          "maskRes": 128,
+          "visible": true
+        }
+      }
+    },
+    {
+      "uuid": [
+        8890385957605222709,
+        921950494030018443
+      ],
+      "name": "Foliage celandine_01",
+      "parent": [
+        2845148526021469569,
+        5683824701656128689
+      ],
+      "children": [],
+      "components": {
+        "transform": {
+          "position": [
+            7.0,
+            0.0,
+            -14.0
+          ],
+          "rotation": [
+            0,
+            0,
+            0
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "terrain": {
+          "sizeX": 12.0,
+          "sizeZ": 12.0,
+          "resolution": 65,
+          "heightScale": 0.0,
+          "seed": 0
+        },
+        "foliage": {
+          "name": "celandine_01",
+          "mesh": [
+            2294922320065938404,
+            10820191898501852696
+          ],
+          "material": [
+            5834994086234966197,
+            10505446830608584194
+          ],
+          "density": 2.0,
+          "seed": 44,
+          "minScale": 0.8,
+          "maxScale": 1.3,
+          "drawDistance": 40.0,
+          "maskRes": 128,
+          "visible": true
+        }
+      }
+    },
+    {
+      "uuid": [
+        3401385152082317895,
+        3795256828764628909
+      ],
+      "name": "Foliage dandelion_01",
+      "parent": [
+        2845148526021469569,
+        5683824701656128689
+      ],
+      "children": [],
+      "components": {
+        "transform": {
+          "position": [
+            21.0,
+            0.0,
+            -14.0
+          ],
+          "rotation": [
+            0,
+            0,
+            0
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "terrain": {
+          "sizeX": 12.0,
+          "sizeZ": 12.0,
+          "resolution": 65,
+          "heightScale": 0.0,
+          "seed": 0
+        },
+        "foliage": {
+          "name": "dandelion_01",
+          "mesh": [
+            17990717383906444560,
+            12545500932913329739
+          ],
+          "material": [
+            17492276573801367653,
+            11385576798336299714
+          ],
+          "density": 1.5,
+          "seed": 45,
+          "minScale": 0.8,
+          "maxScale": 1.3,
+          "drawDistance": 40.0,
+          "maskRes": 128,
+          "visible": true
+        }
+      }
+    },
+    {
+      "uuid": [
+        4966071933319112077,
+        2992033177200115971
+      ],
+      "name": "Foliage weed_plant_02",
+      "parent": [
+        2845148526021469569,
+        5683824701656128689
+      ],
+      "children": [],
+      "components": {
+        "transform": {
+          "position": [
+            -21.0,
+            0.0,
+            0.0
+          ],
+          "rotation": [
+            0,
+            0,
+            0
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "terrain": {
+          "sizeX": 12.0,
+          "sizeZ": 12.0,
+          "resolution": 65,
+          "heightScale": 0.0,
+          "seed": 0
+        },
+        "foliage": {
+          "name": "weed_plant_02",
+          "mesh": [
+            5458156793219336791,
+            12187260395512737094
+          ],
+          "material": [
+            3883658731569693635,
+            9458561391625375333
+          ],
+          "density": 1.5,
+          "seed": 46,
+          "minScale": 0.8,
+          "maxScale": 1.3,
+          "drawDistance": 40.0,
+          "maskRes": 128,
+          "visible": true
+        }
+      }
+    },
+    {
+      "uuid": [
+        4159967529645049665,
+        6497612072124806421
+      ],
+      "name": "Foliage nettle_plant",
+      "parent": [
+        2845148526021469569,
+        5683824701656128689
+      ],
+      "children": [],
+      "components": {
+        "transform": {
+          "position": [
+            -7.0,
+            0.0,
+            0.0
+          ],
+          "rotation": [
+            0,
+            0,
+            0
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "terrain": {
+          "sizeX": 12.0,
+          "sizeZ": 12.0,
+          "resolution": 65,
+          "heightScale": 0.0,
+          "seed": 0
+        },
+        "foliage": {
+          "name": "nettle_plant",
+          "mesh": [
+            2284214383659536263,
+            13038734682371271298
+          ],
+          "material": [
+            13518790097474568622,
+            13379480798531741302
+          ],
+          "density": 1.0,
+          "seed": 47,
+          "minScale": 0.8,
+          "maxScale": 1.3,
+          "drawDistance": 40.0,
+          "maskRes": 128,
+          "visible": true
+        }
+      }
+    },
+    {
+      "uuid": [
+        1134532700872793365,
+        4518319656582898861
+      ],
+      "name": "Foliage periwinkle_plant",
+      "parent": [
+        2845148526021469569,
+        5683824701656128689
+      ],
+      "children": [],
+      "components": {
+        "transform": {
+          "position": [
+            7.0,
+            0.0,
+            0.0
+          ],
+          "rotation": [
+            0,
+            0,
+            0
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "terrain": {
+          "sizeX": 12.0,
+          "sizeZ": 12.0,
+          "resolution": 65,
+          "heightScale": 0.0,
+          "seed": 0
+        },
+        "foliage": {
+          "name": "periwinkle_plant",
+          "mesh": [
+            6594407391927749538,
+            9795284242817508071
+          ],
+          "material": [
+            3227948190120624449,
+            12085337177581057695
+          ],
+          "density": 1.0,
+          "seed": 48,
+          "minScale": 0.8,
+          "maxScale": 1.3,
+          "drawDistance": 40.0,
+          "maskRes": 128,
+          "visible": true
+        }
+      }
+    },
+    {
+      "uuid": [
+        4610420609635141,
+        2315547606767930031
+      ],
+      "name": "Foliage shrub_03",
+      "parent": [
+        2845148526021469569,
+        5683824701656128689
+      ],
+      "children": [],
+      "components": {
+        "transform": {
+          "position": [
+            21.0,
+            0.0,
+            0.0
+          ],
+          "rotation": [
+            0,
+            0,
+            0
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "terrain": {
+          "sizeX": 12.0,
+          "sizeZ": 12.0,
+          "resolution": 65,
+          "heightScale": 0.0,
+          "seed": 0
+        },
+        "foliage": {
+          "name": "shrub_03",
+          "mesh": [
+            8835950348126210040,
+            10955941688722963554
+          ],
+          "material": [
+            17685167629663358966,
+            9874375672790147761
+          ],
+          "density": 1.0,
+          "seed": 49,
+          "minScale": 0.8,
+          "maxScale": 1.3,
+          "drawDistance": 40.0,
+          "maskRes": 128,
+          "visible": true
+        }
+      }
+    },
+    {
+      "uuid": [
+        159393692367205607,
+        6484341151198125869
+      ],
+      "name": "Foliage shrub_04",
+      "parent": [
+        2845148526021469569,
+        5683824701656128689
+      ],
+      "children": [],
+      "components": {
+        "transform": {
+          "position": [
+            -21.0,
+            0.0,
+            14.0
+          ],
+          "rotation": [
+            0,
+            0,
+            0
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "terrain": {
+          "sizeX": 12.0,
+          "sizeZ": 12.0,
+          "resolution": 65,
+          "heightScale": 0.0,
+          "seed": 0
+        },
+        "foliage": {
+          "name": "shrub_04",
+          "mesh": [
+            17356324264343060572,
+            9838269711833479046
+          ],
+          "material": [
+            4583640105149615006,
+            11767663071884143474
+          ],
+          "density": 0.8,
+          "seed": 50,
+          "minScale": 0.8,
+          "maxScale": 1.3,
+          "drawDistance": 50.0,
+          "maskRes": 128,
+          "visible": true
+        }
+      }
+    },
+    {
+      "uuid": [
+        3132842260618855861,
+        256593991241742265
+      ],
+      "name": "Foliage anthurium_botany_01",
+      "parent": [
+        2845148526021469569,
+        5683824701656128689
+      ],
+      "children": [],
+      "components": {
+        "transform": {
+          "position": [
+            -7.0,
+            0.0,
+            14.0
+          ],
+          "rotation": [
+            0,
+            0,
+            0
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "terrain": {
+          "sizeX": 12.0,
+          "sizeZ": 12.0,
+          "resolution": 65,
+          "heightScale": 0.0,
+          "seed": 0
+        },
+        "foliage": {
+          "name": "anthurium_botany_01",
+          "mesh": [
+            16873258114368622031,
+            10703758804955779263
+          ],
+          "material": [
+            14457557857608748565,
+            9875014532268012759
+          ],
+          "density": 0.5,
+          "seed": 51,
+          "minScale": 0.8,
+          "maxScale": 1.2,
+          "drawDistance": 60.0,
+          "maskRes": 128,
+          "visible": true
+        }
+      }
+    },
+    {
+      "uuid": [
+        1382746466831549561,
+        8463630271087733713
+      ],
+      "name": "Foliage flower_gazania",
+      "parent": [
+        2845148526021469569,
+        5683824701656128689
+      ],
+      "children": [],
+      "components": {
+        "transform": {
+          "position": [
+            7.0,
+            0.0,
+            14.0
+          ],
+          "rotation": [
+            0,
+            0,
+            0
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "terrain": {
+          "sizeX": 12.0,
+          "sizeZ": 12.0,
+          "resolution": 65,
+          "heightScale": 0.0,
+          "seed": 0
+        },
+        "foliage": {
+          "name": "flower_gazania",
+          "mesh": [
+            6551532546821343110,
+            9640496823890687268
+          ],
+          "material": [
+            454075499418044873,
+            9918428075715361280
+          ],
+          "density": 0.25,
+          "seed": 52,
+          "minScale": 0.8,
+          "maxScale": 1.2,
+          "drawDistance": 60.0,
+          "maskRes": 128,
+          "visible": true
+        }
+      }
+    },
+    {
+      "uuid": [
+        4913373521821408055,
+        4888558544070000377
+      ],
+      "name": "Foliage shrub_02",
+      "parent": [
+        2845148526021469569,
+        5683824701656128689
+      ],
+      "children": [],
+      "components": {
+        "transform": {
+          "position": [
+            21.0,
+            0.0,
+            14.0
+          ],
+          "rotation": [
+            0,
+            0,
+            0
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "terrain": {
+          "sizeX": 12.0,
+          "sizeZ": 12.0,
+          "resolution": 65,
+          "heightScale": 0.0,
+          "seed": 0
+        },
+        "foliage": {
+          "name": "shrub_02",
+          "mesh": [
+            4920800297994373677,
+            13489970421348216779
+          ],
+          "material": [
+            9446833722229343767,
+            10042880012715803174
+          ],
+          "density": 0.15,
+          "seed": 53,
+          "minScale": 0.8,
+          "maxScale": 1.2,
+          "drawDistance": 80.0,
+          "maskRes": 128,
+          "visible": true
+        }
+      }
+    }
+  ]
+}

@@ -12,6 +12,7 @@
 
 #ifdef HE_HAVE_LIBSSH2
 #include <ContentSync/EngineContentSync.h>
+#include <ContentSync/ContentServerClient.h> // Thema 194: the new HTTP content server
 #include <ContentSync/SftpCredentials.h>
 #endif
 
@@ -107,13 +108,17 @@ void run(Job& j, std::string engineRoot, std::string cacheRoot)
 	o.progress           = [&j](const Deps::Progress& p) { setStage(j, p.stage, p.detail, p.done, p.total); };
 
 #ifdef HE_HAVE_LIBSSH2
-	j.serverConfigured = HE::Cs::engineContentEndpoint().configured();
+	// Either transport counts as "a server is configured" — refreshManifestBlocking() itself
+	// picks the content server over SFTP when both or only the former is set (Thema 194).
+	j.serverConfigured = HE::Cs::engineContentEndpoint().configured() ||
+	                     HE::Cs::contentServerEndpoint().configured();
 	if (j.serverConfigured)
 	{
 		setStage(j, "Connecting to the EngineContent server");
 		auto& sync = HE::Cs::EngineContentSync::instance();
 		// Signing in IS fetching the catalogue: the same connection retry the editor's own
-		// probe uses, and the error text it keeps (already scrubbed of the password).
+		// probe uses (SFTP path only — the content server has no login), and the error text it
+		// keeps (already scrubbed of the password).
 		j.serverReached = sync.refreshManifestBlocking();
 		if (!j.serverReached) j.serverDetail = sync.lastManifestError();
 		// No server: the catalogue the last good connection wrote beside the downloads —

@@ -576,9 +576,11 @@ vec3 applyClouds(vec3 baseSky, vec3 dir, vec3 sunDir, float time, float coverage
 	}
 
 	// Quality (perf knob, uCloudQuality): 0 Low, 1 Med, 2 High. High == original counts.
-	int qBaseN  = (uCloudQuality <= 0) ? 8  : (uCloudQuality == 1 ? 12 : 16);
-	int qMaxN   = (uCloudQuality <= 0) ? 18 : (uCloudQuality == 1 ? 32 : 64);
-	int qShadow = (uCloudQuality <= 0) ? 1  : (uCloudQuality == 1 ? 2  : 3);
+	// The quarter-res pre-pass (uCloudPrepass) demotes one tier — see applyClouds3DReal.
+	int effQ = (uCloudPrepass > 0.5) ? max(uCloudQuality - 1, 0) : uCloudQuality;
+	int qBaseN  = (effQ <= 0) ? 8  : (effQ == 1 ? 12 : 16);
+	int qMaxN   = (effQ <= 0) ? 18 : (effQ == 1 ? 32 : 64);
+	int qShadow = (effQ <= 0) ? 1  : (effQ == 1 ? 2  : 3);
 
 	// Fade the whole cloud layer out into the horizon haze. Applied after the
 	// march; computed here because it also sets the step budget below.
@@ -993,10 +995,12 @@ vec3 applyClouds3D(vec3 baseSky, vec3 dir, vec3 camPos, vec3 sunDir, float time,
 		                    deck3DXZ(camPos, dir, cloudH, wind, time), outT);
 
 	// Quality (perf knob, uCloudQuality): 0 Low, 1 Med, 2 High. High == original counts.
-	float qStepF  = (uCloudQuality <= 0) ? 0.40 : (uCloudQuality == 1 ? 0.30 : 0.22);
-	float qMinN   = (uCloudQuality <= 0) ? 12.0 : (uCloudQuality == 1 ? 18.0 : 24.0);
-	float qMaxN   = (uCloudQuality <= 0) ? 40.0 : (uCloudQuality == 1 ? 72.0 : 128.0);
-	int   qShadow = (uCloudQuality <= 0) ? 1    : (uCloudQuality == 1 ? 2    : 3);
+	// The quarter-res pre-pass (uCloudPrepass) demotes one tier — see applyClouds3DReal.
+	int effQ = (uCloudPrepass > 0.5) ? max(uCloudQuality - 1, 0) : uCloudQuality;
+	float qStepF  = (effQ <= 0) ? 0.40 : (effQ == 1 ? 0.30 : 0.22);
+	float qMinN   = (effQ <= 0) ? 12.0 : (effQ == 1 ? 18.0 : 24.0);
+	float qMaxN   = (effQ <= 0) ? 40.0 : (effQ == 1 ? 72.0 : 128.0);
+	int   qShadow = (effQ <= 0) ? 1    : (effQ == 1 ? 2    : 3);
 
 	cloudH      = max(cloudH, 1.0);
 	float thick = kCloudRefAltitude * 1.5;                   // TALL slab so cumuli can billow upward (3D)
@@ -1189,22 +1193,30 @@ vec3 applyClouds3DReal(vec3 baseSky, vec3 dir, vec3 camPos, vec3 sunDir, float t
 	float ov = overcastAmount(coverage);
 	// Slightly higher minimum step count than classic: the sharper silhouettes
 	// show the IGN dither earlier than the soft classic bodies do.
-	float qStepF  = (uCloudQuality <= 0) ? 0.40 : (uCloudQuality == 1 ? 0.28 : 0.20);
-	float qMinN   = (uCloudQuality <= 0) ? 14.0 : (uCloudQuality == 1 ? 26.0 : 32.0);
-	float qMaxN   = (uCloudQuality <= 0) ? 44.0 : (uCloudQuality == 1 ? 80.0 : 128.0);
-	int   qShadow = (uCloudQuality <= 0) ? 3    : (uCloudQuality == 1 ? 3    : 6);
+	// The quarter-res pre-pass (uCloudPrepass) fills a buffer that gets bilinearly
+	// upsampled anyway, so its extra per-tier detail is invisible there — demote one
+	// quality tier (High→Med, Med→Low, Low unchanged) ONLY for that fill. The inline
+	// full-res march (uCloudPrepass == 0, every backend without the low-res buffer,
+	// and the main composite when the feature is off) keeps the user's chosen tier
+	// unchanged (docs/auto-lod-gpu-capture-stutter-2026-11-08.md: pre-pass was 6.46 ms,
+	// the single biggest block).
+	int effQ = (uCloudPrepass > 0.5) ? max(uCloudQuality - 1, 0) : uCloudQuality;
+	float qStepF  = (effQ <= 0) ? 0.40 : (effQ == 1 ? 0.28 : 0.20);
+	float qMinN   = (effQ <= 0) ? 14.0 : (effQ == 1 ? 26.0 : 32.0);
+	float qMaxN   = (effQ <= 0) ? 44.0 : (effQ == 1 ? 80.0 : 128.0);
+	int   qShadow = (effQ <= 0) ? 3    : (effQ == 1 ? 3    : 6);
 
 	// Medium marches the sun in 3 steps instead of 4 and reaches as far by growing the step faster (2.6 instead of 1.85):
 	// 15, 54, 155 units against 15, 43, 92, 175. The step is the biggest cost of the Realistic clouds.
-	float stGrow = (uCloudQuality == 1 && uCloudInterShadows != 0) ? 2.6 : 1.85;   // without inter-shadows: own body only, as before
+	float stGrow = (effQ == 1 && uCloudInterShadows != 0) ? 2.6 : 1.85;   // without inter-shadows: own body only, as before
 	// The weather map (the column half of the field) is smooth along a ray: evaluate it on every Kth step and interpolate
 	// in between (Low 4, Medium 3, High exact). Empty space costs one column test per step, so this is where Medium spent
 	// almost half of its time (docs/clouds-2-0-cost-and-fine-detail-2026-10-29.md).
-	int qColEvery = (uCloudQuality <= 0) ? 4 : (uCloudQuality == 1 ? 3 : 1);
-	float qSkipA = (uCloudQuality >= 2) ? 0.0 : 0.04;   // opacity below which a step skips the sun march (High: never)
+	int qColEvery = (effQ <= 0) ? 4 : (effQ == 1 ? 3 : 1);
+	float qSkipA = (effQ >= 2) ? 0.0 : 0.04;   // opacity below which a step skips the sun march (High: never)
 	// Adaptive march: coarse steps through empty space, a finer step (this fraction of ds) through the surface layer of a
 	// cloud near the camera, where the lumps are. Low 0.5, Medium 0.34, High 0.25.
-	float qFineF = (uCloudQuality <= 0) ? 0.5 : (uCloudQuality == 1 ? 0.34 : 0.25);
+	float qFineF = (effQ <= 0) ? 0.5 : (effQ == 1 ? 0.34 : 0.25);
 
 	if (uCloudInterShadows == 0) qShadow = min(qShadow, 3); // short march: own body only
 	float evo = uCloudEvolution;

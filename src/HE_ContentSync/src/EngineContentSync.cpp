@@ -1,5 +1,6 @@
 #include "ContentSync/EngineContentSync.h"
 #include "ContentSync/CacheFreshness.h"
+#include "ContentSync/ContentServerClient.h"
 #include "ContentSync/CsLog.h"
 #include "ContentSync/SftpClient.h"
 #include "ContentSync/SftpCredentials.h"
@@ -10,6 +11,7 @@
 
 #include <filesystem>
 #include <fstream>
+#include <memory>
 #include <sstream>
 
 namespace fs = std::filesystem;
@@ -71,10 +73,28 @@ EngineContentSync& EngineContentSync::instance()
 
 bool EngineContentSync::refreshManifestBlocking()
 {
+	// The new HTTP content server (Thema 194) wins when configured — it is what this topic is
+	// for, SFTP stays the fallback for installs that never set config.json's
+	// "EngineContentServerUrl". Both feed the same refreshManifestWith, so single-flighting
+	// (m_refreshMutex), the cache write and the rename guard are identical either way.
+	// Retried on a failed CONNECTION only, same as the SFTP path below (see
+	// sftpWithConnectRetry): a 4xx/404 from the server itself is not transient and
+	// comes back from contentServerGetManifest with `transient` unset.
+	const ContentServerEndpoint& server = contentServerEndpoint();
+	if (server.configured())
+	{
+		return refreshManifestWith([&server](const std::string& localPath)
+		{
+			return sftpWithConnectRetry(
+				[&] { return contentServerGetManifest(server, localPath); });
+		});
+	}
+
 	const SftpEndpoint& endpoint = engineContentEndpoint();
 	if (!endpoint.configured())
 	{
-		HE_LOG_WARN(ContentSync, "%s", "EngineContent manifest refresh skipped — SFTP endpoint not configured");
+		HE_LOG_WARN(ContentSync, "%s",
+		            "EngineContent manifest refresh skipped — neither the content server nor the SFTP endpoint is configured");
 		return false;
 	}
 
@@ -294,10 +314,19 @@ void EngineContentSync::enqueueDownload(const std::string& relativePath, HE::UUI
 
 void EngineContentSync::drainQueue()
 {
+	// Same choice as refreshManifestBlocking: the content server wins when configured. Checked
+	// once for the whole batch, not per file — a mid-batch config.json edit would need a
+	// restart to take effect anyway (contentServerEndpoint() itself is cached for the process).
+	const ContentServerEndpoint server           = contentServerEndpoint();
+	const bool                  useContentServer = server.configured();
+
 	// One session for the whole batch (a scene with many passive references
 	// queues them all at once), not one handshake per file. It lives exactly as
-	// long as this drain: the next batch connects anew.
-	SftpConnection conn(engineContentEndpoint());
+	// long as this drain: the next batch connects anew. Only constructed for the SFTP path —
+	// an HTTP-configured build never opens an SSH session it will not use.
+	std::unique_ptr<SftpConnection> sftpConn;
+	if (!useContentServer) sftpConn = std::make_unique<SftpConnection>(engineContentEndpoint());
+
 	for (;;)
 	{
 		{
@@ -327,13 +356,15 @@ void EngineContentSync::drainQueue()
 		// Byte-level progress, published as the read loop advances. Captures
 		// `this` deliberately: EngineContentSync is a function-local static
 		// (instance()), so it outlives every job by construction.
-		const SftpResult result = conn.getFile(relativePath, localPath.string(),
-			[this](std::uint64_t done, std::uint64_t total)
-			{
-				std::lock_guard<std::mutex> lock(m_mutex);
-				m_status.currentBytesDone  = done;
-				m_status.currentBytesTotal = total;
-			});
+		const auto onProgress = [this](std::uint64_t done, std::uint64_t total)
+		{
+			std::lock_guard<std::mutex> lock(m_mutex);
+			m_status.currentBytesDone  = done;
+			m_status.currentBytesTotal = total;
+		};
+		const SftpResult result = useContentServer
+			? contentServerGetFile(server, relativePath, localPath.string(), onProgress)
+			: sftpConn->getFile(relativePath, localPath.string(), onProgress);
 
 		if (!result.ok)
 		{
