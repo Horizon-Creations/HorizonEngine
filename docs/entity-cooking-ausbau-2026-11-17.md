@@ -304,7 +304,9 @@ Codeänderung, unterschieden sich in 222741 von 3686454 Bytes. Eingegrenzt in zw
 
 Alle A/B-Läufe liefen deshalb mit Sonne an, Wolken aus (`HE_DUMP_COVERAGE=0 HE_DUMP_CLOUDMODE=0
 HE_DUMP_TOD=0.35`), damit der Schattenpfad (Sonne, nicht nur Ambient) tatsächlich mitläuft — zwei
-Render-Pfade, je mit Rauschboden:
+Render-Pfade. Forward hat seinen eigenen Rauschboden (`fwd_off1`/`fwd_off2`); Deferred keinen eigenen,
+weil `def_off1`/`def_on1` schon gleich waren — ein Rauschboden ist nur nötig, wenn zwei Hashes
+auseinanderlaufen:
 
 | Lauf | RENDERPATH | `HE_COOK_STATIC` | md5 |
 |---|---|---|---|
@@ -337,8 +339,11 @@ fwd_on1 / def_on1 (HE_COOK_STATIC=1):
 ```
 Das belegt beide Seiten: der `off`-Lauf hatte überhaupt keinen Cooked-Block (`reg.ctx().find` fand nichts —
 echt uncooked, nicht nur zufällig gleich aussehend), der `on`-Lauf kochte genau die vier erwarteten Zeilen
-und ließ Rig/RopeParent korrekt aus. Zusammen mit den identischen md5 oben ist das der vollständige Beleg:
-Cooking griff, und es änderte kein Pixel.
+und ließ Rig/RopeParent korrekt aus. Das Log liest nach allen `HE_DUMP_FRAMES`-Settle-Frames (Standardwert
+hier 5) — `Ready` vor dem LETZTEN Walk, der das Bild liefert, ist nicht einzeln pro Frame geloggt, nur
+geschlossen: der eingebaute Würfel ist sofort resident, also settelt bereits der erste Walk die Zeile, und
+die Frames 2–5 nehmen den schnellen Pfad. Zusammen mit den identischen md5 oben ist das der vollständige
+Beleg: Cooking griff, und es änderte kein Pixel.
 
 Bildkontrolle (angehängt, `fwd_on1.png`): alle vier Würfel samt Boden und Schatten sichtbar — kein leeres
 oder einfarbiges Bild, das die Gleichheit trivial gemacht hätte.
@@ -370,10 +375,11 @@ echtem Controller über vier Frames", "SaveState-Entity … `applySavedState`").
   Subjekte plus Schatten; `he_tests`-Cook-Suiten (35/35) grün; voller `he_tests`-Lauf unter Scratch-APPDATA
   (`C:\hwtp9\scratch_appdata`): 5983/5984 Fälle, 1952832/1952833 Assertions grün. Der eine Fehlschlag
   (`test_game_build_config.cpp:156`, "GameBuildConfig: the generator writes the checked-in fixture header")
-  ist unabhängig von diesem Schritt — die Datei/der Generator (`GameBuildConfig`/`ProjectSettings`) wurde
-  hier nicht angefasst, der jüngste Commit auf dieser Historie, der sie berührt, ist Audio-Arbeit
-  (`5321d891d`, anderes Thema); die Checked-in-Fixture ist vermutlich nicht nachgezogen worden. Nicht
-  weiter verfolgt (außerhalb des Schritts).
+  ist beweisbar unabhängig von diesem Schritt: `he_tests` enthält `EditorApplication.cpp` gar nicht
+  (`tests/CMakeLists.txt:557`, "EditorApplication is NOT in this binary") — der einzige in diesem Schritt
+  geänderte Code —, und `git diff 99f459bae..HEAD --stat` zeigt für beide Commits dieses Schritts nur
+  `EditorApplication.cpp` und dieses Dokument. `GameBuildConfig`/`ProjectSettings` wurden hier nicht
+  angefasst. Nicht weiter verfolgt (außerhalb des Schritts).
 - **Not verified:** Play-mode-Pfade (CameraRig-Controller, SaveState-Apply) im Dump selbst — nicht nötig,
   s.o., von `test_cooked_static` abgedeckt. Die D3D11-Wolken-Nichtreproduzierbarkeit (Ursache) ist nicht
   untersucht, nur eingegrenzt und umgangen. Aus Schritt 11 weiterhin offen: ob Regel 8/12 (`LOD`,
