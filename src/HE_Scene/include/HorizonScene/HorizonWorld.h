@@ -10,6 +10,8 @@
 #include "Components/EntityIdComponent.h"
 #include <UIWidget/WidgetManager.h>
 
+namespace HE { class LandscapeRuntime; }
+
 using Entity = entt::entity;
 
 class HorizonWorld {
@@ -102,6 +104,14 @@ public:
 	// it back at zero.
 	const glm::dvec3& origin() const { return m_origin; }
 	void setOrigin(const glm::dvec3& origin) { m_origin = origin; }
+
+	// ── World-scale landscape (Thema 326) ────────────────────────────────────
+	// The application's HE::LandscapeRuntime, if the scene streams one (null otherwise); not owned,
+	// not touched by clear() — the application sets it once per frame (GameApplication/EditorApplication),
+	// whatever HorizonWorld clear() does to the rest. The render extractor reads it to put the resident
+	// tiles' height clipmap into RenderWorld::heightfields, same as a TerrainComponent's builtField.
+	const HE::LandscapeRuntime* landscapeRuntime() const { return m_landscapeRuntime; }
+	void setLandscapeRuntime(const HE::LandscapeRuntime* runtime) { m_landscapeRuntime = runtime; }
 
 	// ── Cell streaming (Thema 153) ───────────────────────────────────────────
 	// The scene file's "cells" object, kept verbatim (HE::CellManifest reads it):
@@ -316,6 +326,7 @@ private:
 	bool           m_hierarchyDirty = true;
 	uint64_t       m_structureEpoch = 1;
 	glm::dvec3     m_origin{ 0.0 };
+	const HE::LandscapeRuntime* m_landscapeRuntime = nullptr;
 	std::string    m_cellManifestJson;
 	std::string    m_cellHeadJson;
 	// Declared before the widget managers so it outlives them (they point at it).

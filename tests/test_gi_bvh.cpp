@@ -3,6 +3,7 @@
 #include <HorizonRendering/GiBvh.h>
 
 #include <glm/glm.hpp>
+#include <algorithm>
 #include <cmath>
 #include <random>
 #include <vector>
@@ -236,6 +237,123 @@ TEST_CASE("GI height-field pyramid: every cell's maximum covers the vertices it 
     // A field too small to pyramid is refused rather than half-built.
     GiHeightfield tiny; tiny.res = 4; tiny.data = std::make_shared<std::vector<float>>(16, 0.0f);
     CHECK(HE::BuildGiHeightPyramid(tiny).levels.empty());
+}
+
+// ── Closest-hit march (Thema 326, step 16: reflections against the tile landscape) ───────────────
+// GiHeightPyramidClosestHitRef is the CPU reference the GLSL hfClosestHit (OpenGLRenderer.cpp)
+// mirrors by hand, same relationship as the BVH tests above have to buildGiBvh/giBvhIntersect.
+
+TEST_CASE("GiHeightPyramidClosestHitRef: a tilted plane is hit at (about) its analytic height and normal")
+{
+    const int   res   = 32;
+    const float resM1 = float(res - 1);
+    const float a = 0.2f, b = -0.1f, h0 = 10.0f;
+    GiHeightfield hf; hf.res = res;
+    auto field = std::make_shared<std::vector<float>>(size_t(res) * res);
+    for (int j = 0; j < res; ++j)
+        for (int i = 0; i < res; ++i)
+            (*field)[size_t(j) * res + i] = h0 + a * (float(i) - resM1 * 0.5f) + b * (float(j) - resM1 * 0.5f);
+    hf.data = field;
+    const HE::GiHeightPyramid pyr = HE::BuildGiHeightPyramid(hf);
+    REQUIRE(!pyr.levels.empty());
+
+    const float      invSize = 1.0f / resM1; // 1 texel == 1 local unit, origin at the field's centre
+    const glm::vec3  o(3.0f, 50.0f, -4.0f);
+    const glm::vec3  d = glm::normalize(glm::vec3(0.3f, -1.0f, 0.2f));
+    float t; glm::vec3 n;
+    REQUIRE(HE::GiHeightPyramidClosestHitRef(pyr, o, d, 0.0f, 1000.0f, invSize, invSize, t, n));
+
+    const glm::vec3 hit        = o + d * t;
+    const float      expectedH = h0 + a * hit.x + b * hit.z;
+    // Generous absolute tolerance: the march only resolves the crossing to within half a texel's
+    // step at the finest mip level (the same granularity hfAnyHit uses for shadows), so the hit is
+    // not at the exact geometric crossing.
+    CHECK(std::fabs(hit.y - expectedH) < 1.0f);
+    const glm::vec3 expectedN = glm::normalize(glm::vec3(-a, 1.0f, -b));
+    CHECK(glm::dot(n, expectedN) > 0.99f); // same direction, loose on magnitude noise
+}
+
+TEST_CASE("GiHeightPyramidClosestHitRef: misses above the field, hits once the ray enters its height range")
+{
+    const int   res   = 64; // wide footprint: a mild lateral drift over a 45-unit fall stays inside it
+    const float resM1 = float(res - 1);
+    GiHeightfield hf; hf.res = res;
+    hf.data = std::make_shared<std::vector<float>>(size_t(res) * res, 5.0f);
+    const HE::GiHeightPyramid pyr = HE::BuildGiHeightPyramid(hf);
+    REQUIRE(!pyr.levels.empty());
+    const float invSize = 1.0f / resM1;
+
+    float t; glm::vec3 n;
+    const glm::vec3 oblique = glm::normalize(glm::vec3(0.05f, -1.0f, 0.03f));
+    // Travelling further away from the field (up and out): never crosses it.
+    CHECK_FALSE(HE::GiHeightPyramidClosestHitRef(pyr, glm::vec3(0, 50, 0), -oblique, 0.0f, 1000.0f, invSize, invSize, t, n));
+    // Same start, aimed down through the flat top at y = 5.
+    REQUIRE(HE::GiHeightPyramidClosestHitRef(pyr, glm::vec3(0, 50, 0), oblique, 0.0f, 1000.0f, invSize, invSize, t, n));
+    CHECK(n.y > 0.9f); // flat field: normal points straight up
+}
+
+TEST_CASE("GiHeightPyramidClosestHitRef: closest hit agrees with a dense per-texel brute force on a bumpy field")
+{
+    const int   res   = 64;
+    const float resM1 = float(res - 1);
+    GiHeightfield hf; hf.res = res;
+    auto field = std::make_shared<std::vector<float>>(size_t(res) * res);
+    for (int j = 0; j < res; ++j)
+        for (int i = 0; i < res; ++i)
+            (*field)[size_t(j) * res + i] = 3.0f * std::sin(0.3f * i) * std::cos(0.25f * j) + 0.05f * i;
+    hf.data = field;
+    const HE::GiHeightPyramid pyr = HE::BuildGiHeightPyramid(hf);
+    REQUIRE(!pyr.levels.empty());
+    const float invSize = 1.0f / resM1;
+
+    // Dense reference, deliberately NOT using the pyramid's mip-skip: steps a fraction of a texel at
+    // a time and reports the first crossing, so agreement is a real check on the accelerated march.
+    auto denseBilinear = [&](float x, float z) {
+        const float cx = std::clamp(x + resM1 * 0.5f, 0.0f, resM1), cz = std::clamp(z + resM1 * 0.5f, 0.0f, resM1);
+        const int x0 = int(std::floor(cx)), z0 = int(std::floor(cz));
+        const int x1 = std::min(x0 + 1, res - 1), z1 = std::min(z0 + 1, res - 1);
+        const float fx = cx - x0, fz = cz - z0;
+        const auto& f = *field;
+        const float h00 = f[size_t(z0) * res + x0], h10 = f[size_t(z0) * res + x1];
+        const float h01 = f[size_t(z1) * res + x0], h11 = f[size_t(z1) * res + x1];
+        return (h00 * (1 - fx) + h10 * fx) * (1 - fz) + (h01 * (1 - fx) + h11 * fx) * fz;
+    };
+    auto denseHit = [&](const glm::vec3& o, const glm::vec3& d, float& outT) {
+        for (float t = 0.0f; t < 200.0f; t += 0.02f)
+            if (o.y + d.y * t < denseBilinear(o.x + d.x * t, o.z + d.z * t))
+            { outT = t; return true; }
+        return false;
+    };
+
+    // Field half-width is resM1/2 ≈ 31.5; starting points and lateral drift are kept well inside it
+    // for the whole ~35-unit fall from o.y, or the ray legitimately leaves the (necessarily finite)
+    // footprint before it would reach the surface — a real miss the bounded march is right to
+    // report, which a dense march with no footprint bound (clamped-edge sampling forever) would not.
+    std::mt19937 rng(7);
+    std::uniform_real_distribution<float> xz(-15.0f, 15.0f), side(0.1f, 0.3f), sign01(0.0f, 1.0f);
+    int checked = 0;
+    for (int i = 0; i < 40; ++i)
+    {
+        const glm::vec3 o(xz(rng), 30.0f, xz(rng));
+        // Horizontal component kept away from zero: a purely vertical ray makes the march's
+        // texel-pacing step size blow up (division by a near-zero horizontal speed) — a pre-
+        // existing property of hfAnyHit's own march, not something this closest-hit variant adds.
+        const float dx = side(rng) * (sign01(rng) < 0.5f ? -1.0f : 1.0f);
+        const float dz = side(rng) * (sign01(rng) < 0.5f ? -1.0f : 1.0f);
+        const glm::vec3 d = glm::normalize(glm::vec3(dx, -1.0f, dz));
+
+        float refT = 0.0f, gotT = 0.0f; glm::vec3 n;
+        const bool refHit = denseHit(o, d, refT);
+        const bool gotHit = HE::GiHeightPyramidClosestHitRef(pyr, o, d, 0.0f, 150.0f, invSize, invSize, gotT, n);
+        REQUIRE(refHit == gotHit);
+        // The march's finest step is half a TEXEL along (x,z) (0.5 / texLen, texLen = the ray's
+        // horizontal speed in texels per unit t) — for a mostly-vertical ray that is several units
+        // of t, so the reported hit lands up to about one such step PAST the true crossing (it only
+        // samples at those intervals, never before). hfAnyHit has this exact same coarseness for
+        // shadows; a loose, one-sided-in-practice bound is the honest check here, not a tight one.
+        if (refHit) { CHECK(std::fabs(gotT - refT) < 3.0f); ++checked; }
+    }
+    CHECK(checked > 20); // most rays should actually hit, or the comparison above proves nothing
 }
 
 // ── Refit: the same tree over moved vertices (re-stitched / sculpted terrain chunks) ──────────────

@@ -496,6 +496,8 @@ struct PhysicsWorld::Impl
 
     // Entity id (cast to uint32_t) → Jolt body id
     std::unordered_map<uint32_t, JPH::BodyID> entityToBody;
+    // Ground that belongs to no entity (addGroundField), by the caller's key.
+    std::unordered_map<uint64_t, JPH::BodyID> groundFields;
 
     // Entity id → CharacterVirtual (for CharacterControllerComponent entities)
     std::unordered_map<uint32_t, std::unique_ptr<JPH::CharacterVirtual>> entityToCharacter;
@@ -2649,7 +2651,7 @@ int PhysicsWorld::addEntities(HorizonWorld& world, const std::vector<uint32_t>& 
 
 std::size_t PhysicsWorld::bodyCount() const
 {
-    return m_impl ? m_impl->entityToBody.size() : 0;
+    return m_impl ? m_impl->entityToBody.size() + m_impl->groundFields.size() : 0;
 }
 
 int PhysicsWorld::addEntityTree(HorizonWorld& world, uint32_t rootEntityId)
@@ -3086,6 +3088,50 @@ size_t PhysicsWorld::shiftOrigin(const glm::vec3& shift)
         character->SetPosition(character->GetPosition() - d);
     return ids.size() + m_impl->entityToCharacter.size();
 }
+
+bool PhysicsWorld::addGroundField(uint64_t key, const float* heights, uint32_t samples, const glm::vec3& corner,
+                                  float stepX, float stepZ, uint32_t reportAs)
+{
+    if (!m_impl || !heights || samples < 3 || !(stepX > 0.0f) || !(stepZ > 0.0f)) return false;
+    if (m_impl->groundFields.count(key)) return false;
+    JPH::HeightFieldShapeSettings settings(heights, JPH::Vec3(0.0f, 0.0f, 0.0f), JPH::Vec3(stepX, 1.0f, stepZ), samples);
+    settings.mBlockSize = 2;   // finest culling granularity Jolt allows, as for the single landscape
+    const JPH::ShapeSettings::ShapeResult shape = settings.Create();
+    if (shape.HasError())
+    {
+        HE_LOG_WARN(Physics, "Ground field %llu could not be built (%s)", static_cast<unsigned long long>(key), shape.GetError().c_str());
+        return false;
+    }
+    JPH::BodyCreationSettings bcs(shape.Get(), JPH::RVec3(corner.x, corner.y, corner.z), JPH::Quat::sIdentity(), JPH::EMotionType::Static,
+                                  HELayers::encode(HE::CollisionLayerConfig::kTerrain, false));
+    bcs.mFriction = 0.5f;   // as the implicit landscape: RigidBodyComponent's default
+    bcs.mUserData = static_cast<uint64_t>(reportAs);
+    const JPH::BodyID id = m_impl->physicsSystem.GetBodyInterface().CreateAndAddBody(bcs, JPH::EActivation::DontActivate);
+    if (id.IsInvalid())
+    {
+        HE_LOG_ERROR(Physics, "Ground field %llu: body creation failed, the %u-body limit is most likely exhausted",
+                     static_cast<unsigned long long>(key), Impl::kMaxBodies);
+        return false;
+    }
+    m_impl->groundFields.emplace(key, id);
+    return true;
+}
+
+bool PhysicsWorld::removeGroundField(uint64_t key)
+{
+    if (!m_impl) return false;
+    const auto it = m_impl->groundFields.find(key);
+    if (it == m_impl->groundFields.end()) return false;
+    JPH::BodyInterface& bodies = m_impl->physicsSystem.GetBodyInterface();
+    bodies.RemoveBody(it->second);
+    bodies.DestroyBody(it->second);
+    m_impl->groundFields.erase(it);
+    return true;
+}
+
+bool PhysicsWorld::hasGroundField(uint64_t key) const { return m_impl && m_impl->groundFields.count(key) != 0; }
+
+size_t PhysicsWorld::groundFieldCount() const { return m_impl ? m_impl->groundFields.size() : 0; }
 
 bool PhysicsWorld::setPosition(uint32_t entityId, const glm::vec3& position, bool resetVelocity)
 {
@@ -5047,6 +5093,12 @@ void PhysicsWorld::clear()
         bodyInterface.RemoveBody(bodyId);
         bodyInterface.DestroyBody(bodyId);
     }
+    for (auto& [key, bodyId] : m_impl->groundFields)
+    {
+        bodyInterface.RemoveBody(bodyId);
+        bodyInterface.DestroyBody(bodyId);
+    }
+    m_impl->groundFields.clear();
     m_impl->entityToBody.clear();
     m_impl->writeBackMemo.clear();
     m_impl->entityToCharacter.clear();

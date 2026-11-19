@@ -2037,11 +2037,12 @@ float hfBilinear(vec2 tp)
 	return mix(mix(h00, h10, w.x), mix(h01, h11, w.x), w.y);
 }
 
-bool hfAnyHit(vec3 o, vec3 d, float tMin, float tMax)
+// Shared march: advances along the ray through the mip pyramid and stops at the FIRST (closest)
+// texel where it crosses the surface. hfAnyHit only needs the bool; hfClosestHit (the reflection
+// kernel's landscape branch, Thema 326 step 16) also wants where, which this march already knows
+// the moment it finds a crossing — it just used to throw the position away.
+bool hfMarch(vec3 oL, vec3 dL, float tMin, float tMax, out float outT, out vec2 outTp)
 {
-	if (uHfParams.w < 0.5) return false;
-	vec3 oL = (uHfWorldToLocal * vec4(o, 1.0)).xyz;
-	vec3 dL = mat3(uHfWorldToLocal) * d;
 	vec2 texPerLocal = vec2(uHfParams.x, uHfParams.y) * uHfParams.z;      // local XZ -> texels
 	vec2 tp0 = (oL.xz * vec2(uHfParams.x, uHfParams.y) + 0.5) * uHfParams.z;
 	vec2 tpd = dL.xz * texPerLocal;                                          // texels per unit t
@@ -2096,11 +2097,43 @@ bool hfAnyHit(vec3 o, vec3 d, float tMin, float tMax)
 		}
 		else
 		{
-			if (y < hfBilinear(tp) - 0.02) return true;
+			if (y < hfBilinear(tp) - 0.02) { outT = t; outTp = tp; return true; }
 			t += 0.5 / texLen;
 		}
 	}
 	return false;
+}
+
+bool hfAnyHit(vec3 o, vec3 d, float tMin, float tMax)
+{
+	if (uHfParams.w < 0.5) return false;
+	vec3 oL = (uHfWorldToLocal * vec4(o, 1.0)).xyz;
+	vec3 dL = mat3(uHfWorldToLocal) * d;
+	float outT; vec2 outTp;
+	return hfMarch(oL, dL, tMin, tMax, outT, outTp);
+}
+
+// Closest-hit variant for the reflection kernel (Thema 326 step 16): the same march (the first
+// crossing it finds already IS the closest one — a height field has no overhangs), plus a normal
+// from central differences of the field around the hit texel. uHfWorldToLocal here is a pure
+// translation (LandscapeGi's clipmap window — RenderExtractor::extractLandscapeGiHeightfield), so
+// the LOCAL normal already equals the WORLD normal; a rotated/scaled field would need
+// transpose(inverse(mat3(uHfWorldToLocal))) instead, and the caller would need to transform the hit
+// position back rather than using `origin + dir * outT` directly.
+bool hfClosestHit(vec3 o, vec3 d, float tMin, float tMax, out float outT, out vec3 outNormal)
+{
+	if (uHfParams.w < 0.5) return false;
+	vec3 oL = (uHfWorldToLocal * vec4(o, 1.0)).xyz;
+	vec3 dL = mat3(uHfWorldToLocal) * d;
+	vec2 tp;
+	if (!hfMarch(oL, dL, tMin, tMax, outT, tp)) return false;
+	vec2 texPerLocal = vec2(uHfParams.x, uHfParams.y) * uHfParams.z;
+	float hx1 = hfBilinear(tp + vec2(1.0, 0.0)), hx0 = hfBilinear(tp - vec2(1.0, 0.0));
+	float hz1 = hfBilinear(tp + vec2(0.0, 1.0)), hz0 = hfBilinear(tp - vec2(0.0, 1.0));
+	float dHdx = (hx1 - hx0) * 0.5 * texPerLocal.x;
+	float dHdz = (hz1 - hz0) * 0.5 * texPerLocal.y;
+	outNormal = normalize(vec3(-dHdx, 1.0, -dHdz));
+	return true;
 }
 #undef GI_OCCLUDED
 #define GI_OCCLUDED(o, d, tmin, tmax) (giSceneAnyHit(o, d, tmin, tmax) || hfAnyHit(o, d, tmin, tmax))
@@ -2722,7 +2755,19 @@ void main()
 
 	float dist; int tri;
 	int hitInst = giSceneClosestHitTri(origin, Rs, 0.02, max(uReflParams.x, 1.0), dist, tri);
-	if (hitInst < 0)
+
+	// Tile landscape (Thema 326 step 16): ray-marched against the GI height clipmap instead of a
+	// BVH/BLAS instance — LandscapeRuntime draws tile patches through SetLandscapeProvider, not
+	// RenderWorld.objects, so none exists. uHfParams.w is only set for THIS march when the active
+	// heightfield is the tile clipmap (OpenGLRenderer::RenderGIReflection gates it on
+	// m_giHfKey == kLandscapeGiHeightfieldKey), never for a single TerrainComponent's shadow-only
+	// field, so a scene with the old single terrain traces exactly as before. Capped to the BVH
+	// hit's distance (or the max ray distance on a BVH miss) so whichever candidate is nearer wins
+	// — a mesh standing in front of the landscape still occludes it correctly.
+	float hfT; vec3 hfN;
+	bool hfHit = hfClosestHit(origin, Rs, 0.02, (hitInst >= 0) ? dist : max(uReflParams.x, 1.0), hfT, hfN);
+
+	if (hitInst < 0 && !hfHit)
 	{
 		// Miss → the sky. With the bake it is a full sample (the receiver's
 		// confidence, like a hit at close range) carrying the real sky, so the
@@ -2736,45 +2781,61 @@ void main()
 		continue;
 	}
 
-	vec3 hitPos = origin + Rs * dist;
-	vec3 hitN   = giHitNormal(hitInst, tri, Rs);
-	vec3 albedo = giInsts[hitInst].baseColor.rgb;
-	// Landscape hit: the paint at THIS point instead of one flat colour for the
-	// whole terrain. A landscape is a heightfield over an axis-aligned local
-	// rect whose mesh UVs are linear in it, so the hit POSITION recovers the UV
-	// — no per-vertex UV in the BVH. Mirrors the Metal kernels (GiLandscape.h).
-	int li = giInsts[hitInst].offsets.z;
-	// Auto landscape (cfg.w < 0): no paint, its colour follows the hit's slope
-	// and height (hitN faces the ray).
-	if (li >= 0 && li < uGiLandCount && li < 4 && giLands[li].cfg.w < -0.5)
-		albedo = giAutoLandAlbedo(li, hitPos, hitN);
-	else if (li >= 0 && li < uGiLandCount && li < 4 && int(giLands[li].cfg.w) > 0)
+	vec3 hitPos, hitN, albedo, emissive;
+	if (hfHit)
 	{
-		vec3 lp = (giLands[li].worldToLocal * vec4(hitPos, 1.0)).xyz;
-		vec2 luv = (vec2(lp.x, lp.z) * giLands[li].cfg.xy + 0.5) * giLands[li].cfg.z;
-		// Dynamic indexing of a sampler array is not allowed below GL 4.0 rules
-		// for non-uniform indices, so branch on the (uniform-per-instance) index.
-		vec4 lw = (li == 0) ? texture(uLandWeights[0], luv)
-		        : (li == 1) ? texture(uLandWeights[1], luv)
-		        : (li == 2) ? texture(uLandWeights[2], luv)
-		                    : texture(uLandWeights[3], luv);
-		vec3 lsum = vec3(0.0);
-		float wsum = 0.0;
-		int layers = int(giLands[li].cfg.w);
-		for (int k = 0; k < layers && k < 4; ++k)
+		dist   = hfT;
+		hitPos = origin + Rs * hfT;
+		hitN   = hfN; // uHfWorldToLocal is translation-only here, so the local normal IS the world one
+		// shortcut: flat placeholder colour, no painted weights or auto-material slices yet (needs a
+		// weight clipmap in LandscapeGi, or resolving LandscapeWorldComponent::textureGroup's
+		// AutoLandscapeGroup array) — see docs/landscape-reflections-design-2026-11-19.md §5.
+		albedo   = vec3(0.3, 0.32, 0.26);
+		emissive = vec3(0.0);
+	}
+	else
+	{
+		hitPos = origin + Rs * dist;
+		hitN   = giHitNormal(hitInst, tri, Rs);
+		albedo = giInsts[hitInst].baseColor.rgb;
+		// Landscape hit: the paint at THIS point instead of one flat colour for the
+		// whole terrain. A landscape is a heightfield over an axis-aligned local
+		// rect whose mesh UVs are linear in it, so the hit POSITION recovers the UV
+		// — no per-vertex UV in the BVH. Mirrors the Metal kernels (GiLandscape.h).
+		int li = giInsts[hitInst].offsets.z;
+		// Auto landscape (cfg.w < 0): no paint, its colour follows the hit's slope
+		// and height (hitN faces the ray).
+		if (li >= 0 && li < uGiLandCount && li < 4 && giLands[li].cfg.w < -0.5)
+			albedo = giAutoLandAlbedo(li, hitPos, hitN);
+		else if (li >= 0 && li < uGiLandCount && li < 4 && int(giLands[li].cfg.w) > 0)
 		{
-			if (lw[k] <= 0.0) continue;
-			lsum += giLands[li].layer[k].rgb * lw[k];
-			wsum += lw[k];
+			vec3 lp = (giLands[li].worldToLocal * vec4(hitPos, 1.0)).xyz;
+			vec2 luv = (vec2(lp.x, lp.z) * giLands[li].cfg.xy + 0.5) * giLands[li].cfg.z;
+			// Dynamic indexing of a sampler array is not allowed below GL 4.0 rules
+			// for non-uniform indices, so branch on the (uniform-per-instance) index.
+			vec4 lw = (li == 0) ? texture(uLandWeights[0], luv)
+			        : (li == 1) ? texture(uLandWeights[1], luv)
+			        : (li == 2) ? texture(uLandWeights[2], luv)
+			                    : texture(uLandWeights[3], luv);
+			vec3 lsum = vec3(0.0);
+			float wsum = 0.0;
+			int layers = int(giLands[li].cfg.w);
+			for (int k = 0; k < layers && k < 4; ++k)
+			{
+				if (lw[k] <= 0.0) continue;
+				lsum += giLands[li].layer[k].rgb * lw[k];
+				wsum += lw[k];
+			}
+			albedo = (wsum > 1e-4) ? lsum / wsum : giLands[li].layer[0].rgb;
 		}
-		albedo = (wsum > 1e-4) ? lsum / wsum : giLands[li].layer[0].rgb;
+		emissive = giInsts[hitInst].emissive.rgb;
 	}
 
 	// ── Hit shading: one bounce, then the probe field ────────────────────────
 	// Emissive first (a glowing object is visible in a mirror even unlit); the
 	// probe field deliberately does NOT carry emissive, so this is the only
 	// place it enters.
-	vec3 radiance = giInsts[hitInst].emissive.rgb;
+	vec3 radiance = emissive;
 	float ndl = max(dot(hitN, uSunDir.xyz), 0.0);
 	// Skip the occlusion ray when the sun term is black anyway (night) — the
 	// visibility result would be multiplied by zero.
@@ -6657,7 +6718,7 @@ void OpenGLRenderer::CreateGIPipelines()
 		const std::string header = "#version 430 core\n";
 		m_giShadowCSProgram = linkCompute(header + kGiTraversalGLSL + kGiHeightfieldGLSL + kGiShadowCS);
 		m_giProbeCSProgram  = linkCompute(header + kGiTraversalGLSL + kGiProbeCS);
-		m_giReflCSProgram   = linkCompute(header + kGiTraversalGLSL + kGiReflCS);
+		m_giReflCSProgram   = linkCompute(header + kGiTraversalGLSL + kGiHeightfieldGLSL + kGiReflCS);
 		HE_LOG_INFO(RHI, "%s", "OpenGLRenderer: GI pipelines built (compute ray tracing active)");
 	}
 	catch (const std::exception& e)
@@ -7314,6 +7375,24 @@ unsigned int OpenGLRenderer::RenderGIReflections(int width, int height,
 	glBindTexture(GL_TEXTURE_CUBE_MAP, m_skyReflValid ? m_skyReflCube : m_skyEnvCube);
 	glUniform1i(loc("uSkyRefl"), 9);
 	glUniform1f(loc("uSkyReflValid"), m_skyReflValid ? 1.0f : 0.0f);
+	// Tile landscape's GI height clipmap (Thema 326 step 16), unit 10 — free in this program (0-4
+	// g-buffer/DDGI, 5-8 land weightmaps, 9 sky cube). Gated on key, not just m_giHfActive: a single
+	// TerrainComponent's shadow-only field must never feed this branch (it already has a real BVH
+	// instance and the paint-table path above).
+	{
+		const bool hfOn = m_giHfActive && m_giHfTex && !m_renderWorld.heightfields.empty()
+		                  && m_giHfKey == kLandscapeGiHeightfieldKey;
+		const GiHeightfield* h0 = m_renderWorld.heightfields.empty() ? nullptr : &m_renderWorld.heightfields[0];
+		glActiveTexture(GL_TEXTURE10);
+		glBindTexture(GL_TEXTURE_2D, hfOn ? m_giHfTex : 0);
+		glUniform1i(loc("uHf"), 10);
+		glUniformMatrix4fv(loc("uHfWorldToLocal"), 1, GL_FALSE,
+		                   glm::value_ptr(h0 ? h0->worldToLocal : glm::mat4(1.0f)));
+		glUniform4f(loc("uHfParams"),
+		            h0 ? 1.0f / std::max(h0->size.x, 1e-4f) : 1.0f, h0 ? 1.0f / std::max(h0->size.y, 1e-4f) : 1.0f,
+		            h0 ? float(h0->res - 1) : 1.0f, hfOn ? 1.0f : 0.0f);
+		glUniform4f(loc("uHfParams2"), float(m_giHfTopLevel), m_giHfMaxH, 0.0f, 512.0f);
+	}
 	glActiveTexture(GL_TEXTURE0);
 	glDispatchCompute(static_cast<GLuint>((width + 7) / 8), static_cast<GLuint>((height + 7) / 8), 1);
 	glMemoryBarrier(GL_TEXTURE_FETCH_BARRIER_BIT);
@@ -11373,6 +11452,8 @@ void OpenGLRenderer::Shutdown()
 	if (m_primarySdlWindow && m_glContext)
 		SDL_GL_MakeCurrent(m_primarySdlWindow, static_cast<SDL_GLContext>(m_glContext));
 
+	m_landscape.shutdown();   // its images and program, with the context current
+
 	for (auto& [id, mesh] : m_meshCache)
 	{
 		if (mesh.vao)     glDeleteVertexArrays(1, &mesh.vao);
@@ -11847,6 +11928,45 @@ void OpenGLRenderer::BindSceneLighting(const SceneLightingLocs& L, const SceneSh
 // `allowLowResClouds` is false for previews: the quarter-res pre-pass rebinds
 // its own FBO and viewport, which a small offscreen render has no business
 // doing mid-pass.
+void OpenGLRenderer::DrawLandscape(const glm::mat4& viewProj)
+{
+	if (!m_landscapeProvider || m_landscapeFailed) return;
+	HE::LandscapeRenderFrame frame;
+	m_landscapeProvider(glm::dmat4(viewProj), /*zeroToOne=*/false, frame);   // viewProj is origin-relative, in GL clip space (-1..1)
+	if (!frame.active) return;                                                // no landscape in this scene: nothing is compiled, nothing drawn
+	if (!m_landscape.ready())
+	{
+		std::string err;
+		if (!m_landscape.init(&err))
+		{
+			HE_LOG_WARN(RHI, "OpenGLRenderer: the world-scale landscape is off: %s", err.c_str());
+			m_landscapeFailed = true;
+			return;
+		}
+	}
+
+	// The sun the lit shaders use: the scene's dominant directional light (colour x intensity), else a neutral one.
+	OpenGLLandscape::Shading sh;
+	sh.sunDir = glm::normalize(m_renderWorld.sunDirection);
+	sh.ambient = m_renderWorld.ambient;
+	for (const LightData& l : m_renderWorld.lights)
+		if (l.type == static_cast<uint8_t>(HE::LightType::Directional)) { sh.sunColor = l.color * l.intensity; break; }
+	if (frame.world && !frame.world->albedoArrayPath.empty())
+	{
+		// The texture group's albedo array (World-UV ground). A missing one resolves to the white array: flat colours then.
+		const unsigned int tex = ResolveGraphTexture(HE::UUID{}, frame.world->albedoArrayPath, /*array=*/true);
+		sh.albedoArray = (tex != 0 && tex != m_whiteArrayTex) ? tex : 0;
+		const auto optional = [&](const std::string& path) -> unsigned int {
+			if (path.empty()) return 0u;
+			const unsigned int t = ResolveGraphTexture(HE::UUID{}, path, /*array=*/true);
+			return (t != 0 && t != m_whiteArrayTex) ? t : 0u;
+		};
+		sh.normalArray = optional(frame.world->normalArrayPath);
+		sh.maskArray = optional(frame.world->maskArrayPath);
+	}
+	m_landscape.draw(frame, viewProj, sh);
+}
+
 void OpenGLRenderer::DrawSkyFullscreen(const glm::mat4& invViewProj, const glm::vec3& sunDir,
                                        const glm::vec3& camPos,
                                        const IRenderer::EnvironmentSettings& env,
@@ -13909,6 +14029,8 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 
 			glUseProgram(m_unlitProgram); // restore for the sky + transparent passes
 		}
+		// ── World-scale landscape (Thema 326): after the opaque geometry, before the sky, depth-tested into the same target ──
+		DrawLandscape(viewProj);
 		GpuTimerEndPass();                 // end "Opaque"
 
 		// ── TAA velocity (A2): screen-space motion of the opaque geometry, right

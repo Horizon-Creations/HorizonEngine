@@ -105,4 +105,9 @@ namespace TerrainHeightmap
     // derived from the file size — the World Machine / Unreal interchange
     // shape — and refused when the size is not a perfect square of shorts.
     Result importFile(TerrainComponent& tc, const std::string& path, const Options& opts);
+
+    // The same file formats as importFile, read as 16-bit grey (8-bit pictures are widened by 257 so white is 65535, colour
+    // pictures become luma), row-major width x height, row 0 = the top of the picture. For the world-scale landscape's tiled
+    // import (LandscapePackBuild.h), which has no TerrainComponent to resample onto. False with `error` set in user words.
+    bool readGrey16(const std::string& path, std::vector<uint16_t>& out, uint32_t& width, uint32_t& height, std::string& error);
 }

@@ -1405,6 +1405,37 @@ static std::optional<ExportResult> copyProjectSettingsFile(const ExportSettings&
     return std::nullopt;
 }
 
+// The loose files an export ships beside the pak (ExportSettings::dataFiles): a landscape pack is too big and too seek-heavy for the pak.
+// A destination that would leave the data folder is refused rather than written: the list comes from scene content.
+static std::optional<ExportResult> copyDataFiles(const ExportSettings& settings, const ExportContext& ctx)
+{
+    namespace fs = std::filesystem;
+    for (const ExportSettings::DataFile& f : settings.dataFiles)
+    {
+        const fs::path rel = fs::path(f.dest).lexically_normal();
+        if (f.dest.empty() || rel.is_absolute() || rel.has_root_name() || *rel.begin() == "..")
+            return ExportResult{false, "Refusing to ship a data file to '" + f.dest + "': it is not inside the data folder",
+                                ctx.assetsPacked};
+        std::error_code ec;
+        const fs::path dst = ctx.dataDir / rel;
+        fs::create_directories(dst.parent_path(), ec);
+        if (ec)
+            return ExportResult{false, "Failed to create " + dst.parent_path().string(), ctx.assetsPacked};
+        fs::copy_file(f.source, dst, fs::copy_options::overwrite_existing, ec);
+        if (ec)
+            return ExportResult{false, "Failed to copy " + f.source.string() + " to " + dst.string() + ": " + ec.message(),
+                                ctx.assetsPacked};
+        if (f.afterCopy)
+        {
+            std::string why;
+            if (!f.afterCopy(dst, why))
+                return ExportResult{false, "Failed to prepare " + dst.string() + (why.empty() ? std::string() : ": " + why),
+                                    ctx.assetsPacked};
+        }
+    }
+    return std::nullopt;
+}
+
 // The splash picture, copied under the fixed name the packaged game looks for.
 // Same shape as the settings file above it: an absent source REMOVES a stale
 // copy, because "no picture" is the project's answer and a leftover from an
@@ -1610,6 +1641,7 @@ ExportResult ProjectExporter::exportProject(
         return *fail;
     if (auto fail = writeGameConfig(settings, ctx))                             return *fail;
     if (auto fail = copyProjectSettingsFile(settings, ctx))                     return *fail;
+    if (auto fail = copyDataFiles(settings, ctx))                               return *fail;
     if (auto fail = copySplashImage(settings, ctx))                             return *fail;
     stage("icon");
     const bool hasIcon = writeAppIcons(settings, ctx);
