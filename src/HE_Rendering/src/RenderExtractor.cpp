@@ -635,7 +635,9 @@ void windWaterParams(const MaterialAsset& ma, const MaterialComponent* mc,
 	// either a TerrainComponent or a tile landscape, never both as GI casters); every GI-heightfield
 	// backend (GL, Vulkan, D3D11) turns its whole shadow-heightfield path off the moment
 	// RenderWorld::heightfields holds more than one, so this never adds a second.
-	constexpr uint64_t kLandscapeGiHeightfieldKey = ~0ull;
+	// kLandscapeGiHeightfieldKey itself lives in RenderWorld.h, next to GiHeightfield: the GI
+	// reflection kernels' CPU-side binding code (OpenGLRenderer.cpp) needs the same sentinel to
+	// gate their tile-landscape-only ray-march branch.
 	void extractLandscapeGiHeightfield(HorizonWorld& world, RenderWorld& out)
 	{
 		if (!out.heightfields.empty()) return;

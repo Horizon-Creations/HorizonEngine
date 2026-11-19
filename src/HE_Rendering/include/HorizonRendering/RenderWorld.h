@@ -13,6 +13,12 @@
 #include <vector>
 #include <cstdint>
 
+// Sentinel GiHeightfield::key for the tile landscape's GI clipmap (RenderExtractor::
+// extractLandscapeGiHeightfield) — never a real entt entity id, so a backend can tell "this is the
+// 100 km tile landscape's heightfield" apart from a single TerrainComponent's (whose key is its
+// entity id) without a second copy of the magic number.
+inline constexpr uint64_t kLandscapeGiHeightfieldKey = ~0ull;
+
 // The height field a landscape was built from, shared with the terrain component (no copy
 // per frame). `version` changes when it is rebuilt; the backends re-upload only then.
 struct GiHeightfield {
