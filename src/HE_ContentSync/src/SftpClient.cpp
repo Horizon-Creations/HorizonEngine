@@ -46,6 +46,7 @@ void ensureLibssh2Initialized()
 // next one is tried on timeout; only when every address has timed out does the
 // connect fail, and then as `transient` so the caller may retry.
 constexpr int kConnectTimeoutMs = 5000;   // per address
+constexpr long kIoTimeoutMs     = 60'000; // no byte for this long = the connection is dead
 constexpr int kPollIntervalMs   = 10;
 
 HE::Net::SocketHandle connectBlocking(const std::string& host, std::uint16_t port,
@@ -141,6 +142,10 @@ struct Session
 			return false;
 		}
 		libssh2_session_set_blocking(ssh, 1);
+		// A blocking call that gets nothing for this long fails (LIBSSH2_ERROR_TIMEOUT) instead of waiting for
+		// a TCP error that may take minutes or never come: a download that stalls mid-file (seen: a 1 GiB texture
+		// array stopping at byte 1063288832 every time) is then noticed in a minute and can be resumed.
+		libssh2_session_set_timeout(ssh, kIoTimeoutMs);
 
 		if (libssh2_session_handshake(ssh, static_cast<libssh2_socket_t>(sock)) != 0)
 		{
@@ -305,6 +310,169 @@ void listRemoteDirRecursive(Session& s, const std::string& fullDirPath,
 	libssh2_sftp_close_handle(dir);
 }
 
+// ── Download with resume ─────────────────────────────────────────────────────
+// A big file (EngineContent has 1 GiB texture arrays) over a link that breaks half-way must not start from
+// zero every time. The bytes fetched so far stay in "<local>.sftp-partial" and a sidecar remembers what the
+// remote file looked like when they were fetched (size + mtime); the next attempt continues from there only if
+// the file on the server is still that one, otherwise it starts over. The HTTP path keeps its own ".partial"
+// so the two never mix their bytes (the content server's copy of a file is not guaranteed to be this one).
+
+struct RemoteStamp
+{
+	std::uint64_t size  = 0;
+	std::uint64_t mtime = 0;
+};
+
+bool readStamp(const fs::path& path, RemoteStamp& out)
+{
+	std::ifstream in(path);
+	return static_cast<bool>(in >> out.size >> out.mtime);
+}
+
+void writeStamp(const fs::path& path, const RemoteStamp& stamp)
+{
+	std::ofstream out(path, std::ios::trunc);
+	out << stamp.size << ' ' << stamp.mtime << '\n';
+}
+
+// One attempt at fetching `remotePath` into `local`, continuing a kept partial when it is still valid.
+// `startedAt` / `reachedBytes` say where this attempt began and how far the file on disk got, so the caller can
+// tell whether another round is worth it. On a broken CONNECTION the partial is kept and the result is
+// `transient`; any other failure removes it.
+SftpResult downloadFrom(Session& s, bool& fault, const std::string& remotePath, const std::string& remoteRelPath,
+                        const fs::path& local, const SftpProgressFn& onProgress,
+                        std::uint64_t& startedAt, std::uint64_t& reachedBytes)
+{
+	LIBSSH2_SFTP_HANDLE* handle = libssh2_sftp_open(s.sftp, remotePath.c_str(), LIBSSH2_FXF_READ, 0);
+	if (!handle)
+	{
+		fault = connectionFault(s);
+		return { false, "Could not open remote file '" + remoteRelPath + "': " + s.lastSshError() };
+	}
+
+	// Total size for progress reporting and for the resume check. Not fatal if the server withholds it —
+	// 0 means "unknown" to every consumer, which is honest; a wrong number would not be. Without it nothing
+	// is resumed (there is nothing to check the partial against).
+	std::uint64_t totalBytes = 0;
+	std::uint64_t mtime      = 0;
+	{
+		LIBSSH2_SFTP_ATTRIBUTES attrs;
+		std::memset(&attrs, 0, sizeof(attrs));
+		if (libssh2_sftp_fstat_ex(handle, &attrs, 0) == 0)
+		{
+			if (attrs.flags & LIBSSH2_SFTP_ATTR_SIZE) totalBytes = attrs.filesize;
+			if (attrs.flags & LIBSSH2_SFTP_ATTR_ACMODTIME) mtime = static_cast<std::uint64_t>(attrs.mtime);
+		}
+	}
+	const bool resumable = totalBytes > 0;
+
+	std::error_code ec;
+	if (!local.parent_path().empty())
+		fs::create_directories(local.parent_path(), ec); // ec ignored: the ofstream open below is the real check
+
+	const fs::path tmpPath  = local.string() + ".sftp-partial";
+	const fs::path metaPath = tmpPath.string() + ".meta";
+
+	std::uint64_t offset = 0;
+	if (resumable)
+	{
+		RemoteStamp kept;
+		std::error_code sizeEc;
+		const std::uintmax_t have = fs::file_size(tmpPath, sizeEc);
+		if (!sizeEc && have > 0 && have <= totalBytes && readStamp(metaPath, kept) &&
+		    kept.size == totalBytes && kept.mtime == mtime)
+			offset = static_cast<std::uint64_t>(have);
+	}
+
+	std::ofstream out(tmpPath, std::ios::binary | (offset ? std::ios::app : std::ios::trunc));
+	if (!out)
+	{
+		libssh2_sftp_close_handle(handle);
+		return { false, "Could not create local file '" + tmpPath.string() + "'" };
+	}
+	if (resumable) writeStamp(metaPath, { totalBytes, mtime });
+	if (offset)
+	{
+		libssh2_sftp_seek64(handle, offset);
+		HE_LOG_INFO(ContentSync, "SFTP: continuing '%s' at byte %llu of %llu", remoteRelPath.c_str(),
+		            static_cast<unsigned long long>(offset), static_cast<unsigned long long>(totalBytes));
+	}
+
+	startedAt = reachedBytes = offset;
+	if (onProgress) onProgress(offset, totalBytes);
+
+	std::vector<char> buf(64 * 1024);
+	std::uint64_t doneBytes = offset;
+	bool failed = false;
+	bool readFailed = false;
+	std::string why;
+	for (;;)
+	{
+		const ssize_t n = libssh2_sftp_read(handle, buf.data(), buf.size());
+		if (n < 0)
+		{
+			failed = readFailed = true;
+			break;
+		}
+		if (n == 0) break; // EOF
+		out.write(buf.data(), n);
+		if (!out)
+		{
+			failed = true;
+			why = "could not write the local file";
+			break;
+		}
+		doneBytes += static_cast<std::uint64_t>(n);
+		reachedBytes = doneBytes;
+		if (onProgress) onProgress(doneBytes, totalBytes);
+	}
+
+	std::string extra;
+	if (readFailed)
+	{
+		// The libssh2 code says WHAT broke (-9 timeout, -43 socket recv, -13 disconnect, ...): it is in the log,
+		// the message alone ("Error waiting for SFTP packet") never was enough to tell them apart.
+		why   = s.lastSshError();
+		extra = " (libssh2 error " + std::to_string(s.ssh ? libssh2_session_last_errno(s.ssh) : 0) +
+		        ", after " + std::to_string(doneBytes) + " of " + std::to_string(totalBytes) + " bytes)";
+		fault = connectionFault(s);
+	}
+	libssh2_sftp_close_handle(handle);
+	out.flush();
+	if (!failed && !out) { failed = true; why = "could not write the local file"; }
+	out.close();
+
+	// An end of file before the size the server itself announced is a broken transfer, not a short file.
+	if (!failed && totalBytes > 0 && doneBytes != totalBytes)
+	{
+		failed = true;
+		why    = "the server ended the file early";
+		extra  = " (" + std::to_string(doneBytes) + " of " + std::to_string(totalBytes) + " bytes)";
+	}
+
+	if (failed)
+	{
+		const bool keep = readFailed && fault && resumable;
+		if (!keep)
+		{
+			std::error_code rmEc;
+			fs::remove(tmpPath, rmEc);
+			fs::remove(metaPath, rmEc);
+		}
+		return { false, "Download of '" + remoteRelPath + "' failed: " + why + extra, keep };
+	}
+
+	detail::renameReplacing(tmpPath, local, ec);
+	std::error_code rmEc;
+	fs::remove(metaPath, rmEc);
+	if (ec)
+	{
+		fs::remove(tmpPath, rmEc);
+		return { false, "Could not finalize downloaded file '" + local.string() + "': " + ec.message() };
+	}
+	return { true, {} };
+}
+
 } // namespace
 
 SftpResult sftpWithConnectRetry(const std::function<SftpResult()>& op, int attempts)
@@ -384,83 +552,25 @@ SftpResult SftpConnection::getFile(const std::string& remoteRelPath, const std::
                                    const SftpProgressFn& onProgress)
 {
 	const std::string remotePath = joinRemotePath(m_impl->endpoint.remoteBasePath, remoteRelPath);
-	return m_impl->run([&](Session& s, bool& fault) -> SftpResult {
-		LIBSSH2_SFTP_HANDLE* handle = libssh2_sftp_open(s.sftp, remotePath.c_str(), LIBSSH2_FXF_READ, 0);
-		if (!handle)
-		{
-			fault = connectionFault(s);
-			return { false, "Could not open remote file '" + remoteRelPath + "': " + s.lastSshError() };
-		}
+	const fs::path    local      = localPath;
 
-		// Total size for progress reporting. Not fatal if the server withholds it —
-		// 0 means "unknown" to every consumer, which is honest; a wrong number would
-		// not be.
-		std::uint64_t totalBytes = 0;
-		{
-			LIBSSH2_SFTP_ATTRIBUTES attrs;
-			std::memset(&attrs, 0, sizeof(attrs));
-			if (libssh2_sftp_fstat_ex(handle, &attrs, 0) == 0 && (attrs.flags & LIBSSH2_SFTP_ATTR_SIZE))
-				totalBytes = attrs.filesize;
-		}
-
-		std::error_code ec;
-		fs::path local = localPath;
-		if (!local.parent_path().empty())
-			fs::create_directories(local.parent_path(), ec); // ec ignored: the ofstream open below is the real check
-
-		const fs::path tmpPath = local.string() + ".partial";
-		std::ofstream out(tmpPath, std::ios::binary | std::ios::trunc);
-		if (!out)
-		{
-			libssh2_sftp_close_handle(handle);
-			return { false, "Could not create local file '" + tmpPath.string() + "'" };
-		}
-
-		if (onProgress) onProgress(0, totalBytes);
-
-		std::vector<char> buf(64 * 1024);
-		std::uint64_t doneBytes = 0;
-		bool failed = false;
-		bool readFailed = false;
-		for (;;)
-		{
-			const ssize_t n = libssh2_sftp_read(handle, buf.data(), buf.size());
-			if (n < 0)
-			{
-				failed = readFailed = true;
-				break;
-			}
-			if (n == 0) break; // EOF
-			out.write(buf.data(), n);
-			if (!out)
-			{
-				failed = true;
-				break;
-			}
-			doneBytes += static_cast<std::uint64_t>(n);
-			if (onProgress) onProgress(doneBytes, totalBytes);
-		}
-		const std::string readError = failed ? s.lastSshError() : std::string();
-		if (readFailed) fault = connectionFault(s);
-		libssh2_sftp_close_handle(handle);
-		out.close();
-
-		if (failed)
-		{
-			std::error_code rmEc;
-			fs::remove(tmpPath, rmEc);
-			return { false, "Download of '" + remoteRelPath + "' failed: " + readError };
-		}
-
-		detail::renameReplacing(tmpPath, local, ec);
-		if (ec)
-		{
-			std::error_code rmEc;
-			fs::remove(tmpPath, rmEc);
-			return { false, "Could not finalize downloaded file '" + local.string() + "': " + ec.message() };
-		}
-		return { true, {} };
-	});
+	// A connection that breaks in the middle of the file costs the bytes since the last good one, not the
+	// file: the next round opens a fresh session and continues (downloadFrom). A round that does not get one
+	// new byte ends it - the same stall again, retrying it only repeats the wait. The kept partial stays for
+	// the next call.
+	constexpr int kMaxRounds = 4;
+	SftpResult last;
+	for (int round = 0; round < kMaxRounds; ++round)
+	{
+		std::uint64_t startedAt = 0, reached = 0;
+		last = m_impl->run([&](Session& s, bool& fault) {
+			return downloadFrom(s, fault, remotePath, remoteRelPath, local, onProgress, startedAt, reached);
+		});
+		if (last.ok || !last.transient) return last;
+		if (reached <= startedAt || round + 1 == kMaxRounds) break;
+		HE_LOG_WARN(ContentSync, "%s - continuing on a new connection", last.error.c_str());
+	}
+	return last;
 }
 
 SftpResult SftpConnection::putFile(const std::string& localPath, const std::string& remoteRelPath)
