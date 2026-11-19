@@ -1,0 +1,11 @@
+(vsync keep, --no-counters, 600 frames; fps = 1000/mean dt; locked screen, AC power)
+imp_allcheap_vs_c1   fps  57.2 mean  17.5
+imp_allcheap_vs_c2   fps  58.2 mean  17.2
+imp_allcheap_vs_c3   fps  55.9 mean  17.9
+imp_cq0_vs_c1        fps  56.6 mean  17.7
+imp_cq0_vs_c2        fps  57.4 mean  17.4
+imp_cq0_vs_c3        fps  56.2 mean  17.8
+imp_vs_c1            fps  53.9 mean  18.5
+imp_vs_c2            fps  52.6 mean  19.0
+imp_vs_c3            fps  53.1 mean  18.8
+imp_vs_1/2 (earlier) fps 54.3 / 52.7 ; ground_nocloud_vs_1/2 66.3 / 64.7 ; imp_nocloud_vs_1/2 56.0 / 63.8 ; ground_vs_1/2 68.5 / 63.3

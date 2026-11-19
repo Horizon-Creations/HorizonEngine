@@ -12,6 +12,7 @@
 #include <ContentManager/Assets.h>
 #include <ContentManager/TextureArrayBuild.h>
 #include <MaterialGraph/AutoLandscapeMaterial.h>
+#include <Trails/TrailClipmap.h>
 #include <MaterialGraph/MaterialGraph.h>
 #include <MaterialGraph/WeatherMaterialFunctions.h>
 #include <material/MaterialShaderLibrary.h>
@@ -160,29 +161,31 @@ TEST_CASE("Groups wired: a variant per hex, no extra texture read")
 	CHECK(plain.glsl.find("> 0 ? max(textureSize(heTexP0, 0).z / int(floor(n") != std::string::npos);
 }
 
-TEST_CASE("The auto landscape graph reads variants: 36 hex reads, one variant grid per layer")
+TEST_CASE("The auto landscape graph reads variants: 27 hex reads, one variant grid per layer")
 {
 	const MaterialGraph g = HE::buildAutoLandscapeGraph().graph;
 	const HE::MatShaderGen lit = HE::generateFragment(g, HE::weatherFunctionLoader());
-	REQUIRE(lit.textures.size() == 3);
-	// 4 layers x (Albedo + Normal + Mask) x 3 hexes: the count the plan keeps at 36 reads per pixel;
-	// the text holds them once for V = 1 and once for V > 1 (see the grouped test above).
-	CHECK(countOf(lit.glsl, "textureGrad(heTexP") == 72u);
-	CHECK(countOf(lit.glsl, "_V == 1) {") == 12u);
-	CHECK(countOf(lit.glsl, "_s0))") == 12u);
-	CHECK(countOf(lit.glsl, "heBombGridV(") == 5u);    // the definition and one call per layer (four seeds)
+	REQUIRE(lit.textures.size() == 4);   // three arrays + the trail clipmap (Thema 328 step 5b)
+	// 3 layers (Grass, Dirt, Rock) x (Albedo + Normal + Mask) x 3 hexes = 27 reads per pixel (36 while Snow was
+	// a bombed texture layer too; since Thema 329 step 2 it is MF_ProceduralSnow and reads nothing); the text holds
+	// them once for V = 1 and once for V > 1 (see the grouped test above).
+	CHECK(countOf(lit.glsl, "textureGrad(heTexP") == 90u);
+	CHECK(countOf(lit.glsl, "_V == 1) {") == 15u);
+	CHECK(countOf(lit.glsl, "_s0))") == 15u);
+	CHECK(countOf(lit.glsl, "heBombGridV(") == 6u);    // the definition and one call per read set: grass, dirt and the three rock sizes (five seeds)
 	CHECK(lit.glsl.find("heBombGrid(n") == std::string::npos);
-	for (const char* seed : { ", 11u, n", ", 23u, n", ", 37u, n", ", 53u, n" })
+	for (const char* seed : { ", 11u, n", ", 23u, n", ", 37u, n" })
 		CHECK_MESSAGE(lit.glsl.find(seed) != std::string::npos, seed);
+	CHECK(lit.glsl.find(", 53u, n") == std::string::npos);   // the snow's old seed: no bombed snow read left
 	// No new parameter, no new texture slot.
-	CHECK(lit.params.size() == static_cast<size_t>(HE::kAutoLandscapeParamCount));
+	CHECK(lit.params.size() == static_cast<size_t>(HE::autoLandscapeParamCount(HE::autoLandscapeGroup(HE::AutoLandscapeGroupId::Mountains))));   // the Mountains' 15 plus the three rock sizes
 
 	// The negative control: bombing off reads variant 0 of every layer with plain reads.
 	const std::map<std::string, bool> noBomb{ { HE::kAutoLandscapeSwitchBombing, false } };
 	const HE::MatShaderGen off = HE::generateFragment(g, HE::weatherFunctionLoader(), &noBomb);
 	CHECK(off.glsl.find("heBombGridV") == std::string::npos);
 	CHECK(off.glsl.find("textureGrad(heTexP") == std::string::npos);
-	CHECK(off.params.size() == static_cast<size_t>(HE::kAutoLandscapeParamCount) - 1);
+	CHECK(off.params.size() == static_cast<size_t>(HE::autoLandscapeParamCount(HE::autoLandscapeGroup(HE::AutoLandscapeGroupId::Mountains))) - 1);
 }
 
 TEST_CASE("The variant helpers cross-compile for all five backends")
@@ -394,4 +397,65 @@ TEST_CASE("The arrays assemble in that order: variants of a layer next to each o
 	}
 	TextureAsset out;
 	CHECK_FALSE(HE::buildTextureArray(ptrs, out, true));
+}
+
+TEST_CASE("Auto landscape: the Displacement pin is optional, off it is the graph it always was")
+{
+	using namespace HE;
+	const auto displacementLinks = [](const AutoLandscapeGraph& g) {
+		int n = 0;
+		for (const auto& l : g.graph.links)
+			if (l.dstNode == g.output && l.dstPin == kMatOutputDisplacementPin) ++n;
+		return n; };
+
+	const AutoLandscapeGraph plain = buildAutoLandscapeGraph();
+	CHECK(displacementLinks(plain) == 0);
+	CHECK(plain.graph.findNode(plain.output)->tess == MatTessSettings{});
+	// The default argument builds the very same graph as an explicit "no displacement".
+	CHECK(materialGraphToJson(plain.graph) ==
+	      materialGraphToJson(buildAutoLandscapeGraph(AutoLandscapeView::Lit, AutoLandscapeGroupId::Mountains, false, false).graph));
+
+	for (const AutoLandscapeGroupId id : { AutoLandscapeGroupId::Mountains, AutoLandscapeGroupId::Desert })
+	{
+		const AutoLandscapeGraph on = buildAutoLandscapeGraph(AutoLandscapeView::Lit, id, false, true);
+		CHECK(displacementLinks(on) == 1);
+		const MatTessSettings t = on.graph.findNode(on.output)->tess;
+		CHECK(t.maxDisplacement == doctest::Approx(kAutoLandscapeDisplacementMetres * 0.5f));
+		CHECK(t.maxFactor > 1.0f);
+		// Same parameters, so a project's overrides carry over; only the Displacement chain is added.
+		const AutoLandscapeGraph off = buildAutoLandscapeGraph(AutoLandscapeView::Lit, id, false, false);
+		CHECK(on.graph.nodes.size() == off.graph.nodes.size() + 4);
+		CHECK(on.graph.links.size() == off.graph.links.size() + 5);   // Subtract and Multiply take two inputs each, plus the pin
+	}
+	// Only the lit view carries it: the debug views stay untouched.
+	CHECK(displacementLinks(buildAutoLandscapeGraph(AutoLandscapeView::Surface, AutoLandscapeGroupId::Mountains, false, true)) == 0);
+}
+
+TEST_CASE("Auto landscape: every group reads its Rock role by slope (small / medium / large), three sizes, three parameters")
+{
+	using namespace HE;
+	for (const AutoLandscapeGroup& g : kAutoLandscapeGroups)
+	{
+		CAPTURE(std::string(g.name));
+		CHECK(g.rockBySize);
+		CHECK(g.boulderSlope > g.rockSlope);          // the large rock must start above where rock starts
+		const AutoLandscapeGraph built = buildAutoLandscapeGraph(AutoLandscapeView::Lit, g.id);
+		const MatShaderGen gen = generateFragment(built.graph, weatherFunctionLoader());
+		CHECK(gen.params.size() == static_cast<size_t>(autoLandscapeParamCount(g)));
+		CHECK(gen.params.size() <= static_cast<size_t>(kMatMaxParams));
+		std::map<std::string, float> def;
+		for (const MatParamSlot& s : gen.params) def[s.name] = s.value[0];
+		REQUIRE(def.count(kAutoLandscapeParamBoulderSlope) == 1);
+		CHECK(def[kAutoLandscapeParamBoulderSlope] == doctest::Approx(g.boulderSlope));
+		CHECK(def.count(kAutoLandscapeParamBoulderTile) == 1);
+		CHECK(def.count(kAutoLandscapeParamPebbleTile) == 1);
+		// Five bombed read sets (grass or sand aside): dirt + rock x3, grass; each rock size has its own grid seed.
+		for (const char* seed : { ", 37u, n", ", 41u, n", ", 43u, n" })
+			CHECK_MESSAGE(gen.glsl.find(seed) != std::string::npos, seed);
+	}
+	// The mix material reads the same three sizes from the fat arrays (V variants per role).
+	const AutoLandscapeGraph mix = buildAutoLandscapeGraph(AutoLandscapeView::Lit, AutoLandscapeGroupId::Mountains, true);
+	const MatShaderGen gm = generateFragment(mix.graph, weatherFunctionLoader());
+	for (const char* seed : { ", 37u, n", ", 41u, n", ", 43u, n" })
+		CHECK_MESSAGE(gm.glsl.find(seed) != std::string::npos, seed);
 }

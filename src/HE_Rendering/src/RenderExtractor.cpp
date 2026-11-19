@@ -1,5 +1,6 @@
 #include "HorizonRendering/RenderExtractor.h"
 #include <cstdint>
+#include <MaterialGraph/MaterialParamLimits.h> // kMatParamFloats
 #include <cstdlib>
 #include "HorizonRendering/RenderWorld.h"
 #include "HorizonRendering/RenderConstants.h"   // kShadowMapResolution
@@ -80,8 +81,8 @@ void windWaterParams(const MaterialAsset& ma, const MaterialComponent* mc,
 {
 	if (block.empty())
 	{
-		block.assign(64, 0.0f);
-		const size_t n = std::min(ma.shaderParamData.size(), size_t(64));
+		block.assign(HE::kMatParamFloats, 0.0f);
+		const size_t n = std::min(ma.shaderParamData.size(), size_t(HE::kMatParamFloats));
 		std::copy(ma.shaderParamData.begin(), ma.shaderParamData.begin() + n, block.begin());
 	}
 	static const char* const kKnobs[3] = { "WaveA", "WaveB", "WaveC" };
@@ -303,6 +304,13 @@ void windWaterParams(const MaterialAsset& ma, const MaterialComponent* mc,
 		return out;
 	}
 
+	// The material the chosen LOD level carries of its own (the baked far landscape, LODLevel::materialId), or none.
+	HE::UUID lodLevelMaterial(const LODComponent& lc)
+	{
+		if (lc.current == LODComponent::kRefined || lc.current == 0 || lc.current >= lc.levels.size()) return {};
+		return lc.levels[lc.current].materialId;
+	}
+
 	// The LOD0 mesh's section table when the entity's LOD picked ANOTHER asset
 	// to draw this frame — empty when the drawn mesh is LOD0 itself, there is
 	// no LODComponent, or LOD0 is not resident. A copy, for the pointer reason
@@ -422,7 +430,7 @@ void windWaterParams(const MaterialAsset& ma, const MaterialComponent* mc,
 			HE::GiLandscape ls;
 			ls.worldToLocal = glm::inverse(ttf.worldMatrix);
 			ls.invSize      = { 1.0f / std::max(tc.sizeX, 1e-4f), 1.0f / std::max(tc.sizeZ, 1e-4f) };
-			ls.uvTiling     = tc.uvTiling > 0.0f ? tc.uvTiling : 1.0f;
+			ls.uvTiling     = tc.effectiveUvTiling();   // what the chunk meshes carry (TerrainComponent::uvTilingBuilt)
 			ls.weightmapId  = tc.weightmapTextureId;
 			HE::UUID    autoTexId{};   // auto material's albedo array, resolved below
 			std::string autoTexPath;
@@ -606,8 +614,8 @@ void windWaterParams(const MaterialAsset& ma, const MaterialComponent* mc,
 					if (!matComp->paramOverrides.empty() && contentManager)
 						if (const MaterialAsset* ma = contentManager->getMaterial(matId))
 						{
-							std::vector<float> block(64, 0.0f); // 16 vec4 slots
-							const size_t n = std::min(ma->shaderParamData.size(), size_t(64));
+							std::vector<float> block(HE::kMatParamFloats, 0.0f); // kMatMaxParams vec4 slots
+							const size_t n = std::min(ma->shaderParamData.size(), size_t(HE::kMatParamFloats));
 							std::copy(ma->shaderParamData.begin(), ma->shaderParamData.begin() + n, block.begin());
 							for (const auto& ov : matComp->paramOverrides)
 								for (size_t k = 0; k < ma->graphParamNames.size() && k < 16; ++k)
@@ -623,6 +631,17 @@ void windWaterParams(const MaterialAsset& ma, const MaterialComponent* mc,
 					if (windOn && matId == HE::kEngineWaterMaterialId && contentManager)
 						if (const MaterialAsset* ma = contentManager->getMaterial(matId))
 							windWaterParams(*ma, matComp, windDir, windSpd, obj.paramOverride);
+				}
+				// A far LOD level that carries a material of its own (the baked far landscape) is drawn with it,
+				// whatever the entity's material is, while that level is the chosen one.
+				if (lodPool && lodPool->contains(e))
+				{
+					const HE::UUID levelMat = lodLevelMaterial(lodPool->get(e));
+					if (levelMat != HE::UUID{})
+					{
+						matId = levelMat;
+						obj.paramOverride.clear();
+					}
 				}
 				// Terrain chunk → its parent landscape's painted layer weightmap, so a
 				// Landscape Layer Blend material samples the right terrain's paint. Read
@@ -733,6 +752,16 @@ void windWaterParams(const MaterialAsset& ma, const MaterialComponent* mc,
 				// The param block was merged for the whole-mesh material; a whole draw that a slot
 				// override redirected elsewhere draws that material plain.
 				if (matComp && obj.materialAssetId != matComp->materialAssetId) obj.paramOverride.clear();
+				// resolveEntitySlots answers with the ENTITY's material, which drops the level's own one the gather
+				// loop chose: a far level (a mesh that is not LOD0) always comes through here. A level material is a
+				// whole-mesh draw.
+				if (const auto* lodc = reg.try_get<LODComponent>(e))
+					if (const HE::UUID levelMat = lodLevelMaterial(*lodc); levelMat != HE::UUID{})
+					{
+						obj.materialAssetId = levelMat;
+						obj.sections.clear();
+						obj.paramOverride.clear();
+					}
 			}
 
 		// The cooked LOD rows, after their objects are final: every level's object is resolved and kept, the
@@ -1614,6 +1643,21 @@ float fogWaterlineBand(float signedDepth)
 	return 1.0f - t * t * (3.0f - 2.0f * t);
 }
 
+FogVolumeData ExtractFogVolumeData(HorizonWorld& world, bool backendSupportsVolumetricFog,
+                                   bool cameraUnderwater, float aspectWidthOverHeight,
+                                   float shadowDistance)
+{
+	// First Sky entity wins, like the puddleAmount walk above; a world with none
+	// keeps the default (disabled) component, so MakeFogVolumeData sees fogMode 0.
+	EnvironmentComponent ec{};
+	for (auto [ee, e] : world.registry().view<EnvironmentComponent>().each()) { ec = e; break; }
+	// dt = 0: this is a read of the current state, not a tick — must not advance
+	// timeOfDay (see makeWorldPreviewEnvironment's identical reasoning above).
+	const IRenderer::EnvironmentSettings settings = makeEnvironmentSettings(ec, 0.0f);
+	return MakeFogVolumeData(settings, backendSupportsVolumetricFog, cameraUnderwater,
+	                         aspectWidthOverHeight, shadowDistance);
+}
+
 } // namespace HE
 
 // Out-of-line on purpose (see the header): the one definition the DLL exports.
@@ -1766,6 +1810,10 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 	{ HE_PROFILE_SCOPE_N("Extract::transforms"); extractTransforms(world, reg); }
 	extractCamera(reg, out, aspectRatio, editorCam);
 	out.underwaterCamera = HE::queryUnderwaterCamera(world, out.camera.position, renderWaveClock());
+	// Volumetric fog: the Sky entity's settings gated on the backend's capability and the
+	// camera being dry (the underwater pass owns the view under water). Read once per walk.
+	out.fogVolume = HE::ExtractFogVolumeData(world, m_fogCapable, out.underwaterCamera.wet,
+	                                         aspectRatio, m_shadowDistance);
 	// Renderables. Everything that ends up in out.objects must run before the
 	// shadow fit below, which fits its frustum around their union.
 	// The cooked block follows the structure epoch (the same number the frame key holds, so a reused
@@ -1946,7 +1994,7 @@ void RenderExtractor::extractUI(HorizonWorld& world, float vpWidth, float vpHeig
 {
 	out.uiObjects.clear();
 	if (windowId == 0)
-		UISystem::extract(world, vpWidth, vpHeight, out.uiObjects);
+		UISystem::extract(world, vpWidth, vpHeight, out.uiObjects, m_contentManager);
 	// Live widgets (WidgetManager) append after the sorted entity UI, so they
 	// always draw on top of it; internally sorted by (zOrder, layer, depth).
 	world.widgets().extract(windowId, vpWidth, vpHeight, out.uiObjects);

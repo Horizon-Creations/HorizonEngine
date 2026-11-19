@@ -2,6 +2,7 @@
 #include "ImGuiSoftwareRaster.h"
 #include "TestFsUtil.h"
 #include "StreamingDebugView.h"
+#include "ShaderBuildHint.h"
 #include "EditorApplication.h"   // AppContext
 #include "EditorCamera.h"
 #include "EditorSelection.h"
@@ -283,4 +284,33 @@ TEST_CASE("ui shot: the profiler's Streaming tab, a split scene seen from the ed
 	CHECK(after.width == W);
 
 	he_test::removeAllQuiet(proj);
+}
+
+// ── Shaders compiling in the background (Metal) ─────────────────────────────
+// Objects whose material pipeline is still building are not drawn; this card over
+// the Scene window is why. Shot for scripts/he_uishot.py, and the contract that it
+// says nothing once the last build is in.
+TEST_CASE("ui shot: the Compiling shaders hint over the viewport")
+{
+	Harness h;
+	const auto draw = [&](int pending, int total) {
+		ImGui::NewFrame();
+		ImGui::SetNextWindowPos(ImVec2(0, 0));
+		ImGui::SetNextWindowSize(ImVec2(float(W), 300.0f));
+		ImGui::Begin("Scene", nullptr, ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoScrollbar);
+		const ImVec2 p0 = ImGui::GetCursorScreenPos();
+		const ImVec2 p1(p0.x + ImGui::GetContentRegionAvail().x, p0.y + ImGui::GetContentRegionAvail().y);
+		ImGui::GetWindowDrawList()->AddRectFilled(p0, p1, IM_COL32(54, 74, 98, 255));   // a sky-ish stand-in for the render
+		const size_t before = ImGui::GetWindowDrawList()->VtxBuffer.Size;
+		HE::Ed::drawShaderBuildHint(pending, total, p0, p1);
+		const bool drew = ImGui::GetWindowDrawList()->VtxBuffer.Size != before;
+		ImGui::End();
+		ImGui::Render();
+		return std::pair{ drew, he_ui::rasterize(ImGui::GetDrawData(), W, 300) };
+	};
+	const auto building = draw(5, 8);
+	CHECK(building.first);
+	dump(building.second, "shader_build_hint.bmp");
+	CHECK_FALSE(draw(0, 0).first);
+	CHECK_FALSE(draw(0, 8).first);
 }

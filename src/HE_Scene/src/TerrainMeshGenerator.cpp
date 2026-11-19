@@ -576,7 +576,7 @@ StaticMeshAsset generateTerrainChunkMeshTessellated(
     float sizeX, float sizeZ,
     float u0, float v0, float u1, float v1,
     uint32_t vertsPerSide, float uvTiling,
-    const TerrainDisplacementMap& disp)
+    const TerrainDisplacementMap& disp, const TerrainHeightOffset* extra)
 {
     const uint32_t N = std::max(2u, vertsPerSide);
     // Displacement slope is measured over one REFINED cell: that is the finest
@@ -584,13 +584,38 @@ StaticMeshAsset generateTerrainChunkMeshTessellated(
     // cell size, so two refined neighbours agree on their shared edge.
     const float du = (u1 - u0) / static_cast<float>(N - 1);
     const float dv = (v1 - v0) / static_cast<float>(N - 1);
-    const bool displaced = disp.active();
+    const bool mapped  = disp.active();
+    const bool offset  = extra && extra->active();
+    const bool displaced = mapped || offset;
+    // The offset is asked at every vertex and, for the normal's central difference, at its four neighbours: the
+    // same grid points again and again. Evaluate it once per point (and one ring outside the chunk) and answer
+    // from that; a position off the grid still asks the callback.
+    const int G = static_cast<int>(N) + 2;
+    std::vector<float> offsetGrid;
+    if (offset)
+    {
+        offsetGrid.resize(static_cast<size_t>(G) * G);
+        for (int j = -1; j <= static_cast<int>(N); ++j)
+            for (int i = -1; i <= static_cast<int>(N); ++i)
+                offsetGrid[static_cast<size_t>(j + 1) * G + (i + 1)] =
+                    extra->fn(u0 + static_cast<float>(i) * du, v0 + static_cast<float>(j) * dv);
+    }
+    auto offsetAt = [&](float u, float v) -> float
+    {
+        const float fi = (u - u0) / du, fj = (v - v0) / dv;
+        const int   i  = static_cast<int>(std::lround(fi)), j = static_cast<int>(std::lround(fj));
+        if (std::fabs(fi - static_cast<float>(i)) < 1e-3f && std::fabs(fj - static_cast<float>(j)) < 1e-3f &&
+            i >= -1 && j >= -1 && i <= static_cast<int>(N) && j <= static_cast<int>(N))
+            return offsetGrid[static_cast<size_t>(j + 1) * G + (i + 1)];
+        return extra->fn(u, v);
+    };
 
     StaticMeshAsset mesh = buildChunkMesh(
         [&](float u, float v)
         {
             return sampleTerrainHeightSmooth(heights, srcRes, u, v)
-                 + (displaced ? sampleTerrainDisplacement(disp, u, v) : 0.0f);
+                 + (mapped ? sampleTerrainDisplacement(disp, u, v) : 0.0f)
+                 + (offset ? offsetAt(u, v) : 0.0f);
         },
         [&](float u, float v, float& nx, float& ny, float& nz)
         {
@@ -599,19 +624,169 @@ StaticMeshAsset generateTerrainChunkMeshTessellated(
             // Back from the unit normal to the height gradient (n ∝ (-gx, 1, -gz)),
             // add the displacement's, and renormalise.
             const float gx = -nx / ny, gz = -nz / ny;
-            const float dgx = (sampleTerrainDisplacement(disp, u + du, v)
-                             - sampleTerrainDisplacement(disp, u - du, v)) / (sizeX * du * 2.0f);
-            const float dgz = (sampleTerrainDisplacement(disp, u, v + dv)
-                             - sampleTerrainDisplacement(disp, u, v - dv)) / (sizeZ * dv * 2.0f);
+            float dgx = 0.0f, dgz = 0.0f;
+            if (mapped)
+            {
+                dgx += (sampleTerrainDisplacement(disp, u + du, v) - sampleTerrainDisplacement(disp, u - du, v)) / (sizeX * du * 2.0f);
+                dgz += (sampleTerrainDisplacement(disp, u, v + dv) - sampleTerrainDisplacement(disp, u, v - dv)) / (sizeZ * dv * 2.0f);
+            }
+            if (offset)
+            {
+                dgx += (offsetAt(u + du, v) - offsetAt(u - du, v)) / (sizeX * du * 2.0f);
+                dgz += (offsetAt(u, v + dv) - offsetAt(u, v - dv)) / (sizeZ * dv * 2.0f);
+            }
             nx = -(gx + dgx); ny = 1.0f; nz = -(gz + dgz);
             const float len = std::sqrt(nx * nx + ny * ny + nz * nz);
             if (len > 0.0f) { nx /= len; ny /= len; nz /= len; }
         },
         sizeX, sizeZ, u0, v0, u1, v1, N, uvTiling,
-        displaced ? std::fabs(disp.strength) * 0.5f : 0.0f);
+        displaced ? std::max(mapped ? std::fabs(disp.strength) * 0.5f : 0.0f, offset ? extra->maxAbs : 0.0f) : 0.0f);
     mesh.name = "terrain_chunk_tess";
     mesh.path = "mem://terrain_chunk_tess";
     return mesh;
+}
+
+StaticMeshAsset generateTerrainChunkMeshTessellatedCached(
+    const std::vector<float>& heights, uint32_t srcRes,
+    float sizeX, float sizeZ,
+    float u0, float v0, float u1, float v1,
+    uint32_t vertsPerSide, float uvTiling,
+    const TerrainDisplacementMap& disp, const TerrainHeightOffset* extra, TerrainTessCache& cache)
+{
+    const uint32_t N = std::max(2u, vertsPerSide);
+    const bool  mapped = disp.active();
+    const float du = (u1 - u0) / static_cast<float>(N - 1);
+    const float dv = (v1 - v0) / static_cast<float>(N - 1);
+    const size_t grid = static_cast<size_t>(N) * N;
+
+    cache = TerrainTessCache{};
+    cache.N = N; cache.sizeX = sizeX; cache.sizeZ = sizeZ;
+    cache.u0 = u0; cache.v0 = v0; cache.u1 = u1; cache.v1 = v1; cache.du = du; cache.dv = dv;
+    cache.baseY.resize(grid); cache.gx.resize(grid); cache.gz.resize(grid);
+
+    const float halfX = sizeX * 0.5f, halfZ = sizeZ * 0.5f;
+    const float cxLocal = -halfX + ((u0 + u1) * 0.5f) * sizeX;
+    const float czLocal = -halfZ + ((v0 + v1) * 0.5f) * sizeZ;
+    const float uvT = uvTiling > 0.0f ? uvTiling : 1.0f;
+    const float d = 1.0f / static_cast<float>(srcRes - 1);
+
+    StaticMeshAsset mesh;
+    mesh.type = HE::AssetType::StaticMesh;
+    mesh.vertices.assign((grid + static_cast<size_t>(N) * 4) * 3, 0.0f);   // grid + skirt, filled below
+    mesh.normals .assign((grid + static_cast<size_t>(N) * 4) * 3, 0.0f);
+    mesh.uvs     .reserve((grid + static_cast<size_t>(N) * 4) * 2);
+    mesh.vertices.resize(grid * 3);
+    mesh.normals .resize(grid * 3);
+
+    float hmin = 1e30f, hmax = -1e30f;
+    for (uint32_t j = 0; j < N; ++j)
+        for (uint32_t i = 0; i < N; ++i)
+        {
+            const float u  = u0 + (u1 - u0) * static_cast<float>(i) / static_cast<float>(N - 1);
+            const float v  = v0 + (v1 - v0) * static_cast<float>(j) / static_cast<float>(N - 1);
+            const size_t gi = static_cast<size_t>(j) * N + i;
+            const float by = sampleTerrainHeightSmooth(heights, srcRes, u, v) + (mapped ? sampleTerrainDisplacement(disp, u, v) : 0.0f);
+            cache.baseY[gi] = by;
+            hmin = std::min(hmin, by); hmax = std::max(hmax, by);
+            // The slope, as sampleFieldNormal measures it (source-cell spacing: every chunk agrees on a shared
+            // position), plus the displacement map's, measured over one refined cell.
+            const float gxs = (sampleField(heights, srcRes, u + d, v) - sampleField(heights, srcRes, u - d, v)) / (sizeX * d * 2.0f);
+            const float gzs = (sampleField(heights, srcRes, u, v + d) - sampleField(heights, srcRes, u, v - d)) / (sizeZ * d * 2.0f);
+            float dgx = 0.0f, dgz = 0.0f;
+            if (mapped && du > 0.0f && dv > 0.0f)
+            {
+                dgx = (sampleTerrainDisplacement(disp, u + du, v) - sampleTerrainDisplacement(disp, u - du, v)) / (sizeX * du * 2.0f);
+                dgz = (sampleTerrainDisplacement(disp, u, v + dv) - sampleTerrainDisplacement(disp, u, v - dv)) / (sizeZ * dv * 2.0f);
+            }
+            cache.gx[gi] = gxs + dgx;
+            cache.gz[gi] = gzs + dgz;
+            mesh.vertices[gi * 3 + 0] = (-halfX + u * sizeX) - cxLocal;
+            mesh.vertices[gi * 3 + 2] = (-halfZ + v * sizeZ) - czLocal;
+            mesh.uvs.push_back(u * uvT);
+            mesh.uvs.push_back(v * uvT);
+        }
+
+    const float extraSkirt = std::max(mapped ? std::fabs(disp.strength) * 0.5f : 0.0f, (extra && extra->active()) ? extra->maxAbs : 0.0f);
+    // The skirt's depth, as finishChunkMesh derives it, from the heights WITHOUT the offset (the offset's reach is
+    // in extraSkirt): it must not move when a track does, or every skirt vertex would have to.
+    const float cellWorld  = std::max(sizeX * (u1 - u0), sizeZ * (v1 - v0)) / static_cast<float>(N - 1);
+    const float heightSpan = (hmax > hmin) ? (hmax - hmin) : 0.0f;
+    cache.skirtDepth = std::max(cellWorld * 0.5f, heightSpan * 0.25f) + 0.01f + extraSkirt;
+
+    // Heights and normals for the whole grid; then the topology and the skirt (copied from the ring).
+    applyTerrainHeightOffset(mesh, cache, extra, 0, 0, static_cast<int>(N) - 1, static_cast<int>(N) - 1);
+    finishChunkMesh(mesh, N, sizeX, sizeZ, u0, v0, u1, v1, hmin, hmax, extraSkirt);
+    mesh.name = "terrain_chunk_tess";
+    mesh.path = "mem://terrain_chunk_tess";
+    return mesh;
+}
+
+bool applyTerrainHeightOffset(StaticMeshAsset& mesh, const TerrainTessCache& cache, const TerrainHeightOffset* extra,
+                              int i0, int j0, int i1, int j1)
+{
+    if (!cache.valid()) return false;
+    const int N = static_cast<int>(cache.N);
+    i0 = std::max(i0, 0); j0 = std::max(j0, 0); i1 = std::min(i1, N - 1); j1 = std::min(j1, N - 1);
+    if (i1 < i0 || j1 < j0) return false;
+    const bool offset = extra && extra->active();
+
+    // The offset at the region and one ring around it (the normal's central difference reads the neighbours),
+    // asked once per point.
+    const int W = i1 - i0 + 3, H = j1 - j0 + 3;
+    std::vector<float> off;
+    if (offset)
+    {
+        off.resize(static_cast<size_t>(W) * H);
+        for (int j = 0; j < H; ++j)
+            for (int i = 0; i < W; ++i)
+                off[static_cast<size_t>(j) * W + i] =
+                    extra->fn(cache.u0 + static_cast<float>(i0 - 1 + i) * cache.du, cache.v0 + static_cast<float>(j0 - 1 + j) * cache.dv);
+    }
+    auto at = [&](int i, int j) { return off[static_cast<size_t>(j - j0 + 1) * W + (i - i0 + 1)]; };
+
+    const size_t grid = static_cast<size_t>(N) * N;
+    const bool   haveSkirt = mesh.vertices.size() >= (grid + static_cast<size_t>(4) * (N - 1)) * 3;
+    bool ringChanged = false;
+    for (int j = j0; j <= j1; ++j)
+        for (int i = i0; i <= i1; ++i)
+        {
+            const size_t gi = static_cast<size_t>(j) * N + i;
+            float dgx = 0.0f, dgz = 0.0f, y = cache.baseY[gi];
+            if (offset)
+            {
+                y += at(i, j);
+                dgx = (at(i + 1, j) - at(i - 1, j)) / (cache.sizeX * cache.du * 2.0f);
+                dgz = (at(i, j + 1) - at(i, j - 1)) / (cache.sizeZ * cache.dv * 2.0f);
+            }
+            float nx = -(cache.gx[gi] + dgx), ny = 1.0f, nz = -(cache.gz[gi] + dgz);
+            const float len = std::sqrt(nx * nx + ny * ny + nz * nz);
+            if (len > 0.0f) { nx /= len; ny /= len; nz /= len; }
+            if (i == 0 || j == 0 || i == N - 1 || j == N - 1)
+                ringChanged = ringChanged || mesh.vertices[gi * 3 + 1] != y || mesh.normals[gi * 3 + 0] != nx
+                           || mesh.normals[gi * 3 + 1] != ny || mesh.normals[gi * 3 + 2] != nz;
+            mesh.vertices[gi * 3 + 1] = y;
+            mesh.normals[gi * 3 + 0] = nx; mesh.normals[gi * 3 + 1] = ny; mesh.normals[gi * 3 + 2] = nz;
+        }
+    if (!haveSkirt) return ringChanged;   // the grid alone (the build calls this before the skirt exists)
+
+    // The skirt vertices under the ring vertices inside the region (finishChunkMesh's ring order: bottom, right,
+    // top reversed, left reversed): same normal, y a skirt depth below.
+    size_t k = 0;
+    auto touch = [&](int i, int j)
+    {
+        if (i >= i0 && i <= i1 && j >= j0 && j <= j1)
+        {
+            const size_t gi = static_cast<size_t>(j) * N + i, si = grid + k;
+            mesh.vertices[si * 3 + 1] = mesh.vertices[gi * 3 + 1] - cache.skirtDepth;
+            for (int c = 0; c < 3; ++c) mesh.normals[si * 3 + c] = mesh.normals[gi * 3 + c];
+        }
+        ++k;
+    };
+    for (int i = 0; i < N; ++i)           touch(i, 0);
+    for (int j = 1; j < N; ++j)           touch(N - 1, j);
+    for (int i = N - 2; i >= 0; --i)      touch(i, N - 1);
+    for (int j = N - 2; j >= 1; --j)      touch(0, j);
+    return ringChanged;
 }
 
 // ─── Seam stitching ─────────────────────────────────────────────────────────

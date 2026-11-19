@@ -7,6 +7,7 @@
 #include "../src/HE_Editor/StructuralSync.h"
 
 #include <ContentManager/HAsset.h>
+#include <Types/UUID.h>
 
 #include <HorizonCode/HorizonCode.h>
 #include <Platform/PathSafety.h>
@@ -4218,4 +4219,205 @@ TEST_CASE("Structure gate: pending retries run every frame, the fallback once a 
     // A reset (session ended, world replaced) runs at once.
     gate.reset();
     CHECK(gate.due(world.structureEpoch(), false, 1001));
+}
+
+// ─── Assets are addressed by UUID ────────────────────────────────────────────
+// A key names an asset by its path, and a path is not the asset. With the identity
+// resolvers set — the editor wires them to the file's own header — the lock subject
+// is derived from the UUID, so a rename moves nothing a lock or a frame is filed
+// under, and a peer's frame is resolved to the asset's CURRENT key before its own
+// path is looked at.
+
+namespace {
+// What one machine's ContentManager knows: which key an asset has right now. Two
+// machines have one each, and a rename happens on each at its own time.
+struct FakeRegistry
+{
+    std::map<std::string, HE::UUID> uuidOf;
+
+    void rename(const std::string& from, const std::string& to)
+    {
+        const auto it = uuidOf.find(from);
+        REQUIRE(it != uuidOf.end());
+        const HE::UUID id = it->second;
+        uuidOf.erase(it);
+        uuidOf[to] = id;
+    }
+    void installOn(CollabController& c)
+    {
+        c.setAssetIdentityResolvers(
+            [this](const std::string& key) {
+                const auto it = uuidOf.find(key);
+                return it == uuidOf.end() ? HE::UUID{} : it->second;
+            },
+            [this](std::uint64_t subject) {
+                for (const auto& [key, id] : uuidOf)
+                    if (HE::Net::assetUuidSubject(id.hi, id.lo) == subject) return key;
+                return std::string();
+            });
+    }
+};
+
+struct UuidSession
+{
+    HorizonWorld    hostWorld, clientWorld;
+    CollabController host, client;
+    FakeRegistry    hostReg, clientReg;
+    HE::UUID        id = HE::UUID::generate();
+    std::string     a = "Content/Door.hasset";
+    std::string     b = "Content/Doors/Door.hasset";
+
+    UuidSession()
+    {
+        hostWorld.createEntity("Cube");
+        host.setWorld(&hostWorld);
+        client.setWorld(&clientWorld);
+        client.onWorldReplaced([this] { client.seedNetIds(); });
+        hostReg.uuidOf[a]   = id;
+        clientReg.uuidOf[a] = id;
+        hostReg.installOn(host);
+        clientReg.installOn(client);
+        REQUIRE(host.startHosting(0, "Anna"));
+        REQUIRE(client.joinSession("127.0.0.1", host.port(), host.joinCode(), "Bob"));
+        REQUIRE(pumpUntil(host, client, [&] {
+            return client.status() == CollabController::Status::Joined;
+        }));
+    }
+    ~UuidSession() { client.leave(); host.leave(); }
+
+    // The host claims `key`, after the host has said it is free.
+    void hostClaims(const std::string& key)
+    {
+        using EditState = CollabController::AssetEditState;
+        host.beginAssetEditSession(key);
+        client.beginAssetEditSession(key);
+        REQUIRE(pumpUntil(host, client, [&] {
+            return host.assetEditState(key) == EditState::Editable &&
+                   client.assetEditState(key) == EditState::Editable;
+        }));
+        CHECK(host.beginAssetEdit(key));
+        REQUIRE(pumpUntil(host, client, [&] {
+            return host.ownsAssetLock(key) && client.assetEditState(key) == EditState::HeldByOther;
+        }));
+    }
+};
+} // namespace
+
+TEST_CASE("Asset identity: the lock subject comes from the UUID, so two keys for one asset are one lock")
+{
+    UuidSession s;
+    CHECK(s.host.subjectFor(s.a) == HE::Net::assetUuidSubject(s.id.hi, s.id.lo));
+    // Without an identity the old, path-derived subject stands.
+    CHECK(s.host.subjectFor("Content/Unknown.hasset") ==
+          CollabController::assetSubject("Content/Unknown.hasset"));
+
+    s.hostReg.rename(s.a, s.b);
+    CHECK(s.host.subjectFor(s.b) == HE::Net::assetUuidSubject(s.id.hi, s.id.lo));
+}
+
+TEST_CASE("Asset identity: a lock survives a rename without anything being re-claimed")
+{
+    UuidSession s;
+    s.hostClaims(s.a);
+
+    // The file is renamed on both machines. Nobody released or re-requested anything.
+    s.hostReg.rename(s.a, s.b);
+    s.clientReg.rename(s.a, s.b);
+
+    using EditState = CollabController::AssetEditState;
+    CHECK(s.host.ownsAssetLock(s.b));                              // still the holder's
+    CHECK(s.client.assetEditState(s.b) == EditState::HeldByOther); // still the others' wall
+    CHECK_FALSE(s.client.beginAssetEdit(s.b));                     // and the second claim is still refused
+}
+
+TEST_CASE("Asset identity: a path-addressed asset keeps the old behaviour when it is renamed")
+{
+    // An asset with no UUID (a C++ source, a legacy file): its subject IS its path, so a
+    // rename is a different subject. Nothing regresses, nothing is promised.
+    HorizonWorld hostWorld;
+    CollabController host;
+    host.setWorld(&hostWorld);
+    FakeRegistry empty;
+    empty.installOn(host);
+    CHECK(host.subjectFor("Source/Player.cpp") != host.subjectFor("Source/Hero.cpp"));
+}
+
+TEST_CASE("Asset identity: a peer's delta lands on the asset's current key here, not the sender's")
+{
+    UuidSession s;
+    using EditState = CollabController::AssetEditState;
+
+    // The client edits Door.hasset under the key it knows…
+    s.client.beginAssetEditSession(s.a);
+    REQUIRE(pumpUntil(s.host, s.client, [&] { return s.client.assetEditState(s.a) == EditState::Editable; }));
+    CHECK(s.client.beginAssetEdit(s.a));
+    REQUIRE(pumpUntil(s.host, s.client, [&] { return s.client.ownsAssetLock(s.a); }));
+
+    // …while the host already moved the file (its rename arrived first).
+    s.hostReg.rename(s.a, s.b);
+
+    std::vector<std::string> arrivedAt;
+    s.host.onRemoteDocDeltas([&](const std::string& path,
+                                 const std::vector<HE::Net::CollabSession::DocDelta>&) {
+        arrivedAt.push_back(path);
+    });
+    HE::Net::CollabSession::DocDelta d;
+    d.json = "{}";
+    REQUIRE(s.client.publishDocDeltas(s.a, { d }));
+    REQUIRE(pumpUntil(s.host, s.client, [&] { return !arrivedAt.empty(); }));
+
+    CHECK(arrivedAt[0] == s.b);   // the host's own key for it, not the sender's stale path
+}
+
+TEST_CASE("Asset identity: a frame about an asset this machine does not have keeps its own path")
+{
+    UuidSession s;
+    s.hostReg.uuidOf.clear();   // the host has never heard of this asset
+
+    std::vector<std::string> arrivedAt;
+    s.host.onRemoteDocDeltas([&](const std::string& path,
+                                 const std::vector<HE::Net::CollabSession::DocDelta>&) {
+        arrivedAt.push_back(path);
+    });
+
+    using EditState = CollabController::AssetEditState;
+    s.client.beginAssetEditSession(s.a);
+    REQUIRE(pumpUntil(s.host, s.client, [&] { return s.client.assetEditState(s.a) == EditState::Editable; }));
+    CHECK(s.client.beginAssetEdit(s.a));
+    REQUIRE(pumpUntil(s.host, s.client, [&] { return s.client.ownsAssetLock(s.a); }));
+
+    HE::Net::CollabSession::DocDelta d;
+    d.json = "{}";
+    REQUIRE(s.client.publishDocDeltas(s.a, { d }));
+    REQUIRE(pumpUntil(s.host, s.client, [&] { return !arrivedAt.empty(); }));
+    CHECK(arrivedAt[0] == s.a);
+}
+
+TEST_CASE("Asset identity: an approved rename moves the bookkeeping that holds the asset by key")
+{
+    UuidSession s;
+    s.hostClaims(s.a);
+    REQUIRE(s.host.heldAssetLocks().size() == 1);
+    CHECK(s.host.heldAssetLocks()[0] == s.a);
+
+    // What the editor's handler does to the registry when the file moves.
+    s.host.onRemoteAssetOp([&](HE::Net::CollabSession::AssetOp op, const std::string& from,
+                               const std::string& to, bool) {
+        if (op == HE::Net::CollabSession::AssetOp::Rename) s.hostReg.rename(from, to);
+    });
+    s.client.onRemoteAssetOp([&](HE::Net::CollabSession::AssetOp op, const std::string& from,
+                                 const std::string& to, bool) {
+        if (op == HE::Net::CollabSession::AssetOp::Rename) s.clientReg.rename(from, to);
+    });
+
+    CHECK(s.host.requestAssetRename(s.a, s.b));
+    REQUIRE(pumpUntil(s.host, s.client, [&] { return s.hostReg.uuidOf.count(s.b) == 1 &&
+                                                     s.clientReg.uuidOf.count(s.b) == 1; }));
+
+    // The sweeper in the editor releases whatever is held under a key that has no tab
+    // any more. If this still said the old key, the lock would be dropped under the
+    // tab that is open at the new one.
+    REQUIRE(s.host.heldAssetLocks().size() == 1);
+    CHECK(s.host.heldAssetLocks()[0] == s.b);
+    CHECK(s.host.ownsAssetLock(s.b));
 }

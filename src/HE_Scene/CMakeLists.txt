@@ -30,6 +30,9 @@ add_library(HorizonScene SHARED
     src/Components/TransformComponent.cpp
     src/TerrainMeshGenerator.cpp
     src/TerrainSystem.cpp
+    src/LandscapeHlodBaker.cpp
+    src/LandscapeHlod.cpp
+    src/TrailSystem.cpp
     src/TerrainPaint.cpp
     src/TerrainSculpt.cpp
     src/WaterField.cpp

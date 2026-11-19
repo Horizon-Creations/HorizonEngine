@@ -3355,6 +3355,48 @@ TEST_CASE("A mesh without a section table saves byte-identically to before")
 	CHECK(again->sections[0].materialPath == "mat.hasset");
 }
 
+TEST_CASE("Mesh bake switches: absent chunk = defaults, changed switches round-trip")
+{
+	// A mesh nobody touched saves without MBKE (byte-identical to before) and
+	// loads with the defaults; a changed switch writes the chunk and comes back.
+	TempContentDir dir("he_test_mesh_bake_switches");
+	ContentManager cm(dir.path.string());
+
+	StaticMeshAsset mesh;
+	mesh.type         = HE::AssetType::StaticMesh;
+	mesh.name         = "tri";
+	mesh.path         = "tri.hasset";
+	mesh.vertices     = { 0,0,0,  1,0,0,  0,1,0 };
+	mesh.indices      = { 0, 1, 2 };
+	mesh.materialPath = "mat.hasset";
+	REQUIRE(cm.saveAsset(mesh));
+	CHECK_FALSE(hasChunk(dir.path / "tri.hasset", HAsset::CHUNK_MBKE));
+	const StaticMeshAsset* plain = cm.getStaticMesh(cm.loadAsset("tri.hasset"));
+	REQUIRE(plain != nullptr);
+	CHECK(plain->bake == MeshBakeSettings());
+	CHECK_FALSE(plain->bake.vertexColors);
+	CHECK(plain->bake.mergeTextures);
+	CHECK(plain->bake.uvTexture);
+
+	StaticMeshAsset changed = mesh;
+	changed.path = "tri2.hasset";
+	changed.bake.vertexColors  = true;
+	changed.bake.mergeTextures = false;
+	REQUIRE(cm.saveAsset(changed));
+	CHECK(hasChunk(dir.path / "tri2.hasset", HAsset::CHUNK_MBKE));
+	const StaticMeshAsset* back = cm.getStaticMesh(cm.loadAsset("tri2.hasset"));
+	REQUIRE(back != nullptr);
+	CHECK(back->bake.vertexColors);
+	CHECK_FALSE(back->bake.mergeTextures);
+	CHECK(back->bake.uvTexture);
+
+	// Bits a newer build might add are ignored, the known ones still read.
+	MeshBakeSettings allOn;
+	allOn.vertexColors = true;
+	CHECK(MeshBakeSettings::fromByte(0xFF) == allOn);
+	CHECK(MeshBakeSettings::fromByte(0).toByte() == 0);
+}
+
 TEST_CASE("A multi-section mesh round-trips through save and load")
 {
 	TempContentDir dir("he_test_sections_roundtrip");

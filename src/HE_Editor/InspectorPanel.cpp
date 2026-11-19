@@ -8,6 +8,8 @@
 #include "EditorMultiEdit.h"             // one edit, every selected entity
 #include "HcEditorUtil.h"                // HorizonCode class listing (Script slot)
 #include "TerrainTools.h"                // the Terrain section's Heightmap block
+#include "AutoLodDialog.h"               // Generate LODs on a foliage layer and a LOD component
+#include "NotificationStore.h"          // the result line of Bake Impostor
 #include <HorizonScene/HorizonScene.h>
 #include <HorizonScene/CookedStatic.h>   // an entity under edit leaves the cooked block
 #include <HorizonScene/EntityActive.h>   // the "Active" switch at the top of the panel
@@ -395,6 +397,63 @@ void renderMultiSelection(AppContext& ctx, HorizonWorld& world, Entity primary)
 		if (InspectorPanel::addComponentMenu(world, targets, ctx.undoSys)) s_multi.stale = true;
 		ImGui::EndPopup();
 	}
+}
+#endif
+
+#ifdef HE_IMGUI_ENABLED
+// A Font asset path for UITextComponent, combo-picked from the project's Font
+// assets — the same list+selectable shape as the widget Font slot
+// (UIEditorPanel.cpp's local assetSlot, for the "FontSize" elements). The
+// field itself is a path string, like UIElement::font, not a UUID: step 2
+// resolves it at runtime the same way widgets do (see
+// docs/font-asset-survey-2026-10-29.md); whether it becomes a UUID is step 3's
+// serialization decision, not this slot's.
+static bool fontPathSlot(AppContext& ctx, const char* label, std::string& path, const char* idSuffix)
+{
+	const bool inlineSlot = Row::labelCell(label);
+	if (!inlineSlot)
+	{
+		ImGui::TextUnformatted(label);
+		ImGui::SameLine();
+	}
+	const std::string shown = path.empty()
+		? "(none)" : std::filesystem::path(path).stem().string();
+	ImGui::SetNextItemWidth(inlineSlot ? ImGui::GetContentRegionAvail().x : -FLT_MIN);
+	bool changed = false;
+	if (ImGui::BeginCombo((std::string("##fontslot_") + idSuffix).c_str(), shown.c_str()))
+	{
+		if (ImGui::Selectable("(none)", path.empty()) && !path.empty())
+		{
+			path.clear();
+			changed = true;
+		}
+		for (const auto& a : HcEditorUtil::listAssets(ctx.contentManager, HE::AssetType::Font))
+		{
+			if (ImGui::Selectable((a.label + "##" + a.path).c_str(), path == a.path))
+			{
+				path    = a.path;
+				changed = true;
+			}
+		}
+		ImGui::EndCombo();
+	}
+	// Same reasoning as the widget Font slot's tooltip: the combo shows only the
+	// file stem, and the content-relative path is what the hover is for.
+	if (ImGui::IsItemHovered() && !path.empty())
+	{
+		ImGui::BeginTooltip();
+		{
+			EditorWidgets::WrapText wrap(ImGui::GetFontSize() * 35.0f);
+			ImGui::TextUnformatted(path.c_str());
+		}
+		ImGui::EndTooltip();
+	}
+	if (const EditorWidgets::AssetDrop drop = EditorWidgets::acceptAssetDrop(ctx, HE::AssetType::Font, "font"))
+	{
+		path    = drop.relPath;
+		changed = true;
+	}
+	return changed;
 }
 #endif
 
@@ -1188,6 +1247,12 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 				const char* cloudModes[] = { "Sky-dome (default)", "3D volumetric (parallax)" };
 				int cmode = (env->cloudMode == 1) ? 1 : 0;
 				if (Row::combo("Render Mode", &cmode, cloudModes, 2)) { env->cloudMode = cmode; trackEdit(); }
+				if (env->cloudMode != 1)
+				{
+					Row::sliderFloat("Dome Cloud Height", &env->cloudDomeHeight, 0.25f, 3.0f, "%.2fx"); trackEdit();
+					hint("How high the dome clouds look. 1 is the classic look; raise it and they "
+					     "sit further up, smaller and slower against their size; lower it and they come close.");
+				}
 				if (env->cloudMode == 1)
 				{
 					Row::sliderFloat("Cloud Altitude", &env->cloudHeight, 20.0f, 2000.0f, "%.0f m"); trackEdit();
@@ -1202,6 +1267,12 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 					     "sunlit tops over blue-grey bellies and a silver lining.");
 					if (env->cloudStyle == 1)
 					{
+						const char* cloudTypes[] = { "Mixed cumulus", "Flat cumulus", "Towering cumulus",
+						                             "Stratocumulus", "Cumulonimbus" };
+						int ctype = std::clamp(env->cloudType, 0, 4);
+						if (Row::combo("Cloud Type", &ctype, cloudTypes, 5)) { env->cloudType = ctype; trackEdit(); }
+						hint("The kind of cloud: cell size and height profile. Coverage still sets how much "
+						     "sky they fill.");
 						if (EditorWidgets::checkbox("Clouds Shade Each Other", &env->cloudInterShadows)) trackEdit();
 						hint("Extends the sun march so tall towers darken clouds behind them. "
 						     "Slightly more expensive (scales with Quality).");
@@ -1269,6 +1340,72 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			Row::sliderFloat("Ground Hugging", &env->fogHeightFalloff, 0.0f, 1.0f); trackEdit();
 			ImGui::EndDisabled();
 			hint("Distant objects blend into the horizon (warm at sunset).");
+
+			// Volumetric fog (Thema 225): a froxel-grid volume with light shafts and
+			// shadows instead of the flat per-pixel blend above, past this distance
+			// the analytic formula still takes over. Greyed out on a backend that
+			// has not implemented it yet (IRenderer::Capabilities::supportsVolumetricFog)
+			// — the mode stays whatever the scene authored, it just renders with the
+			// analytic fallback until the backend catches up.
+			const bool fogVolSupported = ctx.renderer && ctx.renderer->GetCapabilities().supportsVolumetricFog;
+			ImGui::BeginDisabled(!fogVolSupported);
+			{
+				const char* fogModes[] = { "Analytic (today)", "Volumetric" };
+				int fogMode = (env->fogMode == 1) ? 1 : 0;
+				if (Row::combo("Mode##fogvol", &fogMode, fogModes, 2)) { env->fogMode = fogMode; trackEdit(); }
+			}
+			ImGui::EndDisabled();
+			if (!fogVolSupported)
+				hint("This backend does not render volumetric fog yet; a scene with it "
+				     "picked still loads and plays, with the Density fog above standing in.");
+			else
+				hint("Froxel-grid fog with sun/light shafts and in-volume shadow, instead "
+				     "of the flat per-pixel blend. Past Volume Distance the Density fog "
+				     "above continues seamlessly.");
+
+			ImGui::BeginDisabled(!fogVolSupported || env->fogMode != 1);
+			{
+				const char* fogQ[] = { "Low", "Medium", "High" };
+				int fogQuality = std::clamp(env->fogQuality, 0, 2);
+				if (Row::combo("Quality##fogvol", &fogQuality, fogQ, 3)) { env->fogQuality = fogQuality; trackEdit(); }
+				hint("Froxel grid size. Higher resolves finer shafts and bank edges; costs more GPU time.");
+
+				Row::sliderFloat("Volume Distance", &env->fogVolumeDistance, 16.0f, 512.0f, "%.0f m"); trackEdit();
+				hint("How far the volume reaches before the Density fog above takes over. "
+				     "Clamped to the directional shadow distance, so the volume is never "
+				     "without a shadow map to sample.");
+
+				Row::colorEdit3("Albedo##fogvol", &env->fogAlbedo.x, ImGuiColorEditFlags_NoInputs); trackEdit();
+				hint("Scattering tint. White scatters the sky/sun colour unchanged; a tint "
+				     "colours the fog itself, like dust or smoke.");
+
+				Row::sliderFloat("Anisotropy", &env->fogAnisotropy, -0.9f, 0.9f, "%.2f"); trackEdit();
+				hint("Henyey-Greenstein phase: negative scatters back toward the camera, "
+				     "positive forms a bright shaft looking toward the sun.");
+
+				Row::sliderFloat("Noise Amount", &env->fogNoiseAmount, 0.0f, 1.0f); trackEdit();
+				hint("0 keeps the pure height formula; higher breaks it up into drifting "
+				     "wisps and clearer patches.");
+				ImGui::BeginDisabled(env->fogNoiseAmount <= 0.0f);
+				Row::sliderFloat("Noise Scale", &env->fogNoiseScale, 5.0f, 200.0f, "%.0f m"); trackEdit();
+				ImGui::EndDisabled();
+				hint("World size of one noise period. Small = fine wisps, large = broad "
+				     "patches of thicker/thinner fog.");
+
+				Row::sliderFloat("Bank Density", &env->fogBankDensity, 0.0f, 1.0f, "%.3f"); trackEdit();
+				hint("A ground-hugging fog bank, on top of the height fog above — valley "
+				     "mist or a lake-bed haze with its own edges.");
+				ImGui::BeginDisabled(env->fogBankDensity <= 0.0f);
+				Row::dragFloat("Bank Base", &env->fogBankBaseY, 0.1f, -1000.0f, 1000.0f, "%.1f m"); trackEdit();
+				hint("World Y of the bank's lower edge.");
+				Row::dragFloat("Bank Thickness", &env->fogBankThickness, 0.1f, 0.1f, 200.0f, "%.1f m"); trackEdit();
+				hint("How tall the bank stands; its top edge is soft and noise-eroded, not a hard line.");
+				ImGui::EndDisabled();
+
+				Row::sliderFloat("Local Light Scatter", &env->fogLocalLightScatter, 0.0f, 2.0f, "%.2f"); trackEdit();
+				hint("How much point/spot lights scatter in the volume, on top of the sun/moon. 0 = off.");
+			}
+			ImGui::EndDisabled();
 
 			ImGui::TreePop(); } // end Atmospheric Fog
 
@@ -3623,14 +3760,24 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			// settings that suit them: mesh, detail levels, density, shadows and the
 			// placement rules. Everything stays editable below; applying overwrites it.
 			{
+				// The kinds are the texture group's (Thema 233): the group of the entity's landscape
+				// material, Mountains (the six of Thema 180) when it has none. The combo index is a
+				// place in that list, so it is clamped every frame, never kept across a group switch.
+				const auto* groupMat = registry.try_get<MaterialComponent>(entity);
+				const HE::AutoLandscapeGroupId group = groupMat ? HE::layerMeshGroupOfMaterial(groupMat->materialAssetId)
+				                                                : HE::AutoLandscapeGroupId::Mountains;
+				const HE::LayerMeshSet kindSet = HE::layerMeshKindsOfGroup(group);
+				std::string kindItems;
+				for (int i = 0; i < kindSet.count; ++i) { kindItems += HE::layerMeshKindName(kindSet.kinds[i]); kindItems.push_back('\0'); }
 				static int presetKind = 0;
-				Row::comboZ("Mesh Preset##fol", &presetKind, "Grass Tuft\0Pebble\0Rock A\0Rock B\0Rock C\0Snow Drift\0");
+				presetKind = std::clamp(presetKind, 0, kindSet.count - 1);
+				Row::comboZ("Mesh Preset##fol", &presetKind, kindItems.c_str());
 				ImGui::SameLine();
 				if (EditorWidgets::smallButton("Apply Preset##fol"))
 				{
 					if (undo) undo->snapshotNow("Apply Foliage Mesh Preset");
-					const HE::LayerMeshKind kind = static_cast<HE::LayerMeshKind>(std::clamp(presetKind, 0, HE::kLayerMeshKindCount - 1));
-					HE::applyLayerMeshPreset(*fol, kind);
+					const HE::LayerMeshKind kind = kindSet.kinds[presetKind];
+					HE::applyLayerMeshPreset(*fol, kind, group);
 					// The meshes are engine FILES: nothing loads them on its own, and a mesh
 					// that is not resident draws as the fallback cube without a word (see the
 					// cross card below). By UUID once the engine folder is scanned, else by path.
@@ -3690,9 +3837,12 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			if (ImGui::IsItemDeactivatedAfterEdit()) { fol->dirty = true; trackEdit(); }
 			{
 				static const char* const kWeightItems[] = { "Off", "Layer 0", "Layer 1", "Layer 2", "Layer 3",
-				                                            "Layer 4", "Layer 5", "Layer 6", "Layer 7" };
+				                                            "Layer 4", "Layer 5", "Layer 6", "Layer 7",
+				                                            "Layer 8", "Layer 9", "Layer 10", "Layer 11" };
+				static_assert(sizeof(kWeightItems) / sizeof(kWeightItems[0]) == kTerrainMaxLayers + 1,
+				              "Off plus one entry per paint layer");
 				int wl = fol->weightLayer + 1;
-				if (Row::combo("Paint Layer##fol", &wl, kWeightItems, 9))
+				if (Row::combo("Paint Layer##fol", &wl, kWeightItems, kTerrainMaxLayers + 1))
 				{
 					if (undo) undo->snapshotNow("Foliage Paint Layer");
 					fol->weightLayer = wl - 1;
@@ -3768,6 +3918,38 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			}
 			ImGui::EndDisabled();
 			EditorWidgets::helpForLabel("Add Level##fol");
+			// The chain from the layer's mesh: Name_LOD1.. as assets, and the levels
+			// above filled in with distances worked out from their pixel error.
+			ImGui::SameLine();
+			ImGui::BeginDisabled(fol->meshAssetId == HE::UUID{});
+			if (EditorWidgets::smallButton("Generate LODs##fol"))
+			{
+				AutoLodDialog::Request req;
+				req.kind   = AutoLodDialog::Kind::FoliageLayer;
+				req.mesh   = fol->meshAssetId;
+				req.entity = entity;
+				req.layer  = static_cast<int>(folc->activeIndex());
+				AutoLodDialog::open(req);
+			}
+			ImGui::EndDisabled();
+			EditorWidgets::helpForLabel("Generate LODs##fol");
+			// A picture of the plant on a cross card as the far level (Impostor.h).
+			ImGui::SameLine();
+			ImGui::BeginDisabled(fol->meshAssetId == HE::UUID{});
+			if (EditorWidgets::smallButton("Bake Impostor##fol"))
+			{
+				AutoLodDialog::Request req;
+				req.kind   = AutoLodDialog::Kind::FoliageLayer;
+				req.mesh   = fol->meshAssetId;
+				req.entity = entity;
+				req.layer  = static_cast<int>(folc->activeIndex());
+				const AutoLodDialog::Outcome r = AutoLodDialog::bakeImpostor(ctx, req, AutoLodDialog::options());
+				HE::Ed::notify(r.ok ? HE::Ed::NoteLevel::Info : HE::Ed::NoteLevel::Important,
+				               r.ok ? "Impostor baked" : "Impostor not baked", r.message);
+				if (r.ok) trackEdit();
+			}
+			ImGui::EndDisabled();
+			EditorWidgets::helpForLabel("Bake Impostor##fol");
 			if (!fol->lods.empty())
 			{
 				Row::dragFloat("Level Hysteresis##fol", &fol->lodHysteresis, 0.1f, 0.0f, 50.f, "%.1f m"); trackEdit();
@@ -3832,6 +4014,17 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 				ImGui::PopID();
 			}
 			if (ImGui::Button("+ Level")) { lod->levels.push_back({}); trackEdit(); }
+			// Simpler copies of the mesh as Name_LOD1.. assets, filled in here with the
+			// distance each one is good enough from. LOD 0 stays the entity's own mesh.
+			ImGui::SameLine();
+			if (EditorWidgets::button("Generate LODs##lod"))
+			{
+				AutoLodDialog::Request req;
+				req.kind   = AutoLodDialog::Kind::Entity;
+				req.entity = entity;
+				AutoLodDialog::open(req);
+			}
+			EditorWidgets::helpForLabel("Generate LODs##lod");
 		}
 		if (removed) { if (undo) undo->snapshotNow(removeLabel.c_str()); registry.remove<LODComponent>(entity); }
 	}
@@ -3904,6 +4097,8 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			if (Row::inputText("Text##txt", buf, sizeof(buf))) { txt->text = buf; trackEdit(); }
 			Row::dragFloat("Font Size##txt", &txt->fontSize, 0.5f, 4.0f, 256.0f); trackEdit();
 			Row::colorEdit4("Color##txt",    glm::value_ptr(txt->color)); trackEdit();
+			if (fontPathSlot(ctx, "Font##txt", txt->font, "uitext")) trackEdit();
+			ImGui::TextDisabled("Empty = default UI font.");
 		}
 		if (removed) { if (undo) undo->snapshotNow(removeLabel.c_str()); registry.remove<UITextComponent>(entity); }
 	}

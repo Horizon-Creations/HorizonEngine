@@ -579,3 +579,116 @@ TEST_CASE("loadAssetAsync: asked again after it was dropped → loaded after all
 
     he_test::removeQuiet(full);
 }
+
+// ─── A queued background load moves up when someone needs it now ────────────────
+// A prefetch asks for an asset at the default Low priority; Low may occupy only
+// part of the pool. When the camera then needs the same asset, its request is
+// coalesced into the queued job — which used to stay in the Low lane, behind the
+// cap, however urgent the new requester was. Now the join promotes it.
+TEST_CASE("loadAssetAsync: a High request for a queued Low load promotes it past the Low cap")
+{
+    const HE::UUID id{0x9807070700000001ULL, 0x0000000000000009ULL};
+    const auto full = writeTempAsset("async_promote.hasset", id);
+    const std::string rel = "async_promote.hasset";
+    ContentManager cm(full.parent_path().string());
+
+    ThreadPool& pool = globalPool();
+    const size_t lowCap = pool.concurrencyLimit(HE::JobPriority::Low);
+    REQUIRE(lowCap < pool.threadCount());   // else there is no worker left to promote onto
+
+    std::atomic<bool>   go{ false };
+    std::atomic<size_t> parked{ 0 };
+    std::vector<std::future<void>> blockers;
+    for (size_t i = 0; i < lowCap; ++i)     // exactly the Low cap, all workers of that lane
+        blockers.push_back(pool.submit([&] {
+            parked.fetch_add(1);
+            while (!go.load()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }, "TestLowHold", HE::JobPriority::Low));
+    while (parked.load() < lowCap) std::this_thread::yield();
+
+    HE::UUID got{};
+    bool fired = false;
+    cm.loadAssetAsync(rel, [&](HE::UUID u) { got = u; fired = true; });   // Low, over the cap: waits
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    cm.pollAsyncResults();
+    CHECK_FALSE(fired);                      // nobody may start it yet
+
+    HE::AsyncLoadOptions urgent;
+    urgent.priority = HE::JobPriority::High;
+    cm.loadAssetAsync(rel, [](HE::UUID) {}, urgent);   // coalesced into the same job
+
+    drainUntil(cm, [&] { return fired; }, 3000);
+    const bool loadedWhileHeld = fired;
+    go.store(true);
+    for (auto& b : blockers) b.get();
+
+    CHECK(loadedWhileHeld);                  // it ran although the whole Low cap was held
+    CHECK(got == id);
+    he_test::removeQuiet(full);
+}
+
+TEST_CASE("asyncBacklogBytes: counts finished loads until the main thread takes them")
+{
+    const HE::UUID id{0xBAC0106000000001ULL, 0x0000000000000002ULL};
+    const auto full = writeTempAsset("async_backlog.hasset", id);
+    const std::string rel = "async_backlog.hasset";
+    ContentManager cm(full.parent_path().string());
+    CHECK(cm.asyncBacklogBytes() == 0);
+
+    bool fired = false;
+    cm.loadAssetAsync(rel, [&](HE::UUID) { fired = true; });
+    // Wait for the worker without polling: the result must sit in the backlog.
+    for (int i = 0; i < 2000 && cm.asyncBacklogBytes() == 0; ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    CHECK(cm.asyncBacklogBytes() == std::filesystem::file_size(full));
+    CHECK_FALSE(fired);
+
+    drainUntil(cm, [&] { return fired; });
+    CHECK(fired);
+    CHECK(cm.asyncBacklogBytes() == 0);      // taken: the bytes leave the backlog
+    he_test::removeQuiet(full);
+}
+
+// A texture's pixels are moved out of the reader into the asset (not copied) on the
+// main thread; they must still arrive byte-exact.
+TEST_CASE("loadAssetAsync: a texture's pixel payload survives the move into the asset")
+{
+    const HE::UUID id{0x7E57BEEF00000001ULL, 0x0000000000000003ULL};
+    const std::string name = "async_texture";
+    constexpr uint32_t W = 64, H = 32;
+    std::vector<uint8_t> pixels(size_t(W) * H * 4);
+    for (size_t i = 0; i < pixels.size(); ++i) pixels[i] = static_cast<uint8_t>((i * 31 + 7) & 0xFF);
+
+    std::vector<uint8_t> meta;
+    const uint16_t typeVal = static_cast<uint16_t>(HE::AssetType::Texture);
+    HAsset::Writer::appendPOD(meta, typeVal);
+    HAsset::Writer::appendPOD(meta, id.hi);
+    HAsset::Writer::appendPOD(meta, id.lo);
+    HAsset::Writer::appendString(meta, name);
+    HAsset::Writer::appendString(meta, name + ".hasset");
+    std::vector<uint8_t> txmi;
+    HAsset::appendTextureHeader(txmi, W, H, 4);
+
+    HAsset::Writer w;
+    w.addChunk(HAsset::CHUNK_META, meta.data(), meta.size());
+    w.addChunk(HAsset::CHUNK_TXMI, txmi.data(), txmi.size());
+    w.addChunk(HAsset::CHUNK_PIXL, pixels.data(), pixels.size());
+    const auto bytes = w.toBytes(typeVal);
+    const auto full = std::filesystem::temp_directory_path() / (name + ".hasset");
+    { std::ofstream f(full, std::ios::binary);
+      f.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size())); }
+
+    ContentManager cm(full.parent_path().string());
+    HE::UUID got{};
+    bool fired = false;
+    cm.loadAssetAsync(name + ".hasset", [&](HE::UUID u) { got = u; fired = true; });
+    drainUntil(cm, [&] { return fired; });
+    REQUIRE(fired);
+    REQUIRE(got == id);
+    const TextureAsset* tex = cm.getTexture(got);
+    REQUIRE(tex != nullptr);
+    CHECK(tex->width == W);
+    CHECK(tex->height == H);
+    CHECK(tex->data == pixels);
+    he_test::removeQuiet(full);
+}

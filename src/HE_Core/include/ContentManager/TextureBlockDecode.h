@@ -32,4 +32,22 @@ HE_API bool decodeBlockLevelToRGBA8(::TextureFormat f, const uint8_t* src, size_
 // truncated.
 HE_API bool decodeTextureToRGBA8(const TextureAsset& in, TextureAsset& out);
 
+// Mean LINEAR colour of slice `slice` of an array (or of a 2D texture, slice 0), taken
+// from the smallest stored level with both sides <= 16 (or the last one) on a <= 16x16
+// grid — a few hundred texels, cheap enough to ask every frame — and sRGB-decoded when
+// `srgb`. Reads RGBA8 or a decodable block format (BC1/BC3/BC4/BC5); false for BC7 and
+// ASTC (no CPU decoder: bake the means at pack time instead, see bakeTextureArraySliceMeans)
+// or when the slice lies outside `data`. `data` holds `slice + 1` or more slices of `f`.
+HE_API bool textureArraySliceMean(::TextureFormat f, const uint8_t* data, size_t dataBytes,
+                                  uint32_t w, uint32_t h, uint32_t mips, bool srgb,
+                                  uint32_t slice, float rgb[3]);
+HE_API bool textureArraySliceMean(const TextureAsset& t, uint32_t slice, float rgb[3]);
+
+// The means of ALL `layers` slices of a tightly packed RGBA8 array, three floats per slice —
+// the payload of CHUNK_TXSM. Same sampling as textureArraySliceMean, so a baked value and a
+// value read back from the same RGBA8 pixels agree exactly. False on a truncated payload.
+HE_API bool bakeTextureArraySliceMeans(const uint8_t* rgba8, size_t bytes, uint32_t w, uint32_t h,
+                                       uint32_t mips, uint32_t layers, bool srgb,
+                                       std::vector<float>& out);
+
 } // namespace HE

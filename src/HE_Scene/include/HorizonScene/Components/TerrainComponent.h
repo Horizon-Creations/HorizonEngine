@@ -5,7 +5,7 @@
 #include <memory>
 #include <vector>
 
-// Paintable landscape layers: two RGBA8 weightmap pages of four channels each.
+// Paintable landscape layers: three RGBA8 weightmap pages of four channels each.
 // Must equal HE::kMatMaxLandscapeLayers (MaterialGraph.h) — test_terrain pins it.
 // The largest resolution a landscape can have: 1025 = 2^10 + 1, the top of the 2ⁿ+1
 // ladder every landscape is snapped to (TerrainSystem / TerrainSculpt::ensureHeights).
@@ -15,7 +15,7 @@
 // read as flat, and the "snap" ran again every frame (dirty → all 256 chunks rebuilt
 // and re-uploaded per frame).
 inline constexpr uint32_t kTerrainMaxResolution = 1025;
-inline constexpr int kTerrainWeightPages = 2;
+inline constexpr int kTerrainWeightPages = 3;
 inline constexpr int kTerrainMaxLayers   = 4 * kTerrainWeightPages;
 
 struct TerrainComponent {
@@ -85,10 +85,30 @@ struct TerrainComponent {
     // zero, which is every landscape painted before there were eight layers —
     // they load without it and render exactly as before. Allocated by the first
     // stroke on layer 4+, never without layerWeights; the weights of one texel
-    // sum to 255 across BOTH pages. Uploaded as the right half of a 2:1
-    // weightmap in the same texture (TerrainPaint::buildWeightTexture), so the
-    // shader needs no second sampler or binding on any backend.
+    // sum to 255 across ALL pages. Uploaded as the right half of a 2:1 weightmap
+    // (the middle third of a 3:1 one) in the same texture (TerrainPaint::
+    // buildWeightTexture), so the shader needs no second sampler or binding on
+    // any backend.
     std::vector<uint8_t>  layerWeights2;
+    // Layers 8..11 (R=8 … A=11), same layout again. Empty = all four zero, which
+    // is every landscape painted before there were twelve layers: it saves and
+    // uploads exactly as it did, and loads without the key. Allocated by the
+    // first stroke on layer 8+, never without layerWeights2 beside it. Uploaded
+    // as the right third of a 3:1 weightmap, and only once a byte in it is set.
+    std::vector<uint8_t>  layerWeights3;
+
+    // ── Mixed texture groups (Thema 233) ─────────────────────────────────────
+    // A terrain's group is its landscape material (MaterialComponent::materialAssetId). With
+    // groupMix on, up to all four groups show on the one terrain: weight layers 8..11 are no
+    // paint layers then but the SHARE of group 0..3 (AutoLandscapeGroupId) of every texel,
+    // summing to 255. They are kept out of the 255-sum of the paint layers (TerrainPaint),
+    // and only the group brush writes them. Off (every landscape before this field, and the
+    // default) the layers are plain paint layers again. Saved only once it is on.
+    bool groupMix = false;
+    // The group the terrain was (an AutoLandscapeGroupId) when the mix went on, -1 while it is off. With
+    // the mix on the terrain's material is the mix material and no longer names its group; this does,
+    // and it is the group the material returns to when the mix goes off.
+    int  baseGroup = -1;
 
     // ── Water ────────────────────────────────────────────────────────────────
     // The water bodies on this landscape and the raster that says where they are
@@ -119,4 +139,11 @@ struct TerrainComponent {
     // Chunk grid the chunk entities were last built for — a change (resolution/size)
     // forces a full rebuild of the chunk set.
     uint32_t builtRes = 0, builtChunksPerSide = 0;
+    // The UV tiling the chunk meshes were built with: uvTiling, but 1 under a material with a
+    // Landscape Layer Blend node, which samples the painted weights at the raw UV and so needs
+    // it to run 0..1 over the whole landscape (TerrainSystem decides, every tick). 0 = not
+    // decided yet; consumers that must agree with the meshes (GI) read effectiveUvTiling().
+    float    uvTilingBuilt = 0.0f;
+    float    effectiveUvTiling() const
+    { return uvTilingBuilt > 0.0f ? uvTilingBuilt : (uvTiling > 0.0f ? uvTiling : 1.0f); }
 };

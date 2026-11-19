@@ -16,7 +16,7 @@ namespace
 // notice a change in the CODE that produced the entry; this is how it is told.
 // "Incremental" off in the export dialog (or no --cache for the packer) is the
 // manual escape hatch.
-constexpr uint8_t kPackPipelineVersion = 3; // 3: hpak v3 hash (manifest hashes changed)
+constexpr uint8_t kPackPipelineVersion = 5; // 3: hpak v3 hash (manifest hashes changed); 4: PSHD carries the G-buffer fragment; 5: the mesh texture bake joins the fingerprint
 
 bool loadPakManifest(const std::filesystem::path& path,
                      uint64_t expectPakTocHash, uint64_t expectSettingsFp,
@@ -110,7 +110,10 @@ namespace HE
 {
 uint64_t packSettingsFingerprint(const Hpak::PackSettings& s)
 {
-    uint8_t buf[8 + 32 + 1];
+    // Value-initialised: any byte the writes below leave out must still be deterministic (on
+    // Linux stack garbage made every call's fingerprint differ, so no manifest ever matched and
+    // the incremental cache never reused anything).
+    uint8_t buf[8 + 32 + 1 + 5 + 8] = {};
     buf[0] = static_cast<uint8_t>(s.codec);
     buf[1] = static_cast<uint8_t>(s.level);
     buf[2] = s.encrypt ? 1 : 0;
@@ -119,10 +122,18 @@ uint64_t packSettingsFingerprint(const Hpak::PackSettings& s)
     // would leave the previous export's blocks in the pak, encoded at the old one.
     buf[3] = static_cast<uint8_t>((s.cook ? 1 : 0) | ((s.textureCompression & 0x7) << 1)
                                   | ((s.textureQuality & 0x3) << 4)
-                                  | ((s.cookTextureArrays ? 1 : 0) << 6));
+                                  | ((s.cookTextureArrays ? 1 : 0) << 6)
+                                  | ((s.onlyReferenced ? 1 : 0) << 7));
     std::memcpy(buf + 4, &s.shaderBackends, 4); // precompiled-shader backend set → re-pack materials
     std::memcpy(buf + 8, s.key, 32);  // all-zero when not encrypting
     buf[8 + 32] = kPackPipelineVersion;
+    // The mesh texture bake: on/off + the atlas size cap (a change re-packs every mesh it touches).
+    buf[8 + 32 + 1] = s.bakeMeshTextures ? 1 : 0;
+    std::memcpy(buf + 8 + 32 + 2, &s.bakeMaxAtlas, 3); // low 3 bytes: caps stay far below 16M
+    // The meshes left out of the bake: an order-independent sum, so the same set hashes the same.
+    uint64_t skipSum = 0;
+    for (const HE::UUID& id : s.bakeSkipMeshes) skipSum += id.hi * 0x9E3779B97F4A7C15ull ^ id.lo;
+    std::memcpy(buf + 8 + 32 + 5, &skipSum, 8);
     return Hpak::hash64(buf, sizeof(buf));
 }
 

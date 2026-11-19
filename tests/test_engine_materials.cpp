@@ -15,7 +15,10 @@
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/DefaultAssets.h>
 #include <ContentManager/HAsset.h>
+#include <MaterialGraph/AutoLandscapeMaterial.h>
+#include <MaterialGraph/ProceduralSurfaceFunctions.h>
 #include <MaterialGraph/MaterialGraph.h>
+#include <MaterialGraph/WeatherMaterialFunctions.h>
 #include <Physics/WaterWaves.h>   // the wave trains the water physics shares with the material
 
 #include <chrono>
@@ -25,6 +28,7 @@
 #include <fstream>
 #include <functional>
 #include <iterator>
+#include <map>
 #include <set>
 #include <string>
 #include <vector>
@@ -339,6 +343,51 @@ TEST_CASE("Engine water material: every knob has a tooltip in the Details panel"
 	CHECK(HE::Ed::Help::find("WaveD") == nullptr);
 }
 
+// One UUID names ONE asset in the ContentManager, whatever its type. Twice a generated
+// engine asset shipped with the id of another one (Water, then DisplacementDemo, both
+// {0x400/0x401, 1} next to the landscape textures) and the later load silently
+// replaced the earlier, so a reference resolved to the wrong asset. This walks every
+// shipped .hasset and fails on the first duplicate id, whichever generator wrote it.
+TEST_CASE("Engine content: no two shipped assets share a UUID")
+{
+	Scratch s("uuidunique");
+	ContentManager cm(s.content());
+	cm.setEngineContentRoot(engineRoot().string());
+
+	std::map<std::string, std::string> seen;   // uuid text -> first path
+	int files = 0;
+	for (const auto& e : fs::recursive_directory_iterator(engineRoot()))
+	{
+		if (!e.is_regular_file() || e.path().extension() != ".hasset") continue;
+		const std::string rel = "Engine/" + fs::relative(e.path(), engineRoot()).generic_string();
+		const HE::UUID id = cm.loadAsset(rel);
+		if (id.hi == 0 && id.lo == 0) continue;   // a type this build cannot load; not this test's business
+		++files;
+		// landscape_tex_gen's textures are not shipped in the repo, so a clash with
+		// them cannot show as a duplicate here: keep its 0x400 block (T_Landscape_*,
+		// the arrays, M_AutoLandscape, the weather functions) free of anything else.
+		const bool inLandscapeBlock = id.hi >= 0x400 && id.hi < 0x500;
+		// The Forest / Grassland / Desert materials (0x415..) and the procedural snow and sand functions (0x41D, 0x41E)
+		// are landscape_tex_gen / matfn_gen output that lives in this block too (Thema 329); the trail clipmap's runtime
+		// texture claims 0x41F but is never a shipped file.
+		bool groupMaterial = false;
+		for (const HE::AutoLandscapeGroup& g : HE::kAutoLandscapeGroups) groupMaterial = groupMaterial || id == g.materialId;
+		// The mix material (Thema 233, 0x4A4; its fat arrays 0x4A5..0x4A7 are textures, not shipped) is one too.
+		const bool knownOccupant = id == HE::kAutoLandscapeMaterialId || groupMaterial
+		                        || id == HE::kAutoLandscapeMixMaterialId
+		                        || id == HE::kWeatherPuddlesFunctionId || id == HE::kWeatherSnowFunctionId
+		                        || id == HE::kProceduralSnowFunctionId || id == HE::kProceduralSandFunctionId
+		                        || rel.rfind("Engine/Textures/", 0) == 0;
+		const bool clear = !inLandscapeBlock || knownOccupant;
+		CHECK_MESSAGE(clear,
+		              rel << " uses a UUID of landscape_tex_gen's 0x400 block (hi 0x" << std::hex << id.hi << ")");
+		const std::string key = std::to_string(id.hi) + ":" + std::to_string(id.lo);
+		const auto it = seen.emplace(key, rel);
+		CHECK_MESSAGE(it.second, "UUID of " << rel << " is already used by " << it.first->second);
+	}
+	CHECK(files > 20);
+}
+
 // ── DisplacementDemo (Thema 207): the example for the Output node's Displacement pin ──
 TEST_CASE("Engine displacement demo: the Displacement pin is wired, sine-only, three knobs")
 {
@@ -348,7 +397,7 @@ TEST_CASE("Engine displacement demo: the Displacement pin is wired, sine-only, t
 	cm.setEngineContentRoot(engineRoot().string());
 
 	const HE::UUID id = cm.loadAsset("Engine/Materials/DisplacementDemo.hasset");
-	CHECK(id == HE::UUID{ 0x0000000000000401ULL, 0x0000000000000001ULL });   // mat_gen entry 1
+	CHECK(id == HE::UUID{ 0x0000000000000601ULL, 0x0000000000000001ULL });   // mat_gen entry 1 (0x600 block)
 	const MaterialAsset* m = cm.getMaterial(id);
 	REQUIRE(m);
 	CHECK(m->blendMode == static_cast<uint8_t>(HE::MatBlendMode::Opaque));
@@ -815,27 +864,28 @@ std::string kindSwizzle(MatParamKind k)
 }
 } // namespace
 
-TEST_CASE("Engine water material: HeParams is 16 std140 vec4 on every backend, each slot read as its knob's kind")
+TEST_CASE("Engine water material: HeParams is kMatMaxParams std140 vec4 on every backend, each slot read as its knob's kind")
 {
 	// One contract, four views of it. The CPU side: every renderer copies
-	// min(shaderParamData.size(), 64) floats into a zero-padded 256-byte block
-	// (Metal/GL/D3D11/D3D12/Vulkan alike, "float padded[64]"). The shader side
-	// must therefore declare exactly 16 vec4 at stride 16 from offset 0, on the
+	// min(shaderParamData.size(), kMatParamFloats) floats into a zero-padded kMatParamBytes block
+	// (Metal/GL/D3D11/D3D12/Vulkan alike, "float padded[kMatParamFloats]"). The shader side
+	// must therefore declare exactly kMatMaxParams vec4 at stride 16 from offset 0, on the
 	// slot each backend binds: Vulkan set 0 binding 3, HLSL b3 (D3D12 root CBV
 	// kRootParamsCB), Metal fragment buffer 2, GL by block NAME "HeParams"
 	// (glUniformBlockBinding → point 2). Slot order is compiler-dependent, so
 	// nothing here looks a slot up by position — only by name or by kind.
-	static_assert(HE::kMatMaxParams == 16, "the renderers hard-code a 64-float / 256-byte HeParams upload");
+	static_assert(HE::kMatParamFloats == HE::kMatMaxParams * 4 && HE::kMatParamBytes == HE::kMatMaxParams * 16,
+	              "the renderers size their HeParams upload from kMatParamFloats / kMatParamBytes");
 	constexpr int kBlockBytes = HE::kMatMaxParams * 16;
 	const WaterSources w = loadWaterSources("ubo");
 	REQUIRE(w.ok);
 
-	SUBCASE("CPU: sixteen knobs pack into the 64-float block the renderers upload")
+	SUBCASE("CPU: sixteen knobs pack into the HeParams block the renderers upload")
 	{
 		REQUIRE(static_cast<int>(w.paramNames.size()) == kWaterKnobCount);
 		REQUIRE(w.paramTypes.size() == w.paramNames.size());
 		CHECK(w.paramData.size() == w.paramNames.size() * 4);
-		CHECK(w.paramData.size() <= static_cast<size_t>(HE::kMatMaxParams) * 4); // nothing cut by min(size, 64)
+		CHECK(w.paramData.size() <= static_cast<size_t>(HE::kMatMaxParams) * 4); // nothing cut by min(size, kMatParamFloats)
 		// Each knob's authored default sits in ITS slot's components, zeros after.
 		for (const Knob& k : kWaterKnobs)
 		{
@@ -885,7 +935,7 @@ TEST_CASE("Engine water material: HeParams is 16 std140 vec4 on every backend, e
 	HE::MaterialShaderLibrary lib;
 	const uint64_t h = srcHash(w.frag);
 
-	SUBCASE("SPIR-V (Vulkan): set 0 binding 3, 256 bytes, v[16] at offset 0 stride 16 — plain and clustered")
+	SUBCASE("SPIR-V (Vulkan): set 0 binding 3, kMatParamBytes, v[kMatMaxParams] at offset 0 stride 16 — plain and clustered")
 	{
 		for (const bool clustered : { false, true })
 		{
@@ -933,13 +983,14 @@ TEST_CASE("Engine water material: HeParams is 16 std140 vec4 on every backend, e
 		CHECK(row);
 	}
 
-	SUBCASE("GL 4.1 / ES 3.0 / GL 4.3: bound by name, 256 bytes in the LINKED program")
+	SUBCASE("GL 4.1 / ES 3.0 / GL 4.3: bound by name, kMatParamBytes in the LINKED program")
 	{
 		struct Prog { const char* what; LB vb; LB fb; bool clustered; };
 		const Prog progs[] = { { "GL 4.1", LB::GLSL410, LB::GLSL410, false },
 		                       { "ES 3.0", LB::GLSLES300, LB::GLSLES300, false },
 		                       { "GL 4.3 clustered", LB::GLSL430, LB::GLSL430, true } };
-		const std::regex block(R"(layout\(std140\)\s+uniform\s+HeParams\s*\{\s*(highp\s+)?vec4\s+v\[16\];\s*\}\s*heParams;)");
+		const std::regex block(R"(layout\(std140\)\s+uniform\s+HeParams\s*\{\s*(highp\s+)?vec4\s+v\[)" +
+		                       std::to_string(HE::kMatMaxParams) + R"(\];\s*\}\s*heParams;)");
 		for (const Prog& pr : progs)
 		{
 			CAPTURE(std::string(pr.what));
@@ -972,9 +1023,9 @@ TEST_CASE("Engine water material: HeParams is 16 std140 vec4 on every backend, e
 		}
 	}
 
-	SUBCASE("Metal: struct of float4 v[16], HeLighting on buffer 1, HeParams on buffer 2")
+	SUBCASE("Metal: struct of float4 v[kMatMaxParams], HeLighting on buffer 1, HeParams on buffer 2")
 	{
-		const std::regex st(R"(struct\s+HeParams\s*\{\s*float4\s+v\[16\];\s*\};)");
+		const std::regex st(R"(struct\s+HeParams\s*\{\s*float4\s+v\[)" + std::to_string(HE::kMatMaxParams) + R"(\];\s*\};)");
 		const std::regex arg(R"(constant\s+HeParams&\s+heParams\s+\[\[buffer\((\d+)\)\]\])");
 		const std::regex lit(R"(constant\s+HeLighting&\s+heLight\s+\[\[buffer\((\d+)\)\]\])");
 		for (const bool clustered : { false, true })
@@ -992,7 +1043,7 @@ TEST_CASE("Engine water material: HeParams is 16 std140 vec4 on every backend, e
 	}
 
 #if defined(_WIN32)
-	SUBCASE("HLSL (D3D11/D3D12): FXC's own reflection — cbuffer HeParams on b3, 256 bytes, float4[16]")
+	SUBCASE("HLSL (D3D11/D3D12): FXC's own reflection — cbuffer HeParams on b3, kMatParamBytes, float4[kMatMaxParams]")
 	{
 		HE::d3d12mat::MaterialRootSignature rs;
 		HE::d3d12mat::DescribeMaterialRootSignature(rs);

@@ -156,6 +156,13 @@ PLACEHOLDER_DUMMIES = {
         " { return groundDepth * wv.y * sp.x + heTrain(xz, 0.0, 0.0, 1.0, 0.0, wv, sp); }\n"
     ),
 }
+# The same functions in HLSL spelling (the D3D fog and caustics shaders carry @SURF@ too).
+SURF_DUMMY_HLSL = (
+    "float heTrain(float2 xz, float dirDeg, float speed, float len, float steep, float4 wv, float4 sp)"
+    " { return steep * sin(dirDeg + speed * sp.z + len + wv.x + xz.x + xz.y); }\n"
+    "float heSurfaceH(float2 xz, float groundDepth, float4 wv, float4 sp)"
+    " { return groundDepth * wv.y * sp.x + heTrain(xz, 0.0, 0.0, 1.0, 0.0, wv, sp); }\n"
+)
 # Any "@WORD@" still present after the splices above is a NEW placeholder this script does not
 # know about yet — report it clearly instead of handing the compiler a literal '@' to choke on
 # (that is how this script itself first caught @SURF@: a bare "ERROR: '@' : unexpected token"
@@ -171,6 +178,8 @@ def extract(path: Path, tag: str) -> dict[str, str]:
     for m in re.finditer(pat, src, re.S):
         body = m.group(2)
         for token, dummy in PLACEHOLDER_DUMMIES.items():
+            if token == "@SURF@" and tag == "HLSL":
+                dummy = SURF_DUMMY_HLSL
             body = body.replace(token, dummy)
         strings[m.group(1)] = body
     return strings

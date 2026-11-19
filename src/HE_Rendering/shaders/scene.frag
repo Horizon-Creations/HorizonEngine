@@ -89,7 +89,8 @@ layout(set = 0, binding = 0) uniform Frame {
     vec4  cascadeSplits;
     vec4  cameraFwd;
     vec4  shadowBias;
-    ivec4 shadowEnabled; // x = 0/1, y = 1 → tint fragments by cascade (debug)
+    ivec4 shadowEnabled; // x = 0/1, y = 1 → tint fragments by cascade (debug),
+                         // z = 1 → Unlit/Wireframe view (heLitP's twin below)
     vec4  sunDir;   // xyz = sun direction
     vec4  fog;      // x=fogDensity, y=fogHeightFalloff
     vec4  viewport; // x=W, y=H, z=ssaoEnabled(1.0), w=unused — must match FrameUBOData exactly
@@ -421,6 +422,16 @@ void main()
     // GL/Metal/D3D11. PBR scalars still come from the material UBO.
     vec3  base  = (mat_ubo.roughPad.z > 0.5) ? texture(uAlbedo, vUV).rgb
                                              : mat_ubo.baseColorMet.rgb;
+    // Unlit view mode: the material's base colour and nothing else — before
+    // any lighting, shadow or weather term. Twin of GL's uUnlit/Metal's
+    // scene.unlit/D3D11's and D3D12's kSceneHLSL; heLitP in
+    // MaterialShaderLibrary.cpp covers graph materials and the deferred
+    // resolve the same way.
+    if (uf.shadowEnabled.z != 0)
+    {
+        FragColor = vec4(base, mat_ubo.roughPad.y);
+        return;
+    }
     float met   = mat_ubo.baseColorMet.a;
     float rough = max(mat_ubo.roughPad.x, 0.04);
     vec3  N     = normalize(vNormal);

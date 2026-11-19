@@ -670,10 +670,17 @@ static json profileToJson(const ExportProfile& p)
 	j["targetPlatform"]   = p.targetPlatform;
 	j["appBundle"]        = p.appBundle;
 	j["shaderBackends"]   = p.shaderBackends;
+	j["autoShaderBackends"] = p.autoShaderBackends;
 	j["compileHorizonCode"] = p.compileHorizonCode;
 	j["hcStopOnFailure"]    = p.hcStopOnFailure;
 	j["textureFormat"]      = p.textureFormat;
 	j["textureQuality"]     = p.textureQuality;
+	j["compressTextureArrays"] = p.compressTextureArrays;
+	j["bakeMeshTextures"]      = p.bakeMeshTextures;
+	j["bakeFarLandscape"]      = p.bakeFarLandscape;
+	j["farLandscapeBudgetMB"]  = p.farLandscapeBudgetMB;
+	j["onlyReferenced"]        = p.onlyReferenced;
+	j["alwaysIncludePatterns"] = p.alwaysIncludePatterns;
 	return j;
 }
 
@@ -695,6 +702,9 @@ static ExportProfile profileFromJson(const json& j)
 	p.appBundle        = jsonBool(j, "appBundle", false);
 	p.shaderBackends   = j.contains("shaderBackends") && j["shaderBackends"].is_number_unsigned()
 	                     ? j["shaderBackends"].get<uint32_t>() : ((1u << 4) | (1u << 0));
+	// Absent in a profile saved before the field: the old default set was never a deliberate
+	// choice (nobody ships Metal AND OpenGL by intent), anything else was.
+	p.autoShaderBackends = jsonBool(j, "autoShaderBackends", p.shaderBackends == ((1u << 4) | (1u << 0)));
 	p.compileHorizonCode = jsonBool(j, "compileHorizonCode", false);
 	p.hcStopOnFailure    = jsonBool(j, "hcStopOnFailure", false);
 	// "compileGameFromSdk" (topic 211) is read by nobody any more: every export
@@ -704,6 +714,15 @@ static ExportProfile profileFromJson(const json& j)
 	if (p.textureFormat != "None") p.textureFormat = "Auto";   // one spelling, not a guess
 	p.textureQuality     = j.contains("textureQuality") && j["textureQuality"].is_number_integer()
 	                     ? std::clamp(j["textureQuality"].get<int>(), 0, 2) : 0;
+	p.compressTextureArrays = jsonBool(j, "compressTextureArrays", true);
+	p.bakeMeshTextures      = jsonBool(j, "bakeMeshTextures", true);
+	p.bakeFarLandscape      = jsonBool(j, "bakeFarLandscape", true);
+	p.farLandscapeBudgetMB  = (j.contains("farLandscapeBudgetMB") && j["farLandscapeBudgetMB"].is_number_integer())
+	                              ? std::clamp(j["farLandscapeBudgetMB"].get<int>(), 16, 16384) : 512;
+	p.onlyReferenced        = jsonBool(j, "onlyReferenced", true);
+	if (auto it = j.find("alwaysIncludePatterns"); it != j.end() && it->is_array())
+		for (const auto& e : *it)
+			if (e.is_string()) p.alwaysIncludePatterns.push_back(e.get<std::string>());
 	if (auto it = j.find("excludePatterns"); it != j.end() && it->is_array())
 		for (const auto& e : *it)
 			if (e.is_string()) p.excludePatterns.push_back(e.get<std::string>());
@@ -1597,12 +1616,16 @@ static json startupSceneJson(ProjectPreset preset)
 		// tour's "drag the time-of-day slider" step actually move the sun.
 		// Keys are EnvironmentComponent member names (HE_ENV_FIELDS_* /
 		// SceneSerializer); anything left out falls back to the struct default.
+		// fogMode 1 = the volumetric fog (Thema 225): a new project starts on it, while the
+		// struct default (what a scene saved before the field loads as) stays 0. It draws
+		// nothing until the fog density or the bank is raised.
 		addChild("Sky", json{ { "environment", (furnish || playable)
 			? json{ { "dayNightCycle", true  },   // without this timeOfDay is inert
 			        { "timeOfDay",     0.32f },   // mid-morning: raking light, long shadows
 			        { "cloudMode",     1     },   // volumetric clouds rather than the dome
-			        { "cloudCoverage", 0.4f  } }
-			: json::object() } });
+			        { "cloudCoverage", 0.4f  },
+			        { "fogMode",       1     } }
+			: json{ { "fogMode", 1 } } } });
 		addChild("Weather", json{ { "weather", json::object() } });
 	}
 

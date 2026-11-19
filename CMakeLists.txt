@@ -147,6 +147,22 @@ set(RECASTNAVIGATION_TESTS    OFF CACHE BOOL "" FORCE)
 set(RECASTNAVIGATION_EXAMPLES OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(recastnavigation)
 
+# ─── meshoptimizer (mesh LOD simplification, tool-only) ───────────────────────
+# Static lib, MIT. Only ever linked into HorizonImporters (editor/asset_compiler
+# build-time tool); never into HorizonGame. Approved as a new dependency by the
+# human (Thema 331, step 2).
+FetchContent_Declare(
+    meshoptimizer
+    GIT_REPOSITORY https://github.com/zeux/meshoptimizer.git
+    GIT_TAG        v1.3
+    GIT_SHALLOW    TRUE
+)
+set(MESHOPT_BUILD_DEMO     OFF CACHE BOOL "" FORCE)
+set(MESHOPT_BUILD_GLTFPACK OFF CACHE BOOL "" FORCE)
+set(MESHOPT_INSTALL        OFF CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(meshoptimizer)
+set_target_properties(meshoptimizer PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
 # ─── Kein -g in den Release-Builds der Physik/Navigation ──────────────────────
 # Jolt (option GENERATE_DEBUG_SYMBOLS, default ON) und Recast (add_compile_options(-g),
 # ohne jede Bedingung) hängen -g an CMAKE_CXX_FLAGS, also an JEDE Konfiguration —
@@ -1014,6 +1030,20 @@ endfunction()
 # cache — without it, a reconfigure keeps the old cached codename (the version from
 # project() updates, but the codename would silently stay stale).
 set(HE_VERSION_CODENAME "Nimbus" CACHE STRING "Sky-themed codename for this release" FORCE)
+# The commit this build comes from, for the log's Build line: a bug report with only a build
+# time cannot say which side of a fix the package is on. Read at configure time, so a local
+# build shows the commit it was last configured at; CI configures fresh. "unknown" without git.
+set(HE_GIT_COMMIT "unknown")
+find_package(Git QUIET)
+if(GIT_FOUND)
+    execute_process(COMMAND "${GIT_EXECUTABLE}" rev-parse --short=10 HEAD
+                    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+                    OUTPUT_VARIABLE HE_GIT_COMMIT_OUT OUTPUT_STRIP_TRAILING_WHITESPACE
+                    RESULT_VARIABLE HE_GIT_COMMIT_RC ERROR_QUIET)
+    if(HE_GIT_COMMIT_RC EQUAL 0 AND HE_GIT_COMMIT_OUT)
+        set(HE_GIT_COMMIT "${HE_GIT_COMMIT_OUT}")
+    endif()
+endif()
 configure_file(
     "${CMAKE_SOURCE_DIR}/cmake/HorizonVersion.h.in"
     "${CMAKE_BINARY_DIR}/generated/HorizonVersion.h"

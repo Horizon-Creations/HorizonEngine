@@ -2,11 +2,14 @@
 #include "TestFsUtil.h"
 #include "MeshImporter.h"
 #include "ImporterCommon.h"
+#include "AutoLod.h"
 #include <ContentManager/Assets.h>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <sstream>
 #include <vector>
 
 namespace fs = std::filesystem;
@@ -65,6 +68,75 @@ bool writeUvGltf(const fs::path& dir)
 	std::ofstream f(dir / "uv.gltf");
 	if (!f) return false;
 	f << json;
+	return true;
+}
+
+// A UV sphere, big enough that an Auto-LOD chain of several ratios produces that many
+// genuinely distinct levels (same lat/lon AutoLod's own "removeStaleSidecars" test
+// proves reaches at least 5 levels with 5 ratios) — unlike the single triangle above,
+// which cannot be reduced at all and so can't tell a 3-level cap from a longer chain.
+bool writeSphereGltf(const fs::path& dir, int lat, int lon)
+{
+	std::vector<float> pos, uv;
+	for (int y = 0; y <= lat; ++y)
+		for (int x = 0; x <= lon; ++x)
+		{
+			const float v = static_cast<float>(y) / lat, u = static_cast<float>(x) / lon;
+			const float th = v * 3.14159265f, ph = u * 6.2831853f;
+			pos.insert(pos.end(), { std::sin(th) * std::cos(ph), std::cos(th), std::sin(th) * std::sin(ph) });
+			uv.insert(uv.end(), { u, v });
+		}
+	std::vector<uint16_t> idx;
+	const uint16_t row = static_cast<uint16_t>(lon + 1);
+	for (int y = 0; y < lat; ++y)
+		for (int x = 0; x < lon; ++x)
+		{
+			const uint16_t a = static_cast<uint16_t>(y * row + x), b = static_cast<uint16_t>(a + 1);
+			const uint16_t c = static_cast<uint16_t>(a + row),     d = static_cast<uint16_t>(c + 1);
+			idx.insert(idx.end(), { a, c, b, b, c, d });
+		}
+
+	const size_t posBytes = pos.size() * sizeof(float);
+	const size_t uvBytes  = uv.size()  * sizeof(float);
+	const size_t idxBytes = idx.size() * sizeof(uint16_t);
+	std::vector<uint8_t> buf(posBytes + uvBytes + idxBytes, 0);
+	std::memcpy(buf.data(), pos.data(), posBytes);
+	std::memcpy(buf.data() + posBytes, uv.data(), uvBytes);
+	std::memcpy(buf.data() + posBytes + uvBytes, idx.data(), idxBytes);
+
+	std::error_code ec;
+	fs::create_directories(dir, ec);
+	{
+		std::ofstream bin(dir / "sphere.bin", std::ios::binary);
+		if (!bin) return false;
+		bin.write(reinterpret_cast<const char*>(buf.data()), static_cast<std::streamsize>(buf.size()));
+	}
+
+	std::ostringstream json;
+	json << "{\n"
+	        "  \"asset\": { \"version\": \"2.0\" },\n"
+	        "  \"scene\": 0,\n"
+	        "  \"scenes\": [ { \"nodes\": [0] } ],\n"
+	        "  \"nodes\":  [ { \"mesh\": 0 } ],\n"
+	        "  \"meshes\": [ { \"primitives\": [ {\n"
+	        "      \"attributes\": { \"POSITION\": 0, \"TEXCOORD_0\": 1 },\n"
+	        "      \"indices\": 2 } ] } ],\n"
+	        "  \"buffers\":    [ { \"uri\": \"sphere.bin\", \"byteLength\": " << buf.size() << " } ],\n"
+	        "  \"bufferViews\": [\n"
+	        "    { \"buffer\": 0, \"byteOffset\": 0, \"byteLength\": " << posBytes << " },\n"
+	        "    { \"buffer\": 0, \"byteOffset\": " << posBytes << ", \"byteLength\": " << uvBytes << " },\n"
+	        "    { \"buffer\": 0, \"byteOffset\": " << (posBytes + uvBytes) << ", \"byteLength\": " << idxBytes << " }\n"
+	        "  ],\n"
+	        "  \"accessors\": [\n"
+	        "    { \"bufferView\": 0, \"componentType\": 5126, \"count\": " << (pos.size() / 3) << ", \"type\": \"VEC3\",\n"
+	        "      \"min\": [-1,-1,-1], \"max\": [1,1,1] },\n"
+	        "    { \"bufferView\": 1, \"componentType\": 5126, \"count\": " << (uv.size() / 2) << ", \"type\": \"VEC2\" },\n"
+	        "    { \"bufferView\": 2, \"componentType\": 5123, \"count\": " << idx.size() << ", \"type\": \"SCALAR\" }\n"
+	        "  ]\n"
+	        "}";
+	std::ofstream f(dir / "sphere.gltf");
+	if (!f) return false;
+	f << json.str();
 	return true;
 }
 
@@ -205,6 +277,85 @@ TEST_CASE("gltfHasSkin routes a skinned glTF away from the static MeshImporter")
 	// Unreadable / non-glTF input must not claim a skin — the caller falls back to
 	// the static path and reports that importer's error.
 	CHECK(Importer::gltfHasSkin(dir / "does_not_exist.gltf") == false);
+
+	he_test::removeAllQuiet(dir);
+}
+
+// Auto-LOD (Thema 331, step 17): a re-import with LOD generation on writes fewer levels
+// than the file had before (here none: one triangle cannot be reduced). The old tail
+// would otherwise stay beside the mesh and the _LOD<n> name convention would keep
+// handing it back as levels of the new geometry.
+TEST_CASE("MeshImporter: a re-import with LODs drops the stale _LOD<n> tail it no longer writes")
+{
+	const fs::path dir = fs::temp_directory_path() / "he_test_stale_lod_gltf";
+	he_test::removeAllQuiet(dir);
+	REQUIRE(writeUvGltf(dir));
+	const fs::path contentRoot = dir / "Content";
+	std::error_code ec;
+	fs::create_directories(contentRoot, ec);
+
+	MeshImporter::ImportSettings settings;
+	settings.generateLods = true;
+	auto mesh = MeshImporter::import(dir / "uv.gltf", contentRoot, {}, settings);
+	REQUIRE(mesh != nullptr);
+	const fs::path lod1 = contentRoot / AutoLod::lodPath(mesh->path, 1);
+	const fs::path lod2 = contentRoot / AutoLod::lodPath(mesh->path, 2);
+	const fs::path lod4 = contentRoot / AutoLod::lodPath(mesh->path, 4);   // behind a gap
+	// A leftover chain from an earlier, longer run, plus one file past a gap.
+	for (const fs::path& f : { lod1, lod2, lod4 }) std::ofstream(f, std::ios::binary) << "old";
+	REQUIRE(fs::exists(lod1));
+
+	auto again = MeshImporter::import(dir / "uv.gltf", contentRoot, {}, settings);
+	REQUIRE(again != nullptr);
+	CHECK_FALSE(fs::exists(lod1));
+	CHECK_FALSE(fs::exists(lod2));
+	CHECK(fs::exists(lod4));   // the walk ends at the first gap, a file past it is not part of the chain
+	CHECK(AutoLod::findLodSidecars(contentRoot, again->path).empty());
+
+	// With LOD generation off the importer leaves sidecars alone.
+	std::ofstream(lod1, std::ios::binary) << "old";
+	MeshImporter::ImportSettings off;
+	REQUIRE(MeshImporter::import(dir / "uv.gltf", contentRoot, {}, off) != nullptr);
+	CHECK(fs::exists(lod1));
+
+	he_test::removeAllQuiet(dir);
+}
+
+// Step 20: Importer::reimport() used to build a fresh ImportOptions (default-constructed
+// lodRatios = 3 entries) and only ever shrink it to std::min(3, levels.size()) — so a
+// chain longer than the default 3 (built through the editor dialog, which allows up to 6)
+// came back from a re-import truncated to 3, and MeshImporter's own stale-sidecar cleanup
+// then deleted the now-unreferenced LOD4+ files as if they belonged to an older, longer run.
+TEST_CASE("Importer::reimport regenerates a longer-than-default Auto-LOD chain instead of capping it to 3")
+{
+	const fs::path dir = fs::temp_directory_path() / "he_test_long_lod_chain_gltf";
+	he_test::removeAllQuiet(dir);
+	REQUIRE(writeSphereGltf(dir, 24, 32));
+	const fs::path contentRoot = dir / "Content";
+	std::error_code ec;
+	fs::create_directories(contentRoot, ec);
+
+	// A chain built with 4 ratios (more than ImportOptions' default 3), on the dialog's own
+	// step/floor curve (ratiosFor(4, 0.5, 0.1) = 0.5/0.25/0.125/0.1 — four distinct values,
+	// so none of the four generated levels collide with each other on this sphere).
+	const std::vector<float> fourRatios = AutoLod::ratiosFor(4, 0.5f, 0.1f);
+	REQUIRE(fourRatios.size() == 4u);
+	MeshImporter::ImportSettings settings;
+	settings.generateLods = true;
+	settings.lodRatios     = fourRatios;
+	auto mesh = MeshImporter::import(dir / "sphere.gltf", contentRoot, {}, settings);
+	REQUIRE(mesh != nullptr);
+	const size_t before = AutoLod::findLodSidecars(contentRoot, mesh->path).size();
+	REQUIRE(before == 4u);
+
+	// Re-import without the caller choosing ratios: reimport() must read how many
+	// sidecars the chain already has and regenerate that many on the same curve, not its
+	// own 3-entry default — which would land on the exact same four ratios used above and
+	// so reproduce the same four levels deterministically.
+	REQUIRE(Importer::reimport(contentRoot / mesh->path, contentRoot));
+	const size_t after = AutoLod::findLodSidecars(contentRoot, mesh->path).size();
+	CHECK(after > 3u);         // not silently capped to the default run's length
+	CHECK(after == before);    // the whole chain survives, not just its first 3 levels
 
 	he_test::removeAllQuiet(dir);
 }

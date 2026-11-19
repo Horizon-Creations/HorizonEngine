@@ -11,6 +11,9 @@ add_executable(he_tests
     test_material_branching.cpp
     test_material_tessellation.cpp
     test_auto_landscape_variants.cpp
+    test_landscape_groups.cpp
+    test_trail_field.cpp
+    test_layer_mesh_groups.cpp
     test_engine_materials.cpp
     test_particle_graph.cpp
     test_animator_state_machine_graph.cpp
@@ -86,6 +89,9 @@ add_executable(he_tests
     # (Content Browser double-click, Open Function, restore), and the tabs
     # following a rename.
     test_editor_tabs.cpp
+    # Which asset a panel's open document belongs to: its UUID, not the tab's path
+    # string — so a peer's edit finds the tab and a rename keeps the edits.
+    test_asset_identity.cpp
     # The D3D12 ImGui SRV heap's free-list: a freed slot waits for its fence
     # before it is handed out again (Dock-Splitter drag, Thema 113).
     test_deferred_slot_free_list.cpp
@@ -139,6 +145,9 @@ add_executable(he_tests
     # Its sibling for asset tabs: per-row answers carry the row's key, and it
     # waits for the scene's offer.
     test_asset_recovery_ui.cpp
+    # Generate LODs: the dialog opens and closes, the runner fills a foliage layer / a
+    # LOD component / only the sidecars, and Undo takes the scene edit back (Thema 331 S3).
+    test_auto_lod_ui.cpp
     # The "git is missing" remedy: Install Git exactly when the route can run,
     # the manual way otherwise. Nothing is installed (the callback is a counter).
     test_git_install_ui.cpp
@@ -149,6 +158,7 @@ add_executable(he_tests
     # The texture colour-space dialog, driven the same way: Apply rewrites the
     # rows that change, a tick changed in the dialog is the flag the import writes.
     test_texture_colour_space_ui.cpp
+    test_static_mesh_editor_ui.cpp
     # The Material Editor tab, driven the same way: the Tessellation cell and its
     # popup while the Displacement pin is wired, on a renderer that tessellates
     # and on one that does not (Thema 207).
@@ -164,6 +174,10 @@ add_executable(he_tests
     test_sky_shader.cpp
     test_jobsystem.cpp
     test_terrain.cpp
+    # Thema 233 step 7: a terrain mixing a second/third texture group (weight
+    # layers 6/7 as group shares), and that paint()/fillLayer() are unchanged
+    # byte for byte when no mix group is set.
+    test_terrain_mix_groups.cpp
     # Thema 210: a landscape texture array that arrives late renders like a first load
     # (content epoch on download + the backends' graph-texture miss sweep, source-pinned).
     test_landscape_reload.cpp
@@ -195,6 +209,11 @@ add_executable(he_tests
     # the same WaterIndex the physics immersion detection uses, wired onto
     # RenderWorld by RenderExtractor::extract() for the post-processing stage.
     test_underwater_camera.cpp
+    # Thema 225 step 2: volumetric fog's host side — FogVolume.h's slice math,
+    # the analytic height-fog integral it has to seam with, FogVolumeData/
+    # MakeFogVolumeData/ExtractFogVolumeData gating, and (under HE_TESTS_HAVE_SHADERC)
+    # the §10 feasibility probe: the real shadow preamble through SPIRV-Cross as Compute.
+    test_fog_volume.cpp
     # The ground under a lake: a polygon dug to a floor with a soft bank, the
     # chunks it rebuilds, and the editor's one undo step giving it back exactly.
     test_terrain_excavate.cpp
@@ -222,6 +241,16 @@ add_executable(he_tests
     test_foliage_lod.cpp
     # Straddler buckets on the pool give the single-threaded result (Thema 238 S2).
     test_foliage_parallel.cpp
+    # meshoptimizer-backed LOD simplifier, tool-only, not wired into the importer or
+    # editor yet (Thema 331 S2): triangle/attribute floors, UV-seam and border locks,
+    # the foliage alpha-coverage retry loop.
+    test_mesh_simplifier.cpp
+    # Auto-LOD chains: generator, sidecars, screen-error distances, foliage/LOD fill (Thema 331 S3).
+    test_auto_lod.cpp
+    # Impostor bake: CPU albedo+alpha picture of a plant, the sized card, the cut-out material (Thema 331 S4).
+    test_impostor.cpp
+    # Meshlet culling prototype: build/frustum/cone vs brute force, opt-in foliage probe (Thema 331 S6).
+    test_meshlet_cull.cpp
     # Graph materials (wind) drawn instanced on GL and Metal (Thema 182, 2e).
     test_graph_instancing.cpp
     test_debug_draw.cpp
@@ -298,6 +327,8 @@ add_executable(he_tests
     test_blend_space.cpp
     test_sequencer_timeline.cpp
     test_sequence.cpp
+    test_landscape_foliage_layer.cpp
+    test_landscape_foliage_node.cpp
     test_sequence_runtime.cpp
     test_cinematic_timeline.cpp
     test_animation_ik.cpp
@@ -331,10 +362,32 @@ add_executable(he_tests
     test_hc_dispatch.cpp
     test_postfx.cpp
     test_hpak.cpp
+    # Pack only what the game reaches (Thema 228)
+    test_reach_filter.cpp
+    # Which materials the export may bake onto a mesh (Thema 228, Punkt 6, Schritt B)
+    test_simple_texture_material.cpp
+    # The atlas bake itself: lossless merge, resampling, groups, kept sections (Schritt C1)
+    test_mesh_texture_bake.cpp
+    # The export pass on real files: mesh + materials + textures in, derived assets out (Schritt C2)
+    test_mesh_bake_pass.cpp
+    # The shipped game frees a compressed texture's CPU bytes after the GPU upload (RAM) and gets them back on request
+    test_cpu_pixel_release.cpp
+    # The game bakes the sky noise in the background while SDL starts (Thema 228)
+    test_sky_noise_prewarm.cpp
+    # The planner for the baked far-landscape material: needed resolution and the downscaling to a byte budget (Thema 228 request, for 326)
+    test_landscape_hlod_plan.cpp
+    # two real exports of a project, filtered and not; a no-op without HE_REACH_PROJECT
+    test_bench_export_reach.cpp
     # BC1/BC4/BC5 next to BC7/BC3: enum + block math, encoders (2D and arrays), CPU decoders (Thema 180, Schritt 10)
     test_texture_bcn.cpp
+    # editor: big RGBA8 texture arrays are read cooked for the GPU, cached by source path/size/mtime (GpuArrayCook.h)
+    test_gpu_array_cook.cpp
     # size / encode time / load time of the Auto Landscape arrays per format; a no-op without HE_BENCH_ARRAYS_IN (Thema 180, Schritt 6)
     test_bench_landscape_arrays.cpp
+    # size / encode time / zstd of ONE baked landscape tile map per side and format; a no-op without HE_BENCH_TILE_PNG (Thema 228, for 326)
+    test_bench_hlod_tile.cpp
+    test_hlod_baker.cpp
+    test_hlod_assets.cpp
     test_async_streaming.cpp
     test_crash_handler.cpp
     test_logging.cpp
@@ -537,6 +590,9 @@ add_executable(he_tests
     # ContentManager in, which tab out — no ImGui. AppContext::EditorTab lives
     # under HE_IMGUI_ENABLED, set per file below.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorTabs.cpp
+    # An asset's identity (file UUID, else the normalised path): ContentManager and
+    # the filesystem in, a key out — no ImGui.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/AssetIdentity.cpp
     # The viewport's right-click verbs (hide / isolate / show all / group /
     # ungroup): a registry and a selection in, touched entities out — no ImGui.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/ViewportActions.cpp
@@ -955,6 +1011,9 @@ add_executable(he_tests
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/SceneRecoveryDialog.cpp
     # And the asset tabs' recovery dialog, for test_asset_recovery_ui.cpp.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/AssetRecoveryDialog.cpp
+    # The Generate LODs dialog and runner, for test_auto_lod_ui.cpp (Thema 331 S3):
+    # same AppContext, same per-file HE_IMGUI_ENABLED. HorizonImporters is linked.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/AutoLodDialog.cpp
     # The git-missing dialog and its remedy, for test_git_install_ui.cpp: same
     # AppContext, same per-file HE_IMGUI_ENABLED. It reads the probe and the
     # git-install callbacks; HorizonSourceControl is linked below.
@@ -970,6 +1029,11 @@ add_executable(he_tests
     # AppContext, same per-file HE_IMGUI_ENABLED. It calls the importers
     # (HorizonImporters, linked below) and CollabController (already here).
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/TextureColourSpaceDialog.cpp
+    # The Mesh Viewer tab (Export bake column), for test_static_mesh_editor_ui.cpp: same per-file
+    # HE_IMGUI_ENABLED; EditorViewportNav is what its 3D view navigates with.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/StaticMeshEditorPanel.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorViewportNav.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorInput.cpp
     # The reward moments it fires (EditorRewards.h), and test_editor_rewards.cpp:
     # same AppContext, same per-file HE_IMGUI_ENABLED.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorRewards.cpp
@@ -1059,6 +1123,8 @@ set_source_files_properties(
     test_scene_recovery_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/AssetRecoveryDialog.cpp
     test_asset_recovery_ui.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/AutoLodDialog.cpp
+    test_auto_lod_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/GitMissingDialog.cpp
     test_git_install_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/ToolSetupDialog.cpp
@@ -1066,6 +1132,10 @@ set_source_files_properties(
     test_tool_setup_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/TextureColourSpaceDialog.cpp
     test_texture_colour_space_ui.cpp
+    test_static_mesh_editor_ui.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/StaticMeshEditorPanel.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorViewportNav.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorInput.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorRewards.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/NotificationBar.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/NotificationPopups.cpp
@@ -1309,6 +1379,15 @@ set_source_files_properties(test_game_build_config.cpp PROPERTIES
     INCLUDE_DIRECTORIES ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/game_build_config
     COMPILE_DEFINITIONS HE_TEST_GAME_BUILD_CONFIG_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/game_build_config/HEGameBuildConfig.h")
 
+# EditorInput.cpp (compiled above) calls the Mac pinch hook, which is ObjC++ on APPLE only
+# (the other platforms get the empty one inside EditorInput.cpp).
+if(APPLE)
+    target_sources(he_tests PRIVATE ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorInputMac.mm)
+    set_source_files_properties(${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorInputMac.mm
+        PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+    target_link_libraries(he_tests PRIVATE "-framework Cocoa")
+endif()
+
 # ─── Process-runner fixture ────────────────────────────────────────────────────
 # A real child process, because every bug HE::Proc exists to avoid is invisible
 # to a mock: exit codes mangled into wait statuses, streams merged, pipes
@@ -1444,6 +1523,13 @@ if(TARGET HorizonContentSync)
     # test_sftp_connection.cpp: SftpConnection's session reuse (CSY-101); its live
     # case runs only with HE_TEST_SFTP pointing at a throwaway server.
     target_sources(he_tests PRIVATE test_engine_content_manifest_refresh.cpp test_sftp_connection.cpp)
+    # LandscapeFoliageLayer through publish scan / manifest / passive pull, no server (Thema 327)
+    target_sources(he_tests PRIVATE test_landscape_foliage_sync.cpp)
+    # a cached EngineContent file the server replaced is dropped (CacheFreshness.h)
+    target_sources(he_tests PRIVATE test_content_cache_freshness.cpp)
+    # Thema 194 step 3: the new HTTP content-server client (manifest + file fetch), against a
+    # real loopback server — no SFTP, no EngineContentSync singleton, see the file's own comment.
+    target_sources(he_tests PRIVATE test_content_server_client.cpp)
     target_link_libraries(he_tests PRIVATE HorizonContentSync)
     target_include_directories(he_tests PRIVATE ${CMAKE_SOURCE_DIR}/src/HE_ContentSync/src)
     if(WIN32)

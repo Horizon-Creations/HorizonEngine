@@ -202,6 +202,12 @@ namespace
 		if (l.heightMin != def.heightMin)           j["heightMin"]      = l.heightMin;
 		if (l.heightMax != def.heightMax)           j["heightMax"]      = l.heightMax;
 		if (l.weightLayer != def.weightLayer)       j["weightLayer"]    = l.weightLayer;
+		// Apply-tag (Thema 327): absent for a hand-added layer, exactly like today.
+		if (l.sourceAssetId != def.sourceAssetId)
+		{
+			j["sourceAsset"] = uuidToJson(l.sourceAssetId);
+			j["sourceEntry"] = l.sourceEntry;
+		}
 		// Farther detail levels; a layer without any writes no key at all.
 		if (!l.lods.empty())
 		{
@@ -245,6 +251,11 @@ namespace
 		// Out of range = no paint rule (a hand-edited file, or a peer with more layers).
 		l.weightLayer     = c.value("weightLayer", l.weightLayer);
 		if (l.weightLayer < 0 || l.weightLayer >= kTerrainMaxLayers) l.weightLayer = -1;
+		if (c.contains("sourceAsset"))
+		{
+			l.sourceAssetId = jsonToUuid(c["sourceAsset"]);
+			l.sourceEntry   = c.value("sourceEntry", l.sourceEntry);
+		}
 		if (c.contains("lods") && c["lods"].is_array())
 		{
 			for (const json& d : c["lods"])
@@ -741,9 +752,23 @@ namespace
 				// its weightRes² × 4 meaning and older builds still read the
 				// first four layers of a scene written by this one.
 				if (t->layerWeights2.size() == t->layerWeights.size())
+				{
 					tc["layerWeights2B64"] = base64Encode(t->layerWeights2.data(),
 					                                      t->layerWeights2.size());
+					// Layers 8..11 the same way, only beside a second page and only
+					// once there is one: a scene with no third page is written exactly
+					// as before there were twelve layers, and an older build reads
+					// the first eight layers of one that has it.
+					if (t->layerWeights3.size() == t->layerWeights.size())
+						tc["layerWeights3B64"] = base64Encode(t->layerWeights3.data(),
+						                                      t->layerWeights3.size());
+				}
 			}
+			// Mixed texture groups (Thema 233): layers 8..11 are the four groups' shares.
+			// Written only when on, so a one-group terrain (every scene before this field)
+			// saves byte for byte as before. The first build kept two shares in layers 6/7
+			// under "mixGroups"; that was never rendered and is not read any more.
+			if (t->groupMix) { tc["groupMix"] = true; tc["baseGroup"] = t->baseGroup; }
 			if (!t->sculptHeights.empty())
 			{
 				// As a base64 blob, NOT a JSON array of N floats — the array form
@@ -1150,6 +1175,10 @@ namespace
 				{ "fontSize", t2->fontSize },
 				{ "color",    vec4ToJson(t2->color) },
 			};
+			// Same key as UIElement in UIWidgetTree.cpp. Empty = default UI font,
+			// so older readers and scenes without the key stay identical. The baked
+			// fontAtlasKey is transient and re-resolved at extract.
+			if (!t2->font.empty()) comps["uitext"]["font"] = t2->font;
 		}
 		if (auto* img = registry.try_get<UIImageComponent>(entity))
 		{
@@ -1763,6 +1792,23 @@ namespace
 				if (t.layerWeights2.size() != t.layerWeights.size())
 					t.layerWeights2.clear();
 			}
+			// Absent in every scene written before there were twelve layers → empty =
+			// layers 8..11 all zero. Needs a second page beside it (the writer only
+			// emits it then); a mismatched blob is dropped like the others.
+			if (!t.layerWeights2.empty() && c.contains("layerWeights3B64")
+			    && c["layerWeights3B64"].is_string())
+			{
+				t.layerWeights3 = base64Decode(c["layerWeights3B64"].get<std::string>());
+				if (t.layerWeights3.size() != t.layerWeights.size())
+					t.layerWeights3.clear();
+			}
+			// Mixed texture groups. Absent in every scene written before this field, and in
+			// every one-group terrain written by this build → both slots stay -1, which is
+			// the legacy, single-group look. Out-of-range or duplicate entries are dropped
+			// rather than carried, same as a truncated weightmap above.
+			t.groupMix = c.value("groupMix", false)
+			             && !t.layerWeights.empty() && t.layerWeights3.size() == t.layerWeights.size();
+			t.baseGroup = t.groupMix ? std::clamp(c.value("baseGroup", 0), 0, 3) : -1;
 			if (c.contains("sculptHeightsB64") && c["sculptHeightsB64"].is_string())
 			{
 				const std::vector<uint8_t> bytes =
@@ -2381,6 +2427,7 @@ namespace
 			t2.text     = c.value("text",     t2.text);
 			t2.fontSize = c.value("fontSize", t2.fontSize);
 			t2.color    = jsonToVec4(c.value("color", json()), t2.color);
+			t2.font     = c.value("font",     std::string());
 			registry.emplace_or_replace<UITextComponent>(entity, std::move(t2));
 		}
 		if (comps.contains("uiimage"))

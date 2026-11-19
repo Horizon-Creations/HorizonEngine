@@ -51,6 +51,23 @@ struct EnvironmentSettings
     // altitude (analytic exponential height fog); 0 = uniform distance fog.
     float     fogDensity      = 0.0f;
     float     fogHeightFalloff = 0.1f;
+    // Volumetric fog (Thema 225, docs/volumetric-fog-plan.md): fogMode 0 keeps the
+    // analytic formula above pixel-identical; 1 switches to the froxel volume, built
+    // by HE::MakeFogVolumeData (HorizonRendering/FogVolume.h) from these fields plus
+    // a capability + camera-underwater gate. These do NOT go through BuildSkyFrameParams
+    // or OpenGL's sky uniforms (unlike fogDensity/fogHeightFalloff above) — no shader
+    // reads them yet, so leaving that step undone is deliberate, not a gap to "fix".
+    int       fogMode              = 0;
+    int       fogQuality           = 1;
+    float     fogVolumeDistance    = 96.0f;
+    glm::vec3 fogAlbedo            = glm::vec3(1.0f);
+    float     fogAnisotropy        = 0.5f;
+    float     fogNoiseAmount       = 0.5f;
+    float     fogNoiseScale        = 40.0f;
+    float     fogBankDensity       = 0.0f;
+    float     fogBankBaseY         = 0.0f;
+    float     fogBankThickness     = 4.0f;
+    float     fogLocalLightScatter = 1.0f;
     // Night-sky aurora borealis intensity (0 = off). Drifting light ribbons
     // that sweep across the sky, drawn only at night.
     float     auroraIntensity = 0.0f;
@@ -96,6 +113,11 @@ struct EnvironmentSettings
     // ABSOLUTE world altitude of the cloud deck base (layer is 1.5x as thick).
     // Camera-independent, so the viewer can fly into and above the clouds.
     float     cloudHeight = 200.0f;
+    // How high the SKY-DOME clouds (cloudMode 0) look: a multiplier on the dome's noise
+    // projection. 1 is the classic look; larger puts the clouds further up (smaller, more
+    // compressed toward the horizon, drifting slower against their own size), smaller brings
+    // them close and large. cloudHeight only drives the 3D mode, this only the dome.
+    float     cloudDomeHeight = 1.0f;
     // Cloud raymarch quality (perf knob): 0 Low, 1 Medium, 2 High — scales step counts.
     int       cloudQuality = 1;
     bool      lowResClouds = true;  // quarter-res cloud pre-pass + upsample (perf; default on)
@@ -107,6 +129,11 @@ struct EnvironmentSettings
     // Cloud look (3D volumetric mode): 0 = Classic (original soft look),
     // 1 = Realistic (Perlin-Worley shapes, flat bases, multi-scatter lighting).
     int       cloudStyle = 1;
+    // What kind of cloud the Realistic 3D layer grows (cloudStyle 1): 0 = Mixed cumulus (the classic
+    // Realistic look), 1 = Flat cumulus (small low cells), 2 = Cumulus congestus (tall towers),
+    // 3 = Stratocumulus (low lumpy sheets), 4 = Cumulonimbus (few huge cells, full-depth towers).
+    // Sets the cell size and the height profile; the amount of sky they cover stays cloudCoverage.
+    int       cloudType = 0;
     // Clouds shade each other (3D mode): extended sun light-march.
     bool      cloudInterShadows = true;
     // Shape-evolution speed (3D Realistic): 0 = frozen drift … 1 = natural

@@ -37,6 +37,7 @@
 #include <HorizonScene/MovementSystem.h>
 #include <HorizonScene/EngineApi.h>
 #include <HorizonScene/Components/NameComponent.h>
+#include <HorizonScene/Components/EnvironmentComponent.h>
 #include <HorizonScene/Components/TransformComponent.h>
 #include <HorizonScene/Components/MeshComponent.h>
 #include <HorizonScene/Components/ColliderComponent.h>
@@ -144,6 +145,10 @@ TEST_CASE("third person: the ground is solid, through the real scene loader")
 	for (auto [e, nc] : reg.view<NameComponent>().each())
 		if (nc.name == "Sky") { hasSky = true; break; }
 	CHECK(hasSky);
+	// A new project's Sky starts on the volumetric fog (Thema 225 step 7); the key is
+	// loaded for real, so a misspelt one in the template would read back as the old 0.
+	REQUIRE((world.environmentEntity() != entt::null));
+	CHECK(reg.get<EnvironmentComponent>(world.environmentEntity()).fogMode == 1);
 
 	// And no camera entity in the scene: the character brings its own, and a
 	// second main camera would win or lose on iteration order.
