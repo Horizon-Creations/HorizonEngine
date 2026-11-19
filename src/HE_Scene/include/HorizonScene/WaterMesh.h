@@ -125,8 +125,8 @@ namespace HE::water
     // two sheets never draw over one another, whatever either one's own depth is.
     inline constexpr float kStreamJoinSink = 0.03f;
 
-    // A key of every other body's id, level and kind: what a stream's mesh depends on besides the ground and its
-    // own cells (the surface of the water it runs into).
+    // A key of every body's id, kind and level (streamDepth for a stream): what a stream's mesh depends on besides
+    // the ground and its own cells (the surface of the water it runs into, a neighbour stream's included).
     uint64_t streamJoinKeyOf(const Field& field);
 
     // A stream lies in the channel the brush dug (Body::brushPatch records what every dab lowered), and the channel is FILLED: the

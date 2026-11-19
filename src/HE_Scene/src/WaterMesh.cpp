@@ -366,7 +366,12 @@ uint64_t streamJoinKeyOf(const Field& f)
 {
     uint64_t h = 1469598103934665603ull;
     for (const Body& b : f.bodies)
-        if (!b.stream) { h = fnv(h, b.id); h = fnv(h, b.level); }
+    {
+        // a stream neighbour's surface is its ground plus streamDepth (streamSurfaceAt), a flat body's its level
+        h = fnv(h, b.id);
+        h = fnv(h, b.stream);
+        h = fnv(h, b.stream ? b.streamDepth : b.level);
+    }
     return h;
 }
 

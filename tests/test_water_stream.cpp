@@ -380,6 +380,23 @@ TEST_CASE("Water joining: a stream that reaches into another stream lies under i
     MESSAGE("vertices of A on B's cells: " << onBFromA << ", of B on A's cells: " << onAFromB);
     CHECK(onBFromA > 50u);                                      // A does meaningfully reach into B along the touching run
     CHECK(onAFromB <= 5u);                                      // B does not: at most a boundary-rounding vertex, never a real reach
+
+    // Lowering B's depth must change A's cache key (WaterSurface keeps A's mesh while surfaceHash is unchanged;
+    // its join strip, clamped to B's OLD surface, would otherwise poke through B's new one).
+    auto hashOfA = [&] {
+        water::SurfaceOptions o = optionsFor();
+        o.joinBody = a; o.streamBody = a; o.streamDepth = tc.water.findBody(a)->streamDepth;
+        o.streamJoinKey = water::streamJoinKeyOf(tc.water);
+        water::Lattice lat;
+        REQUIRE(water::buildLattice(tc, a, water::bodyCells(tc, a), lat, o.clipFor(tc.water.findBody(a)->level)));
+        return water::surfaceHash(lat, tc.water.findBody(a)->level, o);
+    };
+    const uint64_t before = hashOfA();
+    REQUIRE(water::setStream(tc, b, true, 0.1f));
+    CHECK(hashOfA() != before);
+    water::SurfaceMesh sa2;
+    REQUIRE(water::buildSurface(tc, a, optionsFor(), sa2));
+    CHECK(checkJoinedUnder(tc, sa2, b) > 50u);                  // and the rebuilt strip sits under B's new, lower surface
 }
 
 TEST_CASE("Water brush: a stroke started on an existing stream paints its own stream next to it, not over it")
