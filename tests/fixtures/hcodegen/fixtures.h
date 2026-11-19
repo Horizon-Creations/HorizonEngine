@@ -153,8 +153,8 @@ struct Fx
         const HE::api::ApiFn* fn = HE::api::find(id);
         must(fn != nullptr, "engine api id");
         Node n; n.type = NT::EngineCall; n.s = id; n.hasArg = fn->isExec;
-        for (const auto& p : fn->params)  n.params.push_back({ p.name, p.type, p.isArray });
-        for (const auto& r : fn->results) n.results.push_back({ r.name, r.type, r.isArray });
+        for (const auto& p : fn->params)  n.params.push_back(HE::api::toFuncParam(p));
+        for (const auto& r : fn->results) n.results.push_back(HE::api::toFuncParam(r));
         return add(n);
     }
 
@@ -2939,6 +2939,124 @@ inline HE::hccg::ClassSource fxInputRebind()
     return f.done("input_rebind");
 }
 
+// quality_levels: the engine's own enums in a graph — Get Engine Settings (a Ref),
+// Set Quality Of over it, Get Quality Level, a Switch on Enum over QualityLevel,
+// and the plain Set/Get pair into an enum variable. Both halves run it against
+// the same settings store, so the switch and the enum pins agree.
+inline HE::hccg::ClassSource fxQualityLevels()
+{
+    Fx f;
+    f.var("route", PT::String);
+    f.enumVar("shadows", HE::kQualityLevelEnum, "Low");
+
+    // Apply: Textures to Low through the settings OBJECT, read back, route by level.
+    const int ev   = f.event("Apply");
+    const int eng  = f.engineCall("settings.engine");
+    const int set1 = f.engineCall("settings.setQualityOf");
+    f.data(eng, 0, set1, 0);
+    f.data(f.constEnum(HE::kQualitySettingEnum, 8), 0, set1, 1);   // Textures
+    f.data(f.constEnum(HE::kQualityLevelEnum, 0), 0, set1, 2);     // Low
+    f.exec(ev, set1);
+    const int get1 = f.engineCall("settings.qualityLevel");
+    f.data(f.constEnum(HE::kQualitySettingEnum, 8), 0, get1, 0);
+    const int sw = f.switchEnum(HE::kQualityLevelEnum);
+    f.data(get1, 0, sw, 0);
+    f.exec(set1, sw);
+    { const char* names[] = { "low", "medium", "high", "ultra", "custom" };
+      for (int i = 0; i < 5; ++i)
+      {
+          const int s = f.setVar("route", PT::String);
+          f.g.findNode(s)->pinDefaults[0] = Value::ofString(names[i]);
+          f.exec(sw, s, i);
+      } }
+
+    // Shadows: the plain pair, no object, the answer kept in an enum variable.
+    const int evS  = f.event("Shadows");
+    const int set2 = f.engineCall("settings.setQualityLevel");
+    f.data(f.constEnum(HE::kQualitySettingEnum, 1), 0, set2, 0);   // Shadows
+    f.data(f.constEnum(HE::kQualityLevelEnum, 3), 0, set2, 1);     // Ultra
+    f.exec(evS, set2);
+    const int sShadows = f.setVarT("shadows", PT::Enum, HE::kQualityLevelEnum);
+    const int get2 = f.engineCall("settings.qualityLevel");
+    f.data(f.constEnum(HE::kQualitySettingEnum, 1), 0, get2, 0);
+    f.data(get2, 0, sShadows, 0);
+    f.exec(set2, sShadows);
+    return f.done("quality_levels");
+}
+
+// quality_settings: the graphics-quality rows of the settings store — a preset,
+// one single value over it, then the preset and the value read back, and a reset.
+// Same store for both halves; the parity test records what the host was handed.
+inline HE::hccg::ClassSource fxQualitySettings()
+{
+    Fx f;
+    f.var("preset", PT::String);
+    f.var("tex", PT::Float);
+
+    const int ev = f.event("Apply");
+    const int sp = f.engineCall("settings.setQualityPreset");
+    f.g.findNode(sp)->pinDefaults[0] = Value::ofString("Low");
+    const int sv = f.engineCall("settings.setQualityValue");
+    { Node* n = f.g.findNode(sv);
+      n->pinDefaults[0] = Value::ofString("textureQuality");
+      n->pinDefaults[1] = Value::ofFloat(1.0f); }
+    f.exec(ev, sp); f.exec(sp, sv);
+
+    int last = sv;
+    auto read = [&](const char* id, const char* var, PT type)
+    {
+        const int g = f.engineCall(id);
+        const int s = f.setVar(var, type);
+        f.data(g, 0, s, 0);
+        f.exec(last, s);
+        last = s;
+        return g;
+    };
+    read("settings.qualityPreset", "preset", PT::String);
+    const int tv = read("settings.qualityValue", "tex", PT::Float);
+    f.g.findNode(tv)->pinDefaults[0] = Value::ofString("textureQuality");
+    const int reset = f.engineCall("settings.resetToDefaults");
+    f.exec(last, reset);
+    return f.done("quality_settings");
+}
+
+// hardware_rows: the hardware rows read into variables - typed numbers and text, the by-name row and the
+// enum row. Same module for both halves; the parity test installs a fake machine first.
+inline HE::hccg::ClassSource fxHardwareRows()
+{
+    Fx f;
+    f.var("cpu", PT::String);
+    f.var("threads", PT::Int);
+    f.var("ram", PT::Int);
+    f.var("gpu", PT::String);
+    f.var("vram", PT::Int);
+    f.var("hz", PT::Float);
+    f.var("api", PT::String);
+    f.var("byName", PT::String);
+
+    const int ev = f.event("Apply");
+    int last = ev;
+    auto read = [&](const char* id, const char* var, PT type)
+    {
+        const int g = f.engineCall(id);
+        const int s = f.setVar(var, type);
+        f.data(g, 0, s, 0);
+        f.exec(last, s);
+        last = s;
+        return g;
+    };
+    read("hardware.cpuName", "cpu", PT::String);
+    read("hardware.cpuThreads", "threads", PT::Int);
+    read("hardware.ramTotalMB", "ram", PT::Int);
+    read("hardware.gpuName", "gpu", PT::String);
+    read("hardware.gpuVramMB", "vram", PT::Int);
+    read("hardware.displayRefreshHz", "hz", PT::Float);
+    read("hardware.graphicsApi", "api", PT::String);
+    const int bn = read("hardware.value", "byName", PT::String);
+    f.g.findNode(bn)->pinDefaults[0] = Value::ofString("OsName");
+    return f.done("hardware_rows");
+}
+
 // player_settings: the settings rows — setters filed under input, camera, app
 // and settings, then every getter read back into a variable. They share one
 // store (PlayerSettings.cpp), so the compiled half starts from what the
@@ -3238,7 +3356,7 @@ inline std::vector<HE::hccg::ClassSource> all()
         fxInheritBase(), fxInheritDerived(),
         fxInheritNovarsBase(), fxInheritNovars(),
         fxInputActions(), fxContainers(), fxReroutes(), fxCheatEvent(),
-        fxDatetimeDouble(), fxInputRumble(), fxInputRebind(), fxPlayerSettings(), fxPlayerSlots(),
+        fxDatetimeDouble(), fxInputRumble(), fxInputRebind(), fxPlayerSettings(), fxHardwareRows(), fxQualitySettings(), fxQualityLevels(), fxPlayerSlots(),
         fxPullConstruct(), fxPullSpawner(), fxBindTo(),
         fxExtractDestruct(), fxExtractDerived(), fxExtractListener(),
         fxEngineWorld(),

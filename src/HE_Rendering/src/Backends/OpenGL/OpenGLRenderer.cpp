@@ -3496,6 +3496,47 @@ void OpenGLRenderer::Initialize(HE::Window* window)
 	{   // Name the GPU like the Vulkan backend does (vendor / renderer / driver version).
 		auto str = [](GLenum e) { const GLubyte* p = glGetString(e); return p ? reinterpret_cast<const char*>(p) : "?"; };
 		HE_LOG_INFO(RHI, "OpenGLRenderer: GPU %s %s (OpenGL %s)", str(GL_VENDOR), str(GL_RENDERER), str(GL_VERSION));
+		{
+			// The GPU choice (Thema 337): the OpenGL context lives on whatever card the driver gives the process,
+			// there is no API to name one. Said once so the settings page and the log do not pretend otherwise.
+			HE::GpuSelection sel;
+			sel.requested = HE::preferredGpuId();
+			sel.canChoose = false;
+			sel.honored   = sel.requested.empty();
+			sel.note      = "OpenGL cannot choose the graphics card; the driver's default runs (use D3D11, D3D12 or Vulkan to pick one)";
+			if (!sel.requested.empty())
+				HE_LOG_WARN(RHI, "OpenGLRenderer: GPU choice %s ignored: %s", sel.requested.c_str(), sel.note.c_str());
+			HE::setGpuSelection(sel);
+		}
+		// The same facts for HE::GpuInfo (Thema 337). GL_RENDERER carries driver noise after the name
+		// ("NVIDIA GeForce RTX 4070/PCIe/SSE2"), the part before the first slash is the GPU.
+		std::string name = str(GL_RENDERER);
+		if (const size_t slash = name.find('/'); slash != std::string::npos) name.resize(slash);
+		m_adapterInfo.name   = name;
+		m_adapterInfo.vendor = HE::gpuVendorFromText(std::string(str(GL_VENDOR)) + " " + name);
+		{   // "4.6.0 NVIDIA 621.01": the driver's own version is what follows the vendor name.
+			std::string ver = str(GL_VERSION);
+			const std::string vendorName = m_adapterInfo.vendor;
+			if (!vendorName.empty())
+				if (const size_t at = ver.find(vendorName + " "); at != std::string::npos)
+					ver = ver.substr(at + vendorName.size() + 1);
+			m_adapterInfo.driver = ver;
+		}
+		m_adapterInfo.api    = "OpenGL";
+		m_adapterInfo.vramMB = 0;   // GL has no portable query; NVIDIA answers through GL_NVX_gpu_memory_info
+		GLint extCount = 0;
+		glGetIntegerv(GL_NUM_EXTENSIONS, &extCount);
+		for (GLint i = 0; i < extCount; ++i)
+		{
+			const GLubyte* e = glGetStringi(GL_EXTENSIONS, static_cast<GLuint>(i));
+			if (e && std::strcmp(reinterpret_cast<const char*>(e), "GL_NVX_gpu_memory_info") == 0)
+			{
+				GLint kb = 0;
+				glGetIntegerv(0x9047 /* GPU_MEMORY_INFO_DEDICATED_VIDMEM_NVX */, &kb);
+				if (kb > 0) m_adapterInfo.vramMB = static_cast<uint64_t>(kb) / 1024u;
+				break;
+			}
+		}
 	}
 	// Displacement tessellation (Thema 207): core since GL 4.0, so macOS (4.1)
 	// has it too. HE_TESSELLATION=0 turns it off for an A/B against the fallback,
@@ -6257,6 +6298,41 @@ void OpenGLRenderer::CreateSSAOPipeline()
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 		glBindTexture(GL_TEXTURE_2D, 0);
 	}
+}
+
+// The pushed mip floor for new uploads (see uploadGlTextureReleasing, further down).
+static float g_glTexMinLod = 0.0f;
+
+void OpenGLRenderer::SetQualitySettings(const QualitySettings& s)
+{
+	IRenderer::SetQualitySettings(s);
+	g_glTexMinLod = TextureMinLodForQuality(m_quality.textureQuality);
+	m_textureMinLodDirty = true;   // applied at the top of the next DrawScene, where the GL context is current
+}
+
+// Rewrites GL_TEXTURE_MIN_LOD on every world colour texture already uploaded (mesh, skinned,
+// material-override and graph/landscape textures); later uploads take g_glTexMinLod at upload.
+// A texture with a single mip level is unaffected.
+void OpenGLRenderer::ApplyTextureQuality()
+{
+	m_textureMinLodDirty = false;
+	if (g_glTexMinLod == m_textureMinLodApplied) return;
+	const float lod = g_glTexMinLod;
+	auto set = [lod](unsigned int tex, GLenum target)
+	{
+		if (!tex) return;
+		glBindTexture(target, tex);
+		glTexParameterf(target, GL_TEXTURE_MIN_LOD, lod);
+	};
+	for (auto& kv : m_meshCache)         set(kv.second.texture, GL_TEXTURE_2D);
+	for (auto& kv : m_skeletalMeshCache) set(kv.second.texture, GL_TEXTURE_2D);
+	for (auto& kv : m_materialTexCache)  set(kv.second, GL_TEXTURE_2D);
+	for (auto& kv : m_graphTexCache)
+		set(kv.second, m_glArrayTex.count(kv.second) ? GL_TEXTURE_2D_ARRAY : GL_TEXTURE_2D);
+	glBindTexture(GL_TEXTURE_2D, 0);
+	glBindTexture(GL_TEXTURE_2D_ARRAY, 0);
+	m_textureMinLodApplied = lod;
+	HE_LOG_INFO(RHI, "OpenGLRenderer: texture quality - world and material textures start at mip level %.0f", lod);
 }
 
 void OpenGLRenderer::SetSSAOSettings(const SSAOSettings& s)
@@ -9657,12 +9733,24 @@ unsigned int uploadTextureArrayGL(const TextureAsset* tex)
 // game holds each texture once; see ContentManager::releaseCpuPixels). The glTexImage /
 // glCompressedTexImage calls copy the client memory before they return, so the bytes are dead
 // weight the moment an upload succeeded.
+// Texture quality (Thema 324/336): the finest mip level the world's colour textures may use
+// (IRenderer::TextureMinLodForQuality). GL has no per-use sampler state here (the filters are
+// texture parameters), so the clamp is GL_TEXTURE_MIN_LOD on each texture: set at upload below
+// for every world texture (honourSrgb is false only for UI images, which keep full detail) and
+// rewritten on the live ones by OpenGLRenderer::ApplyTextureQuality.
 unsigned int uploadGlTextureReleasing(ContentManager* cm, const TextureAsset* tex,
                                       bool honourSrgb = true, bool arrayPath = false)
 {
 	if (cm && tex && tex->data.empty()) tex = cm->restoreCpuPixels(tex->id);
 	const unsigned int uploaded = arrayPath ? uploadTextureArrayGL(tex) : uploadTextureAssetGL(tex, honourSrgb);
 	if (cm && tex && uploaded) cm->releaseCpuPixels(tex->id);
+	if (uploaded && honourSrgb && g_glTexMinLod > 0.0f)
+	{
+		const GLenum target = arrayPath ? GL_TEXTURE_2D_ARRAY : GL_TEXTURE_2D;
+		glBindTexture(target, uploaded);
+		glTexParameterf(target, GL_TEXTURE_MIN_LOD, g_glTexMinLod);
+		glBindTexture(target, 0);
+	}
 	return uploaded;
 }
 
@@ -11973,6 +12061,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 	if (!m_world) return;
 	if (pw <= 0 || ph <= 0) return;
 	glViewport(0, 0, pw, ph);
+	if (m_textureMinLodDirty) ApplyTextureQuality();
 
 	// Drop GPU textures for materials edited/re-assigned since last frame so the
 	// loop below re-resolves them (deferred here where the GL context is current).
@@ -12041,6 +12130,8 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 		             0, GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
 		glBindTexture(GL_TEXTURE_2D_ARRAY, 0);
 		m_shadowSizeDirty = false;
+		HE_LOG_INFO(RHI, "OpenGLRenderer: shadow cascades rebuilt at %dx%d (%d cascades, distance %.0f)",
+		            m_shadowSize, m_shadowSize, m_shadowSettings.cascadeCount, m_shadowSettings.distance);
 	}
 	m_extractor.setShadowSettings(m_shadowSettings.distance, m_shadowSettings.cascadeCount,
 	                              m_shadowSettings.splitLambda, m_shadowSize);

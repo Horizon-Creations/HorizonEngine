@@ -1371,8 +1371,8 @@ std::string drawEngineApiMenu(const std::string& lowerQuery,
 			HorizonCode::Node tmp;
 			tmp.type = HorizonCode::NodeType::EngineCall;
 			tmp.s = fn.id; tmp.hasArg = fn.isExec;
-			for (const auto& p : fn.params)  tmp.params.push_back({ p.name, p.type, p.isArray });
-			for (const auto& r : fn.results) tmp.results.push_back({ r.name, r.type, r.isArray });
+			for (const auto& p : fn.params)  tmp.params.push_back(HE::api::toFuncParam(p));
+			for (const auto& r : fn.results) tmp.results.push_back(HE::api::toFuncParam(r));
 			if (ImGui::BeginTooltip())
 			{
 				// Scoped: PopTextWrapPos acts on the CURRENT window, and EndTooltip
@@ -1697,7 +1697,8 @@ bool pinSupportsInlineDefault(const HorizonCode::Node& n, int unifiedPin)
 	const int di = dataInIndexOf(n, unifiedPin, pd);
 	if (di < 0 || pd.isArray) return false;
 	return pd.type == P::Bool || pd.type == P::Int ||
-	       pd.type == P::Float || pd.type == P::Double || pd.type == P::String;
+	       pd.type == P::Float || pd.type == P::Double || pd.type == P::String ||
+	       pd.type == P::Enum;
 }
 
 float pinInlineEditorWidth(const HorizonCode::Node& n, int unifiedPin)
@@ -1710,8 +1711,10 @@ float pinInlineEditorWidth(const HorizonCode::Node& n, int unifiedPin)
 	// to be readable to be checkable, and as a dropdown it also has an arrow to
 	// put somewhere. Wide enough for "Ping Pong" and most element names, capped
 	// because a node is not a panel — the list that opens is sized to its
-	// entries, so a long path is one click from being read in full.
-	return pd.type == P::String ? 112.0f : 0.0f;
+	// entries, so a long path is one click from being read in full. An enum
+	// entry is a name too (its dropdown is the same control the String case
+	// uses once it has a list), so it gets the same width.
+	return (pd.type == P::String || pd.type == P::Enum) ? 112.0f : 0.0f;
 }
 
 void drawPinDefaultEditor(HorizonCode::Node& n, int unifiedPin, bool& committed,
@@ -1814,6 +1817,30 @@ void drawPinDefaultEditor(HorizonCode::Node& n, int unifiedPin, bool& committed,
 				if (hasChoices) opts = choices(n, pd.name);
 				for (const std::string& o : opts)
 					if (ImGui::Selectable(o.c_str(), v.s == o)) { v.s = o; committed = true; }
+				ImGui::EndCombo();
+			}
+			break;
+		}
+		case P::Enum:
+		{
+			// Same control as a Const/Make Enum literal's node body (drawLiteralNodeBody)
+			// — the definition's entry names — just anchored to this pin instead of a
+			// separate literal node. Keyed on the PIN's typeName, not the stored value's:
+			// a struct-field or variable pin can be repointed to a different enum asset,
+			// and a stale index from the old one is worse read as "(pick)" again than as
+			// whatever entry happens to share its number in the new definition.
+			const std::string tn = pd.typeName ? pd.typeName : std::string();
+			if (v.typeName != tn) { v = V{}; v.type = P::Enum; v.typeName = tn; }
+			if (tn.empty()) { ImGui::TextDisabled("(no type)"); break; }
+			HE::EnumDef def;
+			if (!HE::TypeRegistry::instance().getEnum(tn, def) || def.entries.empty())
+			{ ImGui::TextDisabled("(no definition)"); break; }
+			const HE::EnumEntry* cur = def.findValue(v.i);
+			if (ImGui::BeginCombo("##pd", cur ? cur->name.c_str() : "(pick)"))
+			{
+				for (const auto& e : def.entries)
+					if (ImGui::Selectable(e.name.c_str(), cur && cur->name == e.name))
+					{ v.i = e.value; committed = true; }
 				ImGui::EndCombo();
 			}
 			break;

@@ -260,6 +260,13 @@ struct EditorConfig
 	// (or this default) to bring it back.
 	bool  GIReflBlur           = false;
 
+	// Asset detail, 0 Low / 1 Medium / 2 High (High = full detail = the engine's
+	// behaviour before these existed). Part of the quality presets
+	// (HE::QualityPreset, ProjectSettings.h); a backend or system that does not
+	// act on a level yet ignores it, see docs/engine-quality-settings-*.md.
+	int   TextureQuality       = 2;
+	int   MaterialQuality      = 2;
+
 	// NOTE: environment / sky settings (day-night, sun, moon, clouds, fog, night
 	// sky, wind) are scene data now — they live on the World root entity as an
 	// EnvironmentComponent, are edited in its Details panel and persist with the

@@ -3029,8 +3029,8 @@ TEST_CASE("heLitP: the reflection stages hang off their own gates, not the sky c
 		CHECK(vk.find("lit.fog[3] = m_ssaoRanThisFrame ? 1.0f : 0.0f;") != std::string::npos);
 		CHECK(vk.find("m_skyEnvValid ? m_skyEnvView : m_whiteCubeView") != std::string::npos);
 		CHECK(vk.find("m_ssaoRanThisFrame ? m_ssaoBlurRT.view  : m_whiteAlbedoView") != std::string::npos);
-		CHECK(vk.find("wr(15, 15, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &skyII);") != std::string::npos);
-		CHECK(vk.find("wr(16, 16, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &aoII);") != std::string::npos);
+		CHECK(vk.find("wr(15, 15, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, nullptr, &skyII);") != std::string::npos);
+		CHECK(vk.find("wr(16, 16, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, nullptr, &aoII);") != std::string::npos);
 		// And the cube is the SHARED bake, not a fourth hand-kept sky.
 		CHECK(vk.find("HE::BuildSkyEnvFaceRow(") != std::string::npos);
 	}

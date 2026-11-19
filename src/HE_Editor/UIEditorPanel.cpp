@@ -6860,9 +6860,9 @@ void drawGraphCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 					nn->s = fn->id;
 					nn->hasArg = fn->isExec;
 					for (const auto& p : fn->params)
-						nn->params.push_back({ p.name, p.type, p.isArray });
+						nn->params.push_back(HE::api::toFuncParam(p));
 					for (const auto& r : fn->results)
-						nn->results.push_back({ r.name, r.type, r.isArray });
+						nn->results.push_back(HE::api::toFuncParam(r));
 					HC::Value v; v.type = PT::String; v.s = tgt->name;
 					nn->pinDefaults[1] = std::move(v);
 				}

@@ -3,6 +3,8 @@
 #include <HorizonScene/EngineApi.h>
 #include <HorizonScene/AntiCheat/AntiCheatHost.h>   // OnCheatDetected + horizon.anticheat.*
 #include <Types/TypeRegistry.h>
+#include <Diagnostics/HardwareInfo.h>
+#include <memory>
 #include <cstdint>
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/Components/TransformComponent.h>
@@ -167,6 +169,71 @@ TEST_CASE("ScriptContext: registry-driven horizon.math.* (Lua)")
     CHECK(engine.getGlobalNumber("_m") == doctest::Approx(9.0));
     CHECK(engine.getGlobalNumber("_s") == doctest::Approx(4.0));
     CHECK(engine.getGlobalNumber("_d") == doctest::Approx(5.0));
+}
+
+TEST_CASE("ScriptContext: horizon.settings quality rows reach the player's settings store (Lua)")
+{
+    // A graphics menu written in Lua: pick a preset, nudge one value, read both back.
+    HE::api::settings::uninstall();
+    HE::api::settings::resetToDefaults();
+    HE::ProjectGraphics seen;
+    HE::api::settings::Host host;
+    host.applyQuality = [&](const HE::ProjectGraphics& g, const HE::ProjectShadowSettings&) { seen = g; };
+    HE::api::settings::install(std::move(host));
+
+    HorizonWorld world;
+    ScriptContext ctx(world);
+    auto& engine = ctx.engine();
+    REQUIRE(engine.exec(
+        "_G._ok  = horizon.settings.setQualityPreset('High')\n"
+        "_G._bad = horizon.settings.setQualityPreset('Insane')\n"
+        "_G._ok2 = horizon.settings.setQualityValue('textureQuality', 0)\n"
+        "_G._tex = horizon.settings.qualityValue('textureQuality')\n"
+        "_G._n   = #horizon.settings.qualityPresetNames()\n"
+        "_G._is_custom = (horizon.settings.qualityPreset() == 'Custom') and 1 or 0\n"));
+    CHECK(engine.getGlobalNumber("_tex") == doctest::Approx(0.0));
+    CHECK(engine.getGlobalNumber("_n") == doctest::Approx(5.0));
+    CHECK(engine.getGlobalNumber("_is_custom") == doctest::Approx(1.0));
+    CHECK(seen.textureQuality == 0);
+    CHECK(seen.ssrEnabled);   // the rest is High's
+    HE::api::settings::uninstall();
+    HE::api::settings::resetToDefaults();
+}
+
+TEST_CASE("ScriptContext: the engine's quality enums and level rows from Lua")
+{
+    // horizon.enums lists every registered enum, the engine's own among them, so a
+    // script names levels and areas instead of counting them.
+    HE::api::settings::uninstall();
+    HE::api::settings::resetToDefaults();
+    HE::ProjectGraphics seen;
+    HE::api::settings::Host host;
+    host.applyQuality = [&](const HE::ProjectGraphics& g, const HE::ProjectShadowSettings&) { seen = g; };
+    HE::api::settings::install(std::move(host));
+
+    HorizonWorld world;
+    ScriptContext ctx(world);
+    auto& engine = ctx.engine();
+    REQUIRE(engine.exec(
+        "local L, S = horizon.enums.QualityLevel, horizon.enums.QualitySetting\n"
+        "_G._medium = L.Medium\n"
+        "_G._ultra  = L.Ultra\n"
+        "_G._tex    = S.Textures\n"
+        "local obj = horizon.settings.engine()\n"
+        "_G._ok    = horizon.settings.setQualityOf(obj, S.Textures, L.Low) and 1 or 0\n"
+        "_G._level = horizon.settings.qualityOf(obj, S.Textures)\n"
+        "_G._plain = horizon.settings.qualityLevel(S.Textures)\n"
+        "_G._lowOk = (horizon.settings.qualityLevel(S.Textures) == L.Low) and 1 or 0\n"));
+    CHECK(engine.getGlobalNumber("_medium") == doctest::Approx(1.0));
+    CHECK(engine.getGlobalNumber("_ultra") == doctest::Approx(3.0));
+    CHECK(engine.getGlobalNumber("_tex") == doctest::Approx(8.0));
+    CHECK(engine.getGlobalNumber("_ok") == doctest::Approx(1.0));
+    CHECK(engine.getGlobalNumber("_level") == doctest::Approx(0.0));   // Low
+    CHECK(engine.getGlobalNumber("_plain") == doctest::Approx(0.0));
+    CHECK(engine.getGlobalNumber("_lowOk") == doctest::Approx(1.0));
+    CHECK(seen.textureQuality == 0);
+    HE::api::settings::uninstall();
+    HE::api::settings::resetToDefaults();
 }
 
 TEST_CASE("ScriptContext: bitwise — Lua 5.4's native operators AND the registry rows (Lua)")
@@ -1250,4 +1317,50 @@ TEST_CASE("ScriptContext: horizon.water makes a lake over a landscape and reads 
 	CHECK(ctx.engine().getGlobalNumber("_cells") > 250.0);
 	CHECK(ctx.engine().getGlobalNumber("_painted") > 0.0);
 	CHECK(world.registry().get<TerrainComponent>(land).water.bodies.size() == 2u);
+}
+
+TEST_CASE("ScriptContext: horizon.hardware rows read the machine's facts (Lua)")
+{
+    // An about box written in Lua: the typed values, the summary and the by-name list.
+    struct Restore { ~Restore() { HE::setHardwareProvider(nullptr); } } restore;
+    struct Fake final : HE::HardwareProvider
+    {
+        HE::HardwareInfo detect() override
+        {
+            HE::HardwareInfo h;
+            h.cpuName = "Lua CPU"; h.cpuCores = 4; h.cpuThreads = 8; h.ramTotalMB = 16384;
+            h.osName = "Test OS"; h.osVersion = "Test OS 1.0"; h.platform = "Windows";
+            return h;
+        }
+        uint64_t freeMemoryMB() override { return 4096; }
+        bool     onBattery() override    { return false; }
+    };
+    HE::setHardwareProvider(std::make_shared<Fake>());
+    HE::GpuInfo gpu; gpu.name = "Lua GPU"; gpu.vendor = "NVIDIA"; gpu.vramMB = 8192; gpu.api = "Vulkan";
+    HE::setGpuInfo(gpu);
+
+    HorizonWorld world;
+    ScriptContext ctx(world);
+    auto& engine = ctx.engine();
+    REQUIRE(engine.exec(
+        "_G._cpu   = horizon.hardware.cpuName()\n"
+        "_G._cores = horizon.hardware.cpuCores()\n"
+        "_G._ram   = horizon.hardware.ramTotalMB()\n"
+        "_G._gpu   = horizon.hardware.gpuName()\n"
+        "_G._vram  = horizon.hardware.gpuVramMB()\n"
+        "_G._api   = horizon.hardware.graphicsApi()\n"
+        "_G._val   = horizon.hardware.value('GpuVendor')\n"
+        "_G._n     = #horizon.hardware.fields()\n"
+        "_G._first = horizon.hardware.fields()[1]\n"
+        "_G._sum   = horizon.hardware.summary()\n"));
+    CHECK(engine.getGlobalString("_cpu") == "Lua CPU");
+    CHECK(engine.getGlobalNumber("_cores") == doctest::Approx(4.0));
+    CHECK(engine.getGlobalNumber("_ram") == doctest::Approx(16384.0));
+    CHECK(engine.getGlobalString("_gpu") == "Lua GPU");
+    CHECK(engine.getGlobalNumber("_vram") == doctest::Approx(8192.0));
+    CHECK(engine.getGlobalString("_api") == "Vulkan");
+    CHECK(engine.getGlobalString("_val") == "NVIDIA");
+    CHECK(engine.getGlobalNumber("_n") == doctest::Approx(static_cast<double>(HE::HardwareProperty::Count)));
+    CHECK(engine.getGlobalString("_first") == "CpuName");
+    CHECK(engine.getGlobalString("_sum").find("CPU: Lua CPU (4 cores, 8 threads)") != std::string::npos);
 }

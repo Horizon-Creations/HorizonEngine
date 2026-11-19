@@ -684,7 +684,7 @@ TEST_CASE("heApplyFogT on Vulkan: binding 34 is a fragment sampler of the materi
         spirv_cross::Compiler comp(f.spirv);
         const spirv_cross::ShaderResources r = comp.get_shader_resources(comp.get_active_interface_variables());
         bool found = false;
-        for (const spirv_cross::Resource& res : r.sampled_images)
+        for (const spirv_cross::Resource& res : r.separate_images) // a texture3D, read by texelFetch
             found = found || comp.get_decoration(res.id, spv::DecorationBinding) == vk::kFogVolumeBinding;
         return found;
     };
@@ -692,17 +692,17 @@ TEST_CASE("heApplyFogT on Vulkan: binding 34 is a fragment sampler of the materi
     HE::MaterialShaderLibrary lib;
     CHECK(lib.spirvFogVolume());
     CHECK(uses34(lib, 0xF06F20ull));
-    // The row exists in the layout, in the fragment stage, as a combined sampler.
+    // The row exists in the layout, in the fragment stage, as a sampled image (no sampler: texelFetch only).
     bool row = false;
     for (uint32_t i = 0; i < vk::kBindingCount; ++i)
         row = row || (vk::kBindings[i].binding == vk::kFogVolumeBinding
-                      && vk::kBindings[i].kind == vk::DescKind::CombinedImageSampler
+                      && vk::kBindings[i].kind == vk::DescKind::SampledImage
                       && (vk::kBindings[i].stages & vk::kStageFragment));
     CHECK(row);
     // ... ahead of the cluster lists (they stay the LAST rows).
     CHECK(vk::kBindings[vk::kPreClusterBindingCount - 1].binding == vk::kFogVolumeBinding);
 
-    // A device that cannot hold the 18th sampler compiles without it (and without the row).
+    // A device that cannot hold the 18th image compiles without it (and without the row).
     // (Not named `small`: rpcndr.h #defines it to `char` on Windows - MSVC C2628, CI run 41529249343.)
     HE::MaterialShaderLibrary noFogLib;
     noFogLib.setSpirvFogVolume(false);
@@ -718,7 +718,7 @@ TEST_CASE("heApplyFogT on Vulkan: binding 34 is a fragment sampler of the materi
     REQUIRE_MESSAGE(op.ok, op.log);
     spirv_cross::Compiler comp(op.spirv);
     const spirv_cross::ShaderResources r = comp.get_shader_resources(comp.get_active_interface_variables());
-    for (const spirv_cross::Resource& res : r.sampled_images)
+    for (const spirv_cross::Resource& res : r.separate_images)
         CHECK(comp.get_decoration(res.id, spv::DecorationBinding) != vk::kFogVolumeBinding);
 }
 #endif // HE_TESTS_HAVE_SHADERC

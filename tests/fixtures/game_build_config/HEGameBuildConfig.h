@@ -80,6 +80,12 @@ inline constexpr HE::GameBuildConfig kConfig = {
     "tolerance": 0.15000000596046448,
     "windowSec": 3.0
   },
+  "autoQuality": {
+    "enabled": false,
+    "maxLevel": 3,
+    "minLevel": 0,
+    "targetFps": 60.0
+  },
   "game": {
     "cookStaticEntities": false,
     "splashEnabled": false,
@@ -109,10 +115,12 @@ inline constexpr HE::GameBuildConfig kConfig = {
     "giReflectionsEnabled": false,
     "giShadowQuality": 1,
     "gpuParticles": true,
+    "materialQuality": 2,
     "motionBlurEnabled": false,
     "motionBlurIntensity": 0.5,
     "motionBlurMax": 24.0,
     "occlusionCulling": false,
+    "qualityPreset": "Custom",
     "renderPath": 1,
     "renderScale": 1.0,
     "specularAA": true,
@@ -124,7 +132,8 @@ inline constexpr HE::GameBuildConfig kConfig = {
     "ssrEnabled": false,
     "ssrIntensity": 1.0,
     "ssrMaxRoughness": 0.6000000238418579,
-    "ssrQuality": 1
+    "ssrQuality": 1,
+    "textureQuality": 2
   },
   "input": {
     "enabled": true,

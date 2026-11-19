@@ -60,6 +60,9 @@ void SoftwareRenderer::Initialize(HE::Window* window)
     m_primary.window = window;
     HE_LOG_INFO(RHI, "%s",
         "SoftwareRenderer: CPU rasterizer, user interface only (no GPU, no driver)");
+    m_adapterInfo = HE::GpuInfo{};
+    m_adapterInfo.name = "CPU rasterizer";
+    m_adapterInfo.api  = "Software";
 }
 
 void SoftwareRenderer::Shutdown()

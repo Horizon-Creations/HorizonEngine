@@ -826,8 +826,8 @@ std::vector<VkUse> activeVk(const std::vector<uint32_t>& spirv, uint32_t stage, 
 		add(r.uniform_buffers, static_cast<int>(K::UniformBuffer));
 		add(r.sampled_images,  static_cast<int>(K::CombinedImageSampler));
 		add(r.storage_buffers, static_cast<int>(K::StorageBuffer));
-		add(r.separate_images,   -1);
-		add(r.separate_samplers, -1);
+		add(r.separate_images,   static_cast<int>(K::SampledImage));
+		add(r.separate_samplers, static_cast<int>(K::Sampler));
 		add(r.storage_images,    -1);
 	}
 	catch (const std::exception& e) { err = e.what(); }

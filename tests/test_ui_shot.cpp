@@ -8,6 +8,7 @@
 #include "EditorTheme.h"
 #include "EditorWidgets.h"
 #include "HcEditorUtil.h"
+#include "HcGraphHost.h"
 #include "HcNodeReference.h"
 #include "GraphEditor.h"   // the canvas under test: node draw order vs on-node widgets
 #include "EditorReference.h"
@@ -21,11 +22,15 @@
 #include "TutorialSteps.h"       // …and the curriculum steps it is tested with
 #include "GitHubSignInView.h"    // the device-flow dialog's body
 #include "ConsoleView.h"         // the console's buffer and rows
+#include <filesystem>
+#include "HardwarePage.h"         // Preferences » Preview » Hardware
 
 #include <ContentManager/ContentManager.h>
 #include <Diagnostics/Log.h>
+#include <Diagnostics/HardwareInfo.h>
 #include <HorizonCode/HorizonCode.h>
 #include <HorizonScene/EngineApi.h>
+#include <Types/TypeRegistry.h>
 
 #include <imgui.h>
 #include <imgui_internal.h>      // DockBuilder*, FindWindowByName
@@ -34,6 +39,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -329,6 +335,210 @@ TEST_CASE("ui shot: a Details-style panel draws its rows")
 	CHECK(int(r) == int(kBgR));
 	CHECK(int(g) == int(kBgG));
 	CHECK(int(b) == int(kBgB));
+}
+
+TEST_CASE("ui shot: the Hardware page lists the machine, a dash where it cannot tell")
+{
+	// A made-up but representative machine, installed through the provider seam: the page must show
+	// exactly what the module holds, and a dash for every field nothing filled in.
+	struct Fake final : HE::HardwareProvider
+	{
+		HE::HardwareInfo detect() override
+		{
+			HE::HardwareInfo h;
+			h.cpuName = "Example CPU 16-Core Processor"; h.cpuCores = 16; h.cpuThreads = 32; h.cpuArch = "x64";
+			h.ramTotalMB = 31859; h.platform = "Windows"; h.osName = "Windows 11";
+			h.osVersion = "Windows 11 (10.0 build 26300)"; h.hasBattery = false;
+			return h;
+		}
+		uint64_t freeMemoryMB() override { return 18432; }
+		bool     onBattery() override    { return false; }
+	};
+	struct Restore { ~Restore() { HE::setHardwareProvider(nullptr); } } restore;
+	HE::setHardwareProvider(std::make_shared<Fake>());
+
+	// Before the renderer and the window system hand anything over: dashes.
+	{
+		const auto rows = HardwarePage::rows();
+		auto find = [&](const char* group, const char* label) -> std::string {
+			for (const auto& r : rows) if (r.group == group && r.label == label) return r.value;
+			return "<missing>";
+		};
+		CHECK(find("Processor", "Name") == "Example CPU 16-Core Processor");
+		CHECK(find("Processor", "Cores") == "16");
+		CHECK(find("Memory", "Installed") == "31859 MB (31.1 GB)");
+		CHECK(find("Memory", "Free now") == "18432 MB (18.0 GB)");
+		CHECK(find("Graphics", "Name") == "-");
+		CHECK(find("Graphics", "Video memory") == "-");
+		CHECK(find("Display", "Resolution") == "-");
+		CHECK(find("System", "Battery") == "none");
+	}
+
+	HE::GpuInfo gpu;
+	gpu.name = "Example GPU 12 GB"; gpu.vendor = "Example"; gpu.driver = "621.01"; gpu.api = "D3D12"; gpu.vramMB = 12010;
+	HE::setGpuInfo(gpu);
+	HE::DisplayInfo disp;
+	disp.width = 2560; disp.height = 1440; disp.refreshHz = 59.94f; disp.scale = 1.25f; disp.name = "Example Monitor";
+	HE::setDisplayInfo(disp);
+	{
+		const auto rows = HardwarePage::rows();
+		auto find = [&](const char* group, const char* label) -> std::string {
+			for (const auto& r : rows) if (r.group == group && r.label == label) return r.value;
+			return "<missing>";
+		};
+		CHECK(find("Graphics", "Name") == "Example GPU 12 GB");
+		CHECK(find("Graphics", "Driver") == "621.01");
+		CHECK(find("Graphics", "Video memory") == "12010 MB (11.7 GB)");
+		CHECK(find("Graphics", "Graphics API") == "D3D12");
+		CHECK(find("Display", "Resolution") == "2560 x 1440 @ 60 Hz");
+		CHECK(find("Display", "Interface scale") == "125 %");
+	}
+
+	constexpr int W = 560, H = 760;
+	Harness harness(W, H);
+	auto scene = [&](int) {
+		ImGui::SetNextWindowPos(ImVec2(10.0f, 10.0f));
+		ImGui::SetNextWindowSize(ImVec2(W - 20.0f, H - 20.0f));
+		ImGui::Begin("Preferences", nullptr,
+		             ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+		             ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoCollapse);
+		HardwarePage::draw();
+		ImGui::End();
+		EditorWidgets::drawQueuedHelp();
+	};
+	const he_ui::Image img = shoot("hardware-page", W, H, 4, scene);
+	REQUIRE(img.valid());
+	const int ink = img.inkedPixels(kBgR, kBgG, kBgB);
+	INFO("inked pixels: " << ink);
+	CHECK(ink > 6000);
+}
+
+TEST_CASE("ui shot: the Hardware page lists every card and display and offers the graphics-card choice")
+{
+	struct Fake final : HE::HardwareProvider
+	{
+		static HE::GpuInfo card(const char* name, uint32_t v, uint32_t d, uint64_t mb, const char* drv, bool sw)
+		{
+			HE::GpuInfo g; g.name = name; g.vendorId = v; g.deviceId = d; g.vramMB = mb; g.driver = drv; g.software = sw;
+			g.vendor = HE::gpuVendorFromPciId(v); g.id = HE::makeGpuId(v, d, 0);
+			return g;
+		}
+		HE::HardwareInfo detect() override
+		{
+			HE::HardwareInfo h;
+			h.cpuName = "Example CPU 16-Core Processor"; h.cpuCores = 16; h.cpuThreads = 32; h.cpuArch = "x64";
+			h.ramTotalMB = 31859; h.platform = "Windows"; h.osVersion = "Windows 11 (10.0 build 26300)";
+			h.gpus = { card("Example Integrated Graphics", 0x1002, 0x13c0, 512, "32.0.21034.41", false),
+			           card("Example GPU 12 GB", 0x10de, 0x2786, 12010, "621.01", false),
+			           card("Example Software Adapter", 0x1414, 0x008c, 0, "10.0", true) };
+			return h;
+		}
+		uint64_t freeMemoryMB() override { return 18432; }
+		bool     onBattery() override    { return false; }
+	};
+	struct Restore
+	{
+		std::filesystem::path dir;
+		~Restore()
+		{
+			HE::setGpuChoiceDirectory("");
+			HE::setPreferredGpuId("");
+			HE::setHardwareProvider(nullptr);
+			std::filesystem::remove_all(dir);
+		}
+	} restore;
+	restore.dir = std::filesystem::temp_directory_path() / "he_ui_gpu_choice";
+	std::filesystem::remove_all(restore.dir);
+	std::filesystem::create_directories(restore.dir);
+	HE::setGpuChoiceDirectory(restore.dir.string());
+	HE::setHardwareProvider(std::make_shared<Fake>());
+
+	HE::GpuInfo active; active.name = "Example GPU 12 GB"; active.vendorId = 0x10de; active.deviceId = 0x2786; active.api = "D3D12";
+	active.vramMB = 12010; active.driver = "621.01";
+	HE::setGpuInfo(active);
+	HE::setPreferredGpuId("");                          // this run started on the default card
+	std::vector<HE::DisplayInfo> displays(2);
+	displays[0].id = 1; displays[0].name = "Example Monitor"; displays[0].width = 2560; displays[0].height = 1440;
+	displays[0].refreshHz = 60.0f; displays[0].scale = 1.25f; displays[0].primary = true;
+	displays[1].id = 2; displays[1].name = "Example Side Monitor"; displays[1].x = 2560; displays[1].width = 1920; displays[1].height = 1080;
+	displays[1].refreshHz = 144.0f; displays[1].scale = 1.0f;
+	HE::setDisplays(displays, 1);                       // the window is on the second one
+
+	{
+		const auto rows = HardwarePage::rows();
+		int cards = 0, shown = 0;
+		bool inUse = false, current = false;
+		for (const auto& r : rows)
+		{
+			if (r.group == "Graphics cards") { ++cards; inUse = inUse || r.label.find("(in use)") != std::string::npos; }
+			if (r.group == "Displays")       { ++shown; current = current || r.value.find("current") != std::string::npos; }
+		}
+		CHECK(cards == 3);
+		CHECK(inUse);
+		CHECK(shown == 2);
+		CHECK(current);
+	}
+
+	// Nothing chosen: the default entry, and every card as an option.
+	{
+		const HardwarePage::GpuChoice c = HardwarePage::gpuChoice();
+		REQUIRE(c.options.size() == 4);
+		CHECK(c.options[0].id.empty());
+		CHECK(c.options[0].label == "Default (system)");
+		CHECK(c.selected == 0);
+		CHECK(c.canChoose);
+		CHECK(c.options[2].label == "Example GPU 12 GB (12010 MB) - in use");
+		CHECK(c.options[3].label.find("(software)") != std::string::npos);
+		CHECK(c.note.empty());
+	}
+	// A card chosen: selected, and the page says it applies at the next start.
+	REQUIRE(HE::savePreferredGpu("1002:13c0:0"));
+	{
+		const HardwarePage::GpuChoice c = HardwarePage::gpuChoice();
+		CHECK(c.selected == 1);
+		CHECK(c.note.find("next time") != std::string::npos);
+	}
+	// The choice this run started with: no "next start" note any more.
+	HE::setPreferredGpuId("1002:13c0:0");
+	CHECK(HardwarePage::gpuChoice().note.empty());
+	// A card that is not in the machine: its own entry, selected, and a sentence about the fallback.
+	REQUIRE(HE::savePreferredGpu("dead:beef:0"));
+	{
+		const HardwarePage::GpuChoice c = HardwarePage::gpuChoice();
+		REQUIRE(c.options.size() == 5);
+		CHECK(c.selected == 4);
+		CHECK(c.options[4].label == "dead:beef:0 (not present)");
+		CHECK(c.note.find("not in this machine") != std::string::npos);
+	}
+	// A backend that cannot choose says so instead.
+	REQUIRE(HE::savePreferredGpu("1002:13c0:0"));
+	{
+		HE::GpuSelection sel; sel.canChoose = false; sel.honored = false; sel.requested = "1002:13c0:0";
+		sel.note = "OpenGL cannot choose the graphics card";
+		HE::setGpuSelection(sel);
+		const HardwarePage::GpuChoice c = HardwarePage::gpuChoice();
+		CHECK_FALSE(c.canChoose);
+		CHECK(c.note.find("OpenGL cannot choose") != std::string::npos);
+		HE::setPreferredGpuId("");                      // this run started on the default card: the note shows
+	}
+
+	constexpr int W = 560, H = 1080;
+	Harness harness(W, H);
+	auto scene = [&](int) {
+		ImGui::SetNextWindowPos(ImVec2(10.0f, 10.0f));
+		ImGui::SetNextWindowSize(ImVec2(W - 20.0f, H - 20.0f));
+		ImGui::Begin("Preferences", nullptr,
+		             ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+		             ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoCollapse);
+		HardwarePage::draw();
+		ImGui::End();
+		EditorWidgets::drawQueuedHelp();
+	};
+	const he_ui::Image img = shoot("hardware-page-multi", W, H, 4, scene);
+	REQUIRE(img.valid());
+	const int ink = img.inkedPixels(kBgR, kBgG, kBgB);
+	INFO("inked pixels: " << ink);
+	CHECK(ink > 8000);
 }
 
 TEST_CASE("ui shot: several entities selected, the rows they disagree on say so")
@@ -1131,6 +1341,29 @@ TEST_CASE("ui shot: a page of tables and a diagram")
 	                                 [&](int) { DocsPanel::draw(host); });
 	REQUIRE(table.valid());
 	CHECK(table.inkedPixels(kBgR, kBgG, kBgB) > 60000);
+	DocsPanel::close();
+}
+
+TEST_CASE("ui shot: the Quality Settings section of the manual")
+{
+	// The newest section of the rendering page: a five-column presets table, three
+	// sub-headings, a script-rows table and two listings. Taller than the other
+	// shots so the table and the first sub-heading are both in frame.
+	constexpr int W = 1000, H = 900;
+	Harness harness(W, H);
+	const DocsPanel::Host host = hostOf(harness);
+
+	HE::Ed::Docs::Library& lib = HE::Ed::Docs::library();
+#ifdef HE_DOCS_BUNDLE_PATH
+	REQUIRE(lib.load(HE_DOCS_BUNDLE_PATH));
+#endif
+	HE::Ed::NodeReference::install(lib);
+
+	DocsPanel::openTopic("rendering#quality");
+	const he_ui::Image img = shoot("docs-quality", W, H, 4,
+	                               [&](int) { DocsPanel::draw(host); });
+	REQUIRE(img.valid());
+	CHECK(img.inkedPixels(kBgR, kBgG, kBgB) > 60000);
 	DocsPanel::close();
 }
 
@@ -2048,6 +2281,107 @@ TEST_CASE("ui shot: a pin's dropdown fits inside its node")
 	     << " wide, default is " << int(GraphEditor::kNodeW) << "), slot ends at " << slotRight);
 	CHECK(nodeRight - nodeLeft > int(GraphEditor::kNodeW));
 	CHECK(slotRight < nodeRight - 2);
+}
+
+// ── An Enum pin is a dropdown too ────────────────────────────────────────────
+// Bool/Int/Float/Double/String pins get a default right on the node (the test
+// above); an Enum pin used to fall through pinSupportsInlineDefault to nothing
+// at all — no text box, no combo, just a wire-only slot, so the only way to set
+// one without a wire was to drop a separate "Enum Value" literal node and wire
+// it in. It is a closed, named set exactly like the String-with-choices case,
+// so it gets the same inline combo (drawLiteralNodeBody already draws it for
+// the literal node's OWN body; this is the same list, anchored to a pin).
+TEST_CASE("ui shot: an enum pin becomes a dropdown right on the node")
+{
+	using HE::EnumDef;
+	using HE::EnumEntry;
+	using HE::TypeRegistry;
+	using P = HorizonCode::PinType;
+
+	// The registry is process-global; every path registered here is removed
+	// again so other suites in this binary still see an empty one.
+	struct RegistryCleanup
+	{
+		std::vector<std::string> paths;
+		~RegistryCleanup()
+		{ for (const auto& p : paths) TypeRegistry::instance().removeType(p); }
+	} cleanup;
+
+	const std::string kPresetPath = "Test/HiveQualityPreset.hasset";
+	{
+		EnumDef def;
+		def.name = "HiveQualityPreset"; def.assetPath = kPresetPath;
+		def.entries = { { "Low", 0 }, { "Medium", 1 }, { "High", 2 }, { "Ultra", 3 } };
+		TypeRegistry::instance().registerEnum(def);
+		cleanup.paths.push_back(kPresetPath);
+	}
+
+	constexpr int W = 300, H = 140;
+	Harness harness(W, H);
+
+	// Shaped like an engine call with one Enum parameter (the layout an actual
+	// quality-preset node would have, had the row taken Enum over String) — the
+	// pin mechanics below only look at the TYPE, so this stands in for any node
+	// with an Enum data-in.
+	HorizonCode::Node node;
+	node.type   = HorizonCode::NodeType::EngineCall;
+	node.s      = "test.setPreset";
+	node.hasArg = true;
+	node.params = { { "preset", P::Enum, false, kPresetPath } };
+	const int presetPin = 2;   // [exec in][exec out][preset]
+
+	CHECK(HcEditorUtil::pinSupportsInlineDefault(node, presetPin));
+	const float slotW = HcEditorUtil::pinInlineEditorWidth(node, presetPin);
+	CHECK(slotW > GraphEditor::kPinEditorW);   // a name needs the same room a string does
+
+	const he_ui::Image img = shoot("graph-enum-pin-dropdown", W, H, 3, [&](int) {
+		ImGui::SetNextWindowPos(ImVec2(0, 0));
+		ImGui::SetNextWindowSize(ImVec2((float)W, (float)H));
+		ImGui::Begin("##enumpin", nullptr,
+			ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+			ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings);
+		ImGui::SetNextItemWidth(slotW);
+		bool committed = false;
+		HcEditorUtil::drawPinDefaultEditor(node, presetPin, committed);
+		ImGui::End();
+	});
+	REQUIRE(img.valid());
+	// Drawn at all (the combo preview, "Low", plus its arrow) — the coarse bar
+	// the rest of this file holds controls to.
+	CHECK(img.inkedPixels(kBgR, kBgG, kBgB) > 40);
+
+	// The pin's stored default followed the pin, not whatever it happened to
+	// hold before: type Enum, typeName the PIN's definition (not empty — a
+	// value that forgot which enum it belongs to can't look its name up again),
+	// and the registry's first entry (value 0, "Low") as the seeded default.
+	auto it = node.pinDefaults.find(0);   // data-in 0 = the only data-in
+	REQUIRE(it != node.pinDefaults.end());
+	CHECK(it->second.type == P::Enum);
+	CHECK(it->second.typeName == kPresetPath);
+	CHECK(it->second.i == 0);
+
+	// An Enum pin whose definition asset is gone (renamed out from under it, or
+	// never resolved) still supports the inline slot — it just says so instead
+	// of crashing or silently falling back to a text box the value can never
+	// round-trip through.
+	HorizonCode::Node orphan;
+	orphan.type   = HorizonCode::NodeType::EngineCall;
+	orphan.s      = "test.setPreset";
+	orphan.hasArg = true;
+	orphan.params = { { "preset", P::Enum, false, "Test/Gone.hasset" } };
+	CHECK(HcEditorUtil::pinSupportsInlineDefault(orphan, presetPin));
+	const he_ui::Image img2 = shoot("graph-enum-pin-no-definition", W, H, 3, [&](int) {
+		ImGui::SetNextWindowPos(ImVec2(0, 0));
+		ImGui::SetNextWindowSize(ImVec2((float)W, (float)H));
+		ImGui::Begin("##enumpin2", nullptr,
+			ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+			ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings);
+		bool committed = false;
+		HcEditorUtil::drawPinDefaultEditor(orphan, presetPin, committed);
+		ImGui::End();
+	});
+	REQUIRE(img2.valid());
+	CHECK(img2.inkedPixels(kBgR, kBgG, kBgB) > 20);   // "(no definition)" still drew something
 }
 
 // ── Mesh material slots ──────────────────────────────────────────────────────
@@ -3717,4 +4051,128 @@ TEST_CASE("search palette: typing ranks, the arrow walks, Enter picks")
 	picked.clear();
 	for (int i = 0; i < 5; ++i) frame(false);
 	CHECK(picked.empty());
+}
+
+// ── Get Engine Settings, Quality Of and Switch on Enum on the real canvas ────
+// What a graph author sees for the engine-settings nodes: the object from Get
+// Engine Settings feeding Set Quality Of, the enum pins drawn as enum pins, and a
+// Switch on Enum with one exec out per quality level.
+TEST_CASE("ui shot: the engine-settings nodes on the HorizonCode canvas")
+{
+	constexpr int W = 1180, H = 560;
+	Harness harness(W, H);
+	namespace HC = HorizonCode;
+
+	HC::Graph graph;
+	const auto add = [&](HC::Node n, float x, float y)
+	{
+		n.x = x; n.y = y;
+		return graph.addNode(std::move(n));
+	};
+	const auto call = [&](const char* id, float x, float y)
+	{
+		const HE::api::ApiFn* fn = HE::api::find(id);
+		REQUIRE(fn != nullptr);
+		HC::Node n; n.type = HC::NodeType::EngineCall; n.s = id; n.hasArg = fn->isExec;
+		for (const auto& p : fn->params)  n.params.push_back(HE::api::toFuncParam(p));
+		for (const auto& r : fn->results) n.results.push_back(HE::api::toFuncParam(r));
+		return add(std::move(n), x, y);
+	};
+	const auto constEnum = [&](const char* type, int v, float x, float y)
+	{
+		HC::Node n; n.type = HC::NodeType::ConstEnum; n.typeName = type; n.f[0] = float(v);
+		return add(std::move(n), x, y);
+	};
+	const auto base = [&](int id, int which)
+	{
+		const HC::Node* n = graph.findNode(id);
+		const auto sig = HC::signatureOf(*n);
+		const int execOut0 = int(sig.execIns.size());
+		const int dataIn0  = execOut0 + int(sig.execOuts.size());
+		const int dataOut0 = dataIn0 + int(sig.dataIns.size());
+		return which == 0 ? 0 : which == 1 ? execOut0 : which == 2 ? dataIn0 : dataOut0;
+	};
+	const auto exec = [&](int a, int b, int out = 0)
+	{ REQUIRE(graph.connect(a, base(a, 1) + out, b, base(b, 0))); };
+	const auto data = [&](int a, int ai, int b, int bi)
+	{ REQUIRE(graph.connect(a, base(a, 3) + ai, b, base(b, 2) + bi)); };
+
+	HC::Node ev; ev.type = HC::NodeType::Event; ev.s = "Apply";
+	const int evId  = add(std::move(ev), 20.0f, 60.0f);
+	const int eng   = call("settings.engine",     20.0f, 220.0f);
+	const int set   = call("settings.setQualityOf", 250.0f, 120.0f);
+	const int what  = constEnum(HE::kQualitySettingEnum, 8, 20.0f, 340.0f);
+	const int lvl   = constEnum(HE::kQualityLevelEnum, 0, 20.0f, 440.0f);
+	const int get   = call("settings.qualityLevel", 520.0f, 300.0f);
+	const int what2 = constEnum(HE::kQualitySettingEnum, 8, 300.0f, 440.0f);
+	HC::Node swn; swn.type = HC::NodeType::SwitchOnEnum; swn.typeName = HE::kQualityLevelEnum;
+	HE::EnumDef def;
+	REQUIRE(HE::TypeRegistry::instance().getEnum(HE::kQualityLevelEnum, def));
+	for (const auto& e : def.entries) swn.params.push_back({ e.name, HC::PinType::Exec, false, {} });
+	const int sw = add(std::move(swn), 800.0f, 120.0f);
+
+	exec(evId, set);
+	data(eng, 0, set, 0);
+	data(what, 0, set, 1);
+	data(lvl, 0, set, 2);
+	data(what2, 0, get, 0);
+	exec(set, sw);
+	data(get, 0, sw, 0);
+
+	GraphEditor::State ge;
+	ge.pan  = ImVec2(0.0f, 0.0f);
+	ge.zoom = 1.0f;
+	int selected = 0;
+	HcGraphHost::Host host;
+	host.graph        = &graph;
+	host.ge           = &ge;
+	host.selectedNode = &selected;
+	host.title        = [](const HC::Node& n) { return HcGraphHost::defaultNodeTitle(n); };
+	GraphEditor::Model m = HcGraphHost::buildModel(host);
+
+	const he_ui::Image img = shoot("hc-engine-settings-nodes", W, H, 4, [&](int)
+	{
+		ImGui::SetNextWindowPos(ImVec2(0, 0));
+		ImGui::SetNextWindowSize(ImVec2(float(W), float(H)));
+		ImGui::Begin("##canvas", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoSavedSettings);
+		GraphEditor::draw("##ge", m, ge, ImVec2(float(W), float(H)));
+		ImGui::End();
+	});
+	REQUIRE(img.valid());
+	CHECK(img.inkedPixels(kBgR, kBgG, kBgB) > 20000);
+	CHECK(HcGraphHost::defaultNodeTitle(*graph.findNode(eng)) == "Get Engine Settings");
+	CHECK(HcGraphHost::defaultNodeTitle(*graph.findNode(set)) == "Set Quality Of");
+}
+
+// The same nodes as the author finds them: the add menu, searched for "quality".
+TEST_CASE("ui shot: the add menu finds the engine-settings nodes")
+{
+	constexpr int W = 520, H = 560;
+	Harness harness(W, H);
+	namespace HC = HorizonCode;
+
+	HC::Graph graph;
+	GraphEditor::State ge;
+	int selected = 0;
+	HcGraphHost::Host host;
+	host.graph        = &graph;
+	host.ge           = &ge;
+	host.selectedNode = &selected;
+	host.title        = [](const HC::Node& n) { return HcGraphHost::defaultNodeTitle(n); };
+	// The level script's own categories: the engine API sits under them all.
+	const HcGraphHost::MenuOpts menus = {
+		{ "Flow", "Events", "Reference", "UI", "Literals", "Math", "Logic", "String",
+		  "Array", "Set", "Map", "Debug" }, {}, {}, {} };
+	host.menus = &menus;
+
+	const he_ui::Image img = shoot("hc-add-menu-quality", W, H, 4, [&](int)
+	{
+		ImGui::SetNextWindowPos(ImVec2(10, 10));
+		ImGui::SetNextWindowSize(ImVec2(float(W) - 20.0f, float(H) - 20.0f));
+		ImGui::Begin("##addmenu", nullptr, ImGuiWindowFlags_NoSavedSettings);
+		HcGraphHost::drawAddMenuTail(host, "quality");
+		ImGui::End();
+	});
+	REQUIRE(img.valid());
+	CHECK(img.inkedPixels(kBgR, kBgG, kBgB) > 5000);
 }

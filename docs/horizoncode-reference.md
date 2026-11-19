@@ -214,9 +214,11 @@ marked "(extracted)" in the list, and a rename carries the mapping along.
 
 ### Literals (edited inline on the node body)
 **Float**, **Bool** (checkbox), **Int**, **String** (grows then scrolls),
-**Vec2**, **Color** (swatch), **Transform** (position/rotation/scale).
-Simple unwired inputs (Bool/Int/Float/String) also show an **inline entry right on
-the node** — no literal node needed.
+**Vec2**, **Color** (swatch), **Transform** (position/rotation/scale), **Enum**
+(dropdown of the definition's entry names).
+Simple unwired inputs (Bool/Int/Float/String/Enum) also show an **inline entry
+right on the node** — no literal node needed; an Enum pin's entry is the same
+dropdown its literal uses.
 
 ### Math & logic
 **Add**, **Subtract**, **Multiply**, **Divide**, **Greater**, **Less**,

@@ -2,6 +2,7 @@
 #include <HorizonCode/HorizonCode.h>          // HorizonCode::Value, PinType
 #include <HorizonCode/HorizonCodeRuntime.h>   // Ctx::runtime (who is calling)
 #include <Types/UUID.h>                       // HE::UUID (content::*Id asset handles)
+#include <Project/QualitySettings.h>            // settings::Host carries the project's graphics + shadows
 #include <glm/glm.hpp>
 #include <cstdint>
 #include <functional>
@@ -2390,6 +2391,17 @@ namespace settings {
         std::optional<bool>  vsync;
         std::optional<bool>  fullscreen;
         std::map<std::string, float> volumes;          // bus → 0..2, kMaster = master
+        // The player's graphics choice (HE::QualityPreset, ProjectSettings.h): a
+        // named preset, then single values over it (HE::qualityFieldName). Both
+        // empty = the project's own graphics, untouched. A preset chosen after
+        // single values replaces them. "Custom" is never stored: it is what the
+        // values read as once a single value has moved off a preset.
+        std::optional<std::string>   qualityPreset;     // "Low" … "Ultra"
+        std::map<std::string, float> quality;           // field name → value
+        // Automatic quality (HE::QualityGovernor): the player's own switch. Unset = what
+        // the project says (ProjectAutoQuality::enabled). Choosing a preset sets it to
+        // false — a fixed preset and automation exclude each other.
+        std::optional<bool>          autoQuality;
     };
     inline constexpr const char* kMaster   = "Master";
     inline constexpr const char* kPrefsKey = "settings";
@@ -2413,6 +2425,23 @@ namespace settings {
         std::function<void(const std::string& bus, std::optional<float> volume)> applyVolume;
         // What a bus is at now, for volume() when the player never set it.
         std::function<float(const std::string& bus)> currentVolume;
+        // The project's graphics and shadows, as the application holds them when it
+        // installs: what the quality rows fall back to and what reset() returns to.
+        HE::ProjectGraphics       baseGraphics;
+        HE::ProjectShadowSettings baseShadows;
+        // The graphics + shadows the player's choice comes to (base, then preset,
+        // then single values; `enabled` on, `preset` = what the values read as).
+        // Called at install when the player chose anything, after every change to
+        // the quality values, and when reset() takes them back (with the base).
+        // The application puts them where its renderer push reads them.
+        std::function<void(const HE::ProjectGraphics&, const HE::ProjectShadowSettings&)> applyQuality;
+        // Automatic quality: what the project says, and whether this application can run
+        // it at all. Only the exported game says yes: a controller that moves quality by
+        // the frame time must not run in the editor, whose frames every comparison there
+        // depends on. Where it is false the auto rows answer "off" and setAutoQuality
+        // refuses (logged).
+        HE::ProjectAutoQuality baseAuto;
+        bool                   autoQualityAvailable = false;
     };
     // install applies every value once (the start-up apply); uninstall only
     // drops the hooks. The values stay — the camera rig keeps reading them.
@@ -2440,11 +2469,135 @@ namespace settings {
     // current one (1 when neither is known).
     void  setVolume(const std::string& bus, float volume);
     float volume(const std::string& bus);
+    // ── Graphics quality (HE::QualityPreset) ──
+    // The player's choice, applied through Host::applyQuality and kept by save().
+    // A preset name is case-insensitive ("Low", "Medium", "High", "Ultra");
+    // "Custom" is accepted and changes nothing (the values stay as they are),
+    // anything else logs and answers false. A single value is one of
+    // qualityFields() — bools as 0/1, ints as numbers, clamped into the field's
+    // range; an unknown name logs and answers false. Choosing a preset drops the
+    // single values chosen before it.
+    bool setQualityPreset(const std::string& name);
+    // What the effective values read as: a preset name, or "Custom".
+    std::string qualityPreset();
+    std::vector<std::string> qualityPresetNames();   // Low … Ultra, Custom
+    bool  setQualityValue(const std::string& field, float value);
+    // 0 for an unknown field (logged). Without a host, the field's default.
+    float qualityValue(const std::string& field);
+    std::vector<std::string> qualityFields();
+
+    // ── The same settings as levels: Low … Ultra per area ──
+    // `setting` is a QualitySetting (the built-in enum), `level` a QualityLevel
+    // (Low 0, Medium 1, High 2, Ultra 3, Custom 4); both travel as ints. A graph
+    // switches on the answer with Switch on Enum.
+    //   qualityLevel  what the area reads as: the preset row its values equal,
+    //                 else Custom (tie-break: see HE::qualityLevelOf).
+    //   setQualityLevel  writes that area from the level's preset row, over the
+    //                 player's other choices; Overall is the preset. Custom keeps
+    //                 what is there and answers true. False (logged) for a setting
+    //                 or level out of range.
+    int  qualityLevel(int setting);
+    bool setQualityLevel(int setting, int level);
+    // The engine's settings as an OBJECT: engineSettings() hands out one fixed
+    // reference (kEngineSettingsRef, never an id a HorizonCode instance can have),
+    // and qualityOf / setQualityOf are the two rows above taking it first, so a
+    // graph can pass "the settings" around and ask it. The value of the reference
+    // is not looked at (0 works too); there is only one set of settings.
+    inline constexpr uint32_t kEngineSettingsRef = 0xE5000001u;
+    uint32_t engineSettings();
+    int      qualityOf(uint32_t engine, int setting);
+    bool     setQualityOf(uint32_t engine, int setting, int level);
+
+    // ── Automatic quality ──
+    // The game moves its OVERALL level by itself to hold the project's target frame
+    // rate (HE::QualityGovernor: smoothed frame time, a step per few seconds, no
+    // pumping). Layers over the preset: project values → the governor's level →
+    // the player's preset (which ends automation) → the player's single values, so
+    // an area the player pinned stays pinned. The governor's level is never saved.
+    //   autoQuality         is it running now
+    //   setAutoQuality      switch it on or off (saved by Save Settings). On, it starts
+    //                       from the project's overall preset; the player's own preset
+    //                       is dropped, their single values stay. False and logged where
+    //                       the application cannot run it (the editor).
+    //   autoQualityLevel    the governor's level as a QualityLevel (Low … Ultra), Custom
+    //                       when automation is off
+    //   tickAutoQuality     the game calls this once a frame with the real frame time
+    bool autoQuality();
+    bool setAutoQuality(bool on);
+    int  autoQualityLevel();
+    void tickAutoQuality(float realFrameSeconds);
     // Persist everything above (NOT the bindings — input.saveBindings) and
     // answer whether the prefs file took it. Nothing chosen removes the key.
     bool  save();
     // Back to the project's values, applied at once. Not saved until save().
     void  resetToDefaults();
+}
+
+// ── Hardware (Thema 337) ─────────────────────────────────────────────────────
+// What machine the game runs on, for a settings screen or an "about" box. All reads: the values come
+// from HE::hardwareInfo (Diagnostics/HardwareInfo.h) - detected once at start-up, the GPU from the
+// renderer, the display from the window system. Type and model names and sizes only; nothing here
+// identifies the machine or the person, and nothing is sent anywhere. A value the machine could not
+// tell reads as "" (text) or 0 (numbers), never as a guess.
+namespace hardware {
+    std::string cpuName();
+    int         cpuCores();          // physical cores; 0 = unknown
+    int         cpuThreads();        // logical processors
+    std::string cpuArch();           // "x64", "arm64", "x86"
+    int         ramTotalMB();
+    int         ramFreeMB();         // available right now
+    std::string gpuName();
+    std::string gpuVendor();
+    std::string gpuDriver();
+    int         gpuVramMB();         // dedicated video memory; 0 = unknown
+    std::string graphicsApi();       // the API the renderer runs on: D3D11, D3D12, OpenGL, Vulkan, Metal, Software
+    std::string osName();
+    std::string osVersion();
+    int         displayWidth();      // the display the window is on
+    int         displayHeight();
+    float       displayRefreshHz();
+    float       displayScale();      // OS content scale, 1.25 = 125 %
+    std::string displayName();
+    bool        hasBattery();
+    bool        onBattery();         // a battery exists AND the machine runs on it
+    std::string summary();           // the main facts, one line per group
+    // What preset this machine can probably carry ("Low" ... "Ultra"), from the numbers above, and
+    // the numbers it came from. A suggestion for a settings screen: nothing applies it by itself.
+    std::string recommendedPreset();
+    std::string recommendedPresetReason();
+    // Every graphics adapter of the machine (hardware.gpu* above describes the one in use). gpuIds() are the
+    // stable ids a GPU choice is saved with ("10de:2786:0"), gpuNames() the display names in the same order,
+    // gpuAt(i) one adapter as a text line ("NVIDIA GeForce RTX 4070 (12010 MB, driver 621.01)", "" past the
+    // end), activeGpuId() the id of the one the renderer runs on ("" before a renderer exists).
+    int                       gpuCount();
+    std::vector<std::string>  gpuNames();
+    std::vector<std::string>  gpuIds();
+    std::string               gpuAt(int index);
+    std::string               activeGpuId();
+    // Which graphics card the game starts on. The choice is an id from gpuIds() ("" = the system's default
+    // card), kept for the NEXT start: the card a running game uses never changes under it. setPreferredGpu
+    // answers false for an id that is not in gpuIds(), and for a choice that could not be saved.
+    // gpuChoiceNote() says in a sentence what came of the choice at this start ("the chosen graphics card
+    // (10de:2786:0)", "... was not found; the system's default graphics card runs instead", "OpenGL cannot
+    // choose the graphics card"). A backend or a platform that cannot choose is told there, not hidden.
+    std::string               preferredGpu();
+    bool                      setPreferredGpu(const std::string& id);
+    std::string               gpuChoiceNote();
+    // The displays that are connected right now. displayCount() and displayNames() list them, displayAt(i)
+    // describes one ("DELL U2723QE (3840x2160 @ 60 Hz, scale 1.50, primary, current)", "" past the end),
+    // currentDisplayIndex() is the one the window is on (-1 when unknown) and follows the window as it is dragged
+    // to another monitor. displayWidth/Height/Name above always describe the current one.
+    int                       displayCount();
+    std::vector<std::string>  displayNames();
+    std::string               displayAt(int index);
+    int                       currentDisplayIndex();
+    // By name, for a settings screen that lists them all: fields() are the HardwareProperty names in
+    // order (CpuName ... OnBattery), value(name) is the text of one ("" for none; the name is
+    // case-insensitive and an unknown name reads "" too).
+    std::vector<std::string> fields();
+    std::string              value(const std::string& field);
+    // The same by HardwareProperty (a HorizonCode enum pin), as text.
+    std::string              info(int property);
 }
 
 // ── Date and time ────────────────────────────────────────────────────────────
@@ -3113,7 +3266,27 @@ struct ApiParam
     // "Self" instead of a zero, and the generated node reference says so in
     // words. Both ask this flag rather than keeping their own list.
     bool        selfDefault = false;
+    // Enum pins: the registry key of the enum (HE::TypeRegistry, e.g.
+    // HE::kQualityLevelEnum). Empty for every other pin. A row's C++ signature
+    // takes an `int` for it, and the Value carries the entry's number; the key is
+    // what lets the graph editor draw the pin in the enum's name, offer its
+    // entries on an unwired pin, and connect it to a Switch on Enum.
+    const char* typeName = "";
 };
+
+// The node pin an engine-row parameter becomes. One function for every place that
+// mirrors a row's pins onto a node (the add menu, a pasted graph, the MCP tools,
+// the node reference, the code generator), because a copy that forgets the
+// enum's key draws the pin as a plain Int and silently breaks the Switch behind it.
+inline HorizonCode::FuncParam toFuncParam(const ApiParam& p)
+{
+    HorizonCode::FuncParam f;
+    f.name    = p.name ? p.name : "";
+    f.type    = p.type;
+    f.isArray = p.isArray;
+    f.typeName = p.typeName ? p.typeName : "";
+    return f;
+}
 
 // How generated C++ reaches a row WITHOUT the registry (HorizonEngine/
 // HorizonEngineApi.h). The registry's params/results say what the node carries;

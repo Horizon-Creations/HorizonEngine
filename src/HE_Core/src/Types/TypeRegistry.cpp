@@ -1,4 +1,5 @@
 #include <Types/TypeRegistry.h>
+#include "Diagnostics/HardwareInfo.h"   // HardwareProperty names for the built-in enum
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
 #include <ContentManager/HAsset.h>
@@ -108,13 +109,67 @@ void noteEntryRename(EnumDef& def, size_t index, const std::string& oldName)
 
 // ─── Registry storage ────────────────────────────────────────────────────────
 
+namespace {
+
+// The engine's own enums (kQualityLevelEnum / kQualitySettingEnum): there from the
+// first call, back after clear(), and not writable by a project. Their values are
+// part of the contract with HE::QualityLevel / HE::QualitySetting
+// (Project/QualitySettings.h) — a graph that saved "Medium" saved 1.
+EnumDef builtinQualityLevel()
+{
+    EnumDef d;
+    d.name      = "QualityLevel";
+    d.assetPath = kQualityLevelEnum;
+    d.entries   = { { "Low", 0, {} }, { "Medium", 1, {} }, { "High", 2, {} },
+                    { "Ultra", 3, {} }, { "Custom", 4, {} } };
+    return d;
+}
+
+EnumDef builtinQualitySetting()
+{
+    EnumDef d;
+    d.name      = "QualitySetting";
+    d.assetPath = kQualitySettingEnum;
+    d.entries   = { { "Overall", 0, {} },          { "Shadows", 1, {} },
+                    { "AntiAliasing", 2, {} },     { "RenderResolution", 3, {} },
+                    { "AmbientOcclusion", 4, {} }, { "Reflections", 5, {} },
+                    { "GlobalIllumination", 6, {} }, { "RayTracedReflections", 7, {} },
+                    { "Textures", 8, {} },         { "Materials", 9, {} } };
+    return d;
+}
+
+EnumDef builtinHardwareProperty()
+{
+    EnumDef d;
+    d.name      = "HardwareProperty";
+    d.assetPath = kHardwarePropertyEnum;
+    for (int i = 0; i < static_cast<int>(HardwareProperty::Count); ++i)
+        d.entries.push_back({ hardwarePropertyName(i), i, {} });
+    return d;
+}
+
+} // namespace
+
 struct TypeRegistry::Impl
 {
     mutable std::mutex mutex;
     std::unordered_map<std::string, EnumDef>   enums;    // key = assetPath
     std::unordered_map<std::string, StructDef> structs;  // key = assetPath
     uint64_t generation = 0;                             // bumped by every write
+
+    Impl() { seedBuiltins(); }
+    // Caller holds the lock (or is the constructor).
+    void seedBuiltins()
+    {
+        for (EnumDef d : { builtinQualityLevel(), builtinQualitySetting(), builtinHardwareProperty() })
+            enums[d.assetPath] = std::move(d);
+    }
 };
+
+bool TypeRegistry::isBuiltin(const std::string& assetPath)
+{
+    return assetPath.rfind(kBuiltinTypePrefix, 0) == 0;
+}
 
 TypeRegistry& TypeRegistry::instance()
 {
@@ -130,6 +185,7 @@ TypeRegistry::Impl& TypeRegistry::impl() const
 
 void TypeRegistry::registerEnum(EnumDef def)
 {
+    if (isBuiltin(def.assetPath)) return;   // the engine's own, never replaced by a project's
     Impl& im = impl();
     std::lock_guard<std::mutex> lk(im.mutex);
     im.enums[def.assetPath] = std::move(def);
@@ -138,6 +194,7 @@ void TypeRegistry::registerEnum(EnumDef def)
 
 void TypeRegistry::registerStruct(StructDef def)
 {
+    if (isBuiltin(def.assetPath)) return;
     Impl& im = impl();
     std::lock_guard<std::mutex> lk(im.mutex);
     im.structs[def.assetPath] = std::move(def);
@@ -146,6 +203,7 @@ void TypeRegistry::registerStruct(StructDef def)
 
 void TypeRegistry::removeType(const std::string& assetPath)
 {
+    if (isBuiltin(assetPath)) return;       // not an asset: there is nothing to delete
     Impl& im = impl();
     std::lock_guard<std::mutex> lk(im.mutex);
     im.enums.erase(assetPath);
@@ -159,6 +217,7 @@ void TypeRegistry::clear()
     std::lock_guard<std::mutex> lk(im.mutex);
     im.enums.clear();
     im.structs.clear();
+    im.seedBuiltins();   // a project switch drops the project's types, not the engine's
     ++im.generation;
 }
 

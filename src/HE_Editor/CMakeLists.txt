@@ -86,7 +86,8 @@ if(EXISTS "${IMGUI_DIR}/imgui.cpp")
 
 	if(HE_IMGUI_VULKAN)
 		# Same SDK layout split as src/HE_Rendering/CMakeLists.txt.
-		if(DEFINED ENV{VULKAN_SDK})
+		# macOS: cmake/HEMoltenVK.cmake presets Vulkan_INCLUDE_DIR/Vulkan_LIBRARY (cache).
+		if(NOT APPLE AND DEFINED ENV{VULKAN_SDK})
 			set(Vulkan_INCLUDE_DIR "$ENV{VULKAN_SDK}/Include")
 			if(WIN32)
 				set(Vulkan_LIBRARY "$ENV{VULKAN_SDK}/Lib/vulkan-1.lib")
@@ -249,6 +250,7 @@ add_executable(HorizonEditor WIN32
 	EditorTransformGizmo.cpp
 	EditorShortcuts.cpp
 	ShortcutsPage.cpp
+	HardwarePage.cpp
 	ScriptEditorPanel.cpp
 	CppClassEditorPanel.cpp
 	MaterialEditorPanel.cpp

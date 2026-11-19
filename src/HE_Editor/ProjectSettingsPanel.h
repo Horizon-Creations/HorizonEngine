@@ -27,8 +27,9 @@ namespace ProjectSettingsPanel
 		// Project — what it IS. (Its repository is on Accounts & Connections ▸
 		// Source Control, next to git itself and the GitHub account.)
 		General, Application, RenderDefaults, Fonts, Permissions,
-		// World — how it simulates and sounds.
-		Shadows, Simulation, CollisionLayers, AudioBuses,
+		// World — how it looks, simulates and sounds. Quality is the preset and the
+		// regulators it is made of (shadows, anti-aliasing, reflections, GI, textures).
+		Quality, Shadows, Simulation, CollisionLayers, AudioBuses,
 		// Online — what a session of it is: AntiCheat is what its host refuses to
 		// believe from a client ("anticheat"), Multiplayer the port, seats and
 		// tick rate ("multiplayer").
