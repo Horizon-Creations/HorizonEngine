@@ -181,6 +181,12 @@ namespace
 	  "Where this entity lives when the scene is split into cells: in a cell that "
 	  "loads around the camera, or always loaded in the base scene.",
 	  "", "scenes#streaming" },
+	{ "Component/Mobility", "Mobility",
+	  "Whether this entity may ever change at run time. Static lets the engine "
+	  "reduce it to flat render/physics data (entity cooking) once nothing else "
+	  "about it objects; Movable keeps it a full entity. With no Mobility "
+	  "component the engine decides on its own from what the entity carries.",
+	  "", "rendering#performance" },
 	{ "Component/LOD", "LOD",
 	  "Swaps this entity's mesh for cheaper versions as the camera gets further "
 	  "away.",
@@ -2148,6 +2154,15 @@ namespace
 	  "waypoint a script looks up by name. Auto leaves the choice to the split. Takes "
 	  "effect the next time the scene is split.",
 	  "", "scenes#streaming" },
+	{ "Mobility/Mode", "",
+	  "Static tells the engine this entity never moves, scripts or reparents, so "
+	  "it may be cooked into flat render/physics data at export and at startup. "
+	  "Movable keeps it a full entity — use it to pin an entity that is still "
+	  "changed from outside the paths cooking watches (code that writes the "
+	  "transform directly, for instance). Static on an entity that still carries "
+	  "a script, an animator or a dynamic body does not cook it either way; the "
+	  "analysis reports the contradiction instead.",
+	  "", "rendering#performance" },
 	{ "Save State/Enabled", "",
 	  "Include this entity in savegames. Off, it is whatever the scene file says "
 	  "every time the game is loaded.",
@@ -4858,6 +4873,18 @@ namespace
 	  "It only opens when a picture is set: with no logo the splash would draw "
 	  "the engine's own wordmark, and the engine does not advertise itself "
 	  "inside your game. Saved to Config/ProjectSettings.json.",
+	  "", "export#overview" },
+	{ "Project General/Cook static entities", "Cook static entities",
+	  "When on, the export finds the meshes that never change while the game runs "
+	  "(no script, animation, physics body, replication or level of detail, and no "
+	  "such parent) and ships that list inside each scene. The game then draws them "
+	  "from a flat block of ready data instead of walking every entity each frame, "
+	  "and skips the analysis at load. A scene exported without it loads and draws "
+	  "exactly as before.\n\n"
+	  "An entity that a script or the engine API changes afterwards, or that gets a "
+	  "script, an animator or a body, falls back to normal handling on its own. "
+	  "Saved to Config/ProjectSettings.json as game.cookStaticEntities. The editor "
+	  "viewport is not affected; HE_COOK_STATIC=1 is the editor's switch.",
 	  "", "export#overview" },
 	{ "Project General/Splash image", "Splash image",
 	  "A PNG the splash shows, project-relative (Content/Splash.png). The export "
@@ -10416,7 +10443,7 @@ namespace
 		"Animator State Machine", "Root Motion", "Animation Layers",
 		"Inverse Kinematics",
 		"Property Animator", "Sequence Player", "Particle System",
-		"Save State", "Streaming", "LOD", "Environment", "Weather", "UI Canvas", "UI Element",
+		"Save State", "Streaming", "Mobility", "LOD", "Environment", "Weather", "UI Canvas", "UI Element",
 		"UI Text", "UI Image", "UI Button",
 	};
 

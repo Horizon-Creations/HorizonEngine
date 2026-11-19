@@ -81,6 +81,7 @@ inline constexpr HE::GameBuildConfig kConfig = {
     "windowSec": 3.0
   },
   "game": {
+    "cookStaticEntities": false,
     "splashEnabled": false,
     "splashImage": "",
     "splashSubtitle": "",
