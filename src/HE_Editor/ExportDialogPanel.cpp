@@ -1511,7 +1511,11 @@ void startExport(AppContext& ctx)
                     {
                         syncPrefabsForExport(sceneWorld, sceneName);
                         HE::collectMeshesWithMaterialOverrides(sceneWorld, overriddenMeshes);
-                        ser.saveToMemory(sceneWorld, sceneBinary, packCookVerdict);
+                        HE::CookSummary cookSummary;
+                        ser.saveToMemory(sceneWorld, sceneBinary, packCookVerdict,
+                                         packCookVerdict ? &cookSummary : nullptr);
+                        if (packCookVerdict)
+                            cookLogLines.push_back(sceneName + " (startup): " + HE::formatCookSummary(cookSummary));
                     }
                     else
                         sceneOk = false;
