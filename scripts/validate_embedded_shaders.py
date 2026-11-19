@@ -78,8 +78,8 @@ MATERIAL_LIB_H = REPO / "src" / "HE_Rendering" / "include" / "material" / "Mater
 
 # Strings that are NOT standalone shaders — they are spliced into others and have
 # no entry point of their own. kGiHeightfieldHLSL/GLSL have no entry point either,
-# but unlike the others they are only ever compiled as part of the extra GiShadowCS
-# variant below (D3D11Renderer.cpp:3626, OpenGLRenderer.cpp:6605) — the plain
+# but unlike the others they are only ever compiled as part of the extra GiShadowCS/GiReflCS
+# variants below (D3D11Renderer.cpp:3626, OpenGLRenderer.cpp:6719/6721) — the plain
 # kGiShadowCSHLSL/kGiShadowCS job below does NOT exercise them, so leaving them out
 # of a compile job entirely (just marking them "covered") would be the same mistake
 # this script exists to catch.
@@ -92,7 +92,8 @@ PRELUDES = {"kGiTraversalHLSL", "kSkyFuncHLSL", "kGiTraversalGLSL", "kSkyFuncGLS
 #   D3D11Renderer.cpp:2802  std::string(kSkyFuncHLSL) + kSkyPSHLSL
 #   D3D12Renderer.cpp       std::string(kGiTraversalHLSL) + kGiShadowCSHLSL (no heightfield)
 #   D3D11Renderer.cpp:1679  std::string(kGiTraversalHLSL) + kGiProbeCSHLSL
-#   OpenGLRenderer.cpp:6605 header + kGiTraversalGLSL + kGiHeightfieldGLSL + kGiShadowCS
+#   OpenGLRenderer.cpp:6719 header + kGiTraversalGLSL + kGiHeightfieldGLSL + kGiShadowCS
+#   OpenGLRenderer.cpp:6721 header + kGiTraversalGLSL + kGiHeightfieldGLSL + kGiReflCS
 # D3D11's OWN kGiShadowCSHLSL call (D3D11Renderer.cpp:3626) additionally splices
 # kGiHeightfieldHLSL between the two — see EXTRA_HLSL_CHECKS below, it is not a
 # plain single-prelude job like the others.
@@ -104,12 +105,14 @@ HLSL_PRELUDE_OF = {
     "kSkyPSHLSL12": "kSkyFuncHLSL",  # D3D12Renderer.cpp:1564 — D3D12's own sky PS copy
     "kSceneHLSL": "kSkyFuncHLSL",
 }
-# GL's kGiShadowCS has one call site and it always carries the heightfield prelude
-# (OpenGLRenderer.cpp:6605), unlike D3D11/D3D12 which differ — so one entry, two preludes.
+# GL's kGiShadowCS and kGiReflCS both carry the heightfield prelude (OpenGLRenderer.cpp's
+# m_giShadowCSProgram/m_giReflCSProgram link lines) — kGiReflCS's own hfClosestHit call
+# (Thema 326 step 16: reflections against the tile landscape) needs hfMarch/hfBilinear from
+# kGiHeightfieldGLSL, same as the shadow kernel's hfAnyHit does.
 GLSL_PRELUDE_OF = {
     "kGiShadowCS": ["kGiTraversalGLSL", "kGiHeightfieldGLSL"],
     "kGiProbeCS": "kGiTraversalGLSL",
-    "kGiReflCS": "kGiTraversalGLSL",
+    "kGiReflCS": ["kGiTraversalGLSL", "kGiHeightfieldGLSL"],
 }
 
 # Entry point -> HLSL profile. Taken from the `compile(..., "<entry>", "<profile>", ...)`
