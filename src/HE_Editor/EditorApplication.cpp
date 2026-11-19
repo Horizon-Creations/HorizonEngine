@@ -8230,7 +8230,7 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 		contentManager().scanContentDirectory();
 		const std::string_view mode(wl);
 		const bool bank = mode == "slope" || mode == "bowl" || mode == "brush" || mode == "cascade" || mode == "hill" || mode == "join" || mode == "fall"
-		               || mode == "crest";
+		               || mode == "crest" || mode == "river";
 		const float level = [bank] { const char* v = std::getenv("HE_DUMP_WATERLEVEL"); return v && *v ? static_cast<float>(std::atof(v)) : (bank ? 2.0f : 0.4f); }();
 		auto land = m_editorWorld->createEntity("WaterLakeLandscape");
 		TransformComponent ltf;
@@ -8352,7 +8352,7 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 				ok = ok && water::addCircle(ltc, b, -34.0f + 62.0f * t, -26.0f + 50.0f * std::sin(t * 3.0f), 17.0f, 6.0f).ok;
 			}
 		}
-		else if (mode == "cascade" || mode == "hill" || mode == "join" || mode == "fall" || mode == "crest")
+		else if (mode == "cascade" || mode == "hill" || mode == "join" || mode == "fall" || mode == "crest" || mode == "river")
 		{
 			// Thema 232: a stroke dragged DOWN the ramp (or the mound) with Follow Slope on, through the brush's
 			// own begin/dab/end, so the witness shows what the tool makes: a stream that lies on the ground
@@ -8374,18 +8374,23 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 				if (const char* sl = std::getenv("HE_DUMP_WATERDIGSLOPE"); sl && *sl) p.bedSlope = static_cast<float>(std::atof(sl));
 			}
 			// "hill": from near the crest down the +X flank of the mound, with a gentle sideways meander.
-			const bool hill = mode == "hill" || mode == "join";
-			const bool fall = mode == "fall";
+			// "river": Thema 232 Schritt 17 — the OTHER shape of curve, on the gentle default terrain (bankSlope
+			// 0.12 m/m, the fallback height formula below), not a mound or a ramp: three full bends over a long
+			// run, the point of the witness being that the current must still run downhill round every one of
+			// them on a slope this slight, not just on the steep hill/fall/crest witnesses' flanks.
+			const bool hill  = mode == "hill" || mode == "join";
+			const bool fall  = mode == "fall";
 			const bool crest = mode == "crest";
-			const float x0 = crest ? -16.0f : fall ? -14.0f : hill ? 3.0f : 22.0f;
-			const float x1 = crest ? 26.0f : fall ? 28.0f : hill ? 46.0f : -12.0f;
+			const bool river = mode == "river";
+			const float x0 = crest ? -16.0f : fall ? -14.0f : hill ? 3.0f : river ? 48.0f : 22.0f;
+			const float x1 = crest ? 26.0f : fall ? 28.0f : hill ? 46.0f : river ? -48.0f : -12.0f;
 			if (fall) { p.radius = 3.0f; p.falloff = 1.0f; }
 			if (crest) { p.radius = 5.0f; p.falloff = 1.0f; }   // a broad stroke, as on a valley wall
-			auto zAt = [hill](float t) { return hill ? 5.0f * std::sin(t * 4.0f) : 0.0f; };
+			auto zAt = [hill, river](float t) { return hill ? 5.0f * std::sin(t * 4.0f) : river ? 18.0f * std::sin(t * 9.42478f) : 0.0f; };
 			const std::vector<float> groundBefore = ltc.sculptHeights;
 			brush::Stroke st;
 			brush::begin(st, ltc, x0, zAt(0.0f), p);
-			const int steps = hill ? 200 : 120;
+			const int steps = (hill || river) ? 200 : 120;
 			uint32_t dugVertices = 0;
 			for (int i = 0; i <= steps; ++i)
 			{
@@ -8417,6 +8422,18 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 					for (int i = 0; i <= 12; ++i) brush::dab(ls, ltc, 47.0f + 4.0f * static_cast<float>(i) / 12.0f, zc, lp);
 					brush::end(ls, ltc);
 				}
+				// A second stream beside the main one, close enough to touch it: a stream joining a stream (Thema 232
+				// Schritt 19), the same one-cell reach as into a lake above, but deeper so an unclamped overlap shows.
+				brush::Params sp = p;
+				sp.levelOffset = p.levelOffset + 0.3f;
+				brush::Stroke s2;
+				brush::begin(s2, ltc, x0, zAt(0.0f) + 1.3f, sp);
+				for (int i = 0; i <= steps; ++i)
+				{
+					const float t = static_cast<float>(i) / static_cast<float>(steps);
+					brush::dab(s2, ltc, x0 + (x1 - x0) * t, zAt(t) + 1.3f, sp);
+				}
+				brush::end(s2, ltc);
 			}
 		}
 		else if (mode == "two")

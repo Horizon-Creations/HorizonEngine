@@ -120,6 +120,10 @@ namespace HE::water
     // difference's half width): wider than the channel's banks, so the cross slope of the channel cancels and
     // the water runs ALONG the channel, not into it.
     inline constexpr float kStreamGradientStep = 2.5f;
+    // Where a stream reaches into a neighbour's first cell (ShoreClip::joinBody), it lies this far under that
+    // neighbour's own surface there (its level if flat, streamSurfaceAt if the neighbour is a stream too), so the
+    // two sheets never draw over one another, whatever either one's own depth is.
+    inline constexpr float kStreamJoinSink = 0.03f;
 
     // A key of every other body's id, level and kind: what a stream's mesh depends on besides the ground and its
     // own cells (the surface of the water it runs into).

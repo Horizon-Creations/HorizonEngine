@@ -457,6 +457,9 @@ namespace
     // Fills pool.line (streamLineSlopeAt): per wet cell the window's mean ground gradient g and the principal axis t of the
     // wet cells in the window (the line's direction, from their covariance); on a line (coherence near 1) the slope is
     // t (t . g), on a blob g. The window sums come from summed-area tables, so the cost is the cells', not the window's.
+    // Measured against the editor's own default brush (radius 10 m, falloff 5 m — a 30 m-wide river) on a bending
+    // stroke: the fixed kStreamLineReach window already finds the line there (see docs/water-flow-2026-11-09.md
+    // Schritt 26); a window that grows with the channel's own width was tried and dropped, see that doc's "Offen".
     void fillLineSlope(StreamPool& pool, const TerrainComponent& tc)
     {
         const int w = pool.w, h = pool.h;
@@ -1252,10 +1255,15 @@ bool buildSurface(const TerrainComponent& tc, const Lattice& lattice, const Cell
                 const float thick = std::max(poolHere + opt.streamDepth * t, streamFillAt(tc, lx, lz) * t);
                 deepestFill = std::max(deepestFill, thick);
                 y = ground + kStreamLift + thick - level;
-                // Over another body's cells (the lake it runs into) it lies just under that water's surface.
+                // Over another body's cells (the lake it runs into, or another stream it joins) it lies just
+                // under that water's own surface there, never through it: a lake has one level, a stream's
+                // surface is its own ground-plus-depth (streamSurfaceAt), the same thing its own mesh is built from.
                 if (const uint16_t other = bodyAt(tc, lx, lz); other != kNoBody && other != opt.streamBody)
-                    if (const Body* ob = tc.water.findBody(other); ob && !ob->stream)
-                        y = std::max(ground + kStreamLift - level, std::min(y, ob->level - 0.03f - level));
+                    if (const Body* ob = tc.water.findBody(other); ob)
+                    {
+                        const float otherSurface = ob->stream ? streamSurfaceAt(tc, *ob, lx, lz) : ob->level;
+                        y = std::max(ground + kStreamLift - level, std::min(y, otherSurface - kStreamJoinSink - level));
+                    }
                 // The ground's slope in WORLD axes (dimensionless): the material draws the sheet's lean from
                 // it and runs the current down it. The landscape's turn, then its y/x scale.
                 const glm::vec2 gl = streamLineSlopeAt(tc, meshPool.get(), lx, lz);

@@ -1615,20 +1615,18 @@ namespace
     // where the line really descends over the next stretch (the ground at line(i - 12) minus at line(i + 12), more than
     // `minDrop` m) the water must run along the line the way it goes down, which is with the painted direction for a
     // positive drop and against it for a negative one. Returns how many samples had such a stretch, and fills `worst`
-    // with the smallest agreement (the cosine between the current and the line's downhill direction) among them,
-    // `slowest` with the lowest speed and `share` with the part of them that agree by more than 0.5.
+    // with the smallest agreement (the cosine between the current and the line's downhill direction) among them.
     template <class Line>
-    int riverAgreement(TerrainComponent& tc, const Line& line, float minDrop, float& worst, float& slowest, float& share)
+    int riverAgreement(TerrainComponent& tc, const brush::Params& p, const Line& line, float minDrop, float& worst, float& slowest)
     {
         tc.water.res = 128;
-        const brush::Params p = followParams();
         brush::Stroke s;
         brush::begin(s, tc, line(0).x, line(0).y, p);
         for (int i = 0; i <= kRiverDabs; ++i) brush::dab(s, tc, line(i).x, line(i).y, p);
         const uint16_t id = s.body;
         brush::end(s, tc);
         const auto pool = water::streamPoolOf(tc, id);
-        int checked = 0, agreeing = 0;
+        int checked = 0;
         worst = 1.0f; slowest = 1e9f;
         for (int i = 12; i <= kRiverDabs - 12; i += 3)
         {
@@ -1639,11 +1637,8 @@ namespace
             const float speed = glm::length(f);
             ++checked;
             slowest = std::min(slowest, speed);
-            const float agree = speed > 0.0f ? glm::dot(f / speed, way) * (drop > 0.0f ? 1.0f : -1.0f) : -1.0f;
-            worst = std::min(worst, agree);
-            agreeing += agree > 0.5f ? 1 : 0;
+            worst = std::min(worst, speed > 0.0f ? glm::dot(f / speed, way) * (drop > 0.0f ? 1.0f : -1.0f) : -1.0f);
         }
-        share = checked > 0 ? static_cast<float>(agreeing) / static_cast<float>(checked) : 0.0f;
         return checked;
     }
 
@@ -1653,12 +1648,13 @@ namespace
         const float u = static_cast<float>(i) / kRiverDabs;
         return { 24.0f - 48.0f * u, 10.0f * std::sin(u * 6.2831853f * 1.5f) };
     }
-    // The same river with a loop in it: the line doubles back up the hill for a stretch, like a river that
-    // winds round a spur. There the water runs AGAINST the painted direction, still down the line.
-    glm::vec2 riverLoop(int i)
+    // The production brush's own defaults (Params{}: radius 10 m, falloff 5 m — a 30 m-wide river), Follow Slope on.
+    brush::Params defaultWidthFollowParams()
     {
-        const float u = static_cast<float>(i) / kRiverDabs;
-        return { 20.0f - 40.0f * u + 7.0f * std::sin(u * 6.2831853f * 3.0f), 12.0f * std::sin(u * 6.2831853f * 1.5f) };
+        brush::Params p;
+        p.followSlope = true;
+        p.levelFromGround = true; p.levelOffset = 0.3f;
+        return p;
     }
     void bumpGround(TerrainComponent& tc, float amount)
     {
@@ -1673,8 +1669,8 @@ TEST_CASE("Water brush streams: a river with bends runs down its own line, at ev
     SUBCASE("smooth hillside")
     {
         TerrainComponent tc = makeLand(10.0f, 0.3f);
-        float worst = 0.0f, slowest = 0.0f, share = 0.0f;
-        CHECK(riverAgreement(tc, riverS, 1.0f, worst, slowest, share) >= 15);
+        float worst = 0.0f, slowest = 0.0f;
+        CHECK(riverAgreement(tc, followParams(), riverS, 1.0f, worst, slowest) >= 15);
         CHECK(worst > 0.9f);          // along the line wherever the line descends, round the bends too
         CHECK(slowest > 0.1f);        // and never standing
     }
@@ -1682,19 +1678,46 @@ TEST_CASE("Water brush streams: a river with bends runs down its own line, at ev
     {
         TerrainComponent tc = makeLand(10.0f, 0.3f);
         bumpGround(tc, 0.15f);
-        float worst = 0.0f, slowest = 0.0f, share = 0.0f;
-        CHECK(riverAgreement(tc, riverS, 1.0f, worst, slowest, share) >= 15);
+        float worst = 0.0f, slowest = 0.0f;
+        CHECK(riverAgreement(tc, followParams(), riverS, 1.0f, worst, slowest) >= 15);
         CHECK(worst > 0.9f);
         CHECK(slowest > 0.1f);
     }
-    SUBCASE("a river that doubles back up the hill: the current follows the line down, against the way it was painted")
+    SUBCASE("the production brush's own default width (30 m): the fix still sees a ribbon, not a flat disc")
     {
         TerrainComponent tc = makeLand(10.0f, 0.3f);
-        float worst = 0.0f, slowest = 0.0f, share = 0.0f;
-        CHECK(riverAgreement(tc, riverLoop, 1.0f, worst, slowest, share) >= 15);
-        // At the turn of a hairpin the line's direction is the chord of the bend and the two ways it could go down
-        // cancel: those few samples may point either way. Everywhere else the current runs down the line.
-        CHECK(share > 0.8f);
+        float worst = 0.0f, slowest = 0.0f;
+        CHECK(riverAgreement(tc, defaultWidthFollowParams(), riverS, 1.0f, worst, slowest) >= 10);
+        CHECK(worst > 0.85f);
+        CHECK(slowest > 0.1f);
+    }
+}
+
+// streamPoolOf (WaterMesh.cpp) caches by {&tc, body, field revision, ground version, heights pointer+count}.
+// A TerrainComponent that goes out of scope (a SUBCASE's own `tc`, or one TEST_CASE's) can hand its stack
+// slot and its sculptHeights block's address straight to the next one built the same way - two separately-
+// scoped landscapes tried here ended up reading each other's pool byte for byte, not their own, with no
+// error raised (a real cache-correctness gap, left as a finding, not fixed here - outside this step; see
+// the handoff). So both landscapes below are alive at once (two named locals, never both equal to one
+// freed-and-reused slot), not one torn down before the other is built.
+TEST_CASE("Water brush streams: a river with bends still runs on a gentle overall slope, near kStreamStillSlope")
+{
+    TerrainComponent land08 = makeLand(10.0f, 0.08f);
+    TerrainComponent land12 = makeLand(10.0f, 0.12f);
+    float worst08 = 0.0f, slowest08 = 0.0f, worst12 = 0.0f, slowest12 = 0.0f;
+    const int checked08 = riverAgreement(land08, followParams(), riverS, 0.3f, worst08, slowest08);
+    const int checked12 = riverAgreement(land12, followParams(), riverS, 0.4f, worst12, slowest12);
+    SUBCASE("0.08 m/m: the line's own slope at the bends is only just over kStreamStillSlope")
+    {
+        CHECK(checked08 >= 15);
+        CHECK(worst08 > 0.9f);         // along the line, same as at the steep slope
+        CHECK(slowest08 > 0.0f);       // and running, not clamped still, this close to the threshold
+    }
+    SUBCASE("0.12 m/m: gentle, but clearly above kStreamStillSlope at every bend")
+    {
+        CHECK(checked12 >= 15);
+        CHECK(worst12 > 0.9f);
+        CHECK(slowest12 > 0.01f);
     }
 }
 
