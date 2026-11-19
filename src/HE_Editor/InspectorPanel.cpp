@@ -14,6 +14,7 @@
 #include <HorizonScene/CookedStatic.h>   // an entity under edit leaves the cooked block
 #include <HorizonScene/EntityActive.h>   // the "Active" switch at the top of the panel
 #include <HorizonScene/Components/NetworkComponent.h> // not in HorizonScene.h: the Network section
+#include <HorizonScene/Components/MobilityComponent.h> // not in HorizonScene.h: the Mobility section
 #include <HorizonScene/FoliagePaint.h>   // density-mask coverage + reset
 #include <HorizonScene/LayerMeshPresets.h>   // the engine's layer meshes as ready-made settings
 #include <HorizonScene/NavigationSystem.h>
@@ -3396,6 +3397,25 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 		if (removed) { if (undo) undo->snapshotNow(removeLabel.c_str()); registry.remove<StreamingComponent>(entity); }
 	}
 
+	// ── Mobility (the entity-cooking override) ──────────────────────────────
+	if (auto* mob = registry.try_get<MobilityComponent>(entity))
+	{
+		if (componentHeader("Mobility", true, removed))
+		{
+			int mode = static_cast<int>(mob->mode);
+			if (Row::comboZ("Mode##mobility", &mode, "Movable Static "))
+				mob->mode = mode == 0 ? MobilityComponent::Mode::Movable : MobilityComponent::Mode::Static;
+			trackEdit();
+			hint("Static tells the engine this entity never moves, scripts or reparents, so it may "
+			     "be cooked into flat render/physics data at export and at startup. Movable keeps "
+			     "it a full entity — use it to pin an entity that is still changed from outside the "
+			     "paths cooking watches (e.g. code that writes the transform directly). A Static "
+			     "entity that still carries a script, an animator or a dynamic body is not cooked "
+			     "either way; the analysis reports the contradiction instead.");
+		}
+		if (removed) { if (undo) undo->snapshotNow(removeLabel.c_str()); registry.remove<MobilityComponent>(entity); }
+	}
+
 	// ── Script (Lua / Python / HorizonCode class) ───────────────────────────
 	if (auto* s = registry.try_get<ScriptComponent>(entity))
 	{
@@ -4275,6 +4295,7 @@ constexpr AddRow kGameplayRows[] = {
 	addRow<ScriptComponent>("Script"),
 	addRow<SaveStateComponent>("Save State"),
 	addRow<StreamingComponent>("Streaming"),
+	addRow<MobilityComponent>("Mobility"),
 };
 constexpr AddRow kNavigationRows[] = {
 	addRow<NavMeshComponent>("Nav Mesh"),

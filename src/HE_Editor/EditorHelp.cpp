@@ -181,6 +181,12 @@ namespace
 	  "Where this entity lives when the scene is split into cells: in a cell that "
 	  "loads around the camera, or always loaded in the base scene.",
 	  "", "scenes#streaming" },
+	{ "Component/Mobility", "Mobility",
+	  "Whether this entity may ever change at run time. Static lets the engine "
+	  "reduce it to flat render/physics data (entity cooking) once nothing else "
+	  "about it objects; Movable keeps it a full entity. With no Mobility "
+	  "component the engine decides on its own from what the entity carries.",
+	  "", "rendering#performance" },
 	{ "Component/LOD", "LOD",
 	  "Swaps this entity's mesh for cheaper versions as the camera gets further "
 	  "away.",
@@ -2148,6 +2154,15 @@ namespace
 	  "waypoint a script looks up by name. Auto leaves the choice to the split. Takes "
 	  "effect the next time the scene is split.",
 	  "", "scenes#streaming" },
+	{ "Mobility/Mode", "",
+	  "Static tells the engine this entity never moves, scripts or reparents, so "
+	  "it may be cooked into flat render/physics data at export and at startup. "
+	  "Movable keeps it a full entity — use it to pin an entity that is still "
+	  "changed from outside the paths cooking watches (code that writes the "
+	  "transform directly, for instance). Static on an entity that still carries "
+	  "a script, an animator or a dynamic body does not cook it either way; the "
+	  "analysis reports the contradiction instead.",
+	  "", "rendering#performance" },
 	{ "Save State/Enabled", "",
 	  "Include this entity in savegames. Off, it is whatever the scene file says "
 	  "every time the game is loaded.",
