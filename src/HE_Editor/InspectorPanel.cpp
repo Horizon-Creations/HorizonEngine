@@ -15,6 +15,7 @@
 #include <HorizonScene/EntityActive.h>   // the "Active" switch at the top of the panel
 #include <HorizonScene/Components/NetworkComponent.h> // not in HorizonScene.h: the Network section
 #include <HorizonScene/Components/MobilityComponent.h> // not in HorizonScene.h: the Mobility section
+#include <HorizonScene/CookAnalysis.h>                    // the Mobility section's "why is it not cooked"
 #include <HorizonScene/FoliagePaint.h>   // density-mask coverage + reset
 #include <HorizonScene/LayerMeshPresets.h>   // the engine's layer meshes as ready-made settings
 #include <HorizonScene/NavigationSystem.h>
@@ -1622,6 +1623,23 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			if (changed) t->dirty = true;
 		}
 		if (removed) { if (undo) undo->snapshotNow(removeLabel.c_str()); registry.remove<TransformComponent>(entity); }
+
+		// ── Mobility (the entity-cooking override), right under the Transform it is about ──
+		// One switch: Movable or Static. An entity without the component shows what the engine
+		// derives for it (Static when nothing blocks cooking); a click then writes the component.
+		if (componentHeader("Mobility", false, removed))
+		{
+			MobilityComponent* mob = registry.try_get<MobilityComponent>(entity);
+			const bool isStatic = mob ? mob->mode == MobilityComponent::Mode::Static
+			                          : HE::analyzeCookability(registry, entity).cookable();
+			Row::labelCell("Mobility##mobilityrow");   // the label column of the Details panel, no-op elsewhere
+			if (EditorWidgets::button(isStatic ? "Static##mobility" : "Movable##mobility", ImVec2(-FLT_MIN, 0.0f)))
+			{
+				if (undo) undo->snapshotNow("Mobility");
+				if (!mob) { mob = &registry.emplace<MobilityComponent>(entity); structuralChange = true; }
+				mob->mode = isStatic ? MobilityComponent::Mode::Movable : MobilityComponent::Mode::Static;
+			}
+		}
 	}
 
 	// ── Transform 2D ────────────────────────────────────────────────────────
@@ -3395,25 +3413,6 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			     "Auto leaves it to the splitter. Split again after changing it.");
 		}
 		if (removed) { if (undo) undo->snapshotNow(removeLabel.c_str()); registry.remove<StreamingComponent>(entity); }
-	}
-
-	// ── Mobility (the entity-cooking override) ──────────────────────────────
-	if (auto* mob = registry.try_get<MobilityComponent>(entity))
-	{
-		if (componentHeader("Mobility", true, removed))
-		{
-			int mode = static_cast<int>(mob->mode);
-			if (Row::comboZ("Mode##mobility", &mode, "Movable Static "))
-				mob->mode = mode == 0 ? MobilityComponent::Mode::Movable : MobilityComponent::Mode::Static;
-			trackEdit();
-			hint("Static tells the engine this entity never moves, scripts or reparents, so it may "
-			     "be cooked into flat render/physics data at export and at startup. Movable keeps "
-			     "it a full entity — use it to pin an entity that is still changed from outside the "
-			     "paths cooking watches (e.g. code that writes the transform directly). A Static "
-			     "entity that still carries a script, an animator or a dynamic body is not cooked "
-			     "either way; the analysis reports the contradiction instead.");
-		}
-		if (removed) { if (undo) undo->snapshotNow(removeLabel.c_str()); registry.remove<MobilityComponent>(entity); }
 	}
 
 	// ── Script (Lua / Python / HorizonCode class) ───────────────────────────

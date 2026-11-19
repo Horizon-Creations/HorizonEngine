@@ -2154,14 +2154,18 @@ namespace
 	  "waypoint a script looks up by name. Auto leaves the choice to the split. Takes "
 	  "effect the next time the scene is split.",
 	  "", "scenes#streaming" },
-	{ "Mobility/Mode", "",
-	  "Static tells the engine this entity never moves, scripts or reparents, so "
-	  "it may be cooked into flat render/physics data at export and at startup. "
-	  "Movable keeps it a full entity — use it to pin an entity that is still "
-	  "changed from outside the paths cooking watches (code that writes the "
-	  "transform directly, for instance). Static on an entity that still carries "
-	  "a script, an animator or a dynamic body does not cook it either way; the "
-	  "analysis reports the contradiction instead.",
+	{ "Mobility/Static", "",
+	  "This entity never moves, scripts or reparents, so it may be cooked into "
+	  "flat render/physics data at export and at startup. Click to make it "
+	  "Movable. Static on an entity that still carries a script, an animator or "
+	  "a dynamic body does not cook it either way; the analysis reports the "
+	  "contradiction instead. Without a choice of its own, an entity shows "
+	  "Static when nothing about it blocks cooking.",
+	  "", "rendering#performance" },
+	{ "Mobility/Movable", "",
+	  "Keeps this entity a full entity, never cooked — use it to pin an entity "
+	  "that is still changed from outside the paths cooking watches (code that "
+	  "writes the transform directly, for instance). Click to make it Static.",
 	  "", "rendering#performance" },
 	{ "Save State/Enabled", "",
 	  "Include this entity in savegames. Off, it is whatever the scene file says "
@@ -4875,7 +4879,7 @@ namespace
 	  "inside your game. Saved to Config/ProjectSettings.json.",
 	  "", "export#overview" },
 	{ "Project General/Cook static entities", "Cook static entities",
-	  "When on, the export finds the meshes that never change while the game runs "
+	  "On by default. When on, the export finds the meshes that never change while the game runs "
 	  "(no script, animation, physics body, replication or level of detail, and no "
 	  "such parent) and ships that list inside each scene. The game then draws them "
 	  "from a flat block of ready data instead of walking every entity each frame, "
