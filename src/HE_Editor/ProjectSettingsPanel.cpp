@@ -670,6 +670,15 @@ void drawGeneralPage(AppContext& ctx)
 	commit |= AppMetadataRows::drawSplashRows(ctx, p, /*compact=*/false);
 	ImGui::Spacing();
 
+	// ── Static entities ──────────────────────────────────────────────────────
+	ImGui::SeparatorText("Performance");
+	commit |= EditorWidgets::checkbox("Cook static entities##cookstatic", &p.settings.game.cookStaticEntities);
+	hint("On export, finds the meshes that never change while the game runs and ships that list "
+	     "with each scene. The game then draws them from a flat block instead of walking every "
+	     "entity each frame. A script, animation or physics body added at run time, or a moved "
+	     "object, hands the entity back to normal handling by itself. The editor is not affected.");
+	ImGui::Spacing();
+
 	// ── Startup scene ────────────────────────────────────────────────────────
 	// The manifest's, not the settings file's: the .heproj has carried it since
 	// the first project, and an export profile may still override it per build.

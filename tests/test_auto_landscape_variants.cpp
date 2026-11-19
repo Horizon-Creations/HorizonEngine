@@ -169,23 +169,23 @@ TEST_CASE("The auto landscape graph reads variants: 27 hex reads, one variant gr
 	// 3 layers (Grass, Dirt, Rock) x (Albedo + Normal + Mask) x 3 hexes = 27 reads per pixel (36 while Snow was
 	// a bombed texture layer too; since Thema 329 step 2 it is MF_ProceduralSnow and reads nothing); the text holds
 	// them once for V = 1 and once for V > 1 (see the grouped test above).
-	CHECK(countOf(lit.glsl, "textureGrad(heTexP") == 54u);
-	CHECK(countOf(lit.glsl, "_V == 1) {") == 9u);
-	CHECK(countOf(lit.glsl, "_s0))") == 9u);
-	CHECK(countOf(lit.glsl, "heBombGridV(") == 4u);    // the definition and one call per layer (three seeds)
+	CHECK(countOf(lit.glsl, "textureGrad(heTexP") == 90u);
+	CHECK(countOf(lit.glsl, "_V == 1) {") == 15u);
+	CHECK(countOf(lit.glsl, "_s0))") == 15u);
+	CHECK(countOf(lit.glsl, "heBombGridV(") == 6u);    // the definition and one call per read set: grass, dirt and the three rock sizes (five seeds)
 	CHECK(lit.glsl.find("heBombGrid(n") == std::string::npos);
 	for (const char* seed : { ", 11u, n", ", 23u, n", ", 37u, n" })
 		CHECK_MESSAGE(lit.glsl.find(seed) != std::string::npos, seed);
 	CHECK(lit.glsl.find(", 53u, n") == std::string::npos);   // the snow's old seed: no bombed snow read left
 	// No new parameter, no new texture slot.
-	CHECK(lit.params.size() == static_cast<size_t>(HE::kAutoLandscapeParamCount));
+	CHECK(lit.params.size() == static_cast<size_t>(HE::autoLandscapeParamCount(HE::autoLandscapeGroup(HE::AutoLandscapeGroupId::Mountains))));   // the Mountains' 15 plus the three rock sizes
 
 	// The negative control: bombing off reads variant 0 of every layer with plain reads.
 	const std::map<std::string, bool> noBomb{ { HE::kAutoLandscapeSwitchBombing, false } };
 	const HE::MatShaderGen off = HE::generateFragment(g, HE::weatherFunctionLoader(), &noBomb);
 	CHECK(off.glsl.find("heBombGridV") == std::string::npos);
 	CHECK(off.glsl.find("textureGrad(heTexP") == std::string::npos);
-	CHECK(off.params.size() == static_cast<size_t>(HE::kAutoLandscapeParamCount) - 1);
+	CHECK(off.params.size() == static_cast<size_t>(HE::autoLandscapeParamCount(HE::autoLandscapeGroup(HE::AutoLandscapeGroupId::Mountains))) - 1);
 }
 
 TEST_CASE("The variant helpers cross-compile for all five backends")
@@ -429,4 +429,33 @@ TEST_CASE("Auto landscape: the Displacement pin is optional, off it is the graph
 	}
 	// Only the lit view carries it: the debug views stay untouched.
 	CHECK(displacementLinks(buildAutoLandscapeGraph(AutoLandscapeView::Surface, AutoLandscapeGroupId::Mountains, false, true)) == 0);
+}
+
+TEST_CASE("Auto landscape: every group reads its Rock role by slope (small / medium / large), three sizes, three parameters")
+{
+	using namespace HE;
+	for (const AutoLandscapeGroup& g : kAutoLandscapeGroups)
+	{
+		CAPTURE(std::string(g.name));
+		CHECK(g.rockBySize);
+		CHECK(g.boulderSlope > g.rockSlope);          // the large rock must start above where rock starts
+		const AutoLandscapeGraph built = buildAutoLandscapeGraph(AutoLandscapeView::Lit, g.id);
+		const MatShaderGen gen = generateFragment(built.graph, weatherFunctionLoader());
+		CHECK(gen.params.size() == static_cast<size_t>(autoLandscapeParamCount(g)));
+		CHECK(gen.params.size() <= static_cast<size_t>(kMatMaxParams));
+		std::map<std::string, float> def;
+		for (const MatParamSlot& s : gen.params) def[s.name] = s.value[0];
+		REQUIRE(def.count(kAutoLandscapeParamBoulderSlope) == 1);
+		CHECK(def[kAutoLandscapeParamBoulderSlope] == doctest::Approx(g.boulderSlope));
+		CHECK(def.count(kAutoLandscapeParamBoulderTile) == 1);
+		CHECK(def.count(kAutoLandscapeParamPebbleTile) == 1);
+		// Five bombed read sets (grass or sand aside): dirt + rock x3, grass; each rock size has its own grid seed.
+		for (const char* seed : { ", 37u, n", ", 41u, n", ", 43u, n" })
+			CHECK_MESSAGE(gen.glsl.find(seed) != std::string::npos, seed);
+	}
+	// The mix material reads the same three sizes from the fat arrays (V variants per role).
+	const AutoLandscapeGraph mix = buildAutoLandscapeGraph(AutoLandscapeView::Lit, AutoLandscapeGroupId::Mountains, true);
+	const MatShaderGen gm = generateFragment(mix.graph, weatherFunctionLoader());
+	for (const char* seed : { ", 37u, n", ", 41u, n", ", 43u, n" })
+		CHECK_MESSAGE(gm.glsl.find(seed) != std::string::npos, seed);
 }

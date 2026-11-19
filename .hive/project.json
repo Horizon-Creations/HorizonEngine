@@ -1,0 +1,35 @@
+{
+  "project": "horizon-creations-horizonengine",
+  "rev": 22,
+  "name": "HorizonEngine",
+  "language": {},
+  "preferences": {
+    "style": {
+      "value": "formatter"
+    },
+    "tests": {
+      "value": "new-code"
+    },
+    "branching": {
+      "value": "branch-per-topic-squash"
+    },
+    "ci_must_pass": {
+      "value": true
+    }
+  },
+  "limits": {
+    "max_parallel": 2,
+    "quota_guard": 0.9,
+    "night": true,
+    "gate": true,
+    "auto_commit": true
+  },
+  "devices": [
+    {
+      "host": "MacBook-Air-von-Connor",
+      "role": "reader"
+    }
+  ],
+  "provenance": {},
+  "suggested": []
+}

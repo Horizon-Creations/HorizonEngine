@@ -10937,8 +10937,12 @@ ID3D12PipelineState* D3D12RendererImpl::GetOrBuildMaterialPSO(uint64_t hash, con
             if (!m_matHlslLogged)
             {
                 m_matHlslLogged = true;
-                HE_LOG_INFO(RHI, "%s", (std::string("D3D12 A4 material VS HLSL:\n") + vsSrc).c_str());
-                HE_LOG_INFO(RHI, "%s", (std::string("D3D12 A4 material PS HLSL:\n") + psSrc).c_str());
+                // Only on request (HE_DUMP_MATERIAL_HLSL=1): two whole shaders in every launch's log buried the lines that matter.
+                if (const char* dump = std::getenv("HE_DUMP_MATERIAL_HLSL"); dump && dump[0] == '1')
+                {
+                    HE_LOG_INFO(RHI, "%s", (std::string("D3D12 A4 material VS HLSL:\n") + vsSrc).c_str());
+                    HE_LOG_INFO(RHI, "%s", (std::string("D3D12 A4 material PS HLSL:\n") + psSrc).c_str());
+                }
             }
             return true;
         };

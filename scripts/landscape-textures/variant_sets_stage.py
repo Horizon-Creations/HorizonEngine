@@ -5,8 +5,9 @@
 
 <staging-root>/<Group>/<RoleLabel>_<Map>[_v2|_v3].<jpg|png>: every set copied under the name --pack-group reads
 (the files stay as downloaded; the importer flips on load). Mountains' variant 1 is not downloaded: it is cut out
-of the CURRENT server arrays (RGBA8 T_Landscape_{Albedo,Normal,Mask}_Array in the cache dir, slice = role,
-Mask split into AO / Roughness / Height), so repacking keeps what is on the server. Needs Pillow; run with -I.
+of the CURRENT server arrays (RGBA8 T_Landscape_{Albedo,Normal,Mask}_Array in the cache dir, slice = role * V,
+V = variants per role of those arrays; Mask split into AO / Roughness / Height), so repacking keeps what is on
+the server. Needs Pillow; run with -I.
 
 Then, per group:  landscape_tex_gen <out> --pack-group <staging>/<Group> --group <Group> --size 2048
                   landscape_tex_gen <out> --mix --from <out>
@@ -43,7 +44,9 @@ alb = H.read_hasset(cache/"T_Landscape_Albedo_Array.hasset")
 nrm = H.read_hasset(cache/"T_Landscape_Normal_Array.hasset")
 msk = H.read_hasset(cache/"T_Landscape_Mask_Array.hasset")
 g = out/"Mountains"
-for s, role in enumerate(["Grass","Dirt","Rock","Snow"]):
+V = max(1, (alb["layers"] - 1) // 4)     # variants per role in the source arrays (4 * V + 1 slices); variant 1 = the first
+for r_, role in enumerate(["Grass","Dirt","Rock","Snow"]):
+    s = r_ * V
     H.view(alb, s, 0).convert("RGB").save(g/f"{role}_Albedo.png")
     H.view(nrm, s, 0).convert("RGB").save(g/f"{role}_Normal.png")
     mk = H.view(msk, s, 0)

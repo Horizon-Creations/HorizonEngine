@@ -171,6 +171,7 @@ bool ProjectSettings::operator==(const ProjectSettings& o) const
         && game.splashEnabled == o.game.splashEnabled
         && game.splashImage == o.game.splashImage
         && game.splashSubtitle == o.game.splashSubtitle
+        && game.cookStaticEntities == o.game.cookStaticEntities
         && nearlyEqual(shadows.distance, o.shadows.distance)
         && shadows.cascadeCount == o.shadows.cascadeCount
         && shadows.resolution == o.shadows.resolution
@@ -357,7 +358,8 @@ void ProjectSettings::toJson(json& out) const
     out["game"] = { { "title",          game.title },
                     { "splashEnabled",  game.splashEnabled },
                     { "splashImage",    game.splashImage },
-                    { "splashSubtitle", game.splashSubtitle } };
+                    { "splashSubtitle", game.splashSubtitle },
+                    { "cookStaticEntities", game.cookStaticEntities } };
 
     out["shadows"] = {
         { "distance",     shadows.distance },
@@ -467,6 +469,7 @@ void ProjectSettings::fromJson(const json& in)
         readBool  (g, "splashEnabled",  game.splashEnabled);
         readString(g, "splashImage",    game.splashImage);
         readString(g, "splashSubtitle", game.splashSubtitle);
+        readBool  (g, "cookStaticEntities", game.cookStaticEntities);
     }
     {
         const json& s = section(in, "shadows");

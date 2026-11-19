@@ -315,6 +315,26 @@ TEST_CASE("ProjectSettings: the splash rides in the game section and reads back"
 	CHECK(c.game.splashImage.empty());
 }
 
+TEST_CASE("ProjectSettings: cooking static entities is off, rides in the game section and reads back")
+{
+	HE::ProjectSettings a;
+	CHECK_FALSE(a.game.cookStaticEntities);     // off until the engine flips it for every project
+	a.game.cookStaticEntities = true;
+	CHECK_FALSE(a.isDefault());
+
+	json j;
+	a.toJson(j);
+	CHECK(j["game"]["cookStaticEntities"] == true);
+	HE::ProjectSettings b;
+	b.fromJson(j);
+	CHECK(a == b);
+
+	// A file written before it existed: the key is absent, the setting is off.
+	HE::ProjectSettings c;
+	c.fromJson(json::parse(R"({"version":1,"game":{"title":"Old"}})"));
+	CHECK_FALSE(c.game.cookStaticEntities);
+}
+
 // ─── Anti-cheat (docs/anti-cheat-plan.md §4.4) ───────────────────────────────
 
 TEST_CASE("ProjectAntiCheatSettings: default-constructed is off, with the plan's policy")
@@ -860,6 +880,7 @@ TEST_CASE("ProjectSettings: operator== and isDefault see every field")
 	HE_FIELD(game.splashEnabled);
 	HE_FIELD(game.splashImage);
 	HE_FIELD(game.splashSubtitle);
+	HE_FIELD(game.cookStaticEntities);
 
 	HE_FIELD(shadows.distance);
 	HE_FIELD(shadows.cascadeCount);
