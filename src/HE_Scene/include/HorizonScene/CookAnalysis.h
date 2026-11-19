@@ -84,8 +84,6 @@ namespace HE
 		uint32_t            cookable = 0;
 		uint32_t            blocked  = 0;
 		std::vector<Reason> reasons;              // only bits that occurred, in rule order
-
-		bool empty() const { return cookable == 0 && blocked == 0; }
 	};
 	CookSummary summarizeCookability(const std::vector<CookEntry>& entries,
 	                                  const entt::registry& reg, size_t maxExamples = 3);
