@@ -1,0 +1,255 @@
+{
+  "project": "horizon-creations-horizonengine",
+  "rev": 22,
+  "releases": [
+    {
+      "version": "0.9.0",
+      "title": null,
+      "branch": "release/0.9.0",
+      "plan": {
+        "idea": null,
+        "goal": null,
+        "non_goals": [],
+        "criteria": [],
+        "budget": null,
+        "mode": false,
+        "confirmed_at": null,
+        "topics": {},
+        "delta": null,
+        "updated_at": null,
+        "agreements": [],
+        "gate": null,
+        "checks": {},
+        "wave_notes": {}
+      }
+    },
+    {
+      "version": "0.8.0",
+      "title": null,
+      "branch": "release/0.8.0",
+      "plan": {
+        "idea": "Release 0.8.0: grosse, offene Landschaft im Weltmaßstab (100x100km) tragfaehig machen, das Landscape-Material-System auf Runtime Virtual Textures umstellen (wie in Unreal: einmal in Pages rendern, danach nur lesen), die sichtbare Vegetation/Mesh-Last durch Auto-LOD und sichtbarkeitsgetriebenes Rendern senken, und eine Reihe Qualitaets-/Werkzeug-Themen (Wasser-Stroemungen und Wasserfaelle, zentrale Engine-Qualitaetsstufen, echtes volumetrisches Nebel, Wolken 2.0, Font-Assets, Hardware-Erkennung) fertigstellen, die zusammen die Grundlage fuer grosse, performante Open-World-Szenen legen.",
+        "goal": "Eine vom Menschen auf dem eigenen Rechner (Ryzen 9 9950X, RTX 4070 12GB) geflogene 100x100km-Landschaft mit Tile-Streaming, RVT-Landscape-Material, Auto-LOD-Foliage und den Qualitaets-/Wasser-/Nebel-Verbesserungen laeuft stabil, alte Projekte laden unveraendert, und die Kernfeatures sind auf allen fuenf Backends (D3D11, D3D12, Vulkan, Metal, OpenGL) zumindest grundverifiziert.",
+        "non_goals": [
+          "Reflexionen gegen die Kachel-Landschaft (kein Backend hat BVH/BLAS-Integration dafuer, eigenes Thema)",
+          "Sculpt/Paint-Ruckschreiben auf Tiles als vollwertiges Feature (nur Entwurf, Folgearbeit)",
+          "Engine-Content-Server (Thema 194) als performancekritischer Launch-Blocker - ist ein Infrastruktur-Thema, kein Rendering-Feature",
+          "Vollstaendige Jahreszeiten-Uebergaenge mit Ueberblendung in jedem Edge-Case (Basisumschaltung reicht fuer 0.8.0)"
+        ],
+        "criteria": [
+          "100km-Testwelt laedt und streamt auf dem Zielrechner ohne Abstuerze, Speicherbudget aus Thema 326 eingehalten",
+          "RVT-Landscape-Material (Thema 333+335) ersetzt das Pro-Pixel-Material auf allen 5 Backends messbar guenstiger, alte Projekte ohne RVT laden unveraendert",
+          "Auto-LOD senkt die Foliage-Testszene von 8fps auf ein spielbares Niveau bei Standard-RenderScale (erreicht: siehe docs/auto-lod-abnahme-2026-11-08.md)",
+          "Wasser-Tool erzeugt bei Steigung automatisch Stroemung/Wasserfall statt stehender Flaeche, sieht nicht blockig aus",
+          "he_tests komplett gruen auf allen Themen-Branches vor dem Merge in release/0.8.0, CI gruen auf dem jeweils neuesten Head"
+        ],
+        "budget": "Richtwerte aus den Themen selbst (kein einzelnes hartes Budget fuer die ganze Szene): 60fps/16.7ms bei Standard-RenderScale als Zielgroesse fuer die Foliage-Testszene (Thema 331), RVT-Hot-Pool-Speicherbudget und Page-Kosten aus Thema 333 Schritt 8, Landscape-Speicherbudget aus Thema 326 Schritt 0 (Ring-Hysterese, harter Byte-Deckel). Jedes Performance-Thema misst gegen seine eigene, bereits dokumentierte Baseline statt gegen eine neue globale Zahl.",
+        "mode": true,
+        "confirmed_at": 1794298830.4915452,
+        "topics": {
+          "326": {
+            "role": "Fundament: Tile-Streaming, Quadtree-Renderer, Speicherbudget fuer die 100km-Welt. Alle anderen Landscape-/RVT-Themen bauen direkt oder indirekt darauf. Kernarbeit (12 Schritte) ist fertig und CI-gruen, PR #214 wartet auf Merge-Freigabe des Menschen; 6 Folgeschritte (D3D-Normal+Mask, Sculpt/Paint-Ruckschreiben, Projekt-relative Pfade, Reflexionen, Mehrbackend-Crash, Metal-Nachpruefung) sind angelegt.",
+            "depends_on": [],
+            "touches": [
+              "src/HE_Scene/include/HorizonScene/LandscapeStore.h",
+              "src/HE_Scene/src/LandscapeRuntime.cpp",
+              "src/HE_Rendering/include/HorizonRendering/LandscapeShaderSource.h (kLandscapeHLSL/kLandscapeFS)",
+              "src/HE_Scene/src/CellStreamer.cpp"
+            ],
+            "risk": "high",
+            "size": "L",
+            "wave": 2
+          },
+          "333": {
+            "role": "Fundament fuer RVT 2.0 (Thema 335 baut direkt darauf auf). Kernarbeit + 4 frisch gefundene Review-Bugs (D3D12 Cold-Page, Vulkan-Pack-Fehler, paintGroup-Journal-Luecke, RVT-Detach bei Szenenwechsel) sind gefixt und gepusht, wartet auf Merge-Freigabe.",
+            "depends_on": [],
+            "touches": [
+              "src/HE_Scene/include/HorizonScene/RvtManager.h",
+              "src/HE_Scene/src/RvtLandscape.cpp",
+              "src/HE_Core/src/MaterialGraph/MaterialGraph.cpp (RvtSample node)",
+              "src/HE_Rendering/src/Backends/*/​*Renderer.* (RVT page pool/upload)"
+            ],
+            "risk": "high",
+            "size": "L",
+            "wave": 2
+          },
+          "194": {
+            "role": "Eigenstaendiges Infrastruktur-Thema (Content-Auslieferung), beruehrt keine Rendering-/Landscape-Dateien der anderen Themen. Schritt 1 legt ein neues Repo unter Horizon-Creations an - nach aussen sichtbare, schwer rueckgaengig zu machende Aktion, braucht explizite Freigabe bevor eine Bee das tut. Bisher nicht begonnen (27 Tage ohne Aktivitaet).",
+            "depends_on": [],
+            "touches": [
+              "neues Repo horizon-creations/<name>",
+              "src/HE_ContentSync/"
+            ],
+            "risk": "medium",
+            "size": "L",
+            "wave": 2
+          },
+          "226": {
+            "role": "Font-Asset-Typ fuers Spiel. Review bereits \"passed\", keine Abhaengigkeiten zu anderen Release-Themen. Nur noch Merge offen.",
+            "depends_on": [],
+            "touches": [
+              "src/HE_Scene/src/UISystem.cpp",
+              "src/HE_Scene/src/SceneSerializer.cpp",
+              "src/HE_Scene/include/HorizonScene/Components/UITextComponent.h"
+            ],
+            "risk": "low",
+            "size": "S",
+            "wave": 2
+          },
+          "324": {
+            "role": "Zentrale Quality-Settings, Basis fuer die bereits gemergten Folgethemen 336/337. Fast fertig, letzte Schritte (Play-Mode-Seed, HorizonCode-Enum-Dropdown) liefen schon direkt vom Menschen.",
+            "depends_on": [],
+            "touches": [
+              "src/HE_Core/include/Project/QualitySettings.h",
+              "src/HE_Editor/EditorApplication.cpp"
+            ],
+            "risk": "low",
+            "size": "M",
+            "wave": 2
+          },
+          "335": {
+            "role": "RVT als Material-Feature (Write/Read-Knoten statt fixem Treiber). Baut auf Thema 333 auf. Schritte 1-5+7-9 fertig (alle 5 Backends verifiziert, Per-Layer-Stale-Flags), Schritt 10 (Export-Anschluss an die Kachel-Welt) ist explizit blockiert bis Thema 326 gemergt ist - erst dann dispatchbar.",
+            "depends_on": [
+              326,
+              333
+            ],
+            "touches": [
+              "src/HE_Core/src/MaterialGraph/RvtSplit.cpp",
+              "src/HE_Scene/src/RvtLandscape.cpp",
+              "src/HE_Scene/src/RvtBaseBake.cpp",
+              "src/HE_Core/src/MaterialGraph/AutoLandscapeMaterial.cpp"
+            ],
+            "risk": "medium",
+            "size": "M",
+            "wave": 3
+          },
+          "232": {
+            "role": "Wasser-Tool bekommt automatische Stroemung/Wasserfall bei Steigung (Terrassen+Bachbett). Aktiv in Arbeit (Schritt 22+, Performance-Tuning), unabhaengig von Landscape/RVT, aber teilt Wasser-Dateien mit Thema 329 (Wasser-Kiesel pro Gruppe) - nicht parallel zu 329 laufen lassen.",
+            "depends_on": [],
+            "touches": [
+              "src/HE_Scene/src/WaterBrush.cpp",
+              "src/HE_Scene/src/WaterFall.cpp",
+              "src/HE_Scene/include/HorizonScene/WaterField.h",
+              "src/HE_Scene/src/WaterSurface.cpp",
+              "src/HE_Tools/src/MatGen/main.cpp (Water.hasset)"
+            ],
+            "risk": "medium",
+            "size": "M",
+            "wave": 2
+          },
+          "329": {
+            "role": "Landscape-3.0-Folge: Path-Layer, prozeduraler Schnee/Sand, Wasser-Kiesel pro Gruppe. Baut auf Thema 233 (fertig) auf. Schritt 6 (Abnahme) wartet auf die Textur-Auswahl des Menschen und auf NN-WS03 fuer D3D/Vulkan. Teilt Wasser-Dateien mit Thema 232 und AutoLandscapeMaterial.cpp mit Thema 335 - nach beiden einplanen, damit keine Datei doppelt in Arbeit ist.",
+            "depends_on": [
+              232,
+              233,
+              335
+            ],
+            "touches": [
+              "src/HE_Core/src/MaterialGraph/AutoLandscapeMaterial.cpp",
+              "src/HE_Scene/src/WaterBrush.cpp (Water-Kiesel-Layer)",
+              "src/HE_Core/src/MaterialGraph/MF_ProceduralSnow/Sand"
+            ],
+            "risk": "medium",
+            "size": "M",
+            "wave": 4
+          },
+          "330": {
+            "role": "Jahreszeiten (Himmel + Landscape-Material per Script umschaltbar). Baut auf Thema 329 auf, braucht dessen fertige Material-Struktur (Path-Layer, Schnee/Sand). Bisher nur Entwurf/Fragen beantwortet, kein Code.",
+            "depends_on": [
+              329
+            ],
+            "touches": [
+              "src/HE_Core/src/MaterialGraph/AutoLandscapeMaterial.cpp",
+              "include/HorizonRendering/SkyShaderSource.h"
+            ],
+            "risk": "medium",
+            "size": "M",
+            "wave": 5
+          },
+          "225": {
+            "wave": 1
+          },
+          "227": {
+            "wave": 1
+          },
+          "228": {
+            "wave": 1
+          },
+          "229": {
+            "wave": 1
+          },
+          "233": {
+            "wave": 1
+          },
+          "327": {
+            "wave": 1
+          },
+          "328": {
+            "wave": 1
+          },
+          "331": {
+            "wave": 1
+          },
+          "332": {
+            "wave": 1
+          },
+          "336": {
+            "wave": 1
+          },
+          "337": {
+            "wave": 1
+          },
+          "338": {
+            "wave": 1
+          },
+          "339": {
+            "wave": 1
+          }
+        },
+        "delta": null,
+        "updated_at": 1794384613.6713617,
+        "agreements": [
+          {
+            "id": "IF-1",
+            "kind": "interface",
+            "title": "LandscapeStore per-tile residency API is the attach point for RVT baked-base part (b)",
+            "text": "Topic 335's RVT-2.0 export-baked-base step (part b, see docs/rvt-2-0-step6-export-baked-base-2026-11-08.md on claude/rvt-material-feature) is explicitly blocked until topic 326 merges `LandscapeStore`/`CellStreamer`/`kLandscapeFS` (PR #214). Once merged, 335 builds its per-tile RVT segment lifecycle directly on top of LandscapeStore's existing read-only residency API: `LandscapeStore::residentKeys()`, `isResident(LandscapeTileKey)`, `isLoading(LandscapeTileKey)` (src/HE_Scene/include/HorizonScene/LandscapeStore.h). The pattern to mirror is `RvtLandscape::attach`/`deactivate`/`remove` (src/HE_Scene/include/HorizonScene/RvtLandscape.h): one segment (scratch copy + page volume) per resident tile instead of per whole landscape, plus `kRvtLookupGLSL` wired into `kLandscapeFS`/`kLandscapeHLSL`, and a per-tile variant of the RVT base-bake key (today hashed per whole landscape). 326 does not need to change anything for this — it only needs to land unmodified. 335 must not start part (b) before 326's merge commit is the branch point it rebases onto.",
+            "owner": 326,
+            "status": "agreed",
+            "version": 1,
+            "by": "queen",
+            "at": 1794379268.060402
+          },
+          {
+            "id": "R-1",
+            "kind": "rule",
+            "title": "AutoLandscapeMaterial.cpp graphs are capped at 4 distinct textures — reuse a slot, don't add one",
+            "text": "src/HE_Core/src/MaterialGraph/AutoLandscapeMaterial.cpp (`buildAutoLandscapeGraph`) is shared by topics 335 (RVT 2.0 Write/Read nodes), 329 (Path-Layer, procedural snow/sand, water-kiesel) and 330 (seasons), run in that order (waves 3/4/5, never concurrently per the release plan). The graph is capped at `kMatMaxGraphTextures` (4, src/HE_Core/include/MaterialGraph/MaterialGraph.h:521): the three per-group arrays (albedo/normal/mask) already take three slots. Topic 329's Path layer already hit this and resolved it by giving Path its own standalone albedo (the 4th slot) but reusing Dirt's existing array slot for its normal instead of requesting a 5th texture — prefer that first, it is free. Checked: the cap is not a sampler limit. All five backends already bind ONE shared sampler across the whole heTexP0..3 block (D3D11 `p.m_matSampler` x4 via `PSSetSamplers`, Vulkan `m_albedoSampler` reused per slot, D3D12/Metal/GL the same pattern) — raising `kMatMaxGraphTextures` costs no extra samplers, only wider SRV/binding-slot arrays (t4..t7 etc.), a few more shader registers, and updating the `static_assert(kMatMaxGraphTextures == 4, ...)` guards in D3D11Renderer.cpp and D3D12Renderer.cpp (Vulkan/GL have no hard assert, just comments). So: reuse an existing slot when a channel can plausibly share one (normal/mask, as 329 did); but if a feature genuinely needs a distinct 5th (or 6th...) texture, raising `kMatMaxGraphTextures` across the 5 backends is an accepted, deliberate option, not a last resort — it is cheap precisely because the sampler is already shared. Either way, raise it as a question/step before writing the code, not after, since it touches 5 renderer files at once.",
+            "owner": 335,
+            "status": "proposed",
+            "version": 2,
+            "by": "queen",
+            "at": 1794384613.671358,
+            "changed_by": "queen"
+          },
+          {
+            "id": "IF-2",
+            "kind": "interface",
+            "title": "WaterField::Body::flowAuto is the single source of truth for physics.flow",
+            "text": "src/HE_Scene/include/HorizonScene/WaterField.h, src/HE_Scene/src/WaterBrush.cpp are shared by topic 232 (owner: terraces, flowAuto, waterfalls) and topic 329 (consumer: water-kiesel layer per group, waves 2 vs 4, never concurrent). `Body::flowAuto` (bool, default false): when true, the water brush derives `BodyPhysics::flow` (glm::vec2) from the ground slope at paint time and keeps it in sync; when false, `flow` is whatever was set directly (editor field or script). Topic 329's water-kiesel layer must read `flow`/`flowAuto` rather than writing `physics.flow` itself, and must orient gravel/kiesel placement along the existing `flow` direction instead of deriving its own slope estimate — two independent slope-to-direction derivations would disagree at terrace edges.",
+            "owner": 232,
+            "status": "agreed",
+            "version": 1,
+            "by": "queen",
+            "at": 1794379277.910417
+          }
+        ],
+        "gate": null,
+        "checks": {
+          "wave_1": 1794299142.7332685
+        },
+        "wave_notes": {}
+      }
+    }
+  ]
+}

@@ -18,6 +18,8 @@ add_executable(he_tests
     test_particle_graph.cpp
     test_animator_state_machine_graph.cpp
     test_scene_serializer.cpp
+    test_cook_analysis.cpp
+    test_cooked_static.cpp
     test_collab_docsync.cpp
     test_scene_entity_ids.cpp
     test_level_script.cpp
@@ -380,6 +382,8 @@ add_executable(he_tests
     test_bench_export_reach.cpp
     # BC1/BC4/BC5 next to BC7/BC3: enum + block math, encoders (2D and arrays), CPU decoders (Thema 180, Schritt 10)
     test_texture_bcn.cpp
+    # editor: big RGBA8 texture arrays are read cooked for the GPU, cached by source path/size/mtime (GpuArrayCook.h)
+    test_gpu_array_cook.cpp
     # size / encode time / load time of the Auto Landscape arrays per format; a no-op without HE_BENCH_ARRAYS_IN (Thema 180, Schritt 6)
     test_bench_landscape_arrays.cpp
     # size / encode time / zstd of ONE baked landscape tile map per side and format; a no-op without HE_BENCH_TILE_PNG (Thema 228, for 326)
@@ -1526,6 +1530,8 @@ if(TARGET HorizonContentSync)
     target_sources(he_tests PRIVATE test_engine_content_manifest_refresh.cpp test_sftp_connection.cpp)
     # LandscapeFoliageLayer through publish scan / manifest / passive pull, no server (Thema 327)
     target_sources(he_tests PRIVATE test_landscape_foliage_sync.cpp)
+    # a cached EngineContent file the server replaced is dropped (CacheFreshness.h)
+    target_sources(he_tests PRIVATE test_content_cache_freshness.cpp)
     # Thema 194 step 3: the new HTTP content-server client (manifest + file fetch), against a
     # real loopback server — no SFTP, no EngineContentSync singleton, see the file's own comment.
     target_sources(he_tests PRIVATE test_content_server_client.cpp)

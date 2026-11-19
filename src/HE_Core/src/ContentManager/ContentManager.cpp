@@ -8,6 +8,7 @@
 #include "Trails/TrailClipmap.h"           // the runtime trail texture answers its own path in loadAsset
 #include "Renderer/UIFont.h"           // uiRasterizeIcon: the editor icon textures
 #include "ContentManager/HAsset.h"
+#include "ContentManager/GpuArrayCook.h"     // editor: texture arrays cooked for the GPU on load
 #include "ContentManager/AssetRefRetarget.h" // move/rename: carry path references over
 #include "Sequence/SequenceJson.h"        // CHUNK_SEQU <-> SequenceAsset
 #include "LandscapeFoliage/LandscapeFoliageLayerJson.h" // CHUNK_LFOL <-> LandscapeFoliageLayerAsset
@@ -1202,7 +1203,11 @@ HE::UUID ContentManager::loadAsset(const std::string& relativePath)
 	const std::string fullPath = resolveAbsolutePath(relativePath);
 
 	HAsset::Reader reader;
-	if (!reader.open(fullPath))
+	// A big loose RGBA8 texture array comes cooked for the GPU when the editor asked for it (GpuArrayCook.h).
+	std::vector<uint8_t> gpuCooked;
+	const bool opened = HE::readGpuCookedArray(fullPath, gpuCooked) ? reader.openData(gpuCooked)
+	                                                                 : reader.open(fullPath);
+	if (!opened)
 	{
 		// The most-reported "why is my asset not there" path: the reference is
 		// fine, the file simply is not where the content root says it should be.
@@ -1426,8 +1431,19 @@ void ContentManager::launchPathLoad(const std::string& relativePath, const std::
 		result.fullPath     = fullPath;
 		result.callback     = std::move(cb);
 
-		std::ifstream f(fullPath, std::ios::binary | std::ios::ate);
-		if (f)
+		// A big loose RGBA8 texture array is read as the GPU wants it when the editor asked for that
+		// (GpuArrayCook.h): the cooked file from the cache, or encoded here on the worker, once.
+		const bool gpuCooked = HE::readGpuCookedArray(fullPath, result.fileBytes);
+		std::ifstream f;
+		if (!gpuCooked) f.open(fullPath, std::ios::binary | std::ios::ate);
+		if (gpuCooked)
+		{
+			progress->bytesTotal.store(result.fileBytes.size(), std::memory_order_relaxed);
+			progress->bytesRead.store(result.fileBytes.size(), std::memory_order_relaxed);
+			result.bytes = result.fileBytes.size();
+			result.asset = splitChunks(result.fileBytes);
+		}
+		else if (f)
 		{
 			// Read in blocks rather than in one istreambuf_iterator gulp: the caller
 			// gets a live byte count (asyncProgress → the editor's progress bar for a

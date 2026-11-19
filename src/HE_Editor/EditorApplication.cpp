@@ -3,6 +3,7 @@
 #include "ImporterCommon.h"   // Importer::setAutoLodOnImport
 #include <Window/Window.h>           // hiddenWindowRequested — no OS windows of ImGui's own
 #include <ContentManager/HAsset.h>   // asset type of a just-saved file
+#include <ContentManager/GpuArrayCook.h>   // texture arrays cooked for the GPU on load
 #include <cstring>
 #include <Diagnostics/EngineProfiler.h> // HE_DUMP_GPUTIME turns live GPU timing on
 #include "AssetThumbnailCache.h" // renderer-owned Content-Browser tiles (freed on shutdown)
@@ -146,6 +147,9 @@ static void onProjectWriteRefused(const char* what);   // ProjectWriteGate handl
 #include <HorizonScene/FlyCameraController.h>  // free-fly PIE camera (shared with the game runtime)
 #include <HorizonScene/CameraRigController.h>  // first/third person rig (shared with the game runtime)
 #include <HorizonScene/Components/ScriptComponent.h>
+#include <HorizonScene/Components/CameraRigComponent.h>  // HE_DUMP_COOKTEST witness
+#include <HorizonScene/Components/SaveStateComponent.h>  // HE_DUMP_COOKTEST witness
+#include <HorizonScene/CookedStatic.h>                   // HE_DUMP_COOKTEST row witness
 #include <ContentManager/Assets.h>
 #include <Renderer/RendererFactory.h>
 #include <DebugDraw/DebugDraw.h>
@@ -1287,6 +1291,21 @@ void EditorApplication::OnInit()
 		std::string engineContentPath = std::string(basePath ? basePath : "") + "EngineContent";
 		contentManager().setEngineContentRoot(engineContentPath);
 		m_globalState->refreshEngineFolder(engineContentPath);
+	}
+
+	// ── Texture arrays go to the GPU block-compressed (GpuArrayCook.h) ──────────
+	// Shared EngineContent holds the landscape's texture arrays as platform-neutral RGBA8 (291 MB each).
+	// Like an export does for its target, cook them for the GPU this editor runs on when they are read:
+	// BC7 on D3D/Vulkan/GL, ASTC on Metal, BC3 on macOS GL, cached beside the EngineContent download
+	// cache so the encoder runs once per download. HE_EDITOR_ARRAY_COMPRESS=none turns it off.
+	{
+		HE::GpuArrayCookSettings cook;
+		cook.format   = HE::gpuArrayCookFormatFor(static_cast<int>(m_backend));
+		cook.quality  = cook.format == 2 ? 1 : 0;   // BC7 balanced; ASTC and BC3 fast
+		cook.cacheDir = (GlobalState::userDataDir() / "EngineContentCookCache").string();
+		HE::setGpuArrayCook(cook);
+		HE_LOG_INFO(Editor, "Texture arrays for the GPU: %s",
+		            cook.format == 2 ? "BC7" : cook.format == 1 ? "ASTC 4x4" : cook.format == 3 ? "BC3" : "RGBA8 (not compressed)");
 	}
 
 	switch (m_backend)
@@ -10243,6 +10262,67 @@ void EditorApplication::dumpFrameHeadless()
 			"EditorApplication: HE_DUMP_ROPETEST tube + ribbon rope and a swept trail added");
 	}
 
+	// ── Entity-cooking witness (HE_DUMP_COOKTEST=1, Thema 343 Schritt 14): the
+	// three cases Schritt 13 changed, in one scene — compare a dump with
+	// HE_COOK_STATIC=0 against one with =1, the pixels must match. A floor
+	// catches their shadows so the shadow pass (fitDirectionalShadow, which
+	// reads a cooked row's worldBounds/castsShadow) is exercised too.
+	//   • CookTestRopeChild0/1, mesh CHILDREN of a RopeComponent parent: the
+	//     parent's Geometry blocker does not pass to the children
+	//     (kAncestorIgnored in CookAnalysis.cpp), so they still cook.
+	//   • CookTestRig, a mesh entity carrying CameraRigComponent itself: the
+	//     Locomotion blocker keeps it OUT of the cooked block (no row at all).
+	//   • CookTestSaveState, a mesh entity carrying SaveStateComponent: Regel 7
+	//     is gone, so it cooks like any other static mesh.
+	// The rope parent's own geometry is not driven through RopeTrailSystem here
+	// — it draws through RopeComponent::runtimeMeshId, a path cooking never
+	// touches, so it adds nothing to this check and is left out.
+	if (const char* ct = std::getenv("HE_DUMP_COOKTEST"); ct && *ct && m_editorWorld)
+	{
+		auto& reg = m_editorWorld->registry();
+		const float cp = std::cos(m_editorCamera.pitch()), sp = std::sin(m_editorCamera.pitch());
+		const float cy = std::cos(m_editorCamera.yaw()),   sy = std::sin(m_editorCamera.yaw());
+		const glm::vec3 camFwd(cp * sy, sp, -cp * cy);
+		const glm::vec3 right = glm::normalize(glm::cross(camFwd, glm::vec3(0.0f, 1.0f, 0.0f)));
+		const glm::vec3 origin = m_editorCamera.position() + camFwd * 10.0f;
+
+		auto makeCube = [&](const char* name, const glm::vec3& pos, const glm::vec3& scale = glm::vec3(0.8f)) {
+			auto e = m_editorWorld->createEntity(name);
+			TransformComponent tc; tc.position = pos; tc.scale = scale;
+			reg.emplace<TransformComponent>(e, tc);
+			reg.emplace<MeshComponent>(e, MeshComponent{ HE::kDefaultCubeMeshId });
+			return e;
+		};
+
+		// A floor for the three cubes' shadows to land on (TOD/COVERAGE pick the
+		// sun; without a floor the shadow pass has nothing to show a difference on).
+		makeCube("CookTestFloor", origin + glm::vec3(0.0f, -1.1f, 0.0f), glm::vec3(16.0f, 0.2f, 6.0f));
+
+		auto ropeParent = m_editorWorld->createEntity("CookTestRopeParent");
+		TransformComponent rtc; rtc.position = origin - right * 4.0f;
+		reg.emplace<TransformComponent>(ropeParent, rtc);
+		RopeComponent rope;
+		rope.controlPoints = { { 0.0f, 0.0f, 0.0f }, { 1.0f, 0.5f, 0.0f } };
+		reg.emplace<RopeComponent>(ropeParent, rope);
+		// Two children: "a Trail/Rope parent with mesh children", plural.
+		for (int i = 0; i < 2; ++i)
+		{
+			const glm::vec3 local(static_cast<float>(i) * 1.0f - 0.5f, 1.2f, 0.0f);
+			const Entity ropeChild = makeCube(i == 0 ? "CookTestRopeChild0" : "CookTestRopeChild1", local);
+			m_editorWorld->reparentEntity(ropeChild, ropeParent);
+			reg.get<TransformComponent>(ropeChild).position = local;
+		}
+
+		const Entity rig = makeCube("CookTestRig", origin);
+		reg.emplace<CameraRigComponent>(rig, CameraRigComponent{});
+
+		const Entity saved = makeCube("CookTestSaveState", origin + right * 4.0f);
+		reg.emplace<SaveStateComponent>(saved, SaveStateComponent{});
+
+		HE_LOG_INFO(Editor, "%s",
+			"EditorApplication: HE_DUMP_COOKTEST floor / rope+2 children / camera-rig / save-state entities added");
+	}
+
 	// ── Selection / collider witness (HE_DUMP_SELBOXTEST=1): entities that sit
 	// under a MOVED parent, which is where a local position and a world
 	// position part ways.
@@ -11234,6 +11314,28 @@ void EditorApplication::dumpFrameHeadless()
 		// background (a freshly registered graph material) are ready for the captured frame.
 		if (const char* sm = std::getenv("HE_DUMP_SETTLEMS"); sm && *sm)
 			std::this_thread::sleep_for(std::chrono::milliseconds(std::clamp(std::atoi(sm), 0, 5000)));
+	}
+
+	// HE_DUMP_COOKTEST row witness: after the settle frames, log what the cooked
+	// block actually did with CookTest* — `reg.ctx().find` only LOOKS, it never
+	// creates the block (cookedStaticOf would, which'd cook the HE_COOK_STATIC=0
+	// run just by asking). No block at all is as meaningful an answer as a row.
+	if (const char* ct = std::getenv("HE_DUMP_COOKTEST"); ct && *ct && m_editorWorld)
+	{
+		auto& reg = m_editorWorld->registry();
+		const HE::CookedStatic* cooked = reg.ctx().find<HE::CookedStatic>();
+		for (auto [e, name] : reg.view<NameComponent>().each())
+		{
+			if (name.name.rfind("CookTest", 0) != 0) continue;
+			const int32_t row = cooked ? cooked->rowOf(e) : -1;
+			const char* state = row < 0 ? "no row"
+				: cooked->state[static_cast<size_t>(row)] == HE::CookedStatic::State::Ready   ? "Ready"
+				: cooked->state[static_cast<size_t>(row)] == HE::CookedStatic::State::Pending ? "Pending"
+				: "Walk";
+			HE_LOG_INFO(Editor, "%s",
+				("EditorApplication: HE_DUMP_COOKTEST " + name.name + " row=" + std::to_string(row) +
+				 " state=" + state).c_str());
+		}
 	}
 
 	std::vector<uint8_t> rgba;

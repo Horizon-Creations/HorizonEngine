@@ -87,6 +87,7 @@ inline constexpr HE::GameBuildConfig kConfig = {
     "targetFps": 60.0
   },
   "game": {
+    "cookStaticEntities": false,
     "splashEnabled": false,
     "splashImage": "",
     "splashSubtitle": "",

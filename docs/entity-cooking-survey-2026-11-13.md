@@ -1,0 +1,576 @@
+# Entity-Cooking: Bestandsaufnahme und Baseline
+
+Stand 13.11.2026, Branch `claude/entity-cooking-statische-entities-auf-daten-reduzieren`, HEAD
+`3b2be965`. Thema 343, Schritt 1: wo die CPU-Zeit für unveränderliche Entities liegt, ob es
+bereits ein Static-/Mobility-Flag gibt (nein), und welche Komponenten/Querverweise eine Entity
+vom Kochen ausschließen. **Kein Produktivcode geändert in diesem Schritt.**
+
+Vorgaben aus dem Thema gelesen, bevor gemessen wurde: `docs/render-extractor-shadow-pass-plan.md`
+(FrameScope / ein Extract pro Frame, Thema 162 — **bereits im Code**, siehe §1) und
+`docs/asset-optimization-plan.md` §5 (Auto-LOD ist ein eigenes, noch nicht gebautes Feature —
+`LODSystem.cpp` existiert schon mit pro-UUID-Levels und per-Frame-Laufzeitauswahl, siehe §5 Regel 8
+und §9).
+
+## 1. Was aus Thema 162 schon da ist (nicht doppelt bauen)
+
+`docs/render-extractor-shadow-pass-plan.md` §9 ist der Abschluss jenes Themas: ein persistenter
+Extract pro Frame (`RenderExtractor::FrameScope`, auf Metal genutzt), eine dirty-flag-basierte
+Transform-Propagierung (`TransformComponent::dirty`, `TransformHierarchy.cpp`) und ein
+Lokale-Matrix-Cache. Im aktuellen Checkout bestätigt:
+
+- `TransformHierarchy.cpp:170-208` (`scan`) markiert nur Entities, deren Wertvergleich sich
+  geändert hat, als `dirty`; `:223-258` (`recomputeFlagged`/`propagateFrom`) rechnet nur
+  geflaggte Teilbäume neu.
+- Das verbleibende, von Thema 162 selbst benannte Problem (§9.7): *"der Walk selbst, nur
+  geänderte Entities neu schreiben"* — das ist exakt dieses Thema (Entity-Cooking). Der Walk
+  (`RenderExtractor::extractMeshes`) läuft laut jener Messung bei 50 574 Entities (Metal,
+  ruhende Welt) mit 18,7 ms immer noch der größte Einzelposten des Frames, obwohl nichts sich
+  bewegt.
+
+Kein Konflikt mit FrameScope: Entity-Cooking würde den Walk selbst verkleinern (cooked Entities
+tragen vorgerechnete Render-Objekte, die der Walk nicht mehr aus der ECS herleiten muss), nicht
+die Cross-Pass-Wiederverwendung ändern, die Thema 162 baut.
+
+## 2. Grep: existiert schon ein Static-/Mobility-Flag?
+
+```
+grep -rniE "isStatic|Mobility|bIsStatic" src/HE_Scene --include=*.h --include=*.cpp
+```
+
+**Kein Treffer.** (Ein breiterer Lauf nach `static.*bool` findet nur reguläre C++-`static`-Lokale
+und -Methoden, z. B. `AudioEngine.h:136 static bool steamAudioCompiledIn()` — keine
+Entity-Eigenschaft.) `RigidBodyComponent::type` hat zwar einen Wert `RigidBodyType::Static`
+(`Types/Enums.h:253-258`), aber das ist eine Physik-Eigenschaft des Jolt-Body, keine
+übergreifende "diese Entity ändert sich nie"-Markierung, die ein Cooking-System lesen könnte.
+Schritt 2 fängt bei null an.
+
+## 3. Hot paths: was jede Entity jeden Frame kostet
+
+Geprüft: entt-`view<T...>()` iteriert nur die Entities, die ALLE verlangten Komponenten tragen
+(die kleinste beteiligte Storage führt den Walk an). Ein `view<ScriptComponent>` oder
+`view<AnimatorComponent>` kostet eine Entity ohne diese Komponente **nichts** — die ganze Liste
+der `*System.cpp`-Dateien unter `src/HE_Scene/src` (`AnimationSystem`, `MovementSystem`,
+`WeatherSystem`, `SequenceSystem`, `ParticleSystem`, `NavigationSystem`, `PropertyAnimationSystem`,
+`RopeTrailSystem`, …, alle über `SceneSystems::tickWorld`/`tickAnimation`,
+`SceneSystems.cpp:106-245`) ist also für eine reine Mesh-Entity bereits kostenlos, weil sie keine
+dieser Komponenten trägt. Das ist **nicht** der Hebel dieses Themas.
+
+Vier Stellen sind es, weil sie über `TransformComponent`, `MeshComponent` oder die komplette
+Registry laufen, unabhängig davon, was sonst an der Entity hängt:
+
+| Scope | Datei:Zeile | Was pro Entity passiert |
+|---|---|---|
+| `Transforms::scan` | `TransformHierarchy.cpp:170-208` | liest `TransformComponent` jeder Entity mit dieser Komponente, `memcmp` gegen den Cache-Key, setzt `dirty` |
+| `Transforms::propagate` / `recomputeFlagged` | `TransformHierarchy.cpp:223-258` | steigt für jede geflaggte Entity die `HierarchyComponent`-Kette ab |
+| `Extract::meshes` (`extractMeshes`) | `RenderExtractor.cpp:326-470+`, aufgerufen `:1609` | `view<TransformComponent, MeshComponent>()`: pro Entity `visible`/`ActiveFilter` prüfen, `RenderObject` (Mesh-/Material-UUID, Weltmatrix, Bounds) neu bauen — **jeden Frame neu**, auch wenn nichts sich geändert hat |
+| `RefineBounds` | `FrameCull.h:77` | pro `RenderObject` die Bounds verfeinern |
+| `FrustumCuller::cull` | `FrustumCuller.cpp:48-71` | pro `RenderObject` ein Frustum-Test, **2× pro Frame** gemessen (Schatten + Szene; gemessen, nicht angenommen — siehe §4.2) |
+| `SortObjects` | `D3D12Renderer.cpp:11501` (gleiches Muster `D3D11Renderer.cpp`) | sortiert die `RenderObject`-Liste nach dem Extract, pro Backend-Aufruf — kein `RenderExtractor.cpp`-Code, aber genauso O(Entity-Zahl) |
+
+Geprüft und **kein** Treffer (nicht Teil des Frame-Hot-Path):
+
+- `HorizonWorld.cpp:544` (`for (auto e : m_registry.view<entt::entity>())`) — das ist in `clear()`,
+  läuft nur beim Entladen der Welt, nicht pro Frame.
+- `LODSystem.cpp:29` — `view<LODComponent, MeshComponent>()`, kostet eine Entity ohne
+  `LODComponent` nichts.
+
+`extractMeshes` selbst ist bereits block-parallelisiert (`parallel_for`, `kBlock = 2048`,
+`RenderExtractor.cpp:447-467`) — der Gewinn aus Cooking ist nicht "parallel statt seriell",
+sondern "gar nicht neu bauen, wenn die Entity sich seit dem letzten Cook nicht geändert hat".
+
+## 4. Messung
+
+### 4.1 Methodik
+
+Werkzeug: `scripts/perf/gen_reference_world.py` (bereits vorhanden, Thema 153/162) erzeugt eine
+`.hescene` mit N Mesh-Entities, 0 % Physik (`--physics 0`, reiner Würfel/Kugel-Mesh +
+`TransformComponent`, kein Skript/Animator/Netzwerk — die Kriterien aus §5 sind damit für jede
+erzeugte Entity erfüllt), gruppiert unter `N/100` Gruppen-Entities (Hierarchietiefe 2). Capture
+über `scripts/he_perf_capture.py --no-counters`, Backend D3D12 (NN-WS03, RTX 4070), Kamera
+`0,25,90,0,-0.25`, `HE_HIDDEN_WINDOW=1`, `HE_BACKGROUND_FPS=0`.
+
+Editor-Binary: **selbst aus diesem Branch gebaut** (`C:/hwec1`, Release, MSVC/Ninja,
+`cmake --preset x64-release -B C:/hwec1 -DDEPLOY_DIR=C:/hwec1/deploy …`), **nicht** aus einem der
+auf diesem Gerät herumstehenden Fremd-Worktree-Deploys — zwei davon (`C:/hw21`, ein Deploy des
+Themas 326/Landscape) wurden probiert und wieder verworfen: ihr `RenderExtractor.cpp` weicht vom
+Stand dieses Branches ab (94 Zeilen, LOD-Material-Auflösung aus einem noch nicht gemergten Thema)
+und — wichtiger — ihr Projekt-/Szenenlade-Pfad lud die 50k-Szene bei `--warmup 0` gar nicht
+innerhalb der 600 aufgezeichneten Frames (kein `SceneLoadTiming`-Log, Walk/Scan praktisch 0 ms).
+Mit genügend Warmup (`--warmup 5000`) lud die 50k-Szene bei `C:/hw21` dann doch, aber das zeigt nur,
+dass sich auf einen fremden, divergenten Deploy für dieses Thema nicht verlassen lässt. Eigener
+Build von HEAD vermeidet das.
+
+**Falle, auf die die ersten Läufe (mit dem fremden `C:/hw21`-Deploy) liefen:** Projekt- und
+Szenenladen laufen asynchron zur Frame-Schleife. Bei `--warmup 0` begann die
+Profiler-Aufzeichnung dort sofort bei Frame 1, und für die 50k-Szene stand in den aufgezeichneten
+600 Frames nirgends ein `SceneLoadTiming`-Log — die Welt blieb während der gesamten Aufzeichnung
+leer, `Extract::meshes`/`Transforms::scan` lagen praktisch bei 0 ms. Für die 10k-Szene lud
+`hw21` zwar (bei Frame ~393 von 600), aber ein Teil der aufgezeichneten Frames fiel trotzdem auf
+die noch leere Welt, der Rest auf die geladene — das erklärt die anfängliche 6-fache Schwankung
+(0,24 ms bis 1,45 ms CPU p50 für dieselbe 10k-Szene, je nachdem, wie schnell das Laden in diesem
+Lauf zufällig war).
+
+**Gegengeprüft, ob das am Engine-Code liegt oder am fremden Deploy:** mit dem eigenen Build
+(`C:/hwec1`) lädt dieselbe 10k-Szene bei `--warmup 0` bei Frame 6
+(`SceneLoadTiming: entities=10168 … f 6`, 13:41:11.823) — weit vor dem Aufzeichnungsende bei
+Frame 601 (13:41:12.797) — keine Verzerrung, kein Treffer der Falle. Die Falle ist also eine
+Eigenschaft des fremden, divergenten `hw21`-Deploys (vermutlich eine dort laufende,
+nicht gemergte Async-Lade-Änderung), nicht des aktuellen Codes auf diesem Branch. Trotzdem
+sicherer: für die eigentliche Messung wurde `--warmup 300` gesetzt und je Lauf im `.log` gegen
+`SceneLoadTiming` geprüft, dass es sicher vor `Profiler: start requested` liegt — bei beiden
+Größen lädt die Szene binnen 6 Frames, `--warmup 300` lässt dafür reichlich Spielraum und hält die
+Laufzeit klein (10–14 s je Lauf).
+
+MD5 der generierten Szenen (für Schritt 2/3, falls dieselben Eingaben später erneut gebraucht
+werden — Datei selbst nicht eingecheckt, siehe oben):
+
+```
+static_10000.hescene  ec67be5437e044b38b38830427537491
+static_50000.hescene  c4797979144161b5b04373dbb46c30c3
+```
+
+Reproduktion der Testszenen (deterministisch über `--seed`, Default 1, hier nicht übersteuert;
+die `.hescene`-Dateien selbst sind nicht eingecheckt — 5,9 MB / 27,9 MB, wie `raw-streaming/` es
+für Thema 153/162 schon hält):
+
+```
+python scripts/perf/gen_reference_world.py --count 10000 --extent 8000 --groups 100 --lights 64 \
+  --physics 0 --template docs/perf-audit/scenes/landscape_noclouds.hescene --out <tmp>/static_10000.hescene
+python scripts/perf/gen_reference_world.py --count 50000 --extent 8000 --groups 500 --lights 64 \
+  --physics 0 --template docs/perf-audit/scenes/landscape_noclouds.hescene --out <tmp>/static_50000.hescene
+```
+
+Beide luden fehlerfrei (`SceneLoadTiming: entities=10168`/`entities=50568`, keine `WARN`/`ERROR`
+außer den aus jedem Capture-Lauf bekannten SFTP-/Gateway-Meldungen, geprüft in den `.log`-Dateien
+des Laufs). Rohdaten: 12 `.summary.json` (6 Wiederholungen × 2 Größen) unter
+`docs/perf-audit/raw-entity-cooking/` — die `.log`-Dateien sind wie überall im Repo per
+`.gitignore` nicht eingecheckt (`*.profile.json` zusätzlich per lokalem `.gitignore`, wie
+`raw-streaming/` es schon hält).
+
+### 4.2 Ergebnis
+
+Eigener Build (`C:/hwec1`, HEAD `3b2be965`, D3D12, NN-WS03, RTX 4070), 6 Wiederholungen je
+Größe, `--warmup 300` (bestätigt je Lauf: `SceneLoadTiming` liegt bei Frame 2 bzw. 6, also weit
+vor dem Profiler-Start bei Frame 300 — siehe §4.1), 600 aufgezeichnete Frames. Alle Zeiten unten
+sind **Summe der Scope-Selbstzeit ÷ 600 Frames** (nicht ÷ Aufruf-Zahl — ein Scope, der mehrfach
+pro Frame läuft, zählt mit allen seinen Aufrufen in die Frame-Summe), Median über die 6
+Wiederholungen, Spannweite in Klammern. "Aufrufe/Frame" aus den rohen `cpuScopes`-Zähldaten
+(nicht aus der 20-Zeilen-`topScopesBySelfTime`-Liste, die zu kurz ist, um das zu zeigen).
+
+| Scope | Aufrufe/Frame | 10 168 Entities, ms/Frame | 50 568 Entities, ms/Frame |
+|---|---|---|---|
+| `Extract::meshes` | 1 | 0,226 (0,222–0,231) | 1,835 (1,776–1,899) |
+| `SortObjects` | 1 | 0,094 | 0,611 |
+| `RefineBounds` | 1 | 0,143 (0,139–0,145) | 0,448 (0,436–0,464) |
+| `FrustumCuller::cull` | **2** (Schatten + Szene) | 0,109 | 0,113 |
+| `Transforms::scan` | 1 | 0,0245 (0,0236–0,0249) | 0,088 (0,086–0,095) |
+| `SceneSystemsTick` (alle `*System.cpp` aus §3 zusammen) | 1 | nicht separat erfasst (unter Top-20-Schwelle) | 0,0198 |
+| `LOD`/`Weather`/`Movement`/`Animation`/`ParticleSystem`/`Foliage` einzeln | 1 je | — | je < 0,002 |
+| `OutlinerPanel::render` (**Editor-only — in einem Spiel/Export nicht vorhanden**) | 1 | 0,195 | 0,545 |
+| **CPU/Frame insgesamt (`cpuMs` p50)** | — | **1,395** (1,383–1,446) | **5,756** (5,671–6,281) |
+
+Rohe `cpuScopes`-Summe aller 58 erfassten Scopes (rep1 je Größe, zur Kontrolle gegen die
+`cpuMs`-Zeile): 1,66 ms/Frame bei 10k, 5,84 ms/Frame bei 50k — deckt die gemessene Frame-Zeit ab
+(Scopes können sich in Sonderfällen minimal überlappen, daher keine exakte Identität erwartet).
+Bei 50k ist `Extract::meshes` mit 1,835 ms **~31 % der Frame-Zeit** — der mit Abstand größte
+Posten, gefolgt von `SortObjects` (~10 %) und `RefineBounds` (~8 %); `OutlinerPanel::render`
+(~10 %) zählt nicht, weil es nur im Editor läuft. `FrustumCuller::cull` bleibt von 10k auf 50k
+praktisch konstant (0,109→0,113 ms trotz 2 Aufrufen/Frame) — der Kostenanteil hängt hier
+offenbar nicht an der Entity-/`RenderObject`-Zahl, sondern an etwas anderem Fixem (z. B.
+Kaskaden-Setup); das ist eine Beobachtung, keine erklärte Ursache (nicht weiter gemessen).
+
+**Wall-Zeit, nicht reine CPU-Zeit:** `Extract::meshes`, `RefineBounds` und die `ExtractFilter`-Phase
+laufen über `parallel_for` (`RenderExtractor.cpp:447-467`, `FrameCull.h:77`) auf bis zu 32
+Worker-Threads (`ThreadPool starting with 32 worker(s)`, Log). Die obigen Zahlen sind also
+Zeit auf dem Hauptthread (wall), nicht Summe der CPU-Zeit aller Worker — ein Teil des
+überlinearen Wachstums von `Extract::meshes` (8,1× bei 5× Entities: 5 Blöcke à 2048 bei 10k
+gegen 25 Blöcke bei 50k) könnte an unterschiedlicher Worker-Auslastung liegen, nicht zwingend an
+Cache-Effekten. **Nicht weiter zerlegt — als unmessene Vermutung markiert, keine gemessene
+Ursache.** Die Pro-Entity-ns-Zahlen (22 ns bzw. 37 ns für `Extract::meshes`) sind entsprechend
+Wandzeit pro Entity, keine CPU-Zeit pro Entity.
+
+**Play-Mode-Update-Pfad nicht gemessen:** `he_perf_capture.py` hat keinen Play-Mode-Schalter, nur
+den Editor-Loop. Die o.g. `SceneSystemsTick`/Einzelsystem-Zahlen sind trotzdem eine Messung
+(nicht nur eine Annahme) dafür, dass diese Systeme für reine Mesh-Entities ohne die jeweilige
+Komponente vernachlässigbar sind (§3) — `tickWorld` läuft auch im Edit-Modus, nur `tickAnimation`
+mit Sequencer-spezifischen Teilen lief hier ggf. nicht identisch zum Play-Modus.
+
+Referenz (Metal, anderes Gerät, Thema 162 §9.3/9.4, ruhende Welt, NACH Thema 162): Walk
+18,7 ms / 73,1 ms bei 50 574 / 200 074 Entities, `Transforms::scan` 1,4 ms / 5,1 ms,
+`RefineBounds` 3,5 ms, `FrustumCuller::cull` 3,2 ms (bei 50k). Nicht direkt vergleichbar (anderes
+Gerät — ein RTX-4070-Windows-Rechner ist kein Vergleichsmaßstab für einen Mac —, anderer Backend,
+andere Mittelungsmethode) — hier nur als Größenordnung zitiert, nicht als Ziel. Auffällig: die
+absoluten Werte hier liegen ca. 10–80× niedriger als die zitierten Metal-Werte für dieselbe
+Entity-Zahl; das ist plausibel (deutlich stärkere CPU/GPU, D3D12 statt Metal, andere Szene/
+Kamera-Framing), aber nicht Grund genug, die Metal-Zahlen für ungültig zu halten — beide sind
+echte Messungen auf unterschiedlicher Hardware.
+
+## 5. Kochbarkeitsregeln (Vorschlag für Schritt 2)
+
+Eine Entity ist **nicht** kochbar, wenn mindestens eine davon zutrifft:
+
+1. Trägt `ScriptComponent` (`Components/ScriptComponent.h`) — Lua/HorizonCode kann jedes Feld
+   jeden Frame ändern.
+2. Trägt `AnimatorComponent`, `AnimationLayerComponent`, `AnimatorBlendComponent`,
+   `AnimatorStateMachineComponent`, `RootMotionComponent` oder `IkComponent` — die Pose ändert
+   sich jeden Frame.
+3. Trägt `PropertyAnimatorComponent` oder `SequencePlayerComponent` — eine Animation-Clip-/
+   Sequence-Wiedergabe schreibt Felder direkt.
+4. Trägt `RigidBodyComponent` mit `type != RigidBodyType::Static` (`Dynamic` oder `Kinematic`,
+   `Types/Enums.h:253-258`) — Jolt bewegt den Body.
+5. Trägt `CharacterControllerComponent`, `NavAgentComponent`, `MovementComponent`,
+   `ParticleSystemComponent` oder `CameraRigComponent` (Schritt 13: der Rig schreibt jeden Frame
+   die eigene Transform der Kamera-Entity) — Bewegungs-/Partikel-Systeme schreiben Transform/State jeden Frame.
+6. Trägt `NetworkComponent` mit `replicates == true` (nicht: trägt die Komponente — ein
+   abgeschaltetes `NetworkComponent` ist laut seinem eigenen Kommentar harmlos, `replicates`
+   ist "THE switch") oder `ReplicatedVarsComponent` mit deklarierten Variablen.
+7. ~~Trägt `SaveStateComponent` — `entity.applySavedState` kann jederzeit ein Savegame über die
+   Entity schreiben, außerhalb von Skript/Engine-API im engeren Sinn.~~ — **entfallen (Schritt 13,
+   `docs/entity-cooking-ausbau-2026-11-17.md` §1)**: `applySavedState` schreibt nur Transform (der
+   Byte-Vergleich in `propagateTransforms` entkocht die Zeile), Sichtbarkeit (der Extract liest
+   `MeshComponent::visible` jeden Frame live) und Skript-Variablen (nur mit `ScriptComponent`, Regel 1).
+8. **Präzisiert in Schritt 8 (17.11.2026):** blockiert ist nur noch `LODComponent` mit gesetztem
+   `refinedMeshId`. Mehrere Level (`levels.size() > 1`) kochen: der reine Distanzwechsel schreibt nur eine
+   von N bekannten Mesh-Ids, die gekochte Zeile hält das aufgelöste Objekt je Level
+   (`CookedStatic::lodFirst`, `docs/entity-cooking-lod-2026-11-17.md`); `LODSystem` bleibt die einzige Stelle, die
+   das Level wählt. Der Ursprungstext der Regel (vor Schritt 8) folgt:
+   Trägt `LODComponent` mit mehr als einem Level (`levels.size() > 1`) ODER mit gesetztem
+   `refinedMeshId` (`refinedMeshId != UUID{}`) — `LODSystem::update` (`LODSystem.cpp:29`) schreibt
+   `MeshComponent::meshAssetId` abhängig von der Kameradistanz jeden Frame neu. Der Skip bei :32
+   prüft nur `levels.empty()`; ein `LODComponent` mit nur einem Level, aber gesetztem
+   `refinedMeshId`, wechselt bei `dist <= refinedMaxDistance` (`LODSystem.cpp:83-86`) trotzdem auf
+   die feinere Mesh — das ist der Weg, über den `TerrainSystem` Terrain-Tessellation anschließt
+   (`TerrainSystem.cpp:316-317`). Nur ein `LODComponent` mit genau einem Level UND
+   `refinedMeshId == UUID{}` ist unkritisch.
+9. Trägt `TrailComponent` oder `RopeComponent` — beide schreiben jeden Frame ihre eigene
+   Geometrie neu (Trail: "every frame is the whole point"; Rope: ändert sich, sobald ein
+   Attachment sich bewegt). Trägt die Entity selbst `JointComponent`, zählt sie ohnehin schon über
+   Regel 4 nicht (ein Joint braucht einen `RigidBodyComponent`, der hier nicht `Static` sein darf,
+   damit der Joint etwas bewegt) — die eigentliche Pointe für `JointComponent`/`RopeComponent`
+   steht in §6: eine ANDERE, selbst unauffällige Entity kann als Ziel/Attachment referenziert
+   werden, ohne diese Komponenten selbst zu tragen.
+   **Schritt 13:** das `Geometry`-Bit gilt nur für die Entity selbst, nicht für ihre Kinder (Regel 10):
+   `RopeTrailSystem` schreibt nie die `TransformComponent` der Rope/Trail-Entity, nur deren eigene
+   Geometrie — ein Kind unter ihr hat eine so stabile Weltmatrix wie jedes andere (`lineBlocked` in
+   `CookAnalysis.cpp` klammert `Geometry` beim Vorfahren-Walk aus).
+   `CameraRigComponent`-Ziele NICHT hier einsortieren — ein Rig schreibt am Ziel nur, was §6 nennt
+   (`targetYaw` Follow/FollowSmoothed: `rotation.y`; `hideTargetMesh`: `visible`), und beides fangen
+   Transform-Byte-Vergleich und Live-Sichtbarkeit ab; ein reines CameraRig-Ziel bleibt kochbar. Die
+   Rig-Entity SELBST schreibt dagegen jeden Frame ihre eigene Transform (`CameraRigController.cpp`
+   `ct.position`/`ct.rotation`) und zählt seit Schritt 13 zu Regel 5 (Locomotion-Bit).
+   `SplineComponent` ebenfalls
+   NICHT — laut eigenem Header "renders nothing and builds nothing", reine Autorendaten ohne
+   Laufzeitschreiber, der hier gefunden wurde.
+10. Ist unter einem Vorfahren, der eine dieser Regeln erfüllt, oder dessen `HierarchyComponent`-
+    Parent sich je ändern kann (`HorizonWorld::reparentEntity`) — eine gekochte Entity mit
+    beweglichem Vorfahren hätte eine falsche Weltmatrix, sobald der Vorfahr sich bewegt.
+11. ~~Ist Ziel eines `StreamingComponent`-gesteuerten Cell-Streamings, dessen Zelle entladen werden
+    kann (§7)~~ — **entfallen (Schritt 7, `docs/entity-cooking-streaming-2026-11-17.md`)**: der
+    Block wird bei jeder Strukturänderung aus der lebenden Registry neu gebaut, eine Zell-Entity
+    braucht keine eigenen Kochdaten.
+12. Trägt `InactiveComponent`, oder ihr `MeshComponent::visible` ist `false` — beides wird über
+    `entity::setVisible` (§8) jederzeit umschaltbar geschrieben, und der Extract-Walk filtert
+    genau danach (`RenderExtractor.cpp:463-464`, §3).
+
+**Bewusst KEINE Regel 13 "könnte per Engine-API-Handle referenziert werden":** ob eine Entity
+jemals per `entity::setPosition`, `physics::addForce` & Co. (die Liste in §8) geschrieben wird,
+lässt sich beim Kochen nicht wissen — `entity::findByName` gibt jedem Skript jederzeit ein Handle
+auf JEDE Entity, auch eine kochbar aussehende. Eine Ausschlussregel dafür würde entweder alles
+oder nichts treffen. Richtig ist das Gegenteil: Schritt 4 hängt an jede schreibende Funktion aus
+§8 einen "entkoche zuerst, falls `e` gekocht ist"-Schritt — eine Laufzeitprüfung bei jedem
+API-Aufruf, keine Vorab-Ausschlussregel hier.
+
+Kochbar (keine der obigen Regeln): nur `TransformComponent` + `MeshComponent` + optional
+`MaterialComponent`, `ColliderComponent` + `RigidBodyComponent{type=Static}`,
+`LODComponent` ohne `refinedMeshId` (auch mit mehreren Leveln, seit Schritt 8), `HierarchyComponent` (wenn Vorfahren ebenfalls kochbar sind),
+`EntityIdComponent`/`NameComponent` (reine Metadaten, keine Laufzeitwirkung).
+
+## 6. Querverweise: eine Entity ohne jede "ausschließende" Komponente kann trotzdem Ziel sein
+
+Durchgängiges Muster in diesem Code: ein Querverweis auf eine ANDERE Entity geht nie über ein
+rohes `entt::entity`-Handle (das überlebt laut Kommentar "weder ein Save noch eine
+Prefab-Instanziierung noch eine Collaboration-Session"), sondern über `HE::UUID`, aufgelöst über
+`EntityIdComponent`:
+
+- `JointComponent::target` (`JointComponent.h:50-55`) — "the OTHER body, by EntityIdComponent
+  UUID — the way RopeComponent names its attachments and CameraRigComponent its target."
+- `RopeComponent`-Attachments (gleiches Muster, `RopeComponent.h`).
+- `SequencePlayerComponent`/Sequence-Asset-Actor-Bindings — "the actors themselves are the
+  sequence's bindings, resolved by EntityIdComponent UUID when playback starts"
+  (`SequencePlayerComponent.h`).
+- `CameraRigComponent::target` — liest die Zielposition (`pivot = targetWorldPosition +
+  pivotOffset`) und schreibt am Ziel nur bei `targetYaw` Follow/FollowSmoothed (`rotation.y`,
+  `CameraRigController.cpp:381-404`) und `hideTargetMesh` (`visible`, `:569-576`). Eine Entity, die nur
+  CameraRig-Ziel ist, bleibt kochbar: der Transform-Schreibzugriff läuft durch den Byte-Vergleich in
+  `propagateTransforms`, der Sichtbarkeits-Schreibzugriff durch den Live-Filter im Extract (Schritt 13
+  korrigiert hier die frühere Begründung "schreibt sie nicht").
+
+Für Schritt 2/3 heißt das: eine Entity, die statisch aussieht (keine der Regeln in §5), aber als
+`JointComponent::target` oder Rope-Attachment von einer ANDEREN, nicht-kochbaren Entity referenziert
+wird, braucht entweder (a) einen Ausschluss über einen Rückindex ("wer verweist per UUID auf
+mich") oder (b) eine gekochte Darstellung, die über `EntityIdComponent`-UUID weiterhin auflösbar
+bleibt (ein Türrahmen, der ein `Fixed`-Joint-Anker ist, bewegt sich selbst nie — PhysicsWorld
+braucht nur seine `RigidBodyComponent`/`ColliderComponent`-Daten, keine volle ECS-Iteration). (b)
+ist der sauberere Weg, aber mehr Aufwand; (a) ist die sichere Standardregel für den ersten Wurf.
+Für CameraRig-Ziele ist kein Ausschluss nötig (die beiden Schreibwege sind oben abgedeckt).
+
+## 7. Cell-Streaming-Wechselwirkung (nur notiert, nicht gelöst)
+
+`StreamingComponent.h` (`CellSplit.h`) entscheidet, ob eine Entity beim Zellwechsel zerstört und
+neu erzeugt wird (`Auto`) oder immer geladen bleibt (`Resident`, Default). Eine gekochte Entity in
+einer `Auto`-Zelle würde beim Entladen zusammen mit der Zelle verschwinden — das ist vermutlich
+der richtige Lebenszyklus (Cooking pro Zelle, nicht pro Welt), aber das ist eine Entwurfsfrage für
+Schritt 3 (Datenstruktur) und Schritt 5 (Export), nicht für diesen Schritt.
+
+## 8. Engine-API-Handles, die eine gekochte Entity zurück in eine normale verwandeln müssen (Schritt 4)
+
+Grep in `src/HE_Scene/src/EngineApi.cpp`, nur gelistet, nicht gelesen (Datei zu groß für
+CLAUDE.md-Budget):
+
+| Funktion | Zeile | Schreibt |
+|---|---|---|
+| `entity::setVisible` | 388 | `MeshComponent::visible` / Active-Status (siehe §5 Regel 12) |
+| `entity::setPosition` | 683 | `TransformComponent` lokal |
+| `entity::setRotation` | 705 | `TransformComponent` lokal |
+| `entity::setWorldPosition` | 735 | `TransformComponent` (Welt→Lokal) |
+| `physics::addForce`/`addImpulse`/`addTorque` | 853-855 | Jolt-Body (braucht Dynamic/Kinematic — Regel 4 deckt das meist schon ab) |
+| `physics::setVelocity`/`setAngularVelocity` | 863, 865 | Jolt-Body |
+| `physics::addJoint`/`removeJoint`/`setJointMotor`/`setJointBreakForce`/`setJointCollideConnected` | 905-944 | `JointComponent` bzw. Jolt-Constraint — siehe §6 |
+| `destroyObject` / `spawnClass` | 324, 307 | Entity-Lebenszyklus (strukturell) |
+| `findByName` | 347 | nichts, aber gibt jedem Skript ein Handle auf JEDE Entity (siehe §5, Absatz nach Regel 12) |
+| `material::setParam` (UI) / `setMaterialParam` | 962, 1722 | `MaterialComponent`-Override |
+| `saveState`/`applyState`/`applySavedState` | 624, 640, 657 | beliebige Felder über `SaveStateComponent` |
+
+Jede dieser Funktionen braucht in Schritt 4 einen "entkoche zuerst"-Hook, falls `e` eine gekochte
+Entity ist (oder die Funktion lehnt gekochte Entities ab, bis entkocht wurde — Entwurfsfrage für
+Schritt 4, hier nur die Liste der Eintrittspunkte).
+
+## 9. Nicht Teil dieses Themas (zur Erinnerung, aus der Aufgabenbeschreibung)
+
+GPU-seitige Änderungen, Auto-LOD-Generierung beim Cook (siehe §5 Regel 8 — `LODSystem` selektiert
+bereits zur Laufzeit, aber generiert keine LOD-Kette; das bliebe getrennt), Foliage (eigenes Thema,
+`FoliageComponent`/`FoliageSystem.cpp` laufen schon über ein einzelnes Component pro Terrain, nicht
+pro Instanz, und sind von diesem Walk nicht betroffen), Editor-Verhalten editierbarer Entities.
+
+## 10. Nächste Schritte (für Schritt 2)
+
+1. Ein Mobility-/Cookable-Flag auf der Entity definieren (vermutlich ein Tag-Component statt ein
+   Feld auf `TransformComponent`, analog zu `InactiveComponent` — kein bestehendes Feld, siehe §2).
+2. Die Regeln aus §5 als eine Prüfung implementieren, die bei Szenen-Load / Export einmal über
+   alle Entities läuft (gleiche Walk-Kosten wie heute, aber einmalig statt pro Frame).
+3. Den Rückindex aus §6 (wer referenziert mich per UUID aus einem nicht-kochbaren Feld) bauen,
+   bevor Entities tatsächlich eingefroren werden — sonst bricht ein Joint/eine Rope beim
+   nächsten Zugriff.
+4. Erst danach (Schritt 3) die gekochte Datenstruktur selbst und den Walk, der sie ausliest statt
+   `extractMeshes`/`Transforms::scan` für diese Entities aufzurufen.
+5. Schritt 4 (Entkochen) braucht die Liste aus §8 als Eintrittspunkte, plus Reparenting
+   (`HorizonWorld::reparentEntity`) und Cell-Streaming-Zerstörung (§7) als weitere Trigger.
+
+## 11. Schritt 9 (17.11.2026): Emitter-eigener Transform in `ParticleSystem::update` — gemessen, nicht umgesetzt
+
+Frage (Thema 343, Schritt 9): `extractParticleBatches` (`RenderExtractor.cpp:485-509`) liest
+`TransformComponent` nur über den `view`, ohne es im Funktionskörper zu benutzen — Partikel
+kommen bereits weltraum-aufgelöst aus `ps.particles`. Die eigentliche Transform-Auflösung für
+einen Emitter passiert stattdessen in `ParticleSystem::update` (`ParticleSystem.cpp:267`):
+`HE::worldMatrixOf(world, e)` wird für **jede** Entity mit `ParticleSystemComponent` **jeden
+Frame** neu aufgelöst, unabhängig davon, ob sich der Transform der Entity selbst je ändert. Die
+Partikel-Simulation selbst bleibt davon unberührt (nicht Teil dieses Schritts) — es geht nur um
+die Position des Emitters.
+
+### 11.1 Warum die Schritt-1-Baseline hier nicht reicht
+
+Die Schritt-1-Tabelle (§4.2) weist `ParticleSystem` mit "< 0,002 ms/Frame bei 50k Entities" aus.
+Das ist **keine Messung der Emitter-Transform-Kosten**: `scripts/perf/gen_reference_world.py`
+erzeugt keine `ParticleSystemComponent`-Entities (geprüft per `grep -n particle
+scripts/perf/gen_reference_world.py` — kein Treffer), die Zahl misst nur eine `entt::view`-
+Iteration über null passende Entities.
+
+### 11.2 Messaufbau
+
+Kein vorhandenes Werkzeug erzeugt Partikel-Emitter in einer `.hescene` (gleiche Lücke wie oben).
+Statt die Szenen-Generierung zu erweitern, ein Scratch-Microbenchmark direkt in
+`tests/test_particles.cpp` (TEST_CASE "SCRATCH perf: emitter worldMatrixOf share of
+ParticleSystem::update", **nicht eingecheckt** — nach der Messung per `git checkout --` wieder
+entfernt, siehe Handoff dieses Schritts): 20 000 Entities mit `TransformComponent` +
+`ParticleSystemComponent`, `maxParticles=0` (per `ParticleGraphAsset`, über den bereits
+bestehenden `makeConfiguredParticleAsset`-Helfer aus demselben Testfile) — `stepPool`s
+Emissions-Schleife läuft dann nie an (`particles.size() < maxParticles` ist mit `maxParticles=0`
+nie wahr), sodass nur der View-Walk + `resolveConfig`-Cache-Hit + `worldMatrixOf` + eine leere
+`stepPool`-Integration übrigbleiben — genau der Teil, um den es hier geht, isoliert von der
+Partikel-Simulation selbst. Verglichen: (a) `ParticleSystem::update` über alle 20 000 Emitter,
+Mittel über 50 Aufrufe, gegen (b) eine reine Schleife über dieselben Entities, die nur
+`HE::worldMatrixOf(world, e)` aufruft (gleicher View, gleiche Aufrufzahl). Eigener Build
+(`C:/hwtp9`, Release/Ninja, Thema-343-Branch @ `8ef96a4c9`).
+
+**Korrektur nach einem ersten, verworfenen Lauf:** `worldMatrixOf` ruft `cachedLocalMatrix` auf,
+das `TransformComponent::localCache` nur zurückgibt, wenn `localCacheValid` gesetzt ist
+(`TransformHierarchy.cpp:351-354`) — gesetzt wird das ausschließlich vom Propagate-Pass
+(`TransformHierarchy.cpp:58-64`). `reg.emplace` kopiert die frisch gebaute `TransformComponent`
+in die Registry, und `TransformCacheFlag`s Kopie-Konstruktor setzt den Flag dabei absichtlich auf
+"ungültig" zurück (§1-Kommentar, `TransformComponent.h:10`). Der erste Benchmark-Versuch rief
+`ParticleSystem::update` nie über `HE::propagateTransforms` vorgewärmt auf — jeder der
+50 × 20 000 `worldMatrixOf`-Aufrufe baute die Lokalmatrix (Quaternion aus Euler-Winkeln, drei
+sin/cos-Paare, `mat4_cast`, `translate`, `scale`) jedes Mal neu, statt (wie in einem echten
+Frame, wo die Welt schon mindestens einmal propagiert wurde) den Cache-Hit zu nehmen. Das maß die
+Kosten eines KALTEN Caches, nicht die eines bereits mindestens einmal propagierten, statischen
+Emitters. Behoben: ein einmaliger `HE::propagateTransforms(world)`-Aufruf nach dem Setup, vor der
+Zeitmessung — genau das, was in einem echten Frame vor dem ersten `ParticleSystem::update` dieser
+Entity bereits passiert ist. Die Zahlen unten sind die KORRIGIERTEN (warmen); die ursprünglichen
+kalten Zahlen (70,3/51,1/65,0/67,3/60,2 % über 5 Läufe, 1,4–2,5 ms/Aufruf) sind verworfen, nicht
+Teil des Ergebnisses — hier nur genannt, damit der Fehler nachvollziehbar bleibt.
+
+**Falle dabei:** der Build schlug zunächst mit `error C2026: Zeichenfolge zu lang` in
+`MaterialShaderLibrary.cpp` fehl, wenn `vcvars64.bat` aus der
+"Visual Studio 2022\Community"-Installation (MSVC 14.44.35207) kommt — derselbe, unveränderte
+Code baut fehlerfrei mit der "Visual Studio 18\Community"-Installation (MSVC 14.51.36231), die
+ein früherer Schritt dieses Themas schon benutzt hatte (bestätigt gegen `C:/hwec1/CMakeCache.txt`).
+Als Lektion gemeldet (`hive_lesson` #640) — nicht Teil dieses Codepfads, nur ein Build-Trap auf
+diesem Gerät.
+
+### 11.3 Ergebnis (mit warmem Lokalmatrix-Cache)
+
+5 Läufe, je 50 Aufrufe gemittelt, 20 000 Emitter:
+
+| Lauf | `ParticleSystem::update`, µs/Aufruf | `worldMatrixOf`-only, µs/Aufruf | Anteil |
+|---|---|---|---|
+| 1 | 907,2 | 463,9 | 51,1 % |
+| 2 | 912,9 | 470,1 | 51,5 % |
+| 3 | 903,7 | 466,3 | 51,6 % |
+| 4 | 904,2 | 476,0 | 52,6 % |
+| 5 | 892,9 | 464,8 | 52,1 % |
+
+Deutlich enger als der erste (verworfene) Lauf — 51,1–52,6 % über alle 5 Läufe, Median ≈ 51,6 %.
+Pro Emitter: `ParticleSystem::update` insgesamt ≈ 45 ns, davon `worldMatrixOf` allein ≈ 23,4 ns
+(Median der 5 Läufe). Auch mit warmem Cache bleiben zwei `try_get`-Aufrufe, der Wertevergleich in
+`localCacheMatches` und eine `mat4`-Multiplikation (`m(identity) * cachedLocal`, trotz trivialem
+`m`, da `glm` keine Identitäts-Sonderfälle kennt) übrig — das ist mehr als die Hälfte von
+`ParticleSystem::update`s eigener Zeit, auch wenn die absoluten Zahlen klein sind.
+
+**Anteil an der Frame-Zeit, nicht nur an `ParticleSystem::update`s eigener Zeit** (Umrechnung der
+gemessenen Pro-Emitter-Rate von 23,4 ns/Emitter für `worldMatrixOf` allein auf andere
+Emitter-Zahlen — **nur die 20 000er-Zeile ist gemessen**, die anderen sind Hochrechnungen aus
+dieser Rate, als solche markiert):
+
+| Emitter-Zahl | `worldMatrixOf` ges., ms/Frame | Anteil an 16,7 ms (60 fps) | Anteil an §4.2s 5,756 ms CPU/Frame (50k Mesh-Entities) |
+|---|---|---|---|
+| 20 000 (**gemessen**) | 0,467 | 2,8 % | 8,1 % |
+| 5 000 (hochgerechnet, plausiblere Größenordnung für Fackeln/Glühwürmchen/Staub) | 0,117 | 0,7 % | 2,0 % |
+| 1 000 (hochgerechnet) | 0,023 | 0,14 % | 0,4 % |
+
+Einordnung: bei 20 000 Emittern (eine sehr partikelreiche Szene) ist `worldMatrixOf` allein ein
+spürbarer, aber kein dominanter Posten (2,8 % des 60-fps-Budgets). Bei einer eher typischen
+Partikel-Dichte (1 000–5 000 Emitter) ist der absolute Beitrag klein (0,02–0,12 ms/Frame). **Der
+Befund ist trotzdem kein "nicht messbar"**: innerhalb von `ParticleSystem::update` selbst ist der
+Anteil mit > 50 % robust und wiederholbar gemessen — die Funktion verdoppelt ihre eigene Laufzeit
+für etwas, das sich bei einem echten statischen Emitter nie ändert.
+
+### 11.4 Warum trotzdem kein Cache in diesem Schritt
+
+`ParticleSystem.cpp:260-266` begründet die aktuelle Lösung ausdrücklich: `tc.worldMatrix`
+(die von `propagateTransforms` gepflegte, bereits dirty-flag-gecachte Weltmatrix, siehe §1) wird
+bewusst **nicht** gelesen, weil die Transform-Propagierung **später im selben Frame** läuft als
+`ParticleSystem::update` (`SceneSystems.cpp:153` vs. die spätere Propagierung) — auf dem ersten
+Tick nach Spawn/Laden ist `tc.worldMatrix` noch Identität bzw. veraltet. Dafür existiert ein
+eigener Regressionstest (`test_particles.cpp`: "a freshly placed emitter emits where it stands",
+MUTATION-Kommentar verlangt explizit `worldMatrixOf`, nicht `tc.worldMatrix[3]`).
+
+Ein naiver Cache ("nach dem ersten Tick `tc.worldMatrix` statt `worldMatrixOf` lesen") trifft
+denselben Fehler in einer zweiten Form: er wäre korrekt für einen Emitter, der sich nie bewegt,
+aber führt für JEDEN Emitter, dessen Transform sich doch einmal ändert (Script, Reparenting,
+Attachment an einen bewegten Knochen — Regel 5 schließt nur die Partikel-SIMULATION vom Cooking
+aus, nicht die Möglichkeit, dass die EMITTER-Entity selbst bewegt wird), einen dauerhaften
+Ein-Frame-Lag ein, nicht nur einen falschen ersten Frame. Das wäre eine stille Verhaltensänderung,
+kein reiner Performance-Gewinn, und es gibt für `ParticleSystemComponent`-Entities keinen
+"entkoche zuerst"-Mechanismus (§8), der das abfangen würde — Regel 5 schließt sie ja gerade
+pauschal vom Cooking-Zustand aus.
+
+**Konkreter Entwurf für einen künftigen Schritt** (hier nur vorgeschlagen, nicht gebaut):
+`HE::CookAnalysis::analyzeCookability(reg, e)` (`CookAnalysis.h`, aus Schritt 2) liefert pro Entity
+ein Bitfeld von `CookBlocker`s; für eine Emitter-Entity ist `CookBlocker::Locomotion` (Bit 4) IMMER
+gesetzt. **Wichtig, erst beim Gegenlesen aufgefallen:** `CookBlocker::Locomotion` ist EIN Bit für
+`CharacterControllerComponent`, `NavAgentComponent`, `MovementComponent` UND
+`ParticleSystemComponent` zusammen (`CookAnalysis.h:32`, Kommentar "5 ... ParticleSystem" listet
+alle vier). `(verdict.blockers & ~uint16_t(CookBlocker::Locomotion)) == 0` allein reicht deshalb
+NICHT — ein Emitter, der zusätzlich ein `MovementComponent` trägt (von einem Script bewegt),
+hätte exakt denselben Verdikt-Wert wie ein rein statischer Emitter, weil beide Komponenten in
+dasselbe Bit fallen. Der Gate müsste also zusätzlich **direkt** prüfen, dass die Entity selbst
+kein `CharacterControllerComponent`, `NavAgentComponent` oder `MovementComponent` trägt (z. B.
+`!reg.any_of<CharacterControllerComponent, NavAgentComponent, MovementComponent>(e)`), nicht nur
+über das gemeinsame Bit — erst `(verdict.blockers & ~Locomotion) == 0` UND diese drei
+Komponenten fehlen zusammen ist die Bedingung "keine der Regeln 1–4/9/10 trifft auf die Entity
+selbst zu, und auch keiner der drei anderen Locomotion-Bit-Mitbewohner". Drei Gründe, das nicht in
+diesem Schritt zu bauen: (1) `CookAnalysis.h`/`MobilityComponent.h`/die drei Locomotion-Komponenten
+stehen nicht in den "Files that matter" dieses Schritts — die Regel "kleiner Diff" verbietet, sie
+hier anzufassen; (2) `analyzeCookability` ist laut eigenem Kommentar für "einmal, beim
+Laden/Export, nie pro Frame" gedacht — es gibt noch keinen Ort, der das Verdikt pro Entity
+zwischenspeichert, und das selbst zu bauen wäre mehr als dieser Messschritt rechtfertigt; (3) die
+Bit-Verwechslung oben zeigt, dass der Gate selbst noch einmal gegengelesen werden muss, bevor er
+gebaut wird — das rohe `MobilityComponent::mode` ungeprüft zu vertrauen wäre ebenso UNSICHER: es
+ist laut eigenem Header nur "des Autors Aussage", von `analyzeCookability` erst gegen echte
+Blocker geprüft (ein fälschlich auf `Static` gesetzter, aber per Skript bewegter Emitter würde
+denselben Lag-Fehler reproduzieren, nur stiller).
+
+**Fazit:** Der Anteil ist real und wiederholbar gemessen (51,1–52,6 % von `ParticleSystem::update`s
+eigener Zeit bei ausschließlich statischen Emittern, warmer Lokalmatrix-Cache) — kein "nicht
+messbar"-Ergebnis innerhalb der Funktion selbst, auch wenn der absolute Beitrag zur Frame-Zeit bei
+realistischen Emitter-Zahlen (1 000–5 000) klein bleibt (§11.3). Trotzdem **kein Code in diesem
+Schritt geändert**: ein sicherer Cache braucht sowohl das Schritt-2-Cookability-Verdikt als Gate
+(dessen Zwischenspeicherung existiert noch nicht) als auch eine direkte Prüfung auf die drei
+anderen Locomotion-Bit-Komponenten (die der Verdikt allein nicht unterscheidet, §11.4 oben).
+Empfehlung an die Queen: ein eigener,
+kleiner Folgeschritt ("Emitter-Transform-Cache, gegated auf CookAnalysis ohne Locomotion-Bit") statt
+hier einen ungegateten Cache zu riskieren, der bewegte Emitter lautlos falsch macht.
+
+## Handoff
+
+- **Topic / step:** Thema 343, Schritt 1 von 5 (Bestandsaufnahme/Baseline), Device NN-WS03.
+- **Branch / commit:** `claude/entity-cooking-statische-entities-auf-daten-reduzieren` @ `3b2be965`
+  (Stand zu Schrittbeginn; dieser Schritt fügt nur `docs/entity-cooking-survey-2026-11-13.md` +
+  `docs/perf-audit/raw-entity-cooking/` hinzu, kein Produktivcode), gepusht: siehe unten.
+- **Done:** Grep nach Static/Mobility-Flag (keiner), Hot-Path-Survey (§3) mit file:line, 51
+  Component-Header unter `src/HE_Scene/include/HorizonScene/Components/` gegen Laufzeit-Mutation
+  gelesen, Kochbarkeitsregeln (§5), Querverweis-Muster UUID-über-EntityIdComponent (§6),
+  Engine-API-Eintrittspunkte (§8) per Grep gelistet, eigener Editor-Build gebaut und zwei
+  Mess-Szenen (10k/50k statische Mesh-Entities) je 6× erfasst (§4).
+- **Files touched:** `docs/entity-cooking-survey-2026-11-13.md` (dieses Dokument),
+  `docs/perf-audit/raw-entity-cooking/*.summary.json` (Rohdaten, 12 Dateien) — keine Quelldatei
+  geändert.
+- **Verified:** `TransformHierarchy.cpp`/`RenderExtractor.cpp`/`FrameCull.h`/`FrustumCuller.cpp`/
+  `D3D12Renderer.cpp:11501`-Zeilen durch Lesen bestätigt; `LODSystem.cpp:29` und
+  `HorizonWorld.cpp:544` gelesen und als NICHT per-Frame-kostend für reine Mesh-Entities bestätigt;
+  `JointComponent`/`RopeComponent`/`SequencePlayerComponent`-UUID-Muster durch Lesen der
+  jeweiligen Header-Kommentare bestätigt; alle §8-Zeilennummern per direktem
+  `grep -n "^void setPosition(Ctx" …` einzeln nachgeschlagen (nicht aus einem versetzten
+  `awk`-Ausschnitt übernommen — das hatte beim ersten Entwurf alle Zeilen um 246 verschoben);
+  §4.2-Zahlen aus den rohen `cpuScopes` (58 Scopes, nicht nur die 20 in `topScopesBySelfTime`)
+  über 6 Wiederholungen je Größe, Frame-Summe statt Aufruf-Mittel; Summe aller Scopes (1,66 ms /
+  5,84 ms) gegen `cpuMs` p50 (1,395 ms / 5,756 ms) als Plausibilitätskontrolle; der Async-Lade-Fehler
+  (§4.1) an `C:/hwec1` mit `--warmup 0` gegengeprüft (lädt bei Frame 6, keine Verzerrung).
+- **Not verified:** Play-Mode-Update-Pfad (kein Play-Mode-Schalter in `he_perf_capture.py`,
+  siehe §4.2); Vulkan/D3D11/OpenGL auf diesem Gerät nicht gemessen (nur D3D12, RTX 4070); 100k/
+  200k-Stufen nicht gemessen (nur 10k/50k, aus Zeitgründen); der genaue Grund für das überlineare
+  Wachstum von `Extract::meshes` (Block-Parallelisierung vs. Cache — §4.2) nicht weiter zerlegt.
+- **Decisions taken:** eigenen Editor aus HEAD gebaut statt eines Fremd-Deploys (Begründung §4.1,
+  Gegenprüfung bestätigt: die Falle lag am fremden Deploy, nicht am Engine-Code); `--physics 0`
+  für die Testszenen; Kochbarkeitsregeln als "ausschließen, bis Gegenteil bewiesen" formuliert,
+  nicht als Positivliste, weil Querverweise (§6) sich nicht an der Entity selbst ablesen lassen;
+  Engine-API-Referenzierbarkeit bewusst NICHT als Kochzeit-Regel aufgenommen (§5, nach Regel 12) —
+  das lässt sich vorab nicht entscheiden, nur bei jedem API-Aufruf zur Laufzeit (Schritt 4).
+- **Decisions suggested, not taken:** ob Joint-/Rope-Ziele einen Rückindex (Ausschluss, §6a) oder
+  eine UUID-auflösbare gekochte Darstellung (§6b) bekommen — Entwurfsfrage für die Queen/Schritt 2;
+  dieses Dokument empfiehlt (a) als sicheren ersten Wurf.
+- **Pending:** Schritt 2 (Kochbarkeits-Markierung, §10) ist der nächste; dieser Schritt selbst hat
+  keine offenen Teilaufgaben.
+- **Traps:** Scene-Load läuft (zumindest bei einem fremden, divergenten Deploy) asynchron zur
+  Frame-Schleife — ohne ausreichend `--warmup` verzerrt ein Mix aus leeren und geladenen Frames im
+  selben Capture-Fenster die Zahlen um bis zu 6× (§4.1). Immer `SceneLoadTiming` im `.log` gegen
+  den `Profiler: start requested`-Zeitstempel prüfen, bevor eine Zahl übernommen wird.
+  `topScopesBySelfTime` im `.summary.json` ist auf 20 Einträge gekappt — für Scopes weiter unten
+  (z. B. `SceneSystemsTick`, `LOD`) die vollen `summary.cpuScopes` aus dem (nicht eingecheckten)
+  `.profile.json` lesen. Ein Scope-`count` ist die Aufrufzahl, nicht die Frame-Zahl — `selfMs`
+  durch `count` teilt "pro Aufruf", nicht "pro Frame" (ein Scope wie `FrustumCuller::cull` läuft
+  2×/Frame). Fremde Worktree-Deploys auf diesem Gerät (`C:/hw21`, weitere unter
+  `C:\ProgramData\Hive\w\...`) können von main abweichen — per
+  `diff src/HE_Scene/src/<Datei>.cpp <Fremd-Deploy-Quelle>` gegen den eigenen Branch prüfen, bevor
+  ihr Binary für eine Messung verwendet wird.
+- **Next steps:** §10 dieses Dokuments — Schritt 2 (Kochbarkeits-Markierung) beginnen.

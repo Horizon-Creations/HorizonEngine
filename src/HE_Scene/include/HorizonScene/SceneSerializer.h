@@ -7,6 +7,7 @@
 #include <entt/entt.hpp>
 #include <nlohmann/json_fwd.hpp>
 #include "HorizonScene/Components/PrefabInstanceComponent.h"
+#include "HorizonScene/CookAnalysis.h"
 
 class HorizonWorld;
 class ContentManager;
@@ -115,7 +116,14 @@ public:
     // In-memory snapshot (CBOR, same structure as the binary file format).
     // Used by play-in-editor and the undo system. load does not clear the
     // world first — call HorizonWorld::clear() when replacing the content.
-    bool saveToMemory(const HorizonWorld& world, std::vector<uint8_t>& out);
+    // `packCookVerdict` (the export, when the project cooks static entities) adds the cookable
+    // set as an optional "cookedStatic" key: a load of the blob then skips the cooking analysis
+    // (CookedStatic::seed) and its world asks the extractor to cook. A reader that does not know
+    // the key ignores it. Never set for undo, play-in-editor or collaboration snapshots.
+    // `outCookSummary`, when given and `packCookVerdict` is set, gets the same verdict broken down
+    // by blocker reason (HE::summarizeCookability) — the export dialog's per-scene log line.
+    bool saveToMemory(const HorizonWorld& world, std::vector<uint8_t>& out, bool packCookVerdict = false,
+                      HE::CookSummary* outCookSummary = nullptr);
     bool loadFromMemory(HorizonWorld& world, const std::vector<uint8_t>& data);
 
     // Prefab serialization: capture an entity subtree (root + all descendants)

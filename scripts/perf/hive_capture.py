@@ -47,13 +47,27 @@ SCENES = {
 }
 
 
+# Where the editor camera stands for each generated scene: above the field at its edge, looking across it (yaw 0 looks
+# along -z), so a good part of the props and lights is in view and nothing sits inside the terrain. Pinned, so every
+# run sees the same picture. The numbers follow the scenes' extents (docs/vulkan-material-draw-cpu-2026-10-28.md and
+# docs/render-extractor-shadow-pass-plan.md use the same overview cameras).
+CAMERAS = {
+    "entities_stress": "0,150,1150,0,-0.2",     # extent 1500 m
+    "lights_stress": "0,25,260,0,-0.25",        # extent 300 m
+    "physics_stress": "0,20,190,0,-0.25",       # extent 200 m
+}
+
+
 def log(*parts):
     print(*parts, file=sys.stderr, flush=True)
 
 
-def run(command, **kwargs):
+def run(command, extra_env=None, **kwargs):
     log("+", " ".join(str(c) for c in command))
-    done = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, **kwargs)
+    # UTF-8 both ways: on Windows the default is cp1252, and the build, the editor and the profile dump write UTF-8.
+    env = dict(os.environ, PYTHONUTF8="1", PYTHONIOENCODING="utf-8", **(extra_env or {}))
+    done = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8",
+                          errors="replace", env=env, **kwargs)
     sys.stderr.write(done.stdout[-4000:] if done.stdout else "")
     if done.returncode != 0:
         sys.exit(f"command failed ({done.returncode}): {' '.join(str(c) for c in command)}")
@@ -157,9 +171,15 @@ def main():
                    "--warmup", str(a.warmup), "--frames", str(a.frames), "--timeout", str(a.timeout), "--no-counters"]
         if scene is not None:
             command += ["--scene", str(scene)]
-        run(command, cwd=REPO)
-        summary = json.loads((work / "out" / "hive.summary.json").read_text())
-        dump = json.loads((work / "out" / "hive.profile.json").read_text())
+        if a.project == "generated" and a.scene in CAMERAS:
+            command += ["--cam", CAMERAS[a.scene]]
+        # The editor runs hidden (no window, no Dock icon, no focus taken: docs/headless-runs.md). A hidden window is
+        # throttled to 15 FPS outside the recording, so the warmup would crawl and the temporal history settle differently:
+        # HE_BACKGROUND_FPS=0 keeps full frames. HE_PERF_SHOW=1 shows the window again (to look at what is measured).
+        hidden = {} if os.environ.get("HE_PERF_SHOW") == "1" else {"HE_HIDDEN_WINDOW": "1", "HE_BACKGROUND_FPS": "0"}
+        run(command, extra_env=hidden, cwd=REPO)
+        summary = json.loads((work / "out" / "hive.summary.json").read_text(encoding="utf-8", errors="replace"))
+        dump = json.loads((work / "out" / "hive.profile.json").read_text(encoding="utf-8", errors="replace"))
     result = result_of(summary, dump)
     if not result["scopes"]:
         sys.exit("the capture holds no scopes")

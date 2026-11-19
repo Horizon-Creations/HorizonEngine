@@ -61,7 +61,8 @@ struct LayerReads { int albedo = 0, normal = 0, mask = 0, height = 0; };
 const char* const kMixArrays[3] = { kAutoLandscapeMixAlbedoArray, kAutoLandscapeMixNormalArray, kAutoLandscapeMixMaskArray };
 } // namespace
 
-AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view, AutoLandscapeGroupId groupId, bool mixed)
+AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view, AutoLandscapeGroupId groupId, bool mixed,
+                                           bool displacement)
 {
     const AutoLandscapeGroup& group = autoLandscapeGroup(groupId);
     AutoLandscapeGraph r;
@@ -72,6 +73,19 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view, AutoLandscape
         "Metres one Grass / Dirt texture covers (world space).");
     const int pRockTile   = w.param(kAutoLandscapeParamRockTile, 4.0f, 0.25f, 32.0f, "Tiling",
         "Metres one Rock / Snow texture covers (world space).");
+    // The other two rock sizes (group.rockBySize): a larger tile reads as larger blocks, a smaller one as
+    // smaller stones. Boulder Slope is where the large rock takes over from the medium one.
+    int pBoulderTile = -1, pPebbleTile = -1, pBoulderSlope = -1;
+    if (group.rockBySize)
+    {
+        pBoulderTile = w.param(kAutoLandscapeParamBoulderTile, 12.0f, 0.25f, 64.0f, "Tiling",
+            "Metres one large rock texture (the steep faces) covers (world space).");
+        pPebbleTile = w.param(kAutoLandscapeParamPebbleTile, 1.5f, 0.1f, 16.0f, "Tiling",
+            "Metres one small rock texture (stones on gentle slopes) covers (world space).");
+        pBoulderSlope = w.param(kAutoLandscapeParamBoulderSlope, group.boulderSlope, 0.0f, 1.0f, "Rock",
+            "Slope (1 - normal.y) where the large rock takes over from the medium rock; the small rock gives way "
+            "to the medium one halfway between Rock Slope and this. 0.40 ~ 53 degrees.");
+    }
     const int pCell       = w.param(kAutoLandscapeParamBombCell, 0.5f, 0.1f, 2.0f, "Tiling",
         "Texture bombing: spacing of the random hexes, in texture repeats. Smaller = more variation, more seams.");
     const int pRockSlope  = w.param(kAutoLandscapeParamRockSlope, group.rockSlope, 0.0f, 1.0f, "Rock",
@@ -162,14 +176,18 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view, AutoLandscape
     const char* const* arrays = mixed ? kMixArrays : group.arrayPaths;
     // One bombed read of role `L` at array slice `slice` (a node): the role's constant in a group's
     // own material, role + 4 * group in the mix material.
-    auto layerAt = [&](int slice, int uv, int seed) {
+    // `variant` >= 0 pins all three maps (and the unbombed debug read) to that variant of the role instead
+    // of letting every hex draw its own: one rock size per read (see the Rock block below).
+    auto layerAt = [&](int slice, int uv, int seed, int variant = -1) {
         LayerReads lr;
+        const int variantC = variant >= 0 ? w.constF(static_cast<float>(variant), 2) : -1;
         auto read = [&](T plain, T bombed, const char* path) {
             const int p = w.node(plain, 2);
             r.graph.findNode(p)->s = path;
             r.graph.connect(uv, 0, p, 0);
             r.graph.connect(slice, 0, p, 1);
             r.graph.connect(groups, 0, p, 2); // the unbombed debug read shows variant 0 of the layer
+            if (variantC >= 0) r.graph.connect(variantC, 0, p, 3);
             if (seed < 0) return p;
             const int b = w.node(bombed, 2);
             MatGraphNode* bn = r.graph.findNode(b);
@@ -179,6 +197,7 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view, AutoLandscape
             r.graph.connect(slice, 0, b, 1);
             r.graph.connect(pCell, 0, b, 2);
             r.graph.connect(groups, 0, b, 3);
+            if (variantC >= 0) r.graph.connect(variantC, 0, b, 4);
             // Compile-time choice: the untaken read is never emitted.
             const int sw = w.op(T::StaticSwitch, 2, { { b }, { p } });
             r.graph.findNode(sw)->s = kAutoLandscapeSwitchBombing;
@@ -191,15 +210,15 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view, AutoLandscape
         lr.height = w.op(T::SplitRGBA, 2, { { lr.mask } }); // pin 2 = B = height
         return lr;
     };
-    auto layer = [&](AutoLandscapeLayer L, int uv, int seed) {
+    auto layer = [&](AutoLandscapeLayer L, int uv, int seed, int variant = -1) {
         const int role = w.constF(static_cast<float>(static_cast<int>(L)), 2);
-        if (!mixed) return layerAt(role, uv, seed);
+        if (!mixed) return layerAt(role, uv, seed, variant);
         // Two groups' slices on the same hex grid, blended by A's weight: only the slice differs, so
         // the grid is emitted once and the extra cost is the second set of taps and a lerp.
         auto sliceOf = [&](int groupPin) {
             return w.op(T::Add, 2, { { role }, { w.op(T::Multiply, 2, { { pick, groupPin }, { four } }) } });
         };
-        const LayerReads a = layerAt(sliceOf(0), uv, seed), b = layerAt(sliceOf(1), uv, seed);
+        const LayerReads a = layerAt(sliceOf(0), uv, seed, variant), b = layerAt(sliceOf(1), uv, seed, variant);
         LayerReads lr;
         lr.albedo = w.op(T::Lerp, 2, { { b.albedo }, { a.albedo }, { pickMix, 2 } });
         lr.normal = w.op(T::Lerp, 2, { { b.normal }, { a.normal }, { pickMix, 2 } });
@@ -275,7 +294,9 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view, AutoLandscape
     }
 
     // Role 0, the ground: the group's own texture, or in the Desert the procedural sand. Its colour
-    // is the mean of the human's reference (coast_sand_01, 4k diffuse: sRGB 129/114/91); the grain,
+    // started as the mean of the human's reference (coast_sand_01, 4k diffuse: sRGB 129/114/91) and is now
+    // pulled toward the red of the Desert's own Hardpan and Sandstone textures (127/85/51 .. 154/115/82), so
+    // dunes and rock no longer differ as hard; the grain,
     // the ripples and the glitter keep the function's defaults. The weather's wetness darkens it
     // (the generic wet response of the lit shader comes on top, sand just darkens more).
     LayerReads grass;
@@ -285,7 +306,8 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view, AutoLandscape
         const int sandColor = w.node(T::ConstColor, 2);
         {
             MatGraphNode* c = r.graph.findNode(sandColor);
-            c->p[0] = 0.221f; c->p[1] = 0.168f; c->p[2] = 0.104f;
+            // linear 0.275 / 0.158 / 0.078 = sRGB ~142/110/80, between the old 129/114/91 and the textures' red; about the old luminance.
+            c->p[0] = 0.275f; c->p[1] = 0.158f; c->p[2] = 0.078f;
         }
         const int look = w.op(T::SplitRGBA, 2, { { pSandLook } });
         r.graph.connect(xz, 0, sand, kSandInPosition);
@@ -329,7 +351,23 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view, AutoLandscape
     else
         grass = layer(AutoLandscapeLayer::Grass, uvGround, 11);
     LayerReads       dirt  = layer(AutoLandscapeLayer::Dirt,      uvGround, 23);
-    LayerReads       rock  = layer(AutoLandscapeLayer::Rock,      uvRock,   37);
+    // Rock: one texture, or (group.rockBySize) three by size. The sizes are the role's first three
+    // variants — 0 medium (the rock this material always had, "Rock Tile Size"), 1 large, 2 small — each
+    // pinned to its variant and tiled on its own: the same photograph covers more ground per repeat at
+    // a larger tile, so its blocks read larger. They are blended by slope in the Rock block. On a
+    // 1-variant array the three read the same slice: one rock at three tilings. In the mix material the
+    // arrays hold V variants of every group's role (slice (group * 4 + role) * V + variant).
+    LayerReads       rock, rockMedium, rockLarge, rockSmall;
+    if (!group.rockBySize)
+        rock = layer(AutoLandscapeLayer::Rock, uvRock, 37);
+    else
+    {
+        rockMedium = layer(AutoLandscapeLayer::Rock, uvRock, 37, kAutoLandscapeRockVariantMedium);
+        rockLarge  = layer(AutoLandscapeLayer::Rock, w.op(T::Divide, 1, { { xz }, { pBoulderTile } }), 41,
+                           kAutoLandscapeRockVariantLarge);
+        rockSmall  = layer(AutoLandscapeLayer::Rock, w.op(T::Divide, 1, { { xz }, { pPebbleTile } }), 43,
+                           kAutoLandscapeRockVariantSmall);
+    }
     // Snow is MF_ProceduralSnow, in every group: noise in world space has no tile and no hex seam to
     // hide, and nothing to read. Cover is the weather's Snow Cover slider, Melt its wetness (rain
     // melts it); it takes no gate (see below). The Weather node, not MF_WeatherSnow's Cover output,
@@ -458,7 +496,46 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view, AutoLandscape
     const int groundSplit = w.op(T::SplitRGBA, 3, { { ground.mask } });
 
     // ── Rock on the slopes (column 4) ────────────────────────────────────────
-    gate(rock, possible({ r.slope }, w.op(T::Multiply, 4, { { pHeight }, { pRockBlend } }), pRockSlope, mR, 2, 4), 4);
+    const int rockCan = possible({ r.slope }, w.op(T::Multiply, 4, { { pHeight }, { pRockBlend } }), pRockSlope, mR, 2, 4);
+    if (!group.rockBySize)
+        gate(rock, rockCan, 4);
+    else
+    {
+        // Small stones on gentle rock slopes, medium rock between, large rock on steep faces: two slope
+        // ramps, small -> medium halfway between Rock Slope and Boulder Slope, medium -> large at Boulder
+        // Slope, both over Rock Blend. The weights come from the slope alone (no height bias), so each
+        // size's read can sit behind an If on an upper bound of its own weight: its ramp's range widened
+        // by 0.01 (a float rounding margin; a read that is not needed costs nothing but time), and only
+        // where rock can show at all (rockCan, which includes paint). The size is a property of the
+        // slope, so painted rock gets it the same way.
+        const int half2    = w.constF(0.5f, 4);
+        const int eps      = w.constF(0.01f, 4);
+        const int midSum   = w.op(T::Add, 4, { { pRockSlope }, { pBoulderSlope } });
+        const int midSlope = w.op(T::Multiply, 4, { { midSum }, { half2 } });
+        const int tMid     = w.ramp(midSlope, pRockBlend, { r.slope }, 4);
+        const int tBig     = w.ramp(pBoulderSlope, pRockBlend, { r.slope }, 4);
+        // Small stones: until the medium ramp has closed.
+        const int midEnd   = w.op(T::Add, 4, { { w.op(T::Add, 4, { { midSlope }, { pRockBlend } }) }, { eps } });
+        const int smallCan = w.op(T::And, 4, { { rockCan }, { w.op(T::Less, 4, { { r.slope }, { midEnd } }) } });
+        // Medium: from where the medium ramp opens until the large one has closed.
+        const int midBeg   = w.op(T::Subtract, 4, { { midSlope }, { eps } });
+        const int bigEnd   = w.op(T::Add, 4, { { w.op(T::Add, 4, { { pBoulderSlope }, { pRockBlend } }) }, { eps } });
+        const int mediumCan = w.op(T::And, 4, { { rockCan },
+            { w.op(T::And, 4, { { w.op(T::Greater, 4, { { r.slope }, { midBeg } }) },
+                                { w.op(T::Less, 4, { { r.slope }, { bigEnd } }) } }) } });
+        // Large: from where the large ramp opens.
+        const int bigBeg   = w.op(T::Subtract, 4, { { pBoulderSlope }, { eps } });
+        const int largeCan = w.op(T::And, 4, { { rockCan }, { w.op(T::Greater, 4, { { r.slope }, { bigBeg } }) } });
+        gate(rockSmall,  smallCan,  4);
+        gate(rockMedium, mediumCan, 4);
+        gate(rockLarge,  largeCan,  4);
+        const Surface sm = blend({ rockSmall.albedo, rockSmall.normal, rockSmall.mask }, rockMedium, tMid, 4);
+        const Surface sl = blend(sm, rockLarge, tBig, 4);
+        rock.albedo = sl.albedo;
+        rock.normal = sl.normal;
+        rock.mask   = sl.mask;
+        rock.height = w.op(T::SplitRGBA, 4, { { rock.mask } }); // pin 2 = B = height
+    }
     const int rockT = w.op(T::Add, 4, { { r.slope },
                                         { heightBias(rock.height, 2, groundSplit, 2, pRockBlend, 4) } });
     r.rockMask = w.ramp(pRockSlope, pRockBlend, { rockT }, 4);
@@ -641,6 +718,22 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view, AutoLandscape
         r.graph.connect(mSplit, 0, r.output, kMatOutputAOPin);
         const int metal = w.constF(0.0f, 8);
         r.graph.connect(metal, 0, r.output, kMatOutputMetallicPin);
+        if (displacement)
+        {
+            // The relief of the blended texture, in metres, along the surface normal. The domain stage
+            // reads the arrays at mip 0 (no derivatives there), like every texture node in it.
+            const int mid    = w.constF(0.5f, 8);
+            const int metres = w.constF(kAutoLandscapeDisplacementMetres, 8);
+            const int rel    = w.op(T::Subtract, 8, { { mSplit, 2 }, { mid } });
+            const int disp   = w.op(T::Multiply, 8, { { rel }, { metres } });
+            r.graph.connect(disp, 0, r.output, kMatOutputDisplacementPin);
+            MatTessSettings tess;
+            tess.maxFactor       = 8.0f;
+            tess.fadeNear        = 15.0f;
+            tess.fadeFar         = 90.0f;
+            tess.maxDisplacement = kAutoLandscapeDisplacementMetres * 0.5f;
+            r.graph.findNode(r.output)->tess = tess;
+        }
     }
     else if (view == AutoLandscapeView::BaseColor)
     {

@@ -86,6 +86,14 @@ struct HE_API ProjectGameSettings
     // text and deliberately NOT the bundle version: that lives in the .heproj
     // and never reaches the runtime, and a subtitle somebody typed is honest.
     std::string splashSubtitle;
+
+    // ── Static entities ──────────────────────────────────────────────────────
+    // The export packs which meshes never change at run time (no script, animation, physics body, ...)
+    // beside each scene, and the shipped game extracts those from a flat block instead of walking
+    // their entities every frame (docs/entity-cooking-export-2026-11-17.md). Only the EXPORT and the
+    // game act on it: the editor never cooks unless HE_COOK_STATIC=1 asks, and a pack exported with it
+    // off is drawn exactly as before. Off by default until the engine flips that for every project.
+    bool        cookStaticEntities = false;
 };
 
 struct HE_API ProjectPhysicsSettings

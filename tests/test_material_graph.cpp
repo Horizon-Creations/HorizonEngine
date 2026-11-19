@@ -2746,7 +2746,7 @@ TEST_CASE("Auto landscape material: three arrays, thirteen parameters, one hex g
 	CHECK(gen.glsl.find("texture(heTex0") == std::string::npos);
 
 	// Every parameter is a real HeParams slot (none baked for being over budget).
-	REQUIRE(gen.params.size() == static_cast<size_t>(HE::kAutoLandscapeParamCount));
+	REQUIRE(gen.params.size() == static_cast<size_t>(HE::autoLandscapeParamCount(HE::autoLandscapeGroup(HE::AutoLandscapeGroupId::Mountains))));
 	CHECK(gen.params.size() <= static_cast<size_t>(HE::kMatMaxParams));
 	for (const char* name : { HE::kAutoLandscapeParamGroundTile, HE::kAutoLandscapeParamRockTile,
 	                          HE::kAutoLandscapeParamBombCell, HE::kAutoLandscapeParamRockSlope,
@@ -2812,7 +2812,7 @@ TEST_CASE("Auto landscape material: three arrays, thirteen parameters, one hex g
 				sawRock = sawRock || static_cast<int>(s->p[0]) == static_cast<int>(HE::AutoLandscapeLayer::Rock);
 			}
 		}
-		CHECK(reads == 18); // 3 bombed layers (Grass, Dirt, Rock) x 3 maps x (plain + bombed)
+		CHECK(reads == 30); // 5 bombed read sets (Grass, Dirt, Rock x3 sizes) x 3 maps x (plain + bombed)
 		CHECK(sawRock);
 	}
 
@@ -2822,7 +2822,7 @@ TEST_CASE("Auto landscape material: three arrays, thirteen parameters, one hex g
 	// Thema 180 Schritt 3: the layers read through the variant grid (Groups wired), which
 	// is heBombGrid plus the variant numbers; the plain heBombGrid is not emitted at all.
 	CHECK(countOf(gen.glsl, "void heBombGridV(") == 1u);
-	CHECK(countOf(gen.glsl, "heBombGridV(") - countOf(gen.glsl, "void heBombGridV(") == 3u);
+	CHECK(countOf(gen.glsl, "heBombGridV(") - countOf(gen.glsl, "void heBombGridV(") == 5u);
 	CHECK(gen.glsl.find("heBombGrid(") == std::string::npos);
 	REQUIRE(gen.switches.size() == 1u);
 	CHECK(gen.switches[0].first == HE::kAutoLandscapeSwitchBombing);
@@ -2848,7 +2848,7 @@ TEST_CASE("Auto landscape material: three arrays, thirteen parameters, one hex g
 			CHECK(m.graph.findNode(id) != nullptr);
 		const HE::MatShaderGen mg = HE::generateFragment(m.graph, HE::weatherFunctionLoader());
 		CHECK_FALSE(mg.glsl.empty());
-		CHECK(mg.params.size() == static_cast<size_t>(HE::kAutoLandscapeParamCount));
+		CHECK(mg.params.size() == static_cast<size_t>(HE::autoLandscapeParamCount(HE::autoLandscapeGroup(HE::AutoLandscapeGroupId::Mountains))));
 	}
 
 	// The graph survives its JSON (what the .hasset stores) byte for byte.
@@ -3024,16 +3024,16 @@ TEST_CASE("MaterialGraph never reuses a node id after removeNode")
 TEST_CASE("More than kMatMaxParams parameters never index past the HeParams array")
 {
 	// REGRESSION: the layout used to be clamped only AFTER the shader text was
-	// built, so an over-budget graph emitted heParams.v[16] (and up) against a
-	// `vec4 v[16]` declaration — an out-of-bounds read in the generated shader.
+	// built, so an over-budget graph emitted heParams.v[kMatMaxParams] (and up) against a
+	// `vec4 v[kMatMaxParams]` declaration — an out-of-bounds read in the generated shader.
 	// The budget is now enforced before emission: surplus params bake their
 	// authored default as a literal instead.
-	// 20 distinct named float params, chained through Adds so every one of them
+	// kMatMaxParams + 4 distinct named float params, chained through Adds so every one of them
 	// is actually reached (and therefore slotted) during emission.
 	MaterialGraph g;
 	const int out = g.addNode(MatNodeType::Output);
 	int acc = -1;
-	for (int i = 0; i < 20; ++i)
+	for (int i = 0; i < HE::kMatMaxParams + 4; ++i)
 	{
 		const int p = g.addNode(MatNodeType::ParamFloat);
 		g.findNode(p)->s    = "P" + std::to_string(i);
@@ -3050,7 +3050,7 @@ TEST_CASE("More than kMatMaxParams parameters never index past the HeParams arra
 	CHECK((int)gen.params.size() == HE::kMatMaxParams);
 
 	// No slot index at or beyond the array length appears in the emitted GLSL.
-	for (int i = HE::kMatMaxParams; i < 32; ++i)
+	for (int i = HE::kMatMaxParams; i < HE::kMatMaxParams + 8; ++i)
 	{
 		const std::string oob = "heParams.v[" + std::to_string(i) + "]";
 		CHECK(gen.glsl.find(oob) == std::string::npos);
@@ -3062,7 +3062,7 @@ TEST_CASE("More than kMatMaxParams parameters never index past the HeParams arra
 	CHECK(gen.glsl.find("vec4 v[" + std::to_string(HE::kMatMaxParams) + "]")
 	      != std::string::npos);
 	// Surplus params are baked: their node comment survives without a UBO read.
-	CHECK(gen.glsl.find("// param: P19") != std::string::npos);
+	CHECK(gen.glsl.find("// param: P" + std::to_string(HE::kMatMaxParams + 3)) != std::string::npos);
 }
 
 TEST_CASE("Exactly kMatMaxParams parameters still all get real UBO slots")
@@ -3689,7 +3689,7 @@ TEST_CASE("The shipped M_AutoLandscape.hasset is exactly what the builder makes"
 	CHECK_MESSAGE(m->nodeGraphJson == HE::materialGraphToJson(HE::buildAutoLandscapeGraph().graph),
 	              "re-run: landscape_tex_gen EditorDeps/EngineContent/Materials --material");
 	CHECK(m->graphTexturePaths.size() == 4u);   // three arrays + the trail clipmap
-	CHECK(m->graphParamNames.size() == static_cast<size_t>(HE::kAutoLandscapeParamCount));
+	CHECK(m->graphParamNames.size() == static_cast<size_t>(HE::autoLandscapeParamCount(HE::autoLandscapeGroup(HE::AutoLandscapeGroupId::Mountains))));
 	// The Landscape tool lists these as the paintable layers — Auto first, so an
 	// unpainted terrain reads the automatic distribution.
 	CHECK(m->graphLayerNames == HE::matLandscapeLayerNames(HE::kAutoLandscapePaintLayerNames));
@@ -4058,7 +4058,7 @@ TEST_CASE("Auto landscape: puddles and ground snow come from the weather functio
 	for (const HE::MatParamSlot& s : HE::generateFragment(a.graph, HE::weatherFunctionLoader()).params)
 		CHECK(s.name != "Puddle Size");
 	const HE::MatShaderGen gen = HE::generateFragment(a.graph, HE::weatherFunctionLoader());
-	CHECK(gen.params.size() == static_cast<size_t>(HE::kAutoLandscapeParamCount));
+	CHECK(gen.params.size() == static_cast<size_t>(HE::autoLandscapeParamCount(HE::autoLandscapeGroup(HE::AutoLandscapeGroupId::Mountains))));
 	CHECK(gen.glsl.find("heLight.weather") != std::string::npos);
 	CHECK(gen.glsl.find("missing function") == std::string::npos);
 

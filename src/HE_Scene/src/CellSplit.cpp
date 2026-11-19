@@ -61,6 +61,7 @@ constexpr ComponentClass kComponentClasses[] = {
 	{ "rigidbody",        StreamClass::Static },
 	{ "decal",            StreamClass::Static },
 	{ "inactive",         StreamClass::Static },
+	{ "mobility",         StreamClass::Static },
 	// A placed prefab, so that a village of prefab houses can stream. The bindings
 	// of a placement name its entities by id: that holds because a cell loads with
 	// the ids it was saved with now, and because a placement whose bindings leave
