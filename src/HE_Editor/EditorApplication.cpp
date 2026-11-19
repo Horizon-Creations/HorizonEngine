@@ -1192,6 +1192,9 @@ void EditorApplication::OnInit()
 	IMGUI_CHECKVERSION();
 	ImGui::CreateContext();
 	HE::Ed::applyHorizonDarkTheme();
+	// Tooltips only after the pointer has rested ~5 s (imgui.cpp BeginTooltipEx). Set here, not in the theme: the
+	// headless UI tests apply the theme and expect a tooltip after a short rest.
+	ImGui::GetStyle().TooltipShowDelay = 5.0f;
 	ImGuiIO& io = ImGui::GetIO();
 	io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
 	io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
