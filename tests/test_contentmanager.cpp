@@ -3610,6 +3610,42 @@ TEST_CASE("Remote EngineContent: a local file is never shadowed by the remote en
 	CHECK(rock.calls == 0);                                         // no download asked for
 }
 
+TEST_CASE("Remote EngineContent: a file indexed and then deleted is asked for again, not given up on")
+{
+	// The editor indexes the engine folders at startup; the EngineContent sync then removes a cached file
+	// the server has a newer copy of ("is out of date … it downloads again when it is used"). The index
+	// still lists the id, so registering the remote entry used to be skipped as "resolvable some other
+	// way" — and every later load of the path ended in "Cannot load asset … no readable .hasset" with no
+	// download ever started.
+	TempContentDir project, engineDir("he_test_remote_engine"), staging("he_test_remote_stage");
+	HE::UUID texId;
+	{
+		ContentManager src(staging.path.string());
+		TextureAsset t;
+		t.type = HE::AssetType::Texture; t.name = "Rock"; t.path = "Rock.hasset";
+		t.width = t.height = 1; t.channels = 4; t.data = { 9, 8, 7, 255 };
+		t.id = texId = HE::UUID::generate();
+		REQUIRE(src.saveAsset(t));
+	}
+	fs::create_directories(engineDir.path / "Textures");
+	fs::copy_file(staging.path / "Rock.hasset", engineDir.path / "Textures" / "Rock.hasset");
+
+	ContentManager cm(project.path.string());
+	cm.setEngineContentRoot(engineDir.path.string());
+	cm.scanContentDirectory();                                    // the startup index sees the file…
+	fs::remove(engineDir.path / "Textures" / "Rock.hasset");      // …and the sync removes it as stale
+
+	FakeRemote rock;
+	const std::string path = "Engine/Textures/Rock.hasset";
+	registerFake(cm, rock, texId, path, staging.path / "Rock.hasset", engineDir.path, "Textures/Rock.hasset");
+
+	CHECK(cm.loadAsset(path) == HE::UUID{});   // not there yet…
+	CHECK(rock.calls == 1);                    // …and the download is under way
+	rock.arrive();
+	REQUIRE(pumpUntil(cm, [&] { return cm.isLoaded(texId); }));
+	CHECK(cm.loadAsset(path) == texId);
+}
+
 TEST_CASE("Remote EngineContent: an arriving material pulls its textures and its parent")
 {
 	TempContentDir project, engineDir("he_test_remote_engine"), staging("he_test_remote_stage");

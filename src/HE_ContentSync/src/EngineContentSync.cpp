@@ -442,14 +442,21 @@ void EngineContentSync::drainQueue()
 		}
 		else
 		{
-			// What the catalogue promised for this file: the next refresh then needs no hash pass over it.
-			std::uint64_t promised = 0;
+			// Hash what actually landed, not what the manifest promised: a manifest refresh that
+			// is stale relative to the server's current bytes (or a truncated/corrupted transfer)
+			// must still show up as a mismatch on the next refresh, not get locked in as "fresh"
+			// by recording a hash nobody checked the file against. Gated on the entry having a
+			// hash at all — a raw file (contentHash 0) is never hash-compared, so hashing it here
+			// would only cost a full read for a record nothing ever reads back.
+			bool hasManifestHash = false;
 			{
 				std::lock_guard<std::mutex> lock(m_manifestMutex);
 				for (const auto& e : m_manifest.entries)
-					if (e.relativePath == relativePath) { promised = e.contentHash; break; }
+					if (e.relativePath == relativePath) { hasManifestHash = e.contentHash != 0; break; }
 			}
-			if (promised) recordCachedFile(GlobalState::engineContentCacheDir(), relativePath, promised);
+			std::uint64_t landedHash = 0;
+			if (hasManifestHash && fnv1a64File(localPath, landedHash))
+				recordCachedFile(GlobalState::engineContentCacheDir(), relativePath, landedHash);
 		}
 
 		// Take the callbacks and settle the status under ONE lock, before firing

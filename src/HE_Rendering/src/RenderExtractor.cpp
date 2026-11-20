@@ -87,7 +87,7 @@ void windWaterParams(const MaterialAsset& ma, const MaterialComponent* mc,
 	}
 	static const char* const kKnobs[3] = { "WaveA", "WaveB", "WaveC" };
 	for (const char* knob : kKnobs)
-		for (size_t k = 0; k < ma.graphParamNames.size() && k < 16; ++k)
+		for (size_t k = 0; k < ma.graphParamNames.size() && k < size_t(HE::kMatMaxParams); ++k)
 		{
 			if (ma.graphParamNames[k] != knob) continue;
 			bool authored = false;
@@ -618,7 +618,7 @@ void windWaterParams(const MaterialAsset& ma, const MaterialComponent* mc,
 							const size_t n = std::min(ma->shaderParamData.size(), size_t(HE::kMatParamFloats));
 							std::copy(ma->shaderParamData.begin(), ma->shaderParamData.begin() + n, block.begin());
 							for (const auto& ov : matComp->paramOverrides)
-								for (size_t k = 0; k < ma->graphParamNames.size() && k < 16; ++k)
+								for (size_t k = 0; k < ma->graphParamNames.size() && k < size_t(HE::kMatMaxParams); ++k)
 									if (ma->graphParamNames[k] == ov.name)
 									{
 										for (int c = 0; c < 4; ++c) block[k * 4 + c] = ov.value[c];
@@ -650,6 +650,7 @@ void windWaterParams(const MaterialAsset& ma, const MaterialComponent* mc,
 				if (const auto* chunk = (anyChunk && chunkPool->contains(e)) ? &chunkPool->get(e) : nullptr)
 				{
 					obj.terrainChunk = true;
+					obj.terrainEntity = static_cast<uint32_t>(chunk->terrain);
 					if (creg.valid(chunk->terrain) && terrainPool && terrainPool->contains(chunk->terrain))
 					{
 						const TerrainComponent& pt = terrainPool->get(chunk->terrain);

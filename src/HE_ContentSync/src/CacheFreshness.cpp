@@ -58,6 +58,13 @@ void saveRecords(const fs::path& cacheDir, const std::map<std::string, Record>& 
 	if (ec) fs::remove(tmp, ec);
 }
 
+std::int64_t mtimeOf(const fs::path& p, std::error_code& ec)
+{
+	return static_cast<std::int64_t>(fs::last_write_time(p, ec).time_since_epoch().count());
+}
+
+} // namespace
+
 // Byte-wise FNV-1a, the same function as Hpak::fnv1a64Bytes (the manifest's change key), fed in blocks.
 bool fnv1a64File(const fs::path& p, std::uint64_t& out)
 {
@@ -79,13 +86,6 @@ bool fnv1a64File(const fs::path& p, std::uint64_t& out)
 	out = h;
 	return true;
 }
-
-std::int64_t mtimeOf(const fs::path& p, std::error_code& ec)
-{
-	return static_cast<std::int64_t>(fs::last_write_time(p, ec).time_since_epoch().count());
-}
-
-} // namespace
 
 std::size_t discardStaleCachedFiles(const fs::path& cacheDir, const EngineContentManifest& manifest,
                                     const std::function<bool(const std::string&)>& isBusy,

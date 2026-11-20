@@ -54,4 +54,10 @@ namespace TerrainSystem
     // changes. Chunks with no neighbour on a side (terrain border, a chunk
     // not built yet) leave that side as it is.
     void stitchSeams(HorizonWorld& world, ContentManager& cm, IRenderer* renderer);
+
+    // A world that is about to be destroyed (the RVT / HLOD baker's scratch copy of a landscape): hands back every chunk
+    // mesh its terrain registered, in the renderer (InvalidateMesh) and in the ContentManager (unloadAsset), and drops this
+    // file's per-world bookkeeping. Without it each scratch world left its whole landscape as meshes behind (~70 MB per
+    // attach of a 1 km landscape, measured on Metal), because the give-back above only runs on a later tick of a world.
+    void releaseWorld(HorizonWorld& world, ContentManager& cm, IRenderer* renderer);
 }

@@ -267,6 +267,15 @@ enum class MatNodeType : uint8_t
     // The indices feed a texture array's Slice pin, so the material reads two groups' slices
     // per fragment instead of four. A map with no third page, or no shares at all, is group 0.
     LandscapeGroupPick,
+
+    // ── v21: Runtime Virtual Texture read (Thema 333, MaterialGraph/RvtLookup.h) ──
+    // The painted landscape material, read back from the page pool instead of being computed:
+    // looks the fragment's world XZ up in the volume's page table and filters the three layers by
+    // hand (texelFetch only, no sampler). Inputs: the volume's two parameter vectors A and B (see
+    // RvtLookup.h; normally Param Vector4 nodes the engine fills). Outputs: Base Color, world Normal,
+    // AO, Roughness, and Valid (0 where there is nothing to show). Engine-internal: the editor palette
+    // does not list it, and only a backend with Capabilities::supportsRvt can draw a material that has it.
+    RvtSample,
 };
 
 // True for every node whose `s` is a texture path sampled through a heTexP slot

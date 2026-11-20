@@ -160,6 +160,10 @@ public:
 	// its selection and undo history here — both refer to entity handles that no
 	// longer exist, and acting on them would touch freed storage.
 	void onWorldReplaced(std::function<void()> fn) { m_onWorldReplaced = std::move(fn); }
+	// Fires right BEFORE a received snapshot clears the world (and also when the load
+	// then fails, which onWorldReplaced does not cover). clear() recycles entt ids, so
+	// whatever keys state on entity handles (RvtLandscape's segments) must let go here.
+	void onWorldReplacing(std::function<void()> fn) { m_onWorldReplacing = std::move(fn); }
 
 	// ── Lifecycle ──
 	// Opens a session on `port` (0 = OS-assigned), generates a session id and a
@@ -1751,4 +1755,5 @@ private:
 	bool m_applyingRemoteAsset = false;
 
 	std::function<void()> m_onWorldReplaced;
+	std::function<void()> m_onWorldReplacing;
 };

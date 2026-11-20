@@ -156,6 +156,34 @@ TEST_CASE("EditorUndo clearHistory wipes both stacks without changing the world"
 	CHECK(entityCount(world) == 2); // root + A (undo already reverted B)
 }
 
+TEST_CASE("EditorUndo onWorldReplacing fires before restore()'s clear(), on undo and redo")
+{
+	HorizonWorld world;
+	EditorUndo undo;
+	undo.setWorld(&world);
+
+	// Mirrors CollabController::onWorldReplacing (test_collab_controller.cpp):
+	// a holder of ids keyed to the outgoing world must detach while that
+	// world's content still stands, before clear() recycles its entt ids.
+	int replacingCalls = 0;
+	int countAtReplacing = 0;
+	undo.onWorldReplacing([&] {
+		++replacingCalls;
+		countAtReplacing = entityCount(world);
+	});
+
+	undo.snapshotNow(); world.createEntity("A");
+	REQUIRE(entityCount(world) == 2);
+
+	CHECK(undo.undo());
+	CHECK(replacingCalls == 1);
+	CHECK(countAtReplacing == 2);   // fired while "A" still existed, before clear()
+
+	CHECK(undo.redo());
+	CHECK(replacingCalls == 2);
+	CHECK(countAtReplacing == 1);   // fired while the undone world still stood
+}
+
 // ── Labels and multi-step jumps (the Undo History window) ────────────────────
 
 TEST_CASE("EditorUndo labels: explicit, then the context scope, then a plain Edit")

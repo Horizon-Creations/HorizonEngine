@@ -101,6 +101,16 @@ public:
 	bool  CaptureViewport(std::vector<uint8_t>& rgba, uint32_t& width, uint32_t& height) override;
 	bool  RenderSceneImage(const EditorCameraOverride& camera, uint32_t width, uint32_t height,
 	                       std::vector<uint8_t>& rgba) override;
+	// Runtime Virtual Texture (Thema 333, docs/rvt-design-2026-11-04.md). The contract is IRenderer.h's, D3D11's the reference.
+	// The pool is three BGRA8 texture2d_array (the format of the viewport target a page is drawn into, so the page goes in with
+	// a plain blit; BaseColor is read through an sRGB view), the tables one R32Uint mipmapped texture per consumer material.
+	bool  CreateRvtPool(uint32_t slots, uint32_t pagePx) override;
+	void  DestroyRvtPool() override;
+	bool  ReadbackRvtSlot(int layer, uint32_t slot, std::vector<uint8_t>& rgba) override;
+	bool  SetRvtPageTable(const HE::UUID& consumerMaterial, const std::vector<std::vector<uint32_t>>& mips) override;
+	bool  ReadbackRvtPageTable(const HE::UUID& consumerMaterial, std::vector<std::vector<uint32_t>>& mips) override;
+	void  SetRvtLandscape(uint32_t terrainEntity, const HE::UUID& landscapeMaterial, const HE::UUID& consumerMaterial) override;
+	void  ReleaseRvtConsumer(const HE::UUID& consumerMaterial) override;
 	void  InvalidateMaterial(const HE::UUID& materialId) override;
 	void  WarmupMaterials(const std::vector<HE::UUID>& materialIds) override;
 	ShaderBuildStatus PumpShaderBuilds() override;
@@ -656,6 +666,48 @@ private:
 	void* m_skyDepthState   = nullptr; // id<MTLDepthStencilState> (sky: LessEqual, no write)
 	void* m_dummyTexture    = nullptr; // id<MTLTexture>, 1×1 white — bound when shadow/AO/moon texture is absent
 	void* m_whiteArrayTexture = nullptr; // id<MTLTexture>, 1×1×1 white texture2d_array (empty array slot)
+	// Runtime Virtual Texture (Thema 333): the page pool (BGRA8 arrays; [0] is read through the sRGB view below), the page
+	// tables per consumer material, the per-landscape material swap, and the inert defaults bound while a draw has no table.
+	void*    m_rvtPool[3]        = { nullptr, nullptr, nullptr };   // id<MTLTexture> 2D array, BGRA8Unorm, PixelFormatView
+	void*    m_rvtPoolAlbedoSrgb = nullptr;                         // id<MTLTexture> view of m_rvtPool[0] as BGRA8Unorm_sRGB
+	uint32_t m_rvtSlots = 0, m_rvtPagePx = 0;   // the manager's slot count (the most pages that can be resident) and the page size
+	uint32_t m_rvtAllocSlots = 0;               // HOT slices the three BGRA arrays hold: they start small and grow with the pages in use
+	bool     m_rvtPack = false;              // layers 1 and 2 are RG8 (normal x and z, surface R and G): a compute copy writes the page, 8 bytes per texel instead of 12
+	void*    m_rvtPackPso = nullptr;         // id<MTLComputePipelineState> of that copy, built on first use
+	uint32_t RvtLayerChannels(int layer) const override;
+	bool     GrowRvtPool(uint32_t needHot);
+	// A page's slot (what the manager hands out) is NOT its slice any more (step 6j): a page that has not been painted for a
+	// while is block-compressed (ASTC 4x4) into the COLD arrays, slice = slot, and its hot slice goes back to a small free list;
+	// the table the shader reads is the manager's table with every entry rewritten to say which array and which slice.
+	struct RvtTable { void* tex = nullptr; uint32_t side = 0, mips = 0; std::vector<std::vector<uint32_t>> src; uint64_t stateVer = 0; };   // tex: id<MTLTexture> R32Uint with mips; src: the manager's table as given
+	std::unordered_map<HE::UUID, RvtTable> m_rvtTables;
+	bool     m_rvtColdOn = false;                  // ASTC cold pool in use (Apple GPU, encoder present, HE_RVT_COLD != 0)
+	void*    m_rvtCold[3] = { nullptr, nullptr, nullptr };   // id<MTLTexture> ASTC_4x4 arrays (albedo sRGB), Shared storage, slice = slot
+	uint32_t m_rvtColdAlloc = 0;
+	std::vector<int32_t>  m_rvtSlotHot;            // per slot: its hot slice, or -1
+	std::vector<uint8_t>  m_rvtSlotCold;           // per slot: the cold arrays hold its page
+	std::vector<uint8_t>  m_rvtSlotBusy;           // per slot: a readback or an encode of it is in flight
+	std::vector<uint32_t> m_rvtSlotVer;            // per slot: bumped by every paint (an encode of an older picture is dropped)
+	std::vector<uint64_t> m_rvtSlotPainted;        // per slot: m_rvtRealFrames at its last paint
+	std::vector<uint32_t> m_rvtHotFree;            // hot slices not in use
+	uint64_t m_rvtStateVer = 1;                    // bumped when a slot changes between hot and cold, tables are re-uploaded
+	uint64_t m_rvtRealFrames = 0;
+	double   m_rvtNextShrinkAt = 0.0, m_rvtNextColdLogAt = 0.0;
+	struct RvtColdWork;                            // the encoder thread and the readbacks in flight (MetalRenderer.mm)
+	RvtColdWork* m_rvtWork = nullptr;
+	uint32_t RvtHotFor(uint32_t slot);             // the hot slice of a slot, taking one when it has none
+	bool     GrowRvtCold(uint32_t needSlices);
+	void     UploadRvtTable(RvtTable& t);
+	void     UpdateRvtCold(bool realFrame);        // once per frame: refresh tables, harvest cold pages, apply encodes, shrink the hot arrays
+	void     StopRvtColdWork();
+	struct RvtSwap { HE::UUID landscapeMat, consumerMat; };
+	std::unordered_map<uint32_t, RvtSwap>  m_rvtSwaps;                   // per landscape entity
+	void*    m_rvtDummyTable     = nullptr;                         // id<MTLTexture> 1x1 R32Uint (0xFFFFFFFF = no page)
+	// Binds the consumer's table and the pool at fragment textures 18..21 (the pins of MaterialShaderLibrary) for a draw whose
+	// material owns a table; the defaults otherwise. Called at the opaque material draw sites.
+	void     BindRvtForDraw(void* renderEncoder, const HE::UUID& material);
+	// After a walk (ExtractFrame and the passes that extract on their own): the swapped landscapes' chunks take the consumer.
+	void     ApplyRvtSwaps();
 	void* m_linearSampler   = nullptr; // id<MTLSamplerState>
 	// Graph-material project textures (heTexP0..3, MSL texture/sampler 1..4):
 	// linear + mips like m_linearSampler, but REPEAT. Every other backend tiles
@@ -1476,6 +1528,15 @@ private:
 	// InvalidateMaterial retires the texture and drops the entry.
 	std::unordered_map<HE::UUID, void*>    m_materialTexCache;
 	std::unordered_map<std::string, void*> m_graphTexCache; // node-graph textures by UUID/path key
+	// Runtime Virtual Texture (Thema 333): the big texture arrays of a landscape material are read by the page pass only once its
+	// landscape is drawn from the pool, so they sit idle in VRAM (~770 MB for the Mix material). When no normal frame and no
+	// page frame has touched an array of >= 64 MB for HE_RVT_ARRAY_IDLE_S seconds (default 20, 0 = never) it is released
+	// and reloaded on its next use (the first page after a long pause pays the reload). Keyed like m_graphTexCache.
+	struct GraphTexUse { double normal = 0.0, page = 0.0; };
+	std::unordered_map<std::string, GraphTexUse> m_graphTexUse;
+	double m_graphTexEvictAt = 0.0;
+	bool   m_logAfterArrayRelease = false;   // log the device's size once the retired arrays are really gone
+	void   EvictIdleGraphArrays();
 	uint64_t m_graphTexMissEpoch = 0; // contentEpoch its nullptr misses were taken at (HE::forgetGraphTextureMisses)
 	std::unordered_map<std::string, void*> m_uiTexCache;    // UI quad images, same keys, never sRGB
 

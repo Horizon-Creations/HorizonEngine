@@ -20,6 +20,7 @@
 #include <HorizonScene/HorizonScene.h>
 #include <Scripting/ScriptEngine.h>
 #include <HorizonScene/PhysicsWorld.h>
+#include <HorizonScene/RvtLandscape.h>   // RvtLandscape::DebugInfo (the Virtual Texture page's status)
 #include <HorizonScene/FixedStep.h>
 #include <HorizonScene/AudioEngine.h>
 #include <HorizonScene/AudioSystem.h>
@@ -70,6 +71,7 @@
 // do not parse McpBridge.h and the tool registry behind it (EDT-1209). Who
 // calls into the bridge includes McpBridge.h itself.
 namespace HE::Ed { class McpBridge; }
+namespace HE::landscape { class RvtLandscape; }
 
 // Stable userdata struct for SDL async dialog callbacks.
 // Lives as a member of EditorApplication — never on the stack.
@@ -166,6 +168,10 @@ struct AppContext
 	// is read per step, so it needs no push): the Simulation page calls it after
 	// saving, and a crate resting in the preview falls the new way at once.
 	std::function<void()> applyPhysicsSettings;
+	// The Runtime Virtual Texture driver's state for the Project Settings ▸ Virtual Texture page (Thema 333): a SNAPSHOT
+	// made when the page asks, empty (running == false) while the driver is off. A callback rather than a pointer to the
+	// driver, which the editor resets whenever the setting is switched off.
+	std::function<HE::landscape::RvtLandscape::DebugInfo()> rvtDebugInfo;
 	ScriptEngine*      propScriptEngine = nullptr; // read-only, for inspector property reading
 
 	// Editor scene-view camera (orbit/fly/focus). Owned by EditorApplication;
@@ -768,6 +774,9 @@ private:
 
 	// Physics simulation — active only while in play mode.
 	std::unique_ptr<PhysicsWorld> m_physicsWorld;
+	// The Runtime Virtual Texture driver of the open landscape (Thema 333 step 4). Made while the project setting (or HE_RVT=1)
+	// asks for it, reset when it does not; shared_ptr so the type may stay incomplete here.
+	std::shared_ptr<HE::landscape::RvtLandscape> m_rvtLandscape;
 	float m_physicsAccum = 0.0f;
 	// A split scene's cells, streamed around the play camera — the game's
 	// CellRuntime with the editor as its host (PlayCellStreaming.h). Made at the

@@ -241,6 +241,16 @@ public:
     // lambda) — 21 is the next free one.
     static constexpr int kGlFogVolumeTextureUnit = 21;
 
+    // RVT cold pages on Vulkan (Thema 333 step 9): unlike D3D11/D3D12 (texelFetch/Load costs no live sampler, SRV
+    // t-registers are plentiful), a GLSL sampler2DArray is ONE combined-image-sampler descriptor in Vulkan no matter how
+    // the shader reads it, so the three cold arrays are three more fragment-stage samplers on top of hot RVT's four
+    // (VulkanMaterialLayout.h: rvtFit 21 -> rvtColdFit 24). VulkanRenderer calls this once, after checking the device's
+    // actual maxPerStageDescriptorSamplers/SampledImages and deciding whether its descriptor set layout can hold the cold
+    // rows at all — fragment()'s SpirV path leaves the cold branch out of the SPIR-V when it cannot, so the compiled
+    // shader never statically references a binding its layout lacks (an invalid pipeline otherwise). D3D11/D3D12/Metal
+    // are never gated by this: it only ever narrows the Vulkan path.
+    static void SetRvtColdVulkanFits(bool fits) { s_rvtColdVulkanFits = fits; }
+
     struct Compiled
     {
         bool                  ok = false;
@@ -619,6 +629,11 @@ private:
     bool m_hlslFogVolume  = false;
     const Compiled& fragmentVariant(uint64_t sourceHash, const std::string& glsl, Backend backend,
                                     bool clustered);
+
+    // SetRvtColdVulkanFits above; conservative default so a renderer that never calls it (D3D11/D3D12/Metal — this flag
+    // only narrows the Vulkan SpirV path) never risks compiling a shader that statically references a binding its
+    // descriptor layout lacks.
+    static inline bool s_rvtColdVulkanFits = false;
 
     std::unordered_map<int, Compiled>      m_vertCache;  // key = (int)backend (+0x100 instanced)
     std::unordered_map<uint64_t, Compiled> m_fragCache;  // key = mix(sourceHash, backend, clustered)

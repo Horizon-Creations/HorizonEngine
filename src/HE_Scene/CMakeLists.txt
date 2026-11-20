@@ -32,6 +32,9 @@ add_library(HorizonScene SHARED
     src/TerrainSystem.cpp
     src/LandscapeHlodBaker.cpp
     src/LandscapeHlod.cpp
+    src/RuntimeVirtualTexture.cpp
+    src/RvtProducer.cpp
+    src/RvtLandscape.cpp
     src/TrailSystem.cpp
     src/TerrainPaint.cpp
     src/TerrainSculpt.cpp

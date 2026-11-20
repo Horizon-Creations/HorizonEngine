@@ -1514,6 +1514,7 @@ void drawMaterialCanvas(State& st, AppContext& ctx, bool assetOk,
 			if (d.type == MatNodeType::Output || d.type == MatNodeType::FunctionCall) return false;
 			const bool fnInterface = d.type == MatNodeType::FnInput || d.type == MatNodeType::FnOutput;
 			if (fnInterface && !st.isFunction) return false;
+			if (d.type == MatNodeType::RvtSample) return false;   // engine-internal (Thema 333): the runtime fills its inputs
 			return matches(d.name, d.category);
 		};
 		const char* lastCat = "";

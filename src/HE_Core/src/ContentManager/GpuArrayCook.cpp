@@ -16,6 +16,7 @@
 #include <fstream>
 #include <iterator>
 #include <mutex>
+#include <set>
 #include <string>
 #include <system_error>
 
@@ -30,7 +31,7 @@ namespace
 std::mutex                g_mutex;
 GpuArrayCookSettings      g_settings;
 std::atomic<bool>         g_on{ false };
-std::atomic<bool>         g_noEncoder{ false };   // a cook came back unchanged: this build cannot encode
+std::set<std::string>     g_failedKeys;   // cache keys whose cook came back unchanged: skip just them, not every path
 
 // What a loose texture .hasset says about itself in its first bytes (META, then TXMI, both small).
 struct TextureHead { uint8_t format = 0; uint32_t channels = 0, layers = 1; bool valid = false; };
@@ -93,7 +94,7 @@ void setGpuArrayCook(const GpuArrayCookSettings& settings)
 {
     std::lock_guard<std::mutex> lock(g_mutex);
     g_settings = settings;
-    g_noEncoder = false;
+    g_failedKeys.clear();
     g_on = settings.format != 0 && !settings.cacheDir.empty();
 }
 
@@ -103,7 +104,7 @@ GpuArrayCookSettings gpuArrayCook()
     return g_settings;
 }
 
-bool gpuArrayCookEnabled() { return g_on.load() && !g_noEncoder.load(); }
+bool gpuArrayCookEnabled() { return g_on.load(); }
 
 uint8_t gpuArrayCookFormatFor(int rendererBackend)
 {
@@ -165,8 +166,18 @@ bool readGpuCookedArray(const std::string& sourcePath, std::vector<uint8_t>& out
         const std::string canon = src.lexically_normal().generic_string();
         return hex16(Hpak::fnv1a64Bytes(reinterpret_cast<const uint8_t*>(canon.data()), canon.size()));
     }();
+
+    // This path's own cook already came back unchanged once (unbuilt encoder, or a
+    // source this build cannot cook): skip it without retrying, other paths are unaffected.
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        if (g_failedKeys.count(key)) return false;
+    }
+
     const fs::path dir = fs::path(s.cacheDir) / ("f" + std::to_string(s.format) + "q" + std::to_string(s.quality));
     const fs::path cached = dir / (key + "_" + std::to_string(size) + "_" +
+                                   // file_time_type's rep is a 128-bit integer on newer libc++ (Xcode 26),
+                                   // which std::to_string has no overload for.
                                    std::to_string(static_cast<long long>(mtime.time_since_epoch().count())) + ".hasset");
 
     // Cache hit: the cooked file stands in for the source.
@@ -193,8 +204,11 @@ bool readGpuCookedArray(const std::string& sourcePath, std::vector<uint8_t>& out
     std::vector<uint8_t> cooked = Hpak::cookTextureBlob(blob, s.format, s.quality);
     if (cooked == blob)
     {
-        g_noEncoder = true;   // an RGBA8 array that stays RGBA8: no encoder for this format in this build
-        HE_LOG_WARN(Asset, "Texture array cook: this build cannot encode format %u, arrays stay RGBA8", s.format);
+        // Unbuilt encoder for this format, or a source this cook cannot handle (bad layout,
+        // already compressed, size mismatch) — either way just this path, not every array.
+        { std::lock_guard<std::mutex> lock(g_mutex); g_failedKeys.insert(key); }
+        HE_LOG_WARN(Asset, "Texture array cook: '%s' came back uncompressed for format %u, skipping this file",
+                    src.filename().string().c_str(), s.format);
         return false;
     }
     const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();

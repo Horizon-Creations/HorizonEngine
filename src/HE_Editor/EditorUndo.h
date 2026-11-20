@@ -1,6 +1,7 @@
 #pragma once
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -35,6 +36,12 @@ class EditorUndo
 {
 public:
 	void setWorld(HorizonWorld* world) { m_world = world; }
+
+	// Fired right before restore() calls m_world->clear() for an undo/redo/
+	// jump, so a holder of ids keyed to the outgoing world (RVT segments by
+	// entt::entity, same reasoning as CollabController::onWorldReplacing) can
+	// detach before clear() recycles them.
+	void onWorldReplacing(std::function<void()> fn) { m_onWorldReplacing = std::move(fn); }
 
 	void capturePre();      // serialize the current world into the scratch slot
 	// scratch → pending (edit session started). The label is decided NOW,
@@ -122,6 +129,7 @@ private:
 	static constexpr size_t kMaxEntries = 64;
 
 	HorizonWorld* m_world = nullptr;
+	std::function<void()> m_onWorldReplacing;
 	Snapshot      m_scratch;
 	Snapshot      m_pending;
 	std::string   m_pendingLabel;
