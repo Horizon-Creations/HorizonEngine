@@ -14,6 +14,7 @@
 #include <HorizonRendering/RenderGraph.h>
 #include <HorizonRendering/CommandBuffer.h>
 #include <HorizonRendering/FrameUploadRing.h>
+#include <HorizonRendering/RvtNearChunks.h>
 #include <HorizonRendering/FogVolume.h>
 #include <HorizonRendering/RenderConstants.h> // HE::kShadowMapResolution
 #include <HorizonRendering/GiBvh.h>
@@ -706,7 +707,7 @@ private:
 	void     StopRvtColdWork();
 	struct RvtSwap { HE::UUID landscapeMat, consumerMat; };
 	std::unordered_map<uint32_t, RvtSwap>  m_rvtSwaps;                   // per landscape entity
-	std::unordered_map<uint32_t, std::unordered_set<uint32_t>> m_rvtNear;   // SetRvtNearChunks: per landscape, chunks that keep their material
+	HE::RvtNearChunks m_rvtNear;                                         // SetRvtNearChunks: chunks that keep their material
 	// The lookup's feedback (HE_RVT_FEEDBACK, RvtLookup.h): a ring of Shared buffers of kRvtFeedbackSlots uints, one bound per
 	// frame at fragment buffer kRvtFeedbackBufferIndex; the frame's completion handler harvests it (the keys go to a shared list
 	// ReadRvtFeedback drains) and clears it for reuse. A frame that finds no free buffer binds the sink (written, never read).

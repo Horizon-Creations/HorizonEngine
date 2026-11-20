@@ -5,6 +5,7 @@
 #include <ContentManager/TextureBlockDecode.h> // CPU BC1/BC3/BC4/BC5 expand when the device cannot sample them
 #include <Renderer/UIFont.h>
 #include <HorizonRendering/RenderWorld.h>
+#include <HorizonRendering/RvtNearChunks.h>
 #include <HorizonRendering/GiCasterRange.h>
 #include <Diagnostics/EngineProfiler.h>
 #include <HorizonRendering/RenderExtractor.h>
@@ -3925,6 +3926,7 @@ struct D3D12RendererImpl
     static constexpr UINT                  kRvtMaxTables = 256;
     struct RvtSwap { HE::UUID landscapeMat, consumerMat; };
     std::unordered_map<uint32_t, RvtSwap>  rvtSwaps;         // per landscape entity
+    HE::RvtNearChunks                      rvtNear;          // SetRvtNearChunks: chunks that keep their material
     // The live state a still sets aside (RenderSceneImage): everything its frame reads that the request changes.
     struct RvtStill
     {
@@ -12225,7 +12227,8 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
     else if (!p.rvtSwaps.empty() && p.rvtPool[0])
         for (RenderObject& o : p.m_renderWorld.objects)
             if (o.terrainChunk)
-                if (const auto sw = p.rvtSwaps.find(o.terrainEntity); sw != p.rvtSwaps.end() && o.materialAssetId == sw->second.landscapeMat)
+                if (const auto sw = p.rvtSwaps.find(o.terrainEntity); sw != p.rvtSwaps.end() && o.materialAssetId == sw->second.landscapeMat
+                    && !p.rvtNear.keeps(o))   // the native near view keeps the chunk's own material
                 {
                     o.materialAssetId = sw->second.consumerMat;
                     o.paramOverride.clear();
@@ -14984,6 +14987,11 @@ void D3D12Renderer::SetRvtLandscape(uint32_t terrainEntity, const HE::UUID& land
 {
     if (consumerMaterial == HE::UUID{}) m_impl->rvtSwaps.erase(terrainEntity);
     else                               m_impl->rvtSwaps[terrainEntity] = { landscapeMaterial, consumerMaterial };
+}
+
+void D3D12Renderer::SetRvtNearChunks(uint32_t terrainEntity, const std::vector<uint32_t>& chunkEntities)
+{
+    m_impl->rvtNear.set(terrainEntity, chunkEntities);
 }
 
 void D3D12Renderer::ReleaseRvtConsumer(const HE::UUID& consumerMaterial)

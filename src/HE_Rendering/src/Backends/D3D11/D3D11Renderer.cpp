@@ -4,6 +4,7 @@
 #include <ContentManager/TextureArrayBuild.h> // texture-array payload layout (Thema 158)
 #include <ContentManager/TextureBlockDecode.h> // CPU BC1/BC3/BC4/BC5 expand when the device cannot sample them
 #include <HorizonRendering/RenderWorld.h>
+#include <HorizonRendering/RvtNearChunks.h>
 #include <HorizonRendering/GiCasterRange.h>
 #include <HorizonRendering/GiHeightfield.h>
 #include <HorizonRendering/UnderwaterCausticsShared.h> // shared wave trains for the caustic pass
@@ -1726,6 +1727,7 @@ struct D3D11RendererImpl
     // SetRvtLandscape: per landscape entity, the material its chunks are drawn with now and the consumer that replaces it
     struct RvtSwap { HE::UUID landscapeMat, consumerMat; };
     std::unordered_map<uint32_t, RvtSwap> rvtSwaps;
+    HE::RvtNearChunks rvtNear;   // SetRvtNearChunks: chunks that keep their material
     ComPtr<ID3D11DepthStencilView>   rvtPageDSV;
     ComPtr<ID3D11ShaderResourceView> rvtPageDepthSRV;
     ComPtr<ID3D11RenderTargetView>   viewportRTV;
@@ -7701,7 +7703,8 @@ void D3D11Renderer::DrawScene(int width, int height)
     else if (!p.rvtSwaps.empty() && p.rvtPageTex)
         for (RenderObject& o : p.m_renderWorld.objects)
             if (o.terrainChunk)
-                if (const auto sw = p.rvtSwaps.find(o.terrainEntity); sw != p.rvtSwaps.end() && o.materialAssetId == sw->second.landscapeMat)
+                if (const auto sw = p.rvtSwaps.find(o.terrainEntity); sw != p.rvtSwaps.end() && o.materialAssetId == sw->second.landscapeMat
+                    && !p.rvtNear.keeps(o))   // the native near view keeps the chunk's own material
                 {
                     o.materialAssetId = sw->second.consumerMat;
                     o.paramOverride.clear();
@@ -10434,6 +10437,11 @@ void D3D11Renderer::SetRvtLandscape(uint32_t terrainEntity, const HE::UUID& land
 {
     if (consumerMaterial == HE::UUID{}) m_impl->rvtSwaps.erase(terrainEntity);
     else                               m_impl->rvtSwaps[terrainEntity] = { landscapeMaterial, consumerMaterial };
+}
+
+void D3D11Renderer::SetRvtNearChunks(uint32_t terrainEntity, const std::vector<uint32_t>& chunkEntities)
+{
+    m_impl->rvtNear.set(terrainEntity, chunkEntities);
 }
 
 void D3D11Renderer::ReleaseRvtConsumer(const HE::UUID& consumerMaterial)

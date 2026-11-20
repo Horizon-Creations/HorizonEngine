@@ -12349,8 +12349,7 @@ void MetalRenderer::SetRvtLandscape(uint32_t terrainEntity, const HE::UUID& land
 
 void MetalRenderer::SetRvtNearChunks(uint32_t terrainEntity, const std::vector<uint32_t>& chunkEntities)
 {
-	if (chunkEntities.empty()) m_rvtNear.erase(terrainEntity);
-	else                       m_rvtNear[terrainEntity] = std::unordered_set<uint32_t>(chunkEntities.begin(), chunkEntities.end());
+	m_rvtNear.set(terrainEntity, chunkEntities);
 }
 
 // The feedback ring: buffers the GPU writes in a frame and the completion handler harvests. Shared so a handler that runs
@@ -12767,7 +12766,7 @@ void MetalRenderer::ApplyRvtSwaps()
 			if (const auto sw = m_rvtSwaps.find(o.terrainEntity); sw != m_rvtSwaps.end() && o.materialAssetId == sw->second.landscapeMat)
 			{
 				// The native near view: a chunk close to the camera keeps the landscape's own material (SetRvtNearChunks).
-				if (const auto nr = m_rvtNear.find(o.terrainEntity); nr != m_rvtNear.end() && nr->second.count(o.entityId)) continue;
+				if (m_rvtNear.keeps(o)) continue;
 				o.materialAssetId = sw->second.consumerMat;
 				o.paramOverride.clear();
 				o.sections.clear();

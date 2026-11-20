@@ -10035,7 +10035,8 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
     else if (!m_rvtSwaps.empty() && m_rvtPool[0].view)
         for (RenderObject& o : m_renderWorld.objects)
             if (o.terrainChunk)
-                if (const auto sw = m_rvtSwaps.find(o.terrainEntity); sw != m_rvtSwaps.end() && o.materialAssetId == sw->second.landscapeMat)
+                if (const auto sw = m_rvtSwaps.find(o.terrainEntity); sw != m_rvtSwaps.end() && o.materialAssetId == sw->second.landscapeMat
+                    && !m_rvtNear.keeps(o))   // the native near view keeps the chunk's own material
                 {
                     o.materialAssetId = sw->second.consumerMat;
                     o.paramOverride.clear();

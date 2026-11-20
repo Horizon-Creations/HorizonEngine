@@ -52,6 +52,7 @@ public:
     bool  SetRvtPageTable(const HE::UUID& consumerMaterial, const std::vector<std::vector<uint32_t>>& mips) override;
     bool  ReadbackRvtPageTable(const HE::UUID& consumerMaterial, std::vector<std::vector<uint32_t>>& mips) override;
     void  SetRvtLandscape(uint32_t terrainEntity, const HE::UUID& landscapeMaterial, const HE::UUID& consumerMaterial) override;
+    void  SetRvtNearChunks(uint32_t terrainEntity, const std::vector<uint32_t>& chunkEntities) override;
     void  ReleaseRvtConsumer(const HE::UUID& consumerMaterial) override;
     void  BeginRvtPages(uint32_t pagePx) override;
     void  EndRvtPages() override;

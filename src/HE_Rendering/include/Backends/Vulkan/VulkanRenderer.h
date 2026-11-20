@@ -6,6 +6,7 @@
 #include "VulkanUploadAlloc.h"
 #include <HorizonRendering/RenderConstants.h>
 #include <HorizonRendering/InstanceArena.h>
+#include <HorizonRendering/RvtNearChunks.h>
 #include <HorizonRendering/RenderWorld.h>
 #include <HorizonRendering/GiHeightfield.h>
 #include <HorizonRendering/RenderExtractor.h>
@@ -118,6 +119,7 @@ public:
 	bool  SetRvtPageTable(const HE::UUID& consumerMaterial, const std::vector<std::vector<uint32_t>>& mips) override;
 	bool  ReadbackRvtPageTable(const HE::UUID& consumerMaterial, std::vector<std::vector<uint32_t>>& mips) override;
 	void  SetRvtLandscape(uint32_t terrainEntity, const HE::UUID& landscapeMaterial, const HE::UUID& consumerMaterial) override;
+	void  SetRvtNearChunks(uint32_t terrainEntity, const std::vector<uint32_t>& chunkEntities) override { m_rvtNear.set(terrainEntity, chunkEntities); }
 	void  ReleaseRvtConsumer(const HE::UUID& consumerMaterial) override;
 	void  BeginRvtPages(uint32_t pagePx) override;
 	void  EndRvtPages() override;
@@ -586,6 +588,7 @@ private:
 	void        UpdateRvtCold();
 	struct RvtSwap { HE::UUID landscapeMat, consumerMat; };
 	std::unordered_map<uint32_t, RvtSwap>  m_rvtSwaps;    // per landscape entity
+	HE::RvtNearChunks                      m_rvtNear;     // SetRvtNearChunks: chunks that keep their material
 	bool rvtOneShot(const std::function<void(VkCommandBuffer)>& record);
 	bool rvtMakeImage(VkFormat format, uint32_t w, uint32_t h, uint32_t layers, uint32_t mips, VkImageUsageFlags usage,
 	                  VkImageCreateFlags flags, RvtImage& out);

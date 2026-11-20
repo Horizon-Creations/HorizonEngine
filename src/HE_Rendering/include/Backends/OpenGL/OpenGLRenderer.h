@@ -6,6 +6,7 @@
 #include "OpenGLShaderManager.h"
 #include <HorizonRendering/RenderWorld.h>
 #include <HorizonRendering/RenderExtractor.h>
+#include <HorizonRendering/RvtNearChunks.h>
 #include <HorizonRendering/FrameCull.h>
 #include <HorizonRendering/FrustumCuller.h>
 #include <HorizonRendering/OcclusionCuller.h>
@@ -62,6 +63,7 @@ public:
 	bool  SetRvtPageTable(const HE::UUID& consumerMaterial, const std::vector<std::vector<uint32_t>>& mips) override;
 	bool  ReadbackRvtPageTable(const HE::UUID& consumerMaterial, std::vector<std::vector<uint32_t>>& mips) override;
 	void  SetRvtLandscape(uint32_t terrainEntity, const HE::UUID& landscapeMaterial, const HE::UUID& consumerMaterial) override;
+	void  SetRvtNearChunks(uint32_t terrainEntity, const std::vector<uint32_t>& chunkEntities) override { m_rvtNear.set(terrainEntity, chunkEntities); }
 	void  ReleaseRvtConsumer(const HE::UUID& consumerMaterial) override;
 	bool  RenderSceneImage(const EditorCameraOverride& camera, uint32_t width, uint32_t height,
 	                       std::vector<uint8_t>& rgba) override;
@@ -499,6 +501,7 @@ private:
 	std::unordered_map<HE::UUID, RvtTable> m_rvtTables;   // per consumer material
 	struct RvtSwap { HE::UUID landscapeMat, consumerMat; };
 	std::unordered_map<uint32_t, RvtSwap>  m_rvtSwaps;    // per landscape entity
+	HE::RvtNearChunks                      m_rvtNear;     // SetRvtNearChunks: chunks that keep their material
 	void         BindRvtForDraw(const HE::UUID& material);
 	unsigned int m_clusterSSBO[3]   = { 0, 0, 0 }; // lights, grid, index list
 	void         CreateClusterSSBOs();

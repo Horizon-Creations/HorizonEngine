@@ -12454,7 +12454,8 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 	else if (!m_rvtSwaps.empty() && m_rvtPool[0])
 		for (RenderObject& o : m_renderWorld.objects)
 			if (o.terrainChunk)
-				if (const auto sw = m_rvtSwaps.find(o.terrainEntity); sw != m_rvtSwaps.end() && o.materialAssetId == sw->second.landscapeMat)
+				if (const auto sw = m_rvtSwaps.find(o.terrainEntity); sw != m_rvtSwaps.end() && o.materialAssetId == sw->second.landscapeMat
+				    && !m_rvtNear.keeps(o))   // the native near view keeps the chunk's own material
 				{
 					o.materialAssetId = sw->second.consumerMat;
 					o.paramOverride.clear();
