@@ -59,6 +59,41 @@ TEST_CASE("RVT node: the fragment calls the shared lookup and declares the table
 	CHECK(pg.find("heRvt") == std::string::npos);
 }
 
+TEST_CASE("RVT node wired into Displacement: the domain stage gets a neutral value, never a call to the undeclared lookup")
+{
+	using T = HE::MatNodeType;
+	// Only the displacement reads it: no fragment use, so nothing of the RVT is declared anywhere.
+	{
+		HE::MaterialGraph g;
+		const int out = g.addNode(T::Output);
+		const int rvt = g.addNode(T::RvtSample);
+		g.connect(rvt, 2, out, HE::kMatOutputDisplacementPin); // AO: Float, the pin's type
+		const HE::MatShaderGen gen = HE::generateFragment(g);
+		REQUIRE_FALSE(gen.displacementBody.empty());
+		CHECK(gen.displacementBody.find("heRvt") == std::string::npos);
+		CHECK(gen.displacementBody.find("_ao = 1.0") != std::string::npos);
+		CHECK(gen.displacementBody.find("heDisp") != std::string::npos);
+		CHECK(gen.glsl.find("heRvt") == std::string::npos);
+	}
+	// The same node also feeds the fragment: the fragment keeps its lookup, the domain stage still has no call to it.
+	{
+		HE::MaterialGraph g = rvtGraph();
+		int out = 0, rvt = 0;
+		for (const HE::MatGraphNode& n : g.nodes)
+		{
+			if (n.type == T::Output) out = n.id;
+			if (n.type == T::RvtSample) rvt = n.id;
+		}
+		REQUIRE(out != 0);
+		REQUIRE(rvt != 0);
+		g.connect(rvt, 3, out, HE::kMatOutputDisplacementPin);
+		const HE::MatShaderGen gen = HE::generateFragment(g);
+		REQUIRE_FALSE(gen.displacementBody.empty());
+		CHECK(gen.displacementBody.find("heRvt") == std::string::npos);
+		CHECK(gen.glsl.find("heRvtSample(vWorldPos.xz") != std::string::npos);
+	}
+}
+
 TEST_CASE("RVT node: the HLSL keeps t40..t43, spends no live sampler, and the real FXC compiles it")
 {
 	using B = HE::MaterialShaderLibrary::Backend;
@@ -174,7 +209,7 @@ TEST_CASE("RVT cold bit (step 9): bit 23 never corrupts the 24-bit slot, boundar
 	CHECK(2048u < kMaxSlot);
 }
 
-TEST_CASE("RVT node: the MSL reads the table and the pool as textures 17..20 and spends no sampler (Metal's cap is 16)")
+TEST_CASE("RVT node: the MSL reads the table and the pool as textures 18..21 and spends no sampler (Metal's cap is 16)")
 {
 	using B = HE::MaterialShaderLibrary::Backend;
 	HE::MaterialShaderLibrary lib;
@@ -182,23 +217,24 @@ TEST_CASE("RVT node: the MSL reads the table and the pool as textures 17..20 and
 	const auto& ms = lib.fragment(std::hash<std::string>{}("rvt-node-msl"), glsl, B::Metal);
 	REQUIRE_MESSAGE(ms.ok, ms.log);
 	const std::string& msl = ms.source;
-	CHECK_MESSAGE(msl.find("heRvtTable [[texture(17)]]") != std::string::npos, msl);
-	CHECK(msl.find("heRvtAlbedo [[texture(18)]]") != std::string::npos);
-	CHECK(msl.find("heRvtNormal [[texture(19)]]") != std::string::npos);
-	CHECK(msl.find("heRvtSurface [[texture(20)]]") != std::string::npos);
+	// Texture 17 is heFogVolume's (Thema 225 step 5); RVT starts one higher than it used to.
+	CHECK_MESSAGE(msl.find("heRvtTable [[texture(18)]]") != std::string::npos, msl);
+	CHECK(msl.find("heRvtAlbedo [[texture(19)]]") != std::string::npos);
+	CHECK(msl.find("heRvtNormal [[texture(20)]]") != std::string::npos);
+	CHECK(msl.find("heRvtSurface [[texture(21)]]") != std::string::npos);
 	// The packed pool (step 6k): the normal layer holds x and z, the lookup rebuilds y from the unit length.
 	const char* packEnv = std::getenv("HE_RVT_PACK");
 	const size_t nrm = msl.find("heRvtNormalOf(");
 	CHECK(nrm != std::string::npos);
 	if (!(packEnv && *packEnv == '0') && nrm != std::string::npos)
 		CHECK(msl.find("sqrt(", nrm) != std::string::npos);
-	// The cold pool's block-compressed arrays (step 6j): textures 21..23, sampled (inline sampler), selected by the table entry's bit 23.
+	// The cold pool's block-compressed arrays (step 6j): textures 22..24, sampled (inline sampler), selected by the table entry's bit 23.
 	const char* coldEnv = std::getenv("HE_RVT_COLD");
 	if (!(coldEnv && *coldEnv == '0'))
 	{
-		CHECK(msl.find("heRvtAlbedoC [[texture(21)]]") != std::string::npos);
-		CHECK(msl.find("heRvtNormalC [[texture(22)]]") != std::string::npos);
-		CHECK(msl.find("heRvtSurfaceC [[texture(23)]]") != std::string::npos);
+		CHECK(msl.find("heRvtAlbedoC [[texture(22)]]") != std::string::npos);
+		CHECK(msl.find("heRvtNormalC [[texture(23)]]") != std::string::npos);
+		CHECK(msl.find("heRvtSurfaceC [[texture(24)]]") != std::string::npos);
 		CHECK(msl.find("heRvtAlbedoC.sample(") != std::string::npos);
 	}
 	// Fetch only (.read), and no [[sampler(n)]] with n >= 16 anywhere: an inline constexpr sampler stands in for the four.

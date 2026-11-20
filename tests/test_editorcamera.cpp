@@ -275,6 +275,8 @@ TEST_CASE("ViewMode: the headless override reads VIEWMODE first, then the old GB
 	CHECK(viewModeOverride(ViewMode::Lit, "unlit",     nullptr) == ViewMode::Unlit);
 	CHECK(viewModeOverride(ViewMode::Lit, "wireframe", "2")     == ViewMode::Wireframe);
 	CHECK(viewModeOverride(ViewMode::Lit, "normals",   nullptr) == ViewMode::GBufferNormal);
+	CHECK(viewModeOverride(ViewMode::Lit, "rvt",       nullptr) == ViewMode::RvtDebug);
+	CHECK(viewModeOverride(ViewMode::Lit, "7",         nullptr) == ViewMode::RvtDebug);
 	CHECK(viewModeOverride(ViewMode::Lit, "5",         nullptr) == ViewMode::GBufferRoughSpecMetal);
 	// Garbage keeps the UI's value rather than inventing a mode.
 	CHECK(viewModeOverride(ViewMode::Unlit, "bogus", nullptr) == ViewMode::Unlit);

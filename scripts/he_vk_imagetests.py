@@ -422,6 +422,41 @@ CASES = {
              lambda p: sum(p["window"]) > sum(p["below_rim"]) + 90),
         ]},
     },
+    # Volumetric fog (Thema 225 step 5, docs/volumetric-fog-plan.md, docs/volumetric-fog-vulkan-2026-11-02.md):
+    # the FOGTEST "slits" witness (a 14 m wall with three 1.2 m slits 14 m ahead of the camera at
+    # (0, 3, -24) looking +Z, the low morning sun (TOD 0.3: toward +X +Z, 17 degrees up) behind it, so the
+    # slits throw shafts through the fog toward the camera), density 0.03, Low grid (96 x 54 x 32 - the
+    # CPU rasteriser pays per froxel), the clock pinned. This is the FIRST execution of the Vulkan
+    # Inject/Integrate/Apply passes anywhere (written on a Mac without a Vulkan device), under the
+    # validation layer: any message while the picture is made fails the case.
+    #   m0         fogMode 0: the passes never run (log: no "volumetric fog frame" line).
+    #   m1         fogMode 1, forward: Inject + Integrate + Apply + heApplyFogT's binding 34.
+    #   m1_parity  fogMode 1 with HE_FOG_PARITY=1 (noise, bank, haze, sun and lights off): the volume
+    #              must read like the analytic fog (plan §9). REPORT ONLY here: the FOGTEST boxes are
+    #              built-in shaded, whose fog colour is the procedural sky, not the baked cube the
+    #              volume reads - the parity gate of plan §9 is judged on graph-material pixels.
+    #   m1_def     fogMode 1, deferred: the Apply split lands in the resolve's m_hdrLoadRP.
+    # Judged: the volume changes the picture (m0 vs m1 mean |Δ| >= 0.5 steps - an unmeasured floor
+    # chosen to fail only a SILENTLY OFF volume, byte-identical frames; re-tighten from the first
+    # run's printed number) and the log witnesses. The shaft look is for the eye: the artifact
+    # holds m0/m1/m1_parity/m1_def BMPs.
+    "fog": {
+        "base": {"FOGTEST": "slits", "SKYTEST": "1", "TOD": "0.3", "CLOUDMODE": "0", "COVERAGE": "0",
+                 "CAMX": "0", "CAMY": "3", "CAMZ": "-24", "YAW": "180", "PITCH": "3",
+                 "AA": "0", "BLOOM": "0", "RENDERPATH": "0",
+                 "FOGDENSITY": "0.03", "FOGQUALITY": "0", "FRAMES": "12"},
+        "variants": {
+            "m0":        {"dump": {"FOGMODE": "0"}, "env": {"HE_SKY_TIME": "10"}},
+            "m1":        {"dump": {"FOGMODE": "1"}, "env": {"HE_SKY_TIME": "10"}},
+            "m1_parity": {"dump": {"FOGMODE": "1"}, "env": {"HE_SKY_TIME": "10", "HE_FOG_PARITY": "1"}},
+            "m1_def":    {"dump": {"FOGMODE": "1", "RENDERPATH": "1"}, "env": {"HE_SKY_TIME": "10"}},
+        },
+        "pairs": [("m0", "m1", 0.5), ("m0", "m1_parity", None), ("m1", "m1_def", None)],
+        "require": {v: ["HE_DUMP_FOGTEST witness scene added"] + ([] if v == "m0" else ["volumetric fog frame (grid 96x"])
+                    for v in ("m0", "m1", "m1_parity", "m1_def")},
+        "forbid": {"m0": ["volumetric fog frame"],
+                   "m1": ["volumetric fog off"], "m1_parity": ["volumetric fog off"], "m1_def": ["volumetric fog off"]},
+    },
     # UI Image widget (Thema 157): tile 12 of HE_DUMP_UITEST=image is an Image
     # element at x 60..300, y 590..700 of the 1280x720 frame showing a generated
     # picture (red top-left, green top-right, blue bottom-left, yellow bottom-

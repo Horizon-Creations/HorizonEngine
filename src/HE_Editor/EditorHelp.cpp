@@ -181,6 +181,12 @@ namespace
 	  "Where this entity lives when the scene is split into cells: in a cell that "
 	  "loads around the camera, or always loaded in the base scene.",
 	  "", "scenes#streaming" },
+	{ "Component/Mobility", "Mobility",
+	  "Whether this entity may ever change at run time. Static lets the engine "
+	  "reduce it to flat render/physics data (entity cooking) once nothing else "
+	  "about it objects; Movable keeps it a full entity. With no Mobility "
+	  "component the engine decides on its own from what the entity carries.",
+	  "", "rendering#performance" },
 	{ "Component/LOD", "LOD",
 	  "Swaps this entity's mesh for cheaper versions as the camera gets further "
 	  "away.",
@@ -1018,6 +1024,69 @@ namespace
 	  "so a camera that hovers on a boundary does not make plants flicker "
 	  "between two levels. The Draw Distance edge is not affected.",
 	  "", "scenes#foliage" },
+	{ "Foliage/Generate LODs", "",
+	  "Makes simpler copies of the layer's mesh as assets next to it (Name_LOD1, "
+	  "Name_LOD2 ...) and replaces this layer's detail levels with them. Each "
+	  "level starts at the distance where its error shrinks to the pixel error "
+	  "you choose, and the far ones draw fewer plants. The layer's Draw Distance "
+	  "is kept; a level that would start beyond it is left out. Undo takes the "
+	  "levels back; the generated files stay on disk.",
+	  "", "scenes#foliage" },
+
+	{ "Foliage/Bake Impostor", "",
+	  "Bakes a picture of the layer's plant, seen from two sides, and makes it the "
+	  "layer's farthest detail level: a cross card (two crossed quads, sized to the "
+	  "plant) with a cut-out material over the picture. Writes Name_Impostor, "
+	  "Name_ImpostorMat and Name_ImpostorCard next to the mesh; baking again "
+	  "replaces them in place. The size is the one in Generate LODs. Undo takes "
+	  "the level back; the files stay on disk.",
+	  "", "scenes#foliage" },
+
+	// ── Generate LODs (dialog) ───────────────────────────────────────────────
+	{ "Generate LODs/Levels", "",
+	  "How many simpler copies to make after the original: 3 gives the original "
+	  "plus three, each with fewer triangles.",
+	  "", "rendering#performance" },
+	{ "Generate LODs/Reduction Per Level", "",
+	  "The share of the previous level's triangles each level keeps: 0.5 halves "
+	  "the count every step. The last level ignores this and lands on Lowest Level.",
+	  "", "rendering#performance" },
+	{ "Generate LODs/Lowest Level", "",
+	  "The share of the original's triangles the last level keeps, in percent.",
+	  "", "rendering#performance" },
+	{ "Generate LODs/Pixel Error", "",
+	  "How wrong a level may look, in pixels on a 1080 p screen at 60 degrees, "
+	  "where it takes over. Each level's distance is worked out from the error "
+	  "its simplification introduced, so a higher value switches earlier.",
+	  "", "rendering#performance" },
+	{ "Generate LODs/Foliage Mode", "",
+	  "For leaf cards and other thin geometry: whole pieces may disappear, and if "
+	  "the material's texture has an alpha channel a level has to keep most of "
+	  "the original's visible leaf area. Leave off for solid meshes such as rocks.",
+	  "", "rendering#performance" },
+	{ "Generate LODs/End on Cross Card", "",
+	  "Adds the engine's cross card as the last detail level. Without Bake "
+	  "Impostor it draws the layer's material, so it only looks right for "
+	  "materials whose texture already shows one plant.",
+	  "", "scenes#foliage" },
+	{ "Generate LODs/Bake Impostor", "",
+	  "Also bakes a picture of the plant, seen from two sides, and puts it on the "
+	  "last level's cross card (the card is sized to the plant). Implies End on "
+	  "Cross Card. The files are Name_Impostor, Name_ImpostorMat and "
+	  "Name_ImpostorCard next to the mesh.",
+	  "", "scenes#foliage" },
+	{ "Generate LODs/Impostor Size", "",
+	  "Texels along one side of each view; the picture holds both views side by "
+	  "side. 512 suits a plant that is a few pixels tall when the card takes over; "
+	  "1024 for a tree that is still large.",
+	  "", "scenes#foliage" },
+	{ "Generate LODs/Generate", "",
+	  "Writes the simplified meshes next to the original and applies them where "
+	  "this dialog was opened from.",
+	  "", "rendering#performance" },
+	{ "Generate LODs/Cancel", "",
+	  "Closes the dialog without making anything.",
+	  "Esc", "rendering#performance" },
 
 	// ── Navigation ───────────────────────────────────────────────────────────
 	{ "Nav Mesh/Cell Size", "",
@@ -1259,6 +1328,57 @@ namespace
 	  "How much the fog pools near the ground instead of filling the air evenly. "
 	  "High values give valley mist.",
 	  "", "rendering#sky" },
+	{ "Environment/Mode##fogvol", "Volumetric Fog Mode",
+	  "Analytic keeps today's flat per-pixel blend toward the horizon. Volumetric "
+	  "raymarches a real 3D fog volume with sun/light shafts and in-fog shadow, past "
+	  "Volume Distance the analytic fog still takes over. A Sky you add today starts "
+	  "on Volumetric (it draws nothing until Density or Bank Density is above 0); a "
+	  "scene saved before this existed stays Analytic. Greyed out on a backend that "
+	  "has not implemented it yet (Direct3D 11/12 for now): a scene with Volumetric "
+	  "chosen still loads and plays there, with the Density fog standing in.",
+	  "", "rendering#sky" },
+	{ "Environment/Quality##fogvol", "Volumetric Fog Quality",
+	  "Size of the froxel grid the volume is computed on. Higher resolves finer "
+	  "light shafts and sharper bank edges, at a higher GPU cost.",
+	  "", "rendering#performance" },
+	{ "Environment/Volume Distance", "",
+	  "How far the volumetric fog reaches before the Density fog above continues "
+	  "seamlessly. Clamped to the directional shadow distance, so the volume is "
+	  "never asked to shade past where it has a shadow map to sample.",
+	  "", "rendering#sky" },
+	{ "Environment/Albedo##fogvol", "Volumetric Fog Albedo",
+	  "Scattering tint of the volume. White scatters the sky and sun colour "
+	  "unchanged; a tint colours the fog itself, the way dust or smoke would.",
+	  "", "rendering#sky" },
+	{ "Environment/Anisotropy", "",
+	  "Henyey-Greenstein scattering phase. Negative scatters light back toward the "
+	  "camera; positive forms a brighter shaft when looking toward the sun.",
+	  "", "rendering#sky" },
+	{ "Environment/Noise Amount", "",
+	  "How much 3D noise breaks up the volume's height formula. 0 keeps a smooth "
+	  "layer; higher gives drifting wisps and clearer patches. Foggy weather raises "
+	  "it; once you move it the weather leaves it alone until the next preset pick.",
+	  "", "rendering#sky" },
+	{ "Environment/Noise Scale", "",
+	  "World size of one noise period. Small values give fine wisps, large values "
+	  "broad patches of thicker and thinner fog.",
+	  "", "rendering#sky" },
+	{ "Environment/Bank Density", "",
+	  "A ground-hugging fog bank layered on top of the height fog, with its own "
+	  "edges — valley mist or haze sitting over a lake bed. A Weather preset drives "
+	  "it (Foggy a thick bank, Rain a faint one); once you move it the weather leaves "
+	  "it alone until the next preset pick.",
+	  "", "rendering#sky" },
+	{ "Environment/Bank Base", "",
+	  "World Y of the fog bank's lower edge.", "", "rendering#sky" },
+	{ "Environment/Bank Thickness", "",
+	  "How tall the fog bank stands. Its top edge is soft and eroded by noise, "
+	  "never a hard line.",
+	  "", "rendering#sky" },
+	{ "Environment/Local Light Scatter", "",
+	  "How much point and spot lights scatter inside the volume, on top of the "
+	  "sun or moon. 0 switches it off.",
+	  "", "rendering#sky" },
 	{ "Environment/Star Brightness", "",
 	  "How bright the star field is. Stars fade out by themselves as the sky "
 	  "lightens.",
@@ -1356,7 +1476,8 @@ namespace
 	  "", "rendering#weather" },
 	{ "Weather/Fog Density##wx", "",
 	  "Atmospheric fog thickness — the Sky's Density. Moving it takes it away from the "
-	  "preset until the next pick.",
+	  "preset until the next pick. With the Sky's Fog Mode on Volumetric the preset "
+	  "also sets the ground bank and its noise (Bank Density, Noise Amount).",
 	  "", "rendering#weather" },
 	{ "Weather/Wind Speed##wx", "",
 	  "Cloud drift and rain slant, 1 = calm. The Sky's Wind Speed, set from here.",
@@ -1480,6 +1601,11 @@ namespace
 	{ "UI Text/Color", "",
 	  "Text colour, alpha included. Fading a whole panel is usually better done on "
 	  "the panel's opacity than on each label.",
+	  "", "ui#elements" },
+	{ "UI Text/Font", "",
+	  "The Font asset this text draws with, baked into its own atlas at the "
+	  "font's size. Empty uses the shared default UI font — the same resolution "
+	  "a widget's Font slot goes through.",
 	  "", "ui#elements" },
 	{ "UI Image/Tint", "",
 	  "Multiplied into the image. White leaves the texture alone; the alpha "
@@ -2028,6 +2154,19 @@ namespace
 	  "waypoint a script looks up by name. Auto leaves the choice to the split. Takes "
 	  "effect the next time the scene is split.",
 	  "", "scenes#streaming" },
+	{ "Mobility/Static", "",
+	  "This entity never moves, scripts or reparents, so it may be cooked into "
+	  "flat render/physics data at export and at startup. Click to make it "
+	  "Movable. Static on an entity that still carries a script, an animator or "
+	  "a dynamic body does not cook it either way; the analysis reports the "
+	  "contradiction instead. Without a choice of its own, an entity shows "
+	  "Static when nothing about it blocks cooking.",
+	  "", "rendering#performance" },
+	{ "Mobility/Movable", "",
+	  "Keeps this entity a full entity, never cooked — use it to pin an entity "
+	  "that is still changed from outside the paths cooking watches (code that "
+	  "writes the transform directly, for instance). Click to make it Static.",
+	  "", "rendering#performance" },
 	{ "Save State/Enabled", "",
 	  "Include this entity in savegames. Off, it is whatever the scene file says "
 	  "every time the game is loaded.",
@@ -2112,6 +2251,13 @@ namespace
 	{ "LOD/+ Level", "",
 	  "Adds a detail level: a cheaper mesh and the distance from which it takes "
 	  "over.",
+	  "", "rendering#performance" },
+	{ "LOD/Generate LODs", "",
+	  "Makes simpler copies of this entity's mesh as assets next to it (Name_LOD1, "
+	  "Name_LOD2 ...) and replaces the levels here with them: LOD 0 stays the "
+	  "mesh itself, each further level shows from the distance where its error "
+	  "shrinks to the pixel error you choose, scaled by the entity's size. Undo "
+	  "takes the levels back; the generated files stay on disk.",
 	  "", "rendering#performance" },
 	{ "UI Canvas/Screen Space", "",
 	  "The canvas is drawn flat on the screen, at the same size wherever the "
@@ -2735,6 +2881,14 @@ namespace
 	  "The triangle edges of every mesh, unlit. Shows how dense a model is and "
 	  "where the LOD switches; the sky and particles stay as they are.",
 	  "Alt+2", "editor#viewport" },
+	{ "Viewport View Mode/RVT Mip Levels", "",
+	  "Unlit, with every landscape drawn from the Runtime Virtual Texture coloured "
+	  "by the detail level of the page it reads: red finest (mip 0), then orange, "
+	  "yellow, green, cyan, blue, magenta for ever coarser pages. Dark stripes mark "
+	  "pixels that want a finer page than the pool holds there, so they show a "
+	  "coarser one. Surfaces without RVT stay plain Unlit; with the virtual texture "
+	  "off (Preferences > World > Virtual Texture) nothing is coloured.",
+	  "", "editor#viewport" },
 	{ "Viewport View Mode/Base Color", "",
 	  "The G-buffer's base colour, straight from the material. Needs the "
 	  "Deferred render path (Preferences > Rendering) — the forward path has "
@@ -2837,6 +2991,12 @@ namespace
 	  "Reads the source file again and rebuilds the asset from it — after the "
 	  "model was changed in the program it came from. A texture keeps its "
 	  "color space setting.",
+	  "", "editor#content-browser" },
+	{ "Content Browser/Generate LODs...", "",
+	  "Makes simpler copies of this static mesh as assets next to it (Name_LOD1, "
+	  "Name_LOD2 ...), e.g. 100 / 50 / 25 / 10 % of the triangles. Material slots "
+	  "are kept. Running it again replaces the copies and keeps their references. "
+	  "A foliage layer or a LOD component then uses them via its own Generate LODs.",
 	  "", "editor#content-browser" },
 	{ "Content Browser/Color Space...", "",
 	  "Says whether the selected textures hold color (sRGB, decoded by the GPU) "
@@ -4344,6 +4504,13 @@ namespace
 	  "Keeps mesh and texture data in main memory after it has been uploaded to "
 	  "the GPU. It costs RAM and saves a re-read.",
 	  "", "advanced#assets" },
+	{ "Preferences/Content Browser/Generate LODs on Import", "",
+	  "When a static mesh is imported, also write simplified copies next to it "
+	  "(Name_LOD1, Name_LOD2 ... at 50, 25 and 10 % of the triangles). Reimporting "
+	  "a mesh that already has them refreshes them. Off by default: it adds files "
+	  "to every import. Generate LODs in the Content Browser does the same for a "
+	  "mesh that is already in the project.",
+	  "", "editor#preferences" },
 	{ "Preferences/Content Browser/Refresh Interval (s)", "",
 	  "How often the Content Browser re-checks the project folder for files "
 	  "changed outside the editor.",
@@ -4739,6 +4906,18 @@ namespace
 	  "the engine's own wordmark, and the engine does not advertise itself "
 	  "inside your game. Saved to Config/ProjectSettings.json.",
 	  "", "export#overview" },
+	{ "Project General/Cook static entities", "Cook static entities",
+	  "On by default. When on, the export finds the meshes that never change while the game runs "
+	  "(no script, animation, physics body, replication or level of detail, and no "
+	  "such parent) and ships that list inside each scene. The game then draws them "
+	  "from a flat block of ready data instead of walking every entity each frame, "
+	  "and skips the analysis at load. A scene exported without it loads and draws "
+	  "exactly as before.\n\n"
+	  "An entity that a script or the engine API changes afterwards, or that gets a "
+	  "script, an animator or a body, falls back to normal handling on its own. "
+	  "Saved to Config/ProjectSettings.json as game.cookStaticEntities. The editor "
+	  "viewport is not affected; HE_COOK_STATIC=1 is the editor's switch.",
+	  "", "export#overview" },
 	{ "Project General/Splash image", "Splash image",
 	  "A PNG the splash shows, project-relative (Content/Splash.png). The export "
 	  "copies it beside project.hcfg as Splash.png; the game reads it from "
@@ -5106,6 +5285,48 @@ namespace
 	  "floor under the slope bias — the number that matters on flat ground under "
 	  "a high sun.",
 	  "", "rendering#shadows" },
+	// ── World ▸ Virtual Texture ──────────────────────────────────────────────
+	{ "Virtual Texture/Native near view", "Native near view",
+	  "Keeps the landscape's own material close to the camera. A page has a fixed ground resolution (the texel size), the "
+	  "material has its textures' resolution, which is far finer: from close up the pages are blurry whatever their level. "
+	  "With this on, every landscape chunk nearer than the distance where one finest-level texel covers one screen pixel draws "
+	  "its own material, and only the chunks beyond it are drawn from pages. That distance follows the texel size and the "
+	  "camera (about 290 m for 0.25 m texels on a 1080-pixel-high image); a finer texel size moves it closer and saves more.\n\n"
+	  "The price: the near chunks run the full material again, and its large texture arrays stay in memory. Off draws every "
+	  "chunk from pages. Applies at once.",
+	  "", "rendering#performance" },
+	{ "Virtual Texture/Pool size", "Pool size",
+	  "How many pages the pool holds, shared by every landscape: each page is 136 x 136 pixels in three layers, about "
+	  "0.22 MB, so 512 pages are 108 MB of video memory. A pool that is too small shows up on this page as a request "
+	  "count and an orange line: the farthest pages are then not painted and that part of the landscape stays on its "
+	  "own material.\n\n"
+	  "Changing it rebuilds the pool and repaints every page, so pick it once.",
+	  "", "rendering#performance" },
+	{ "Virtual Texture/Texel size", "Texel size",
+	  "How much ground one pixel of the finest page covers. 0.25 m is a pixel the size of a hand span on the screen from a "
+	  "walking camera; each finer step (12.5, 6.3, 3.1, 1.6 cm) doubles the detail. The finest level is only kept within a "
+	  "short distance of the camera: up to where one of its texels still covers a screen pixel (about 15 m at 1.6 cm on a "
+	  "1080-pixel image), each coarser level twice as far, so a finer texel costs pages close by, not over the whole landscape. 0.5 m and 1 m are the coarse end. Where the "
+	  "backend reports which pages the image actually reads (Metal), those are painted, within the same distance bands. "
+	  "A landscape too large for the finest choice (over 2048 pages a side) gets the finest texel that fits.\n\n"
+	  "Changing it rebuilds the pool and repaints every page, so pick it once.",
+	  "", "rendering#performance" },
+	{ "Virtual Texture/Near radius", "Near radius",
+	  "How far around the camera the landscape is kept at the finest level, in metres. Beyond it coarser levels are used, "
+	  "four times fewer pages per step. A larger radius needs more pages (see the pool size) and paints more after a "
+	  "change; changes to it apply at once, without rebuilding anything.",
+	  "", "rendering#performance" },
+	{ "Virtual Texture/Activation radius", "Activation radius",
+	  "How near a landscape must be to the camera, measured to its edge, to be drawn from pages. A farther one keeps "
+	  "drawing its own material and holds no pages, so a world of many landscapes only pays for the ones around you. "
+	  "It is drawn from pages again once it comes back in range, from a slightly larger radius than it switched on at, so "
+	  "it does not flicker at the border. Applies at once.",
+	  "", "rendering#performance" },
+	{ "Virtual Texture/Pages per frame", "Pages per frame",
+	  "The most pages one frame may paint, over every landscape together: the budget that spreads a first fill or the "
+	  "repaint after a stroke over several frames instead of one long one. A higher number finishes sooner and makes the "
+	  "frames it works in longer. The status line on this page shows what the last painting cost.",
+	  "", "rendering#performance" },
 	// ── Physics ▸ Simulation ─────────────────────────────────────────────────
 	{ "Physics/Fixed rate", "Fixed rate",
 	  "How many simulation steps a second of game time is cut into, whatever "
@@ -10139,6 +10360,7 @@ namespace
 		// The target-folder dialog of "Import to Project...", raised from the same
 		// context menu.
 		{ "Import to Project/", "editor-interface", "Editor Interface", "Content Browser" },
+		{ "Generate LODs/",     "editor-interface", "Editor Interface", "Content Browser" },
 		{ "New Asset/",        "editor-interface", "Editor Interface", "Creating assets" },
 		{ "Console/",          "editor-interface", "Editor Interface", "Console" },
 		{ "Audio Mixer/",      "editor-interface", "Editor Interface", "Audio Mixer" },
@@ -10211,7 +10433,8 @@ namespace
 		{ "Multiplayer/",      "editor-settings", "Settings Reference", "Project: multiplayer" },
 		{ "Render Defaults/",  "editor-settings", "Settings Reference", "Project: render defaults" },
 		{ "Shadows/",          "editor-settings", "Settings Reference", "Project: shadows" },
-		{ "Physics/",          "editor-settings", "Settings Reference", "Project: physics" },
+		{ "Virtual Texture/",  "editor-settings", "Settings Reference", "Project: virtual texture" },
+		{ "Physics/",         "editor-settings", "Settings Reference", "Project: physics" },
 		{ "Audio Buses/",      "editor-settings", "Settings Reference", "Project: audio buses" },
 		{ "Permissions/",    "editor-settings", "Settings Reference", "Project permissions" },
 		{ "Fonts/",          "editor-settings", "Settings Reference", "Project fonts" },
@@ -10319,7 +10542,7 @@ namespace
 		"Animator State Machine", "Root Motion", "Animation Layers",
 		"Inverse Kinematics",
 		"Property Animator", "Sequence Player", "Particle System",
-		"Save State", "Streaming", "LOD", "Environment", "Weather", "UI Canvas", "UI Element",
+		"Save State", "Streaming", "Mobility", "LOD", "Environment", "Weather", "UI Canvas", "UI Element",
 		"UI Text", "UI Image", "UI Button",
 	};
 

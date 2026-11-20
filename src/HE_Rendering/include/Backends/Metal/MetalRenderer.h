@@ -1,6 +1,8 @@
 #pragma once
 #include <vector>
 #include <cstdint>
+#include <memory>
+#include <unordered_set>
 #include <Renderer/IRenderer.h>
 #include <Renderer/GpuPassAccumulator.h>
 #include "MetalShaderManager.h"
@@ -12,6 +14,8 @@
 #include <HorizonRendering/RenderGraph.h>
 #include <HorizonRendering/CommandBuffer.h>
 #include <HorizonRendering/FrameUploadRing.h>
+#include <HorizonRendering/RvtNearChunks.h>
+#include <HorizonRendering/FogVolume.h>
 #include <HorizonRendering/RenderConstants.h> // HE::kShadowMapResolution
 #include <HorizonRendering/GiBvh.h>
 #include <HorizonRendering/GIProbeGrid.h>
@@ -110,6 +114,10 @@ public:
 	bool  ReadbackRvtPageTable(const HE::UUID& consumerMaterial, std::vector<std::vector<uint32_t>>& mips) override;
 	void  SetRvtLandscape(uint32_t terrainEntity, const HE::UUID& landscapeMaterial, const HE::UUID& consumerMaterial) override;
 	void  ReleaseRvtConsumer(const HE::UUID& consumerMaterial) override;
+	void  SetRvtNearChunks(uint32_t terrainEntity, const std::vector<uint32_t>& chunkEntities) override;
+	void  SetSceneVisible(bool visible) override { m_sceneHidden = !visible; }
+	bool  m_sceneHidden = false;   // SetSceneVisible: the offscreen viewport is not shown this frame, its scene passes are skipped
+	bool  ReadRvtFeedback(std::vector<uint32_t>& keys) override;
 	void  InvalidateMaterial(const HE::UUID& materialId) override;
 	void  WarmupMaterials(const std::vector<HE::UUID>& materialIds) override;
 	ShaderBuildStatus PumpShaderBuilds() override;
@@ -231,8 +239,13 @@ private:
 	// lighting resolve is drawn (plus the forward-routed opaque replay), and the
 	// transparency list is taken from the hand-off. Everything else (skinned,
 	// sky, transparency, particles) is the SAME code as forward.
+	// fogCmdBuf / fogScenePass: only when the volumetric fog is on this frame. EncodeScene then
+	// ends the encoder after the sky, runs the full-screen Apply pass on fogCmdBuf and opens
+	// a second encoder from fogScenePass (colour + depth Load) for the translucent tail; the
+	// encoder that is live on return is left in m_fogSceneEncoder (retained — the caller takes it).
 	void EncodeScene(void* renderEncoder, int width, int height,
-	                 MetalDeferredFrame* deferred = nullptr);
+	                 MetalDeferredFrame* deferred = nullptr,
+	                 void* fogCmdBuf = nullptr, void* fogScenePass = nullptr);
 	bool EncodeWaterReflPrepass(void* cmdBuf, int width, int height, const std::vector<TPDraw>& draws);
 
 	// ── Deferred render path (G-buffer + lighting resolve) ───────────────────
@@ -486,10 +499,12 @@ private:
 	void* m_skyReflPipeline = nullptr; // id<MTLRenderPipelineState> skyFragment, RGBA16F, no depth
 	void* m_skyReflCube     = nullptr; // id<MTLTexture> cube RGBA16F, kSkyReflCubeSize²
 	bool  m_skyReflValid    = false;   // the cube holds THIS frame's sky
-	// Two of the six faces per frame after the first full bake (see OpenGLRenderer.h); an undrawn face keeps its picture.
-	static constexpr int kSkyReflFacesPerFrame = 2;
+	// One of the six faces per frame after the first full bake (the whole cube every 6 frames); an undrawn face keeps its
+	// picture. Was two, at 512² (see the cost note at kSkyReflCubeSize, MetalRenderer.mm).
+	static constexpr int kSkyReflFacesPerFrame = 1;
 	bool  m_skyReflBaked    = false;
 	int   m_skyReflPhase    = 0;
+	bool  m_skyReflThisFrame = false;   // baked in this EncodeFrame already: the water pass's second trace reuses it
 	void  EncodeSkyReflCube(void* cmdBuf);
 	// The cube graph materials bind as heSkyEnv (slot 14). Transparent surfaces (water) never reach the
 	// GI-reflection trace, so their specular lookup is the only place the real sky (aurora, stars,
@@ -699,8 +714,21 @@ private:
 	void     StopRvtColdWork();
 	struct RvtSwap { HE::UUID landscapeMat, consumerMat; };
 	std::unordered_map<uint32_t, RvtSwap>  m_rvtSwaps;                   // per landscape entity
+	HE::RvtNearChunks m_rvtNear;                                         // SetRvtNearChunks: chunks that keep their material
+	// The lookup's feedback (HE_RVT_FEEDBACK, RvtLookup.h): a ring of Shared buffers of kRvtFeedbackSlots uints, one bound per
+	// frame at fragment buffer kRvtFeedbackBufferIndex; the frame's completion handler harvests it (the keys go to a shared list
+	// ReadRvtFeedback drains) and clears it for reuse. A frame that finds no free buffer binds the sink (written, never read).
+	static constexpr int kRvtFeedbackBufferIndex = 7;
+	struct RvtFeedbackShared;
+	std::shared_ptr<RvtFeedbackShared> m_rvtFb;
+	void*    m_rvtFbCurrent = nullptr;         // id<MTLBuffer> bound this frame (a ring buffer or the sink)
+	int      m_rvtFbCurrentIdx = -1;           // its ring index, -1 = the sink
+	uint32_t m_rvtFbPhase = 0;                 // frame & 63: which pixel of each 8x8 cell reports (heLight.viewMode.z)
+	void*    RvtFeedbackBindTarget();          // what a material encoder binds at kRvtFeedbackBufferIndex (made on first use)
+	void     BeginRvtFeedbackFrame();          // picks this frame's buffer (start of the frame)
+	void     EndRvtFeedbackFrame(void* cmdBuf); // hands it to the frame's completion
 	void*    m_rvtDummyTable     = nullptr;                         // id<MTLTexture> 1x1 R32Uint (0xFFFFFFFF = no page)
-	// Binds the consumer's table and the pool at fragment textures 17..20 (the pins of MaterialShaderLibrary) for a draw whose
+	// Binds the consumer's table and the pool at fragment textures 18..21 (the pins of MaterialShaderLibrary) for a draw whose
 	// material owns a table; the defaults otherwise. Called at the opaque material draw sites.
 	void     BindRvtForDraw(void* renderEncoder, const HE::UUID& material);
 	// After a walk (ExtractFrame and the passes that extract on their own): the swapped landscapes' chunks take the consumer.
@@ -1246,6 +1274,45 @@ private:
 	void  DestroyCloudShadowTarget();
 	void  EncodeCloudShadow(void* cmdBuf);
 
+	// ── Volumetric fog (Thema 225, docs/volumetric-fog-plan.md) ──────────────
+	// fogMode 1: Inject (density + light + shadows + history) and Integrate (front-to-back
+	// scan) as two compute dispatches before the scene encoder, Apply as a full-screen pass
+	// between the sky and the translucent draws (the scene encoder is split there), and
+	// heApplyFogT on translucent graph materials reading the integrated volume at fragment
+	// texture 17. All of it only while m_fogFrameActive; with fogMode 0 nothing below runs
+	// and every shader sees fogVol = 0 (the analytic fog, pixel for pixel as before).
+	// Kernels: MaterialShaderLibrary::fogInject/fogIntegrate/fogApply (one GLSL source).
+	bool       EnsureFogPipelines();
+	void       EnsureFogTargets(const glm::ivec3& grid);
+	void       DestroyFogTargets();
+	void       EncodeFogVolume(void* cmdBuf, float aspect);          // Inject + Integrate
+	void*      EncodeFogApplyAndReopen(void* sceneEncoder, void* cmdBuf, void* scenePass, int width, int height);
+	void       FillFogLighting(HE::MaterialShaderLibrary::Lighting& lit) const;
+	void*      m_fogInjectPipe    = nullptr; // id<MTLComputePipelineState>
+	void*      m_fogIntegratePipe = nullptr; // id<MTLComputePipelineState>
+	void*      m_fogApplyPipe     = nullptr; // id<MTLRenderPipelineState>
+	bool       m_fogTried         = false;   // the pipelines are built once; a failure keeps the analytic fog
+	void*      m_fogInject[2]     = { nullptr, nullptr }; // id<MTLTexture> 3D RGBA16F, ping-pong (S, sigma_t)
+	void*      m_fogIntegrated    = nullptr; // id<MTLTexture> 3D RGBA16F (L, T at each slice's far edge)
+	void*      m_fogNoise         = nullptr; // id<MTLTexture> 3D RG16Unorm 64^3: HE::BuildSkyNoise3D(64), the same generator as the sky's 256^3 volume, small enough to stay in cache
+	void*      m_fogDummy3D       = nullptr; // id<MTLTexture> 1x1x1 3D: what texture 17 holds when the volume is off
+	glm::ivec3 m_fogGrid          = glm::ivec3(0);
+	int        m_fogHist          = 0;       // index of the inject volume holding LAST frame's result
+	bool       m_fogHistValid     = false;
+	uint32_t   m_fogFrameIndex    = 0;
+	glm::vec3  m_fogNoiseOffset   = glm::vec3(0.0f); // wind-accumulated (plan §6.2)
+	float      m_fogNoiseTime     = 0.0f;
+	glm::mat4  m_fogPrevViewProj  = glm::mat4(1.0f);
+	glm::vec3  m_fogPrevCam       = glm::vec3(0.0f);
+	float      m_fogPrevFocal     = 0.0f;    // projection[1][1], a FOV change resets the history
+	double     m_fogLastTime      = 0.0;     // steady clock seconds of the last inject
+	bool       m_fogFrameActive   = false;   // this frame runs the volume (set in EncodeFrame, read by every fill)
+	HE::FogVolumeConstants m_fogApplyConstants; // this frame's constants, for the Apply pass
+	HE::FogVolumeData m_fogFrame;            // this frame's data (copy of the walk's, for the fills)
+	glm::mat4  m_fogViewProjFlip  = glm::mat4(1.0f); // y-flipped unjittered viewProj for heApplyFogT
+	uint32_t   m_fogSceneTimerBase = 0xFFFFFFFFu; // ftBeginMulti("Scene") pair spanning the split scene encoders
+	void*      m_fogSceneEncoder  = nullptr; // CFBridgingRetain'd: the encoder EncodeScene left open after the split
+
 	// ── SSAO (screen-space ambient occlusion) ───────────────────────────────
 	// Mirrors the GL backend: a view-space position pre-pass feeds a hemisphere-
 	// kernel occlusion estimate, blurred and then sampled by the scene shader to
@@ -1353,14 +1420,18 @@ private:
 		glm::vec4 autoWet{0.0f};   // auto only — HE::GiLandscape::autoWet / autoSlope / autoSnow
 		glm::vec4 autoSlope{0.0f};
 		glm::vec4 autoSnow{0.0f};
+		// Drawn from the RVT: the consumer's RvtVolumeA/B (RvtLookup.h; rvtB.w = mip count, 0 = not from pages). The table
+		// is bound per entry at the kernels' rvtTables slot, the pools beside it.
+		glm::vec4 rvtA{0.0f};
+		glm::vec4 rvtB{0.0f};
 	};
-	static_assert(sizeof(GILandGpu) == 64 + 8 * 16, "must match the MSL GILand layout");
+	static_assert(sizeof(GILandGpu) == 64 + 10 * 16, "must match the MSL GILand layout");
 	void* m_giLandBuf         = nullptr; // id<MTLBuffer> (retained), rebuilt per frame
 	void* m_giInstanceLandBuf = nullptr; // id<MTLBuffer> (retained), HW per-instance index
 	// Packs RenderWorld::landscapes into m_giLandBuf and returns how many made it
 	// (capped at HE::kGiMaxLandscapes); `outWeightTex` receives each one's
 	// weightmap texture in the same order, for the kernel's texture array.
-	int BuildGILandscapeTable(std::vector<void*>& outWeightTex);
+	int BuildGILandscapeTable(std::vector<void*>& outWeightTex, std::vector<void*>* outRvtTables = nullptr);
 	std::unordered_map<HE::UUID, GISwBlasRange> m_giSwBlasCache;
 	std::vector<HE::GiBvhNode>     m_giSwNodesCpu;
 	std::vector<HE::GiBvhTriangle> m_giSwTrisCpu;

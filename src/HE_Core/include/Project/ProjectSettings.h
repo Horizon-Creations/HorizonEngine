@@ -53,8 +53,9 @@ namespace HE {
 //   graphics        the graphics half of that config.json, and the editor viewport's
 //                   look, when `graphics.enabled` (see ProjectGraphics).
 //   input           the game's gamepad deadzones when `input.enabled`.
-//   (rvt            was here until RVT 2.0, Thema 335: the switch is global now, an old
-//                   file's "rvt" section is read past, not loaded.)
+//   rvt             the Runtime Virtual Texture's tuning (pool, texel size, radii, paint budget,
+//                   native near view). On/off is the global switch since RVT 2.0 (Thema 335): an
+//                   old file's "rvt.enabled" is read past.
 //   anticheat       the host's AntiCheatService (HorizonScene) — thresholds,
 //                   what happens per level, the game's value rules.
 //   multiplayer     NetGameSession::setProjectDefaults — the port, the seats,
@@ -87,6 +88,15 @@ struct HE_API ProjectGameSettings
     // text and deliberately NOT the bundle version: that lives in the .heproj
     // and never reaches the runtime, and a subtitle somebody typed is honest.
     std::string splashSubtitle;
+
+    // ── Static entities ──────────────────────────────────────────────────────
+    // The export packs which meshes never change at run time (no script, animation, physics body, ...)
+    // beside each scene, and the shipped game extracts those from a flat block instead of walking
+    // their entities every frame (docs/entity-cooking-export-2026-11-17.md). Only the EXPORT and the
+    // game act on it: the editor never cooks unless HE_COOK_STATIC=1 asks, and a pack exported with it
+    // off is drawn exactly as before. On by default; a project file written before the key existed
+    // therefore loads with it on, too.
+    bool        cookStaticEntities = true;
 };
 
 struct HE_API ProjectShadowSettings
@@ -272,6 +282,38 @@ struct HE_API ProjectInputSettings
     float triggerDeadzone = 0.05f;
 
     static constexpr float kMaxDeadzone = 0.9f;
+};
+
+// ─── Runtime Virtual Texture (Thema 333, docs/rvt-design-2026-11-04.md) ───────────────────────────────────
+// The landscape material rendered once into pages of a shared pool, then only read; the shader that paints it runs
+// when something changes. Whether it is on at all is the global switch (Preferences > Rendering, the game's config.json;
+// RvtLandscape::wanted, Thema 335): this is the project's tuning of it.
+struct HE_API ProjectRvtSettings
+{
+    // The pool: pages of 136 px, three layers each (BaseColor, Normal, Surface), 222 KB a page. Changing it rebuilds the
+    // pool and repaints every page.
+    int   poolPages         = 512;       // 108 MB
+    // The finest level: metres of ground per texel of a page. Changing it rebuilds the pool.
+    float metersPerTexel    = 0.25f;
+    // Pages at the finest level are kept within this radius of the camera (metres); a landscape within the activation
+    // radius is drawn from pages, a farther one from its own material. Both change live, without a rebuild.
+    float nearRadiusM       = 64.0f;
+    float activationRadiusM = 600.0f;
+    // How many pages one frame may paint: the budget that spreads a fill or a stroke's repaint over frames.
+    int   maxPagesPerFrame  = 8;
+    // Native near view: the landscape chunks closer than the distance where a finest-level texel covers one pixel keep their own
+    // material (as sharp as the material is); only the rest is drawn from pages. Live, no rebuild.
+    bool  nativeNear        = true;
+
+    // One declaration a line: MSVC refuses a second name after a comma in a dllexport class (C2487).
+    static constexpr int   kMinPoolPages     = 64;
+    static constexpr int   kMaxPoolPages     = 2048;
+    static constexpr float kMinTexel         = 0.01f;   // ~1.5 cm is the finest preset; the page table is kept page by page
+    static constexpr float kMaxTexel         = 4.0f;
+    static constexpr float kMinRadius        = 8.0f;
+    static constexpr float kMaxRadius        = 5000.0f;
+    static constexpr int   kMinPagesPerFrame = 1;
+    static constexpr int   kMaxPagesPerFrame = 64;
 };
 
 // ─── Anti-cheat ───────────────────────────────────────────────────────────────
@@ -513,6 +555,7 @@ struct HE_API ProjectSettings
     ProjectRenderDefaults        renderDefaults;
     ProjectGraphics              graphics;
     ProjectInputSettings         input;
+    ProjectRvtSettings           rvt;
     ProjectAntiCheatSettings     antiCheat;
     ProjectMultiplayerSettings   multiplayer;
     ProjectSourceControlSettings sourceControl;

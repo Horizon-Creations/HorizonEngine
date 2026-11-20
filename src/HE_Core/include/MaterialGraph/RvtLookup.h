@@ -43,7 +43,18 @@ inline constexpr char kRvtDeclarationsGLSL[] =
     "layout(set = 0, binding = 44) uniform sampler2DArray heRvtAlbedoC;\n"
     "layout(set = 0, binding = 45) uniform sampler2DArray heRvtNormalC;\n"
     "layout(set = 0, binding = 46) uniform sampler2DArray heRvtSurfaceC;\n"
+    "#endif\n"
+    // The feedback (Metal, HE_RVT_FEEDBACK): a hash table of the pages pixels WANT, 4096 slots, 0xFFFFFFFF = empty. The renderer
+    // clears it per frame, reads it back when the frame is done and hands the keys to the driver (IRenderer::ReadRvtFeedback).
+    "#ifdef HE_RVT_FEEDBACK\n"
+    "layout(std430, set = 0, binding = 47) buffer HeRvtFeedback { uint heRvtFb[]; };\n"
     "#endif\n";
+inline constexpr uint32_t kRvtFeedbackBinding = 47;
+inline constexpr uint32_t kRvtFeedbackSlots   = 4096;
+// A feedback key: volume (5 bits) | mip (5) | page x (11) | page y (11). B.y of the volume parameters carries the volume
+// id above the border (border + 256 * volume; the consumer material bakes it in, RvtLandscape::consumerGraphJson).
+inline constexpr uint32_t rvtFeedbackKey(uint32_t volume, uint32_t mip, uint32_t x, uint32_t y)
+{ return (volume << 27) | (mip << 22) | (x << 11) | y; }
 
 // The normal layer's texel as a unit vector. Normally the three channels are the world normal * 0.5 + 0.5; a backend that packs the
 // layer into two channels (Metal, HE_RVT_RGNORMAL) stores x and z in R and G (a landscape normal never points down, y >= 0) and
@@ -73,6 +84,20 @@ inline constexpr char kRvtLookupGLSL[] =
     "    int mip = clamp(int(floor(log2(max(mpp / max(A.w, 1e-4), 1.0)))), 0, mipCount - 1);\n"
     "    int pps = max(pps0 >> mip, 1);\n"
     "    ivec2 pg = clamp(ivec2(uv * float(pps)), ivec2(0), ivec2(pps - 1));\n"
+    "#ifdef HE_RVT_FEEDBACK\n"
+    "    // One pixel in 64 reports the page it wants (an 8x8 cell, the sampled pixel walking through it frame by frame,\n"
+    "    // heLight.viewMode.z = frame & 63), before the table says whether that page is there.\n"
+    "    {\n"
+    "        ivec2 fc = ivec2(gl_FragCoord.xy);\n"
+    "        int ph = int(heLight.viewMode.z);\n"
+    "        if (((fc.x + ph) & 7) == 0 && ((fc.y + (ph >> 3)) & 7) == 0)\n"
+    "        {\n"
+    "            uint key = (uint(B.y / 256.0) << 27) | (uint(mip) << 22) | (uint(pg.x) << 11) | uint(pg.y);\n"
+    "            // The frame phase salts the slot: two pages that collide in one frame do not collide in the next.\n"
+    "            heRvtFb[((key ^ uint(ph * 40503)) * 2654435761u) >> 20] = key;\n"
+    "        }\n"
+    "    }\n"
+    "#endif\n"
     "    uint e = texelFetch(heRvtTable, pg, mip).r;\n"
     "    // The viewport's Virtual Texture view mode (heLight.viewMode.y, IRenderer ViewMode::RvtDebug): a pixel where no page exists at\n"
     "    // any mip is flat black instead of the neutral grey the caller gets.\n"
@@ -100,7 +125,7 @@ inline constexpr char kRvtLookupGLSL[] =
     "        base = dc; valid = 1.0;\n"
     "        return;\n"
     "    }\n"
-    "    float ps = B.x, bd = B.y;\n"
+    "    float ps = B.x, bd = mod(B.y, 256.0);   // B.y = border + 256 * volume id\n"
     "    // Texel space of the physical page, texel centres at whole numbers. A page on the EDGE of the volume has nothing\n"
     "    // beyond it (its border was painted from a scene that holds only this volume: clear-black), so there the filter\n"
     "    // stays inside the payload; an inner page\'s border holds its neighbour\'s ground and is read as it is.\n"

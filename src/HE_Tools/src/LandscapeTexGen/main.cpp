@@ -366,6 +366,9 @@ uint8_t gCompressFormat = 0;
 // puddles are their own overlay); 0 = the maps as they are.
 uint8_t gMinRoughnessByte = 0;
 
+// --match-variants F: pack-time colour matching of the per-hex variants (see packGroupReal).
+float gMatchVariants = 0.0f;
+
 // --displacement: --material writes the material with its Displacement pin wired (buildAutoLandscapeGraph).
 bool gDisplacement = false;
 
@@ -891,6 +894,54 @@ int packGroupReal(const std::string& outDir, const std::string& pngDir, int requ
         }
     }
 
+    // --match-variants F: the roles whose variants are drawn PER HEX (Grass and Dirt; the Rock role is by slope,
+    // Snow and the Desert's sand are procedural) show every hex of the texture bombing as a patch when the
+    // variants differ in colour. Pull each later variant's mean albedo colour toward variant 1's: a per-channel
+    // gain in linear light, strength F (0 = as photographed, 1 = the same mean). The detail stays.
+    if (gMatchVariants > 0.0f && variants > 1)
+    {
+        static float lin[256];
+        for (int i = 0; i < 256; ++i) lin[i] = std::pow(static_cast<float>(i) / 255.0f, 2.2f);
+        const auto meanLin = [&](const std::vector<uint8_t>& px, double m[3]) {
+            m[0] = m[1] = m[2] = 0.0;
+            const size_t n = px.size() / 4;
+            for (size_t i = 0; i < n; i += 7)   // a sample is plenty for a mean
+                for (int c = 0; c < 3; ++c) m[c] += lin[px[i * 4 + static_cast<size_t>(c)]];
+            const double cnt = static_cast<double>((n + 6) / 7);
+            for (int c = 0; c < 3; ++c) m[c] /= cnt;
+        };
+        for (int role = 0; role < 2; ++role)
+        {
+            if (role == 0 && group.proceduralSand) continue;
+            double m0[3];
+            meanLin(slotMaps[static_cast<size_t>(role * variants)][Albedo], m0);
+            for (int v = 1; v < variants; ++v)
+            {
+                auto& px = slotMaps[static_cast<size_t>(role * variants + v)][Albedo];
+                double mv[3];
+                meanLin(px, mv);
+                // Brightness is matched at full strength F, the hue (the colour relative to the brightness) at
+                // half of it: enough that the hexes do not read as patches, not a recolouring of the photograph.
+                const auto lum = [](const double m[3]) { return 0.2126 * m[0] + 0.7152 * m[1] + 0.0722 * m[2]; };
+                const double l0 = std::max(lum(m0), 1e-4), lv = std::max(lum(mv), 1e-4);
+                const double kL = gMatchVariants, kC = 0.5 * gMatchVariants;
+                float gain[3];
+                for (int c = 0; c < 3; ++c)
+                    gain[c] = static_cast<float>(std::pow(l0 / lv, kL) *
+                                                 std::pow((m0[c] / l0) / std::max(mv[c] / lv, 1e-4), kC));
+                if (std::abs(gain[0] - 1.0f) + std::abs(gain[1] - 1.0f) + std::abs(gain[2] - 1.0f) < 0.01f) continue;
+                std::printf("  %s variant %d: colour gain %.2f %.2f %.2f toward variant 1\n", roleNames[role].c_str(), v + 1,
+                            gain[0], gain[1], gain[2]);
+                for (size_t i = 0; i + 3 < px.size(); i += 4)
+                    for (int c = 0; c < 3; ++c)
+                    {
+                        const float l = std::min(1.0f, lin[px[i + static_cast<size_t>(c)]] * gain[c]);
+                        px[i + static_cast<size_t>(c)] = static_cast<uint8_t>(std::lround(std::pow(l, 1.0f / 2.2f) * 255.0f));
+                    }
+            }
+        }
+    }
+
     int ok = 0;
     for (int map = 0; map < MapCount; ++map)
     {
@@ -1045,8 +1096,8 @@ bool writeMaterial(const std::string& outDir, const HE::AutoLandscapeGroup& grou
     return true;
 }
 
-// The three FAT arrays of the mix material (Thema 233): slice (group * 4 + role) is role `role`'s
-// variant 0 of group `group`, copied from that group's own arrays in `fromDir` (the files the groups
+// The three FAT arrays of the mix material (Thema 233): slice (group * 4 + role) * V + variant is variant `variant` of role `role`'s
+// slices of group `group`, copied from that group's own arrays in `fromDir` (the files the groups
 // ship as, Mountains' without a group name). All twelve must agree in size, mips, format and colour
 // space. With real textures this is 4x one group's memory; `fromDir` may hold smaller ones.
 int writeMixArrays(const std::string& outDir, const std::string& fromDir)
@@ -1072,7 +1123,10 @@ int writeMixArrays(const std::string& outDir, const std::string& fromDir)
         a.type = HE::AssetType::Texture;
         a.width = ref.width; a.height = ref.height; a.channels = ref.channels;
         a.mipLevels = ref.mipLevels; a.format = ref.format; a.srgb = ref.srgb;
-        a.layers = static_cast<uint32_t>(HE::kAutoLandscapeMixDepth);
+        // V variants of every group's role, the same V in all four (the shader divides the depth by 16 to
+        // get it): slice (group * 4 + role) * V + variant, the order the loops below append in.
+        const int V = HE::autoLandscapeVariantCount(static_cast<int>(ref.layers));
+        a.layers = static_cast<uint32_t>(HE::kAutoLandscapeMixDepth * V);
         const size_t sliceBytes = HE::textureArraySliceBytes(ref.width, ref.height, ref.mipLevels, ref.format);
         bool fits = sliceBytes != 0;
         for (int g = 0; g < HE::kAutoLandscapeGroupCount && fits; ++g)
@@ -1080,29 +1134,30 @@ int writeMixArrays(const std::string& outDir, const std::string& fromDir)
             const TextureAsset& t = *groupArrays[g];
             fits = t.width == ref.width && t.height == ref.height && t.channels == ref.channels &&
                    t.mipLevels == ref.mipLevels && t.format == ref.format && t.srgb == ref.srgb &&
+                   HE::autoLandscapeVariantCount(static_cast<int>(t.layers)) == V &&
                    t.layers >= static_cast<uint32_t>(HE::kAutoLandscapeRoleCount) && HE::textureArrayPayloadValid(t);
         }
         if (!fits)
         {
-            std::fprintf(stderr, "  %s maps: the four groups' arrays differ in size, mips or format\n", kMapNames[map]);
+            std::fprintf(stderr, "  %s maps: the four groups' arrays differ in size, mips, format or variant count\n", kMapNames[map]);
             continue;
         }
         a.data.reserve(sliceBytes * a.layers);
         for (int g = 0; g < HE::kAutoLandscapeGroupCount; ++g)
         {
             const TextureAsset& t = *groupArrays[g];
-            const int variants = HE::autoLandscapeVariantCount(static_cast<int>(t.layers));
             for (int role = 0; role < HE::kAutoLandscapeRoleCount; ++role)
-            {
-                const size_t at = HE::textureArrayOffset(t.width, t.height, t.mipLevels,
-                                                         static_cast<uint32_t>(role * variants), 0, t.format);
-                a.data.insert(a.data.end(), t.data.begin() + at, t.data.begin() + at + sliceBytes);
-                // A block-compressed array carries its slice means (CHUNK_TXSM): the mix's come from the
-                // same slices, so the GI landscape colours do not need the pixels back.
-                const size_t m = static_cast<size_t>(role * variants) * 3;
-                if (ref.format != TextureFormat::RGBA8 && m + 3 <= t.sliceMeans.size())
-                    a.sliceMeans.insert(a.sliceMeans.end(), t.sliceMeans.begin() + m, t.sliceMeans.begin() + m + 3);
-            }
+                for (int v = 0; v < V; ++v)
+                {
+                    const size_t at = HE::textureArrayOffset(t.width, t.height, t.mipLevels,
+                                                             static_cast<uint32_t>(role * V + v), 0, t.format);
+                    a.data.insert(a.data.end(), t.data.begin() + at, t.data.begin() + at + sliceBytes);
+                    // A block-compressed array carries its slice means (CHUNK_TXSM): the mix's come from the
+                    // same slices, so the GI landscape colours do not need the pixels back.
+                    const size_t m = static_cast<size_t>(role * V + v) * 3;
+                    if (ref.format != TextureFormat::RGBA8 && m + 3 <= t.sliceMeans.size())
+                        a.sliceMeans.insert(a.sliceMeans.end(), t.sliceMeans.begin() + m, t.sliceMeans.begin() + m + 3);
+                }
         }
         const std::string name = std::string("T_Landscape_Mix_") + kMapNames[map] + "_Array";
         a.name = name;
@@ -1149,6 +1204,7 @@ int main(int argc, char** argv)
                              "                 and writes no loose per-layer files; a mode flag, goes with --group\n"
                              "  --compress bc7|astc write the group arrays block-compressed (BC7 desktop / ASTC 4x4 Apple, slice means baked), not RGBA8; platform-specific, NOT for shared EngineContent\n"
                              "  --min-roughness F  floor (0..1) for the roughness of real texture files; wet-mud maps average 0.5 and look like mirrors\n"
+                             "  --match-variants F pull the colour of the per-hex variants (Grass, Dirt roles) toward variant 1 (0..1): the texture bombing otherwise shows every hex as a patch\n"
                              "  the mode flag (--arrays-only/--material/--pack/--loose) must come right after <output-dir>; given\n"
                              "  later (e.g. after --group) it is not recognised and the tool refuses rather than silently falling\n"
                              "  back to regenerating placeholders over real data\n");
@@ -1212,8 +1268,12 @@ int main(int argc, char** argv)
     const HE::AutoLandscapeGroup& group = HE::kAutoLandscapeGroups[groupIndex];
     // --min-roughness F (0..1): see gMinRoughnessByte.
     for (int i = 2; i + 1 < argc; ++i)
+    {
+        if (std::string(argv[i]) == "--match-variants")
+            gMatchVariants = std::clamp(static_cast<float>(std::atof(argv[i + 1])), 0.0f, 1.0f);
         if (std::string(argv[i]) == "--min-roughness")
             gMinRoughnessByte = toByte(std::clamp(static_cast<float>(std::atof(argv[i + 1])), 0.0f, 1.0f));
+    }
     // --compress bc7: the group arrays are written block-compressed (see gCompressFormat).
     for (int i = 2; i + 1 < argc; ++i)
         if (std::string(argv[i]) == "--compress")

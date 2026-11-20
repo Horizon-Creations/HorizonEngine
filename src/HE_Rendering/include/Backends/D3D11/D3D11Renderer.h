@@ -43,6 +43,7 @@ public:
     bool  SetRvtPageTable(const HE::UUID& consumerMaterial, const std::vector<std::vector<uint32_t>>& mips) override;
     bool  ReadbackRvtPageTable(const HE::UUID& consumerMaterial, std::vector<std::vector<uint32_t>>& mips) override;
     void  SetRvtLandscape(uint32_t terrainEntity, const HE::UUID& landscapeMaterial, const HE::UUID& consumerMaterial) override;
+    void  SetRvtNearChunks(uint32_t terrainEntity, const std::vector<uint32_t>& chunkEntities) override;
     void  ReleaseRvtConsumer(const HE::UUID& consumerMaterial) override;
     // One page through the lean page pass (RenderSceneImage routes camera.rvtSlot >= 0 here).
     bool  RenderRvtPage(const EditorCameraOverride& camera, uint32_t px);
@@ -103,6 +104,15 @@ public:
     // Whole-frame D3D11 timestamp timing (double-buffered ring, never stalls)
     // + this frame's CPU draw/triangle/visibility counters.
     FrameGpuStats GetFrameGpuStats() const override;
+
+    // View mode (IRenderer::SetViewMode) as the two questions the passes ask.
+    // Wireframe is drawn unlit — shaded edges say nothing a flat edge does not,
+    // and the flat one reads far better against the sky. Mirrors GL/Metal.
+    bool  UnlitViewActive() const
+    {
+        return m_viewMode == HE::ViewMode::Unlit || m_viewMode == HE::ViewMode::Wireframe || m_viewMode == HE::ViewMode::RvtDebug;
+    }
+    bool  WireframeViewActive() const { return m_viewMode == HE::ViewMode::Wireframe; }
 
 private:
     // Extract → cull → sort → RenderGraph → replay into the currently bound targets.

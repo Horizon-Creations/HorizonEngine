@@ -52,6 +52,7 @@ public:
     bool  SetRvtPageTable(const HE::UUID& consumerMaterial, const std::vector<std::vector<uint32_t>>& mips) override;
     bool  ReadbackRvtPageTable(const HE::UUID& consumerMaterial, std::vector<std::vector<uint32_t>>& mips) override;
     void  SetRvtLandscape(uint32_t terrainEntity, const HE::UUID& landscapeMaterial, const HE::UUID& consumerMaterial) override;
+    void  SetRvtNearChunks(uint32_t terrainEntity, const std::vector<uint32_t>& chunkEntities) override;
     void  ReleaseRvtConsumer(const HE::UUID& consumerMaterial) override;
     void  BeginRvtPages(uint32_t pagePx) override;
     void  EndRvtPages() override;
@@ -128,6 +129,15 @@ public:
     // ImTextureID-compatible handle, or nullptr if no registrar is installed.
     void* CreateImGuiTexture(const void* rgba8Pixels, int width, int height) override;
     void  DestroyImGuiTexture(void* handle) override;
+
+    // View mode (IRenderer::SetViewMode) as the two questions the passes ask.
+    // Wireframe is drawn unlit — shaded edges say nothing a flat edge does not,
+    // and the flat one reads far better against the sky. Mirrors GL/Metal/D3D11.
+    bool  UnlitViewActive() const
+    {
+        return m_viewMode == HE::ViewMode::Unlit || m_viewMode == HE::ViewMode::Wireframe || m_viewMode == HE::ViewMode::RvtDebug;
+    }
+    bool  WireframeViewActive() const { return m_viewMode == HE::ViewMode::Wireframe; }
 
 private:
     // A still's set (RenderSceneImage): the live viewport set aside and a fresh one built, then given back (see the .cpp).

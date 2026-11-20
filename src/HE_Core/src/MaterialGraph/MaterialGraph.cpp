@@ -238,12 +238,14 @@ const std::vector<MatNodeDesc>& registry()
         // ── v13: texture arrays — s = the array texture, Slice picks the layer ──
         // "Groups" (appended, Thema 180 Schritt 3): 0 / unwired = the array is read slice for
         // slice as always; N > 0 = it holds N groups of V variants each (depth = N * V + extra),
-        // "Slice" names the group and the node reads that group's variant 0.
+        // "Slice" names the group and the node reads that group's variant 0. "Variant" (appended,
+        // Thema 329 Schritt 5): wired next to Groups it names the variant to read instead of 0
+        // (clamped into 0..V-1, so a 1-variant array still reads the group's only slice).
         { MatNodeType::TextureArraySample, "Texture Array Sample", "Texture",
-          { { "UV", F::Vec2, 0 }, { "Slice", F::Float, 0 }, { "Groups", F::Float, 0 } },
+          { { "UV", F::Vec2, 0 }, { "Slice", F::Float, 0 }, { "Groups", F::Float, 0 }, { "Variant", F::Float, 0 } },
           { { "RGB", F::Vec3, 0 }, { "A", F::Float, 0 } }, 0 },
         { MatNodeType::NormalMapArraySample, "Normal Map Array", "Texture",
-          { { "UV", F::Vec2, 0 }, { "Slice", F::Float, 0 }, { "Groups", F::Float, 0 } },
+          { { "UV", F::Vec2, 0 }, { "Slice", F::Float, 0 }, { "Groups", F::Float, 0 }, { "Variant", F::Float, 0 } },
           { { "N", F::Vec3, 0 } }, 1 }, // p[0] = strength
 
         // ── v14: texture bombing — p = Rotation, Sharpness, Seed (+ Strength);
@@ -256,14 +258,15 @@ const std::vector<MatNodeDesc>& registry()
           { { "N", F::Vec3, 0 } }, 4 },
         // "Groups" (appended, Thema 180 Schritt 3): wired with N > 0, each of the three hexes
         // draws its own variant 0..V-1 of group "Slice" from its cell's hash (V = depth / N);
-        // unwired = one slice for all three, as before.
+        // unwired = one slice for all three, as before. "Variant" (appended, Thema 329 Schritt 5):
+        // wired next to Groups, all three hexes read that one variant instead of drawing their own.
         { MatNodeType::TextureArrayBombSample, "Texture Array Bombing", "Texture",
           { { "UV", F::Vec2, 0 }, { "Slice", F::Float, 0 }, { "Cell", F::Float, kMatBombDefaultCell },
-            { "Groups", F::Float, 0 } },
+            { "Groups", F::Float, 0 }, { "Variant", F::Float, 0 } },
           { { "RGB", F::Vec3, 0 }, { "A", F::Float, 0 } }, 3 },
         { MatNodeType::NormalMapArrayBombSample, "Normal Map Array Bombing", "Texture",
           { { "UV", F::Vec2, 0 }, { "Slice", F::Float, 0 }, { "Cell", F::Float, kMatBombDefaultCell },
-            { "Groups", F::Float, 0 } },
+            { "Groups", F::Float, 0 }, { "Variant", F::Float, 0 } },
           { { "N", F::Vec3, 0 } }, 4 },
 
         // ── v15: the hex grid as data, no texture — p[0] = Seed ──
@@ -1307,8 +1310,12 @@ HE_MG_NOINLINE bool emitTextureNode(EmitCtx& c, const Scope& sc, const MatGraphN
                 // variant per pixel would be a hard seam, so the debug mode shows variant 0.
                 const std::string depth = "float(textureSize(" + sampler + ", 0).z - 1)";
                 decl += " int " + v + "_V = " + variantCount(sampler, inputExpr(c, sc, n, 2, F::Float)) + ";";
+                // Variant wired: the group's variant `Variant` (0..V-1) instead of its variant 0.
+                const std::string pick = hasInput(sc, n, 3)
+                    ? " + float(clamp(int(floor(" + inputExpr(c, sc, n, 3, F::Float) + " + 0.5)), 0, " + v + "_V - 1))"
+                    : std::string();
                 coord = "vec3(" + v + "_uv, min(clamp(floor(" + sliceExpr
-                      + " + 0.5), 0.0, " + depth + ") * float(" + v + "_V), " + depth + "))";
+                      + " + 0.5), 0.0, " + depth + ") * float(" + v + "_V)" + pick + ", " + depth + "))";
             }
             if (n.type == MatNodeType::TextureArraySample)
             {
@@ -1377,12 +1384,19 @@ HE_MG_NOINLINE bool emitBombNode(EmitCtx& c, const Scope& sc, const MatGraphNode
             {
                 // slice = group * V + variant, the variant from the hash's 8 free low bits in
                 // integers (no float rounding that could differ per API), clamped into the array.
+                // Variant wired: no draw, every hex reads the named variant (clamped into 0..V-1).
+                const bool fixedVariant = hasInput(sc, n, 4);
+                const std::string fixedPick = fixedVariant
+                    ? "clamp(int(floor(" + inputExpr(c, sc, n, 4, F::Float) + " + 0.5)), 0, " + v + "_V - 1)"
+                    : std::string();
                 for (int k = 0; k < 3; ++k)
                 {
                     const std::string i = std::to_string(k);
-                    sliceDecl += "int " + v + "_s" + i + " = clamp(int(" + v + "_l) * " + v + "_V + int(((" + g
-                              + "s." + std::string(1, "xyz"[k]) + " & 255u) * uint(" + v + "_V)) >> 8u), 0, textureSize(" + sampler
-                              + ", 0).z - 1); ";
+                    const std::string pick = fixedVariant
+                        ? fixedPick
+                        : "int(((" + g + "s." + std::string(1, "xyz"[k]) + " & 255u) * uint(" + v + "_V)) >> 8u)";
+                    sliceDecl += "int " + v + "_s" + i + " = clamp(int(" + v + "_l) * " + v + "_V + " + pick
+                              + ", 0, textureSize(" + sampler + ", 0).z - 1); ";
                 }
             }
             // Guarded (inside an If's branch, see computeBranchGuards): everything so far
@@ -1586,6 +1600,14 @@ HE_MG_NOINLINE bool emitLayerBlendNode(EmitCtx& c, const Scope& sc, const MatGra
         }
         case MatNodeType::RvtSample:
         {
+            if (dsStage(sc)) // heRvtSample needs derivatives and its bindings are not declared here: "nothing to show"
+            {
+                // The same values heRvtSample starts from (RvtLookup.h), valid = 0.
+                decl = "vec3 " + v + "_b = vec3(0.5); vec3 " + v + "_n = vec3(0.0, 1.0, 0.0); float " + v + "_ao = 1.0; float " + v
+                     + "_r = 0.8; float " + v + "_ok = 0.0; vec3 " + v + " = " + v + "_b; // RVT Sample: fragment stage only";
+                pinExpr = { v + "_b", v + "_n", v + "_ao", v + "_r", v + "_ok" };
+                break;
+            }
             c.usesRvt = true;
             const std::string va = inputExpr(c, sc, n, 0, F::Vec4), vb = inputExpr(c, sc, n, 1, F::Vec4);
             decl = "vec3 " + v + "_b; vec3 " + v + "_n; float " + v + "_ao; float " + v + "_r; float " + v + "_ok; "
@@ -2671,6 +2693,28 @@ MatShaderGen generateFragment(const MaterialGraph& graphIn, const MatFunctionLoa
     // the tail reads.
     c.uiDomain = static_cast<int>(out->p[3]) == static_cast<int>(MatDomain::UserInterface);
 
+    // ── Blend mode (Output p[1]) decides what pin 4 means and where alpha comes from. ──
+    const int   blendMode = std::clamp(static_cast<int>(out->p[1]), 0, 2);
+    const float cutoff    = out->p[2] > 0.0f ? out->p[2] : 0.5f; // mask threshold
+    std::string opacity   = "1.0";                                // Opaque/Masked → solid
+    std::string mask;
+    if (blendMode == (int)MatBlendMode::Masked)
+    {
+        // Evaluate the mask and discard BEFORE BaseColor/Metallic/.../Normal: a masked
+        // fragment that fails the cutoff must not pay for the rest of the graph's
+        // texture samples (a normal map's screen-space tangent frame, metallic/
+        // roughness/AO/emissive reads) only to be thrown away. The mask usually reuses
+        // the base-colour texture's alpha (see PbrMaterialImport::buildGraph), so this
+        // does not add a sample — it only moves the ones the mask depends on ahead of
+        // the ones it doesn't (Thema 331 step 8: foliage cutout overdraw).
+        mask = inputExpr(c, root, *out, kMatOutputOpacityPin, F::Float);
+        // The mask may resolve to a variable a pending If-branch block has not
+        // assigned yet (computeBranchGuards can guard the Opacity pin same as any
+        // other); flush it before the discard statement below reads that variable.
+        if (refsPending(c, mask)) flushGuards(c);
+        c.body += "    if (" + mask + " < " + fmtF(cutoff) + ") discard;\n";
+    }
+
     const std::string base    = inputExpr(c, root, *out, kMatOutputBaseColorPin, F::Vec3);
     const std::string met     = inputExpr(c, root, *out, kMatOutputMetallicPin,  F::Float);
     const std::string spec    = inputExpr(c, root, *out, kMatOutputSpecularPin,  F::Float);
@@ -2689,14 +2733,7 @@ MatShaderGen generateFragment(const MaterialGraph& graphIn, const MatFunctionLoa
                                    : static_cast<int>(MatDomain::Surface);
     const bool lit = !uiDomain && out->p[0] > 0.5f;
 
-    // ── Blend mode (Output p[1]) decides what pin 4 means and where alpha comes from. ──
-    const int   blendMode = std::clamp(static_cast<int>(out->p[1]), 0, 2);
-    const float cutoff    = out->p[2] > 0.0f ? out->p[2] : 0.5f; // mask threshold
-    std::string opacity   = "1.0";                                // Opaque/Masked → solid
-    std::string mask;
-    if (blendMode == (int)MatBlendMode::Masked)
-        mask = inputExpr(c, root, *out, kMatOutputOpacityPin, F::Float);
-    else if (blendMode == (int)MatBlendMode::Translucent)
+    if (blendMode == (int)MatBlendMode::Translucent)
         opacity = inputExpr(c, root, *out, kMatOutputOpacityPin, F::Float);
 
     // ── Surface normal (pin 5): unconnected → the interpolated vertex normal. ──
@@ -2799,9 +2836,8 @@ MatShaderGen generateFragment(const MaterialGraph& graphIn, const MatFunctionLoa
                              + "// heDispBody\n" + dispStatements;
     }
     src += "void main() {\n" + c.body;
-    // Masked: kill sub-cutoff fragments BEFORE shading — hard-edged holes, opaque pass.
-    if (blendMode == (int)MatBlendMode::Masked)
-        src += "    if (" + mask + " < " + fmtF(cutoff) + ") discard;\n";
+    // Masked: the "< cutoff → discard" statement is already in c.body (emitted
+    // ahead of BaseColor/Metallic/.../Normal, above) — hard-edged holes, opaque pass.
     src += "    vec3 heN = " + normalExpr + ";\n";
 
     // The declarations + body + masked-discard + heN prologue is IDENTICAL for
@@ -2830,7 +2866,12 @@ MatShaderGen generateFragment(const MaterialGraph& graphIn, const MatFunctionLoa
         // graph material stayed saturated while everything around it faded into
         // the horizon. UNLIT output is deliberately left alone: there "unlit"
         // means "my colour, verbatim".
-        src += "    oColor = vec4(heApplyFog(heLitP(" + base + ", heN, " + met + ", " + rough
+        // Translucent surfaces are drawn AFTER the volumetric-fog Apply pass (which fogs
+        // the opaque scene + sky), so they read the froxel volume themselves:
+        // heApplyFogT. It is heApplyFog (the analytic fog) wherever no volume is bound.
+        src += std::string("    oColor = vec4(")
+             + (blendMode == (int)MatBlendMode::Translucent ? "heApplyFogT" : "heApplyFog")
+             + "(heLitP(" + base + ", heN, " + met + ", " + rough
              + ", vWorldPos, " + spec + ", " + ao + ") + "
              + emis + ", vWorldPos), " + opacity + ");\n";
     else

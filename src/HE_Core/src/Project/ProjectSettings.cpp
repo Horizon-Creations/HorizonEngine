@@ -171,6 +171,7 @@ bool ProjectSettings::operator==(const ProjectSettings& o) const
         && game.splashEnabled == o.game.splashEnabled
         && game.splashImage == o.game.splashImage
         && game.splashSubtitle == o.game.splashSubtitle
+        && game.cookStaticEntities == o.game.cookStaticEntities
         && nearlyEqual(shadows.distance, o.shadows.distance)
         && shadows.cascadeCount == o.shadows.cascadeCount
         && shadows.resolution == o.shadows.resolution
@@ -195,6 +196,12 @@ bool ProjectSettings::operator==(const ProjectSettings& o) const
         && input.enabled == o.input.enabled
         && nearlyEqual(input.stickDeadzone, o.input.stickDeadzone)
         && nearlyEqual(input.triggerDeadzone, o.input.triggerDeadzone)
+        && rvt.poolPages == o.rvt.poolPages
+        && nearlyEqual(rvt.metersPerTexel, o.rvt.metersPerTexel)
+        && nearlyEqual(rvt.nearRadiusM, o.rvt.nearRadiusM)
+        && nearlyEqual(rvt.activationRadiusM, o.rvt.activationRadiusM)
+        && rvt.maxPagesPerFrame == o.rvt.maxPagesPerFrame
+        && rvt.nativeNear == o.rvt.nativeNear
         && antiCheat.enabled == o.antiCheat.enabled
         && antiCheat.integrityCheck == o.antiCheat.integrityCheck
         && nearlyEqual(antiCheat.tolerance, o.antiCheat.tolerance)
@@ -274,6 +281,15 @@ void ProjectSettings::clamp()
                                            0.0f, ProjectInputSettings::kMaxDeadzone);
     }
 
+    {
+        using R = ProjectRvtSettings;
+        rvt.poolPages         = std::clamp(rvt.poolPages, R::kMinPoolPages, R::kMaxPoolPages);
+        rvt.metersPerTexel    = std::clamp(finiteOr(rvt.metersPerTexel, R{}.metersPerTexel), R::kMinTexel, R::kMaxTexel);
+        rvt.nearRadiusM       = std::clamp(finiteOr(rvt.nearRadiusM, R{}.nearRadiusM), R::kMinRadius, R::kMaxRadius);
+        rvt.activationRadiusM = std::clamp(finiteOr(rvt.activationRadiusM, R{}.activationRadiusM), R::kMinRadius, R::kMaxRadius);
+        rvt.maxPagesPerFrame  = std::clamp(rvt.maxPagesPerFrame, R::kMinPagesPerFrame, R::kMaxPagesPerFrame);
+    }
+
     using AC = ProjectAntiCheatSettings;
     auto& a = antiCheat;
     a.tolerance          = std::clamp(finiteOr(a.tolerance, AC{}.tolerance), 0.0f, AC::kMaxTolerance);
@@ -342,7 +358,8 @@ void ProjectSettings::toJson(json& out) const
     out["game"] = { { "title",          game.title },
                     { "splashEnabled",  game.splashEnabled },
                     { "splashImage",    game.splashImage },
-                    { "splashSubtitle", game.splashSubtitle } };
+                    { "splashSubtitle", game.splashSubtitle },
+                    { "cookStaticEntities", game.cookStaticEntities } };
 
     out["shadows"] = {
         { "distance",     shadows.distance },
@@ -373,6 +390,13 @@ void ProjectSettings::toJson(json& out) const
     out["input"] = { { "enabled",         input.enabled },
                      { "stickDeadzone",   input.stickDeadzone },
                      { "triggerDeadzone", input.triggerDeadzone } };
+    out["rvt"] = { { "poolPages",         rvt.poolPages },
+                   { "metersPerTexel",    rvt.metersPerTexel },
+                   { "nearRadiusM",       rvt.nearRadiusM },
+                   { "activationRadiusM", rvt.activationRadiusM },
+                   { "maxPagesPerFrame",  rvt.maxPagesPerFrame },
+                   { "nativeNear",        rvt.nativeNear } };
+
     out["renderDefaults"] = {
         { "useEditorSettings", renderDefaults.useEditorSettings },
         { "windowWidth",       renderDefaults.windowWidth },
@@ -445,6 +469,7 @@ void ProjectSettings::fromJson(const json& in)
         readBool  (g, "splashEnabled",  game.splashEnabled);
         readString(g, "splashImage",    game.splashImage);
         readString(g, "splashSubtitle", game.splashSubtitle);
+        readBool  (g, "cookStaticEntities", game.cookStaticEntities);
     }
     {
         const json& s = section(in, "shadows");
@@ -495,8 +520,16 @@ void ProjectSettings::fromJson(const json& in)
         readNumber(i, "stickDeadzone",   input.stickDeadzone);
         readNumber(i, "triggerDeadzone", input.triggerDeadzone);
     }
-    // An older file may still carry an "rvt" section (RVT was a project setting before RVT 2.0, Thema 335): it is not read.
-    // The switch is global now (Preferences ▸ Rendering), the texel size and radii belong to the RVT Write node.
+    {
+        // "enabled" (before RVT 2.0, Thema 335) is read past: on/off is the global switch (Preferences > Rendering).
+        const json& r = section(in, "rvt");
+        readNumber(r, "poolPages",         rvt.poolPages);
+        readNumber(r, "metersPerTexel",    rvt.metersPerTexel);
+        readNumber(r, "nearRadiusM",       rvt.nearRadiusM);
+        readNumber(r, "activationRadiusM", rvt.activationRadiusM);
+        readNumber(r, "maxPagesPerFrame",  rvt.maxPagesPerFrame);
+        readBool  (r, "nativeNear",        rvt.nativeNear);   // missing (a file from before) = the default, on
+    }
     {
         const json& a = section(in, "anticheat");
         readBool  (a, "enabled",            antiCheat.enabled);

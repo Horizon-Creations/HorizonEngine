@@ -72,6 +72,7 @@
 #include "ProjectLaunchOpen.h"            // a .heproj double-clicked in the file manager
 #include "SceneRecoveryDialog.h"          // startup "unsaved work found" offer
 #include "AssetRecoveryDialog.h"          // the same for asset tabs
+#include "AutoLodDialog.h"                // Generate LODs: Content Browser, Foliage levels, LOD component
 #include "TextureColourSpaceDialog.h"     // sRGB or linear, at import and after
 #include "ReportIssueDialog.h"           // Help > Report Issue (pre-filled GitHub issue)
 #include "SelfUpdateDialog.h"            // Help > Check for Updates (SFTP self-update)
@@ -826,6 +827,8 @@ void EditorUI::render(AppContext& ctx, float dt)
     SceneRecoveryDialog::Draw(ctx);
     // The asset tabs' copies, once the scene's offer is answered (it waits).
     AssetRecoveryDialog::Draw(ctx);
+    // Generate LODs, opened by the Content Browser, the Details panel (Foliage, LOD).
+    AutoLodDialog::draw(ctx);
 
     // ── Assets ▸ Publish Engine Content to Server… ───────────────────────────
     EngineContentPublishDialog::Draw(ctx);
@@ -2346,6 +2349,9 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 	EditorToolbar::setRevealAssetHook(&ContentBrowserPanel::revealAsset);
 	// …and so does its Save: the button must be the keystroke, cues included.
 	EditorToolbar::setSaveHook([] { s_saveFromToolbar = true; });
+	// Nobody looks at the scene until the viewport shows it this frame (ViewportPanel sets it back): with another tab in
+	// front the renderer skips the scene's GPU work, the world keeps ticking.
+	if (ctx.renderer) ctx.renderer->SetSceneVisible(false);
 	// Runs every frame regardless of which tab/panel is active (before any early-out):
 	// guarantees the RMB fly-look capture can never stay stuck once the button is released.
 	ViewportPanel::enforceViewportLookCaptureInvariant(ctx.window ? ctx.window->GetNativeWindow() : nullptr);

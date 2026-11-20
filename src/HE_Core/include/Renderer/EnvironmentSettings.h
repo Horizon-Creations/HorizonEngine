@@ -51,6 +51,23 @@ struct EnvironmentSettings
     // altitude (analytic exponential height fog); 0 = uniform distance fog.
     float     fogDensity      = 0.0f;
     float     fogHeightFalloff = 0.1f;
+    // Volumetric fog (Thema 225, docs/volumetric-fog-plan.md): fogMode 0 keeps the
+    // analytic formula above pixel-identical; 1 switches to the froxel volume, built
+    // by HE::MakeFogVolumeData (HorizonRendering/FogVolume.h) from these fields plus
+    // a capability + camera-underwater gate. These do NOT go through BuildSkyFrameParams
+    // or OpenGL's sky uniforms (unlike fogDensity/fogHeightFalloff above) — no shader
+    // reads them yet, so leaving that step undone is deliberate, not a gap to "fix".
+    int       fogMode              = 0;
+    int       fogQuality           = 1;
+    float     fogVolumeDistance    = 96.0f;
+    glm::vec3 fogAlbedo            = glm::vec3(1.0f);
+    float     fogAnisotropy        = 0.5f;
+    float     fogNoiseAmount       = 0.5f;
+    float     fogNoiseScale        = 40.0f;
+    float     fogBankDensity       = 0.0f;
+    float     fogBankBaseY         = 0.0f;
+    float     fogBankThickness     = 4.0f;
+    float     fogLocalLightScatter = 1.0f;
     // Night-sky aurora borealis intensity (0 = off). Drifting light ribbons
     // that sweep across the sky, drawn only at night.
     float     auroraIntensity = 0.0f;

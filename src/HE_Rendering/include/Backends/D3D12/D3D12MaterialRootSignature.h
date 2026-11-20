@@ -34,9 +34,11 @@
 //   [14]     heSSRFwd        t31   forward SSR result
 //   [15]     heGIReflFwd     t32   forward GI-reflection result
 //   [16]     heCloudShadow   t33   cloud-shadow transmittance
-//   [17]     heRvtTable      t40   Runtime Virtual Texture page table (R32_UINT, mips), one per consumer material, per draw
-//   [18..20] heRvtAlbedo/Normal/Surface t41..t43  the RVT page pool (Texture2DArray each), shared, in the template
-// ([17..20] are Thema 333: docs/rvt-design-2026-11-04.md. A material without the RvtSample node never names them.)
+//   [17]     heFogVolume     t34   integrated volumetric-fog volume (Texture3D; Thema 225 step 9)
+//   [18]     heRvtTable      t40   Runtime Virtual Texture page table (R32_UINT, mips), one per consumer material, per draw
+//   [19..21] heRvtAlbedo/Normal/Surface t41..t43  the RVT page pool (Texture2DArray each), shared, in the template
+//   [22..24] heRvtAlbedo/Normal/SurfaceCold t44..t46  RVT cold (BC7) pages
+// ([18..24] are Thema 333: docs/rvt-design-2026-11-04.md. A material without the RvtSample node never names them.)
 // [9] has no gate (a Landscape Layer Blend samples it unconditionally): every
 // draw block gets the chunk's weightmap — or the 1x1 layer-0 default for
 // anything that is not a landscape chunk — written over the template's null
@@ -65,7 +67,7 @@
 
 namespace HE::d3d12mat
 {
-constexpr UINT kSrvPerDraw          = 24;
+constexpr UINT kSrvPerDraw          = 25;
 constexpr UINT kSlotTex0            = 0;  // t2
 constexpr UINT kSlotTexP0           = 1;  // t4..t7 → slots 1..4
 constexpr UINT kSlotGIShadow        = 5;  // t10
@@ -80,13 +82,14 @@ constexpr UINT kSlotGIVisibility    = 13; // t18
 constexpr UINT kSlotSSRFwd          = 14; // t31
 constexpr UINT kSlotGIReflFwd       = 15; // t32
 constexpr UINT kSlotCloudShadow     = 16; // t33
-constexpr UINT kSlotRvtTable        = 17; // t40 (Texture2D<uint>, the consumer's page table)
-constexpr UINT kSlotRvtAlbedo       = 18; // t41 (Texture2DArray, sRGB view)
-constexpr UINT kSlotRvtNormal       = 19; // t42
-constexpr UINT kSlotRvtSurface      = 20; // t43
-constexpr UINT kSlotRvtAlbedoCold   = 21; // t44 (Texture2DArray BC7_UNORM_SRGB, step 9)
-constexpr UINT kSlotRvtNormalCold   = 22; // t45 (Texture2DArray BC7_UNORM)
-constexpr UINT kSlotRvtSurfaceCold  = 23; // t46 (Texture2DArray BC7_UNORM)
+constexpr UINT kSlotFogVolume       = 17; // t34 heFogVolume (Texture3D, Thema 225 step 9; texelFetch, no sampler)
+constexpr UINT kSlotRvtTable        = 18; // t40 (Texture2D<uint>, the consumer's page table)
+constexpr UINT kSlotRvtAlbedo       = 19; // t41 (Texture2DArray, sRGB view)
+constexpr UINT kSlotRvtNormal       = 20; // t42
+constexpr UINT kSlotRvtSurface      = 21; // t43
+constexpr UINT kSlotRvtAlbedoCold   = 22; // t44 (Texture2DArray BC7_UNORM_SRGB, step 9)
+constexpr UINT kSlotRvtNormalCold   = 23; // t45 (Texture2DArray BC7_UNORM)
+constexpr UINT kSlotRvtSurfaceCold  = 24; // t46 (Texture2DArray BC7_UNORM)
 
 // Root parameter indices (SetGraphicsRootConstantBufferView / DescriptorTable).
 constexpr UINT kRootLightCB   = 0; // b0 HeLighting (FS)
@@ -104,7 +107,7 @@ constexpr UINT kParamCount    = 9;
 // as the negative control for t24..t26 — a clustered PSO against it must be
 // rejected, a plain one must still build.
 constexpr UINT kPreClusterParamCount = 6;
-constexpr UINT kRangeCount    = 9;
+constexpr UINT kRangeCount    = 10;
 constexpr UINT kSamplerCount  = 16;
 // What the signature covered BEFORE Thema 56 (t2, t4..t7, t10..t11, t12, t13 /
 // s2, s4..s7, s10..s13): the first five ranges and nine samplers. he_tests
@@ -165,8 +168,9 @@ inline void DescribeMaterialRootSignature(MaterialRootSignature& out,
     srv(4, 13, 1, kSlotLocalShadow);      // t13      heLocalShadow (Texture2DArray)
     srv(5, 14, 5, kSlotLandscapeWeights); // t14..t18 landscape weights, sky cube, AO, DDGI atlases
     srv(6, 31, 3, kSlotSSRFwd);           // t31..t33 forward SSR / GI-refl, cloud shadow
-    srv(7, 40, 4, kSlotRvtTable);         // t40..t43 Runtime Virtual Texture: page table + three pool arrays
-    srv(8, 44, 3, kSlotRvtAlbedoCold);    // t44..t46 RVT cold (BC7) pages, step 9
+    srv(7, 34, 1, kSlotFogVolume);        // t34      heFogVolume (Texture3D; declared when HE_FOG_VOLUME is on)
+    srv(8, 40, 4, kSlotRvtTable);         // t40..t43 Runtime Virtual Texture: page table + three pool arrays
+    srv(9, 44, 3, kSlotRvtAlbedoCold);    // t44..t46 RVT cold (BC7) pages, step 9
 
     out.params[kRootSrvTable].ParameterType                       = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
     out.params[kRootSrvTable].DescriptorTable.NumDescriptorRanges = rangeCount;

@@ -1,5 +1,7 @@
 #include "HorizonScene/SceneSerializer.h"
 #include "HorizonScene/HorizonWorld.h"
+#include "HorizonScene/CookAnalysis.h"
+#include "HorizonScene/CookedStatic.h"
 #include "HorizonScene/Components/NameComponent.h"
 #include "HorizonScene/Components/HierarchyComponent.h"
 #include "HorizonScene/Components/TransformComponent.h"
@@ -24,6 +26,7 @@
 #include "HorizonScene/Components/StreamingComponent.h"
 #include "HorizonScene/Components/EditorLockComponent.h"   // the Outliner's lock, an entity-level field
 #include "HorizonScene/Components/InactiveComponent.h"     // the "Active" switch, a component like any other
+#include "HorizonScene/Components/MobilityComponent.h"    // the author's Static/Movable choice (entity cooking)
 #include "HorizonScene/Components/PrefabInstanceComponent.h"
 #include "HorizonScene/Components/EnvironmentComponent.h"
 #include "HorizonScene/Components/EnvironmentLightComponent.h"
@@ -1172,6 +1175,10 @@ namespace
 				{ "fontSize", t2->fontSize },
 				{ "color",    vec4ToJson(t2->color) },
 			};
+			// Same key as UIElement in UIWidgetTree.cpp. Empty = default UI font,
+			// so older readers and scenes without the key stay identical. The baked
+			// fontAtlasKey is transient and re-resolved at extract.
+			if (!t2->font.empty()) comps["uitext"]["font"] = t2->font;
 		}
 		if (auto* img = registry.try_get<UIImageComponent>(entity))
 		{
@@ -1196,6 +1203,10 @@ namespace
 		// when set; see InactiveComponent.h.
 		if (registry.all_of<InactiveComponent>(entity))
 			comps["inactive"] = json::object();
+		// Static/Movable, only when the author decided; no component means "derived
+		// by CookAnalysis", which is what every older scene loads as.
+		if (const auto* mob = registry.try_get<MobilityComponent>(entity))
+			comps["mobility"] = mob->mode == MobilityComponent::Mode::Static ? "static" : "movable";
 		return comps;
 	}
 
@@ -2416,6 +2427,7 @@ namespace
 			t2.text     = c.value("text",     t2.text);
 			t2.fontSize = c.value("fontSize", t2.fontSize);
 			t2.color    = jsonToVec4(c.value("color", json()), t2.color);
+			t2.font     = c.value("font",     std::string());
 			registry.emplace_or_replace<UITextComponent>(entity, std::move(t2));
 		}
 		if (comps.contains("uiimage"))
@@ -2438,6 +2450,13 @@ namespace
 		}
 		if (comps.contains("inactive"))
 			registry.emplace_or_replace<InactiveComponent>(entity);
+		if (comps.contains("mobility"))
+		{
+			MobilityComponent mob;
+			if (comps["mobility"].is_string() && comps["mobility"].get<std::string>() == "static")
+				mob.mode = MobilityComponent::Mode::Static;
+			registry.emplace_or_replace<MobilityComponent>(entity, mob);
+		}
 	}
 #undef HE_NAVCFG_FIELDS
 
@@ -2524,6 +2543,71 @@ namespace
 	}
 
 	// ── JSON → Scene ─────────────────────────────────────────────────────────
+	// ── The packed cook verdict (project setting "Cook static entities") ─────────
+	// An OPTIONAL top-level key, the way levelScript and cells are: a reader that does not know it
+	// walks past it, and a scene without it is analysed at its first extract as ever, so no format
+	// version moves. What it holds is the VERDICT only: the entities analyzeCookability() cleared,
+	// as the 16 bytes of their UUIDs, base64 in one string (the entity ids are what the file keys
+	// everything by; entt handles are not stable across a load). Not a matrix, not a bound: the
+	// first walk after the load produces those, from a mesh that is resident by then.
+	constexpr const char* kCookedStaticKey = "cookedStatic";
+	static_assert(sizeof(HE::UUID) == 2 * sizeof(uint64_t), "the packed verdict is the UUIDs' raw bytes");
+
+	// `outSummary`, when given, gets the same population `ids` is drawn from, broken down
+	// by blocker reason (HE::summarizeCookability) — the export log's per-scene line
+	// (ExportDialogPanel.cpp). Built from this one analyzeCookability() pass, not a second walk.
+	void addCookedSeed(HorizonWorld& world, json& scene, HE::CookSummary* outSummary = nullptr)
+	{
+		auto& registry = world.registry();
+		const std::vector<HE::CookEntry> entries = HE::analyzeCookability(registry);
+		std::vector<HE::UUID> ids;
+		std::vector<HE::CookEntry> candidates;
+		if (outSummary) candidates.reserve(entries.size());
+		for (const HE::CookEntry& ce : entries)
+		{
+			// What buildSceneJson wrote is all the load can find again.
+			if (!registry.all_of<MeshComponent, NameComponent>(ce.entity) || isEngineGenerated(registry, ce.entity))
+				continue;
+			if (outSummary) candidates.push_back(ce);
+			if (ce.verdict.cookable())
+				ids.push_back(entityUuid(registry, ce.entity));
+		}
+		scene[kCookedStaticKey] = {
+			{ "version",  1 },
+			{ "cookable", base64Encode(reinterpret_cast<const uint8_t*>(ids.data()), ids.size() * sizeof(HE::UUID)) } };
+		if (outSummary) *outSummary = HE::summarizeCookability(candidates, registry);
+	}
+
+	// Hands the block the verdict the scene carried. One UUID that does not name an entity of this load,
+	// or one without a transform and a mesh, and the whole verdict is dropped: the scene was edited
+	// by something that did not know it, and the analysis at the first extract is the safe answer.
+	void applyCookedSeed(HorizonWorld& world, const json& packed,
+	                     const std::unordered_map<HE::UUID, Entity>& idMap)
+	{
+		if (!packed.is_object() || packed.value("version", 0) != 1) return;
+		const auto it = packed.find("cookable");
+		if (it == packed.end() || !it->is_string()) return;
+		const std::vector<uint8_t> bytes = base64Decode(it->get_ref<const std::string&>());
+		if (bytes.empty() || bytes.size() % sizeof(HE::UUID) != 0) return;
+
+		auto& registry = world.registry();
+		std::vector<Entity> cookable;
+		cookable.reserve(bytes.size() / sizeof(HE::UUID));
+		for (size_t off = 0; off < bytes.size(); off += sizeof(HE::UUID))
+		{
+			HE::UUID id;
+			std::memcpy(&id, bytes.data() + off, sizeof(HE::UUID));
+			const auto found = idMap.find(id);
+			if (found == idMap.end() || !registry.all_of<TransformComponent, MeshComponent>(found->second))
+			{
+				HE_LOG_WARN(Serialize, "Scene load: the packed cook verdict does not match the scene; it is ignored");
+				return;
+			}
+			cookable.push_back(found->second);
+		}
+		HE::seedCookedStatic(registry, std::move(cookable), world.structureEpoch());
+	}
+
 	bool applySceneJson(HorizonWorld& world, const json& scene)
 	{
 		// Level script (scene-wide HorizonCode graph). Load it before the early
@@ -2610,6 +2694,10 @@ namespace
 		// the ordinary "Sun"/"Moon" copies such a scene file carries.
 		world.ensureEnvironmentLights();
 		world.markHierarchyDirty();
+		// Last, so the epoch it is valid for is the one the world is left at, and the block's
+		// listeners only hear what happens after the load.
+		if (const auto packed = scene.find(kCookedStaticKey); packed != scene.end())
+			applyCookedSeed(world, *packed, idMap);
 		return true;
 	}
 
@@ -3035,7 +3123,8 @@ namespace
 	X("uitext",              UITextComponent) \
 	X("uiimage",             UIImageComponent) \
 	X("uibutton",            UIButtonComponent) \
-	X("inactive",            InactiveComponent)
+	X("inactive",            InactiveComponent) \
+	X("mobility",            MobilityComponent)
 
 	bool removeComponentForKey(entt::registry& registry, Entity entity, const std::string& key)
 	{
@@ -3289,6 +3378,8 @@ bool SceneSerializer::isKnownComponentKey(const std::string& key)
 		"uiimage", "uitext", "weather",
 		// The "Active" switch, off (InactiveComponent) — an empty object.
 		"inactive",
+		// Static/Movable (MobilityComponent) — "static" or "movable".
+		"mobility",
 		// Not a component: serializeEntityComponents carries the display name
 		// in the same object, because a rename would otherwise be the one edit
 		// the component-sync path drops.
@@ -3659,9 +3750,11 @@ bool SceneSerializer::loadJSON(HorizonWorld& world, const std::filesystem::path&
 }
 
 // ── In-memory snapshots (CBOR) ────────────────────────────────────────────────
-bool SceneSerializer::saveToMemory(const HorizonWorld& world, std::vector<uint8_t>& out)
+bool SceneSerializer::saveToMemory(const HorizonWorld& world, std::vector<uint8_t>& out, bool packCookVerdict,
+                                    HE::CookSummary* outCookSummary)
 {
     json scene = buildSceneJson(const_cast<HorizonWorld&>(world));
+    if (packCookVerdict) addCookedSeed(const_cast<HorizonWorld&>(world), scene, outCookSummary);
     out = json::to_cbor(scene);
     HE_LOG_DEBUG(Serialize, "Scene snapshot to memory: %zu entity/-ies, %zu byte(s)",
                  sceneEntityCount(scene), out.size());

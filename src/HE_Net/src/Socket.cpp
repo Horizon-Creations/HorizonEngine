@@ -578,7 +578,7 @@ SocketHandle socketCreateListenerLoopback(std::uint16_t port, int backlog) {
     return h;
 }
 
-SocketResult socketConnectPoll(SocketHandle h) {
+SocketResult socketConnectPoll(SocketHandle h, int timeoutMs) {
     if (h == kInvalidSocket) return SocketResult::Error;
 
     // A pending non-blocking connect signals completion by becoming writable;
@@ -597,7 +597,9 @@ SocketResult socketConnectPoll(SocketHandle h) {
     FD_SET(s, &errSet);
     const int nfds = s + 1;
 #endif
-    timeval tv{};   // zero timeout — pure poll, never blocks the caller
+    timeval tv{};   // timeoutMs 0 (default): pure poll, never blocks the caller
+    tv.tv_sec  = timeoutMs / 1000;
+    tv.tv_usec = (timeoutMs % 1000) * 1000;
 
     const int rc = ::select(nfds, nullptr, &writeSet, &errSet, &tv);
     if (rc < 0) {

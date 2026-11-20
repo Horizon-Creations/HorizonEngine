@@ -870,7 +870,18 @@ void render(AppContext& ctx)
         // Holding the project still while the worker packs is the Build window's
         // job now — it is the modal that stays up for the whole run.
 
-        ImGui::SetNextWindowSize(ImVec2(560, 0), ImGuiCond_Always);
+        // Width follows the editor window instead of a fixed pixel count: 560 px
+        // is a sliver on a 4K display and most of the screen on a laptop, and
+        // resizing it by hand on every open is exactly what this avoids. The
+        // clamp keeps the profile row (combo + two buttons + name field) from
+        // being squeezed and the lines from becoming unreadably long;
+        // pinDialogToEditorWindow still caps it to the window on tiny screens.
+        // The floor follows the font as well: the profile row (combo, two buttons,
+        // a name field) is ~40 characters wide whatever the display scale is.
+        const float dlgW = std::clamp(ImGui::GetMainViewport()->WorkSize.x * 0.45f,
+                                      ImGui::GetFontSize() * 42.0f, 1100.0f);
+        const float dlgK = dlgW / 560.0f;   // scale for the fixed-width fields below
+        ImGui::SetNextWindowSize(ImVec2(dlgW, 0), ImGuiCond_Always);
         EditorWidgets::pinDialogToEditorWindow();
         if (ImGui::BeginPopupModal("Export Project##build", nullptr,
             ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings))
@@ -898,7 +909,7 @@ void render(AppContext& ctx)
 
                 ImGui::Text("Profile:");
                 ImGui::SameLine();
-                ImGui::SetNextItemWidth(180.0f);
+                ImGui::SetNextItemWidth(180.0f * dlgK);
                 if (ImGui::BeginCombo("##exportProfile",
                         proj.exportProfiles[s_exportProfileIdx].name.c_str()))
                 {
@@ -924,7 +935,7 @@ void render(AppContext& ctx)
                     pm->saveProject(proj.path);
                 }
                 ImGui::SameLine();
-                ImGui::SetNextItemWidth(120.0f);
+                ImGui::SetNextItemWidth(120.0f * dlgK);
                 ImGui::InputTextWithHint("##newProfileName", "new profile",
                                          &s_exportNewProfileName);
                 ImGui::SameLine();
@@ -997,9 +1008,9 @@ void render(AppContext& ctx)
                 // rather than at the window edge: the popup is AlwaysAutoResize and
                 // only the SetNextWindowSize above keeps its width from following
                 // its own content, so a wrap at "the current width" is one dropped
-                // line away from shrinking the dialog frame over frame. 550 = the
-                // 560 the dialog is pinned to, minus the window padding.
-                EditorWidgets::WrapText wrap(550.0f);
+                // line away from shrinking the dialog frame over frame. dlgW - 10
+                // = the width the dialog is pinned to, minus the window padding.
+                EditorWidgets::WrapText wrap(dlgW - 10.0f);
                 const std::filesystem::path base =
                     SDL_GetBasePath() ? std::filesystem::path(SDL_GetBasePath())
                                       : std::filesystem::path{};
@@ -1065,7 +1076,7 @@ void render(AppContext& ctx)
             {
                 ImGui::Text("Texture compression:");
                 ImGui::SameLine();
-                ImGui::SetNextItemWidth(170.0f);
+                ImGui::SetNextItemWidth(170.0f * dlgK);
                 const char* fmtPreview = s_exportTextureFormat == "None"
                                              ? "None (RGBA8)" : "Auto (per target)";
                 if (ImGui::BeginCombo("##textureFormat", fmtPreview))
@@ -1080,7 +1091,7 @@ void render(AppContext& ctx)
                 ImGui::SameLine();
                 ImGui::TextUnformatted("Quality:");
                 ImGui::SameLine();
-                ImGui::SetNextItemWidth(110.0f);
+                ImGui::SetNextItemWidth(110.0f * dlgK);
                 static const char* const kQualityNames[] = { "Fast", "Balanced", "High" };
                 const int q = std::clamp(s_exportTextureQuality, 0, 2);
                 ImGui::BeginDisabled(s_exportTextureFormat == "None");
@@ -1093,6 +1104,9 @@ void render(AppContext& ctx)
                 }
                 ImGui::EndDisabled();
                 EditorWidgets::helpForKey("Export/Texture quality");
+                // Wrapped: these notes are longer than the dialog, and a clipped
+                // sentence reads as a complete one.
+                EditorWidgets::WrapText wrap(dlgW - 10.0f);
                 if (s_exportTextureFormat == "None")
                     ImGui::TextDisabled("Uncompressed RGBA8 with baked mips: the exact pixels, "
                                         "and the largest pak.");
@@ -1109,7 +1123,10 @@ void render(AppContext& ctx)
             EditorWidgets::checkbox("Compress assets",       &s_exportCompress);
             EditorWidgets::checkbox("Encrypt assets",        &s_exportEncrypt);
             if (s_exportEncrypt)
+            {
+                EditorWidgets::WrapText wrap(dlgW - 10.0f);
                 ImGui::TextDisabled("Note: encryption key management is the project's responsibility.");
+            }
             // Mods are a game's idea: a .hpak dropped next to the executable that
             // replaces content. An application is not modded from outside, and a
             // switch nobody should touch is worse than no switch.
@@ -1117,7 +1134,10 @@ void render(AppContext& ctx)
             {
                 EditorWidgets::checkbox("Enable mod support",    &s_exportModSupport);
                 if (s_exportModSupport)
+                {
+                    EditorWidgets::WrapText wrap(dlgW - 10.0f);
                     ImGui::TextDisabled("The game mounts every .hpak in a Mods/ folder next to the executable.");
+                }
             }
             else
                 s_exportModSupport = false;
@@ -1127,7 +1147,10 @@ void render(AppContext& ctx)
             {
                 EditorWidgets::checkbox("Development hotkeys",   &s_exportDevTools);
                 if (s_exportDevTools)
+                {
+                    EditorWidgets::WrapText wrap(dlgW - 10.0f);
                     ImGui::TextDisabled("F10 shows the stats card with per-pass GPU times, V toggles VSync. Leave off for the build players get.");
+                }
             }
             else
                 s_exportDevTools = false;
@@ -1143,7 +1166,7 @@ void render(AppContext& ctx)
             // against, or what stops it before anything runs.
             const HE::ExportSdk::ExportGate sdkGate = currentExportGate(ctx);
             {
-                EditorWidgets::WrapText wrap(550.0f);
+                EditorWidgets::WrapText wrap(dlgW - 10.0f);
                 ExportSdkGateUi::drawGameCompileStatus(ctx, sdkGate);
             }
 
@@ -1184,7 +1207,7 @@ void render(AppContext& ctx)
                 const auto lastRun = BuildProgressDialog::interpretedClasses();
                 if (!lastRun.headline.empty())
                 {
-                    EditorWidgets::WrapText wrap(550.0f);
+                    EditorWidgets::WrapText wrap(dlgW - 10.0f);
                     ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f),
                                        "Last export: %s", lastRun.headline.c_str());
                     // Four is what the build window shows before it scrolls;
@@ -1371,8 +1394,27 @@ void render(AppContext& ctx)
 
     if (s_startRequest && !s_exportRunning.load())
     {
-        s_startRequest = false;
-        requestStart(ctx);
+        // The setup in startExport (every scene loaded and serialized, every
+        // HorizonCode asset read) runs on this thread and blocks the editor for
+        // as long as the project is big. Start it one frame later and put the
+        // Build window up first, so the click is answered with "Preparing…"
+        // instead of a window that simply stops. Only when the run is going to
+        // start: a parked or refused one must not leave this run behind.
+        static bool s_announced = false;
+        if (!s_announced && currentExportGate(ctx).state == HE::ExportSdk::GateState::Ready)
+        {
+            s_announced = true;
+            Build::begin({ "Setup" });
+            Build::stepBegin(0);
+            Build::setActivity("Preparing export: reading scenes and assets\xe2\x80\xa6");
+            BuildProgressDialog::requestOpen();
+        }
+        else
+        {
+            s_announced    = false;
+            s_startRequest = false;
+            requestStart(ctx);
+        }
     }
     pumpWaitingExport(ctx);
 #else
@@ -1461,6 +1503,27 @@ void startExport(AppContext& ctx)
                                       + " placed prefab(s) point at an asset that is gone; "
                                       "shipped as they were last saved");
                 };
+                // Project Settings ▸ General ▸ Cook static entities: each scene carries its cookable set,
+                // so the game skips the analysis at load (SceneSerializer::saveToMemory).
+                const bool packCookVerdict =
+                    ctx.projectManager->currentProject().settings.game.cookStaticEntities;
+                // Collected here and logged after Build::begin() below (not at the point each
+                // scene is packed): that begin() call clears the log Build::log would otherwise
+                // write into, same as every other line from this setup phase (see its :1642 summary).
+                std::vector<std::string> cookLogLines;
+                if (!packCookVerdict)
+                    cookLogLines.push_back(
+                        "Cooking: Project Settings ▸ General ▸ Performance ▸ "
+                        "\"Cook static entities\" is off — nothing packed as cooked");
+                // A scene's cooking in the log: its summary, then one line per entity.
+                const auto appendCookLines = [&cookLogLines](const std::string& scene, const HE::CookSummary& s)
+                {
+                    cookLogLines.push_back(scene + ": " + HE::formatCookSummary(s));
+                    for (const std::string& l : s.entityLines)
+                        cookLogLines.push_back("  " + l);
+                    if (s.entityLinesOmitted)
+                        cookLogLines.push_back("  ... and " + std::to_string(s.entityLinesOmitted) + " more entities");
+                };
                 // Meshes some entity draws with a material of its own: the texture bake
                 // leaves them alone (an override material would read its texture through
                 // the atlas UVs). Collected from every scene the export serializes.
@@ -1475,7 +1538,11 @@ void startExport(AppContext& ctx)
                     {
                         syncPrefabsForExport(sceneWorld, sceneName);
                         HE::collectMeshesWithMaterialOverrides(sceneWorld, overriddenMeshes);
-                        ser.saveToMemory(sceneWorld, sceneBinary);
+                        HE::CookSummary cookSummary;
+                        ser.saveToMemory(sceneWorld, sceneBinary, packCookVerdict,
+                                         packCookVerdict ? &cookSummary : nullptr);
+                        if (packCookVerdict)
+                            appendCookLines(sceneName + " (startup)", cookSummary);
                     }
                     else
                         sceneOk = false;
@@ -1499,8 +1566,9 @@ void startExport(AppContext& ctx)
                     if (!s_exportBakeFarLandscape || !ctx.renderer || !ctx.contentManager) return;
                     if (!ctx.renderer->GetCapabilities().supportsRawCapture)
                     {
+                        // cookLogLines, not Build::log: Build::begin() below would clear it (see there).
                         if (!farBackendNoted)
-                            Build::log(1, "Far landscape: not baked, the picture needs a renderer that can hand back a "
+                            cookLogLines.push_back("Warning: far landscape not baked, the picture needs a renderer that can hand back a "
                                           "frame without tonemap and post effects and this editor's one cannot (the far "
                                           "levels keep the landscape's own material)");
                         farBackendNoted = true;
@@ -1511,7 +1579,7 @@ void startExport(AppContext& ctx)
                     std::vector<HE::landscape::HlodAssetBlob> blobs;
                     const HE::landscape::HlodExportStats st = HE::landscape::bakeWorldLandscapes(
                         w, ctx.world, *ctx.contentManager, *ctx.renderer, o, blobs, farSeen,
-                        [&](const std::string& s) { Build::log(0, label + ": " + s); });
+                        [&](const std::string& s) { cookLogLines.push_back(label + ": " + s); });
                     for (HE::landscape::HlodAssetBlob& b : blobs)
                     {
                         Hpak::PackSettings::ExtraAsset ea;
@@ -1519,7 +1587,7 @@ void startExport(AppContext& ctx)
                         farAssets.push_back(std::move(ea));
                     }
                     if (st.terrains > 0)
-                        Build::log(0, label + ": far landscape " + std::to_string(st.terrains) + " landscape(s), "
+                        cookLogLines.push_back(label + ": far landscape " + std::to_string(st.terrains) + " landscape(s), "
                                       + std::to_string(st.chunks) + " chunk(s) in " + std::to_string(static_cast<int>(st.ms))
                                       + " ms");
                 };
@@ -1579,8 +1647,16 @@ void startExport(AppContext& ctx)
                             if (loaded) HE::collectMeshesWithMaterialOverrides(w2, overriddenMeshes);
                             if (loaded) bakeFarLandscapes(w2, rel);
                             if (loaded) bakeRvtBase(w2, rel);
-                            if (loaded && ser2.saveToMemory(w2, bytes))
+                            HE::CookSummary cookSummary;
+                            if (loaded && ser2.saveToMemory(w2, bytes, packCookVerdict,
+                                                             packCookVerdict ? &cookSummary : nullptr))
                             {
+                                // The startup scene is one of these files too and already logged above.
+                                std::error_code eqEc;
+                                const bool isStartup = !scenePath.empty()
+                                    && std::filesystem::equivalent(sit->path(), scenePath, eqEc);
+                                if (packCookVerdict && !isStartup)
+                                    appendCookLines(rel, cookSummary);
                                 // Level script → codegen source, keyed by the scene's
                                 // pak UUID (the same key the runtime derives, §9.1).
                                 if (hcCompile)
@@ -1769,12 +1845,18 @@ void startExport(AppContext& ctx)
                 const bool hasBuild = hcCompile && !hcSources.empty();
                 std::vector<std::string> stepNames{ "Setup", "Build game" };
                 if (hasBuild) stepNames.emplace_back("Build HorizonCode");
+                // Cook is its own step in front of Package: what the export decided to cook
+                // (static entities per scene, the texture format) is reported there, not as
+                // a line among Setup's. The per-asset cooking itself runs inside the pack
+                // and is listed in the Package log.
+                stepNames.emplace_back("Cook");
                 stepNames.emplace_back("Package");
                 stepNames.emplace_back("Clean up");
                 const int stepSetup   = 0;
                 const int stepSdkGame = 1;
                 const int stepBuild   = hasBuild ? 2 : -1;
-                const int stepPackage = hasBuild ? 3 : 2;
+                const int stepCook    = hasBuild ? 3 : 2;
+                const int stepPackage = stepCook + 1;
                 const int stepCleanup = stepPackage + 1;
                 const HE::ExportSdk::GameSdk gameSdk = gate.sdk;
                 const std::string sdkProfile = gate.profile;
@@ -1976,6 +2058,8 @@ void startExport(AppContext& ctx)
                 {
                     Build::log(0, (reused ? "reused  " : "packed  ") + relPath);
                 };
+                // The Cook ring's log: one line per asset, in the order the cook pass took them.
+                es.onCook = [](const std::string& line) { Build::log(0, line); };
                 // What the pack had to leave out (a reference to a file no root
                 // has, a UUID two assets share): the game would otherwise just
                 // draw a fallback with no explanation anywhere.
@@ -1983,10 +2067,21 @@ void startExport(AppContext& ctx)
                 {
                     Build::log(1, msg);
                 };
-                es.onStage = [stepPackage, stepCleanup](const char* what)
+                static const char* const kTextureFormatNames[] = { "RGBA8 (no block compression)", "ASTC 4x4", "BC7", "BC3" };
+                const std::string textureLine = std::string("Textures: ")
+                    + kTextureFormatNames[std::min<size_t>(es.textureCompression, 3)];
+                es.onStage = [stepCook, stepPackage, stepCleanup, cookLogLines, textureLine](const char* what)
                 {
                     const std::string s = what;
-                    if (s == "pack")
+                    if (s == "cook")
+                    {
+                        Build::stepBegin(stepCook);
+                        for (const std::string& line : cookLogLines)
+                            Build::log(0, line);
+                        Build::log(0, textureLine);
+                        Build::setActivity("Cooking assets\xe2\x80\xa6");
+                    }
+                    else if (s == "pack")
                     {
                         Build::stepBegin(stepPackage);
                         Build::setActivity("Packing assets\xe2\x80\xa6");

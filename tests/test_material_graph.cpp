@@ -2754,7 +2754,7 @@ TEST_CASE("Auto landscape material: three arrays, thirteen parameters, one hex g
 	CHECK(gen.glsl.find("texture(heTex0") == std::string::npos);
 
 	// Every parameter is a real HeParams slot (none baked for being over budget).
-	REQUIRE(gen.params.size() == static_cast<size_t>(HE::kAutoLandscapeParamCount));
+	REQUIRE(gen.params.size() == static_cast<size_t>(HE::autoLandscapeParamCount(HE::autoLandscapeGroup(HE::AutoLandscapeGroupId::Mountains))));
 	CHECK(gen.params.size() <= static_cast<size_t>(HE::kMatMaxParams));
 	for (const char* name : { HE::kAutoLandscapeParamGroundTile, HE::kAutoLandscapeParamRockTile,
 	                          HE::kAutoLandscapeParamBombCell, HE::kAutoLandscapeParamRockSlope,
@@ -2820,7 +2820,7 @@ TEST_CASE("Auto landscape material: three arrays, thirteen parameters, one hex g
 				sawRock = sawRock || static_cast<int>(s->p[0]) == static_cast<int>(HE::AutoLandscapeLayer::Rock);
 			}
 		}
-		CHECK(reads == 18); // 3 bombed layers (Grass, Dirt, Rock) x 3 maps x (plain + bombed)
+		CHECK(reads == 30); // 5 bombed read sets (Grass, Dirt, Rock x3 sizes) x 3 maps x (plain + bombed)
 		CHECK(sawRock);
 	}
 
@@ -2830,7 +2830,7 @@ TEST_CASE("Auto landscape material: three arrays, thirteen parameters, one hex g
 	// Thema 180 Schritt 3: the layers read through the variant grid (Groups wired), which
 	// is heBombGrid plus the variant numbers; the plain heBombGrid is not emitted at all.
 	CHECK(countOf(gen.glsl, "void heBombGridV(") == 1u);
-	CHECK(countOf(gen.glsl, "heBombGridV(") - countOf(gen.glsl, "void heBombGridV(") == 3u);
+	CHECK(countOf(gen.glsl, "heBombGridV(") - countOf(gen.glsl, "void heBombGridV(") == 5u);
 	CHECK(gen.glsl.find("heBombGrid(") == std::string::npos);
 	REQUIRE(gen.switches.size() == 1u);
 	CHECK(gen.switches[0].first == HE::kAutoLandscapeSwitchBombing);
@@ -2856,7 +2856,7 @@ TEST_CASE("Auto landscape material: three arrays, thirteen parameters, one hex g
 			CHECK(m.graph.findNode(id) != nullptr);
 		const HE::MatShaderGen mg = HE::generateFragment(m.graph, HE::weatherFunctionLoader());
 		CHECK_FALSE(mg.glsl.empty());
-		CHECK(mg.params.size() == static_cast<size_t>(HE::kAutoLandscapeParamCount));
+		CHECK(mg.params.size() == static_cast<size_t>(HE::autoLandscapeParamCount(HE::autoLandscapeGroup(HE::AutoLandscapeGroupId::Mountains))));
 	}
 
 	// The graph survives its JSON (what the .hasset stores) byte for byte.
@@ -3698,7 +3698,7 @@ TEST_CASE("The shipped M_AutoLandscape.hasset is exactly what the builder makes"
 	              "re-run: landscape_tex_gen EditorDeps/EngineContent/Materials --material");
 	CHECK(m->graphTexturePaths.size() == 4u);   // three arrays + the trail clipmap
 	// + the RVT Read node's two volume vectors (RVT on: the shipped asset keeps every page-side parameter too)
-	CHECK(m->graphParamNames.size() == static_cast<size_t>(HE::kAutoLandscapeParamCount) + 2);
+	CHECK(m->graphParamNames.size() == static_cast<size_t>(HE::autoLandscapeParamCount(HE::autoLandscapeGroup(HE::AutoLandscapeGroupId::Mountains))) + 2);
 	// The Landscape tool lists these as the paintable layers — Auto first, so an
 	// unpainted terrain reads the automatic distribution.
 	CHECK(m->graphLayerNames == HE::matLandscapeLayerNames(HE::kAutoLandscapePaintLayerNames));
@@ -4068,7 +4068,7 @@ TEST_CASE("Auto landscape: puddles and ground snow come from the weather functio
 	for (const HE::MatParamSlot& s : HE::generateFragment(a.graph, HE::weatherFunctionLoader()).params)
 		CHECK(s.name != "Puddle Size");
 	const HE::MatShaderGen gen = HE::generateFragment(a.graph, HE::weatherFunctionLoader());
-	CHECK(gen.params.size() == static_cast<size_t>(HE::kAutoLandscapeParamCount));
+	CHECK(gen.params.size() == static_cast<size_t>(HE::autoLandscapeParamCount(HE::autoLandscapeGroup(HE::AutoLandscapeGroupId::Mountains))));
 	CHECK(gen.glsl.find("heLight.weather") != std::string::npos);
 	CHECK(gen.glsl.find("missing function") == std::string::npos);
 
@@ -5082,25 +5082,30 @@ TEST_CASE("Vulkan: heLandscapeWeights (binding 14) is in the material layout, an
 		              && (HE::vkmat::kBindings[i].stages & ~HE::vkmat::kStageTess) == HE::vkmat::kStageFragment);
 	CHECK(row);
 
-	// The device limit: 17 fragment samplers with the row, 16 (the spec
-	// minimum, which every device meets) without it — the renderer's fallback.
-	CHECK(HE::vkmat::fragmentSamplerCount(true) == 17);
-	CHECK(HE::vkmat::fragmentSamplerCount(false) == 16);
-	CHECK_FALSE(HE::vkmat::landscapeWeightsFit(16, 16));
-	CHECK_FALSE(HE::vkmat::landscapeWeightsFit(16, 1u << 20));
-	CHECK_FALSE(HE::vkmat::landscapeWeightsFit(1u << 20, 16));
-	CHECK(HE::vkmat::landscapeWeightsFit(17, 17));
-	CHECK(HE::vkmat::landscapeWeightsFit(1u << 20, 1u << 20)); // NVIDIA / lavapipe class
-	// The RVT rows (Thema 333) are four more on top: 21 with the weights row, 20 without; a device that fits neither
-	// keeps the layout it had (no RVT).
-	CHECK(HE::vkmat::fragmentSamplerCount(true, true) == 21);
-	CHECK(HE::vkmat::fragmentSamplerCount(false, true) == 20);
-	CHECK(HE::vkmat::rvtFit(21, 21, true));
-	CHECK_FALSE(HE::vkmat::rvtFit(20, 21, true));
-	CHECK_FALSE(HE::vkmat::rvtFit(21, 20, true));
-	CHECK(HE::vkmat::rvtFit(20, 20, false));
-	CHECK_FALSE(HE::vkmat::rvtFit(16, 16, false));
-	CHECK(HE::vkmat::rvtFit(1u << 20, 1u << 20, true));
+	// The device limit: 18 fragment samplers with both optional rows (the weightmap and,
+	// Thema 225 step 5, the fog volume at 34), 17 without the fog row, 16 (the spec
+	// minimum, which every device meets) without either — the renderer's fallbacks.
+	CHECK(HE::vkmat::fragmentSamplerCount(true, true) == 18);
+	CHECK(HE::vkmat::fragmentSamplerCount(true, false) == 17);
+	CHECK(HE::vkmat::fragmentSamplerCount(false, false) == 16);
+	CHECK_FALSE(HE::vkmat::landscapeWeightsFit(16, 16, false));
+	CHECK_FALSE(HE::vkmat::landscapeWeightsFit(16, 1u << 20, false));
+	CHECK_FALSE(HE::vkmat::landscapeWeightsFit(1u << 20, 16, false));
+	CHECK(HE::vkmat::landscapeWeightsFit(17, 17, false));
+	CHECK_FALSE(HE::vkmat::fogVolumeFit(17, 17));
+	CHECK(HE::vkmat::fogVolumeFit(18, 18));
+	CHECK(HE::vkmat::fogVolumeFit(1u << 20, 1u << 20)); // NVIDIA / lavapipe class
+	CHECK(HE::vkmat::landscapeWeightsFit(1u << 20, 1u << 20));
+	// The RVT rows (Thema 333) are four more on top of whatever heLandscapeWeights/heFogVolume decided: 22 with both,
+	// 20 with neither; a device that fits neither keeps the layout it had (no RVT).
+	CHECK(HE::vkmat::fragmentSamplerCount(true, true, true) == 22);
+	CHECK(HE::vkmat::fragmentSamplerCount(false, false, true) == 20);
+	CHECK(HE::vkmat::rvtFit(22, 22, true, true));
+	CHECK_FALSE(HE::vkmat::rvtFit(21, 22, true, true));
+	CHECK_FALSE(HE::vkmat::rvtFit(22, 21, true, true));
+	CHECK(HE::vkmat::rvtFit(20, 20, false, false));
+	CHECK_FALSE(HE::vkmat::rvtFit(16, 16, false, false));
+	CHECK(HE::vkmat::rvtFit(1u << 20, 1u << 20, true, true));
 
 	int landscapeCases = 0;
 	std::set<VkUse> rvtUses;           // the RVT node's (Thema 333) own bindings, 40..43: layout rows since the Vulkan port
@@ -5822,9 +5827,10 @@ HRESULT makeMaterialPso(ID3D12Device* dev, ID3D12RootSignature* rs, ID3DBlob* vs
 	return dev->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&out));
 }
 
-// The RVT node's table/pool (t40..t43, Thema 333) and cold pages (t44..t46, Thema 333 step 9, RvtLookup.h) are the last
-// range of the D3D12 material root signature. The signature WITHOUT that range (the one before the D3D12 port) is the
-// negative control: it must leave exactly these seven uncovered.
+// The RVT node's table/pool (t40..t43) and cold (BC7) pages (t44..t46, step 9) are the last two ranges of the D3D12
+// material root signature, cold being the very last one. The signature WITHOUT that last range is the negative control:
+// it must leave only RVT registers uncovered — which ones depends on whether the test graph's own output wiring left a
+// dead-code-eliminated reference to a given cold texture (HE_RVT_COLD defaults on), so this accepts any subset of them.
 bool onlyRvtBindings(std::string miss)
 {
 	for (const char* n : { "heRvtTable(2:40)", "heRvtAlbedo(2:41)", "heRvtNormal(2:42)", "heRvtSurface(2:43)",
@@ -6347,7 +6353,7 @@ TEST_CASE("D3D12: every node's bytecode binds only registers the material root s
 		// must stay the ONLY thing uncovered there, though.
 		if (c.name.find("RVT Sample") == 0)
 		{
-			CHECK_MESSAGE(miss.empty(), "'", c.name, "' binds registers the material root signature does not cover (t40..t43 are its last range): ", miss);
+			CHECK_MESSAGE(miss.empty(), "'", c.name, "' binds registers the material root signature does not cover (t40..t46 are its last two ranges): ", miss);
 			const std::string without = uncovered(b, HE::d3d12mat::kRangeCount - 1, HE::d3d12mat::kSamplerCount);
 			CHECK_MESSAGE((!without.empty() && onlyRvtBindings(without)), "'", c.name, "' without the RVT range: ", without);
 		}

@@ -70,6 +70,9 @@ struct GiLandscape
 	glm::vec4 autoWet{ 0.0f };       // rgb = puddle colour (Wet Ground mean, water-darkened), a = puddle share of flat ground
 	glm::vec4 autoSlope{ 0.0f };     // x Rock Slope, y Rock Blend, z Dirt Amount, w Puddle Max Slope
 	glm::vec4 autoSnow{ 0.0f };      // x Snow Height (world Y), y Snow Blend, z Snow Max Slope, w unused
+	// The landscape entity: a backend that draws it from the Runtime Virtual Texture (SetRvtLandscape) reads a hit's colour
+	// from the pages instead of the means above (the real ground, textures included).
+	uint32_t  terrainEntity = 0xFFFFFFFFu;
 };
 
 namespace giauto_detail

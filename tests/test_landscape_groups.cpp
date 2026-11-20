@@ -288,7 +288,7 @@ TEST_CASE("The mix material: two groups' slices of fat arrays, the shares read f
 	const HE::MatShaderGen gen = HE::generateFragment(a.graph, HE::weatherFunctionLoader());
 	REQUIRE(!gen.glsl.empty());
 	// Sand look is a parameter of the mix (the Desert's ground), so it is a Desert-sized set.
-	CHECK(gen.params.size() == static_cast<size_t>(HE::kAutoLandscapeParamCount + 1));
+	CHECK(gen.params.size() == static_cast<size_t>(HE::autoLandscapeParamCount(HE::autoLandscapeGroup(HE::AutoLandscapeGroupId::Mountains)) + 1));
 	CHECK(gen.params.size() <= static_cast<size_t>(HE::kMatMaxParams));
 
 	// The fat arrays, not any group's own.

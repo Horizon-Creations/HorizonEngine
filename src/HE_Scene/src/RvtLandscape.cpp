@@ -13,6 +13,7 @@
 #include <MaterialGraph/MaterialGraph.h>
 #include <MaterialGraph/RvtSplit.h>
 #include <Renderer/IRenderer.h>
+#include <Project/ProjectSettings.h>   // ProjectRvtSettings
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -27,7 +28,7 @@ namespace
 {
     // The consumer material for one volume: a lit graph whose colour, normal, AO and roughness come from the RvtSample node.
     // The volume's two parameter vectors are baked in as the defaults of two Param Vector4 nodes.
-    std::string consumerGraphJson(const rvt::VolumeLayout& l)
+    std::string consumerGraphJson(const rvt::VolumeLayout& l, uint16_t volume)
     {
         using HE::MatNodeType;
         const rvt::VolumeDesc& d = l.desc();
@@ -38,7 +39,8 @@ namespace
         const int rv  = g.addNode(MatNodeType::RvtSample);
         g.findNode(pa)->p[0] = d.origin.x;           g.findNode(pa)->p[1] = d.origin.y;
         g.findNode(pa)->p[2] = l.extentM();          g.findNode(pa)->p[3] = l.texelMeters(0);
-        g.findNode(pb)->p[0] = float(d.pageSize);    g.findNode(pb)->p[1] = float(d.border);
+        // B.y = border + 256 * volume: the lookup's feedback reports the volume with the page (RvtLookup.h, rvtFeedbackKey).
+        g.findNode(pb)->p[0] = float(d.pageSize);    g.findNode(pb)->p[1] = float(d.border) + 256.0f * float(volume);
         g.findNode(pb)->p[2] = float(l.pagesPerSide(0)); g.findNode(pb)->p[3] = float(l.mipCount());
         g.connect(pa, 0, rv, 0);
         g.connect(pb, 0, rv, 1);
@@ -59,6 +61,14 @@ namespace
         const float dx = std::max({ mn.x - p.x, 0.0f, p.x - mx.x });
         const float dz = std::max({ mn.y - p.y, 0.0f, p.y - mx.y });
         return std::sqrt(dx * dx + dz * dz);
+    }
+
+    // Brings a scratch copy up to date with what the journal says changed in the live landscape (the journal is not cleared here).
+    void syncScratch(HlodBaker& baker, const TerrainComponent& tc)
+    {
+        const TerrainComponent::RvtJournal& j = tc.rvtJournal;
+        if (j.all) baker.syncTerrain(tc, true, glm::vec2(0.0f), glm::vec2(0.0f));
+        else       baker.syncTerrain(tc, false, glm::vec2(j.minX, j.minZ), glm::vec2(j.maxX, j.maxZ));
     }
 }
 
@@ -219,6 +229,10 @@ uint64_t RvtLandscape::stateHash(HorizonWorld& live, entt::entity terrain, Segme
         const glm::vec3 pos = HE::worldPositionOf(live, terrain);
         mix(h, tc->sizeX); mix(h, tc->sizeZ); mix(h, pos.x); mix(h, pos.z);
         mix(geo, tc->sizeX); mix(geo, tc->sizeZ); mix(geo, pos.x); mix(geo, pos.z);
+        // A mixed landscape binds one shared mix material, so the group whose parameter defaults the views start from comes
+        // from the terrain (HlodBaker::begin reads baseGroup), not from the material id above.
+        mix(h, tc->groupMix); mix(h, tc->baseGroup);
+        mix(geo, tc->groupMix); mix(geo, tc->baseGroup);
     }
     fullHash = h;
     geoHash = h;   // a material without RVT nodes: anything that moved is a reason to start over
@@ -263,7 +277,14 @@ bool RvtLandscape::attach(HorizonWorld& live, entt::entity terrain, Segment& seg
 {
     if (!ensurePool()) return false;
     const auto t0 = std::chrono::steady_clock::now();
-    if (!seg.baker || !seg.attached)
+    TerrainComponent& liveTc = live.registry().get<TerrainComponent>(terrain);
+    if (seg.baker && seg.attached)
+    {
+        // Re-attach after deactivate(): the scratch copy is from before the edits made while this segment was out of range
+        // (tick() only drains the journal of live segments), so it takes them now. The fresh volume has no pages to make stale.
+        if (liveTc.rvtJournal.any) syncScratch(*seg.baker, liveTc);
+    }
+    else
     {
         // RVT 2.0 step 6: the export's baked base, when the pak carries it for exactly this landscape (the key says the material's
         // page inputs and the ground are the ones it was taken of) and nothing ended it yet. The page graphs are then not built.
@@ -286,14 +307,20 @@ bool RvtLandscape::attach(HorizonWorld& live, entt::entity terrain, Segment& seg
         seg.baked = useBaked;
         if (!useBaked) m_materialsRegistered += 3;   // the three view materials HlodBaker::begin registers (never unregistered)
     }
-    const TerrainComponent& tc = live.registry().get<TerrainComponent>(terrain);
+    const TerrainComponent& tc = liveTc;
     HlodChunkRect r0;
     seg.baker->chunkRect(0, 0, r0);
 
     rvt::VolumeDesc vd;
     vd.origin = r0.min;
-    vd.sizeM = tc.sizeX;
+    vd.sizeM = tc.sizeX;                           // the volume is a square; sizeX == sizeZ here, HlodBaker::begin refuses non-square chunks
     vd.finestMetersPerTexel = m_settings.metersPerTexel;
+    // The feedback key has 11 bits a page coordinate (RvtLookup.h, rvtFeedbackKey) and the table is capped at 2048 a side: a
+    // landscape too large for this texel size gets the finest texel that fits, said once.
+    while (rvt::VolumeLayout(vd).pagesPerSide(0) > 2048) vd.finestMetersPerTexel *= 2.0f;
+    if (vd.finestMetersPerTexel != m_settings.metersPerTexel)
+        HE_LOG_WARN(Scene, "RvtLandscape: a %.0f m landscape at %.4f m per texel needs more than 2048 pages a side; it uses %.4f m",
+                    vd.sizeM, m_settings.metersPerTexel, vd.finestMetersPerTexel);
     seg.volume = m_manager->addVolume(vd);
     seg.volumeLive = true;
     if (static_cast<uint32_t>(m_manager->layout(seg.volume).physicalPageSize()) != m_pagePx)
@@ -306,12 +333,19 @@ bool RvtLandscape::attach(HorizonWorld& live, entt::entity terrain, Segment& seg
 
     if (!seg.baker->rvtLiveGraphJson().empty())
         refreshConsumer(seg);   // RVT 2.0: the material's own live part, the volume vectors in its Read node
-    else if (seg.consumer == HE::UUID{})
+    // A material without RVT nodes: the driver's own consumer, which has the volume's origin, extent, page counts and id baked
+    // in, so a landscape that moved or was resized (the volume is rebuilt by remove()+attach() then) needs a new one; the old one
+    // is already out of the renderer (deactivate) and its id is simply not used again, like every material this driver makes.
+    else if (const rvt::VolumeDesc& cd = seg.consumerDesc;
+             seg.consumer == HE::UUID{} || cd.origin != vd.origin || cd.sizeM != vd.sizeM ||
+             cd.finestMetersPerTexel != vd.finestMetersPerTexel || seg.consumerVolume != seg.volume)
     {
+        seg.consumerDesc = vd;
+        seg.consumerVolume = seg.volume;
         MaterialAsset ca;
         ca.type = HE::AssetType::Material;
         ca.name = "RvtLandscapeConsumer";
-        ca.nodeGraphJson = consumerGraphJson(m_manager->layout(seg.volume));
+        ca.nodeGraphJson = consumerGraphJson(m_manager->layout(seg.volume), seg.volume);
         seg.consumer = m_cm.registerMaterial(std::move(ca));
         m_cm.regenerateMaterialFromGraph(seg.consumer);
         m_renderer.WarmupMaterials({ seg.consumer });
@@ -352,7 +386,8 @@ void RvtLandscape::refreshConsumer(Segment& seg)
         const rvt::VolumeLayout& l = m_manager->layout(seg.volume);
         const rvt::VolumeDesc& d = l.desc();
         const float a[4] = { d.origin.x, d.origin.y, l.extentM(), l.texelMeters(0) };
-        const float b[4] = { float(d.pageSize), float(d.border), float(l.pagesPerSide(0)), float(l.mipCount()) };
+        // B.y = border + 256 * volume: the lookup's feedback reports the volume with the page (RvtLookup.h, rvtFeedbackKey).
+        const float b[4] = { float(d.pageSize), float(d.border) + 256.0f * float(seg.volume), float(l.pagesPerSide(0)), float(l.mipCount()) };
         auto put = [&](const std::string& name, const float* v) {
             const auto it = std::find(ma->graphParamNames.begin(), ma->graphParamNames.end(), name);
             if (it == ma->graphParamNames.end()) return;
@@ -440,6 +475,8 @@ void RvtLandscape::deactivate(entt::entity terrain, Segment& seg)
     // Out of range: the pages and the table go (they are the memory); the scratch copy and the materials stay, so a camera that
     // walks over the border back and forth builds nothing and registers nothing.
     applySwap(terrain, seg, false);
+    if (!seg.nearChunks.empty()) m_renderer.SetRvtNearChunks(static_cast<uint32_t>(entt::to_integral(terrain)), {});
+    seg.nearChunks.clear();
     if (seg.consumer != HE::UUID{}) m_renderer.ReleaseRvtConsumer(seg.consumer);
     if (seg.volumeLive && m_manager) m_manager->removeVolume(seg.volume);
     seg.volumeLive = false;
@@ -475,6 +512,64 @@ void RvtLandscape::pauseSwap(bool paused)
         if (!s.swapOn) continue;
         applySwap(kv.first, s, !paused);
     }
+}
+
+float RvtLandscape::nativeNearRadius() const
+{
+    // One mip-0 texel per pixel: a texel of t metres at distance d covers t * H / (2 d tan(fov/2)) pixels.
+    const float t = std::max(m_settings.metersPerTexel, 1e-3f);
+    return t * std::max(m_viewportH, 1.0f) / (2.0f * std::tan(std::clamp(m_fovY, 0.05f, 3.0f) * 0.5f));
+}
+
+void RvtLandscape::updateNearChunks(HorizonWorld& live, const glm::vec3& cameraPos, FrameStats& st)
+{
+    auto& reg = live.registry();
+    const float r = nativeNearRadius();
+    // HE_RVT_NATIVE_NEAR=0 / 1 overrides the setting (A/B, and the witnesses whose small landscape lies inside the radius).
+    static const int envNear = [] { const char* v = std::getenv("HE_RVT_NATIVE_NEAR"); return (v && *v) ? (*v == '0' ? 0 : 1) : -1; }();
+    const bool nativeNear = envNear >= 0 ? envNear == 1 : m_settings.nativeNear;
+    for (auto& kv : m_segments)
+    {
+        Segment& seg = kv.second;
+        std::unordered_set<uint32_t> next;
+        if (nativeNear && seg.volumeLive && reg.valid(kv.first) && reg.all_of<TerrainComponent>(kv.first))
+        {
+            const TerrainComponent& tc = reg.get<TerrainComponent>(kv.first);
+            const uint32_t n = std::max(tc.builtChunksPerSide, 1u);
+            const glm::vec3 pos = HE::worldPositionOf(live, kv.first);
+            const float cw = tc.sizeX / float(n), ch = tc.sizeZ / float(n);
+            for (auto [e, cc] : reg.view<TerrainChunkComponent>().each())
+            {
+                if (cc.terrain != kv.first) continue;
+                const glm::vec2 mn(pos.x - tc.sizeX * 0.5f + float(cc.cx) * cw, pos.z - tc.sizeZ * 0.5f + float(cc.cz) * ch);
+                const float dxz = distToRect(glm::vec2(cameraPos.x, cameraPos.z), mn, mn + glm::vec2(cw, ch));
+                const float dy  = std::max(0.0f, cameraPos.y - pos.y - tc.heightScale);   // above the highest the ground can reach
+                const float d   = std::sqrt(dxz * dxz + dy * dy);
+                const uint32_t id = static_cast<uint32_t>(entt::to_integral(e));
+                // Hysteresis: a chunk on the line does not flip every frame.
+                if (d < r || (seg.nearChunks.count(id) && d < r * 1.15f)) next.insert(id);
+            }
+        }
+        if (next != seg.nearChunks)
+        {
+            seg.nearChunks = std::move(next);
+            m_renderer.SetRvtNearChunks(static_cast<uint32_t>(entt::to_integral(kv.first)),
+                                        std::vector<uint32_t>(seg.nearChunks.begin(), seg.nearChunks.end()));
+        }
+        st.nearChunks += static_cast<uint32_t>(seg.nearChunks.size());
+    }
+}
+
+RvtLandscape::Settings RvtLandscape::settingsFromProject(const HE::ProjectRvtSettings& p)
+{
+    Settings s;
+    s.poolSlots         = static_cast<uint32_t>(p.poolPages);
+    s.maxPagesPerFrame  = static_cast<uint32_t>(p.maxPagesPerFrame);
+    s.metersPerTexel    = p.metersPerTexel;
+    s.nearRadiusM       = p.nearRadiusM;
+    s.activationRadiusM = p.activationRadiusM;
+    s.nativeNear        = p.nativeNear;
+    return s;
 }
 
 bool RvtLandscape::wanted(bool userSwitch, bool backendCan)
@@ -727,14 +822,50 @@ RvtLandscape::FrameStats RvtLandscape::tick(HorizonWorld& live, const glm::vec3&
         tc.rvtJournal.clear();
     }
 
+    // The GPU feedback (a backend that has it): the pages pixels asked for, kept wanted for a while after their last report.
+    {
+        constexpr uint64_t kFeedbackTicks = 120;
+        m_feedbackScratch.clear();
+        if (m_renderer.ReadRvtFeedback(m_feedbackScratch))
+        {
+            for (uint32_t k : m_feedbackScratch) m_feedback[k] = m_ticks;
+            for (auto it = m_feedback.begin(); it != m_feedback.end();)
+                it = m_ticks - it->second > kFeedbackTicks ? m_feedback.erase(it) : std::next(it);
+        }
+        else m_feedback.clear();
+        st.feedbackPages = static_cast<uint32_t>(m_feedback.size());
+    }
+
     // What the camera needs across all active volumes, ranked together, one budget; exactly that is painted.
     std::vector<rvt::VolumeView> views;
     for (const auto& kv : byVolume)
     {
         rvt::ViewDesc view;
         view.cameraXZ = cam;
-        view.nearRadiusM = m_settings.nearRadiusM;
-        views.push_back({ kv.first, view });
+        // The radius is set for 0.25 m texels; a finer texel shrinks it in step, so the square stays the same number of pages
+        // per mip (at 0.0625 m and 64 m it would be 289 a mip, past any pool, and the volume would never count as filled).
+        // The same ground is then served one mip deeper, at the same texel size as before; the feedback asks for more.
+        view.nearRadiusM = m_settings.nearRadiusM * std::min(1.0f, m_settings.metersPerTexel / 0.25f);
+        // The feedback within distance bands: a pixel may ask for mip m only within band0 * 2^m of the camera (farther it gets
+        // the mip of its band, the same page's ancestor). So the finest level stays the metres around the camera where it is
+        // visible at all, and a far, steep or mirrored pixel cannot fill the pool with it.
+        const rvt::VolumeLayout& L = m_manager->layout(kv.first);
+        // The band of mip m reaches where its texel shrinks to a pixel (nativeNearRadius() * 2^m): a pixel never gets a page
+        // finer than it can show, and every pixel up to there gets the one it can. The camera square above stays small.
+        const float band0 = std::max(view.nearRadiusM, nativeNearRadius());
+        for (const auto& f : m_feedback)   // rvtFeedbackKey: volume 5 | mip 5 | x 11 | y 11
+        {
+            if ((f.first >> 27) != kv.first) continue;
+            int mip = int((f.first >> 22) & 31u), x = int((f.first >> 11) & 2047u), y = int(f.first & 2047u);
+            if (mip >= L.mipCount() || x >= L.pagesPerSide(mip) || y >= L.pagesPerSide(mip)) continue;
+            glm::vec2 mn, mx;
+            L.pageRect(mip, x, y, mn, mx, false);
+            const glm::vec2 c = (mn + mx) * 0.5f;
+            const float d = std::max(std::abs(c.x - cam.x), std::abs(c.y - cam.y));
+            while (mip + 1 < L.mipCount() && d > band0 * float(1 << mip)) { ++mip; x >>= 1; y >>= 1; }
+            view.requested.push_back({ kv.first, uint8_t(mip), uint16_t(x), uint16_t(y) });
+        }
+        views.push_back({ kv.first, std::move(view) });
     }
     m_manager->beginFrame();
     const auto paintT0 = std::chrono::steady_clock::now();
@@ -812,6 +943,7 @@ RvtLandscape::FrameStats RvtLandscape::tick(HorizonWorld& live, const glm::vec3&
         }
         if (seg.swapOn) ++st.activeSegments;
     }
+    updateNearChunks(live, cameraPos, st);
 
     const rvt::Stats ms = m_manager->stats();
     // One warning per episode: a pool that is too small starves every frame, and the number alone changes the text each time.
@@ -832,8 +964,9 @@ RvtLandscape::FrameStats RvtLandscape::tick(HorizonWorld& live, const glm::vec3&
     {
         uint32_t bakedSegs = 0;
         for (const auto& kv : m_segments) if (kv.second.baked && kv.second.volumeLive) ++bakedSegs;
-        HE_LOG_INFO(Scene, "RvtLandscape: %u page(s) painted, %u marked stale, %u table(s) uploaded, %u attached (%u from the baked base), %u released, %u/%u segment(s) drawn from pages (%u from the baked base), %u resident, %u stale, painting took %.1f ms",
-                    st.pagesPainted, st.pagesStale, st.tablesUploaded, st.attaches, st.bakedAttaches, st.detaches, st.activeSegments, st.segments, bakedSegs, ms.resident, ms.dirty, st.paintMs);
+        HE_LOG_INFO(Scene, "RvtLandscape: %u page(s) painted, %u marked stale, %u table(s) uploaded, %u attached (%u from the baked base), %u released, %u/%u segment(s) drawn from pages (%u from the baked base), %u resident, %u stale, painting took %.1f ms; %u page(s) wanted by feedback, %u chunk(s) native near (radius %.0f m)",
+                    st.pagesPainted, st.pagesStale, st.tablesUploaded, st.attaches, st.bakedAttaches, st.detaches, st.activeSegments, st.segments, bakedSegs, ms.resident, ms.dirty, st.paintMs,
+                    st.feedbackPages, st.nearChunks, double(nativeNearRadius()));
     }
     return st;
 }

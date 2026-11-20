@@ -158,6 +158,14 @@ struct AutoLandscapeGroup
     // the arrays: its albedo / normal / AO / roughness / height come from the function in world
     // space, so the group's first array slice is never read. Desert only (Thema 329, step 2).
     bool proceduralSand = false;
+    // The slope where the large rock takes over from the medium one (Boulder Slope, see the rock sizes
+    // below); it must be above rockSlope. Per group, because the groups' rock starts at different slopes.
+    float boulderSlope = 0.40f;
+    // The Rock role is three textures by slope instead of one: variant 0 of the role's slices is the
+    // medium rock, variant 1 the large one (steep faces), variant 2 the small one (stones on gentle
+    // slopes), each at its own tile size and blended by slope. On a one-variant array the three read
+    // the same slice (one rock at three tilings). Off = one rock texture, the variants random per hex.
+    bool rockBySize = true;
 };
 
 // Ids, in landscape_tex_gen's 0x400 block: 0x412 is Mountains, 0x413 / 0x414 are the weather
@@ -172,7 +180,7 @@ inline constexpr AutoLandscapeGroup kAutoLandscapeGroups[kAutoLandscapeGroupCoun
       kAutoLandscapeMaterialId, kAutoLandscapeMaterialPath,
       { kAutoLandscapeAlbedoArray, kAutoLandscapeNormalArray, kAutoLandscapeMaskArray },
       kAutoLandscapePaintLayerNames, { "Grass", "Dirt", "Rock", "Snow" },
-      0.12f, 0.35f, 60.0f },
+      0.12f, 0.35f, 60.0f, false, 0.40f },
     { AutoLandscapeGroupId::Forest, "Forest",
       { 0x0000000000000415ULL, 0x0000000000000001ULL }, "Engine/Materials/M_AutoLandscape_Forest.hasset",
       { "Engine/Textures/Landscape/T_Landscape_Forest_Albedo_Array.hasset",
@@ -180,7 +188,7 @@ inline constexpr AutoLandscapeGroup kAutoLandscapeGroups[kAutoLandscapeGroupCoun
         "Engine/Textures/Landscape/T_Landscape_Forest_Mask_Array.hasset" },
       "Auto\nForest Floor\nRoots\nMossy Rock\nSnow\nPuddles",
       { "Forest Floor", "Roots", "Mossy Rock", "Snow" },
-      0.10f, 0.50f, 2000.0f },
+      0.10f, 0.50f, 2000.0f, false, 0.35f },
     { AutoLandscapeGroupId::Grassland, "Grassland",
       { 0x0000000000000419ULL, 0x0000000000000001ULL }, "Engine/Materials/M_AutoLandscape_Grassland.hasset",
       { "Engine/Textures/Landscape/T_Landscape_Grassland_Albedo_Array.hasset",
@@ -188,7 +196,7 @@ inline constexpr AutoLandscapeGroup kAutoLandscapeGroups[kAutoLandscapeGroupCoun
         "Engine/Textures/Landscape/T_Landscape_Grassland_Mask_Array.hasset" },
       "Auto\nMeadow\nBare Soil\nStones\nSnow\nPuddles",
       { "Meadow", "Bare Soil", "Stones", "Snow" },
-      0.20f, 0.20f, 2000.0f },
+      0.20f, 0.20f, 2000.0f, false, 0.40f },
     // Untuned first numbers (Thema 233 step 6): sand holds steep dune flanks, so rock shows late, little
     // hardpan, no snow in reach.
     { AutoLandscapeGroupId::Desert, "Desert",
@@ -198,7 +206,7 @@ inline constexpr AutoLandscapeGroup kAutoLandscapeGroups[kAutoLandscapeGroupCoun
         "Engine/Textures/Landscape/T_Landscape_Desert_Mask_Array.hasset" },
       "Auto\nSand\nHardpan\nSandstone\nSnow\nPuddles",
       { "Sand", "Hardpan", "Sandstone", "Snow" },
-      0.30f, 0.15f, 2000.0f, true },
+      0.30f, 0.15f, 2000.0f, true, 0.55f },
 };
 
 inline constexpr const AutoLandscapeGroup& autoLandscapeGroup(AutoLandscapeGroupId id)
@@ -228,7 +236,7 @@ inline constexpr char kAutoLandscapeMixMaterialPath[] = "Engine/Materials/M_Auto
 inline constexpr char kAutoLandscapeMixAlbedoArray[]  = "Engine/Textures/Landscape/T_Landscape_Mix_Albedo_Array.hasset";
 inline constexpr char kAutoLandscapeMixNormalArray[]  = "Engine/Textures/Landscape/T_Landscape_Mix_Normal_Array.hasset";
 inline constexpr char kAutoLandscapeMixMaskArray[]    = "Engine/Textures/Landscape/T_Landscape_Mix_Mask_Array.hasset";
-inline constexpr int  kAutoLandscapeMixDepth = kAutoLandscapeGroupCount * kAutoLandscapeRoleCount;   // V = 1
+inline constexpr int  kAutoLandscapeMixDepth = kAutoLandscapeGroupCount * kAutoLandscapeRoleCount;   // slices per variant: the fat arrays hold V times this
 inline constexpr int  autoLandscapeMixSlice(int group, int role) { return group * kAutoLandscapeRoleCount + role; }
 inline constexpr bool isAutoLandscapeMixMaterial(const UUID& id) { return id == kAutoLandscapeMixMaterialId; }
 
@@ -263,15 +271,28 @@ inline constexpr char kAutoLandscapeParamSnowMaxSlope[]   = "Snow Max Slope";
 inline constexpr char kAutoLandscapeParamPuddleAmount[]   = "Puddle Amount";
 inline constexpr char kAutoLandscapeParamPuddleMaxSlope[] = "Puddle Max Slope";
 inline constexpr char kAutoLandscapeSwitchBombing[]       = "Texture Bombing";
-// The procedural surfaces. A graph has kMatMaxParams (16) HeParams slots and 13 were taken, so the
-// look is packed: one Vec4 each (x..w in the order named here), plus the snow's colour as a colour
-// picker. The sand's colour is the reference's mean and stays baked, the Desert would be over budget.
+// The procedural surfaces. These were packed when a graph had 16 HeParams slots and 13 were taken:
+// one Vec4 each (x..w in the order named here), plus the snow's colour as a colour picker. The sand's
+// colour is the reference's mean and stays baked. The budget is kMatMaxParams (32) since the RVT work
+// (MaterialParamLimits.h), so packing is no longer forced, but the layout is serialized in the
+// materials and the witness, so keep it; the Desert uses 16 of 32 (autoLandscapeParamCount).
 inline constexpr char kAutoLandscapeParamSnowColor[]      = "Snow Color";
 inline constexpr char kAutoLandscapeParamSnowLook[]       = "Snow Look";  // Grain, Drift, Glitter, Softness
 inline constexpr char kAutoLandscapeParamSandLook[]       = "Sand Look";  // Grain Size (m), Ripple, Ripple Size (m), Glitter
+// The three rock sizes of a group with rockBySize: the tile size of the large and the small rock texture
+// ("Rock Tile Size" stays the medium one) and the slope where the large rock takes over. The small -> medium
+// change sits halfway between "Rock Slope" and Boulder Slope.
+inline constexpr char kAutoLandscapeParamBoulderTile[]    = "Boulder Tile Size";
+inline constexpr char kAutoLandscapeParamPebbleTile[]     = "Pebble Tile Size";
+inline constexpr char kAutoLandscapeParamBoulderSlope[]   = "Boulder Slope";
 inline constexpr int  kAutoLandscapeParamCount            = 15;   // every group; the Desert adds Sand Look
+inline constexpr int  kAutoLandscapeRockSizeParamCount    = 3;    // the three above, in a rockBySize group
+// The role variants the three rock sizes read (see AutoLandscapeGroup::rockBySize).
+inline constexpr int  kAutoLandscapeRockVariantMedium     = 0;
+inline constexpr int  kAutoLandscapeRockVariantLarge      = 1;
+inline constexpr int  kAutoLandscapeRockVariantSmall      = 2;
 inline constexpr int  autoLandscapeParamCount(const AutoLandscapeGroup& g)
-{ return kAutoLandscapeParamCount + (g.proceduralSand ? 1 : 0); }
+{ return kAutoLandscapeParamCount + (g.proceduralSand ? 1 : 0) + (g.rockBySize ? kAutoLandscapeRockSizeParamCount : 0); }
 
 // Trails fade out between these camera distances (metres): the clipmap window is 128 m wide and wraps, so
 // it only belongs to the place within 64 m of the camera (Trails/TrailClipmap.h).

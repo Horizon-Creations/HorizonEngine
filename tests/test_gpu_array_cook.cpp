@@ -51,6 +51,23 @@ void writeArray(const fs::path& dir, int slices, int phaseStep)
 	REQUIRE(cm.saveAsset(arr));
 }
 
+// Same slices as writeArray, but with the PIXL payload a few bytes short of what the TXMI
+// header (width/height/layers/mips) says it should be — cookTexture's own size check then
+// sends this one array's cook back unchanged, same as an unbuilt encoder would.
+void writeBrokenArray(const fs::path& dir, const char* name)
+{
+	std::vector<TextureAsset> src;
+	for (int s = 0; s < 4; ++s) src.push_back(ramp(64, 64, s * 20));
+	std::vector<const TextureAsset*> ptrs;
+	for (const auto& t : src) ptrs.push_back(&t);
+	TextureAsset arr;
+	REQUIRE(HE::buildTextureArray(ptrs, arr, /*bakeMips=*/true));
+	arr.data.resize(arr.data.size() - 16);
+	arr.type = HE::AssetType::Texture; arr.name = name; arr.path = std::string(name) + ".hasset"; arr.srgb = true;
+	ContentManager cm(dir.string());
+	REQUIRE(cm.saveAsset(arr));
+}
+
 size_t countCached(const fs::path& cache)
 {
 	size_t n = 0;
@@ -158,6 +175,38 @@ TEST_CASE("GpuArrayCook: an RGBA8 array is cooked once, cached by source, and lo
 
 	HE::setGpuArrayCook(HE::GpuArrayCookSettings{});
 	CHECK_FALSE(HE::gpuArrayCookEnabled());
+	he_test::removeAllQuiet(dir);
+}
+
+TEST_CASE("GpuArrayCook: a failed cook skips only its own path, other arrays still cook")
+{
+	CookGuard guard;
+	const fs::path dir = fs::temp_directory_path() / "he_gpucook_partial_fail";
+	he_test::removeAllQuiet(dir);
+	const fs::path src = dir / "src", cache = dir / "cache";
+	fs::create_directories(src);
+	writeBrokenArray(src, "gc_bad");
+	writeArray(src, 4, 20);   // a second, good array at a different path
+
+	HE::GpuArrayCookSettings s; s.format = 3; s.quality = 0; s.cacheDir = cache.string(); s.minSourceBytes = 0;
+	HE::setGpuArrayCook(s);
+
+	std::vector<uint8_t> bad;
+	CHECK_FALSE(HE::readGpuCookedArray((src / "gc_bad.hasset").string(), bad));
+	CHECK(HE::gpuArrayCookEnabled());   // one failed cook must not disable cooking for the rest
+
+	std::vector<uint8_t> good;
+	REQUIRE(HE::readGpuCookedArray((src / "gc_arr.hasset").string(), good));
+	CHECK(countCached(cache) == 1);     // only the good array made it into the cache
+
+	// The bad path stays skipped (no repeated cook attempt), the good one keeps hitting cache.
+	std::vector<uint8_t> badAgain;
+	CHECK_FALSE(HE::readGpuCookedArray((src / "gc_bad.hasset").string(), badAgain));
+	std::vector<uint8_t> goodAgain;
+	REQUIRE(HE::readGpuCookedArray((src / "gc_arr.hasset").string(), goodAgain));
+	CHECK(goodAgain == good);
+
+	HE::setGpuArrayCook(HE::GpuArrayCookSettings{});
 	he_test::removeAllQuiet(dir);
 }
 #endif // HE_HAVE_STB_DXT

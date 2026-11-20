@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <cmath>
 #include <tuple>
+#include <unordered_set>
 
 namespace HE::rvt
 {
@@ -61,13 +62,43 @@ uint16_t RvtManager::addVolume(const VolumeDesc& d)
 			m_volumes[i].layout = VolumeLayout(d);
 			m_volumes[i].live = true;
 			++m_volumes[i].tableVersion;
+			resetTable(m_volumes[i]);
 			return uint16_t(i);
 		}
 	Volume v;
 	v.layout = VolumeLayout(d);
 	v.live = true;
-	m_volumes.push_back(v);
+	resetTable(v);
+	m_volumes.push_back(std::move(v));
 	return uint16_t(m_volumes.size() - 1);
+}
+
+void RvtManager::resetTable(Volume& v)
+{
+	v.table.resize(size_t(v.layout.mipCount()));
+	for (int m = 0; m < v.layout.mipCount(); ++m) v.table[size_t(m)].assign(size_t(v.layout.pageCount(m)), kPageTableInvalid);
+}
+
+void RvtManager::refreshSubtree(uint16_t volume, int mip, int x, int y)
+{
+	Volume& v = m_volumes[volume];
+	const int mips = v.layout.mipCount();
+	if (v.table.size() != size_t(mips)) resetTable(v);
+	// The top entry walks up for its own fallback; every finer one is its own page or its parent's entry, already final.
+	v.table[size_t(mip)][size_t(y) * size_t(v.layout.pagesPerSide(mip)) + size_t(x)] = resolve(volume, mip, x, y);
+	for (int k = mip - 1; k >= 0; --k)
+	{
+		const int span = 1 << (mip - k), n = v.layout.pagesPerSide(k), np = v.layout.pagesPerSide(k + 1);
+		const std::vector<uint32_t>& up = v.table[size_t(k + 1)];
+		std::vector<uint32_t>& t = v.table[size_t(k)];
+		for (int yy = y * span; yy < (y + 1) * span; ++yy)
+			for (int xx = x * span; xx < (x + 1) * span; ++xx)
+			{
+				const auto it = m_pages.find(PageKey{ volume, uint8_t(k), uint16_t(xx), uint16_t(yy) }.pack());
+				t[size_t(yy) * size_t(n) + size_t(xx)] = it != m_pages.end() ? packPageTableEntry(it->second.slot, k)
+				                                                              : up[size_t(yy >> 1) * size_t(np) + size_t(xx >> 1)];
+			}
+	}
 }
 
 void RvtManager::removeVolume(uint16_t id)
@@ -84,7 +115,7 @@ void RvtManager::dropVolumePages(uint16_t volume)
 		if (uint16_t(it->first >> 40) == volume) { m_freeSlots.push_back(it->second.slot); it = m_pages.erase(it); }
 		else ++it;
 	}
-	if (hasVolume(volume)) ++m_volumes[volume].tableVersion;
+	if (hasVolume(volume)) { ++m_volumes[volume].tableVersion; resetTable(m_volumes[volume]); }
 }
 
 bool RvtManager::acquireSlot(uint32_t& slot)
@@ -100,8 +131,11 @@ bool RvtManager::acquireSlot(uint32_t& slot)
 	}
 	if (victim == m_pages.end()) return false;
 	slot = victim->second.slot;
-	++m_volumes[uint16_t(victim->first >> 40)].tableVersion;
+	const uint64_t vk = victim->first;
+	const uint16_t vv = uint16_t(vk >> 40);
+	++m_volumes[vv].tableVersion;
 	m_pages.erase(victim);
+	refreshSubtree(vv, int((vk >> 32) & 0xFF), int((vk >> 16) & 0xFFFF), int(vk & 0xFFFF));
 	++m_stats.evictions;
 	return true;
 }
@@ -128,6 +162,31 @@ std::vector<PageRender> RvtManager::updateAll(const std::vector<VolumeView>& vie
 		Volume& v = m_volumes[volume];
 		const VolumeLayout& L = v.layout;
 		const glm::vec2 vmin = L.desc().origin, vmax = vmin + glm::vec2(L.extentM());
+		std::unordered_set<uint64_t> seen;   // a page wanted twice (square and feedback, two feedback children) is ranked once
+
+		// One wanted page: touched if resident (not evictable this frame), queued if missing or dirty.
+		const auto want = [&](int mip, int x, int y) {
+			PageKey k{ volume, uint8_t(mip), uint16_t(x), uint16_t(y) };
+			if (!seen.insert(k.pack()).second) return;
+			const bool pin = isPinnedMip(v, mip);
+			glm::vec2 mn, mx;
+			L.pageRect(mip, x, y, mn, mx, false);
+			const glm::vec2 c = (mn + mx) * 0.5f;
+			const float dist = std::max(std::abs(c.x - view.cameraXZ.x), std::abs(c.y - view.cameraXZ.y));
+			auto it = m_pages.find(k.pack());
+			if (it != m_pages.end())
+			{
+				it->second.lastUsed = m_frame;                      // needed: not evictable this frame
+				it->second.pinned = pin;
+				if (it->second.dirty) wants.push_back({ k, 1, dist });
+			}
+			else
+			{
+				// Nothing coarser to show in its place yet: these come first, coarsest first, so the whole view is covered at once.
+				const bool bare = resolve(volume, mip, x, y) == kPageTableInvalid;
+				wants.push_back({ k, bare ? 0 : 1, bare ? float(-mip) : dist });
+			}
+		};
 
 		for (int mip = 0; mip < L.mipCount(); ++mip)
 		{
@@ -143,27 +202,13 @@ std::vector<PageRender> RvtManager::updateAll(const std::vector<VolumeView>& vie
 				L.pageAt(mip, view.cameraXZ + glm::vec2(h), x1, y1);
 			}
 			for (int y = y0; y <= y1; ++y)
-				for (int x = x0; x <= x1; ++x)
-				{
-					PageKey k{ volume, uint8_t(mip), uint16_t(x), uint16_t(y) };
-					glm::vec2 mn, mx;
-					L.pageRect(mip, x, y, mn, mx, false);
-					const glm::vec2 c = (mn + mx) * 0.5f;
-					const float dist = std::max(std::abs(c.x - view.cameraXZ.x), std::abs(c.y - view.cameraXZ.y));
-					auto it = m_pages.find(k.pack());
-					if (it != m_pages.end())
-					{
-						it->second.lastUsed = m_frame;                      // needed: not evictable this frame
-						it->second.pinned = pin;
-						if (it->second.dirty) wants.push_back({ k, 1, dist });
-					}
-					else
-					{
-						// Nothing coarser to show in its place yet: these come first, coarsest first, so the whole view is covered at once.
-						const bool bare = resolve(volume, mip, x, y) == kPageTableInvalid;
-						wants.push_back({ k, bare ? 0 : 1, bare ? float(-mip) : dist });
-					}
-				}
+				for (int x = x0; x <= x1; ++x) want(mip, x, y);
+		}
+		// The feedback: each reported page and its ancestors (out-of-range keys, e.g. from a volume that was rebuilt since, dropped).
+		for (const PageKey& r : view.requested)
+		{
+			if (r.volume != volume || r.mip >= L.mipCount() || r.x >= L.pagesPerSide(r.mip) || r.y >= L.pagesPerSide(r.mip)) continue;
+			for (int m = r.mip, x = r.x, y = r.y; m < L.mipCount(); ++m, x >>= 1, y >>= 1) want(m, x, y);
 		}
 	}
 
@@ -194,6 +239,7 @@ std::vector<PageRender> RvtManager::updateAll(const std::vector<VolumeView>& vie
 			Page p; p.slot = slot; p.lastUsed = m_frame; p.pinned = isPinnedMip(v, w.key.mip);
 			m_pages[w.key.pack()] = p;
 			++v.tableVersion;
+			refreshSubtree(w.key.volume, w.key.mip, w.key.x, w.key.y);
 		}
 		PageRender r;
 		r.key = w.key; r.slot = slot; r.repaint = repaint; r.layers = layers;
@@ -267,22 +313,23 @@ uint32_t RvtManager::resolve(uint16_t volume, int mip, int x, int y) const
 
 std::vector<uint32_t> RvtManager::pageTable(uint16_t volume, int mip, bool markStale) const
 {
-	std::vector<uint32_t> t;
-	if (!hasVolume(volume) || mip >= m_volumes[volume].layout.mipCount()) return t;
-	const int n = m_volumes[volume].layout.pagesPerSide(mip);
-	t.resize(size_t(n) * size_t(n));
-	for (int y = 0; y < n; ++y)
-		for (int x = 0; x < n; ++x)
-		{
-			uint32_t e = resolve(volume, mip, x, y);
-			if (markStale && e != kPageTableInvalid)
+	// The kept table (refreshSubtree); test_rvt_core checks it against resolve() of every entry. The debug view's stale mark is
+	// laid over a copy, entry by entry (only while that view is on).
+	if (!hasVolume(volume) || mip >= m_volumes[volume].layout.mipCount()) return {};
+	std::vector<uint32_t> t = m_volumes[volume].table[size_t(mip)];
+	if (markStale)
+	{
+		const int n = m_volumes[volume].layout.pagesPerSide(mip);
+		for (int y = 0; y < n; ++y)
+			for (int x = 0; x < n; ++x)
 			{
+				uint32_t& e = t[size_t(y) * size_t(n) + size_t(x)];
+				if (e == kPageTableInvalid) continue;
 				// The page that actually holds the picture (the cell itself or its resident ancestor) is the one that is stale.
 				const int em = pageTableMip(e);
 				if (isDirty(PageKey{ volume, uint8_t(em), uint16_t(x >> (em - mip)), uint16_t(y >> (em - mip)) })) e |= kPageTableStale;
 			}
-			t[size_t(y) * size_t(n) + size_t(x)] = e;
-		}
+	}
 	return t;
 }
 

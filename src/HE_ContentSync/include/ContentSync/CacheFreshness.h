@@ -9,8 +9,10 @@
 //
 // The hash is the manifest's own (Hpak::fnv1a64Bytes of the file). Hashing a 300 MB array costs about
 // half a second, so a file is hashed once and remembered (path -> size, mtime, hash in
-// <cacheDir>/.cache-hashes.json); a download records the hash its manifest entry promised, and an
-// unchanged size + mtime reuses the record.
+// <cacheDir>/.cache-hashes.json); a download hashes the bytes that actually landed before recording
+// them — never the hash the manifest merely promised, since a manifest older than the file the server
+// just served would otherwise lock in the wrong hash as "fresh" forever. An unchanged size + mtime
+// reuses the record on later refreshes.
 
 #include "ContentSync/CsCommon.h"
 #include "ContentSync/EngineContentManifest.h"
@@ -30,9 +32,16 @@ HE_CS_API std::size_t discardStaleCachedFiles(const std::filesystem::path& cache
                                               const std::function<bool(const std::string&)>& isBusy = {},
                                               const std::function<void(const std::string&)>& onLog = {});
 
-// A download of `relativePath` just landed and the manifest promised `contentHash`: remember it so the
-// next refresh does not have to hash the file. contentHash 0 forgets the record instead.
+// A download of `relativePath` just landed with `contentHash` already verified against its bytes
+// (see fnv1a64File below): remember it so the next refresh does not have to hash the file again.
+// contentHash 0 forgets the record instead.
 HE_CS_API void recordCachedFile(const std::filesystem::path& cacheDir, const std::string& relativePath,
                                 std::uint64_t contentHash);
+
+// Byte-wise FNV-1a of a file on disk, the same function as Hpak::fnv1a64Bytes (the manifest's change
+// key) fed in blocks so a large file need not be read into one buffer. Exported so a caller that is
+// about to call recordCachedFile can hash the file that actually landed instead of trusting a promised
+// hash it never checked. False (out left unchanged) if the file could not be read in full.
+HE_CS_API bool fnv1a64File(const std::filesystem::path& p, std::uint64_t& out);
 
 } // namespace HE::Cs

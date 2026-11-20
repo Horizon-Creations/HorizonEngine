@@ -77,6 +77,10 @@ struct ViewDesc
 	// Half extent (metres) around the camera that is served by mip 0. Mip m serves the square of half
 	// extent nearRadiusM * 2^m, so every mip needs about the same number of pages.
 	float     nearRadiusM = 64.0f;
+	// Pages the GPU reported as sampled (the feedback of the lookup, RvtLookup.h: the mip each pixel WANTS), on top of the
+	// square above: they are wanted like the square's, and so is every coarser page above them (the fallback chain the shader
+	// would read while a fine one is still missing). Keys of other volumes are ignored. Empty = the square alone.
+	std::vector<PageKey> requested;
 };
 
 // One volume and the view it is looked at through, for updateAll().
@@ -181,8 +185,13 @@ public:
 
 private:
 	struct Page { uint32_t slot = 0; uint64_t lastUsed = 0; uint8_t dirty = 0; bool pinned = false; };   // dirty: stale layers (bit k)
-	struct Volume { VolumeLayout layout; bool live = false; uint64_t tableVersion = 0; };
+	// `table` is the page table of every mip, kept up to date page by page (refreshSubtree): rebuilding all of it on every
+	// residency change cost O(pages0^2) per change, a hitch per page once the finest level has ~1000 pages a side.
+	struct Volume { VolumeLayout layout; bool live = false; uint64_t tableVersion = 0; std::vector<std::vector<uint32_t>> table; };
 
+	void resetTable(Volume& v);
+	// Re-resolves the entries under (mip,x,y) at that mip and every finer one, top-down: a page appeared or vanished there.
+	void refreshSubtree(uint16_t volume, int mip, int x, int y);
 	bool acquireSlot(uint32_t& slot);                 // free slot, else evict the least recently used
 	bool isPinnedMip(const Volume& v, int mip) const { return mip >= v.layout.mipCount() - m_pinnedMips; }
 

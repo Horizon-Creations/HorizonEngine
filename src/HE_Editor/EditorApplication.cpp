@@ -1,5 +1,6 @@
 #include "EditorApplication.h"
 #include "EditorGraphics.h"   // the project's copy of the graphics fields
+#include "ImporterCommon.h"   // Importer::setAutoLodOnImport
 #include <Window/Window.h>           // hiddenWindowRequested — no OS windows of ImGui's own
 #include <ContentManager/HAsset.h>   // asset type of a just-saved file
 #include <ContentManager/GpuArrayCook.h>   // texture arrays cooked for the GPU on load
@@ -68,6 +69,7 @@
 #include <Diagnostics/Log.h>
 #ifdef HE_HAVE_LIBSSH2
 #include <ContentSync/EngineContentSync.h> // EngineContent manifest fetch, driven by the SFTP probe
+#include <ContentSync/ContentServerClient.h> // Thema 194: the new HTTP content server, checked alongside the SFTP probe
 #include "EngineContentPublishDialog.h"    // takeRunSucceeded / shutdown
 #endif
 #ifdef HE_HAVE_LIBSSH2
@@ -107,6 +109,7 @@ static void onProjectWriteRefused(const char* what);   // ProjectWriteGate handl
 #include <HorizonScene/Components/FoliageComponent.h>   // HE_DUMP_FOLIAGETEST witness
 #include <HorizonScene/FoliageSystem.h>
 #include <HorizonScene/LayerMeshPresets.h>   // HE_DUMP_AUTOLANDMESHES witness
+#include "AutoLodDialog.h"                    // HE_AUTOLOD_BAKE witness
 #include <HorizonScene/LandscapeHlod.h>        // HE_DUMP_HLODBAKE / HE_DUMP_HLODFAR witnesses
 #include <HorizonScene/LandscapeHlodBaker.h>
 #include <HorizonScene/RvtProducer.h>
@@ -148,6 +151,9 @@ static void onProjectWriteRefused(const char* what);   // ProjectWriteGate handl
 #include <HorizonScene/FlyCameraController.h>  // free-fly PIE camera (shared with the game runtime)
 #include <HorizonScene/CameraRigController.h>  // first/third person rig (shared with the game runtime)
 #include <HorizonScene/Components/ScriptComponent.h>
+#include <HorizonScene/Components/CameraRigComponent.h>  // HE_DUMP_COOKTEST witness
+#include <HorizonScene/Components/SaveStateComponent.h>  // HE_DUMP_COOKTEST witness
+#include <HorizonScene/CookedStatic.h>                   // HE_DUMP_COOKTEST row witness
 #include <ContentManager/Assets.h>
 #include <Renderer/RendererFactory.h>
 #include <DebugDraw/DebugDraw.h>
@@ -1135,6 +1141,8 @@ void EditorApplication::OnInit()
 		}
 	});
 
+	// Same reason as openScene: clear() recycles entt ids, so an RVT segment would alias the snapshot's entities.
+	m_collab.onWorldReplacing([this] { if (m_rvtLandscape) m_rvtLandscape->detach(); });
 	m_collab.onWorldReplaced([this] {
 		// Wire identity is each entity's uuid, which the snapshot carried — so
 		// seeding just warms the uuid↔handle cache (deletions need it, see
@@ -1190,6 +1198,9 @@ void EditorApplication::OnInit()
 	IMGUI_CHECKVERSION();
 	ImGui::CreateContext();
 	HE::Ed::applyHorizonDarkTheme();
+	// Tooltips only after the pointer has rested ~5 s (imgui.cpp BeginTooltipEx). Set here, not in the theme: the
+	// headless UI tests apply the theme and expect a tooltip after a short rest.
+	ImGui::GetStyle().TooltipShowDelay = 5.0f;
 	ImGuiIO& io = ImGui::GetIO();
 	io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
 	io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
@@ -1624,6 +1635,7 @@ void EditorApplication::OnInit()
 	GlobalState& globalstate = GlobalState::getInstance();
 	m_editorConfig.ContentBrowserRefreshRate   = globalstate.getCustomConfigInt("ContentBrowserRefreshRate",   m_editorConfig.ContentBrowserRefreshRate);
 	m_editorConfig.KeepCPUAssets               = globalstate.getCustomConfigBool("KeepCPUAssets",               m_editorConfig.KeepCPUAssets);
+	m_editorConfig.AutoLodOnImport             = globalstate.getCustomConfigBool("AutoLodOnImport",             m_editorConfig.AutoLodOnImport);
 	// The persisted key was misspelled "KeepCPUAssetsInfoAcknoleged" until the
 	// 2026-07 rework. Read the old spelling FIRST and hand it in as the default for
 	// the corrected key, so a user who already dismissed the info box keeps that
@@ -2162,6 +2174,9 @@ void EditorApplication::OnInit()
 	setWorld(m_editorWorld.get());
 	m_propScriptEngine = std::make_unique<ScriptEngine>();
 	m_undo.setWorld(m_editorWorld.get());
+	// Same reason as openScene/m_collab.onWorldReplacing: restore()'s clear()
+	// recycles entt ids, so an RVT segment would alias the loaded snapshot's entities.
+	m_undo.onWorldReplacing([this] { if (m_rvtLandscape) m_rvtLandscape->detach(); });
 
 	if (!m_audioEngine.init())
 		HE_LOG_WARN(Editor, "%s", "EditorApplication: audio engine init failed (no audio playback)");
@@ -2691,12 +2706,24 @@ void EditorApplication::startSftpProbe()
 		m_sftpProbe = probe;
 		m_sftpChecked.store(true, std::memory_order_release);
 
+		// Thema 194: the new HTTP content server is a second, independent way the remote
+		// library can be "available" — probeSftp() only ever checks the SFTP side, so a build
+		// configured ONLY with config.json's EngineContentServerUrl (no SFTP credentials) would
+		// otherwise never even attempt a refresh. refreshManifestBlocking() itself already
+		// prefers the content server when it is configured (EngineContentSync.cpp).
+		const bool contentServerConfigured = HE::Cs::contentServerEndpoint().configured();
+
 		// Manifest fetch + Engine-tree re-merge run on this same worker thread —
 		// GlobalState's setters/refresh only touch their own mutex-guarded tree
 		// and the filesystem, never ImGui, so this is safe off the main thread
 		// (the existing m_contentRefreshFuture async path relies on the same fact).
-		bool haveManifest = probe.ready() &&
+		// Whether refreshManifestBlocking() itself succeeded, before the cache
+		// fallback below can turn a failed refresh back into "have a manifest" —
+		// the notes need this to tell "fetched fine" from "fell back to yesterday's
+		// copy", which `haveManifest` alone can no longer say once it is set.
+		const bool manifestRefreshed = (probe.ready() || contentServerConfigured) &&
 		                    HE::Cs::EngineContentSync::instance().refreshManifestBlocking();
+		bool haveManifest = manifestRefreshed;
 		// No server this session — fall back to the catalogue the last successful
 		// refresh wrote beside the downloads. Without it an offline editor shows
 		// NO EngineContent at all: not the assets that are still on the server,
@@ -2718,15 +2745,29 @@ void EditorApplication::startSftpProbe()
 		// (SftpCredentials.h), so an empty one means a build that was never meant
 		// to reach the server, and nagging about it every start would train the
 		// user to ignore the bell before it has ever carried anything real.
-		if (probe.configured && !probe.reachable)
+		// refreshManifestBlocking() always prefers the HTTP content server once it is
+		// configured (EngineContentSync.cpp), so once contentServerConfigured is true that
+		// is the transport that actually ran here, regardless of what the SFTP probe found.
+		// Basing the note on `probe` in that case would either stay silent on an HTTP
+		// failure next to a reachable SFTP endpoint, or blame SFTP ("accepted the login")
+		// for a fault that is really on the HTTP server — lastManifestError() is the one
+		// thing that reports what this refresh actually did, on whichever transport ran.
+		const bool httpFailed      = contentServerConfigured && !manifestRefreshed;
+		const bool sftpUnreachable = !contentServerConfigured && probe.configured && !probe.reachable;
+		if (httpFailed || sftpUnreachable)
 		{
+			const std::string reason = httpFailed
+				? HE::Cs::EngineContentSync::instance().lastManifestError() : probe.detail;
 			HE::Ed::NoteSpec note;
 			note.level = haveManifest ? HE::Ed::NoteLevel::Important : HE::Ed::NoteLevel::Critical;
-			note.title = "EngineContent server unreachable";
-			note.text  = "The EngineContent server could not be reached.";
-			note.detail = (probe.detail.empty()
+			// HTTP failures besides an unreachable server also land here (e.g. a manifest
+			// that failed to parse), so "unreachable" is only accurate for the SFTP case.
+			note.title = httpFailed ? "EngineContent catalogue unavailable" : "EngineContent server unreachable";
+			note.text  = httpFailed ? "The EngineContent catalogue could not be fetched."
+			                        : "The EngineContent server could not be reached.";
+			note.detail = (reason.empty()
 					? std::string("The connection was refused or timed out.")
-					: probe.detail)
+					: reason)
 				+ (haveManifest
 					? "  Working from the catalogue of the last successful connection: "
 					  "assets already downloaded still work, anything else cannot be "
@@ -2738,7 +2779,7 @@ void EditorApplication::startSftpProbe()
 			note.actions.push_back({ "Try again", [this] { refreshEngineContentManifest(); }, true });
 			HE::Ed::notify(std::move(note));
 		}
-		else if (probe.configured && !haveManifest)
+		else if (!contentServerConfigured && probe.configured && !haveManifest)
 		{
 			// Reached and authenticated, but the catalogue itself did not arrive —
 			// a different fault (manifest missing, unreadable, or unparseable) and
@@ -3485,6 +3526,9 @@ void EditorApplication::OnRender(float dt)
 			window()->SetTitle(title);
 		}
 	}
+	// The importers read the preference through a process default (they have no
+	// AppContext), so it is handed over every frame: live, no restart.
+	Importer::setAutoLodOnImport(m_editorConfig.AutoLodOnImport);
 	// ── Automatic asynchronous content refresh ────────────────────────────────
 	if (m_projectLoaded && m_editorConfig.ContentBrowserRefreshRate > 0)
 	{
@@ -4105,6 +4149,17 @@ void EditorApplication::OnRender(float dt)
 				if (renderer() && rvtOn)
 				{
 					if (!m_rvtLandscape) m_rvtLandscape = std::make_shared<HE::landscape::RvtLandscape>(contentManager(), *renderer());
+					m_rvtLandscape->setSettings(HE::landscape::RvtLandscape::settingsFromProject(m_projectManager.currentProject().settings.rvt));
+					// The near radius against the camera's field of view and the scene viewport's pixel height (the window's
+					// until the viewport has a size: taller, so a larger radius, the safe side).
+#ifdef HE_IMGUI_ENABLED
+					{
+						int vpW = 0, vpH = 0;
+						ViewportPanel::renderSizePx(vpW, vpH);
+						const float h = vpH > 0 ? float(vpH) : ImGui::GetIO().DisplaySize.y * ImGui::GetIO().DisplayFramebufferScale.y;
+						m_rvtLandscape->setView(glm::radians(m_editorCamera.fovDegrees()), h);
+					}
+#endif
 					HE_PROFILE_SCOPE_N("RvtLandscape");
 					// The viewport's "Virtual Texture" view mode: the tables carry the stale marks while it is on.
 					m_rvtLandscape->setDebugView(renderer()->GetViewMode() == HE::ViewMode::RvtDebug);
@@ -5319,6 +5374,63 @@ void EditorApplication::OnRender(float dt)
 		updateAssetAutosave(nowMs, ctx);
 	}
 
+	// ── HE_AUTOLOD_BAKE witness (Thema 331 S3/S4) ─────────────────────────────
+	// HE_AUTOLOD_BAKE=<out.hescene>:<chain|card|impostor> runs the REAL Generate LODs / Bake
+	// Impostor code (AutoLodDialog::run) over every foliage layer of the project's scene the
+	// editor just opened, writes the scene to <out.hescene> and quits. The scene is the input
+	// of scripts/he_perf_capture.py --scene and of an HE_CAPTURE_FRAME picture, which is how
+	// the far level is seen in the editor loop rather than in a synthetic world:
+	//   chain     the LOD chain only
+	//   card      ...ended on the engine's cross card, drawn with the layer's material
+	//   impostor  ...ended on the baked impostor card
+	// The project's own files get the sidecars, so point it at a COPY of the project.
+	if (const char* ab = std::getenv("HE_AUTOLOD_BAKE"); ab && *ab && m_projectLoaded && m_editorWorld && !m_isPlaying)
+	{
+		static int s_autoLodBakeWait = 0;
+		static bool s_autoLodBakeDone = false;
+		if (!s_autoLodBakeDone && ++s_autoLodBakeWait > 30)
+		{
+			s_autoLodBakeDone = true;
+			std::string spec = ab;
+			std::string mode = "impostor";
+			if (const size_t colon = spec.rfind(':'); colon != std::string::npos && colon > 1)
+			{
+				mode = spec.substr(colon + 1);
+				spec.resize(colon);
+			}
+			AutoLodDialog::Options o;
+			o.foliage       = true;
+			o.crossCard     = mode != "chain";
+			o.bakeImpostor  = mode == "impostor";
+			o.impostorSize  = 1;
+			if (const char* sz = std::getenv("HE_AUTOLOD_IMPOSTOR_SIZE"); sz && *sz) o.impostorSize = std::clamp(std::atoi(sz), 0, 2);
+			int layers = 0, ok = 0;
+			auto& reg = m_editorWorld->registry();
+			for (auto e : reg.view<FoliageComponent>())
+			{
+				const size_t count = reg.get<FoliageComponent>(e).layers.size();
+				for (size_t li = 0; li < count; ++li)
+				{
+					AutoLodDialog::Request req;
+					req.kind   = AutoLodDialog::Kind::FoliageLayer;
+					req.entity = e;
+					req.layer  = static_cast<int>(li);
+					const AutoLodDialog::Outcome r = AutoLodDialog::run(ctx, req, o);
+					++layers;
+					ok += r.ok ? 1 : 0;
+					HE_LOG_INFO(Editor, "EditorApplication: HE_AUTOLOD_BAKE %s layer %zu: %s%s", mode.c_str(), li,
+						r.ok ? "" : "FAILED ", r.message.c_str());
+				}
+			}
+			SceneSerializer saver;
+			const bool saved = saver.save(*m_editorWorld, spec, SerializeFormat::JSON);
+			HE_LOG_INFO(Editor, "EditorApplication: HE_AUTOLOD_BAKE %d of %d layer(s) ok, scene %s -> %s",
+				ok, layers, saved ? "written" : "NOT written", spec.c_str());
+			m_quitConfirmed = true;
+			Quit();
+		}
+	}
+
 	// ── FPS counter ───────────────────────────────────────────────────────
 	if (dt > 0.0f)
 	{
@@ -5555,7 +5667,15 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 		// Otherwise make sure there IS a Sky entity to configure — the world/scene may
 		// have started empty (only the Game/Simulation templates seed a sky).
 		else if (m_editorWorld->environmentEntity() == entt::null)
+		{
 			m_editorWorld->addSky();
+			// addSky() starts new skies on the volumetric fog (step 7); a witness dump keeps
+			// the analytic default so HE_DUMP_FOGDENSITY alone stays the pre-existing A/B
+			// baseline — HE_DUMP_FOGMODE=1 below opts into the volume.
+			if (auto* fresh = m_editorWorld->registry().try_get<EnvironmentComponent>(
+			        m_editorWorld->environmentEntity()))
+				fresh->fogMode = 0;
+		}
 		Entity dumpSky = m_editorWorld->environmentEntity();
 		if (auto* e = dumpSky == entt::null ? nullptr
 		            : m_editorWorld->registry().try_get<EnvironmentComponent>(dumpSky))
@@ -5609,6 +5729,21 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 			e->godRays           = static_cast<float>(envF("HE_DUMP_GODRAYS", e->godRays));
 			e->shootingStars     = static_cast<float>(envF("HE_DUMP_METEORS", e->shootingStars));
 			e->lensFlare         = static_cast<float>(envF("HE_DUMP_LENSFLARE", e->lensFlare));
+			// Fog (docs/volumetric-fog-plan.md): the analytic knobs plus the volume's, so a
+			// mode-0 / mode-1 pair of dumps differs only by FOGMODE. The loaded scene
+			// carries serialized values, hence the explicit overrides.
+			e->fogDensity        = static_cast<float>(envF("HE_DUMP_FOGDENSITY", e->fogDensity));
+			e->fogHeightFalloff  = static_cast<float>(envF("HE_DUMP_FOGFALLOFF", e->fogHeightFalloff));
+			e->fogMode           = static_cast<int>(envF("HE_DUMP_FOGMODE", static_cast<float>(e->fogMode)));
+			e->fogQuality        = static_cast<int>(envF("HE_DUMP_FOGQUALITY", static_cast<float>(e->fogQuality)));
+			e->fogVolumeDistance = static_cast<float>(envF("HE_DUMP_FOGDIST", e->fogVolumeDistance));
+			e->fogAnisotropy     = static_cast<float>(envF("HE_DUMP_FOGANISO", e->fogAnisotropy));
+			e->fogNoiseAmount    = static_cast<float>(envF("HE_DUMP_FOGNOISE", e->fogNoiseAmount));
+			e->fogNoiseScale     = static_cast<float>(envF("HE_DUMP_FOGNOISESCALE", e->fogNoiseScale));
+			e->fogBankDensity    = static_cast<float>(envF("HE_DUMP_FOGBANK", e->fogBankDensity));
+			e->fogBankBaseY      = static_cast<float>(envF("HE_DUMP_FOGBANKY", e->fogBankBaseY));
+			e->fogBankThickness  = static_cast<float>(envF("HE_DUMP_FOGBANKH", e->fogBankThickness));
+			e->fogLocalLightScatter = static_cast<float>(envF("HE_DUMP_FOGLIGHTS", e->fogLocalLightScatter));
 		}
 		// Look slightly up toward the sky from a low vantage. HE_DUMP_YAW rotates the
 		// heading (0 = toward -Z, 180 = toward +Z) so e.g. the aurora band can be framed.
@@ -6440,6 +6575,65 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 		}
 		HE_LOG_INFO(Editor, "%s",
 			"EditorApplication: HE_DUMP_SSRTEST witness scene added");
+	}
+
+	// ── Volumetric fog witness (HE_DUMP_FOGTEST, Thema 225): a grey ground slab with a
+	// row of tall pillars 12 m ahead of the default dump camera (a shadow caster for the
+	// shafts) and a few cubes nearer. =point additionally hangs a shadow-casting point
+	// light between the cubes. Pair with SKYTEST (sun position via TOD/YAW), the FOG*
+	// keys and HE_DUMP_WATERTEST=floor for the bank-over-water shot. Fixed world
+	// coordinates near the origin, like the other witnesses.
+	if (const char* ft = std::getenv("HE_DUMP_FOGTEST"); ft && *ft && m_editorWorld)
+	{
+		auto& reg = m_editorWorld->registry();
+		auto addBox = [&](const char* name, const glm::vec3& pos, const glm::vec3& scale,
+		                  float r, float g, float b)
+		{
+			MaterialAsset m;
+			m.type = HE::AssetType::Material;
+			m.name = name;
+			m.baseColor[0] = r; m.baseColor[1] = g; m.baseColor[2] = b;
+			m.roughness = 0.85f;
+			auto e = m_editorWorld->createEntity(name);
+			TransformComponent tc;
+			tc.position = pos;
+			tc.scale    = scale;
+			reg.emplace<TransformComponent>(e, tc);
+			reg.emplace<MeshComponent>(e, MeshComponent{ HE::kDefaultCubeMeshId });
+			reg.emplace<MaterialComponent>(e,
+				MaterialComponent{ contentManager().registerMaterial(std::move(m)) });
+		};
+		addBox("FogGround", glm::vec3(0.0f, -0.1f, -10.0f), glm::vec3(60.0f, 0.2f, 60.0f), 0.45f, 0.45f, 0.42f);
+		const bool slits = std::string(ft) == "slits";
+		if (slits)
+		{
+			// A 14 m wall 14 m ahead with three 1.2 m slits: the sun behind it throws parallel
+			// shafts through the fog toward the camera (the volumetric-shadow witness).
+			const float edges[4][2] = { { -24.0f, -9.6f }, { -8.4f, -0.6f }, { 0.6f, 8.4f }, { 9.6f, 24.0f } };
+			for (const auto& e : edges)
+				addBox("FogWall", glm::vec3(0.5f * (e[0] + e[1]), 7.0f, -14.0f),
+				       glm::vec3(e[1] - e[0], 14.0f, 0.6f), 0.55f, 0.52f, 0.48f);
+		}
+		for (int i = 0; i < (slits ? 0 : 5); ++i)
+			addBox("FogPillar", glm::vec3(-8.0f + 4.0f * static_cast<float>(i), 4.0f, -12.0f),
+			       glm::vec3(1.2f, 8.0f, 1.2f), 0.7f, 0.65f, 0.55f);
+		addBox("FogCubeA", glm::vec3(-2.0f, 0.6f, -6.0f), glm::vec3(1.2f), 0.8f, 0.3f, 0.25f);
+		addBox("FogCubeB", glm::vec3( 2.5f, 0.6f, -7.5f), glm::vec3(1.2f), 0.25f, 0.45f, 0.8f);
+		if (std::string(ft) == "point")
+		{
+			auto le = m_editorWorld->createEntity("FogLamp");
+			TransformComponent ltc;
+			ltc.position = glm::vec3(0.0f, 2.0f, -7.0f);
+			reg.emplace<TransformComponent>(le, ltc);
+			LightComponent lc;
+			lc.type        = HE::LightType::Point;
+			lc.color       = glm::vec3(1.0f, 0.75f, 0.45f);
+			lc.intensity   = 8.0f;
+			lc.range       = 14.0f;
+			lc.castsShadow = true;
+			reg.emplace<LightComponent>(le, lc);
+		}
+		HE_LOG_INFO(Editor, "%s", "EditorApplication: HE_DUMP_FOGTEST witness scene added");
 	}
 
 	// ── Engine water witness (HE_DUMP_WATERTEST, Thema 152): the SHIPPED
@@ -7796,6 +7990,31 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 				fl.lods.push_back(d);
 			}
 			HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_FOLIAGELOD %zu level(s) from '%s'", fl.lods.size(), fd);
+		}
+		// HE_DUMP_FOLIAGEIMPOSTOR=<from>:<card path>:<material path> adds a baked impostor level
+		// (Thema 331 S4): the card and its cut-out material are project files, loaded by
+		// path, so the dump needs the project in the config (LastProjectPath). The log line
+		// says whether the three assets (card, material, its atlas) resolved; this is how
+		// the far level is seen on a backend the editor loop cannot drive headless (GL).
+		if (const char* ip = std::getenv("HE_DUMP_FOLIAGEIMPOSTOR"); ip && *ip && fl.lods.size() < FoliageLayer::kMaxLods)
+		{
+			const std::string spec(ip);
+			const size_t c1 = spec.find(':'), c2 = c1 == std::string::npos ? c1 : spec.find(':', c1 + 1);
+			if (c2 != std::string::npos)
+			{
+				FoliageLod d;
+				d.distance = static_cast<float>(std::atof(spec.c_str()));
+				d.meshAssetId     = contentManager().loadAsset(spec.substr(c1 + 1, c2 - c1 - 1));
+				d.materialAssetId = contentManager().loadAsset(spec.substr(c2 + 1));
+				const MaterialAsset* im = contentManager().getMaterial(d.materialAssetId);
+				const std::string atlas = im && !im->texturePaths.empty() ? im->texturePaths[0] : std::string{};
+				const HE::UUID atlasId = atlas.empty() ? HE::UUID{} : contentManager().loadAsset(atlas);
+				HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_FOLIAGEIMPOSTOR card %s, material %s, atlas '%s' %s",
+				            d.meshAssetId == HE::UUID{} ? "NOT loaded" : "loaded",
+				            d.materialAssetId == HE::UUID{} ? "NOT loaded" : "loaded", atlas.c_str(),
+				            atlasId == HE::UUID{} ? "NOT loaded" : "loaded");
+				fl.lods.push_back(d);
+			}
 		}
 		reg.emplace<FoliageComponent>(land, fol);
 		TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
@@ -10059,6 +10278,67 @@ void EditorApplication::dumpFrameHeadless()
 			"EditorApplication: HE_DUMP_ROPETEST tube + ribbon rope and a swept trail added");
 	}
 
+	// ── Entity-cooking witness (HE_DUMP_COOKTEST=1, Thema 343 Schritt 14): the
+	// three cases Schritt 13 changed, in one scene — compare a dump with
+	// HE_COOK_STATIC=0 against one with =1, the pixels must match. A floor
+	// catches their shadows so the shadow pass (fitDirectionalShadow, which
+	// reads a cooked row's worldBounds/castsShadow) is exercised too.
+	//   • CookTestRopeChild0/1, mesh CHILDREN of a RopeComponent parent: the
+	//     parent's Geometry blocker does not pass to the children
+	//     (kAncestorIgnored in CookAnalysis.cpp), so they still cook.
+	//   • CookTestRig, a mesh entity carrying CameraRigComponent itself: the
+	//     Locomotion blocker keeps it OUT of the cooked block (no row at all).
+	//   • CookTestSaveState, a mesh entity carrying SaveStateComponent: Regel 7
+	//     is gone, so it cooks like any other static mesh.
+	// The rope parent's own geometry is not driven through RopeTrailSystem here
+	// — it draws through RopeComponent::runtimeMeshId, a path cooking never
+	// touches, so it adds nothing to this check and is left out.
+	if (const char* ct = std::getenv("HE_DUMP_COOKTEST"); ct && *ct && m_editorWorld)
+	{
+		auto& reg = m_editorWorld->registry();
+		const float cp = std::cos(m_editorCamera.pitch()), sp = std::sin(m_editorCamera.pitch());
+		const float cy = std::cos(m_editorCamera.yaw()),   sy = std::sin(m_editorCamera.yaw());
+		const glm::vec3 camFwd(cp * sy, sp, -cp * cy);
+		const glm::vec3 right = glm::normalize(glm::cross(camFwd, glm::vec3(0.0f, 1.0f, 0.0f)));
+		const glm::vec3 origin = m_editorCamera.position() + camFwd * 10.0f;
+
+		auto makeCube = [&](const char* name, const glm::vec3& pos, const glm::vec3& scale = glm::vec3(0.8f)) {
+			auto e = m_editorWorld->createEntity(name);
+			TransformComponent tc; tc.position = pos; tc.scale = scale;
+			reg.emplace<TransformComponent>(e, tc);
+			reg.emplace<MeshComponent>(e, MeshComponent{ HE::kDefaultCubeMeshId });
+			return e;
+		};
+
+		// A floor for the three cubes' shadows to land on (TOD/COVERAGE pick the
+		// sun; without a floor the shadow pass has nothing to show a difference on).
+		makeCube("CookTestFloor", origin + glm::vec3(0.0f, -1.1f, 0.0f), glm::vec3(16.0f, 0.2f, 6.0f));
+
+		auto ropeParent = m_editorWorld->createEntity("CookTestRopeParent");
+		TransformComponent rtc; rtc.position = origin - right * 4.0f;
+		reg.emplace<TransformComponent>(ropeParent, rtc);
+		RopeComponent rope;
+		rope.controlPoints = { { 0.0f, 0.0f, 0.0f }, { 1.0f, 0.5f, 0.0f } };
+		reg.emplace<RopeComponent>(ropeParent, rope);
+		// Two children: "a Trail/Rope parent with mesh children", plural.
+		for (int i = 0; i < 2; ++i)
+		{
+			const glm::vec3 local(static_cast<float>(i) * 1.0f - 0.5f, 1.2f, 0.0f);
+			const Entity ropeChild = makeCube(i == 0 ? "CookTestRopeChild0" : "CookTestRopeChild1", local);
+			m_editorWorld->reparentEntity(ropeChild, ropeParent);
+			reg.get<TransformComponent>(ropeChild).position = local;
+		}
+
+		const Entity rig = makeCube("CookTestRig", origin);
+		reg.emplace<CameraRigComponent>(rig, CameraRigComponent{});
+
+		const Entity saved = makeCube("CookTestSaveState", origin + right * 4.0f);
+		reg.emplace<SaveStateComponent>(saved, SaveStateComponent{});
+
+		HE_LOG_INFO(Editor, "%s",
+			"EditorApplication: HE_DUMP_COOKTEST floor / rope+2 children / camera-rig / save-state entities added");
+	}
+
 	// ── Selection / collider witness (HE_DUMP_SELBOXTEST=1): entities that sit
 	// under a MOVED parent, which is where a local position and a world
 	// position part ways.
@@ -11582,6 +11862,8 @@ void EditorApplication::dumpFrameHeadless()
 			HE::landscape::RvtLandscape::Settings cfg;
 			// every mip-0 page of the 128 m landscape is wanted; on a bigger one the ring is a part of it (the camera test needs that)
 			cfg.nearRadiusM = wreg.get<TerrainComponent>(land).sizeX > 200.0f ? 48.0f : 160.0f;
+			// HE_DUMP_RVTDRIVER_TEXEL=<m>: the finest texel size (default 0.25), e.g. 0.0625 to see a fine volume fill the pool.
+			if (const char* tx = std::getenv("HE_DUMP_RVTDRIVER_TEXEL"); tx && *tx) cfg.metersPerTexel = std::clamp(float(std::atof(tx)), 0.01f, 4.0f);
 			drv.setSettings(cfg);
 			const glm::vec3 centre = HE::worldPositionOf(*m_editorWorld, land);
 			glm::vec3 camPos = centre + glm::vec3(0.0f, 110.0f, 0.0f);
@@ -11962,6 +12244,30 @@ void EditorApplication::dumpFrameHeadless()
 						else HE_LOG_WARN(Editor, "EditorApplication: HE_DUMP_RVTDRIVER layers: the witness parameter has no slot (re-attached %s)", rescanned ? "yes" : "no");
 					}
 				}
+			}
+			// HE_DUMP_RVTDRIVER_MIRRORSHOT=<prefix> (with HE_DUMP_AUTOLANDMIRROR=1 and GI reflections on): the mirrors of the
+			// auto-landscape witness from its camera, once with the landscape's own colour in the GI (the swap paused: the
+			// per-layer means) and once drawn from the pages (the GI reads the RVT at the hit): <prefix>.own.bmp / .rvt.bmp.
+			if (const char* ms = std::getenv("HE_DUMP_RVTDRIVER_MIRRORSHOT"); ms && *ms)
+			{
+				EditorCameraOverride mc;
+				mc.active = true; mc.editorIcons = false; mc.fovDegrees = 60.0f; mc.nearPlane = 0.1f; mc.farPlane = 4000.0f;
+				mc.position = glm::vec3(-40.0f, 304.0f, 14.0f);
+				const float pitch = glm::radians(-4.0f);
+				mc.view = glm::lookAt(mc.position, mc.position + glm::vec3(0.0f, std::sin(pitch), -std::cos(pitch)), glm::vec3(0.0f, 1.0f, 0.0f));
+				camPos = mc.position;
+				// The pages this view reads: rendered frames from this camera report them (the feedback), ticks paint them.
+				std::vector<uint8_t> warm;
+				for (int i = 0; i < 120; ++i) { r->RenderSceneImage(mc, W, H, warm); sceneTick(); }
+				std::vector<uint8_t> own, pages;
+				drv.pauseSwap(true);
+				const bool okOwn = r->RenderSceneImage(mc, W, H, own);
+				drv.pauseSwap(false);
+				const bool okPages = r->RenderSceneImage(mc, W, H, pages);
+				if (okOwn)   writeBMP(std::string(ms) + ".own.bmp", own, W, H);
+				if (okPages) writeBMP(std::string(ms) + ".rvt.bmp", pages, W, H);
+				HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTDRIVER mirror shot: own %s, pages %s (%s.*.bmp)", okOwn ? "ok" : "FAILED",
+				            okPages ? "ok" : "FAILED", ms);
 			}
 			drv.detach();
 			normalFrames("end");
@@ -12412,6 +12718,28 @@ void EditorApplication::dumpFrameHeadless()
 		// background (a freshly registered graph material) are ready for the captured frame.
 		if (const char* sm = std::getenv("HE_DUMP_SETTLEMS"); sm && *sm)
 			std::this_thread::sleep_for(std::chrono::milliseconds(std::clamp(std::atoi(sm), 0, 5000)));
+	}
+
+	// HE_DUMP_COOKTEST row witness: after the settle frames, log what the cooked
+	// block actually did with CookTest* — `reg.ctx().find` only LOOKS, it never
+	// creates the block (cookedStaticOf would, which'd cook the HE_COOK_STATIC=0
+	// run just by asking). No block at all is as meaningful an answer as a row.
+	if (const char* ct = std::getenv("HE_DUMP_COOKTEST"); ct && *ct && m_editorWorld)
+	{
+		auto& reg = m_editorWorld->registry();
+		const HE::CookedStatic* cooked = reg.ctx().find<HE::CookedStatic>();
+		for (auto [e, name] : reg.view<NameComponent>().each())
+		{
+			if (name.name.rfind("CookTest", 0) != 0) continue;
+			const int32_t row = cooked ? cooked->rowOf(e) : -1;
+			const char* state = row < 0 ? "no row"
+				: cooked->state[static_cast<size_t>(row)] == HE::CookedStatic::State::Ready   ? "Ready"
+				: cooked->state[static_cast<size_t>(row)] == HE::CookedStatic::State::Pending ? "Pending"
+				: "Walk";
+			HE_LOG_INFO(Editor, "%s",
+				("EditorApplication: HE_DUMP_COOKTEST " + name.name + " row=" + std::to_string(row) +
+				 " state=" + state).c_str());
+		}
 	}
 
 	std::vector<uint8_t> rgba;
@@ -15761,6 +16089,10 @@ void EditorApplication::setPlayMode(bool play)
 		// The streamed cells go first, while the physics world their bodies are in
 		// still stands; the snapshot below brings back the base the split left.
 		if (m_playCells) m_playCells->end(*m_editorWorld);
+		// Segments are keyed by entt::entity of the outgoing world; clear() recycles
+		// those ids, so a stale segment would alias an unrelated entity in the restored
+		// snapshot (same reason GameApplication::loadScene detaches before its clear()).
+		if (m_rvtLandscape) m_rvtLandscape->detach();
 		m_editorWorld->clear();
 		if (!serializer.load(*m_editorWorld, snapshot, SerializeFormat::Binary))
 		{
@@ -16514,6 +16846,9 @@ bool EditorApplication::restoreRecoveredScene()
 	m_undo.snapshotNow("Restore Recovered Scene");   // the file's state; Undo brings it back
 
 	SceneSerializer serializer;
+	// See openScene: clear() recycles entt ids, so a segment from the scene opened
+	// above would alias an unrelated entity in the snapshot loaded over it.
+	if (m_rvtLandscape) m_rvtLandscape->detach();
 	m_editorWorld->clear();
 	m_levelScriptMirror = {};   // as in openScene: another scene, another level script
 	if (!serializer.load(*m_editorWorld, pending->snapshotPath, SerializeFormat::JSON))
@@ -16656,6 +16991,10 @@ bool EditorApplication::openScene(const std::string& path)
 	if (m_isPlaying) setPlayMode(false); // leave play mode before switching scenes
 
 	SceneSerializer serializer;
+	// Segments are keyed by entt::entity; clear() recycles those ids, so a segment
+	// from the old scene would alias an unrelated entity in the new one (same
+	// reason GameApplication::loadScene detaches before its clear()).
+	if (m_rvtLandscape) m_rvtLandscape->detach();
 	m_editorWorld->clear();
 	// A different scene brings a different level script — see onWorldReplaced.
 	m_levelScriptMirror = {};
@@ -16743,6 +17082,9 @@ void EditorApplication::newScene()
 
 	if (m_isPlaying) setPlayMode(false);
 
+	// See openScene: clear() recycles entt ids, so a segment from the old scene
+	// would alias an unrelated entity in the new empty one.
+	if (m_rvtLandscape) m_rvtLandscape->detach();
 	m_editorWorld->clear(); // keeps the root entity, drops all children
 	m_currentScenePath.clear();
 	m_selection.clear();
@@ -17111,6 +17453,7 @@ void EditorApplication::writeEditorConfig()
 {
 	GlobalState& globalstate = GlobalState::getInstance();
 	globalstate.setCustomConfigEntry("KeepCPUAssets",               m_editorConfig.KeepCPUAssets);
+	globalstate.setCustomConfigEntry("AutoLodOnImport",             m_editorConfig.AutoLodOnImport);
 	globalstate.setCustomConfigEntry("KeepCPUAssetsInfoAcknowledged", m_editorConfig.KeepCPUAssetsInfoAcknowledged);
 	globalstate.setCustomConfigEntry("ContentBrowserRefreshRate",   m_editorConfig.ContentBrowserRefreshRate);
 	globalstate.setCustomConfigEntry("CbTreeWidth",                 m_editorConfig.CbTreeWidth);

@@ -124,6 +124,15 @@ struct TerrainComponent {
     // the chunks' draw calls so the layer-blend node can sample it.
     HE::UUID weightmapTextureId{};
     bool     weightsDirty = false;   // re-upload the texture on the next tick
+    // Set alongside weightsDirty by paint()/paintGroup() ONLY, carrying forward false if a
+    // wide edit (fillLayer/fillGroup/enableGroupMix/disableGroupMix, TerrainSync) was already
+    // pending when the stroke ran — a stroke on top of one must not narrow the journal back
+    // down. Every known wide writer clears it explicitly, which is the signal TerrainSystem
+    // needs to call rvtJournal.noteAll() even if a stroke's rect is already pending from the
+    // same tick (Thema 333 step 29). A writer that mutates layerWeights/weightsDirty directly
+    // without going through one of those (or a fresh load, where it defaults false already)
+    // is not covered — none exists today, but one would need to clear this flag too.
+    bool     weightsDirtyFromStroke = false;
     // Mean of layerWeights over the whole terrain, normalised (Σ = 1). Recomputed
     // with the texture upload — consumers that shade the landscape FLAT, with no
     // texel to sample (the GI ray kernels colour a hit per instance), blend the

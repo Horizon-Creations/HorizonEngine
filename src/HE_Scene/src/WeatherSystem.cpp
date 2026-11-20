@@ -14,14 +14,16 @@ WeatherPreset weatherPreset(WeatherKind kind)
 {
     switch (kind)
     {
-        //                     cloud  fog    wind  precip  type               wet   lightning
-        case WeatherKind::Clear:    return { 0.05f, 0.00f, 0.8f, 0.0f, PrecipType::None, 0.0f, false };
-        case WeatherKind::Cloudy:   return { 0.45f, 0.00f, 1.2f, 0.0f, PrecipType::None, 0.0f, false };
-        case WeatherKind::Overcast: return { 0.85f, 0.01f, 1.4f, 0.0f, PrecipType::None, 0.1f, false };
-        case WeatherKind::Foggy:    return { 0.60f, 0.08f, 0.4f, 0.0f, PrecipType::None, 0.2f, false };
-        case WeatherKind::Rain:     return { 0.90f, 0.03f, 1.6f, 0.7f, PrecipType::Rain, 0.8f, false };
-        case WeatherKind::Storm:    return { 1.00f, 0.04f, 2.6f, 1.0f, PrecipType::Rain, 1.0f, true  };
-        case WeatherKind::Snow:     return { 0.80f, 0.05f, 0.9f, 0.6f, PrecipType::Snow, 0.3f, false };
+        // fogBank / fogNoise (volumetric fog, plan §11) are the last two columns: Foggy
+        // gets a real ground bank and wispy noise, the wet kinds a faint one, the rest none.
+        //                     cloud  fog    wind  precip  type               wet   lightning bank   noise
+        case WeatherKind::Clear:    return { 0.05f, 0.00f, 0.8f, 0.0f, PrecipType::None, 0.0f, false, 0.00f, 0.5f };
+        case WeatherKind::Cloudy:   return { 0.45f, 0.00f, 1.2f, 0.0f, PrecipType::None, 0.0f, false, 0.00f, 0.5f };
+        case WeatherKind::Overcast: return { 0.85f, 0.01f, 1.4f, 0.0f, PrecipType::None, 0.1f, false, 0.00f, 0.5f };
+        case WeatherKind::Foggy:    return { 0.60f, 0.08f, 0.4f, 0.0f, PrecipType::None, 0.2f, false, 0.15f, 0.7f };
+        case WeatherKind::Rain:     return { 0.90f, 0.03f, 1.6f, 0.7f, PrecipType::Rain, 0.8f, false, 0.02f, 0.5f };
+        case WeatherKind::Storm:    return { 1.00f, 0.04f, 2.6f, 1.0f, PrecipType::Rain, 1.0f, true,  0.02f, 0.5f };
+        case WeatherKind::Snow:     return { 0.80f, 0.05f, 0.9f, 0.6f, PrecipType::Snow, 0.3f, false, 0.00f, 0.5f };
         default:                    return {};
     }
 }
@@ -104,6 +106,8 @@ void WeatherSystem::update(HorizonWorld& world, float dt, const glm::vec3& camer
     const float tWind  = 1.0f + (tp.windSpeed - 1.0f) * intensity; // intensity 0 → calm
     const float tPrec  = std::clamp(tp.precip * intensity, 0.0f, 1.0f);
     const float tWet   = std::clamp(tp.wetness * intensity, 0.0f, 1.0f);
+    const float tBank  = std::max(tp.fogBank * intensity, 0.0f);
+    const float tNoise = std::clamp(0.5f + (tp.fogNoise - 0.5f) * intensity, 0.0f, 1.0f); // intensity 0 -> the Environment default
 
     // A weather preset is a *set of values*. The system drives them into the
     // EnvironmentComponent, but per-value it backs off the moment the user moves a slider
@@ -121,7 +125,7 @@ void WeatherSystem::update(HorizonWorld& world, float dt, const glm::vec3& camer
     const bool reclaim = (wx.targetKind != wx.prevTarget);
 
     // Desired values this frame: blended while transitioning, the target once settled.
-    float dCloud, dFog, dWind, dRain, dSnow, dWet;
+    float dCloud, dFog, dWind, dRain, dSnow, dWet, dBank, dNoise;
     if (wx.targetKind != wx.currentKind)
     {
         if (reclaim) // first frame of a new target → snapshot the live env as the origin
@@ -132,6 +136,8 @@ void WeatherSystem::update(HorizonWorld& world, float dt, const glm::vec3& camer
             wx.fromRain    = env ? env->rainAmount    : 0.0f;
             wx.fromSnow    = env ? env->snowAmount    : 0.0f;
             wx.fromWetness = env ? env->wetness       : wx.curWetness;
+            wx.fromFogBank  = env ? env->fogBankDensity : 0.0f;
+            wx.fromFogNoise = env ? env->fogNoiseAmount : 0.5f;
             wx.transitionElapsed = 0.0f;
         }
         const float dur = std::max(wx.transitionDuration, 1e-4f);
@@ -144,12 +150,15 @@ void WeatherSystem::update(HorizonWorld& world, float dt, const glm::vec3& camer
         dRain  = lerpf(wx.fromRain,    tRain,  s);
         dSnow  = lerpf(wx.fromSnow,    tSnow,  s);
         dWet   = lerpf(wx.fromWetness, tWet,   s);
+        dBank  = lerpf(wx.fromFogBank,  tBank,  s);
+        dNoise = lerpf(wx.fromFogNoise, tNoise, s);
         if (a >= 1.0f) wx.currentKind = wx.targetKind;
     }
     else
     {
         dCloud = tCloud; dFog = tFog; dWind = tWind;
         dRain  = tRain;  dSnow = tSnow; dWet = tWet;
+        dBank  = tBank;  dNoise = tNoise;
         wx.transitionElapsed = 0.0f;
     }
     wx.prevTarget = wx.targetKind;
@@ -167,6 +176,10 @@ void WeatherSystem::update(HorizonWorld& world, float dt, const glm::vec3& camer
         drive(env->rainAmount,    wx.lastRain,    dRain);
         drive(env->snowAmount,    wx.lastSnow,    dSnow);
         drive(env->wetness,       wx.lastWetness, dWet);
+        // Volumetric fog's bank + noise: same ownership rule as every value above. Only
+        // read at fogMode 1, so a scene still on the analytic fog renders unchanged.
+        drive(env->fogBankDensity, wx.lastFogBank,  dBank);
+        drive(env->fogNoiseAmount, wx.lastFogNoise, dNoise);
         // The two sliders for materials are plain authored values, not preset-driven.
         env->puddleAmount = std::clamp(wx.puddleAmount, 0.0f, 1.0f);
         env->snowCover    = std::clamp(wx.snowCover,    0.0f, 1.0f);
