@@ -69,6 +69,18 @@ Stufe 0 bis 14 m): Treiber p50 0,16-0,19 ms CPU; beim schnellen Flug (`HE_PERF_C
 durch das Malen (bis 45 ms für 8 Seiten in einem Frame), nicht durch die Tabelle. "Pages per frame" senken glättet das;
 ein Zeitbudget für das Malen fehlt noch.
 
+**Nachtrag "die richtige RVT-Stufe im Spiegel" (nach dem Merge in RVT 2.0):** Footprint jetzt
+`(|Pw-cam| + dist) * rvt.x * giRvtStretch(rd, hitN) + dist * rough²`. `rvt.x` = Radiant je **Bildschirm**pixel aus der
+echten Projektion (nicht mehr 60° fest und nicht die Trace-Größe: Qualität 0/1 lasen 1-2 Stufen zu grob), `giRvtStretch` =
+die Streckung im Welt-XZ wie die größte Ableitung des Rasterisierers (1/cos des Einfalls, mal XZ-Anteil der Streckrichtung,
+Klippe von oben streckt nach oben). Treffer melden ihre Wunschseite in die Rückmeldung (`buffer(7)`, jede 16. Spur, gleiche
+Hash-Formel wie RvtLookup.h). Zeugen-Schalter: `HE_GI_RVT_MAP=1` (Spiegel zeigen die Stufenfarben unbeleuchtet in der
+normalen Ansicht; die Virtual-Texture-Ansicht zeichnet unbeleuchtet, dort zeigt ein Spiegel nur seine Grundfarbe),
+`HE_GI_RVT_FEEDBACK=0` (A/B). Ergebnis: HW- und SW-Kernel, Qualität 0/1/2 wählen dieselben Stufen, gleich dem Boden in
+direkter Sicht beim gleichen Weg. Spiegel-Detailmaß fällt 0,27 -> 0,11: vorher bis ~3 Stufen feiner als der Boden selbst
+(Streifung/Flimmern), jetzt wie der Rasterisierer. Rückmeldung aus Treffern: im Zeugen (128 m und 1024 m) keine
+Stand-in-Streifen mit und ohne, die Spiegel lesen dort grobe Stufen, die der Kameraring schon hält.
+
 ## Handoff
 
 - **Topic / step:** GI-Optimierung + RVT-Landschaftsfarbe, Metal fertig; Windows-Backends offen (Hive, Welle 2 von 0.8).

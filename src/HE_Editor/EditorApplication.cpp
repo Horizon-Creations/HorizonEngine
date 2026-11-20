@@ -12266,6 +12266,7 @@ void EditorApplication::dumpFrameHeadless()
 				const bool okPages = r->RenderSceneImage(mc, W, H, pages);
 				if (okOwn)   writeBMP(std::string(ms) + ".own.bmp", own, W, H);
 				if (okPages) writeBMP(std::string(ms) + ".rvt.bmp", pages, W, H);
+				// (With HE_GI_RVT_MAP=1 the mirrors of .rvt.bmp show the page map instead: the mip each reflection reads.)
 				HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTDRIVER mirror shot: own %s, pages %s (%s.*.bmp)", okOwn ? "ok" : "FAILED",
 				            okPages ? "ok" : "FAILED", ms);
 			}
