@@ -53,8 +53,9 @@ namespace HE {
 //   graphics        the graphics half of that config.json, and the editor viewport's
 //                   look, when `graphics.enabled` (see ProjectGraphics).
 //   input           the game's gamepad deadzones when `input.enabled`.
-//   rvt             the Runtime Virtual Texture of the landscape (Thema 333): on or
-//                   off and the size of its page pool, read by editor + game.
+//   rvt             the Runtime Virtual Texture's tuning (pool, texel size, radii, paint budget,
+//                   native near view). On/off is the global switch since RVT 2.0 (Thema 335): an
+//                   old file's "rvt.enabled" is read past.
 //   anticheat       the host's AntiCheatService (HorizonScene) — thresholds,
 //                   what happens per level, the game's value rules.
 //   multiplayer     NetGameSession::setProjectDefaults — the port, the seats,
@@ -285,12 +286,10 @@ struct HE_API ProjectInputSettings
 
 // ─── Runtime Virtual Texture (Thema 333, docs/rvt-design-2026-11-04.md) ───────────────────────────────────
 // The landscape material rendered once into pages of a shared pool, then only read; the shader that paints it runs
-// when something changes. OFF by default: default-constructed IS today's behaviour (the landscape draws its own
-// material). HE_RVT=1 / HE_RVT=0 in the environment force it on / off whatever this says (every witness script and
-// the MCP loop rely on it).
+// when something changes. Whether it is on at all is the global switch (Preferences > Rendering, the game's config.json;
+// RvtLandscape::wanted, Thema 335): this is the project's tuning of it.
 struct HE_API ProjectRvtSettings
 {
-    bool  enabled           = false;
     // The pool: pages of 136 px, three layers each (BaseColor, Normal, Surface), 222 KB a page. Changing it rebuilds the
     // pool and repaints every page.
     int   poolPages         = 512;       // 108 MB

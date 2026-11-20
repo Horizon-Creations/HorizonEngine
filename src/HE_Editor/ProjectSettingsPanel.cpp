@@ -867,21 +867,22 @@ void drawVirtualTexturePage(AppContext& ctx)
 	const bool supported = ctx.renderer && ctx.renderer->GetCapabilities().supportsRvt;
 	if (!supported)
 		hint("This graphics backend cannot draw from virtual texture pages (the software renderer does not; "
-		     "OpenGL needs 25 texture units, Vulkan a device that allows 21 samplers per stage). The setting is saved with "
+		     "OpenGL needs 25 texture units, Vulkan a device that allows 21 samplers per stage). The settings are saved with "
 		     "the project and ignored here: the landscape keeps drawing its own material.");
 	{
 		const char* env = std::getenv("HE_RVT");
 		if (env && *env)
 		{
 			ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.78f, 0.35f, 1.0f));
-			ImGui::TextWrapped("HE_RVT=%s is set in the environment and overrides the switch below.", env);
+			ImGui::TextWrapped("HE_RVT=%s is set in the environment and overrides the global switch.", env);
 			ImGui::PopStyleColor();
 		}
 	}
 
 	bool commit = false;
 	ImGui::SeparatorText("Landscape");
-	if (EditorWidgets::checkbox("Runtime Virtual Texture", &s.enabled)) commit = true;
+	hint("On or off is the editor's global switch (Preferences > Display > Runtime Virtual Texture) and, in the game, its "
+	     "config.json; this page is how this project tunes it.");
 	if (EditorWidgets::checkbox("Native near view", &s.nativeNear)) commit = true;
 	hint("Close to the camera the landscape keeps its own material (as sharp as the material is); only chunks farther away "
 	     "than where a finest-level texel covers one pixel are drawn from pages. Costs the full material on the near chunks.");
@@ -932,10 +933,8 @@ void drawVirtualTexturePage(AppContext& ctx)
 	const HE::landscape::RvtLandscape::DebugInfo d = ctx.rvtDebugInfo ? ctx.rvtDebugInfo() : HE::landscape::RvtLandscape::DebugInfo{};
 	if (!d.running)
 	{
-		ImGui::TextDisabled("%s", HE::landscape::RvtLandscape::wanted(s)
-		                              ? (supported ? "Waiting for a landscape within the activation radius."
-		                                           : "Not running: this backend has no virtual texture.")
-		                              : "Off: the landscape draws its own material.");
+		ImGui::TextDisabled("%s", supported ? "Not running: the global switch is off, or no landscape is within the activation radius."
+		                                    : "Not running: this backend has no virtual texture.");
 		return;
 	}
 	ImGui::Text("%u of %u landscape(s) drawn from pages", d.activeSegments, d.segments);

@@ -13332,7 +13332,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			// colour back untouched — graph materials and the deferred resolve
 			// both read this. Scene-pass fill only; previews keep the zero.
 			lit.viewMode[0] = UnlitViewActive() ? 1.0f : 0.0f;
-			lit.viewMode[1] = m_viewMode == HE::ViewMode::RvtMips ? 1.0f : 0.0f;   // heRvtMipView (RvtLookup.h)
+			lit.viewMode[1] = RvtDebugViewActive() ? 1.0f : 0.0f;   // RVT debug view (RvtLookup.h)
 			// Volumetric fog (v3.6, Thema 225): fogVol.x gates the opaque
 			// heApplyFog (Apply owns it instead) and heApplyFogT (translucent
 			// graph materials, binding 34/texture unit 21). Called AFTER

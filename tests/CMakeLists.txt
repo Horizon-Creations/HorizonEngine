@@ -380,10 +380,17 @@ add_executable(he_tests
     test_rvt_core.cpp
     # The RVT read as a graph node: shared lookup, t40..t43 pins, no live sampler, FXC (Thema 333 step 3)
     test_rvt_shader.cpp
+    # RVT 2.0 step 1: RVT Write / RVT Read nodes and the page/live graph cut (Thema 335)
+    test_rvt_material_split.cpp
     # Block encoder for RVT cold pages: ASTC (Metal, step 6j) and BC7 (Windows, step 9)
     test_block_encode.cpp
     # The RVT change journal on TerrainComponent: strokes leave a rect, rebuilds leave all (Thema 333 step 4)
     test_rvt_journal.cpp
+    # RVT 2.0 step 3: what makes a page stale, derived from the page subgraphs (Thema 335)
+    test_rvt_page_invalidation.cpp
+    # RVT 2.0 step 4: the auto landscape material cut at Write/Read: base before the Write, snow/sand/puddles/trails after the Read (Thema 335)
+    test_rvt_auto_landscape.cpp
+    test_rvt_base_bake.cpp
     # two real exports of a project, filtered and not; a no-op without HE_REACH_PROJECT
     test_bench_export_reach.cpp
     # BC1/BC4/BC5 next to BC7/BC3: enum + block math, encoders (2D and arrays), CPU decoders (Thema 180, Schritt 10)

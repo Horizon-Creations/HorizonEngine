@@ -10,6 +10,7 @@ namespace HE::landscape { class HlodBaker; }
 
 namespace HE::rvt
 {
+    // Each page paints only the layers it names (PageRender::layers): a repaint of a page stale in one layer costs one layer.
     // Returns how many of `pages` were painted (all of them unless the renderer refused one). `pagePx` is the pool's
     // page size (VolumeLayout::physicalPageSize()).
     uint32_t paintPages(HE::landscape::HlodBaker& baker, const std::vector<PageRender>& pages, uint32_t pagePx);

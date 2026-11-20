@@ -2908,6 +2908,16 @@ namespace
 	  "The G-buffer's emissive colour on its own — what glows, and how much, "
 	  "before bloom gets to it. Deferred render path only.",
 	  "", "editor#viewport" },
+	{ "Viewport View Mode/Virtual Texture", "",
+	  "The page map of the Runtime Virtual Texture, drawn unlit. A landscape read "
+	  "from pages is coloured by the mip of the page it shows (green is the "
+	  "finest, each coarser mip steps round the colour wheel); thin white lines "
+	  "are page borders, dark diagonal stripes mark a page that stands in for a "
+	  "finer one that is not painted yet, a pale checker marks a painted page "
+	  "that is stale and waits to be repainted, and flat black is no page at all. "
+	  "Needs the RVT switch on (Preferences > Rendering) and a landscape drawn "
+	  "from pages; anything else is shown unlit.",
+	  "", "editor#viewport" },
 
 	// ── World Outliner ───────────────────────────────────────────────────────
 	{ "World Outliner/Create Child", "",
@@ -4277,6 +4287,16 @@ namespace
 	  "picture stays the same; the draw count drops. Off by default until it "
 	  "has proven itself on real scenes.",
 	  "", "rendering#performance" },
+	{ "Preferences/Display/Runtime Virtual Texture", "",
+	  "The one switch for Runtime Virtual Textures. On: a material with an RVT Write node is painted once into pages of a "
+	  "shared pool, and the RVT Read node only reads them back, so what comes before the Write node runs again only when "
+	  "something there changes. Off: the RVT Write node is skipped, the RVT Read node is replaced by whatever feeds the Write "
+	  "node, and the graph computes directly, the same shader as a graph without the pair.\n\n"
+	  "Needs a graphics backend that can hold a virtual texture (Metal, D3D11, D3D12, Vulkan and OpenGL with enough texture "
+	  "units do; the software renderer, an OpenGL driver with too few texture units or a Vulkan device at the sampler minimum "
+	  "do not): there it stays off whatever this says. The export follows the same switch, so a game exported with it off "
+	  "ships the direct graph. The environment variable HE_RVT=1 or 0 forces it on or off over this switch.",
+	  "", "rendering#performance" },
 	{ "Preferences/Display/VSync", "",
 	  "Waits for the display before showing a frame: no tearing, and the frame "
 	  "rate is capped to the monitor's. Off is for measuring performance.",
@@ -5266,16 +5286,6 @@ namespace
 	  "a high sun.",
 	  "", "rendering#shadows" },
 	// ── World ▸ Virtual Texture ──────────────────────────────────────────────
-	{ "Virtual Texture/Runtime Virtual Texture", "Runtime Virtual Texture",
-	  "Draws the landscape from pages instead of running its material for every pixel of every frame. The landscape's "
-	  "material is rendered once into small tiles of a shared pool (a page: colour, normal and surface at a fixed ground "
-	  "resolution); from then on the landscape only reads them, and the material runs again only where something changed — "
-	  "a sculpt or paint stroke, an edited parameter. A frame in which nothing changed paints nothing.\n\n"
-	  "Off by default: with it off the landscape draws exactly what it always drew. Saved to Config/ProjectSettings.json and "
-	  "read as you edit, by the editor and by the exported game. Needs a graphics backend that supports it (D3D11, D3D12, "
-	  "Vulkan, OpenGL and Metal do; the software renderer does not yet) — the page above says so where it does not. The "
-	  "environment variable HE_RVT=1 or 0 forces it on or off over this switch.",
-	  "", "rendering#performance" },
 	{ "Virtual Texture/Native near view", "Native near view",
 	  "Keeps the landscape's own material close to the camera. A page has a fixed ground resolution (the texel size), the "
 	  "material has its textures' resolution, which is far finer: from close up the pages are blurry whatever their level. "
@@ -5295,8 +5305,8 @@ namespace
 	{ "Virtual Texture/Texel size", "Texel size",
 	  "How much ground one pixel of the finest page covers. 0.25 m is a pixel the size of a hand span on the screen from a "
 	  "walking camera; each finer step (12.5, 6.3, 3.1, 1.6 cm) doubles the detail. The finest level is only kept within a "
-	  "few metres of the camera (the near radius shrinks with the texel: about 4 m at 1.6 cm), each coarser level twice as "
-	  "far, so a finer texel costs pages close by, not over the whole landscape. 0.5 m and 1 m are the coarse end. Where the "
+	  "short distance of the camera: up to where one of its texels still covers a screen pixel (about 15 m at 1.6 cm on a "
+	  "1080-pixel image), each coarser level twice as far, so a finer texel costs pages close by, not over the whole landscape. 0.5 m and 1 m are the coarse end. Where the "
 	  "backend reports which pages the image actually reads (Metal), those are painted, within the same distance bands. "
 	  "A landscape too large for the finest choice (over 2048 pages a side) gets the finest texel that fits.\n\n"
 	  "Changing it rebuilds the pool and repaints every page, so pick it once.",
@@ -8433,6 +8443,30 @@ namespace
 	  "they do, down to 16 texels per chunk side; the export log says which "
 	  "landscapes were baked below what the screen wants. Saved in the profile.",
 	  "", "export#overview" },
+	{ "Export/Bake RVT base", "Bake RVT base",
+	  "Landscapes whose material has an RVT Write / RVT Read pair paint what sits "
+	  "before the Write node (layers, groups, texture bombing) into virtual texture "
+	  "pages while the game runs. For a landscape the game never edits that is the "
+	  "same work every run, so the export does it once: it photographs the pages' "
+	  "three layers (colour, normal, ambient occlusion + roughness) over the whole "
+	  "landscape and ships them as three textures. The game then paints its pages "
+	  "from those pictures and never builds the material's page graphs; the snow, "
+	  "sand, puddles and trails after the Read node stay a live shader. The pictures "
+	  "are as sharp as the live pages (0.25 m a texel) up to 4096 texels a side and "
+	  "the budget below, coarser beyond. They are only used when the landscape's "
+	  "ground and the material's page inputs are exactly what the export saw; the "
+	  "first sculpt or paint stroke, or a script that changes a parameter before the "
+	  "Write node, makes the game use the material's own graphs again. Needs the "
+	  "Runtime Virtual Texture switch on (Preferences > Rendering) and a landscape "
+	  "that is square, unrotated and unscaled. Saved in the profile.",
+	  "", "export#overview" },
+	{ "Export/RVT base budget (MB)", "RVT base budget (MB)",
+	  "What the baked RVT base pictures of all landscapes in this export may cost "
+	  "once cooked (block-compressed, with mip levels), in megabytes. When a "
+	  "landscape's picture does not fit, it is halved in size until it does; the "
+	  "export log says which landscapes were baked below the live pages' "
+	  "resolution. Saved in the profile.",
+	  "", "export#overview" },
 	{ "Export/Match the game's backend", "Match the game's backend",
 	  "Bake the precompiled material shaders for the one graphics backend the "
 	  "exported game runs: the one the project's Render Defaults name, else the "
@@ -10400,7 +10434,7 @@ namespace
 		{ "Render Defaults/",  "editor-settings", "Settings Reference", "Project: render defaults" },
 		{ "Shadows/",          "editor-settings", "Settings Reference", "Project: shadows" },
 		{ "Virtual Texture/",  "editor-settings", "Settings Reference", "Project: virtual texture" },
-		{ "Physics/",          "editor-settings", "Settings Reference", "Project: physics" },
+		{ "Physics/",         "editor-settings", "Settings Reference", "Project: physics" },
 		{ "Audio Buses/",      "editor-settings", "Settings Reference", "Project: audio buses" },
 		{ "Permissions/",    "editor-settings", "Settings Reference", "Project permissions" },
 		{ "Fonts/",          "editor-settings", "Settings Reference", "Project fonts" },

@@ -248,6 +248,11 @@ struct ExportProfile
 	// (the pictures get coarser, down to 16 px a chunk, until they fit). Needs the Metal renderer for now.
 	bool bakeFarLandscape = true;
 	int  farLandscapeBudgetMB = 512;
+	// Bake the base of every landscape whose material has an RVT Write / Read pair (HorizonScene/RvtBaseBake.h): the pages the
+	// game would paint from the material's layers at run time come out of the pak as three textures instead. A game that edits
+	// the ground (sculpt, paint) leaves them for the material's own graphs. rvtBaseBudgetMB caps what they cost cooked.
+	bool bakeRvtBase = true;
+	int  rvtBaseBudgetMB = 256;
 	// Pack only the assets the game reaches (the startup scene, the scenes something loads,
 	// scripts, the manifest, the engine's own needs) and leave out the rest. On by default.
 	// `alwaysIncludePatterns` are globs on the addressed path (like excludePatterns) that

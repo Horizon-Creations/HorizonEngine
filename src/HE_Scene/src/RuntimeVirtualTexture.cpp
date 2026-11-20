@@ -226,7 +226,13 @@ std::vector<PageRender> RvtManager::updateAll(const std::vector<VolumeView>& vie
 		const bool repaint = it != m_pages.end();
 		if (budget == 0) { if (!repaint) { ++missing; ++m_missing[w.key.volume]; } continue; }
 		uint32_t slot = 0;
-		if (repaint) { slot = it->second.slot; it->second.dirty = false; }
+		uint8_t layers = kRvtAllLayers;                  // a first paint is every layer
+		if (repaint)
+		{
+			slot = it->second.slot;
+			if (it->second.dirty) { layers = it->second.dirty; ++m_dirtyVersion; }   // a repaint is the stale layers only
+			it->second.dirty = 0;
+		}
 		else
 		{
 			if (!acquireSlot(slot)) { ++m_stats.starved; ++missing; ++m_missing[w.key.volume]; continue; }
@@ -236,7 +242,7 @@ std::vector<PageRender> RvtManager::updateAll(const std::vector<VolumeView>& vie
 			refreshSubtree(w.key.volume, w.key.mip, w.key.x, w.key.y);
 		}
 		PageRender r;
-		r.key = w.key; r.slot = slot; r.repaint = repaint;
+		r.key = w.key; r.slot = slot; r.repaint = repaint; r.layers = layers;
 		L.pageRect(w.key.mip, w.key.x, w.key.y, r.rectMin, r.rectMax, true);
 		out.push_back(r);
 		--budget;
@@ -247,9 +253,10 @@ std::vector<PageRender> RvtManager::updateAll(const std::vector<VolumeView>& vie
 	return out;
 }
 
-uint32_t RvtManager::invalidateRect(uint16_t volume, glm::vec2 mn, glm::vec2 mx)
+uint32_t RvtManager::invalidateRect(uint16_t volume, glm::vec2 mn, glm::vec2 mx, uint8_t layers)
 {
-	if (!hasVolume(volume)) return 0;
+	layers &= kRvtAllLayers;
+	if (!hasVolume(volume) || layers == 0) return 0;
 	const VolumeLayout& L = m_volumes[volume].layout;
 	uint32_t n = 0;
 	for (auto& kv : m_pages)
@@ -259,24 +266,37 @@ uint32_t RvtManager::invalidateRect(uint16_t volume, glm::vec2 mn, glm::vec2 mx)
 		glm::vec2 pmn, pmx;
 		L.pageRect(mip, x, y, pmn, pmx, true);
 		if (pmx.x <= mn.x || pmn.x >= mx.x || pmx.y <= mn.y || pmn.y >= mx.y) continue;
-		kv.second.dirty = true;
+		if ((kv.second.dirty | layers) != kv.second.dirty) ++m_dirtyVersion;   // news only when a layer turns stale that was not
+		kv.second.dirty |= layers;
 		++n;
 	}
 	return n;
 }
 
-uint32_t RvtManager::invalidateVolume(uint16_t volume)
+uint32_t RvtManager::invalidateVolume(uint16_t volume, uint8_t layers)
 {
+	layers &= kRvtAllLayers;
 	uint32_t n = 0;
+	if (layers == 0) return 0;
 	for (auto& kv : m_pages)
-		if (uint16_t(kv.first >> 40) == volume) { kv.second.dirty = true; ++n; }
+		if (uint16_t(kv.first >> 40) == volume)
+		{
+			if ((kv.second.dirty | layers) != kv.second.dirty) ++m_dirtyVersion;
+			kv.second.dirty |= layers;
+			++n;
+		}
 	return n;
 }
 
 bool RvtManager::isDirty(const PageKey& k) const
 {
+	return dirtyLayers(k) != 0;
+}
+
+uint8_t RvtManager::dirtyLayers(const PageKey& k) const
+{
 	auto it = m_pages.find(k.pack());
-	return it != m_pages.end() && it->second.dirty;
+	return it == m_pages.end() ? uint8_t(0) : it->second.dirty;
 }
 
 uint32_t RvtManager::resolve(uint16_t volume, int mip, int x, int y) const
@@ -291,11 +311,26 @@ uint32_t RvtManager::resolve(uint16_t volume, int mip, int x, int y) const
 	return kPageTableInvalid;
 }
 
-std::vector<uint32_t> RvtManager::pageTable(uint16_t volume, int mip) const
+std::vector<uint32_t> RvtManager::pageTable(uint16_t volume, int mip, bool markStale) const
 {
-	// The kept table (refreshSubtree); test_rvt_core checks it against resolve() of every entry.
+	// The kept table (refreshSubtree); test_rvt_core checks it against resolve() of every entry. The debug view's stale mark is
+	// laid over a copy, entry by entry (only while that view is on).
 	if (!hasVolume(volume) || mip >= m_volumes[volume].layout.mipCount()) return {};
-	return m_volumes[volume].table[size_t(mip)];
+	std::vector<uint32_t> t = m_volumes[volume].table[size_t(mip)];
+	if (markStale)
+	{
+		const int n = m_volumes[volume].layout.pagesPerSide(mip);
+		for (int y = 0; y < n; ++y)
+			for (int x = 0; x < n; ++x)
+			{
+				uint32_t& e = t[size_t(y) * size_t(n) + size_t(x)];
+				if (e == kPageTableInvalid) continue;
+				// The page that actually holds the picture (the cell itself or its resident ancestor) is the one that is stale.
+				const int em = pageTableMip(e);
+				if (isDirty(PageKey{ volume, uint8_t(em), uint16_t(x >> (em - mip)), uint16_t(y >> (em - mip)) })) e |= kPageTableStale;
+			}
+	}
+	return t;
 }
 
 Stats RvtManager::stats() const
@@ -304,7 +339,13 @@ Stats RvtManager::stats() const
 	s.poolSlots = m_poolSlots;
 	s.resident = uint32_t(m_pages.size());
 	s.dirty = s.pinned = 0;
-	for (const auto& kv : m_pages) { s.dirty += kv.second.dirty ? 1u : 0u; s.pinned += kv.second.pinned ? 1u : 0u; }
+	for (uint8_t l = 0; l < kRvtLayerCount; ++l) s.dirtyLayer[l] = 0;
+	for (const auto& kv : m_pages)
+	{
+		s.dirty += kv.second.dirty ? 1u : 0u;
+		s.pinned += kv.second.pinned ? 1u : 0u;
+		for (uint8_t l = 0; l < kRvtLayerCount; ++l) s.dirtyLayer[l] += (kv.second.dirty >> l) & 1u;
+	}
 	return s;
 }
 

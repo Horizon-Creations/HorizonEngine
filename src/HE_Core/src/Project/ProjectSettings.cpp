@@ -196,7 +196,6 @@ bool ProjectSettings::operator==(const ProjectSettings& o) const
         && input.enabled == o.input.enabled
         && nearlyEqual(input.stickDeadzone, o.input.stickDeadzone)
         && nearlyEqual(input.triggerDeadzone, o.input.triggerDeadzone)
-        && rvt.enabled == o.rvt.enabled
         && rvt.poolPages == o.rvt.poolPages
         && nearlyEqual(rvt.metersPerTexel, o.rvt.metersPerTexel)
         && nearlyEqual(rvt.nearRadiusM, o.rvt.nearRadiusM)
@@ -391,8 +390,7 @@ void ProjectSettings::toJson(json& out) const
     out["input"] = { { "enabled",         input.enabled },
                      { "stickDeadzone",   input.stickDeadzone },
                      { "triggerDeadzone", input.triggerDeadzone } };
-    out["rvt"] = { { "enabled",           rvt.enabled },
-                   { "poolPages",         rvt.poolPages },
+    out["rvt"] = { { "poolPages",         rvt.poolPages },
                    { "metersPerTexel",    rvt.metersPerTexel },
                    { "nearRadiusM",       rvt.nearRadiusM },
                    { "activationRadiusM", rvt.activationRadiusM },
@@ -523,8 +521,8 @@ void ProjectSettings::fromJson(const json& in)
         readNumber(i, "triggerDeadzone", input.triggerDeadzone);
     }
     {
+        // "enabled" (before RVT 2.0, Thema 335) is read past: on/off is the global switch (Preferences > Rendering).
         const json& r = section(in, "rvt");
-        readBool  (r, "enabled",           rvt.enabled);
         readNumber(r, "poolPages",         rvt.poolPages);
         readNumber(r, "metersPerTexel",    rvt.metersPerTexel);
         readNumber(r, "nearRadiusM",       rvt.nearRadiusM);
