@@ -1029,6 +1029,7 @@ void render(AppContext& ctx, float dt)
 			ctx.renderer->SetViewportSize(
 				static_cast<uint32_t>(s_viewportPxW),
 				static_cast<uint32_t>(s_viewportPxH));
+			ctx.renderer->SetSceneVisible(true);   // the picture is on screen this frame (EditorUI::renderEditor resets it)
 
 			if (void* tex = ctx.renderer->GetViewportTexture())
 			{

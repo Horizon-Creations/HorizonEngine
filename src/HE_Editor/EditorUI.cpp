@@ -2349,6 +2349,9 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 	EditorToolbar::setRevealAssetHook(&ContentBrowserPanel::revealAsset);
 	// …and so does its Save: the button must be the keystroke, cues included.
 	EditorToolbar::setSaveHook([] { s_saveFromToolbar = true; });
+	// Nobody looks at the scene until the viewport shows it this frame (ViewportPanel sets it back): with another tab in
+	// front the renderer skips the scene's GPU work, the world keeps ticking.
+	if (ctx.renderer) ctx.renderer->SetSceneVisible(false);
 	// Runs every frame regardless of which tab/panel is active (before any early-out):
 	// guarantees the RMB fly-look capture can never stay stuck once the button is released.
 	ViewportPanel::enforceViewportLookCaptureInvariant(ctx.window ? ctx.window->GetNativeWindow() : nullptr);

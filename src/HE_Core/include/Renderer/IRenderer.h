@@ -720,6 +720,10 @@ public:
     // ImGui-compatible texture handle (GL: GLuint cast; Metal: id<MTLTexture>).
     // Pass 0×0 to return to direct-to-window rendering.
     virtual void  SetViewportSize(uint32_t /*width*/, uint32_t /*height*/) {}
+    // Whether the offscreen viewport (SetViewportSize) is on screen this frame. False = nobody looks at it (another editor tab
+    // in front, the viewport window hidden): the backend may skip the scene's GPU work and keep the last image; the world goes
+    // on ticking as usual. Set every frame before Render(); a backend that ignores it renders as before.
+    virtual void  SetSceneVisible(bool /*visible*/) {}
     virtual void* GetViewportTexture() { return m_viewportImGuiHandle; }
 
     // Called by the platform layer (editor) after it has registered the viewport

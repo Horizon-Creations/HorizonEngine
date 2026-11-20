@@ -115,6 +115,8 @@ public:
 	void  SetRvtLandscape(uint32_t terrainEntity, const HE::UUID& landscapeMaterial, const HE::UUID& consumerMaterial) override;
 	void  ReleaseRvtConsumer(const HE::UUID& consumerMaterial) override;
 	void  SetRvtNearChunks(uint32_t terrainEntity, const std::vector<uint32_t>& chunkEntities) override;
+	void  SetSceneVisible(bool visible) override { m_sceneHidden = !visible; }
+	bool  m_sceneHidden = false;   // SetSceneVisible: the offscreen viewport is not shown this frame, its scene passes are skipped
 	bool  ReadRvtFeedback(std::vector<uint32_t>& keys) override;
 	void  InvalidateMaterial(const HE::UUID& materialId) override;
 	void  WarmupMaterials(const std::vector<HE::UUID>& materialIds) override;

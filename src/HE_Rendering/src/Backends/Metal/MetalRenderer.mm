@@ -18991,7 +18991,12 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 		// window sizing without recomputing it — harmless (== pw/ph) when !isPrimary.
 		int shW = pw, shH = ph;
 		m_fogFrameActive = false;   // EncodeFogVolume turns it on for a primary frame that runs the volume
-		if (isPrimary)
+		// The scene's GPU work (extract, shadows, GI, G-buffer, post, offscreen tonemap) only when somebody sees the result: an
+		// offscreen viewport the editor did not show this frame (SetSceneVisible(false), another tab in front) keeps its last
+		// image, and the swapchain below still draws the UI. Direct-to-window (the game) always renders, and so does a capture
+		// (RenderSceneImage: screenshots, thumbnails, RVT pages), which is asked for exactly because somebody wants the picture.
+		const bool sceneWork = isPrimary && (m_captureOnly || !(m_sceneHidden && m_viewportReqW > 0 && m_viewportReqH > 0));
+		if (sceneWork)
 		{
 			// Shadow cascades MUST be fit with the SAME aspect the scene pass uses
 			// (below), else render≠sample cascade matrices → shadow swimming.
@@ -19042,7 +19047,7 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 		// Step the GPU weather-particle pool once per frame (primary only), before the
 		// scene render encoder reads it. Metal tracks the compute→vertex dependency on
 		// the shared buffer within this command buffer. No-op when the path is disabled.
-		if (isPrimary)
+		if (sceneWork)
 			SimulateGpuParticles((__bridge void*)cmdBuf);
 		flushPass("GIAccel");   // detailed: commit the Shadow (+ particle sim) command buffer
 
@@ -19053,7 +19058,7 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 		// scene pass — EncodeGIShadowRays rasterizes its G-buffer with THIS
 		// extraction's camera, and a mismatched aspect misaligns the shadow mask
 		// against the scene pass's screen-space sampling.
-		if (isPrimary)
+		if (sceneWork)
 			EncodeGIAccelBuild((__bridge void*)cmdBuf,
 			                   shH > 0 ? static_cast<float>(shW) / static_cast<float>(shH) : 1.0f);
 		flushPass("GIShadow");   // detailed: commit the GIAccel command buffer (empty if GI off)
@@ -19065,7 +19070,7 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 		// what the scene pass will use (offscreen-viewport-or-window sizing),
 		// computed above for the CSM cascade fit. No-op (early return) unless GI
 		// is enabled/supported and EncodeGIAccelBuild actually built a TLAS.
-		if (isPrimary)
+		if (sceneWork)
 			EncodeGIShadowRays((__bridge void*)cmdBuf, std::max(1, shW / 2), std::max(1, shH / 2));
 		flushPass("GIProbes");   // detailed: commit the GIShadow command buffer (empty if GI off)
 
@@ -19074,12 +19079,12 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 		// unless GI is enabled/supported/has a built TLAS; lazily builds the probe
 		// grid + atlases on first call. Replaces AO + flat/IBL ambient in
 		// fragmentMain when active — see EncodeScene's giActive gate below.
-		if (isPrimary)
+		if (sceneWork)
 			EncodeGIProbeUpdate((__bridge void*)cmdBuf);
 		flushPass("SSAO");   // detailed: commit the GIProbes command buffer (empty if GI off)
 
 		const bool offscreen = isPrimary && m_viewportReqW > 0 && m_viewportReqH > 0;
-		if (isPrimary)
+		if (sceneWork)
 		{
 			// Output size (what the user sees) vs. RENDER size (what the scene is
 			// rasterized at). Render scale (A4) separates the two: everything
