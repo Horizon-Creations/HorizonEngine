@@ -44,6 +44,31 @@ mit `giRvtAlbedo` fest auf Magenta sind alle Bodentreffer in beiden Spiegeln und
 gleich (Spiegel-Boden RGB 34,7/31,1/22,9 gegen 35,3/31,4/23,0); der Unterschied zeigt sich an strukturierter Landschaft.
 Kosten in Catania: GPU 4,49 ms, Reflections 1,42 ms (wie ohne).
 
+**Nachtrag "immer noch eine Farbe" (gleicher Tag):** Drei Ursachen, alle gefunden.
+1. Mip-Wahl: der Footprint weitete mit `dist * rough * 0.5` (Spiegel 0,05: 0,5 m je Pixel bei 20 m). Jetzt GGX-Alpha
+   `dist * rough²` (09d0baf2c).
+2. Reflexionsqualität 1 (Medium) tract in halber Auflösung + Blur: halbiert das Detail (Maß unten 0,076 -> 0,150 bei Qualität 2).
+3. Hauptursache: die Seiten selbst. Der Ring schrumpfte mit dem Texel, die Rückmeldung war unbegrenzt, und der alte Zeuge
+   renderte vor der Aufnahme keine Frames (keine Rückmeldung): in jeder Entfernung kam ~4-6 cm an, egal welcher Texel.
+   Jetzt: Abstandsbänder der Rückmeldung aus der Pixelgröße (`nativeNearRadius() * 2^m`, Stufe 0 bei 1,6 cm bis ~15 m),
+   Texel bis 1,6 cm, Seitentabelle seitenweise gepflegt (`RvtManager::refreshSubtree`, Test gegen `resolve()`), Schlüssel-
+   breite (11 Bit) und 2048-Seiten-Deckel in `attach()`, Hash-Slot mit Frame-Phase gesalzen. Zeuge rendert 120 Frames aus
+   der Spiegel-Kamera vor der Aufnahme.
+
+Maß: mittlere Helligkeitsdifferenz benachbarter Pixel (Detail), Zeuge Qualität 2, nach den Fixes:
+
+| | Boden direkt | Spiegel |
+|---|---|---|
+| eigenes Material (Spiegel: Mittelfarben) | 0,711 | 0,013 |
+| RVT 25 cm | 0,093 | 0,181 |
+| RVT 6,3 cm | 0,312 | 0,294 |
+| RVT 1,6 cm | **0,781** | 0,294 |
+
+Bilder `6-rvt-1.6cm.png`, `7-rvt-6.3cm.png`, `8-rvt-25cm.png`, `9-eigenes-material.png`. Catania-Kopie bei 1,6 cm (11 Mips,
+Stufe 0 bis 14 m): Treiber p50 0,16-0,19 ms CPU; beim schnellen Flug (`HE_PERF_CAM_FLY=0.15`) einzelne Frames bis 48 ms
+durch das Malen (bis 45 ms für 8 Seiten in einem Frame), nicht durch die Tabelle. "Pages per frame" senken glättet das;
+ein Zeitbudget für das Malen fehlt noch.
+
 ## Handoff
 
 - **Topic / step:** GI-Optimierung + RVT-Landschaftsfarbe, Metal fertig; Windows-Backends offen (Hive, Welle 2 von 0.8).

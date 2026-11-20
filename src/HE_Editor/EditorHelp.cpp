@@ -5294,9 +5294,11 @@ namespace
 	  "", "rendering#performance" },
 	{ "Virtual Texture/Texel size", "Texel size",
 	  "How much ground one pixel of the finest page covers. 0.25 m is a pixel the size of a hand span on the screen from a "
-	  "walking camera; 0.125 m and 0.0625 m double the detail each step and quadruple the pages needed to cover the same "
-	  "ground, 0.5 m and 1 m do the opposite. Coarser levels are made automatically for the distance. Where the backend "
-	  "reports which pages the image actually reads (Metal), exactly those are painted.\n\n"
+	  "walking camera; each finer step (12.5, 6.3, 3.1, 1.6 cm) doubles the detail. The finest level is only kept within a "
+	  "few metres of the camera (the near radius shrinks with the texel: about 4 m at 1.6 cm), each coarser level twice as "
+	  "far, so a finer texel costs pages close by, not over the whole landscape. 0.5 m and 1 m are the coarse end. Where the "
+	  "backend reports which pages the image actually reads (Metal), those are painted, within the same distance bands. "
+	  "A landscape too large for the finest choice (over 2048 pages a side) gets the finest texel that fits.\n\n"
 	  "Changing it rebuilds the pool and repaints every page, so pick it once.",
 	  "", "rendering#performance" },
 	{ "Virtual Texture/Near radius", "Near radius",

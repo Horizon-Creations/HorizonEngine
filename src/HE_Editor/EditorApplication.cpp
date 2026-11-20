@@ -11714,7 +11714,7 @@ void EditorApplication::dumpFrameHeadless()
 			// every mip-0 page of the 128 m landscape is wanted; on a bigger one the ring is a part of it (the camera test needs that)
 			cfg.nearRadiusM = wreg.get<TerrainComponent>(land).sizeX > 200.0f ? 48.0f : 160.0f;
 			// HE_DUMP_RVTDRIVER_TEXEL=<m>: the finest texel size (default 0.25), e.g. 0.0625 to see a fine volume fill the pool.
-			if (const char* tx = std::getenv("HE_DUMP_RVTDRIVER_TEXEL"); tx && *tx) cfg.metersPerTexel = std::clamp(float(std::atof(tx)), 0.03f, 4.0f);
+			if (const char* tx = std::getenv("HE_DUMP_RVTDRIVER_TEXEL"); tx && *tx) cfg.metersPerTexel = std::clamp(float(std::atof(tx)), 0.01f, 4.0f);
 			drv.setSettings(cfg);
 			const glm::vec3 centre = HE::worldPositionOf(*m_editorWorld, land);
 			glm::vec3 camPos = centre + glm::vec3(0.0f, 110.0f, 0.0f);
@@ -11952,7 +11952,9 @@ void EditorApplication::dumpFrameHeadless()
 				const float pitch = glm::radians(-4.0f);
 				mc.view = glm::lookAt(mc.position, mc.position + glm::vec3(0.0f, std::sin(pitch), -std::cos(pitch)), glm::vec3(0.0f, 1.0f, 0.0f));
 				camPos = mc.position;
-				for (int i = 0; i < 120; ++i) sceneTick();   // the pages around the new camera
+				// The pages this view reads: rendered frames from this camera report them (the feedback), ticks paint them.
+				std::vector<uint8_t> warm;
+				for (int i = 0; i < 120; ++i) { r->RenderSceneImage(mc, W, H, warm); sceneTick(); }
 				std::vector<uint8_t> own, pages;
 				drv.pauseSwap(true);
 				const bool okOwn = r->RenderSceneImage(mc, W, H, own);

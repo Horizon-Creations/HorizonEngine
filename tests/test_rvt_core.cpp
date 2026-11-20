@@ -97,6 +97,48 @@ TEST_CASE("RVT: the first frame paints the view coarsest first, and a frame with
 	CHECK(m.tableVersion(v) == ver);
 }
 
+TEST_CASE("RVT page table: the table kept page by page equals resolve() of every entry after fills, evictions and drops")
+{
+	// A small pool so the walk evicts; two volumes so one's changes must not touch the other's table.
+	RvtManager m(40, 16);
+	const uint16_t a = m.addVolume(square512());
+	VolumeDesc d2 = square512(); d2.origin = { 1000.0f, 0.0f };
+	const uint16_t b = m.addVolume(d2);
+	const auto check = [&](uint16_t v) {
+		const VolumeLayout& L = m.layout(v);
+		for (int mip = 0; mip < L.mipCount(); ++mip)
+		{
+			const std::vector<uint32_t> t = m.pageTable(v, mip);
+			const int n = L.pagesPerSide(mip);
+			REQUIRE(t.size() == size_t(n) * size_t(n));
+			for (int y = 0; y < n; ++y)
+				for (int x = 0; x < n; ++x)
+					if (t[size_t(y) * size_t(n) + size_t(x)] != m.resolve(v, mip, x, y))
+					{
+						FAIL_CHECK("volume " << v << " mip " << mip << " page " << x << "," << y);
+						return;
+					}
+		}
+	};
+	uint32_t seed = 12345u;
+	const auto rnd = [&](float lo, float hi) { seed = seed * 1664525u + 1013904223u; return lo + (hi - lo) * float(seed >> 8) / float(1u << 24); };
+	for (int f = 0; f < 60; ++f)
+	{
+		m.beginFrame();
+		ViewDesc va = viewAt(rnd(0, 512), rnd(0, 512), 40.0f);
+		va.requested = { PageKey{ a, 0, uint16_t(rnd(0, 16)), uint16_t(rnd(0, 16)) } };
+		m.updateAll({ VolumeView{ a, va }, VolumeView{ b, viewAt(1000.0f + rnd(0, 512), rnd(0, 512), 40.0f) } });
+		if (f % 7 == 0) check(a);
+		if (f % 11 == 0) check(b);
+		if (f == 30) m.dropVolumePages(b);
+	}
+	check(a);
+	check(b);
+	m.removeVolume(a);
+	const uint16_t c = m.addVolume(square512());   // reuses a's id: a fresh, empty table
+	check(c);
+}
+
 TEST_CASE("RVT feedback: a reported page far outside the camera square is painted with its ancestors, then nothing")
 {
 	RvtManager m(1000, 100000);

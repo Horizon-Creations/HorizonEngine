@@ -166,6 +166,12 @@ bool RvtLandscape::attach(HorizonWorld& live, entt::entity terrain, Segment& seg
     vd.origin = r0.min;
     vd.sizeM = tc.sizeX;                           // the volume is a square; sizeX == sizeZ here, HlodBaker::begin refuses non-square chunks
     vd.finestMetersPerTexel = m_settings.metersPerTexel;
+    // The feedback key has 11 bits a page coordinate (RvtLookup.h, rvtFeedbackKey) and the table is capped at 2048 a side: a
+    // landscape too large for this texel size gets the finest texel that fits, said once.
+    while (rvt::VolumeLayout(vd).pagesPerSide(0) > 2048) vd.finestMetersPerTexel *= 2.0f;
+    if (vd.finestMetersPerTexel != m_settings.metersPerTexel)
+        HE_LOG_WARN(Scene, "RvtLandscape: a %.0f m landscape at %.4f m per texel needs more than 2048 pages a side; it uses %.4f m",
+                    vd.sizeM, m_settings.metersPerTexel, vd.finestMetersPerTexel);
     seg.volume = m_manager->addVolume(vd);
     seg.volumeLive = true;
     if (static_cast<uint32_t>(m_manager->layout(seg.volume).physicalPageSize()) != m_pagePx)
@@ -480,9 +486,25 @@ RvtLandscape::FrameStats RvtLandscape::tick(HorizonWorld& live, const glm::vec3&
         // per mip (at 0.0625 m and 64 m it would be 289 a mip, past any pool, and the volume would never count as filled).
         // The same ground is then served one mip deeper, at the same texel size as before; the feedback asks for more.
         view.nearRadiusM = m_settings.nearRadiusM * std::min(1.0f, m_settings.metersPerTexel / 0.25f);
+        // The feedback within distance bands: a pixel may ask for mip m only within band0 * 2^m of the camera (farther it gets
+        // the mip of its band, the same page's ancestor). So the finest level stays the metres around the camera where it is
+        // visible at all, and a far, steep or mirrored pixel cannot fill the pool with it.
+        const rvt::VolumeLayout& L = m_manager->layout(kv.first);
+        // The band of mip m reaches where its texel shrinks to a pixel (nativeNearRadius() * 2^m): a pixel never gets a page
+        // finer than it can show, and every pixel up to there gets the one it can. The camera square above stays small.
+        const float band0 = std::max(view.nearRadiusM, nativeNearRadius());
         for (const auto& f : m_feedback)   // rvtFeedbackKey: volume 5 | mip 5 | x 11 | y 11
-            if ((f.first >> 27) == kv.first)
-                view.requested.push_back({ kv.first, uint8_t((f.first >> 22) & 31u), uint16_t((f.first >> 11) & 2047u), uint16_t(f.first & 2047u) });
+        {
+            if ((f.first >> 27) != kv.first) continue;
+            int mip = int((f.first >> 22) & 31u), x = int((f.first >> 11) & 2047u), y = int(f.first & 2047u);
+            if (mip >= L.mipCount() || x >= L.pagesPerSide(mip) || y >= L.pagesPerSide(mip)) continue;
+            glm::vec2 mn, mx;
+            L.pageRect(mip, x, y, mn, mx, false);
+            const glm::vec2 c = (mn + mx) * 0.5f;
+            const float d = std::max(std::abs(c.x - cam.x), std::abs(c.y - cam.y));
+            while (mip + 1 < L.mipCount() && d > band0 * float(1 << mip)) { ++mip; x >>= 1; y >>= 1; }
+            view.requested.push_back({ kv.first, uint8_t(mip), uint16_t(x), uint16_t(y) });
+        }
         views.push_back({ kv.first, std::move(view) });
     }
     m_manager->beginFrame();

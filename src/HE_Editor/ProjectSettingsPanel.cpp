@@ -900,11 +900,11 @@ void drawVirtualTexturePage(AppContext& ctx)
 		}
 	}
 	{
-		static const float kTexel[] = { 0.0625f, 0.125f, 0.25f, 0.5f, 1.0f };
-		static const char* const kNames[] = { "0.0625 m  (finest)", "0.125 m", "0.25 m", "0.5 m", "1 m  (coarsest)" };
+		static const float kTexel[] = { 0.015625f, 0.03125f, 0.0625f, 0.125f, 0.25f, 0.5f, 1.0f };
+		static const char* const kNames[] = { "1.6 cm  (finest)", "3.1 cm", "6.3 cm", "12.5 cm", "25 cm", "50 cm", "1 m  (coarsest)" };
 		int cur = 0;
-		for (int i = 0; i < 5; ++i) if (s.metersPerTexel >= kTexel[i] - 0.001f) cur = i;
-		if (Row::combo("Texel size##rvttexel", &cur, kNames, 5))
+		for (int i = 0; i < 7; ++i) if (s.metersPerTexel >= kTexel[i] * 0.99f) cur = i;
+		if (Row::combo("Texel size##rvttexel", &cur, kNames, 7))
 		{
 			s.metersPerTexel = kTexel[cur];
 			commit = true;

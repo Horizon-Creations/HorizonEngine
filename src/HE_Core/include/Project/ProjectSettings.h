@@ -309,7 +309,7 @@ struct HE_API ProjectRvtSettings
     // One declaration a line: MSVC refuses a second name after a comma in a dllexport class (C2487).
     static constexpr int   kMinPoolPages     = 64;
     static constexpr int   kMaxPoolPages     = 2048;
-    static constexpr float kMinTexel         = 0.05f;
+    static constexpr float kMinTexel         = 0.01f;   // ~1.5 cm is the finest preset; the page table is kept page by page
     static constexpr float kMaxTexel         = 4.0f;
     static constexpr float kMinRadius        = 8.0f;
     static constexpr float kMaxRadius        = 5000.0f;

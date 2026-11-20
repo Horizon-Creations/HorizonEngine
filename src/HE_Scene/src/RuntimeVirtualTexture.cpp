@@ -62,13 +62,43 @@ uint16_t RvtManager::addVolume(const VolumeDesc& d)
 			m_volumes[i].layout = VolumeLayout(d);
 			m_volumes[i].live = true;
 			++m_volumes[i].tableVersion;
+			resetTable(m_volumes[i]);
 			return uint16_t(i);
 		}
 	Volume v;
 	v.layout = VolumeLayout(d);
 	v.live = true;
-	m_volumes.push_back(v);
+	resetTable(v);
+	m_volumes.push_back(std::move(v));
 	return uint16_t(m_volumes.size() - 1);
+}
+
+void RvtManager::resetTable(Volume& v)
+{
+	v.table.resize(size_t(v.layout.mipCount()));
+	for (int m = 0; m < v.layout.mipCount(); ++m) v.table[size_t(m)].assign(size_t(v.layout.pageCount(m)), kPageTableInvalid);
+}
+
+void RvtManager::refreshSubtree(uint16_t volume, int mip, int x, int y)
+{
+	Volume& v = m_volumes[volume];
+	const int mips = v.layout.mipCount();
+	if (v.table.size() != size_t(mips)) resetTable(v);
+	// The top entry walks up for its own fallback; every finer one is its own page or its parent's entry, already final.
+	v.table[size_t(mip)][size_t(y) * size_t(v.layout.pagesPerSide(mip)) + size_t(x)] = resolve(volume, mip, x, y);
+	for (int k = mip - 1; k >= 0; --k)
+	{
+		const int span = 1 << (mip - k), n = v.layout.pagesPerSide(k), np = v.layout.pagesPerSide(k + 1);
+		const std::vector<uint32_t>& up = v.table[size_t(k + 1)];
+		std::vector<uint32_t>& t = v.table[size_t(k)];
+		for (int yy = y * span; yy < (y + 1) * span; ++yy)
+			for (int xx = x * span; xx < (x + 1) * span; ++xx)
+			{
+				const auto it = m_pages.find(PageKey{ volume, uint8_t(k), uint16_t(xx), uint16_t(yy) }.pack());
+				t[size_t(yy) * size_t(n) + size_t(xx)] = it != m_pages.end() ? packPageTableEntry(it->second.slot, k)
+				                                                              : up[size_t(yy >> 1) * size_t(np) + size_t(xx >> 1)];
+			}
+	}
 }
 
 void RvtManager::removeVolume(uint16_t id)
@@ -85,7 +115,7 @@ void RvtManager::dropVolumePages(uint16_t volume)
 		if (uint16_t(it->first >> 40) == volume) { m_freeSlots.push_back(it->second.slot); it = m_pages.erase(it); }
 		else ++it;
 	}
-	if (hasVolume(volume)) ++m_volumes[volume].tableVersion;
+	if (hasVolume(volume)) { ++m_volumes[volume].tableVersion; resetTable(m_volumes[volume]); }
 }
 
 bool RvtManager::acquireSlot(uint32_t& slot)
@@ -101,8 +131,11 @@ bool RvtManager::acquireSlot(uint32_t& slot)
 	}
 	if (victim == m_pages.end()) return false;
 	slot = victim->second.slot;
-	++m_volumes[uint16_t(victim->first >> 40)].tableVersion;
+	const uint64_t vk = victim->first;
+	const uint16_t vv = uint16_t(vk >> 40);
+	++m_volumes[vv].tableVersion;
 	m_pages.erase(victim);
+	refreshSubtree(vv, int((vk >> 32) & 0xFF), int((vk >> 16) & 0xFFFF), int(vk & 0xFFFF));
 	++m_stats.evictions;
 	return true;
 }
@@ -200,6 +233,7 @@ std::vector<PageRender> RvtManager::updateAll(const std::vector<VolumeView>& vie
 			Page p; p.slot = slot; p.lastUsed = m_frame; p.pinned = isPinnedMip(v, w.key.mip);
 			m_pages[w.key.pack()] = p;
 			++v.tableVersion;
+			refreshSubtree(w.key.volume, w.key.mip, w.key.x, w.key.y);
 		}
 		PageRender r;
 		r.key = w.key; r.slot = slot; r.repaint = repaint;
@@ -259,13 +293,9 @@ uint32_t RvtManager::resolve(uint16_t volume, int mip, int x, int y) const
 
 std::vector<uint32_t> RvtManager::pageTable(uint16_t volume, int mip) const
 {
-	std::vector<uint32_t> t;
-	if (!hasVolume(volume) || mip >= m_volumes[volume].layout.mipCount()) return t;
-	const int n = m_volumes[volume].layout.pagesPerSide(mip);
-	t.resize(size_t(n) * size_t(n));
-	for (int y = 0; y < n; ++y)
-		for (int x = 0; x < n; ++x) t[size_t(y) * size_t(n) + size_t(x)] = resolve(volume, mip, x, y);
-	return t;
+	// The kept table (refreshSubtree); test_rvt_core checks it against resolve() of every entry.
+	if (!hasVolume(volume) || mip >= m_volumes[volume].layout.mipCount()) return {};
+	return m_volumes[volume].table[size_t(mip)];
 }
 
 Stats RvtManager::stats() const
