@@ -10347,6 +10347,7 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
         // back untouched — graph materials, the deferred resolve (rl copies
         // frameMatLight) and the forward replay all read this. Mirrors GL/Metal/D3D.
         lit.viewMode[0] = UnlitViewActive() ? 1.0f : 0.0f;
+        lit.viewMode[1] = m_viewMode == HE::ViewMode::RvtMips ? 1.0f : 0.0f;   // heRvtMipView (RvtLookup.h)
         // Volumetric fog (Thema 225 step 5, plan §2.5): fogVol.x = 1 hands the opaque fog to the
         // Apply pass (heApplyFog is a no-op), .w = 1 says binding 34 holds the integrated volume
         // on THIS frame (heApplyFogT reads it). fogViewProj is the PLAIN Vulkan clip matrix: its

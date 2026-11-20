@@ -2881,6 +2881,14 @@ namespace
 	  "The triangle edges of every mesh, unlit. Shows how dense a model is and "
 	  "where the LOD switches; the sky and particles stay as they are.",
 	  "Alt+2", "editor#viewport" },
+	{ "Viewport View Mode/RVT Mip Levels", "",
+	  "Unlit, with every landscape drawn from the Runtime Virtual Texture coloured "
+	  "by the detail level of the page it reads: red finest (mip 0), then orange, "
+	  "yellow, green, cyan, blue, magenta for ever coarser pages. Dark stripes mark "
+	  "pixels that want a finer page than the pool holds there, so they show a "
+	  "coarser one. Surfaces without RVT stay plain Unlit; with the virtual texture "
+	  "off (Preferences > World > Virtual Texture) nothing is coloured.",
+	  "", "editor#viewport" },
 	{ "Viewport View Mode/Base Color", "",
 	  "The G-buffer's base colour, straight from the material. Needs the "
 	  "Deferred render path (Preferences > Rendering) — the forward path has "

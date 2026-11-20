@@ -156,7 +156,7 @@ public:
 	// and the flat one reads far better against the sky. Mirrors GL/Metal/D3D11/D3D12.
 	bool  UnlitViewActive() const
 	{
-		return m_viewMode == HE::ViewMode::Unlit || m_viewMode == HE::ViewMode::Wireframe;
+		return m_viewMode == HE::ViewMode::Unlit || m_viewMode == HE::ViewMode::Wireframe || m_viewMode == HE::ViewMode::RvtMips;
 	}
 	bool  WireframeViewActive() const { return m_viewMode == HE::ViewMode::Wireframe; }
 

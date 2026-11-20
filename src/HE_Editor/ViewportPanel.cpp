@@ -539,6 +539,46 @@ namespace
 			y += lineH;
 		}
 	}
+
+	// The key to the "RVT Mip Levels" view, bottom left. The swatches are the
+	// shader's palette (heRvtMipView in RvtLookup.h): keep the two in step.
+	void drawRvtMipLegend(const ImVec2& rectMin, const ImVec2& rectMax)
+	{
+		struct Row { ImU32 col; const char* text; };
+		static const Row kRows[] = {
+			{ IM_COL32(255,  38,  26, 255), "Mip 0  finest (0.25 m/texel by default)" },
+			{ IM_COL32(255, 140,  26, 255), "Mip 1" },
+			{ IM_COL32(255, 242,  38, 255), "Mip 2" },
+			{ IM_COL32( 51, 230,  51, 255), "Mip 3" },
+			{ IM_COL32( 38, 230, 242, 255), "Mip 4" },
+			{ IM_COL32( 51,  89, 255, 255), "Mip 5" },
+			{ IM_COL32(230,  51, 242, 255), "Mip 6+ coarsest" },
+		};
+		const char* kStripes = "Dark stripes: finer page wanted, not loaded";
+		const char* kOther   = "Uncoloured: not drawn from the RVT";
+		ImDrawList* dl = ImGui::GetWindowDrawList();
+		const float pad = 6.0f, lineH = ImGui::GetTextLineHeight(), sw = lineH * 0.8f;
+		float w = std::max(ImGui::CalcTextSize(kStripes).x, ImGui::CalcTextSize(kOther).x);
+		for (const Row& r : kRows) w = std::max(w, sw + pad + ImGui::CalcTextSize(r.text).x);
+		const int n = static_cast<int>(IM_ARRAYSIZE(kRows)) + 2;
+		const ImVec2 size(w + pad * 2.0f, lineH * static_cast<float>(n) + pad * 2.0f);
+		const ImVec2 p0(rectMin.x + 8.0f, rectMax.y - size.y - 8.0f);
+		const ImVec2 p1(p0.x + size.x, p0.y + size.y);
+		if (p1.x > rectMax.x || p0.y < rectMin.y) return;   // too small a pane to hold it
+		dl->AddRectFilled(p0, p1, IM_COL32(12, 11, 10, 190), 4.0f);
+		dl->AddRect(p0, p1, IM_COL32(255, 255, 255, 30), 4.0f);
+		const ImU32 text = IM_COL32(225, 222, 215, 255);
+		float y = p0.y + pad;
+		for (const Row& r : kRows)
+		{
+			const float sy = y + (lineH - sw) * 0.5f;
+			dl->AddRectFilled(ImVec2(p0.x + pad, sy), ImVec2(p0.x + pad + sw, sy + sw), r.col, 2.0f);
+			dl->AddText(ImVec2(p0.x + pad + sw + pad, y), text, r.text);
+			y += lineH;
+		}
+		dl->AddText(ImVec2(p0.x + pad, y), text, kStripes); y += lineH;
+		dl->AddText(ImVec2(p0.x + pad, y), IM_COL32(160, 157, 150, 255), kOther);
+	}
 }
 
 // The actions behind the menu, also bound to keys in render(): one place for
@@ -1834,6 +1874,8 @@ void render(AppContext& ctx, float dt)
 				// readable whatever the scene is doing underneath it.
 				if (s_showFlags.stats)
 					drawStatsOverlay(ctx, rectMin, rectMax);
+				if (s_tb.viewMode == HE::ViewMode::RvtMips)
+					drawRvtMipLegend(rectMin, rectMax);
 				if (ctx.renderer)
 				{
 					const IRenderer::ShaderBuildStatus builds = ctx.renderer->PumpShaderBuilds();

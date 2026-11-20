@@ -12571,6 +12571,7 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
         // back untouched — graph materials, the deferred resolve (rl copies
         // frameMatLight) and the forward replay all read this. Mirrors GL/Metal/D3D11.
         lit.viewMode[0] = UnlitViewActive() ? 1.0f : 0.0f;
+        lit.viewMode[1] = m_viewMode == HE::ViewMode::RvtMips ? 1.0f : 0.0f;   // heRvtMipView (RvtLookup.h)
         // Volumetric fog (HeLighting v3.6, Thema 225 step 9): fogVol.x gates the opaque
         // heApplyFog (Apply owns it instead). fogVol.w (heFogVolume bound) stays 0 and
         // fogVol.w: heFogVolume (t34) is bound in every forward material block this frame, so

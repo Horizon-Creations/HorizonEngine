@@ -17035,6 +17035,7 @@ void MetalRenderer::FillMaterialLighting(HE::MaterialShaderLibrary::Lighting& ma
 	// untouched — graph materials, the deferred resolve and the SSR composite
 	// all read this. Scene-pass fill only; previews keep the zero.
 	matLight.viewMode[0] = UnlitViewActive() ? 1.0f : 0.0f;
+	matLight.viewMode[1] = m_viewMode == HE::ViewMode::RvtMips ? 1.0f : 0.0f;   // heRvtMipView (RvtLookup.h)
 	FillFogLighting(matLight);
 }
 

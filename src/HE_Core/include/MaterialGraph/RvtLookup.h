@@ -58,6 +58,18 @@ inline constexpr char kRvtNormalGLSL[] =
 // Needs derivatives (dFdx/dFdy): a fragment function. `valid` is 0 where nothing can be shown (outside the volume, no page
 // table yet); the outputs are then neutral and the caller decides what to do (the node exposes `valid`).
 inline constexpr char kRvtLookupGLSL[] =
+    "// The \"RVT Mip Levels\" view (ViewMode::RvtMips, heLight.viewMode.y): the page's mip as a colour (0 red, 1 orange,\n"
+    "// 2 yellow, 3 green, 4 cyan, 5 blue, 6+ magenta) over the picture's brightness; dark stripes where the table fell back\n"
+    "// to a coarser page than the pixel wants (eff > mip), i.e. the page the pixel asks for is not resident.\n"
+    "void heRvtMipView(inout vec3 base, vec2 wxz, int mip, int eff)\n"
+    "{\n"
+    "    if (heLight.viewMode.y < 0.5) return;\n"
+    "    const vec3 pal[7] = vec3[7](vec3(1.0, 0.15, 0.1), vec3(1.0, 0.55, 0.1), vec3(1.0, 0.95, 0.15), vec3(0.2, 0.9, 0.2),\n"
+    "                                vec3(0.15, 0.9, 0.95), vec3(0.2, 0.35, 1.0), vec3(0.9, 0.2, 0.95));\n"
+    "    float luma = dot(base, vec3(0.299, 0.587, 0.114));\n"
+    "    base = pal[clamp(eff, 0, 6)] * (0.6 + 0.4 * luma);\n"
+    "    if (eff > mip && fract((wxz.x + wxz.y) * 0.25) < 0.5) base *= 0.35;\n"
+    "}\n"
     "void heRvtSample(vec2 wxz, vec4 A, vec4 B,\n"
     "                 out vec3 base, out vec3 nrm, out float ao, out float rough, out float valid)\n"
     "{\n"
@@ -122,6 +134,7 @@ inline constexpr char kRvtLookupGLSL[] =
     "        ao = cs.x; rough = cs.y;\n"
     "#endif\n"
     "        valid = 1.0;\n"
+    "        heRvtMipView(base, wxz, mip, eff);\n"
     "        return;\n"
     "    }\n"
     "#endif\n"
@@ -136,5 +149,6 @@ inline constexpr char kRvtLookupGLSL[] =
     "    vec4 s01 = texelFetch(heRvtSurface, ivec3(a.x, b.y, slot), 0), s11 = texelFetch(heRvtSurface, ivec3(b.x, b.y, slot), 0);\n"
     "    vec2 sf = mix(mix(s00, s10, f.x), mix(s01, s11, f.x), f.y).rg;\n"
     "    ao = sf.x; rough = sf.y; valid = 1.0;\n"
+    "    heRvtMipView(base, wxz, mip, eff);\n"
     "}\n";
 }
