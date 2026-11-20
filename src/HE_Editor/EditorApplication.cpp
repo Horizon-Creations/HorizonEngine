@@ -4137,11 +4137,15 @@ void EditorApplication::OnRender(float dt)
 				{
 					if (!m_rvtLandscape) m_rvtLandscape = std::make_shared<HE::landscape::RvtLandscape>(contentManager(), *renderer());
 					m_rvtLandscape->setSettings(HE::landscape::RvtLandscape::settingsFromProject(rs));
-					// The near radius against the camera's field of view and the window's pixel height (the viewport is at most
-					// that tall: a slightly larger radius, the safe side).
+					// The near radius against the camera's field of view and the scene viewport's pixel height (the window's
+					// until the viewport has a size: taller, so a larger radius, the safe side).
 #ifdef HE_IMGUI_ENABLED
-					m_rvtLandscape->setView(glm::radians(m_editorCamera.fovDegrees()),
-					                        ImGui::GetIO().DisplaySize.y * ImGui::GetIO().DisplayFramebufferScale.y);
+					{
+						int vpW = 0, vpH = 0;
+						ViewportPanel::renderSizePx(vpW, vpH);
+						const float h = vpH > 0 ? float(vpH) : ImGui::GetIO().DisplaySize.y * ImGui::GetIO().DisplayFramebufferScale.y;
+						m_rvtLandscape->setView(glm::radians(m_editorCamera.fovDegrees()), h);
+					}
 #endif
 					HE_PROFILE_SCOPE_N("RvtLandscape");
 					m_rvtLandscape->tick(*m_editorWorld, m_editorCamera.position());
@@ -11709,6 +11713,8 @@ void EditorApplication::dumpFrameHeadless()
 			HE::landscape::RvtLandscape::Settings cfg;
 			// every mip-0 page of the 128 m landscape is wanted; on a bigger one the ring is a part of it (the camera test needs that)
 			cfg.nearRadiusM = wreg.get<TerrainComponent>(land).sizeX > 200.0f ? 48.0f : 160.0f;
+			// HE_DUMP_RVTDRIVER_TEXEL=<m>: the finest texel size (default 0.25), e.g. 0.0625 to see a fine volume fill the pool.
+			if (const char* tx = std::getenv("HE_DUMP_RVTDRIVER_TEXEL"); tx && *tx) cfg.metersPerTexel = std::clamp(float(std::atof(tx)), 0.03f, 4.0f);
 			drv.setSettings(cfg);
 			const glm::vec3 centre = HE::worldPositionOf(*m_editorWorld, land);
 			glm::vec3 camPos = centre + glm::vec3(0.0f, 110.0f, 0.0f);

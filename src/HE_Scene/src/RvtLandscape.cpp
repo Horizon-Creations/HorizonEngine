@@ -476,7 +476,10 @@ RvtLandscape::FrameStats RvtLandscape::tick(HorizonWorld& live, const glm::vec3&
     {
         rvt::ViewDesc view;
         view.cameraXZ = cam;
-        view.nearRadiusM = m_settings.nearRadiusM;
+        // The radius is set for 0.25 m texels; a finer texel shrinks it in step, so the square stays the same number of pages
+        // per mip (at 0.0625 m and 64 m it would be 289 a mip, past any pool, and the volume would never count as filled).
+        // The same ground is then served one mip deeper, at the same texel size as before; the feedback asks for more.
+        view.nearRadiusM = m_settings.nearRadiusM * std::min(1.0f, m_settings.metersPerTexel / 0.25f);
         for (const auto& f : m_feedback)   // rvtFeedbackKey: volume 5 | mip 5 | x 11 | y 11
             if ((f.first >> 27) == kv.first)
                 view.requested.push_back({ kv.first, uint8_t((f.first >> 22) & 31u), uint16_t((f.first >> 11) & 2047u), uint16_t(f.first & 2047u) });
