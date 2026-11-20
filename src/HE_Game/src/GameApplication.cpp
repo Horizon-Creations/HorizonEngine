@@ -3418,8 +3418,10 @@ void GameApplication::OnRender(float deltaTime)
 	if (m_world && !m_appMode)
 	{
 		glm::vec3 camPos(0.0f);
+		float camFovDeg = 60.0f;   // the RVT's native near view measures its radius against it
 		for (auto e : m_world->registry().view<TransformComponent, CameraComponent>())
 		{
+			camFovDeg = m_world->registry().get<CameraComponent>(e).fovDegrees;
 			// Composed from the parent chain, not read out of tc.worldMatrix: that
 			// matrix is only as fresh as the last propagateTransforms. The rig path
 			// above runs one, the free-flight path does not, and a camera spawned
@@ -3442,6 +3444,7 @@ void GameApplication::OnRender(float deltaTime)
 		{
 			if (!m_rvtLandscape) m_rvtLandscape = std::make_shared<HE::landscape::RvtLandscape>(contentManager(), *r);
 			m_rvtLandscape->setSettings(HE::landscape::RvtLandscape::settingsFromProject(m_projectSettings.rvt));
+			m_rvtLandscape->setView(glm::radians(camFovDeg), static_cast<float>(m_windowHeight));
 			m_rvtLandscape->tick(*m_world, camPos);
 		}
 		else if (m_rvtLandscape)

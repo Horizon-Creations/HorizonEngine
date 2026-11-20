@@ -26,6 +26,7 @@
 #include <HorizonRendering/SkyNoise3D.h>      // HE::BuildSkyNoise3D
 #include <HorizonRendering/SsaoKernel.h>      // HE::BuildSSAOKernel / BuildSSAONoise
 #include <MaterialGraph/MaterialGraph.h> // kMatMaxGraphTextures
+#include <MaterialGraph/RvtLookup.h>     // kRvtFeedbackSlots
 #include <HorizonRendering/GiInstanceSurface.h> // shared GI-hit surface resolution
 #include <HorizonRendering/GraphTextureMisses.h> // graph-texture misses forgotten per content epoch
 #include <Renderer/UIFont.h>             // shared baked UI font atlas
@@ -12346,6 +12347,85 @@ void MetalRenderer::SetRvtLandscape(uint32_t terrainEntity, const HE::UUID& land
 	            double(((__bridge id<MTLDevice>)m_device).currentAllocatedSize) / (1024.0 * 1024.0));
 }
 
+void MetalRenderer::SetRvtNearChunks(uint32_t terrainEntity, const std::vector<uint32_t>& chunkEntities)
+{
+	if (chunkEntities.empty()) m_rvtNear.erase(terrainEntity);
+	else                       m_rvtNear[terrainEntity] = std::unordered_set<uint32_t>(chunkEntities.begin(), chunkEntities.end());
+}
+
+// The feedback ring: buffers the GPU writes in a frame and the completion handler harvests. Shared so a handler that runs
+// after the renderer is gone touches nothing of it (the same rule as the GPU timer's state).
+struct MetalRenderer::RvtFeedbackShared
+{
+	std::mutex             lock;
+	std::vector<uint32_t>  keys;          // harvested, not yet read (ReadRvtFeedback)
+	std::vector<id<MTLBuffer>> ring;      // 3 buffers: one per frame in flight
+	std::vector<uint8_t>   busy;          // per ring buffer: bound to a frame that has not completed
+	id<MTLBuffer>          sink = nil;    // bound when every ring buffer is busy: written, never read
+};
+
+void* MetalRenderer::RvtFeedbackBindTarget()
+{
+	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+	if (!m_rvtFb && device)
+	{
+		m_rvtFb = std::make_shared<RvtFeedbackShared>();
+		const NSUInteger bytes = HE::kRvtFeedbackSlots * sizeof(uint32_t);
+		for (int i = 0; i < 3; ++i)
+		{
+			id<MTLBuffer> b = [device newBufferWithLength:bytes options:MTLResourceStorageModeShared];
+			std::memset(b.contents, 0xFF, bytes);
+			m_rvtFb->ring.push_back(b);
+		}
+		m_rvtFb->busy.assign(3, 0);
+		m_rvtFb->sink = [device newBufferWithLength:bytes options:MTLResourceStorageModePrivate];
+	}
+	if (m_rvtFbCurrent) return m_rvtFbCurrent;
+	return m_rvtFb ? (__bridge void*)m_rvtFb->sink : nullptr;
+}
+
+void MetalRenderer::BeginRvtFeedbackFrame()
+{
+	m_rvtFbPhase = (m_rvtFbPhase + 1) & 63u;
+	m_rvtFbCurrent = nullptr;
+	m_rvtFbCurrentIdx = -1;
+	if (!RvtFeedbackBindTarget()) return;
+	std::lock_guard<std::mutex> g(m_rvtFb->lock);
+	for (int i = 0; i < int(m_rvtFb->ring.size()); ++i)
+		if (!m_rvtFb->busy[size_t(i)]) { m_rvtFb->busy[size_t(i)] = 1; m_rvtFbCurrentIdx = i; break; }
+	m_rvtFbCurrent = (__bridge void*)(m_rvtFbCurrentIdx >= 0 ? m_rvtFb->ring[size_t(m_rvtFbCurrentIdx)] : m_rvtFb->sink);
+}
+
+void MetalRenderer::EndRvtFeedbackFrame(void* cmdBufPtr)
+{
+	if (!m_rvtFb || m_rvtFbCurrentIdx < 0) return;
+	id<MTLCommandBuffer> cb = (__bridge id<MTLCommandBuffer>)cmdBufPtr;
+	std::shared_ptr<RvtFeedbackShared> fb = m_rvtFb;
+	const int idx = m_rvtFbCurrentIdx;
+	m_rvtFbCurrentIdx = -1;
+	if (!cb) { std::lock_guard<std::mutex> g(fb->lock); fb->busy[size_t(idx)] = 0; return; }
+	[cb addCompletedHandler:^(id<MTLCommandBuffer>) {
+		std::lock_guard<std::mutex> g(fb->lock);
+		uint32_t* p = static_cast<uint32_t*>(fb->ring[size_t(idx)].contents);
+		size_t got = 0;
+		for (uint32_t i = 0; i < HE::kRvtFeedbackSlots; ++i)
+			if (p[i] != 0xFFFFFFFFu) { fb->keys.push_back(p[i]); p[i] = 0xFFFFFFFFu; ++got; }
+		if (std::getenv("HE_RVT_FEEDBACK_DEBUG")) HE_LOG_INFO(RHI, "MetalRenderer: RVT feedback harvested %zu key(s) from ring %d", got, idx);
+		if (fb->keys.size() > 65536) fb->keys.erase(fb->keys.begin(), fb->keys.end() - 65536);   // nobody reads: stay bounded
+		fb->busy[size_t(idx)] = 0;
+	}];
+}
+
+bool MetalRenderer::ReadRvtFeedback(std::vector<uint32_t>& keys)
+{
+	static const bool on = [] { const char* e = std::getenv("HE_RVT_FEEDBACK"); return !(e && *e == '0'); }();
+	if (!on || !m_rvtFb) return on && m_rvtPool[0] != nullptr;
+	std::lock_guard<std::mutex> g(m_rvtFb->lock);
+	keys.insert(keys.end(), m_rvtFb->keys.begin(), m_rvtFb->keys.end());
+	m_rvtFb->keys.clear();
+	return true;
+}
+
 void MetalRenderer::ReleaseRvtConsumer(const HE::UUID& consumerMaterial)
 {
 	for (auto it = m_rvtSwaps.begin(); it != m_rvtSwaps.end();)
@@ -12658,6 +12738,8 @@ void MetalRenderer::BindRvtForDraw(void* renderEncoder, const HE::UUID& material
 	[enc setFragmentTexture:(__bridge id<MTLTexture>)m_rvtPoolAlbedoSrgb atIndex:19];
 	[enc setFragmentTexture:(__bridge id<MTLTexture>)m_rvtPool[1]      atIndex:20];
 	[enc setFragmentTexture:(__bridge id<MTLTexture>)m_rvtPool[2]      atIndex:21];
+	if (void* fb = RvtFeedbackBindTarget())
+		[enc setFragmentBuffer:(__bridge id<MTLBuffer>)fb offset:0 atIndex:kRvtFeedbackBufferIndex];
 	if (m_rvtCold[0])
 		for (int layer = 0; layer < 3; ++layer)
 			[enc setFragmentTexture:(__bridge id<MTLTexture>)m_rvtCold[layer] atIndex:NSUInteger(22 + layer)];
@@ -12684,6 +12766,8 @@ void MetalRenderer::ApplyRvtSwaps()
 		if (o.terrainChunk)
 			if (const auto sw = m_rvtSwaps.find(o.terrainEntity); sw != m_rvtSwaps.end() && o.materialAssetId == sw->second.landscapeMat)
 			{
+				// The native near view: a chunk close to the camera keeps the landscape's own material (SetRvtNearChunks).
+				if (const auto nr = m_rvtNear.find(o.terrainEntity); nr != m_rvtNear.end() && nr->second.count(o.entityId)) continue;
 				o.materialAssetId = sw->second.consumerMat;
 				o.paramOverride.clear();
 				o.sections.clear();
@@ -15922,6 +16006,10 @@ void MetalRenderer::BindMaterialPreambleSlots(void* renderEncoder, bool frameSta
 	[encoder setFragmentTexture:(__bridge id<MTLTexture>)m_rvtDummyTable atIndex:18];
 	for (int slot = 19; slot <= 24; ++slot)   // 19..21 the hot pool's arrays, 22..24 the cold pool's (step 6j)
 		[encoder setFragmentTexture:(__bridge id<MTLTexture>)m_whiteArrayTexture atIndex:slot];
+	// The lookup's feedback buffer (HE_RVT_FEEDBACK): this frame's, or the sink outside a frame (previews, pages). Every encoder
+	// that may draw a consumer needs one bound: the shader writes it unconditionally.
+	if (void* fb = RvtFeedbackBindTarget())
+		[encoder setFragmentBuffer:(__bridge id<MTLBuffer>)fb offset:0 atIndex:kRvtFeedbackBufferIndex];
 }
 
 void MetalRenderer::EncodeSkinnedObjects(void* renderEncoder, const glm::mat4& viewProj,
@@ -17036,6 +17124,7 @@ void MetalRenderer::FillMaterialLighting(HE::MaterialShaderLibrary::Lighting& ma
 	// all read this. Scene-pass fill only; previews keep the zero.
 	matLight.viewMode[0] = UnlitViewActive() ? 1.0f : 0.0f;
 	matLight.viewMode[1] = m_viewMode == HE::ViewMode::RvtMips ? 1.0f : 0.0f;   // heRvtMipView (RvtLookup.h)
+	matLight.viewMode[2] = float(m_rvtFbPhase);                                 // which pixel of 8x8 reports (HE_RVT_FEEDBACK)
 	FillFogLighting(matLight);
 }
 
@@ -18292,6 +18381,7 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 		matLight.specAA[1] = 1.0f;
 		// The RVT mip view tints the base colour the G-buffer stores (heRvtMipView, RvtLookup.h).
 		matLight.viewMode[1] = m_viewMode == HE::ViewMode::RvtMips ? 1.0f : 0.0f;
+		matLight.viewMode[2] = float(m_rvtFbPhase);   // the feedback's pixel of each 8x8 cell (HE_RVT_FEEDBACK)
 		// The G-buffer's WPO vertex stage reads this block too: without the wind
 		// the deferred path would draw every Wind Sway material standing still.
 		HE::FillMaterialWind(GetEnvironment(), matLight);
@@ -18787,6 +18877,7 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 		// closed and handed to the last command buffer's completion just before
 		// the commit below. No path between here and there returns early.
 		m_uploadRing->beginFrame();
+		BeginRvtFeedbackFrame();   // this frame's feedback buffer, harvested by its completion (EndRvtFeedbackFrame below)
 
 		// ── Per-pass GPU timing setup (only while a profiler capture records) ──
 		// Builds one over-allocated counter sample buffer for this frame; the major
@@ -19651,6 +19742,8 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 			if (!ticket.empty())
 				[cmdBuf addCompletedHandler:^(id<MTLCommandBuffer>) { ring->release(ticket); }];
 		}
+		EndRvtFeedbackFrame((__bridge void*)cmdBuf);
+		m_rvtFbCurrent = nullptr;   // outside the frame the sink is bound (a page or a preview must not write a harvested buffer)
 
 		// Publish GPU timing once the buffer completes (background thread). All
 		// captured state is by-value / shared_ptr so it outlives the renderer if it

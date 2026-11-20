@@ -34,6 +34,7 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 class HorizonWorld;
@@ -55,6 +56,9 @@ namespace HE::landscape
             float    nearRadiusM      = 64.0f;   // half extent around the camera that is served at mip 0
             float    activationRadiusM = 600.0f; // a landscape closer than this (to its rectangle) is drawn from pages; farther ones are not
             uint32_t maxAttachesPerFrame = 1;    // attaching builds a scratch copy (100-250 ms): one per frame, nearest first
+            // Native near view: the chunks closer than the distance where one mip-0 texel covers one pixel keep the landscape's
+            // own material (sharp at any distance), the rest is drawn from the pages. Off = every chunk from the pages.
+            bool     nativeNear       = true;
         };
         struct FrameStats
         {
@@ -67,6 +71,8 @@ namespace HE::landscape
             uint32_t activeSegments = 0;   // drawn from the pages now
             bool     rescanned     = false; // a segment was rebuilt from scratch (a parameter change)
             double   paintMs       = 0.0;   // wall clock of the whole painting of this frame (what the user feels, on every backend)
+            uint32_t feedbackPages = 0;    // pages the GPU feedback holds wanted now (0 on a backend without it)
+            uint32_t nearChunks    = 0;    // chunks drawn with their own material (native near view)
         };
 
         RvtLandscape(ContentManager& cm, IRenderer& renderer);
@@ -87,6 +93,11 @@ namespace HE::landscape
 
         // Once per frame, after the terrain update. `live` is the world the renderer draws.
         FrameStats tick(HorizonWorld& live, const glm::vec3& cameraPos);
+        // The projection the near radius is measured against (vertical field of view, image height in pixels): the native
+        // near view swaps a chunk where a mip-0 texel shrinks below a pixel. Unset = 60 degrees, 1080 px.
+        void setView(float fovYRadians, float viewportHeightPx) { m_fovY = fovYRadians; m_viewportH = viewportHeightPx; }
+        // The distance from the camera beyond which the pages are sharp enough (one mip-0 texel per pixel).
+        float nativeNearRadius() const;
         // Gives every landscape back to its material: the renderer stops swapping, the scratch copies and the pool go.
         void detach();
         // Draws the landscapes from their own material for a moment (a comparison) and back, without touching anything else.
@@ -127,6 +138,8 @@ namespace HE::landscape
             HE::UUID   landscapeMaterial;         // what the chunks are drawn with without the swap
             HE::UUID   consumer;                  // kept across deactivations; made anew when the volume it was baked for moved or resized
             rvt::VolumeDesc consumerDesc;         // the origin/extent/texel size baked into the consumer's parameter defaults
+            uint16_t   consumerVolume = 0;        // the volume id baked into it (B.y), which the feedback keys carry
+            std::unordered_set<uint32_t> nearChunks;   // chunk entities drawn with the landscape's own material (native near view)
             uint64_t   stateHash = 0;             // what the view graphs and the volume were built from
             uint64_t   uploadedVersion = ~0ull;
             bool       attached = false;          // scratch copy + volume exist
@@ -163,5 +176,12 @@ namespace HE::landscape
         std::string     m_lastNote;
         uint32_t        m_lastStarved = 0;
         bool            m_starvedWarned = false;
+        float           m_fovY = 1.0471976f;         // setView
+        float           m_viewportH = 1080.0f;
+        // The GPU feedback, kept for a while: a frame samples one pixel in 64, so a page stays wanted for kFeedbackTicks ticks
+        // after it was last reported (key -> tick). Without that, a page some pixels need would be evictable 63 frames in 64.
+        std::unordered_map<uint32_t, uint64_t> m_feedback;
+        std::vector<uint32_t> m_feedbackScratch;
+        void updateNearChunks(HorizonWorld& live, const glm::vec3& cameraPos, FrameStats& st);
     };
 }

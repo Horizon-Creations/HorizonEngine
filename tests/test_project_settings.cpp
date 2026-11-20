@@ -920,6 +920,7 @@ TEST_CASE("ProjectSettings: operator== and isDefault see every field")
 	HE_FIELD(rvt.nearRadiusM);
 	HE_FIELD(rvt.activationRadiusM);
 	HE_FIELD(rvt.maxPagesPerFrame);
+	HE_FIELD(rvt.nativeNear);
 
 	HE_FIELD(antiCheat.enabled);
 	HE_FIELD(antiCheat.integrityCheck);
@@ -1059,6 +1060,7 @@ TEST_CASE("ProjectRvtSettings: off by default, in the file, and a file from befo
 	CHECK(d.rvt.nearRadiusM == doctest::Approx(64.0f));
 	CHECK(d.rvt.activationRadiusM == doctest::Approx(600.0f));
 	CHECK(d.rvt.maxPagesPerFrame == 8);
+	CHECK(d.rvt.nativeNear);
 	CHECK(d.isDefault());
 
 	// Turning it on is a change the saver must see: a project whose ONLY edit is "RVT on" would otherwise count as default,
@@ -1071,10 +1073,20 @@ TEST_CASE("ProjectRvtSettings: off by default, in the file, and a file from befo
 	a.rvt.nearRadiusM       = 96.0f;
 	a.rvt.activationRadiusM = 1200.0f;
 	a.rvt.maxPagesPerFrame  = 16;
+	a.rvt.nativeNear        = false;
 
 	json j;
 	a.toJson(j);
 	CHECK(j["rvt"]["enabled"] == true);
+	CHECK(j["rvt"]["nativeNear"] == false);
+	{
+		// A file from before the native near view (no "nativeNear") reads as on, the default.
+		json noNear = j;
+		noNear["rvt"].erase("nativeNear");
+		HE::ProjectSettings n;
+		n.fromJson(noNear);
+		CHECK(n.rvt.nativeNear);
+	}
 	CHECK(j["rvt"]["poolPages"] == 1024);
 	CHECK(j["rvt"]["maxPagesPerFrame"] == 16);
 	HE::ProjectSettings b;

@@ -77,6 +77,10 @@ struct ViewDesc
 	// Half extent (metres) around the camera that is served by mip 0. Mip m serves the square of half
 	// extent nearRadiusM * 2^m, so every mip needs about the same number of pages.
 	float     nearRadiusM = 64.0f;
+	// Pages the GPU reported as sampled (the feedback of the lookup, RvtLookup.h: the mip each pixel WANTS), on top of the
+	// square above: they are wanted like the square's, and so is every coarser page above them (the fallback chain the shader
+	// would read while a fine one is still missing). Keys of other volumes are ignored. Empty = the square alone.
+	std::vector<PageKey> requested;
 };
 
 // One volume and the view it is looked at through, for updateAll().

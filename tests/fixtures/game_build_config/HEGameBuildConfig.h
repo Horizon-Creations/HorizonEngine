@@ -176,6 +176,7 @@ inline constexpr HE::GameBuildConfig kConfig = {
     "enabled": false,
     "maxPagesPerFrame": 8,
     "metersPerTexel": 0.25,
+    "nativeNear": true,
     "nearRadiusM": 64.0,
     "poolPages": 512
   },

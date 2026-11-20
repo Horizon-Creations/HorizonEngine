@@ -3231,12 +3231,17 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fragmentVariant(
             pins.push_back({ Stage::Fragment, 0, 25, static_cast<uint32_t>(kMetalClusterGridBufferIndex) });
             pins.push_back({ Stage::Fragment, 0, 26, static_cast<uint32_t>(kMetalClusterIndexBufferIndex) });
         }
+        // The RVT feedback buffer (binding 47, declared only under HE_RVT_FEEDBACK) → fragment buffer 7 (MetalRenderer::
+        // kRvtFeedbackBufferIndex, bound on every material encoder by BindMaterialPreambleSlots).
+        pins.push_back({ Stage::Fragment, 0, 47, 7 });
         // The RVT lookup may read cold (block-compressed) pages on Metal: HE_RVT_COLD declares the three cold arrays and the branch
         // (RvtLookup.h). HE_RVT_COLD=0 leaves it out of the shader (the hot-only A/B, and a Mac without ASTC sampling).
         static const bool rvtCold = [] { const char* e = std::getenv("HE_RVT_COLD"); return !(e && *e == '0'); }();
         // HE_RVT_RGNORMAL: the pool keeps the normal as x and z in two channels (step 6k); HE_RVT_PACK=0 keeps the three-channel pool.
         static const bool rvtPack = [] { const char* e = std::getenv("HE_RVT_PACK"); return !(e && *e == '0'); }();
-        if ((rvtCold || rvtPack) && injected.find("heRvtSample(") != std::string::npos)
+        // HE_RVT_FEEDBACK: the lookup reports the pages pixels want (MetalRenderer harvests them); 0 = the camera square alone.
+        static const bool rvtFeedback = [] { const char* e = std::getenv("HE_RVT_FEEDBACK"); return !(e && *e == '0'); }();
+        if ((rvtCold || rvtPack || rvtFeedback) && injected.find("heRvtSample(") != std::string::npos)
         {
             std::string withCold = injected;
             const size_t vpos = withCold.find("#version");
@@ -3244,6 +3249,7 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fragmentVariant(
             std::string defs;
             if (rvtCold) defs += "#define HE_RVT_COLD 1\n";
             if (rvtPack) defs += "#define HE_RVT_RGNORMAL 1\n";
+            if (rvtFeedback) defs += "#define HE_RVT_FEEDBACK 1\n";
             if (eol != std::string::npos) withCold.insert(eol + 1, defs);
             out = toCompiled(compileMslPinned(withCold, Stage::Fragment, pins, kMaterialMslOptions()));
         }

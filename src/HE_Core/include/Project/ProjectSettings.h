@@ -302,6 +302,9 @@ struct HE_API ProjectRvtSettings
     float activationRadiusM = 600.0f;
     // How many pages one frame may paint: the budget that spreads a fill or a stroke's repaint over frames.
     int   maxPagesPerFrame  = 8;
+    // Native near view: the landscape chunks closer than the distance where a finest-level texel covers one pixel keep their own
+    // material (as sharp as the material is); only the rest is drawn from pages. Live, no rebuild.
+    bool  nativeNear        = true;
 
     // One declaration a line: MSVC refuses a second name after a comma in a dllexport class (C2487).
     static constexpr int   kMinPoolPages     = 64;

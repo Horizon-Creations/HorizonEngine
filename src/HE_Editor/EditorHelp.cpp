@@ -5276,6 +5276,15 @@ namespace
 	  "Vulkan, OpenGL and Metal do; the software renderer does not yet) — the page above says so where it does not. The "
 	  "environment variable HE_RVT=1 or 0 forces it on or off over this switch.",
 	  "", "rendering#performance" },
+	{ "Virtual Texture/Native near view", "Native near view",
+	  "Keeps the landscape's own material close to the camera. A page has a fixed ground resolution (the texel size), the "
+	  "material has its textures' resolution, which is far finer: from close up the pages are blurry whatever their level. "
+	  "With this on, every landscape chunk nearer than the distance where one finest-level texel covers one screen pixel draws "
+	  "its own material, and only the chunks beyond it are drawn from pages. That distance follows the texel size and the "
+	  "camera (about 290 m for 0.25 m texels on a 1080-pixel-high image); a finer texel size moves it closer and saves more.\n\n"
+	  "The price: the near chunks run the full material again, and its large texture arrays stay in memory. Off draws every "
+	  "chunk from pages. Applies at once.",
+	  "", "rendering#performance" },
 	{ "Virtual Texture/Pool size", "Pool size",
 	  "How many pages the pool holds, shared by every landscape: each page is 136 x 136 pixels in three layers, about "
 	  "0.22 MB, so 512 pages are 108 MB of video memory. A pool that is too small shows up on this page as a request "
@@ -5285,8 +5294,9 @@ namespace
 	  "", "rendering#performance" },
 	{ "Virtual Texture/Texel size", "Texel size",
 	  "How much ground one pixel of the finest page covers. 0.25 m is a pixel the size of a hand span on the screen from a "
-	  "walking camera; 0.125 m doubles the detail and quadruples the pages needed to cover the same ground, 0.5 m and 1 m do "
-	  "the opposite. Coarser levels are made automatically for the distance.\n\n"
+	  "walking camera; 0.125 m and 0.0625 m double the detail each step and quadruple the pages needed to cover the same "
+	  "ground, 0.5 m and 1 m do the opposite. Coarser levels are made automatically for the distance. Where the backend "
+	  "reports which pages the image actually reads (Metal), exactly those are painted.\n\n"
 	  "Changing it rebuilds the pool and repaints every page, so pick it once.",
 	  "", "rendering#performance" },
 	{ "Virtual Texture/Near radius", "Near radius",

@@ -1,6 +1,8 @@
 #pragma once
 #include <vector>
 #include <cstdint>
+#include <memory>
+#include <unordered_set>
 #include <Renderer/IRenderer.h>
 #include <Renderer/GpuPassAccumulator.h>
 #include "MetalShaderManager.h"
@@ -111,6 +113,8 @@ public:
 	bool  ReadbackRvtPageTable(const HE::UUID& consumerMaterial, std::vector<std::vector<uint32_t>>& mips) override;
 	void  SetRvtLandscape(uint32_t terrainEntity, const HE::UUID& landscapeMaterial, const HE::UUID& consumerMaterial) override;
 	void  ReleaseRvtConsumer(const HE::UUID& consumerMaterial) override;
+	void  SetRvtNearChunks(uint32_t terrainEntity, const std::vector<uint32_t>& chunkEntities) override;
+	bool  ReadRvtFeedback(std::vector<uint32_t>& keys) override;
 	void  InvalidateMaterial(const HE::UUID& materialId) override;
 	void  WarmupMaterials(const std::vector<HE::UUID>& materialIds) override;
 	ShaderBuildStatus PumpShaderBuilds() override;
@@ -702,6 +706,19 @@ private:
 	void     StopRvtColdWork();
 	struct RvtSwap { HE::UUID landscapeMat, consumerMat; };
 	std::unordered_map<uint32_t, RvtSwap>  m_rvtSwaps;                   // per landscape entity
+	std::unordered_map<uint32_t, std::unordered_set<uint32_t>> m_rvtNear;   // SetRvtNearChunks: per landscape, chunks that keep their material
+	// The lookup's feedback (HE_RVT_FEEDBACK, RvtLookup.h): a ring of Shared buffers of kRvtFeedbackSlots uints, one bound per
+	// frame at fragment buffer kRvtFeedbackBufferIndex; the frame's completion handler harvests it (the keys go to a shared list
+	// ReadRvtFeedback drains) and clears it for reuse. A frame that finds no free buffer binds the sink (written, never read).
+	static constexpr int kRvtFeedbackBufferIndex = 7;
+	struct RvtFeedbackShared;
+	std::shared_ptr<RvtFeedbackShared> m_rvtFb;
+	void*    m_rvtFbCurrent = nullptr;         // id<MTLBuffer> bound this frame (a ring buffer or the sink)
+	int      m_rvtFbCurrentIdx = -1;           // its ring index, -1 = the sink
+	uint32_t m_rvtFbPhase = 0;                 // frame & 63: which pixel of each 8x8 cell reports (heLight.viewMode.z)
+	void*    RvtFeedbackBindTarget();          // what a material encoder binds at kRvtFeedbackBufferIndex (made on first use)
+	void     BeginRvtFeedbackFrame();          // picks this frame's buffer (start of the frame)
+	void     EndRvtFeedbackFrame(void* cmdBuf); // hands it to the frame's completion
 	void*    m_rvtDummyTable     = nullptr;                         // id<MTLTexture> 1x1 R32Uint (0xFFFFFFFF = no page)
 	// Binds the consumer's table and the pool at fragment textures 18..21 (the pins of MaterialShaderLibrary) for a draw whose
 	// material owns a table; the defaults otherwise. Called at the opaque material draw sites.

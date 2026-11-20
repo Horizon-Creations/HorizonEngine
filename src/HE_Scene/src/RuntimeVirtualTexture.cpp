@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <cmath>
 #include <tuple>
+#include <unordered_set>
 
 namespace HE::rvt
 {
@@ -128,6 +129,31 @@ std::vector<PageRender> RvtManager::updateAll(const std::vector<VolumeView>& vie
 		Volume& v = m_volumes[volume];
 		const VolumeLayout& L = v.layout;
 		const glm::vec2 vmin = L.desc().origin, vmax = vmin + glm::vec2(L.extentM());
+		std::unordered_set<uint64_t> seen;   // a page wanted twice (square and feedback, two feedback children) is ranked once
+
+		// One wanted page: touched if resident (not evictable this frame), queued if missing or dirty.
+		const auto want = [&](int mip, int x, int y) {
+			PageKey k{ volume, uint8_t(mip), uint16_t(x), uint16_t(y) };
+			if (!seen.insert(k.pack()).second) return;
+			const bool pin = isPinnedMip(v, mip);
+			glm::vec2 mn, mx;
+			L.pageRect(mip, x, y, mn, mx, false);
+			const glm::vec2 c = (mn + mx) * 0.5f;
+			const float dist = std::max(std::abs(c.x - view.cameraXZ.x), std::abs(c.y - view.cameraXZ.y));
+			auto it = m_pages.find(k.pack());
+			if (it != m_pages.end())
+			{
+				it->second.lastUsed = m_frame;                      // needed: not evictable this frame
+				it->second.pinned = pin;
+				if (it->second.dirty) wants.push_back({ k, 1, dist });
+			}
+			else
+			{
+				// Nothing coarser to show in its place yet: these come first, coarsest first, so the whole view is covered at once.
+				const bool bare = resolve(volume, mip, x, y) == kPageTableInvalid;
+				wants.push_back({ k, bare ? 0 : 1, bare ? float(-mip) : dist });
+			}
+		};
 
 		for (int mip = 0; mip < L.mipCount(); ++mip)
 		{
@@ -143,27 +169,13 @@ std::vector<PageRender> RvtManager::updateAll(const std::vector<VolumeView>& vie
 				L.pageAt(mip, view.cameraXZ + glm::vec2(h), x1, y1);
 			}
 			for (int y = y0; y <= y1; ++y)
-				for (int x = x0; x <= x1; ++x)
-				{
-					PageKey k{ volume, uint8_t(mip), uint16_t(x), uint16_t(y) };
-					glm::vec2 mn, mx;
-					L.pageRect(mip, x, y, mn, mx, false);
-					const glm::vec2 c = (mn + mx) * 0.5f;
-					const float dist = std::max(std::abs(c.x - view.cameraXZ.x), std::abs(c.y - view.cameraXZ.y));
-					auto it = m_pages.find(k.pack());
-					if (it != m_pages.end())
-					{
-						it->second.lastUsed = m_frame;                      // needed: not evictable this frame
-						it->second.pinned = pin;
-						if (it->second.dirty) wants.push_back({ k, 1, dist });
-					}
-					else
-					{
-						// Nothing coarser to show in its place yet: these come first, coarsest first, so the whole view is covered at once.
-						const bool bare = resolve(volume, mip, x, y) == kPageTableInvalid;
-						wants.push_back({ k, bare ? 0 : 1, bare ? float(-mip) : dist });
-					}
-				}
+				for (int x = x0; x <= x1; ++x) want(mip, x, y);
+		}
+		// The feedback: each reported page and its ancestors (out-of-range keys, e.g. from a volume that was rebuilt since, dropped).
+		for (const PageKey& r : view.requested)
+		{
+			if (r.volume != volume || r.mip >= L.mipCount() || r.x >= L.pagesPerSide(r.mip) || r.y >= L.pagesPerSide(r.mip)) continue;
+			for (int m = r.mip, x = r.x, y = r.y; m < L.mipCount(); ++m, x >>= 1, y >>= 1) want(m, x, y);
 		}
 	}
 

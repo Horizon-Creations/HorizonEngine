@@ -4137,6 +4137,12 @@ void EditorApplication::OnRender(float dt)
 				{
 					if (!m_rvtLandscape) m_rvtLandscape = std::make_shared<HE::landscape::RvtLandscape>(contentManager(), *renderer());
 					m_rvtLandscape->setSettings(HE::landscape::RvtLandscape::settingsFromProject(rs));
+					// The near radius against the camera's field of view and the window's pixel height (the viewport is at most
+					// that tall: a slightly larger radius, the safe side).
+#ifdef HE_IMGUI_ENABLED
+					m_rvtLandscape->setView(glm::radians(m_editorCamera.fovDegrees()),
+					                        ImGui::GetIO().DisplaySize.y * ImGui::GetIO().DisplayFramebufferScale.y);
+#endif
 					HE_PROFILE_SCOPE_N("RvtLandscape");
 					m_rvtLandscape->tick(*m_editorWorld, m_editorCamera.position());
 				}

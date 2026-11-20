@@ -780,6 +780,13 @@ public:
     // landscape. Keyed by the landscape AND its material: a far LOD level that already carries another material (the baked far
     // landscape) stays as it is. Done in the renderer's own view of the frame, never in the world: the scene stays as authored.
     virtual void SetRvtLandscape(uint32_t /*terrainEntity*/, const HE::UUID& /*landscapeMaterial*/, const HE::UUID& /*consumerMaterial*/) {}
+    // The chunk entities of that landscape that keep their own material although the swap is on (the native near view: close
+    // to the camera the material itself is sharper than any page). Replaces the previous set; empty = every chunk swaps.
+    // A backend without it swaps every chunk (the near view is then blurrier, nothing else changes).
+    virtual void SetRvtNearChunks(uint32_t /*terrainEntity*/, const std::vector<uint32_t>& /*chunkEntities*/) {}
+    // The pages the lookup's feedback reported since the last call (keys of RvtLookup.h's rvtFeedbackKey, unordered, may repeat),
+    // appended to `keys`. False = the backend has no feedback (the driver then serves the camera square alone).
+    virtual bool ReadRvtFeedback(std::vector<uint32_t>& /*keys*/) { return false; }
     // Takes one volume out: its table and its swap go, the pool and the other volumes stay (DestroyRvtPool drops everything).
     virtual void ReleaseRvtConsumer(const HE::UUID& /*consumerMaterial*/) {}
     // The pages of one tick are painted between BeginRvtPages(pagePx) and EndRvtPages(): a backend whose page is the general

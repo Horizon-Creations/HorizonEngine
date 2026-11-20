@@ -97,6 +97,33 @@ TEST_CASE("RVT: the first frame paints the view coarsest first, and a frame with
 	CHECK(m.tableVersion(v) == ver);
 }
 
+TEST_CASE("RVT feedback: a reported page far outside the camera square is painted with its ancestors, then nothing")
+{
+	RvtManager m(1000, 100000);
+	const uint16_t v = m.addVolume(square512());
+	m.beginFrame();
+	m.update(v, viewAt(16, 16, 16.0f));                // the camera in a corner, a small square
+	ViewDesc fb = viewAt(16, 16, 16.0f);
+	fb.requested = { PageKey{ v, 0, 14, 14 }, PageKey{ v, 0, 14, 14 },   // a far mip-0 page, reported twice
+	                 PageKey{ v, 0, 99, 0 }, PageKey{ uint16_t(v + 1), 0, 1, 1 } };   // out of range / another volume: dropped
+	m.beginFrame();
+	const auto r = m.update(v, fb);
+	std::set<uint64_t> keys;
+	for (const PageRender& p : r) keys.insert(p.key.pack());
+	CHECK(keys.size() == r.size());
+	CHECK(keys.count(PageKey{ v, 0, 14, 14 }.pack()) == 1);
+	CHECK(keys.count(PageKey{ v, 1, 7, 7 }.pack()) == 1);      // its parent, outside mip 1's square too
+	CHECK(keys.count(PageKey{ v, 2, 3, 3 }.pack()) == 1);
+	CHECK(r.size() == 3);                                      // mip 3 and 4 were already in the square's fill
+	for (const PageRender& p : r)                              // the table now points the far pixel at its own page
+		if (p.key.mip == 0) CHECK(m.resolve(v, 0, 14, 14) == packPageTableEntry(p.slot, 0));
+
+	// Still reported, nothing changed: nothing to paint, the table stays.
+	const uint64_t ver = m.tableVersion(v);
+	for (int f = 0; f < 3; ++f) { m.beginFrame(); CHECK(m.update(v, fb).empty()); }
+	CHECK(m.tableVersion(v) == ver);
+}
+
 TEST_CASE("RVT: the per-frame budget spreads the first fill, coarse pages first")
 {
 	RvtManager m(1000, 10);
