@@ -11628,10 +11628,19 @@ void D3D12Renderer::Initialize(HE::Window* window)
     // Opt-in: on in _DEBUG builds, or in any build when HE_GPU_DEBUG is set. These add a
     // per-GPU-op cost (esp. DRED auto-breadcrumbs) that is fine at vsync-capped FPS but
     // tanks the editor at the uncapped FPS you get with vsync off — so keep it gated.
+    // HE_GPU_D3D12_MULTI_DEVICE opts back OUT even in a _DEBUG build: a process that creates more
+    // than one D3D12 device while the debug layer is on (landscape_gpu_check's own offscreen probe,
+    // then this renderer) crashes later inside the driver's layered-device loader
+    // (D3D12CoreCreateLayeredDevice/nvapi) — not something this renderer can fix, so a tool that
+    // knows it will create a second device in-process sets this instead of risking it.
+    // Read via the Win32 API, not the CRT's getenv: landscape_gpu_check sets this with
+    // SetEnvironmentVariableA from its own executable before this renderer (in a separate DLL,
+    // a separate CRT-cached environment) ever runs, and only the Win32 call sees that write.
+    const bool multiDevice = GetEnvironmentVariableA("HE_GPU_D3D12_MULTI_DEVICE", nullptr, 0) != 0;
 #ifdef _DEBUG
-    m_impl->gpuDebug = true;
+    m_impl->gpuDebug = !multiDevice;
 #else
-    m_impl->gpuDebug = (std::getenv("HE_GPU_DEBUG") != nullptr);
+    m_impl->gpuDebug = (std::getenv("HE_GPU_DEBUG") != nullptr) && !multiDevice;
 #endif
     if (m_impl->gpuDebug)
     {

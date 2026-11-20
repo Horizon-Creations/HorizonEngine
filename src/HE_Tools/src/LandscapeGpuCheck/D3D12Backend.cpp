@@ -39,7 +39,11 @@ public:
 	bool init(std::string& error) override
 	{
 		ComPtr<ID3D12Debug> dbg;
-		const bool layer = SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&dbg)));
+		// This offscreen device and the engine's D3D12Renderer are two separate ID3D12Device
+		// instances in the same process; main() sets HE_GPU_D3D12_MULTI_DEVICE for exactly that
+		// reason — the debug layer's layered-device loader does not survive a second device in
+		// one process (D3D12CoreCreateLayeredDevice/nvapi crashes later, asynchronously).
+		const bool layer = !GetEnvironmentVariableA("HE_GPU_D3D12_MULTI_DEVICE", nullptr, 0) && SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&dbg)));
 		if (layer) dbg->EnableDebugLayer();
 		std::printf("  D3D12 debug layer: %s\n", layer ? "on" : "not installed");
 		if (FAILED(D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&m_device)))) { error = "D3D12CreateDevice failed"; return false; }

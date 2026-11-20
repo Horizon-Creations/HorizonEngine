@@ -45,6 +45,12 @@
 #include <string>
 #include <thread>
 
+#if defined(_WIN32) && defined(HE_CHECK_D3D12)
+#include <Windows.h>
+#undef far   // windef.h's legacy near/far keywords collide with the `far` distance-counter below
+#undef near
+#endif
+
 using namespace HE;
 
 namespace
@@ -558,6 +564,13 @@ void writePngFile(const std::string& path, int width, int height, const uint8_t*
 
 int main(int argc, char** argv)
 {
+#if defined(_WIN32) && defined(HE_CHECK_D3D12)
+	// The offscreen D3D12 check below and the engine's D3D12Renderer each create their own
+	// ID3D12Device; with the debug layer on, a second device in this process crashes later,
+	// asynchronously, inside the driver's layered-device loader (D3D12CoreCreateLayeredDevice).
+	// Both read this to skip the debug layer instead — see D3D12Renderer::Initialize.
+	SetEnvironmentVariableA("HE_GPU_D3D12_MULTI_DEVICE", "1");
+#endif
 	std::filesystem::path outDir = ".";
 	std::string only;
 	bool measure = false;    // --measure: only time the landscape (CPU and GPU) instead of checking pictures
