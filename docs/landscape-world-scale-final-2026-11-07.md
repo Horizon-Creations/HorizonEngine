@@ -36,7 +36,7 @@ Jeder Lauf einzeln mit `--only <backend>`, Logs unter `out/gpucheck_step12/<back
 | Vulkan 1.4.357 | OK (depth bad 9/80176 px, worst 1/255) | OK (100 % Boden) | OK | **grün** |
 | D3D11 | **3 FAIL** (Normal+Mask-Unterprüfung, s.u.) | OK (100 % Boden) | OK | gelb — bekannte Lücke |
 | D3D12 | **3 FAIL** (identisch zu D3D11) | OK (100 % Boden) | OK | gelb — bekannte Lücke |
-| Metal | — | — | — | **nicht verifiziert** (kein Mac in dieser Session erreichbar) |
+| Metal (Apple M5, Schritt 18, 20.11.) | OK (depth bad 0/80176 px, colour bad 0, worst 1/255) | OK (100 % Boden) | OK (100 % Boden) | **grün** (Mac, `landscape_gpu_check --only metal`; Details im Abschnitt „Schritt 18" unten) |
 
 **D3D11/D3D12-Befund (kein neuer Fund, bestätigt eine bereits gemeldete Lücke):** die Unterprüfung
 „world uv, normal + mask" zeigt bei beiden D3D-Backends für alle sechs Varianten (keine Karten, flache
@@ -72,9 +72,8 @@ abgewartet (Vorgabe: CI nicht pollen); der nächste, der dieses Thema anfasst, o
 
 ## 5. Bewusst ausgeklammert (aus früheren Handoffs, hier nicht neu geprüft)
 
-* **Metal** — kein Mac in dieser Session erreichbar; zuletzt in Schritt 2 (OpenGL+Metal, Mac) und für Vulkan
-  separat (MoltenVK, Schritt „landscape-vulkan-mac") verifiziert, nicht aber mit dem heutigen Stand (Commit
-  `5295c34fa`) erneut gegengeprüft.
+* **Metal** — in Schritt 18 (20.11.) auf dem Mac gegen HEAD `a8664db6b` (enthält `5295c34fa`) nachgeholt, siehe
+  „Schritt 18" unten. Nicht mitgeprüft dort: Performance, ein echter 100-km-Flug, der Live-Editor.
 * **Reflexionen gegen die Kachel-Landschaft** — laufen auf allen fünf Backends über BVH/BLAS-Trefferlisten,
   nie über das Höhenfeld; die Kachel-Landschaft hat auf KEINEM Backend eine BVH/BLAS-Integration. Die
   Höhenfeld-Schatten-Optimierung existiert nur auf GL/Vulkan/D3D11 — Metal und D3D12 haben dort nur BVH/DXR
@@ -100,7 +99,7 @@ abgewartet (Vorgabe: CI nicht pollen); der nächste, der dieses Thema anfasst, o
 5. **Mehrere Backends in einem Windows-Prozess crashen** (`landscape_gpu_check` ohne `--only`) — ein
    Renderer-seitiger Fund (Thema 1521+), nicht blockierend für den Spielbetrieb (Spiel/Editor laufen immer nur
    mit einem Backend gleichzeitig), aber ein offenes Risiko für künftige Mehrbackend-Werkzeuge.
-6. **Metal** auf dem aktuellen Stand nicht gegengeprüft (kein Mac erreichbar in dieser Session).
+6. ~~**Metal** auf dem aktuellen Stand nicht gegengeprüft~~ — erledigt in Schritt 18 (20.11.), grün.
 
 ## 7. Fazit
 
@@ -130,3 +129,32 @@ Windows-CI (s. §3) grün durchläuft.
   (§6.1) als eigener, kleiner Folgeschritt. 3. Sculpt/Paint-Rückschreiben (§6.2) und projekt-relative
   Pack-Pfade (§6.3) bleiben offene, größere Folgearbeit für 0.8.0, falls gewünscht. 4. Reflexionen gegen die
   Kachel-Landschaft (§6.4) ist der größte offene Posten, gehört eher zu einem eigenen Thema als zu 326.
+
+## Schritt 18: Metal auf dem aktuellen Stand (20.11.2026, Mac, Apple M5)
+
+HEAD `a8664db6b` (enthält `5295c34fa`), Release, Ninja. Keine Code-Änderung.
+
+* **Verifiziert (gelaufen):**
+  * `he_tests` + `HorizonEditor` + `landscape_gpu_check` (mit `RendererMetal`) gebaut, rc=0.
+  * `ctest -R test_landscape`: 24/24 grün (CPU-seitig; sie kompilieren kein MSL und zeichnen nicht auf Metal).
+  * `landscape_gpu_check --only metal`: OK in allen fünf Unterprüfungen. Der MSL-Text kompiliert zur Laufzeit
+    (`MetalLandscape::init`, kein Fehler im Log), die Pipeline läuft auf der M5.
+    * ramp, erste Position: 180 Patches in 203 Draws, holes 0, extras 0, Tiefe bad 0/80176, Farbe bad 0 (worst 1/255).
+    * ramp nach 10-km-Sprung (Atlas gibt 191 Kacheln frei und belegt neu): holes 1, Tiefe bad 0, Farbe bad 0.
+    * hills (fBm): 215 Patches, Boden 55,7 % des Bildes. world-uv: 83153/83153 Bodenpixel texturiert.
+    * Normal+Mask: mittlere Helligkeit je Variante (keine Karten 123,47 ... AO 0,5 113,52) deckt sich mit GL (123,48 ... 113,59).
+    * Engine (echter MetalRenderer, forward und deferred-Tile): 100 % des erwarteten Bodens grün.
+  * Dasselbe Werkzeug `--only gl` am selben Stand: gleiche Zahlen (GL: Tiefe bad 6 und 4 px, Metal 0).
+  * Bilder angesehen, Metal neben GL: `landscape_Metal_{hills,ramp,worlduv,engine_deferred}.png` gegen die GL-Gegenstücke,
+    mit dem Auge nicht zu unterscheiden (Gipfel, Streifenmuster, Horizont, Wolken gleich).
+  * Struktur-Layout gelesen: C++ `Globals` 800 B und `PatchData` 48 B (`MetalLandscape.mm`) gegen MSL `LsGlobals`/`LsPatch`
+    (`LandscapeShaderSource.h:332-355`) Mitglied für Mitglied gleich; die static_asserts halten die Größen.
+  * `git log`: GLSL-Körper seit dem MSL-Port (`1c8413959`) unverändert (nur `//#LANDSCAPE_BODY#`-Marken, Vulkan-Prelude).
+* **Nicht verifiziert:** Performance auf Metal (nichts gemessen); ein echter 100-km-Flug oder der Live-Editor
+  (HorizonEditor gebaut, nicht gestartet); GLSL- gegen MSL-Körper Zeile für Zeile verglichen (nur über Git-Historie
+  und die Bildergleichheit geschlossen); `draws=0`-Falle: nicht nötig, das Werkzeug zählt 203/196/235 Draws und prüft
+  100 % Boden; Windows; Pixel-A/B mit Hash (nur Sicht und die Pixelprüfung des Werkzeugs).
+* **Beobachtung (nicht geändert):** Warnung `LandscapeStore: 415 tiles wanted within 8000 m but the budget holds 191; the
+  effective radius shrinks` in jedem Lauf, GL und Metal gleich: Absicht des Werkzeugs (kleiner Atlas, damit Slots
+  recycelt werden).
+* **Next steps:** keine für Metal. Offen bleiben §6 Punkt 1-5.
