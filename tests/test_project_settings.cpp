@@ -315,24 +315,25 @@ TEST_CASE("ProjectSettings: the splash rides in the game section and reads back"
 	CHECK(c.game.splashImage.empty());
 }
 
-TEST_CASE("ProjectSettings: cooking static entities is off, rides in the game section and reads back")
+TEST_CASE("ProjectSettings: cooking static entities is on, rides in the game section and reads back")
 {
 	HE::ProjectSettings a;
-	CHECK_FALSE(a.game.cookStaticEntities);     // off until the engine flips it for every project
-	a.game.cookStaticEntities = true;
+	CHECK(a.game.cookStaticEntities);           // on for every project, new or old
+	a.game.cookStaticEntities = false;
 	CHECK_FALSE(a.isDefault());
 
 	json j;
 	a.toJson(j);
-	CHECK(j["game"]["cookStaticEntities"] == true);
+	CHECK(j["game"]["cookStaticEntities"] == false);
 	HE::ProjectSettings b;
 	b.fromJson(j);
 	CHECK(a == b);
+	CHECK_FALSE(b.game.cookStaticEntities);
 
-	// A file written before it existed: the key is absent, the setting is off.
+	// A file written before it existed: the key is absent, the setting is on.
 	HE::ProjectSettings c;
 	c.fromJson(json::parse(R"({"version":1,"game":{"title":"Old"}})"));
-	CHECK_FALSE(c.game.cookStaticEntities);
+	CHECK(c.game.cookStaticEntities);
 }
 
 // ─── Anti-cheat (docs/anti-cheat-plan.md §4.4) ───────────────────────────────

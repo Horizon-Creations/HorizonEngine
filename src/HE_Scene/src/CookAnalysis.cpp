@@ -147,6 +147,15 @@ namespace
 	}
 }
 
+std::string formatCookBlockers(CookVerdict verdict)
+{
+	std::string out;
+	for (CookBlocker b : kAllBlockers)
+		if (verdict.has(b))
+			out += (out.empty() ? "" : ", ") + std::string(blockerLabel(b));
+	return out;
+}
+
 std::vector<CookEntry> analyzeCookability(const entt::registry& reg)
 {
 	const auto view = reg.view<const TransformComponent>();
@@ -181,6 +190,14 @@ CookSummary summarizeCookability(const std::vector<CookEntry>& entries, const en
 	CookSummary out;
 	for (const CookEntry& ce : entries)
 	{
+		if (out.entityLines.size() < CookSummary::kMaxEntityLines)
+		{
+			const auto* nm = reg.try_get<NameComponent>(ce.entity);
+			out.entityLines.push_back((nm && !nm->name.empty() ? nm->name : std::string("(unnamed)"))
+				+ (ce.verdict.cookable() ? ": cooked" : ": not cooked - " + formatCookBlockers(ce.verdict)));
+		}
+		else
+			++out.entityLinesOmitted;
 		if (ce.verdict.cookable()) { ++out.cookable; continue; }
 		++out.blocked;
 		for (size_t i = 0; i < std::size(kAllBlockers); ++i)

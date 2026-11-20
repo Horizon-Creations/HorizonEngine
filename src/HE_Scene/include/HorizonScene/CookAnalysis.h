@@ -52,6 +52,10 @@ namespace HE
 		bool has(CookBlocker b) const { return (blockers & static_cast<uint16_t>(b)) != 0; }
 	};
 
+	// "Script, Physics" — the blockers of one verdict as a human reads them (the Details panel's
+	// Mobility section); empty when the verdict is cookable.
+	std::string formatCookBlockers(CookVerdict verdict);
+
 	// The verdict for one entity: its own blockers plus, for an ancestor with
 	// any, CookBlocker::Ancestor. Walks the parent chain, so it costs the depth.
 	CookVerdict analyzeCookability(const entt::registry& reg, entt::entity e);
@@ -83,6 +87,11 @@ namespace HE
 		};
 		uint32_t            cookable = 0;
 		uint32_t            blocked  = 0;
+		// One line per entity of the population ("Rock: cooked", "Door: not cooked - Script"), for the
+		// Cook step of the build log; capped at kMaxEntityLines, `entityLinesOmitted` counts the rest.
+		static constexpr size_t kMaxEntityLines = 2000;
+		std::vector<std::string> entityLines;
+		uint32_t            entityLinesOmitted = 0;
 		std::vector<Reason> reasons;              // only bits that occurred, in rule order
 	};
 	CookSummary summarizeCookability(const std::vector<CookEntry>& entries,

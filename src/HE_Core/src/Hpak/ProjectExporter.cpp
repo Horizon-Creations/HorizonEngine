@@ -624,6 +624,10 @@ static std::optional<ExportResult> resolvePackSettings(const ExportSettings& set
     packSettings.compileShaderVariants = settings.compileShaderVariants;
     packSettings.compileParticleShaderVariants = settings.compileParticleShaderVariants;
     packSettings.onAsset = settings.onAsset;
+    packSettings.onCook = settings.onCook;
+    // The writer says when its cook pass is over; the caller sees that as the "pack" stage.
+    if (settings.onStage)
+        packSettings.onPhase = [onStage = settings.onStage](const char* phase) { onStage(phase); };
     packSettings.onWarning = settings.onWarning;
     packSettings.onlyReferenced = settings.onlyReferenced;
     packSettings.alwaysIncludePatterns = settings.alwaysIncludePatterns;
@@ -1595,7 +1599,7 @@ ExportResult ProjectExporter::exportProject(
     if (auto fail = prepareOutputLayout(outputDir, projectName, settings, ctx)) return *fail;
     if (auto fail = resolvePackSettings(settings, ctx))                         return *fail;
     if (settings.planned) ctx.sceneUuid = settings.plannedSceneUuid;
-    stage("pack");
+    stage("cook");   // the writer announces "pack" itself once every asset is cooked
     if (auto fail = packContent(contentDir, projectName, settings, startupSceneBinary,
                                 extraScenes, gameInstanceJson, ctx))            return *fail;
 

@@ -233,7 +233,9 @@ struct HE_API ExportSettings {
     // thread-safe when exporting on a worker thread.
     std::function<void(int, int, const std::string&)> progress;
     // Optional stage callback, called as each phase of the export begins with a
-    // stable identifier: "layout", "pack", "binaries", "hclib", "config",
+    // stable identifier: "layout", "cook" (assets are cooked: references rewritten,
+    // textures and meshes converted), "pack" (the cooked assets are compressed and
+    // stored), "binaries", "hclib", "config",
     // "bundle". The counters above only describe packing; this is what lets a
     // caller tell "packaging" from "finishing up" — copying a runtime and
     // codesigning an .app are neither instant nor part of the pak. Same thread
@@ -244,6 +246,9 @@ struct HE_API ExportSettings {
     // `progress`. This is what lets a build window list WHAT was packed, not only
     // how many.
     std::function<void(const std::string&, bool)> onAsset;
+    // Optional, one call per asset the cook pass handled (see Hpak::PackSettings::onCook): the
+    // line a build window shows under "Cook". Same thread rule as `progress`.
+    std::function<void(const std::string&)> onCook;
     // Optional, one call per problem the pack found and worked around by leaving
     // something out (see Hpak::PackSettings::onWarning). Same thread rule as `progress`.
     std::function<void(const std::string&)> onWarning;
