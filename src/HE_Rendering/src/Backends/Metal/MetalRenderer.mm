@@ -3240,9 +3240,9 @@ kernel void giReflRay(uint2 gid [[thread_position_in_grid]],
 			// there is a guess). Non-landscape hits leave `albedo` untouched.
 			{
 				float3 painted;
-				// Metres one reflected pixel covers at the hit (camera -> mirror -> hit, ~60 degree view; widened by
-				// roughness): the RVT mip a hit reads, like the rasterizer's derivative choice.
-				const float footprint = (length(Pw - P.camPos.xyz) + dist) * 1.155 / max(P.texSize.y, 1.0) + dist * rough * 0.5;
+				// Metres one reflected pixel covers at the hit (camera -> mirror -> hit, ~60 degree view; widened by the
+				// lobe, GGX alpha = rough^2: a mirror adds nothing): the RVT mip a hit reads, like the rasterizer's choice.
+				const float footprint = (length(Pw - P.camPos.xyz) + dist) * 1.155 / max(P.texSize.y, 1.0) + dist * rough * rough;
 				if (giLandscapeAlbedo(lands, instanceLand[instId], int(P.land.x),
 				                      landWeights, hitPos, hitN, painted, rvtTables, rvtHot, rvtCold, footprint))
 					albedo = painted;
@@ -4072,7 +4072,7 @@ kernel void giReflRaySw(uint2 gid [[thread_position_in_grid]],
 			// (auto material: its slope/height masks, hence after hitN).
 			{
 				float3 painted;
-				const float footprint = (length(Pw - P.camPos.xyz) + dist) * 1.155 / max(P.texSize.y, 1.0) + dist * rough * 0.5;
+				const float footprint = (length(Pw - P.camPos.xyz) + dist) * 1.155 / max(P.texSize.y, 1.0) + dist * rough * rough;
 				if (giLandscapeAlbedo(lands, insts[hitInst].offsets.z, int(P.land.x),
 				                      landWeights, hitPos, hitN, painted, rvtTables, rvtHot, rvtCold, footprint))
 					albedo = painted;

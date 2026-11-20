@@ -32,7 +32,7 @@ im Spiegel, auf **allen** Backends. Ohne residentes Albedo-Array fällt es auf W
 
 **Änderung (Metal, HW- und SW-Kern):** Wird die Landschaft gerade aus der RVT gezeichnet (`m_rvtSwaps`), liest der
 Treffer die Seiten: `giRvtAlbedo` (Seitenmathe aus `RvtLookup.h`, Mip aus dem Footprint
-`(|Pw-cam| + dist) * 1.155 / texH + dist * rough * 0.5`, Tabelle fällt selbst auf gröbere Seiten zurück, Bit 23 = kalter
+`(|Pw-cam| + dist) * 1.155 / texH + dist * rough²` (GGX-Alpha; ein Spiegel weitet nichts), Tabelle fällt selbst auf gröbere Seiten zurück, Bit 23 = kalter
 ASTC-Pool). Daten: `GiLandscape::terrainEntity` (Extraktor), `GILandGpu::rvtA/rvtB` = `RvtVolumeA/B` des Consumers
 (aus `graphParamNames`/`shaderParamData`), Bindung: Tabellen Textur 13..16, heißer Pool 17, kalter Pool 18.
 Kein Treffer in der Volume oder keine Seite -> die alten Mittelfarben.
