@@ -1413,8 +1413,20 @@ bool MaterialShaderLibrary::resolveShaders(const ContentManager& cm, const UUID&
     if (const MaterialAsset* mat = cm.getMaterial(materialId))
         vertBodyOut = mat->customShaderVertGlsl;
     if (!vertBodyOut.empty()) // fold the vertex into the pipeline key
-        hashOut ^= std::hash<std::string>{}(vertBodyOut) * 0x9E3779B97F4A7C15ULL;
+        hashOut ^= textHash(materialId, 2, vertBodyOut) * 0x9E3779B97F4A7C15ULL;
     return true;
+}
+
+uint64_t MaterialShaderLibrary::textHash(const UUID& materialId, int kind, const std::string& text) const
+{
+    std::lock_guard<std::mutex> g(m_textHashLock);
+    HashedText& h = m_textHashes[materialId][size_t(kind)];
+    if (h.text.size() != text.size() || std::memcmp(h.text.data(), text.data(), text.size()) != 0)
+    {
+        h.text = text;
+        h.hash = std::hash<std::string>{}(text);
+    }
+    return h.hash;
 }
 
 const MaterialShaderVariant* MaterialShaderLibrary::precompiledFor(const MaterialAsset* ma,
@@ -1459,10 +1471,10 @@ bool MaterialShaderLibrary::resolveGBufferShaders(const ContentManager& cm, cons
     if (!mat || mat->customShaderFragGlsl.empty() || mat->customShaderGBufGlsl.empty())
         return false;
     fragOut = mat->customShaderGBufGlsl;
-    hashOut = std::hash<std::string>{}(fragOut);
+    hashOut = textHash(materialId, 1, fragOut);
     vertBodyOut = mat->customShaderVertGlsl;
     if (!vertBodyOut.empty()) // fold the vertex into the pipeline key (like resolveShaders)
-        hashOut ^= std::hash<std::string>{}(vertBodyOut) * 0x9E3779B97F4A7C15ULL;
+        hashOut ^= textHash(materialId, 2, vertBodyOut) * 0x9E3779B97F4A7C15ULL;
     return true;
 }
 
@@ -1473,7 +1485,7 @@ bool MaterialShaderLibrary::resolveFragment(const ContentManager& cm, const UUID
     const MaterialAsset* mat = cm.getMaterial(materialId);
     if (!mat || mat->customShaderFragGlsl.empty()) return false;
     glslOut = mat->customShaderFragGlsl;
-    hashOut = std::hash<std::string>{}(glslOut);
+    hashOut = textHash(materialId, 0, glslOut);
     return true;
 }
 

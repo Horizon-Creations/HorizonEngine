@@ -19213,6 +19213,9 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 
 			if (deferredActive)
 			{
+				// Detailed capture: the deferred block gets its own buckets (it used to be counted as "SSAO", which then held
+				// the G-buffer, the resolve and the reflections too).
+				flushPass("GBuffer");
 				EnsureGBufferTargets(sceneW, sceneH);
 				MTLRenderPassDescriptor* gbPass = [MTLRenderPassDescriptor renderPassDescriptor];
 				id<MTLTexture> gbTex[4] = { (__bridge id<MTLTexture>)m_gbColor0,
@@ -19276,6 +19279,7 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 				// Screen-space motion, straight after the pass whose depth it
 				// tests against (A2). Only runs when TAA is the active mode.
 				EncodeVelocity((__bridge void*)cmdBuf, sceneW, sceneH);
+				flushPass("Reflections");   // detailed: commit the G-buffer (+ decals, tile resolve, velocity)
 
 				// Reflections: the GI compute trace fills m_giReflTex first,
 				// then the shared composite (SSR trace + additive env-specular

@@ -11,6 +11,7 @@
 #include <MaterialGraph/MaterialGraph.h> // HE::MatParamKind
 #include <MaterialGraph/WeatherMaterialFunctions.h>
 #include <Types/TypeRegistry.h>              // struct/enum defs mirror in on load
+#include <material/MaterialShaderLibrary.h>  // the per-draw shader key
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -721,6 +722,32 @@ TEST_CASE("ContentManager replaceStaticMesh keeps the UUID, swaps the payload")
 	CHECK_FALSE(cm.replaceMaterial(id, MaterialAsset{}));
 	CHECK_FALSE(cm.replaceStaticMesh(HE::UUID::generate(), StaticMeshAsset{}));
 	CHECK(cm.getStaticMesh(id)->indices.size() == 6);
+}
+
+TEST_CASE("MaterialShaderLibrary: the per-draw shader key follows the text, even an in-place edit of the same length")
+{
+	TempContentDir dir("he_test_shader_key");
+	ContentManager cm(dir.path.string());
+	MaterialAsset mat;
+	mat.customShaderFragGlsl = "void main() { float a = 0.5; }";
+	mat.customShaderGBufGlsl = "void main() { float g = 0.5; }";
+	const HE::UUID id = cm.registerMaterial(std::move(mat));
+
+	HE::MaterialShaderLibrary lib;
+	uint64_t k1 = 0, k2 = 0, g1 = 0;
+	std::string frag, vert;
+	REQUIRE(lib.resolveShaders(cm, id, k1, frag, vert));
+	REQUIRE(lib.resolveShaders(cm, id, k2, frag, vert));
+	CHECK(k1 == k2);                                         // unchanged text, the remembered key
+	CHECK(k1 == std::hash<std::string>{}(frag));             // and it is the plain hash of the text
+	REQUIRE(lib.resolveGBufferShaders(cm, id, g1, frag, vert));
+	CHECK(g1 != k1);                                         // the G-buffer key is its own
+
+	// A writer that rewrites the text in place, same length, nobody told: a new key all the same.
+	cm.getMaterialMutable(id)->customShaderFragGlsl = "void main() { float a = 0.7; }";
+	REQUIRE(lib.resolveShaders(cm, id, k2, frag, vert));
+	CHECK(k2 != k1);
+	CHECK(k2 == std::hash<std::string>{}(frag));
 }
 
 TEST_CASE("ContentManager registers a runtime material and mesh distinctly")

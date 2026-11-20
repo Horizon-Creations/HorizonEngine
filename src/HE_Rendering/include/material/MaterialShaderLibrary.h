@@ -9,7 +9,9 @@
 
 #include <Types/Enums.h> // HE::RendererBackend (precompiledFor)
 #include <Types/UUID.h>
+#include <array>
 #include <cstdint>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -638,6 +640,14 @@ private:
     std::unordered_map<int, Compiled>      m_vertCache;  // key = (int)backend (+0x100 instanced)
     std::unordered_map<uint64_t, Compiled> m_fragCache;  // key = mix(sourceHash, backend, clustered)
     std::unordered_map<uint64_t, Compiled> m_cvertCache; // key = mix(bodyHash, backend, instanced)
+    // The resolve* functions run for every draw of every frame and used to hash the whole shader text each time (tens of KB,
+    // the largest CPU item of a G-buffer pass). The hash is kept per material and text kind with a copy of the text it was
+    // taken from: an equal text (size + memcmp, an order of magnitude cheaper than hashing) reuses it, any change rehashes.
+    // No version counter is needed, so a writer that replaces the text without telling anyone is still seen.
+    struct HashedText { std::string text; uint64_t hash = 0; };
+    mutable std::mutex m_textHashLock;
+    mutable std::unordered_map<UUID, std::array<HashedText, 3>> m_textHashes;   // [0] fragment, [1] G-buffer fragment, [2] WPO vertex
+    uint64_t textHash(const UUID& materialId, int kind, const std::string& text) const;
     std::unordered_map<int, Compiled>      m_uiVertCache; // key = (int)backend
     std::unordered_map<int, Compiled>      m_resolveCache; // key = (int)backend (+64 clustered)
     std::unordered_map<int, Compiled>      m_resolveTileCache; // key = (int)backend (+64 clustered)
