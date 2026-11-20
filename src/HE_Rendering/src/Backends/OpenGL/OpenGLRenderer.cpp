@@ -7184,7 +7184,7 @@ unsigned int OpenGLRenderer::RenderGIShadow(int width, int height, const glm::ma
 // EncodeSkyReflCube, which this mirrors: six faces of the real sky pass around
 // the camera, low-res clouds off (that buffer is screen-space, a face is not).
 // Leaves the caller's framebuffer, viewport and depth-test state as it found them.
-static constexpr int kSkyReflCubeSize = 512;
+static constexpr int kSkyReflCubeSize = 256;   // as Metal's kSkyReflCubeSize (cost note there)
 void OpenGLRenderer::RenderSkyReflCube()
 {
 	m_skyReflValid = false;

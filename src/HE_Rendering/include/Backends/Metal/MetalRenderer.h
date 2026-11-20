@@ -496,10 +496,12 @@ private:
 	void* m_skyReflPipeline = nullptr; // id<MTLRenderPipelineState> skyFragment, RGBA16F, no depth
 	void* m_skyReflCube     = nullptr; // id<MTLTexture> cube RGBA16F, kSkyReflCubeSize²
 	bool  m_skyReflValid    = false;   // the cube holds THIS frame's sky
-	// Two of the six faces per frame after the first full bake (see OpenGLRenderer.h); an undrawn face keeps its picture.
-	static constexpr int kSkyReflFacesPerFrame = 2;
+	// One of the six faces per frame after the first full bake (the whole cube every 6 frames); an undrawn face keeps its
+	// picture. Was two, at 512² (see the cost note at kSkyReflCubeSize, MetalRenderer.mm).
+	static constexpr int kSkyReflFacesPerFrame = 1;
 	bool  m_skyReflBaked    = false;
 	int   m_skyReflPhase    = 0;
+	bool  m_skyReflThisFrame = false;   // baked in this EncodeFrame already: the water pass's second trace reuses it
 	void  EncodeSkyReflCube(void* cmdBuf);
 	// The cube graph materials bind as heSkyEnv (slot 14). Transparent surfaces (water) never reach the
 	// GI-reflection trace, so their specular lookup is the only place the real sky (aurora, stars,

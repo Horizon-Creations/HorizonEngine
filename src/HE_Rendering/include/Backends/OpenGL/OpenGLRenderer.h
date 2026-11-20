@@ -1385,7 +1385,8 @@ private:
 	bool         m_skyReflValid = false; // the cube holds THIS frame's sky
 	// Only kSkyReflFacesPerFrame of the six faces are redrawn per frame (the clouds drift slowly; all six at
 	// 512² cost ~2.5 ms on a 4070 at 1080p), the first frame draws all of them. A face not drawn keeps its picture.
-	static constexpr int kSkyReflFacesPerFrame = 2;
+	// One face of 256² per frame, as on Metal (measured there: 512² x 2 faces was most of the reflection pass).
+	static constexpr int kSkyReflFacesPerFrame = 1;
 	bool         m_skyReflBaked = false; // every face holds a picture
 	int          m_skyReflPhase = 0;     // which pair of faces is next
 	// The cube graph materials bind as heSkyEnv (unit 14). Transparent surfaces (water)

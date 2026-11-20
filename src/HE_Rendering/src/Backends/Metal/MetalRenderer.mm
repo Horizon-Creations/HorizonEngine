@@ -15854,11 +15854,17 @@ void MetalRenderer::DestroySkyViewLut()
 // the camera, so a reflection ray that misses the scene returns the sky the
 // viewer sees — clouds and weather included — instead of m_skyEnvCube's
 // cloudless CPU atmosphere. Every frame the reflections trace (clouds drift
-// with the clock); two of the six 512² faces per frame after the first full bake. No
-// low-res cloud composite: that buffer is screen-space, a face is not.
-static constexpr int kSkyReflCubeSize = 512;
+// with the clock); one of the six 256² faces per frame after the first full bake. No
+// low-res cloud composite: that buffer is screen-space, a face is not. A face with full clouds
+// costs ~1.2 ms at 256² and ~2.4 ms at 512² (Catania, M5): 512² with two faces a frame was most
+// of the reflection pass; the sky in a glossy reflection does not need it (2026-11-20).
+static constexpr int kSkyReflCubeSize = 256;
 void MetalRenderer::EncodeSkyReflCube(void* cmdBufPtr)
 {
+	// Once per frame: the deferred frame traces twice (opaque, then the water pre-pass) and the sky is the same for both.
+	// The bake was the bulk of the reflection cost (~2.4 ms a 512² face with full clouds), not the trace.
+	if (m_skyReflThisFrame) return;
+	m_skyReflThisFrame = true;
 	m_skyReflValid = false;
 	static const bool s_off = [] {
 		const char* e = std::getenv("HE_GIREFL_SKY");
@@ -18877,6 +18883,7 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 		// the commit below. No path between here and there returns early.
 		m_uploadRing->beginFrame();
 		BeginRvtFeedbackFrame();   // this frame's feedback buffer, harvested by its completion (EndRvtFeedbackFrame below)
+		m_skyReflThisFrame = false;   // EncodeSkyReflCube bakes at most once per frame
 
 		// ── Per-pass GPU timing setup (only while a profiler capture records) ──
 		// Builds one over-allocated counter sample buffer for this frame; the major
@@ -19293,7 +19300,9 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 				if (deferredTile && (m_ssrFrameActive || m_giReflFrameActive))
 				{
 					EncodeGIReflections((__bridge void*)cmdBuf, sceneW, sceneH);
+					flushPass("SSRComposite");   // detailed: commit the GI reflection trace
 					EncodeSSRPasses((__bridge void*)cmdBuf, sceneW, sceneH);
+					flushPass("WaterRefl");      // detailed: commit the SSR trace + composite
 					// The forward tail (water and every other translucent graph material) is
 					// not in the G-buffer, so the composite above never touched it and slots
 					// 9/10 stayed empty: the water mirrored only the flat sky cube. Its
