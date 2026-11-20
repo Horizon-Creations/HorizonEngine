@@ -18290,6 +18290,8 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 		// is already an encoded texel.
 		matLight.specAA[0] = m_specularAA ? m_specularAAStrength : 0.0f;
 		matLight.specAA[1] = 1.0f;
+		// The RVT mip view tints the base colour the G-buffer stores (heRvtMipView, RvtLookup.h).
+		matLight.viewMode[1] = m_viewMode == HE::ViewMode::RvtMips ? 1.0f : 0.0f;
 		// The G-buffer's WPO vertex stage reads this block too: without the wind
 		// the deferred path would draw every Wind Sway material standing still.
 		HE::FillMaterialWind(GetEnvironment(), matLight);
