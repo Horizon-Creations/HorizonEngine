@@ -643,6 +643,8 @@ int main(int argc, char** argv)
 	{
 		start(gpucheck::makeGlBackend());
 		engine(HE::RendererBackend::OpenGL, "OpenGL");
+		++ran;
+		rc = std::max(rc, gpucheck::runReflectionCheck(pack, (outDir / "landscape_OpenGL_engine_reflection.png").string()));
 	}
 #ifdef HE_CHECK_METAL
 	if (only.empty() || only == "metal")

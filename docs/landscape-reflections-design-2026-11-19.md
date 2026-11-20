@@ -194,13 +194,30 @@ already share it for shadows. **Metal and D3D12 need their closest-hit path buil
   `linkCompute`'s link-status check, at program start-up, not at `cmake --build` time — see
   `docs/verify-runtime-compiled-shaders.md`'s standing lesson that these strings are never checked
   by the build).
-* **Not verified**: an actual GPU frame with a tile landscape + mirror-material object, reading
-  back the reflection texture to confirm the landscape appears and is not a flat placeholder colour
-  end-to-end. `he_tests` has no headless OpenGL context for GI (`test_gi_reflection_tier.cpp` tests
-  pure CPU tables; grepped for any GL-context GI test — none exists), and building one, or
-  extending `landscape_gpu_check` with a reflection-specific engine check, is bigger than this
-  step's "keep it small" budget. This is the swapped-in **weaker check** the project's rules ask to
-  name explicitly: the doctest is a CPU-side proof of the march's math, not a pixel proof of the
-  shader actually running. The next step that touches this code should close that gap (either a
-  `landscape_gpu_check --only gl` reflection mode, or a minimal offscreen-context test in
-  `he_tests`) before relying on this path for anything user-visible.
+* **Verified on real hardware (step 23, NN-WS03, RTX 4070)**: `scripts/validate_embedded_shaders.py
+  --glsl-only` compiles `header + kGiTraversalGLSL + kGiHeightfieldGLSL + kGiReflCS` with
+  glslangValidator exactly as `OpenGLRenderer.cpp:6721` assembles it (it already had the right job —
+  `GLSL_PRELUDE_OF["kGiReflCS"]` — from this step's own change; nobody had RUN it before now). Closed
+  the gap this section used to describe as not-worth-the-budget: `landscape_gpu_check`
+  (`EngineCheck.cpp`, `runReflectionCheck`, GL-only) builds a tile landscape via `LandscapeRuntime`
+  + `HorizonWorld::setLandscapeRuntime` (every other check in that file calls
+  `SetLandscapeProvider` but never that — the heightfield extractor has nothing to feed without it),
+  a mirror cube (metallic 1, roughness 0.05) standing on it, and a directional light (its absence
+  was the harness's own bug: `kUnlitFS`'s `uLightCount == 0` branch — OpenGLRenderer.cpp:537-543 —
+  returns a flat unlit colour *before* the code that samples `uGIRefl`, so a scene with no light
+  "passes" silently with the reflection path never exercised; bisected by forcing `kGiReflCS`'s
+  `main()` to write solid magenta unconditionally and watching it not appear on screen). With the
+  light in place the real log line fires (`OpenGLRenderer: GI pipelines built`), the heightfield
+  uploads (`GI height field 1025x1025, 9 mips`), and the mirror's centre pixel is rgb(192,196,186)
+  with reflections on vs rgb(151,148,141) with them off (worst channel delta 48/255) — a real,
+  on-hardware change, not a log line alone. The mirror is *not* green: a heightfield hit still
+  returns the flat placeholder albedo `vec3(0.3, 0.32, 0.26)` this section's §5/§6 already flagged
+  (no painted weights yet), so the check asserts the pixel MOVES when reflections toggle off rather
+  than asserting a specific colour — a plain-colour check can't tell "hit the landscape" from "the
+  kernel never ran" while that gap stands.
+* **Still not verified**: the landscape's own paint showing through the reflection (the §5/§6 gap
+  itself — unchanged by this step, tracked there) end-to-end on D3D11/D3D12/Vulkan/Metal (this
+  step was GL-only, matching the gate it closes); and `he_tests` still has no headless GL context
+  for GI, so this remains a `landscape_gpu_check` run, not an automated test — rerun it
+  (`landscape_gpu_check --only gl`) after any change near `kGiReflCS`/`EnsureGiHeightfield`/
+  `extractLandscapeGiHeightfield`.

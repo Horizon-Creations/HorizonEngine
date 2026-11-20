@@ -20,4 +20,9 @@ struct EngineCamera
 // `arrayRoot` (optional): an EngineContent folder that holds Textures/Landscape/T_Landscape_Forest_Albedo_Array.hasset. Then the renderer draws the ground in
 // world coordinates from that array (texture group Forest) and the check is that the ground is NOT the flat colour any more but has texture in it.
 int runEngineCheck(HE::RendererBackend backend, HE::RenderPath path, const std::string& packPath, const std::string& pngPath, const std::string& arrayRoot = {});
+
+// GL-only: a mirror standing on the tile landscape with GI reflections on, checking that the GI
+// pipelines link (the 'GI pipelines built' log line) and that the mirror's pixel moves when
+// reflections toggle off. See docs/landscape-reflections-design-2026-11-19.md §7.
+int runReflectionCheck(const std::string& packPath, const std::string& pngPath);
 } // namespace gpucheck
