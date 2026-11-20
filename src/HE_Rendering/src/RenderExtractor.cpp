@@ -432,6 +432,7 @@ void windWaterParams(const MaterialAsset& ma, const MaterialComponent* mc,
 			ls.invSize      = { 1.0f / std::max(tc.sizeX, 1e-4f), 1.0f / std::max(tc.sizeZ, 1e-4f) };
 			ls.uvTiling     = tc.effectiveUvTiling();   // what the chunk meshes carry (TerrainComponent::uvTilingBuilt)
 			ls.weightmapId  = tc.weightmapTextureId;
+			ls.terrainEntity = static_cast<uint32_t>(te);
 			HE::UUID    autoTexId{};   // auto material's albedo array, resolved below
 			std::string autoTexPath;
 			if (contentManager)

@@ -1417,14 +1417,18 @@ private:
 		glm::vec4 autoWet{0.0f};   // auto only — HE::GiLandscape::autoWet / autoSlope / autoSnow
 		glm::vec4 autoSlope{0.0f};
 		glm::vec4 autoSnow{0.0f};
+		// Drawn from the RVT: the consumer's RvtVolumeA/B (RvtLookup.h; rvtB.w = mip count, 0 = not from pages). The table
+		// is bound per entry at the kernels' rvtTables slot, the pools beside it.
+		glm::vec4 rvtA{0.0f};
+		glm::vec4 rvtB{0.0f};
 	};
-	static_assert(sizeof(GILandGpu) == 64 + 8 * 16, "must match the MSL GILand layout");
+	static_assert(sizeof(GILandGpu) == 64 + 10 * 16, "must match the MSL GILand layout");
 	void* m_giLandBuf         = nullptr; // id<MTLBuffer> (retained), rebuilt per frame
 	void* m_giInstanceLandBuf = nullptr; // id<MTLBuffer> (retained), HW per-instance index
 	// Packs RenderWorld::landscapes into m_giLandBuf and returns how many made it
 	// (capped at HE::kGiMaxLandscapes); `outWeightTex` receives each one's
 	// weightmap texture in the same order, for the kernel's texture array.
-	int BuildGILandscapeTable(std::vector<void*>& outWeightTex);
+	int BuildGILandscapeTable(std::vector<void*>& outWeightTex, std::vector<void*>* outRvtTables = nullptr);
 	std::unordered_map<HE::UUID, GISwBlasRange> m_giSwBlasCache;
 	std::vector<HE::GiBvhNode>     m_giSwNodesCpu;
 	std::vector<HE::GiBvhTriangle> m_giSwTrisCpu;

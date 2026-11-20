@@ -11941,6 +11941,28 @@ void EditorApplication::dumpFrameHeadless()
 					            rescanned ? "yes" : "NO", painted, refill, mF, xF);
 				}
 			}
+			// HE_DUMP_RVTDRIVER_MIRRORSHOT=<prefix> (with HE_DUMP_AUTOLANDMIRROR=1 and GI reflections on): the mirrors of the
+			// auto-landscape witness from its camera, once with the landscape's own colour in the GI (the swap paused: the
+			// per-layer means) and once drawn from the pages (the GI reads the RVT at the hit): <prefix>.own.bmp / .rvt.bmp.
+			if (const char* ms = std::getenv("HE_DUMP_RVTDRIVER_MIRRORSHOT"); ms && *ms)
+			{
+				EditorCameraOverride mc;
+				mc.active = true; mc.editorIcons = false; mc.fovDegrees = 60.0f; mc.nearPlane = 0.1f; mc.farPlane = 4000.0f;
+				mc.position = glm::vec3(-40.0f, 304.0f, 14.0f);
+				const float pitch = glm::radians(-4.0f);
+				mc.view = glm::lookAt(mc.position, mc.position + glm::vec3(0.0f, std::sin(pitch), -std::cos(pitch)), glm::vec3(0.0f, 1.0f, 0.0f));
+				camPos = mc.position;
+				for (int i = 0; i < 120; ++i) sceneTick();   // the pages around the new camera
+				std::vector<uint8_t> own, pages;
+				drv.pauseSwap(true);
+				const bool okOwn = r->RenderSceneImage(mc, W, H, own);
+				drv.pauseSwap(false);
+				const bool okPages = r->RenderSceneImage(mc, W, H, pages);
+				if (okOwn)   writeBMP(std::string(ms) + ".own.bmp", own, W, H);
+				if (okPages) writeBMP(std::string(ms) + ".rvt.bmp", pages, W, H);
+				HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTDRIVER mirror shot: own %s, pages %s (%s.*.bmp)", okOwn ? "ok" : "FAILED",
+				            okPages ? "ok" : "FAILED", ms);
+			}
 			drv.detach();
 			normalFrames("end");
 			HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTDRIVER done: %llu pages painted in total, detached", static_cast<unsigned long long>(drv.pagesPaintedTotal()));

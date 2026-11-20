@@ -2898,6 +2898,8 @@ struct GILand {
 	float4   autoWet;  // auto: rgb puddle colour, a puddle share of flat ground
 	float4   autoSlope;// auto: Rock Slope, Rock Blend, Dirt Amount, Puddle Max Slope
 	float4   autoSnow; // auto: Snow Height, Snow Blend, Snow Max Slope
+	float4   rvtA;     // drawn from the RVT: the consumer's RvtVolumeA (origin xz, extent, texel metres at mip 0)
+	float4   rvtB;     // RvtVolumeB (page px, border + 256 * volume, pages per side at mip 0, mip count; w = 0: not from pages)
 };
 
 constant int kGIProbeOctSize = 8; // must match MetalRenderer::kGIProbeOctSize
@@ -2930,12 +2932,42 @@ static float3 giAutoLandAlbedo(const device GILand& L, float3 pos, float3 n)
 // slope and height instead (hitN = the world normal facing the ray).
 // Returns false when this instance is not a landscape (caller keeps its flat
 // per-instance albedo).
+// A landscape drawn from the Runtime Virtual Texture: the hit's colour from the pages (the real ground, textures and all)
+// instead of the means. RvtLookup.h's page math, nearest page at the mip whose texel matches `footprint` (metres the
+// reflected pixel covers there); the table already points a missing page at its nearest coarser one.
+static bool giRvtAlbedo(const device GILand& L, texture2d<uint> table, texture2d_array<float> hot,
+                        texture2d_array<float> cold, float3 hitPos, float footprint, thread float3& albedoOut)
+{
+	if (L.rvtB.w < 0.5) return false;
+	const float2 uv = (hitPos.xz - L.rvtA.xy) / max(L.rvtA.z, 1e-3);
+	if (uv.x < 0.0 || uv.y < 0.0 || uv.x >= 1.0 || uv.y >= 1.0) return false;
+	const int mipCount = max(int(L.rvtB.w + 0.5), 1);
+	const int pps0     = max(int(L.rvtB.z + 0.5), 1);
+	const int mip = clamp(int(floor(log2(max(footprint / max(L.rvtA.w, 1e-4), 1.0)))), 0, mipCount - 1);
+	const int pps = max(pps0 >> mip, 1);
+	const uint2 pg = uint2(clamp(int2(uv * float(pps)), int2(0), int2(pps - 1)));
+	const uint e = table.read(pg, uint(mip)).r;
+	if (e == 0xFFFFFFFFu) return false;
+	const uint slot = e & 0x7FFFFFu;
+	const int  ppsE = max(pps0 >> int(e >> 24), 1);
+	const float2 g  = uv * float(ppsE);
+	const float ps = L.rvtB.x, bd = fmod(L.rvtB.y, 256.0);
+	const float2 tuv = (bd + (g - floor(g)) * ps) / (ps + 2.0 * bd);
+	constexpr sampler s(coord::normalized, address::clamp_to_edge, filter::linear);
+	albedoOut = (e & 0x800000u) != 0u ? cold.sample(s, tuv, slot, level(0.0)).rgb
+	                                  : hot.sample(s, tuv, slot, level(0.0)).rgb;
+	return true;
+}
+
 static bool giLandscapeAlbedo(const device GILand* lands, int li, int landCount,
                               array<texture2d<float>, 4> weightTex,
-                              float3 hitPos, float3 hitN, thread float3& albedoOut)
+                              float3 hitPos, float3 hitN, thread float3& albedoOut,
+                              array<texture2d<uint>, 4> rvtTables, texture2d_array<float> rvtHot,
+                              texture2d_array<float> rvtCold, float footprint)
 {
 	if (li < 0 || li >= landCount || li >= 4) return false;
 	const device GILand& L = lands[li];
+	if (giRvtAlbedo(L, rvtTables[li], rvtHot, rvtCold, hitPos, footprint, albedoOut)) return true;
 	if (L.cfg.w < -0.5) { albedoOut = giAutoLandAlbedo(L, hitPos, hitN); return true; }
 	const int layers = int(L.cfg.w);
 	if (layers <= 0) return false;
@@ -3066,7 +3098,10 @@ kernel void giReflRay(uint2 gid [[thread_position_in_grid]],
                       const device uint* instanceMesh             [[buffer(4)]],
                       const device GILand* lands                  [[buffer(5)]],
                       const device int* instanceLand              [[buffer(6)]],
-                      array<texture2d<float>, 4> landWeights      [[texture(9)]])
+                      array<texture2d<float>, 4> landWeights      [[texture(9)]],
+                      array<texture2d<uint>, 4>  rvtTables        [[texture(13)]],
+                      texture2d_array<float>     rvtHot           [[texture(17)]],
+                      texture2d_array<float>     rvtCold          [[texture(18)]])
 {
 	if (float(gid.x) >= P.texSize.x || float(gid.y) >= P.texSize.y) return;
 	// Nearest sampling: interpolated oct-encoded normals / depths at geometry
@@ -3205,8 +3240,11 @@ kernel void giReflRay(uint2 gid [[thread_position_in_grid]],
 			// there is a guess). Non-landscape hits leave `albedo` untouched.
 			{
 				float3 painted;
+				// Metres one reflected pixel covers at the hit (camera -> mirror -> hit, ~60 degree view; widened by
+				// roughness): the RVT mip a hit reads, like the rasterizer's derivative choice.
+				const float footprint = (length(Pw - P.camPos.xyz) + dist) * 1.155 / max(P.texSize.y, 1.0) + dist * rough * 0.5;
 				if (giLandscapeAlbedo(lands, instanceLand[instId], int(P.land.x),
-				                      landWeights, hitPos, hitN, painted))
+				                      landWeights, hitPos, hitN, painted, rvtTables, rvtHot, rvtCold, footprint))
 					albedo = painted;
 			}
 
@@ -3359,6 +3397,8 @@ struct GILand {
 	float4   autoWet;
 	float4   autoSlope;
 	float4   autoSnow;
+	float4   rvtA;     // as the HW kernel's GILand: RvtVolumeA / RvtVolumeB of a landscape drawn from the RVT
+	float4   rvtB;
 };
 
 // Auto landscape material at a hit — copy of the HW kernel's giAutoLandAlbedo
@@ -3382,12 +3422,42 @@ static float3 giAutoLandAlbedo(const device GILand& L, float3 pos, float3 n)
 // Albedo of a landscape hit sampled at the PAINT — see the HW kernel's copy for
 // why the hit POSITION is enough to recover the UV; an auto landscape follows
 // the hit's slope and height. false = not a landscape.
+// A landscape drawn from the Runtime Virtual Texture: the hit's colour from the pages (the real ground, textures and all)
+// instead of the means. RvtLookup.h's page math, nearest page at the mip whose texel matches `footprint` (metres the
+// reflected pixel covers there); the table already points a missing page at its nearest coarser one.
+static bool giRvtAlbedo(const device GILand& L, texture2d<uint> table, texture2d_array<float> hot,
+                        texture2d_array<float> cold, float3 hitPos, float footprint, thread float3& albedoOut)
+{
+	if (L.rvtB.w < 0.5) return false;
+	const float2 uv = (hitPos.xz - L.rvtA.xy) / max(L.rvtA.z, 1e-3);
+	if (uv.x < 0.0 || uv.y < 0.0 || uv.x >= 1.0 || uv.y >= 1.0) return false;
+	const int mipCount = max(int(L.rvtB.w + 0.5), 1);
+	const int pps0     = max(int(L.rvtB.z + 0.5), 1);
+	const int mip = clamp(int(floor(log2(max(footprint / max(L.rvtA.w, 1e-4), 1.0)))), 0, mipCount - 1);
+	const int pps = max(pps0 >> mip, 1);
+	const uint2 pg = uint2(clamp(int2(uv * float(pps)), int2(0), int2(pps - 1)));
+	const uint e = table.read(pg, uint(mip)).r;
+	if (e == 0xFFFFFFFFu) return false;
+	const uint slot = e & 0x7FFFFFu;
+	const int  ppsE = max(pps0 >> int(e >> 24), 1);
+	const float2 g  = uv * float(ppsE);
+	const float ps = L.rvtB.x, bd = fmod(L.rvtB.y, 256.0);
+	const float2 tuv = (bd + (g - floor(g)) * ps) / (ps + 2.0 * bd);
+	constexpr sampler s(coord::normalized, address::clamp_to_edge, filter::linear);
+	albedoOut = (e & 0x800000u) != 0u ? cold.sample(s, tuv, slot, level(0.0)).rgb
+	                                  : hot.sample(s, tuv, slot, level(0.0)).rgb;
+	return true;
+}
+
 static bool giLandscapeAlbedo(const device GILand* lands, int li, int landCount,
                               array<texture2d<float>, 4> weightTex,
-                              float3 hitPos, float3 hitN, thread float3& albedoOut)
+                              float3 hitPos, float3 hitN, thread float3& albedoOut,
+                              array<texture2d<uint>, 4> rvtTables, texture2d_array<float> rvtHot,
+                              texture2d_array<float> rvtCold, float footprint)
 {
 	if (li < 0 || li >= landCount || li >= 4) return false;
 	const device GILand& L = lands[li];
+	if (giRvtAlbedo(L, rvtTables[li], rvtHot, rvtCold, hitPos, footprint, albedoOut)) return true;
 	if (L.cfg.w < -0.5) { albedoOut = giAutoLandAlbedo(L, hitPos, hitN); return true; }
 	const int layers = int(L.cfg.w);
 	if (layers <= 0) return false;
@@ -3912,7 +3982,10 @@ kernel void giReflRaySw(uint2 gid [[thread_position_in_grid]],
                         const device GiInst* insts [[buffer(2)]],
                         constant GIReflParams& P    [[buffer(3)]],
                         const device GILand* lands  [[buffer(4)]],
-                        array<texture2d<float>, 4> landWeights [[texture(9)]])
+                        array<texture2d<float>, 4> landWeights [[texture(9)]],
+                        array<texture2d<uint>, 4>  rvtTables   [[texture(13)]],
+                        texture2d_array<float>     rvtHot      [[texture(17)]],
+                        texture2d_array<float>     rvtCold     [[texture(18)]])
 {
 	if (float(gid.x) >= P.texSize.x || float(gid.y) >= P.texSize.y) return;
 	constexpr sampler smp(coord::normalized, address::clamp_to_edge, filter::nearest);
@@ -3999,8 +4072,9 @@ kernel void giReflRaySw(uint2 gid [[thread_position_in_grid]],
 			// (auto material: its slope/height masks, hence after hitN).
 			{
 				float3 painted;
+				const float footprint = (length(Pw - P.camPos.xyz) + dist) * 1.155 / max(P.texSize.y, 1.0) + dist * rough * 0.5;
 				if (giLandscapeAlbedo(lands, insts[hitInst].offsets.z, int(P.land.x),
-				                      landWeights, hitPos, hitN, painted))
+				                      landWeights, hitPos, hitN, painted, rvtTables, rvtHot, rvtCold, footprint))
 					albedo = painted;
 			}
 			// Occlusion ray skipped when the sun term is black anyway (night) —
@@ -8866,9 +8940,10 @@ void MetalRenderer::EncodeGISwAccelBuild()
 // Rebuilt per frame: it is a handful of 192-byte entries, and the weightmap
 // TEXTURES come from the same UUID-keyed cache the raster path uses (uploaded
 // once, re-uploaded only when the paint changes).
-int MetalRenderer::BuildGILandscapeTable(std::vector<void*>& outWeightTex)
+int MetalRenderer::BuildGILandscapeTable(std::vector<void*>& outWeightTex, std::vector<void*>* outRvtTables)
 {
 	outWeightTex.clear();
+	if (outRvtTables) outRvtTables->clear();
 	RetireGIObject(m_giLandBuf); m_giLandBuf = nullptr;
 	if (m_renderWorld.landscapes.empty() || !m_device) return 0;
 
@@ -8893,8 +8968,31 @@ int MetalRenderer::BuildGILandscapeTable(std::vector<void*>& outWeightTex)
 		g.autoWet   = ls.autoWet;
 		g.autoSlope = ls.autoSlope;
 		g.autoSnow  = ls.autoSnow;
+		// Drawn from the RVT right now: the hit reads the pages (RvtLookup.h's math, in giRvtAlbedo). The volume's two
+		// vectors are the consumer material's own parameters, the table the one SetRvtPageTable keeps for it.
+		void* rvtTable = nullptr;
+		if (outRvtTables && m_rvtPool[0] && m_contentManager)
+			if (const auto sw = m_rvtSwaps.find(ls.terrainEntity); sw != m_rvtSwaps.end())
+				if (const auto t = m_rvtTables.find(sw->second.consumerMat); t != m_rvtTables.end() && t->second.tex)
+					if (const MaterialAsset* cm = m_contentManager->getMaterial(sw->second.consumerMat))
+					{
+						const auto slotOf = [&](const char* name) -> int {
+							for (size_t k = 0; k < cm->graphParamNames.size(); ++k)
+								if (cm->graphParamNames[k] == name) return static_cast<int>(k);
+							return -1;
+						};
+						const int a = slotOf("RvtVolumeA"), b = slotOf("RvtVolumeB");
+						if (a >= 0 && b >= 0 && cm->shaderParamData.size() >= size_t(std::max(a, b) + 1) * 4)
+						{
+							const float* d = cm->shaderParamData.data();
+							g.rvtA = glm::vec4(d[a * 4], d[a * 4 + 1], d[a * 4 + 2], d[a * 4 + 3]);
+							g.rvtB = glm::vec4(d[b * 4], d[b * 4 + 1], d[b * 4 + 2], d[b * 4 + 3]);
+							rvtTable = t->second.tex;
+						}
+					}
 		gpu.push_back(g);
 		outWeightTex.push_back(wm);
+		if (outRvtTables) outRvtTables->push_back(rvtTable);
 	}
 	if (gpu.empty()) return 0;
 	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
@@ -18096,8 +18194,8 @@ void MetalRenderer::EncodeGIReflections(void* cmdBufPtr, int width, int height)
 		// Painted landscapes: the table + one weightmap texture each, so a hit on
 		// a terrain reads the PAINT at that point instead of one averaged colour
 		// for the whole landscape (see GiLandscape.h).
-		std::vector<void*> landTex;
-		const int landCount = BuildGILandscapeTable(landTex);
+		std::vector<void*> landTex, landRvt;
+		const int landCount = BuildGILandscapeTable(landTex, &landRvt);
 		// The real sky (clouds, weather) for rays that miss — see EncodeSkyReflCube.
 		// Baked on this command buffer ahead of the trace encoder below.
 		EncodeSkyReflCube((__bridge void*)cmdBuf);
@@ -18182,6 +18280,13 @@ void MetalRenderer::EncodeGIReflections(void* cmdBufPtr, int width, int height)
 			[enc setTexture:(__bridge id<MTLTexture>)(i < (int)landTex.size() && landTex[i]
 			                                          ? landTex[i] : m_dummyTexture)
 			        atIndex:9 + i];
+		// A landscape drawn from the RVT: its page table at 13..16 and the pool's albedo (hot sRGB view, cold ASTC) at
+		// 17/18, so a hit reads the real ground (giRvtAlbedo). Typed dummies where there is none (Metal checks the type).
+		for (int i = 0; i < HE::kGiMaxLandscapes; ++i)
+			[enc setTexture:(__bridge id<MTLTexture>)(i < (int)landRvt.size() && landRvt[i] ? landRvt[i] : m_rvtDummyTable)
+			        atIndex:13 + i];
+		[enc setTexture:(__bridge id<MTLTexture>)(m_rvtPoolAlbedoSrgb ? m_rvtPoolAlbedoSrgb : m_whiteArrayTexture) atIndex:17];
+		[enc setTexture:(__bridge id<MTLTexture>)(m_rvtCold[0] ? m_rvtCold[0] : m_whiteArrayTexture) atIndex:18];
 		const MTLSize tgSize  = MTLSizeMake(8, 8, 1);
 		const MTLSize tgCount = MTLSizeMake(static_cast<NSUInteger>((tw + 7) / 8),
 		                                    static_cast<NSUInteger>((th + 7) / 8), 1);

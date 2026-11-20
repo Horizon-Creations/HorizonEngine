@@ -4911,7 +4911,9 @@ TEST_CASE("GI auto landscape: the three kernel copies carry the reference's mask
 		CHECK_MESSAGE(count(mtl, term) == 2, "Metal: ", term);
 		CHECK_MESSAGE(count(gl, term) == 1, "OpenGL: ", term);
 	}
-	CHECK(count(mtl, "landWeights, hitPos, hitN, painted)") == 2);
+	CHECK(count(mtl, "landWeights, hitPos, hitN, painted, rvtTables, rvtHot, rvtCold, footprint)") == 2);
+	// A landscape drawn from the RVT reads the pages first (giRvtAlbedo), in both Metal kernels.
+	CHECK(count(mtl, "if (giRvtAlbedo(L, rvtTables[li], rvtHot, rvtCold, hitPos, footprint, albedoOut)) return true;") == 2);
 	CHECK(count(mtl, "if (L.cfg.w < -0.5) { albedoOut = giAutoLandAlbedo(L, hitPos, hitN); return true; }") == 2);
 	CHECK(count(gl, "albedo = giAutoLandAlbedo(li, hitPos, hitN);") == 1);
 }
