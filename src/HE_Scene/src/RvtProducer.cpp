@@ -11,7 +11,7 @@ namespace HE::rvt
             HE::landscape::HlodChunkRect rect;
             rect.min  = p.rectMin;
             rect.size = p.rectMax - p.rectMin;
-            if (baker.renderRvtPage(rect, pagePx, p.slot)) ++painted;
+            if (baker.renderRvtPage(rect, pagePx, p.slot, p.layers)) ++painted;
         }
         return painted;
     }

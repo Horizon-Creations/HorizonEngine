@@ -173,7 +173,6 @@ inline constexpr HE::GameBuildConfig kConfig = {
   },
   "rvt": {
     "activationRadiusM": 600.0,
-    "enabled": false,
     "maxPagesPerFrame": 8,
     "metersPerTexel": 0.25,
     "nativeNear": true,

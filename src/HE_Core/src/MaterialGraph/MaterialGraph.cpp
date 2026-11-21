@@ -1,5 +1,6 @@
 #include "MaterialGraph/MaterialGraph.h"
 #include "MaterialGraph/RvtLookup.h"
+#include "MaterialGraph/RvtSplit.h"
 #include <cstdint>
 
 #include <GraphCommon/GraphJson.h>
@@ -300,6 +301,15 @@ const std::vector<MatNodeDesc>& registry()
           { { "Volume A", F::Vec4, 0 }, { "Volume B", F::Vec4, 0 } },
           { { "Base Color", F::Vec3, 0 }, { "Normal", F::Vec3, 0 }, { "AO", F::Float, 0 }, { "Roughness", F::Float, 0 },
             { "Valid", F::Float, 0 } }, 0 },
+
+        // ── v22: RVT 2.0 — the Write/Read pair (RvtSplit.h). Pin ORDER is on disk: never reorder. ──
+        { MatNodeType::RvtWrite, "RVT Write", "Landscape",
+          { { "Base Color", F::Vec3, 0.5f }, { "Normal", F::Vec3, 0 }, { "Roughness", F::Float, 0.5f }, { "AO", F::Float, 1 },
+            { "Specular", F::Float, 0.5f }, { "Height", F::Float, 0 }, { "Mask", F::Float, 0 } },
+          {}, 2 },
+        { MatNodeType::RvtRead, "RVT Read", "Landscape", {},
+          { { "Base Color", F::Vec3, 0 }, { "Normal", F::Vec3, 0 }, { "Roughness", F::Float, 0 }, { "AO", F::Float, 0 },
+            { "Valid", F::Float, 0 } }, 0 },
     };
     return kReg;
 }
@@ -527,6 +537,8 @@ int MaterialGraph::addNode(MatNodeType type, float x, float y)
     if (matNodeIsBombing(type)) { n.p[0] = 1.0f; n.p[1] = kMatBombDefaultSharpness; n.p[2] = 0.0f; }
     if (type == MatNodeType::NormalMapBombSample || type == MatNodeType::NormalMapArrayBombSample)
         n.p[3] = 1.0f;
+    // v22: a fresh RVT Write/Read pair names the same virtual texture out of the box.
+    if (type == MatNodeType::RvtWrite || type == MatNodeType::RvtRead) n.s = "RVT";
     // v10: a fresh layer-blend node starts with two named layers.
     if (type == MatNodeType::LandscapeLayerBlend) n.s = "Layer 1\nLayer 2";
     if (type == MatNodeType::Output) n.p[2] = 0.5f;
@@ -1604,6 +1616,28 @@ HE_MG_NOINLINE bool emitLayerBlendNode(EmitCtx& c, const Scope& sc, const MatGra
             pinExpr = { v + "_b", v + "_n", v + "_ao", v + "_r", v + "_ok" };
             break;
         }
+        case MatNodeType::RvtWrite:
+            // A sink: the page shaders are cut from the pins that feed it (RvtSplit.h), the live
+            // shader never evaluates it. Reached only through a function graph or a stray link.
+            decl = "float " + v + " = 0.0;";
+            break;
+        case MatNodeType::RvtRead:
+        {
+            // The same lookup as RvtSample. Its two volume vectors are parameters the engine fills,
+            // named after the RVT so two Read nodes of one RVT share the slots.
+            c.usesRvt = true;
+            MatGraphNode pa; pa.id = n.id; pa.s = matRvtVolumeParamName(n.s, 'A');
+            MatGraphNode pb; pb.id = n.id; pb.s = matRvtVolumeParamName(n.s, 'B');
+            pa.group = pb.group = "RVT";
+            const int sa = paramSlot(c, pa, MatParamKind::Vec4), sb = paramSlot(c, pb, MatParamKind::Vec4);
+            const std::string va = sa < 0 ? std::string("vec4(0.0)") : "heParams.v[" + std::to_string(sa) + "]";
+            const std::string vb = sb < 0 ? std::string("vec4(0.0)") : "heParams.v[" + std::to_string(sb) + "]";
+            decl = "vec3 " + v + "_b; vec3 " + v + "_n; float " + v + "_ao; float " + v + "_r; float " + v + "_ok; "
+                 + "heRvtSample(vWorldPos.xz, " + va + ", " + vb + ", " + v + "_b, " + v + "_n, " + v + "_ao, " + v + "_r, " + v + "_ok); "
+                 + "vec3 " + v + " = " + v + "_b;";
+            pinExpr = { v + "_b", v + "_n", v + "_r", v + "_ao", v + "_ok" };
+            break;
+        }
         case MatNodeType::LandscapeGroupPick:
         {
             c.usesLandscapeWeights = true;
@@ -2577,9 +2611,30 @@ std::string emitDeclarations(const EmitCtx& c, bool uiDomain, bool domainStage, 
 }
 } // namespace
 
-MatShaderGen generateFragment(const MaterialGraph& graph, const MatFunctionLoader& loader,
+MatShaderGen generateFragment(const MaterialGraph& graphIn, const MatFunctionLoader& loaderIn,
                               const std::map<std::string, bool>* switchOverrides)
 {
+    // RVT off (the global switch, or a backend without virtual textures): the RVT Write is skipped and the RVT Read is replaced by
+    // the expressions that feed the Write, in this graph and in every function graph it calls. From here on the generator sees the
+    // graph a material without the pair would be, so the shader is the same one (matRvtEnabled in RvtSplit.h).
+    const bool rvtInline = !matRvtEnabled();
+    MaterialGraph inlined;
+    std::map<std::string, MaterialGraph> inlinedFns; // node-based: pointers stay valid while the loader hands them out
+    MatFunctionLoader inlineLoader;
+    if (rvtInline)
+    {
+        inlined = matInlineRvt(graphIn);
+        if (loaderIn)
+            inlineLoader = [&](const std::string& path) -> const MaterialGraph* {
+                const MaterialGraph* fn = loaderIn(path);
+                if (!fn) return nullptr;
+                auto it = inlinedFns.find(path);
+                if (it == inlinedFns.end()) it = inlinedFns.emplace(path, matInlineRvt(*fn)).first;
+                return &it->second;
+            };
+    }
+    const MaterialGraph&     graph  = rvtInline ? inlined : graphIn;
+    const MatFunctionLoader& loader = rvtInline ? inlineLoader : loaderIn;
     const MatGraphNode* out = firstOutputNode(graph);
 
     const std::string headerCommon =
@@ -2720,6 +2775,52 @@ MatShaderGen generateFragment(const MaterialGraph& graph, const MatFunctionLoade
         dispStatements = c.body.substr(mark) + "    float heDisp = " + dispExpr + ";\n";
         c.body.resize(mark); // the displacement statements belong to the domain stage only
     }
+
+    // RVT on: this shader is the part after the Read node, so the parameters, switches and textures that only the pages
+    // (everything before a Write node) read are not in its text. They are the material's own all the same: the instance panel
+    // lists the parameters and an instance overrides them, the page driver reads them, and what a material names as its
+    // textures is how the GI and the asset scan find its arrays. They get their slots after the live ones and the text never
+    // indexes them. (The consumer the page driver draws is cut from the live part alone, so it binds none of the arrays.)
+    if (!rvtInline && !uiDomain)
+        for (const MatGraphNode& wn : graph.nodes)
+        {
+            if (wn.type != MatNodeType::RvtWrite) continue;
+            for (const MatGraphLink& wl : graph.links)
+            {
+                if (wl.dstNode != wn.id) continue;
+                for (int id : matGraphDependencies(graph, wl.srcNode))
+                {
+                    const MatGraphNode* dn = graph.findNode(id);
+                    if (!dn) continue;
+                    switch (dn->type)
+                    {
+                        case MatNodeType::ParamFloat: paramSlot(c, *dn, MatParamKind::Float); break;
+                        case MatNodeType::ParamColor: paramSlot(c, *dn, MatParamKind::Color); break;
+                        case MatNodeType::ParamVec2:  paramSlot(c, *dn, MatParamKind::Vec2);  break;
+                        case MatNodeType::ParamVec4:  paramSlot(c, *dn, MatParamKind::Vec4);  break;
+                        case MatNodeType::ParamBool:  paramSlot(c, *dn, MatParamKind::Bool);  break;
+                        case MatNodeType::StaticSwitch:
+                        {
+                            const std::string swName = dn->s.empty() ? ("switch_" + std::to_string(dn->id)) : dn->s;
+                            bool on = dn->p[0] > 0.5f;
+                            if (c.switchOv)
+                                if (auto it = c.switchOv->find(swName); it != c.switchOv->end()) on = it->second;
+                            bool seen = false;
+                            for (const auto& sw : c.switches) seen = seen || sw.first == swName;
+                            if (!seen) c.switches.push_back({ swName, on });
+                            break;
+                        }
+                        default:
+                            if (matNodeSamplesTexture(dn->type))
+                                textureSampler(c, *dn, dn->type == MatNodeType::TextureArraySample
+                                                    || dn->type == MatNodeType::NormalMapArraySample
+                                                    || dn->type == MatNodeType::TextureArrayBombSample
+                                                    || dn->type == MatNodeType::NormalMapArrayBombSample);
+                            break;
+                    }
+                }
+            }
+        }
 
     uint32_t arrayMask = 0;
     std::string src = emitDeclarations(c, uiDomain, /*domainStage=*/false, arrayMask);

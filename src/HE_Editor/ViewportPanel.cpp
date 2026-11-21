@@ -540,28 +540,26 @@ namespace
 		}
 	}
 
-	// The key to the "RVT Mip Levels" view, bottom left. The swatches are the
-	// shader's palette (heRvtMipView in RvtLookup.h): keep the two in step.
+	// The key to the "Virtual Texture" view (ViewMode::RvtDebug), bottom left. The swatches are the lookup's page-map colours
+	// (RvtLookup.h: hue = fract(0.33 + mip * 0.13), full saturation): keep the two in step.
 	void drawRvtMipLegend(const ImVec2& rectMin, const ImVec2& rectMax)
 	{
-		struct Row { ImU32 col; const char* text; };
-		static const Row kRows[] = {
-			{ IM_COL32(255,  38,  26, 255), "Mip 0  finest (0.25 m/texel by default)" },
-			{ IM_COL32(255, 140,  26, 255), "Mip 1" },
-			{ IM_COL32(255, 242,  38, 255), "Mip 2" },
-			{ IM_COL32( 51, 230,  51, 255), "Mip 3" },
-			{ IM_COL32( 38, 230, 242, 255), "Mip 4" },
-			{ IM_COL32( 51,  89, 255, 255), "Mip 5" },
-			{ IM_COL32(230,  51, 242, 255), "Mip 6+ coarsest" },
+		static const char* const kMipText[] = { "Mip 0  finest", "Mip 1", "Mip 2", "Mip 3", "Mip 4", "Mip 5", "Mip 6", "Mip 7+" };
+		constexpr int kMips = 8;
+		const char* const kMarks[] = {
+			"Dark stripes: a coarser page stands in (finer one not painted yet)",
+			"Light checker: the page is painted but stale",
+			"White line: page border",
+			"Black: no page at any level",
+			"Uncoloured: not drawn from the RVT",
 		};
-		const char* kStripes = "Dark stripes: finer page wanted, not loaded";
-		const char* kOther   = "Uncoloured: not drawn from the RVT";
+		constexpr int kMarkCount = 5;
 		ImDrawList* dl = ImGui::GetWindowDrawList();
 		const float pad = 6.0f, lineH = ImGui::GetTextLineHeight(), sw = lineH * 0.8f;
-		float w = std::max(ImGui::CalcTextSize(kStripes).x, ImGui::CalcTextSize(kOther).x);
-		for (const Row& r : kRows) w = std::max(w, sw + pad + ImGui::CalcTextSize(r.text).x);
-		const int n = static_cast<int>(IM_ARRAYSIZE(kRows)) + 2;
-		const ImVec2 size(w + pad * 2.0f, lineH * static_cast<float>(n) + pad * 2.0f);
+		float w = 0.0f;
+		for (const char* t : kMarks) w = std::max(w, ImGui::CalcTextSize(t).x);
+		for (const char* t : kMipText) w = std::max(w, sw + pad + ImGui::CalcTextSize(t).x);
+		const ImVec2 size(w + pad * 2.0f, lineH * float(kMips + kMarkCount) + pad * 2.0f);
 		const ImVec2 p0(rectMin.x + 8.0f, rectMax.y - size.y - 8.0f);
 		const ImVec2 p1(p0.x + size.x, p0.y + size.y);
 		if (p1.x > rectMax.x || p0.y < rectMin.y) return;   // too small a pane to hold it
@@ -569,15 +567,22 @@ namespace
 		dl->AddRect(p0, p1, IM_COL32(255, 255, 255, 30), 4.0f);
 		const ImU32 text = IM_COL32(225, 222, 215, 255);
 		float y = p0.y + pad;
-		for (const Row& r : kRows)
+		for (int m = 0; m < kMips; ++m)
 		{
+			float hue = 0.33f + float(m) * 0.13f;
+			hue -= std::floor(hue);
+			float r = 0.0f, g = 0.0f, b = 0.0f;
+			ImGui::ColorConvertHSVtoRGB(hue, 1.0f, 1.0f, r, g, b);
 			const float sy = y + (lineH - sw) * 0.5f;
-			dl->AddRectFilled(ImVec2(p0.x + pad, sy), ImVec2(p0.x + pad + sw, sy + sw), r.col, 2.0f);
-			dl->AddText(ImVec2(p0.x + pad + sw + pad, y), text, r.text);
+			dl->AddRectFilled(ImVec2(p0.x + pad, sy), ImVec2(p0.x + pad + sw, sy + sw), ImGui::GetColorU32(ImVec4(r, g, b, 1.0f)), 2.0f);
+			dl->AddText(ImVec2(p0.x + pad + sw + pad, y), text, kMipText[m]);
 			y += lineH;
 		}
-		dl->AddText(ImVec2(p0.x + pad, y), text, kStripes); y += lineH;
-		dl->AddText(ImVec2(p0.x + pad, y), IM_COL32(160, 157, 150, 255), kOther);
+		for (int i = 0; i < kMarkCount; ++i)
+		{
+			dl->AddText(ImVec2(p0.x + pad, y), i == kMarkCount - 1 ? IM_COL32(160, 157, 150, 255) : text, kMarks[i]);
+			y += lineH;
+		}
 	}
 }
 
@@ -1875,7 +1880,7 @@ void render(AppContext& ctx, float dt)
 				// readable whatever the scene is doing underneath it.
 				if (s_showFlags.stats)
 					drawStatsOverlay(ctx, rectMin, rectMax);
-				if (s_tb.viewMode == HE::ViewMode::RvtMips)
+				if (s_tb.viewMode == HE::ViewMode::RvtDebug)
 					drawRvtMipLegend(rectMin, rectMax);
 				if (ctx.renderer)
 				{

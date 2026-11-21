@@ -625,7 +625,7 @@ namespace TerrainSystem
             if (tc.layerWeights.empty())
             {
                 tc.weightmapTextureId = HE::UUID{};   // unpainted → shader uses layer 0
-                if (tc.weightsDirty) { markWeightGatedFoliage(reg, te); tc.rvtJournal.noteAll(); }   // painted -> cleared (undo, reset)
+                if (tc.weightsDirty) { markWeightGatedFoliage(reg, te); tc.rvtJournal.noteAll(TerrainComponent::RvtJournal::kWeights); }   // painted -> cleared (undo, reset)
                 tc.weightsDirty = false;
                 tc.weightsDirtyFromStroke = false;
                 setUnpaintedLayerAverage(tc);
@@ -638,7 +638,7 @@ namespace TerrainSystem
                 tc.weightmapTextureId = HE::UUID{};
                 tc.weightsDirty = false;
                 tc.weightsDirtyFromStroke = false;
-                tc.rvtJournal.noteAll();
+                tc.rvtJournal.noteAll(TerrainComponent::RvtJournal::kWeights);
                 setUnpaintedLayerAverage(tc);
                 continue;
             }
@@ -649,7 +649,7 @@ namespace TerrainSystem
             // so it must not be widened here even with another stroke's rect already pending from
             // the same tick. Everything else that sets weightsDirty (a fill, a load, an undo) said
             // nothing about where, independent of whatever is already in the journal.
-            if (!tc.weightsDirtyFromStroke) tc.rvtJournal.noteAll();
+            if (!tc.weightsDirtyFromStroke) tc.rvtJournal.noteAll(TerrainComponent::RvtJournal::kWeights);
             computeAverageLayerWeights(tc);           // paint changed → refresh the mean
             markWeightGatedFoliage(reg, te);
 
@@ -920,7 +920,7 @@ namespace TerrainSystem
             tc.builtChunksPerSide = g.chunksPerSide;
             // The ground picture changed under the Runtime Virtual Texture: all of it for a full rebuild, the brush rect for a region.
             if (rebuildAll) tc.rvtJournal.noteAll();
-            else if (tc.regionDirty) tc.rvtJournal.noteRect(tc.dirtyMinX, tc.dirtyMinZ, tc.dirtyMaxX, tc.dirtyMaxZ);
+            else if (tc.regionDirty) tc.rvtJournal.noteRect(tc.dirtyMinX, tc.dirtyMinZ, tc.dirtyMaxX, tc.dirtyMaxZ, TerrainComponent::RvtJournal::kHeight);
             tc.dirty              = false;
             tc.regionDirty        = false;
 

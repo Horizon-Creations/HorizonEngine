@@ -914,7 +914,6 @@ TEST_CASE("ProjectSettings: operator== and isDefault see every field")
 	HE_FIELD(input.enabled);
 	HE_FIELD(input.stickDeadzone);
 	HE_FIELD(input.triggerDeadzone);
-	HE_FIELD(rvt.enabled);
 	HE_FIELD(rvt.poolPages);
 	HE_FIELD(rvt.metersPerTexel);
 	HE_FIELD(rvt.nearRadiusM);
@@ -1050,11 +1049,10 @@ TEST_CASE("ProjectSettings::clamp: a NaN or infinite float falls back, field by 
 	}
 }
 
-TEST_CASE("ProjectRvtSettings: off by default, in the file, and a file from before it existed loads as off (Thema 333)")
+TEST_CASE("ProjectSettings: the \"rvt\" section is the project's RVT tuning; an old \"enabled\" is read past (Thema 333, 335)")
 {
-	// Default-constructed is today's behaviour: the landscape draws its own material.
+	// Default-constructed is the tuning every project starts with.
 	const HE::ProjectSettings d;
-	CHECK_FALSE(d.rvt.enabled);
 	CHECK(d.rvt.poolPages == 512);
 	CHECK(d.rvt.metersPerTexel == doctest::Approx(0.25f));
 	CHECK(d.rvt.nearRadiusM == doctest::Approx(64.0f));
@@ -1063,53 +1061,54 @@ TEST_CASE("ProjectRvtSettings: off by default, in the file, and a file from befo
 	CHECK(d.rvt.nativeNear);
 	CHECK(d.isDefault());
 
-	// Turning it on is a change the saver must see: a project whose ONLY edit is "RVT on" would otherwise count as default,
-	// never get a file, and lose the setting on the next open.
+	// Tuning it is a change the saver must see: a project whose ONLY edit is the pool would otherwise count as default,
+	// never get a file, and lose the setting on the next open. (On/off is the global switch since RVT 2.0, Thema 335.)
 	HE::ProjectSettings a;
-	a.rvt.enabled = true;
-	CHECK_FALSE(a.isDefault());
 	a.rvt.poolPages         = 1024;
+	CHECK_FALSE(a.isDefault());
 	a.rvt.metersPerTexel    = 0.5f;
 	a.rvt.nearRadiusM       = 96.0f;
 	a.rvt.activationRadiusM = 1200.0f;
 	a.rvt.maxPagesPerFrame  = 16;
 	a.rvt.nativeNear        = false;
+	a.shadows.resolution    = 4096;
 
 	json j;
 	a.toJson(j);
-	CHECK(j["rvt"]["enabled"] == true);
+	CHECK_FALSE(j["rvt"].contains("enabled"));
 	CHECK(j["rvt"]["nativeNear"] == false);
-	{
-		// A file from before the native near view (no "nativeNear") reads as on, the default.
-		json noNear = j;
-		noNear["rvt"].erase("nativeNear");
-		HE::ProjectSettings n;
-		n.fromJson(noNear);
-		CHECK(n.rvt.nativeNear);
-	}
 	CHECK(j["rvt"]["poolPages"] == 1024);
 	CHECK(j["rvt"]["maxPagesPerFrame"] == 16);
 	HE::ProjectSettings b;
 	b.fromJson(j);
-	CHECK(a == b);
-	CHECK(b.rvt.activationRadiusM == doctest::Approx(1200.0f));
+	CHECK(b.shadows.resolution == 4096);
+	CHECK(b == a);
 
-	// A file written before the section existed (or by an engine that does not know it) is the default: off.
+	// A file from before RVT 2.0 still carries "enabled": it is read past, the rest loads.
 	json old = j;
-	old.erase("rvt");
+	old["rvt"]["enabled"] = true;
+	HE::ProjectSettings e;
+	e.fromJson(old);
+	CHECK(e == a);
+
+	// A file from before the native near view (no "nativeNear") reads as on, the default.
+	json noNear = j;
+	noNear["rvt"].erase("nativeNear");
+	HE::ProjectSettings n;
+	n.fromJson(noNear);
+	CHECK(n.rvt.nativeNear);
+
+	// Garbage in the section is as harmless as a valid one.
 	HE::ProjectSettings c;
-	c.rvt.enabled = true;     // fromJson is a full reset, not a merge: a missing section must not keep this
-	c.fromJson(old);
-	CHECK_FALSE(c.rvt.enabled);
+	c.fromJson(json{ { "rvt", { { "enabled", "yes" }, { "poolPages", "many" } } } });
 	CHECK(c.isDefault());
 }
 
 TEST_CASE("ProjectRvtSettings: out-of-range and wrong-type values are corrected, never trusted (Thema 333)")
 {
 	HE::ProjectSettings s;
-	s.fromJson(json{ { "rvt", { { "enabled", true }, { "poolPages", 1 }, { "metersPerTexel", 1000.0 },
+	s.fromJson(json{ { "rvt", { { "poolPages", 1 }, { "metersPerTexel", 1000.0 },
 	                            { "nearRadiusM", -5.0 }, { "activationRadiusM", 1.0e9 }, { "maxPagesPerFrame", 9999 } } } });
-	CHECK(s.rvt.enabled);
 	CHECK(s.rvt.poolPages == HE::ProjectRvtSettings::kMinPoolPages);
 	CHECK(s.rvt.metersPerTexel == doctest::Approx(HE::ProjectRvtSettings::kMaxTexel));
 	CHECK(s.rvt.nearRadiusM == doctest::Approx(HE::ProjectRvtSettings::kMinRadius));
@@ -1117,8 +1116,7 @@ TEST_CASE("ProjectRvtSettings: out-of-range and wrong-type values are corrected,
 	CHECK(s.rvt.maxPagesPerFrame == HE::ProjectRvtSettings::kMaxPagesPerFrame);
 
 	HE::ProjectSettings t;
-	t.fromJson(json{ { "rvt", { { "enabled", "yes" }, { "poolPages", "many" }, { "metersPerTexel", "fine" } } } });
-	CHECK_FALSE(t.rvt.enabled);
+	t.fromJson(json{ { "rvt", { { "poolPages", "many" }, { "metersPerTexel", "fine" } } } });
 	CHECK(t.rvt.poolPages == 512);
 	CHECK(t.rvt.metersPerTexel == doctest::Approx(0.25f));
 }

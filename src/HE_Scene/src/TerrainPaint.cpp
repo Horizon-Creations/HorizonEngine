@@ -172,7 +172,8 @@ bool paint(TerrainComponent& tc, float localX, float localZ,
     tc.weightsDirtyFromStroke = announced;   // stays unannounced if it already was; else this rect is the whole of it
     // The texels this stroke may have changed, as a terrain-local rect (the Runtime Virtual Texture pages under it).
     tc.rvtJournal.noteRect(-halfX + static_cast<float>(x0) * texelX, -halfZ + static_cast<float>(z0) * texelZ,
-                           -halfX + static_cast<float>(x1 + 1) * texelX, -halfZ + static_cast<float>(z1 + 1) * texelZ);
+                           -halfX + static_cast<float>(x1 + 1) * texelX, -halfZ + static_cast<float>(z1 + 1) * texelZ,
+                           TerrainComponent::RvtJournal::kWeights);
     return true;
 }
 
