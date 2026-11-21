@@ -31,6 +31,9 @@ public:
 		// id<MTLRenderPipelineState> of the ground's material (landscapeVertex + landscapeFragment), for the target of this encoder; the
 		// caller has bound everything a material draw needs but the landscape's own images. nullptr = the fixed layer blend.
 		void* materialPipeline = nullptr;
+		// id<MTLRenderPipelineState> from makePassPipeline: the ground in another pass's target (a shadow map layer, the GI pre-pass).
+		// Wins over materialPipeline; only the vertex stage's images are bound.
+		void* passPipeline = nullptr;
 	};
 	struct Stats
 	{
@@ -52,6 +55,10 @@ public:
 	bool init(void* device, unsigned long colorFormat, unsigned long depthFormat, std::string* error = nullptr);
 	void shutdown();
 	bool ready() const;
+	// A pipeline of the landscape's vertex stage for another pass: `fragment` names a fragment function of kLandscapeMSL
+	// ("fragmentGiGBuf") or is null (depth only, a shadow map). Returns a RETAINED id<MTLRenderPipelineState> the caller releases
+	// (CFBridgingRelease), or null with `error`. After init().
+	void* makePassPipeline(const char* fragment, const unsigned long* colorFormats, int colorCount, unsigned long depthFormat, std::string* error = nullptr);
 
 	// Executes the frame's uploads and table updates, then encodes its patches into `renderEncoder` (an id<MTLRenderCommandEncoder>)
 	// with `viewProj`: the plain GL-convention view-projection (origin-relative world to clip, depth -1..1), the one MetalRenderer's scene pass

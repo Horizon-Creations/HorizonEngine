@@ -126,6 +126,29 @@ bool MetalLandscape::init(void* devicePtr, unsigned long colorFormat, unsigned l
 	return true;
 }
 
+void* MetalLandscape::makePassPipeline(const char* fragment, const unsigned long* colorFormats, int colorCount, unsigned long depthFormat, std::string* error)
+{
+	Impl& m = *m_impl;
+	if (!m.ok) return nullptr;
+	@autoreleasepool
+	{
+		NSError* err = nil;
+		id<MTLLibrary> lib = [m.device newLibraryWithSource:[NSString stringWithUTF8String:glsl::kLandscapeMSL] options:nil error:&err];
+		MTLRenderPipelineDescriptor* pd = [[MTLRenderPipelineDescriptor alloc] init];
+		pd.vertexFunction = [lib newFunctionWithName:@"vertexMain"];
+		if (fragment) pd.fragmentFunction = [lib newFunctionWithName:[NSString stringWithUTF8String:fragment]];
+		for (int i = 0; i < colorCount; ++i) pd.colorAttachments[static_cast<NSUInteger>(i)].pixelFormat = static_cast<MTLPixelFormat>(colorFormats[i]);
+		pd.depthAttachmentPixelFormat = static_cast<MTLPixelFormat>(depthFormat);
+		id<MTLRenderPipelineState> pso = lib && (!fragment || pd.fragmentFunction) ? [m.device newRenderPipelineStateWithDescriptor:pd error:&err] : nil;
+		if (!pso)
+		{
+			if (error) *error = std::string("landscape pass pipeline: ") + (err ? [[err localizedDescription] UTF8String] : "no such function");
+			return nullptr;
+		}
+		return (void*)CFBridgingRetain(pso);
+	}
+}
+
 void MetalLandscape::shutdown()
 {
 	Impl& m = *m_impl;
@@ -286,7 +309,14 @@ void MetalLandscape::encode(void* renderEncoder, const LandscapeRenderFrame& f, 
 		[enc setVertexTexture:m.tileHeights atIndex:kTex + 0];
 		[enc setVertexTexture:m.slotTable atIndex:kTex + 1];
 		[enc setVertexTexture:m.coarseHeights atIndex:kTex + 2];
-		if (shading.materialPipeline)
+		if (shading.passPipeline)
+		{
+			// Another pass's target (a shadow map layer, the GI pre-pass): the vertex stage's bindings are all it reads. Both sides of
+			// the ground, whatever the pass culls for its meshes: a height field has no back.
+			[enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)shading.passPipeline];
+			[enc setCullMode:MTLCullModeNone];
+		}
+		else if (shading.materialPipeline)
 		{
 			// A material draws the patches (MaterialShaderLibrary::landscapeVertex / landscapeFragment): the vertex stage reads what
 			// kLandscapeMSL's does, where it does; the fragment's weights sit on the slots a material has free, 13 and 25-30

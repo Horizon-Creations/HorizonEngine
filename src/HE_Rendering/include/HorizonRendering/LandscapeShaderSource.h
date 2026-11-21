@@ -546,6 +546,22 @@ fragment float4 fragmentMain(LsVertexOut in [[stage_in]],
     float ndl = max(dot(n, normalize(G.sunDir.xyz)), 0.0);
     return float4(albedo * (G.ambient.xyz * ao + G.sunColor.xyz * ndl), 1.0);
 }
+
+// The ground for MetalRenderer's GI pre-pass (origin-relative position, a = 1: geometry; normal): the pass every lit pixel gets its
+// ray-traced sun shadow from. Same vertex stage, so the same surface as the scene pass draws. (The shadow maps take the vertex stage
+// alone, no fragment function.)
+struct LsGiOut { float4 posOut [[color(0)]]; float4 normOut [[color(1)]]; };
+fragment LsGiOut fragmentGiGBuf(LsVertexOut in [[stage_in]], constant LsGlobals& G [[buffer(20)]])
+{
+    float2 abs2 = in.worldRel.xz + G.origin.xz;
+    if (abs2.x > G.world.x || abs2.y > G.world.y || abs2.x < 0.0 || abs2.y < 0.0) discard_fragment();
+    float3 n = normalize(cross(dfdx(in.worldRel), dfdy(in.worldRel)));
+    if (n.y < 0.0) n = -n;
+    LsGiOut o;
+    o.posOut = float4(in.worldRel, 1.0);
+    o.normOut = float4(n, 0.0);
+    return o;
+}
 )MSL";
 
 // ─── D3D11 / D3D12 ───────────────────────────────────────────────────────────

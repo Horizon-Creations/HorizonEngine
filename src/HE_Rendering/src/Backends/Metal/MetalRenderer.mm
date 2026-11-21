@@ -7311,6 +7311,9 @@ void MetalRenderer::Shutdown()
 	m_uiMaterialPipelines.clear();
 	for (auto& [k, pso] : m_landscapeMaterialPipelines) if (pso) CFBridgingRelease(pso);
 	m_landscapeMaterialPipelines.clear();
+	if (m_landscapeShadowPipeline) { CFBridgingRelease(m_landscapeShadowPipeline); m_landscapeShadowPipeline = nullptr; }
+	if (m_landscapeGiPipeline)     { CFBridgingRelease(m_landscapeGiPipeline);     m_landscapeGiPipeline = nullptr; }
+	m_landscapeShadowTried = m_landscapeGiTried = false;
 	if (m_uiBackdrop) { CFBridgingRelease(m_uiBackdrop); m_uiBackdrop = nullptr; }
 	m_uiBackdropW = m_uiBackdropH = 0;
 	if (m_bloomBrightPipeline)  { CFBridgingRelease(m_bloomBrightPipeline);  m_bloomBrightPipeline = nullptr; }
@@ -8585,7 +8588,8 @@ void MetalRenderer::EncodeShadowMap(void* cmdBufPtr, float aspect)
 	                    && m_giIrradianceAtlas && m_giVisibilityAtlas;
 	const bool wantCsm   = m_renderWorld.shadow.enabled && !giOwnsSun;
 	const bool wantLocal = m_renderWorld.shadow.localLayerCount > 0 && m_localShadowTex;
-	if ((!wantCsm && !wantLocal) || m_renderWorld.objects.empty()) return;
+	// Nothing to cast: no objects, and no tile landscape either (its ground casts into every layer, below).
+	if ((!wantCsm && !wantLocal) || (m_renderWorld.objects.empty() && !m_landscapeProvider)) return;
 	RefineObjectBounds();
 	const int cascades    = wantCsm ? std::clamp(m_renderWorld.shadow.cascadeCount, 1, kCsmCascades) : 0;
 	const int localLayers = wantLocal
@@ -8793,6 +8797,8 @@ void MetalRenderer::EncodeShadowMap(void* cmdBufPtr, float aspect)
 					         indexBufferOffset:0];
 				}, "ShadowLoop", /*serial=*/true);
 			}
+			// The tile landscape casts into every layer: the ground shadows itself and what stands on it.
+			EncodeLandscapePass((__bridge void*)enc, HE::kMetalClipFix * sv.viewProj, /*giGBuffer=*/false);
 			[enc endEncoding];
 		};
 
@@ -9635,6 +9641,8 @@ void MetalRenderer::EncodeGIShadowRays(void* cmdBufPtr, int width, int height)
 				                  indexType:MTLIndexTypeUInt32 indexBuffer:ibuf indexBufferOffset:0];
 			}
 		}
+		// The tile landscape's ground is geometry like the meshes: without it here its pixels would have no shadow value at all.
+		EncodeLandscapePass((__bridge void*)genc, viewProjRaster, /*giGBuffer=*/true);
 		[genc endEncoding];
 
 		// ── 2. Ray-traced occlusion (compute) — HW intersection_query against
@@ -16351,19 +16359,52 @@ void* MetalRenderer::GetOrBuildLandscapeMaterialPipeline(const HE::UUID& materia
 #endif
 }
 
+bool MetalRenderer::EnsureLandscape()
+{
+	if (m_landscapeFailed) return false;
+	if (m_landscape.ready()) return true;
+	std::string err;
+	if (!m_landscape.init(m_device, static_cast<unsigned long>(kSceneColorFormat), static_cast<unsigned long>(kDepthFormat), &err))
+	{
+		HE_LOG_WARN(RHI, "MetalRenderer: the world-scale landscape is off: %s", err.c_str());
+		m_landscapeFailed = true;
+		return false;
+	}
+	return true;
+}
+
+// The tile landscape in a pass that is not the scene's: a shadow map layer (depth only) or the GI pre-pass (position + normal).
+// `clip` is that pass's matrix with depth 0..1. The provider is asked for THIS view (its patches are the ones this view sees; their
+// levels are the main camera's whatever the view, LandscapeRuntime::buildFrame, so caster and receiver are the same surface), and a
+// frame carries the uploads that were pending when it was asked, so whichever pass comes first in a frame brings the tiles in.
+void MetalRenderer::EncodeLandscapePass(void* renderEncoder, const glm::mat4& clip, bool giGBuffer)
+{
+	if (!m_landscapeProvider || !EnsureLandscape()) return;
+	// HE_LANDSCAPE_PASSES=0: the ground in the scene pass alone, as before (the A/B of landscape_gpu_check; read per call so a
+	// running process can switch).
+	if (const char* e = std::getenv("HE_LANDSCAPE_PASSES"); e && *e == '0') return;
+	void*& pso = giGBuffer ? m_landscapeGiPipeline : m_landscapeShadowPipeline;
+	bool& tried = giGBuffer ? m_landscapeGiTried : m_landscapeShadowTried;
+	if (!pso && !tried)
+	{
+		tried = true;
+		std::string err;
+		const unsigned long gi[2] = { static_cast<unsigned long>(kGiGBufPosFormat), static_cast<unsigned long>(MTLPixelFormatRGBA16Float) };
+		pso = m_landscape.makePassPipeline(giGBuffer ? "fragmentGiGBuf" : nullptr, gi, giGBuffer ? 2 : 0, static_cast<unsigned long>(kDepthFormat), &err);
+		if (!pso) HE_LOG_WARN(RHI, "MetalRenderer: the landscape is not in the %s: %s", giGBuffer ? "GI pre-pass" : "shadow maps", err.c_str());
+	}
+	if (!pso) return;
+	HE::LandscapeRenderFrame frame;
+	m_landscapeProvider(glm::dmat4(clip), /*zeroToOne=*/true, frame);
+	if (!frame.active) return;
+	MetalLandscape::Shading sh;
+	sh.passPipeline = pso;
+	m_landscape.encode(renderEncoder, frame, clip, sh);
+}
+
 void MetalRenderer::EncodeLandscape(void* renderEncoder, const glm::mat4& viewProj, const HE::LandscapeRenderFrame& frame)
 {
-	if (!frame.active || m_landscapeFailed) return;   // asked for at the top of EncodeScene; no landscape in this scene: nothing compiled, nothing drawn
-	if (!m_landscape.ready())
-	{
-		std::string err;
-		if (!m_landscape.init(m_device, static_cast<unsigned long>(kSceneColorFormat), static_cast<unsigned long>(kDepthFormat), &err))
-		{
-			HE_LOG_WARN(RHI, "MetalRenderer: the world-scale landscape is off: %s", err.c_str());
-			m_landscapeFailed = true;
-			return;
-		}
-	}
+	if (!frame.active || !EnsureLandscape()) return;   // asked for at the top of EncodeScene; no landscape in this scene: nothing compiled, nothing drawn
 
 	MetalLandscape::Shading sh;
 	// The ground's material, when it has a shader and its landscape variant builds: bound here like a mesh draw of that material

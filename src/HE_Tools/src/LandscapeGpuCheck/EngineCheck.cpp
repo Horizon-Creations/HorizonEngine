@@ -321,6 +321,77 @@ int runMaterialCheck(HE::RendererBackend backend, const std::string& packPath, c
 			}
 			reg.get<MeshComponent>(boxEnt).castsShadow = true;
 
+			// The ground CASTS: a second box hangs UNDER the ramp and a camera under the ramp looks at the two faces of it that point at
+			// the sun (the engine's sun stands where it stands, so the receiver goes behind the ground instead). They are lit when the
+			// ground is not in the shadow maps and in its shadow when it is.
+			{
+				const glm::dvec3 hangAbs(boxX, kBase + kSlope * (boxX - kPivot) - 50.0, boxZ);
+				const auto hangEnt = world.createEntity("Hanging");
+				TransformComponent htf;
+				htf.position = glm::vec3(hangAbs - origin);
+				htf.scale = glm::vec3(30.0f);
+				reg.emplace<TransformComponent>(hangEnt, htf);
+				reg.emplace<MeshComponent>(hangEnt, MeshComponent{ HE::kDefaultCubeMeshId });
+				const EditorCameraOverride over = ov;
+				const glm::vec3 underEye = htf.position + glm::vec3(80.0f, 5.0f, 80.0f);
+				ov.view = glm::lookAt(underEye, htf.position, glm::vec3(0, 1, 0));
+				ov.position = underEye;
+				const glm::mat4 proj = glm::perspective(glm::radians(70.0f), static_cast<float>(kW) / static_cast<float>(kH), 2.0f, 20000.0f);
+				const glm::vec4 clip = proj * ov.view * glm::vec4(htf.position, 1.0f);
+				const int cx = static_cast<int>((clip.x / clip.w * 0.5f + 0.5f) * kW), cy = static_cast<int>((0.5f - clip.y / clip.w * 0.5f) * kH);
+				const auto boxLum = [&](const std::vector<uint8_t>& img) {
+					double s = 0.0;
+					int n = 0;
+					for (int y = cy - 4; y <= cy + 4; ++y)
+						for (int x = cx - 4; x <= cx + 4; ++x)
+							if (x >= 0 && y >= 0 && x < static_cast<int>(kW) && y < static_cast<int>(kH)) { s += lum(&img[(static_cast<size_t>(y) * kW + static_cast<size_t>(x)) * 4]); ++n; }
+					return s / std::max(n, 1);
+				};
+				std::vector<uint8_t> under, underNoCaster;
+				setenv("HE_LANDSCAPE_PASSES", "0", 1);
+				const bool gotB = shoot(underNoCaster);
+				unsetenv("HE_LANDSCAPE_PASSES");
+				if (!gotB || !shoot(under)) fail("RenderSceneImage gave an image (under the ground)");
+				else
+				{
+					const double below = boxLum(under), belowNoCaster = boxLum(underNoCaster);
+					std::printf("  the ground casts: a box under the ground is %.0f/255, and %.0f/255 when the ground is not in the shadow maps\n",
+					            below, belowNoCaster);
+					if (below > belowNoCaster * 0.7) fail("a box under the ground stands in the ground's shadow");
+					writePngFile(pngPath.substr(0, pngPath.size() - 4) + "_under.png", static_cast<int>(kW), static_cast<int>(kH), under.data());
+				}
+				ov = over;
+				world.destroyEntity(hangEnt);
+			}
+
+			// The same shadow with GI on: the sun's shadow is then ray traced for the pixels of the GI pre-pass, which the ground is in.
+			if (renderer->GetCapabilities().supportsGlobalIllumination)
+			{
+				gi.enabled = true;
+				renderer->SetGISettings(gi);
+				const auto settle = [&](std::vector<uint8_t>& img) { bool ok = true; for (int i = 0; i < 10 && ok; ++i) ok = shoot(img); return ok; };
+				// The control is the ground left out of the pre-pass: its pixels then have no ray-traced shadow value.
+				std::vector<uint8_t> giOn, giOff;
+				const bool a = settle(giOn);
+				setenv("HE_LANDSCAPE_PASSES", "0", 1);
+				const bool b = a && settle(giOff);
+				unsetenv("HE_LANDSCAPE_PASSES");
+				if (!b) fail("RenderSceneImage gave an image (GI)");
+				else
+				{
+					size_t darker = 0;
+					for (size_t i = 0; i < px; ++i)
+						darker += isBlue(&giOn[i * 4]) && isBlue(&giOff[i * 4]) && lum(&giOn[i * 4]) < 0.8 * lum(&giOff[i * 4]) ? 1 : 0;
+					std::printf("  shadow, GI on: %zu ground px are darker with the ground in the GI pre-pass than without\n", darker);
+					writePngFile(pngPath.substr(0, pngPath.size() - 4) + "_gi_nopass.png", static_cast<int>(kW), static_cast<int>(kH), giOff.data());
+					if (darker < 150) fail("the ground takes the box's ray-traced shadow (GI on)", std::to_string(darker) + " px");
+					writePngFile(pngPath.substr(0, pngPath.size() - 4) + "_gi.png", static_cast<int>(kW), static_cast<int>(kH), giOn.data());
+				}
+				gi.enabled = false;
+				renderer->SetGISettings(gi);
+				shoot(giOff);   // back on the cascades before the fog frame
+			}
+
 			IRenderer::EnvironmentSettings env = renderer->GetEnvironment();
 			env.fogDensity = 0.004f;
 			env.fogHeightFalloff = 0.0f;   // the ramp stands 600 m up: with a falloff the fog would lie far below it
@@ -336,6 +407,10 @@ int runMaterialCheck(HE::RendererBackend backend, const std::string& packPath, c
 				if (gap / static_cast<double>(std::max<size_t>(n, 1)) < 4.0) fail("the ground is fogged");
 				writePngFile(pngPath.substr(0, pngPath.size() - 4) + "_fog.png", static_cast<int>(kW), static_cast<int>(kH), fogged.data());
 			}
+			// A scene with no mesh at all still renders its shadow maps for the ground: the frame comes back.
+			world.destroyEntity(boxEnt);
+			std::vector<uint8_t> alone;
+			if (!shoot(alone)) fail("RenderSceneImage gave an image (the ground alone)");
 		}
 		renderer->SetLandscapeProvider({});
 		renderer->Shutdown();
