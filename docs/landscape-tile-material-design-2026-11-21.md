@@ -1,6 +1,6 @@
 # Tile landscape through the material pipeline (Thema 326) — findings and plan, 2026-11-21
 
-Status: **nothing of this is built.** Survey done on Metal, plan agreed with the reviewer. Start at "Next steps".
+Status: **built and verified on Metal** (steps 1-6 below, see Handoff at the end). GL, Vulkan and D3D still draw the fixed blend.
 
 ## What is true today (verified by reading, Metal)
 
@@ -48,6 +48,55 @@ Status: **nothing of this is built.** Survey done on Metal, plan agreed with the
 8. GL, Vulkan; D3D into the Windows handoff.
 9. Tools on tiles: Ramp, Roughen, Mountain, foliage mask, water, heightmap import (today: Raise, Lower, Smooth, Flatten, Paint Layer).
 
-## Not verified
+## Handoff
+
+**State**: on Metal the tile landscape is drawn with its material, takes shadows (cascades and ray-traced), casts into the shadow maps,
+is fogged. Branch `claude/landscape-weltmassstab-100km`, commits `b8b5c66a5`, `d087290f2`, `57fc9a755`, `08e903a87`.
+
+**What exists**
+* `MaterialShaderLibrary::landscapeVertex / landscapeFragment / landscapeVertexSource / landscapeFragmentSource`
+  (`src/HE_Rendering/src/material/MaterialShaderLibrary.cpp`, behind `uiVertex`). GLSL bindings: 50 LsGlobals (both stages), 51 slot table,
+  52-54 tile weight pages, 55-57 coarse weight pages, 58 LsPatch, 59 tile heights, 60 coarse heights. Metal pins: vertex buffers 20/21,
+  vertex textures 20-22; fragment buffer 20, textures 13 and 25-30, all with inline samplers.
+* `LandscapeRenderFrame::materialId` (`src/HE_Core/include/Renderer/LandscapeRenderFrame.h`): the landscape entity's
+  `MaterialComponent`, else the texture group's Auto Landscape material (`LandscapeRuntime::update`); `setMaterialId` for tools.
+  No serializer change: `MaterialComponent` is the field.
+* `IRenderer::Capabilities::landscapeMaterial` (Metal only).
+* `MetalRenderer::GetOrBuildLandscapeMaterialPipeline`, `EnsureLandscape`, `EncodeLandscapePass` (shadow layers, GI pre-pass),
+  `MetalLandscape::Shading::materialPipeline / passPipeline`, `MetalLandscape::makePassPipeline`, `fragmentGiGBuf` in `kLandscapeMSL`.
+* `HE_LANDSCAPE_PASSES=0`: the ground in the scene pass alone (A/B switch, read per call).
+* Editor: tile brush has Roughen.
+
+**Verified** (Apple M5, `landscape_gpu_check --arrays EditorDeps/EngineContent`, exit 0; `he_tests` 6508/6508 before the last two commits,
+`tile landscape variant*` test after)
+* marker material: 112 020 of 129 600 px are its layer 0; without the material 0.8 % blue, the fixed green.
+* box shadow on the ground: 4 686 px darker (GI off); with GI on 4 907 px darker than with the ground left out of the pre-pass.
+* the ground casts: a box under the ground 150/255 against 223/255 without the ground in the shadow maps.
+* fog moves the ground by 66.7/255. Same numbers forward and deferred.
+* the engine's Auto Landscape (Forest) material draws the ground: picture in `docs/landscape-tile-material-2026-11-21/`.
+
+**Not verified / known gaps**
+* No timing at all. The vertex stage reads up to 11 heights a vertex, the far ground runs the whole material.
+* GI on (Metal): the ground is NOT in the ray-tracing acceleration structure, and the cascades are off while GI owns the sun, so with
+  GI on the ground casts no shadow (mountains do not shadow valleys) and bounces no light. It receives. Needs the GI height clipmap
+  (`extractLandscapeGiHeightfield`) as a mesh in the TLAS.
+* The shadow pass has no fragment stage, so the top node's ground beyond the world's edge casts too.
+* SSAO and velocity pre-passes do not have the ground.
+* The first frame with a new material compiles on the render thread (one hitch).
+* RVT: the ground reads no virtual texture (no `TerrainComponent`, so `RvtLandscape` paints nothing for it); the material evaluates inline.
+* The baked far image is not read while a material draws (the material runs everywhere, so there is no ring); photographing the
+  material into it would be a saving, not a fix.
+* GL 4.1 / Vulkan / D3D: fixed blend. Windows: nothing of this ran.
+* Editor by hand: not opened.
+
+**Next steps**
+1. Terrain into the Metal TLAS (GI on: ground casts and bounces).
+2. Vulkan: descriptor bindings 50-60 in the material layout, draw in the scene pass, landscape in shadow and G-buffer passes.
+3. GL: same (4.1 has no binding qualifiers above the unit count: units are assigned by uniform name).
+4. D3D11/12: registers for 50-60 (SM 5.0 has none free in the material fragment: weights must go through `Load` on t-registers only).
+5. Time it (`he_perf_capture.py`), then decide on the far image from the material.
+6. Tools on tiles: Ramp, Mountain, foliage mask, water, heightmap import.
+
+## Not verified at design time (kept for the record)
 
 The SPIRV-Cross output of a patched fragment, the sampler count after the rewrite, SSAO/velocity inputs, anything on GL/Vulkan/D3D.
