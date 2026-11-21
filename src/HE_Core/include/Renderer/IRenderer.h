@@ -51,6 +51,17 @@ struct EditorCameraOverride
     // With rawOutput: the colour is written sRGB-encoded (the exact curve), for a picture that becomes an sRGB
     // texture. Without it the 8 bits hold the linear value, which is what data views (normals, roughness) want.
     bool      rawSrgb      = false;
+    // RenderSceneImage only (Runtime Virtual Textures, Thema 333): >= 0 sends the finished picture, on the GPU and
+    // without a readback, into slice `rvtSlot` of layer `rvtLayer` of the pool CreateRvtPool made. The picture must be
+    // exactly the pool's page size; `rgba` stays empty and the call returns true. Layer 0 is read as sRGB (use rawSrgb),
+    // layers 1 and 2 as plain data.
+    int       rvtSlot      = -1;
+    int       rvtLayer     = 0;
+    // With rvtSlot >= 0: draw every object of the world with this material (null = the objects' own). The page of a virtual
+    // texture is one world seen three times, once per layer view; with the material here instead of written into the
+    // world's components, the three views extract the same scene and the renderer walks it once (the extractor's
+    // beginFrame reuse). It also keeps a far-LOD stand-in material (the baked far landscape) out of a page.
+    HE::UUID  rvtMaterial;
 };
 
 // ─── WorldPreviewEnv ────────────────────────────────────────────────────────
@@ -167,6 +178,9 @@ enum class AAMethod : int
 //   GBuffer*   — one G-buffer attachment straight to the screen. Deferred path
 //                only: the forward path has no G-buffer, so a backend that is
 //                forward this frame draws Lit instead (see resolveViewMode).
+//   RvtMips    — Unlit, and every surface drawn from the Runtime Virtual Texture
+//                coloured by the mip of the page it reads (RvtLookup.h,
+//                heRvtMipView); everything else stays plain Unlit.
 // Append-only: the values travel through the headless dump knobs.
 enum class ViewMode : int
 {
@@ -177,8 +191,9 @@ enum class ViewMode : int
     GBufferNormal         = 4,
     GBufferRoughSpecMetal = 5, // r = roughness, g = specular, b = metallic
     GBufferEmissive       = 6,
+    RvtMips               = 7,
 };
-constexpr int kViewModeCount = 7;
+constexpr int kViewModeCount = 8;
 
 inline bool viewModeIsGBuffer(ViewMode m)
 {
@@ -216,6 +231,7 @@ inline const char* viewModeName(ViewMode m)
     case ViewMode::GBufferNormal:         return "Normals";
     case ViewMode::GBufferRoughSpecMetal: return "Rough / Spec / Metal";
     case ViewMode::GBufferEmissive:       return "Emissive";
+    case ViewMode::RvtMips:               return "RVT Mip Levels";
     }
     return "Lit";
 }
@@ -256,6 +272,10 @@ public:
         // RenderSceneImage honours EditorCameraOverride::rawOutput / rawSrgb: the picture is the materials' own
         // colour, no tonemap, bloom, AA or other post. The far-landscape bake needs it (Thema 228).
         bool supportsRawCapture = false;
+        // CreateRvtPool / EditorCameraOverride::rvtSlot work: the backend can hold the page pool of the Runtime
+        // Virtual Textures and fill a slice of it from RenderSceneImage (Thema 333). False = the landscape keeps
+        // running its material directly.
+        bool supportsRvt = false;
         // Screen-space reflections (docs/ssr-plan.md, docs/ssr-cross-backend-
         // plan.md). Metal (in the deferred tile path: lag-free, from the stored
         // G-buffer), OpenGL and D3D11/D3D12/Vulkan (forward trace against last
@@ -701,6 +721,10 @@ public:
     // ImGui-compatible texture handle (GL: GLuint cast; Metal: id<MTLTexture>).
     // Pass 0×0 to return to direct-to-window rendering.
     virtual void  SetViewportSize(uint32_t /*width*/, uint32_t /*height*/) {}
+    // Whether the offscreen viewport (SetViewportSize) is on screen this frame. False = nobody looks at it (another editor tab
+    // in front, the viewport window hidden): the backend may skip the scene's GPU work and keep the last image; the world goes
+    // on ticking as usual. Set every frame before Render(); a backend that ignores it renders as before.
+    virtual void  SetSceneVisible(bool /*visible*/) {}
     virtual void* GetViewportTexture() { return m_viewportImGuiHandle; }
 
     // Called by the platform layer (editor) after it has registered the viewport
@@ -735,6 +759,52 @@ public:
     virtual bool  RenderSceneImage(const EditorCameraOverride& /*camera*/,
                                    uint32_t /*width*/, uint32_t /*height*/,
                                    std::vector<uint8_t>& /*rgba*/) { return false; }
+
+    // ── Runtime Virtual Texture page pool (Thema 333, docs/rvt-design-2026-11-04.md) ──
+    // Three texture arrays of `slots` slices, each pagePx x pagePx RGBA8: layer 0 BaseColor (sRGB), layer 1 world
+    // normal x 0.5 + 0.5, layer 2 R = AO, G = roughness: the three unlit views of the Auto Landscape material.
+    // Slices are filled with RenderSceneImage and EditorCameraOverride::rvtSlot. Creating again replaces the pool.
+    // False (and nothing created) when the backend cannot (Capabilities::supportsRvt).
+    virtual bool CreateRvtPool(uint32_t /*slots*/, uint32_t /*pagePx*/) { return false; }
+    virtual void DestroyRvtPool() {}
+    // Reads one slice back (a witness or a debug view; not for per-frame use). `rgba` = pagePx * pagePx * 4 bytes,
+    // row 0 first. False when there is no pool or the slice is out of range.
+    virtual bool ReadbackRvtSlot(int /*layer*/, uint32_t /*slot*/, std::vector<uint8_t>& /*rgba*/) { return false; }
+    // The page table the landscape shader reads (Thema 333 step 3): one R32_UINT texture with a mip chain, mip m being
+    // (side >> m)^2 entries row-major (y * side + x), exactly what rvt::RvtManager::pageTable() returns per mip, each entry
+    // `slot | effectiveMip << 24` or 0xFFFFFFFF. `mips[0]` is the finest, its side a power of two. Upload again whenever
+    // RvtManager::tableVersion changes; a different shape recreates the texture. False without a pool or on a bad shape.
+    // One table per VOLUME, named by the consumer material that reads it: a draw whose material is that consumer gets that
+    // table bound, so a landscape cut into tiles (one volume each, all in the one pool) draws every tile from its own.
+    virtual bool SetRvtPageTable(const HE::UUID& /*consumerMaterial*/, const std::vector<std::vector<uint32_t>>& /*mips*/) { return false; }
+    // Reads the table back the same way (a witness).
+    virtual bool ReadbackRvtPageTable(const HE::UUID& /*consumerMaterial*/, std::vector<std::vector<uint32_t>>& /*mips*/) { return false; }
+    // From now on the terrain chunks of landscape entity `terrainEntity` that are drawn with `landscapeMaterial` are drawn with
+    // `consumerMaterial` instead (the material with the RvtSample node, which reads the pool and the table above), and with
+    // none of the object's own parameter block (it is laid out for the old material). Null `consumerMaterial` = off for that
+    // landscape. Keyed by the landscape AND its material: a far LOD level that already carries another material (the baked far
+    // landscape) stays as it is. Done in the renderer's own view of the frame, never in the world: the scene stays as authored.
+    virtual void SetRvtLandscape(uint32_t /*terrainEntity*/, const HE::UUID& /*landscapeMaterial*/, const HE::UUID& /*consumerMaterial*/) {}
+    // The chunk entities of that landscape that keep their own material although the swap is on (the native near view: close
+    // to the camera the material itself is sharper than any page). Replaces the previous set; empty = every chunk swaps.
+    // A backend without it swaps every chunk (the near view is then blurrier, nothing else changes).
+    virtual void SetRvtNearChunks(uint32_t /*terrainEntity*/, const std::vector<uint32_t>& /*chunkEntities*/) {}
+    // The pages the lookup's feedback reported since the last call (keys of RvtLookup.h's rvtFeedbackKey, unordered, may repeat),
+    // appended to `keys`. False = the backend has no feedback (the driver then serves the camera square alone).
+    virtual bool ReadRvtFeedback(std::vector<uint32_t>& /*keys*/) { return false; }
+    // Takes one volume out: its table and its swap go, the pool and the other volumes stay (DestroyRvtPool drops everything).
+    virtual void ReleaseRvtConsumer(const HE::UUID& /*consumerMaterial*/) {}
+    // The pages of one tick are painted between BeginRvtPages(pagePx) and EndRvtPages(): a backend whose page is the general
+    // RenderSceneImage frame (a viewport-sized set set aside and rebuilt around every call, post-FX repaired at the live size
+    // afterwards) keeps ONE page-size set across the whole bracket and gives the live viewport back once, at the end. The
+    // result of every page is the same inside or outside a bracket (witness: HE_DUMP_RVTTEST part 1b). No-ops
+    // by default (D3D11 has a lean page pass of its own, OpenGL's per-call set is cheap).
+    virtual void BeginRvtPages(uint32_t /*pagePx*/) {}
+    virtual void EndRvtPages() {}
+    // Which of the four channels (bit 0 R .. bit 3 A) of pool layer `layer` the backend keeps. A backend that packs a layer into fewer
+    // channels (Metal: normal as x and z in RG8, the surface as R and G; the shader rebuilds the rest) says so, ReadbackRvtSlot returns
+    // those channels in their place and zero elsewhere, and a witness compares only what exists. Default: all four.
+    virtual uint32_t RvtLayerChannels(int /*layer*/) const { return 0xFu; }
 
     // ── Material hot-reload ────────────────────────────────────────────────
     // Drop any GPU state the backend cached for this material (e.g. uploaded

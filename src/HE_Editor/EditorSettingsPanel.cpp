@@ -1136,6 +1136,7 @@ void requestOpenProjectPage(ProjectSettingsPanel::Page page)
 	case P::Fonts:           target = Page::ProjectFonts;        break;
 	case P::Permissions:     target = Page::ProjectPermissions;  break;
 	case P::Shadows:         target = Page::WorldShadows;        break;
+	case P::VirtualTexture:  target = Page::WorldVirtualTexture; break;
 	case P::Simulation:      target = Page::WorldSimulation;     break;
 	case P::CollisionLayers: target = Page::WorldCollisionLayers; break;
 	case P::AudioBuses:      target = Page::WorldAudioBuses;     break;
@@ -2230,6 +2231,7 @@ constexpr NavItem kProjectItems[] = {
 };
 constexpr NavItem kWorldItems[] = {
 	{ Page::WorldShadows,        "Shadows" },
+	{ Page::WorldVirtualTexture, "Virtual Texture" },
 	{ Page::WorldSimulation,     "Simulation" },
 	{ Page::WorldCollisionLayers, "Collision Layers" },
 	{ Page::WorldAudioBuses,     "Audio Buses" },
@@ -2260,6 +2262,7 @@ bool projectPageOf(Page p, ProjectSettingsPanel::Page& out)
 	case Page::ProjectFonts:        out = P::Fonts;           return true;
 	case Page::ProjectPermissions:  out = P::Permissions;     return true;
 	case Page::WorldShadows:        out = P::Shadows;         return true;
+	case Page::WorldVirtualTexture: out = P::VirtualTexture;  return true;
 	case Page::WorldSimulation:     out = P::Simulation;      return true;
 	case Page::WorldCollisionLayers: out = P::CollisionLayers; return true;
 	case Page::WorldAudioBuses:     out = P::AudioBuses;      return true;

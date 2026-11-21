@@ -1491,6 +1491,27 @@ void startExport(AppContext& ctx)
                                       + " placed prefab(s) point at an asset that is gone; "
                                       "shipped as they were last saved");
                 };
+                // Project Settings ▸ General ▸ Cook static entities: each scene carries its cookable set,
+                // so the game skips the analysis at load (SceneSerializer::saveToMemory).
+                const bool packCookVerdict =
+                    ctx.projectManager->currentProject().settings.game.cookStaticEntities;
+                // Collected here and logged after Build::begin() below (not at the point each
+                // scene is packed): that begin() call clears the log Build::log would otherwise
+                // write into, same as every other line from this setup phase (see its :1642 summary).
+                std::vector<std::string> cookLogLines;
+                if (!packCookVerdict)
+                    cookLogLines.push_back(
+                        "Cooking: Project Settings ▸ General ▸ Performance ▸ "
+                        "\"Cook static entities\" is off — nothing packed as cooked");
+                // A scene's cooking in the log: its summary, then one line per entity.
+                const auto appendCookLines = [&cookLogLines](const std::string& scene, const HE::CookSummary& s)
+                {
+                    cookLogLines.push_back(scene + ": " + HE::formatCookSummary(s));
+                    for (const std::string& l : s.entityLines)
+                        cookLogLines.push_back("  " + l);
+                    if (s.entityLinesOmitted)
+                        cookLogLines.push_back("  ... and " + std::to_string(s.entityLinesOmitted) + " more entities");
+                };
                 // Meshes some entity draws with a material of its own: the texture bake
                 // leaves them alone (an override material would read its texture through
                 // the atlas UVs). Collected from every scene the export serializes.
@@ -1519,7 +1540,11 @@ void startExport(AppContext& ctx)
                         syncPrefabsForExport(sceneWorld, sceneName);
                         HE::collectMeshesWithMaterialOverrides(sceneWorld, overriddenMeshes);
                         shipLandscapePack(sceneWorld, sceneName);
-                        ser.saveToMemory(sceneWorld, sceneBinary);
+                        HE::CookSummary cookSummary;
+                        ser.saveToMemory(sceneWorld, sceneBinary, packCookVerdict,
+                                         packCookVerdict ? &cookSummary : nullptr);
+                        if (packCookVerdict)
+                            appendCookLines(sceneName + " (startup)", cookSummary);
                     }
                     else
                         sceneOk = false;
@@ -1543,8 +1568,9 @@ void startExport(AppContext& ctx)
                     if (!s_exportBakeFarLandscape || !ctx.renderer || !ctx.contentManager) return;
                     if (!ctx.renderer->GetCapabilities().supportsRawCapture)
                     {
+                        // cookLogLines, not Build::log: Build::begin() below would clear it (see there).
                         if (!farBackendNoted)
-                            Build::log(1, "Far landscape: not baked, the picture needs a renderer that can hand back a "
+                            cookLogLines.push_back("Warning: far landscape not baked, the picture needs a renderer that can hand back a "
                                           "frame without tonemap and post effects and this editor's one cannot (the far "
                                           "levels keep the landscape's own material)");
                         farBackendNoted = true;
@@ -1555,7 +1581,7 @@ void startExport(AppContext& ctx)
                     std::vector<HE::landscape::HlodAssetBlob> blobs;
                     const HE::landscape::HlodExportStats st = HE::landscape::bakeWorldLandscapes(
                         w, ctx.world, *ctx.contentManager, *ctx.renderer, o, blobs, farSeen,
-                        [&](const std::string& s) { Build::log(0, label + ": " + s); });
+                        [&](const std::string& s) { cookLogLines.push_back(label + ": " + s); });
                     for (HE::landscape::HlodAssetBlob& b : blobs)
                     {
                         Hpak::PackSettings::ExtraAsset ea;
@@ -1563,7 +1589,7 @@ void startExport(AppContext& ctx)
                         farAssets.push_back(std::move(ea));
                     }
                     if (st.terrains > 0)
-                        Build::log(0, label + ": far landscape " + std::to_string(st.terrains) + " landscape(s), "
+                        cookLogLines.push_back(label + ": far landscape " + std::to_string(st.terrains) + " landscape(s), "
                                       + std::to_string(st.chunks) + " chunk(s) in " + std::to_string(static_cast<int>(st.ms))
                                       + " ms");
                 };
@@ -1589,8 +1615,16 @@ void startExport(AppContext& ctx)
                             if (loaded) HE::collectMeshesWithMaterialOverrides(w2, overriddenMeshes);
                             if (loaded) bakeFarLandscapes(w2, rel);
                             if (loaded) shipLandscapePack(w2, rel);
-                            if (loaded && ser2.saveToMemory(w2, bytes))
+                            HE::CookSummary cookSummary;
+                            if (loaded && ser2.saveToMemory(w2, bytes, packCookVerdict,
+                                                             packCookVerdict ? &cookSummary : nullptr))
                             {
+                                // The startup scene is one of these files too and already logged above.
+                                std::error_code eqEc;
+                                const bool isStartup = !scenePath.empty()
+                                    && std::filesystem::equivalent(sit->path(), scenePath, eqEc);
+                                if (packCookVerdict && !isStartup)
+                                    appendCookLines(rel, cookSummary);
                                 // Level script → codegen source, keyed by the scene's
                                 // pak UUID (the same key the runtime derives, §9.1).
                                 if (hcCompile)
@@ -1779,12 +1813,18 @@ void startExport(AppContext& ctx)
                 const bool hasBuild = hcCompile && !hcSources.empty();
                 std::vector<std::string> stepNames{ "Setup", "Build game" };
                 if (hasBuild) stepNames.emplace_back("Build HorizonCode");
+                // Cook is its own step in front of Package: what the export decided to cook
+                // (static entities per scene, the texture format) is reported there, not as
+                // a line among Setup's. The per-asset cooking itself runs inside the pack
+                // and is listed in the Package log.
+                stepNames.emplace_back("Cook");
                 stepNames.emplace_back("Package");
                 stepNames.emplace_back("Clean up");
                 const int stepSetup   = 0;
                 const int stepSdkGame = 1;
                 const int stepBuild   = hasBuild ? 2 : -1;
-                const int stepPackage = hasBuild ? 3 : 2;
+                const int stepCook    = hasBuild ? 3 : 2;
+                const int stepPackage = stepCook + 1;
                 const int stepCleanup = stepPackage + 1;
                 const HE::ExportSdk::GameSdk gameSdk = gate.sdk;
                 const std::string sdkProfile = gate.profile;
@@ -1997,6 +2037,8 @@ void startExport(AppContext& ctx)
                 {
                     Build::log(0, (reused ? "reused  " : "packed  ") + relPath);
                 };
+                // The Cook ring's log: one line per asset, in the order the cook pass took them.
+                es.onCook = [](const std::string& line) { Build::log(0, line); };
                 // What the pack had to leave out (a reference to a file no root
                 // has, a UUID two assets share): the game would otherwise just
                 // draw a fallback with no explanation anywhere.
@@ -2004,10 +2046,21 @@ void startExport(AppContext& ctx)
                 {
                     Build::log(1, msg);
                 };
-                es.onStage = [stepPackage, stepCleanup](const char* what)
+                static const char* const kTextureFormatNames[] = { "RGBA8 (no block compression)", "ASTC 4x4", "BC7", "BC3" };
+                const std::string textureLine = std::string("Textures: ")
+                    + kTextureFormatNames[std::min<size_t>(es.textureCompression, 3)];
+                es.onStage = [stepCook, stepPackage, stepCleanup, cookLogLines, textureLine](const char* what)
                 {
                     const std::string s = what;
-                    if (s == "pack")
+                    if (s == "cook")
+                    {
+                        Build::stepBegin(stepCook);
+                        for (const std::string& line : cookLogLines)
+                            Build::log(0, line);
+                        Build::log(0, textureLine);
+                        Build::setActivity("Cooking assets\xe2\x80\xa6");
+                    }
+                    else if (s == "pack")
                     {
                         Build::stepBegin(stepPackage);
                         Build::setActivity("Packing assets\xe2\x80\xa6");

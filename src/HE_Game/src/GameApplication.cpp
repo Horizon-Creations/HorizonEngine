@@ -26,6 +26,7 @@
 #include <HorizonScene/UICursorSDL.h>
 #include <HorizonScene/SceneSerializer.h>
 #include <HorizonScene/SceneSystems.h>
+#include <HorizonScene/RvtLandscape.h>
 #include <HorizonScene/RootMotion.h>
 #include <HorizonScene/SequenceSystem.h>
 #include <HorizonScene/AudioSystem.h>
@@ -1961,6 +1962,16 @@ void GameApplication::swapToWorld(std::unique_ptr<HorizonWorld> newWorld, const 
 	WeatherAudio::stop(m_weatherAudio, m_audioEngine);   // the new scene's weather fades in on its own
 	m_audioEngine.stopAll();
 	HE::api::scene::clearZones();
+	// The segments are keyed by entt::entity of the outgoing m_world; a handle from
+	// that registry can alias an unrelated entity in the new one (same reason the
+	// entity/animator hosts below are torn down and rebuilt rather than carried over).
+	// Re-attaching against the new world on the next OnRender tick is cheap — nothing
+	// runs until a landscape is actually near the camera.
+	if (m_rvtLandscape)
+	{
+		m_rvtLandscape->detach();
+		m_rvtLandscape.reset();
+	}
 
 	// A scene must not inherit the last one's time controls. Whoever loaded a
 	// level in slow motion, or from behind a pause menu, meant to leave it —
@@ -3462,8 +3473,10 @@ void GameApplication::OnRender(float deltaTime)
 	if (m_world && !m_appMode)
 	{
 		glm::vec3 camPos(0.0f);
+		float camFovDeg = 60.0f;   // the RVT's native near view measures its radius against it
 		for (auto e : m_world->registry().view<TransformComponent, CameraComponent>())
 		{
+			camFovDeg = m_world->registry().get<CameraComponent>(e).fovDegrees;
 			// Composed from the parent chain, not read out of tc.worldMatrix: that
 			// matrix is only as fresh as the last propagateTransforms. The rig path
 			// above runs one, the free-flight path does not, and a camera spawned
@@ -3480,6 +3493,20 @@ void GameApplication::OnRender(float deltaTime)
 		HE_PROFILE_SCOPE_N("SceneSystemsTick");
 		SceneSystems::tickWorld(*m_world, contentManager(), r, camPos, gameDt,
 		                        m_physicsWorld.get(), gpuParticles);
+		// The virtual texture of the landscape, after the terrain update of the tick: the project's setting (the exported
+		// Config/ProjectSettings.json), or HE_RVT=1 / 0 over it.
+		if (r && HE::landscape::RvtLandscape::wanted(m_projectSettings.rvt))
+		{
+			if (!m_rvtLandscape) m_rvtLandscape = std::make_shared<HE::landscape::RvtLandscape>(contentManager(), *r);
+			m_rvtLandscape->setSettings(HE::landscape::RvtLandscape::settingsFromProject(m_projectSettings.rvt));
+			m_rvtLandscape->setView(glm::radians(camFovDeg), static_cast<float>(m_windowHeight));
+			m_rvtLandscape->tick(*m_world, camPos);
+		}
+		else if (m_rvtLandscape)
+		{
+			m_rvtLandscape->detach();
+			m_rvtLandscape.reset();
+		}
 		// Animation last, after every system that could have moved something this
 		// frame — a state machine reads what gameplay just produced. Still ahead
 		// of extraction, which consumes the bone matrices.
@@ -3806,6 +3833,8 @@ void GameApplication::installPlayerSettings()
 
 void GameApplication::OnShutdown()
 {
+	// The virtual texture driver hands its pool back to the renderer: while it still exists, not from the destructor.
+	m_rvtLandscape.reset();
 	// The session FIRST, and said out loud: leave() writes a goodbye and drops
 	// every peer, so the others learn the seat is free now rather than waiting
 	// out the transport timeout. A quitting host that simply vanished would

@@ -27,13 +27,28 @@
 // the LAST entries, so the first kPreClusterBindingCount rows are the layout
 // as it was before — the test's negative control.
 //
+// heFogVolume (Thema 225 step 5): binding 34, the integrated froxel fog volume. Its row brings the
+// fragment stage to 18 combined image samplers (with heLandscapeWeights), two over the spec minimum
+// of maxPerStageDescriptorSamplers/…SampledImages (16). The renderer drops it FIRST (fogVolumeFit;
+// materials then compile without HE_FOG_VOLUME) and only then asks landscapeWeightsFit about the
+// remaining layout — a device at the minimum loses both rows.
+//
 // heLandscapeWeights (Thema 143): binding 14, the painted terrain's weightmap
-// (Landscape Layer Blend). Its row brings the fragment stage to 17 combined
-// image samplers, one over the spec minimum of maxPerStageDescriptorSamplers /
-// …SampledImages (16). A device at that minimum cannot create the full layout
-// at all, so the renderer then builds it WITHOUT this one row (landscapeWeightsFit)
-// and draws a layer-blend material through the built-in path instead: losing
-// the paint there beats losing every graph material.
+// (Landscape Layer Blend). A device that cannot hold it even after heFogVolume is dropped
+// (landscapeWeightsFit) gets the layout WITHOUT this row too, and draws a layer-blend material
+// through the built-in path instead: losing the paint there beats losing every graph material.
+//
+// Runtime Virtual Textures (Thema 333, docs/rvt-design-2026-11-04.md): bindings 40..43 are the page table and the three
+// pool arrays (MaterialGraph/RvtLookup.h), AFTER the cluster lists. They are fragment samplers too: four more on top of
+// whatever heLandscapeWeights/heFogVolume decided, so a device at the spec minimum cannot hold them (rvtFit) and the
+// renderer builds the layout without these rows and reports no RVT support. Bound per draw only for a material that owns
+// a page table (the consumer), never written for the rest: a descriptor no pipeline statically uses need not be valid.
+//
+// Cold pages (step 9): bindings 44..46 are the BC7 arrays (heRvtAlbedoC/NormalC/SurfaceC), read with texelFetch like the
+// four above (HE_RVT_COLD_FETCH, no filtering distinction at the descriptor level: CombinedImageSampler either way, since
+// a GLSL sampler2DArray is one descriptor regardless of how the shader reads it). Three more on top of rvtFit's count:
+// rvtColdFit decides the FULL 33-row layout; a device that fits RVT but not the cold rows gets the hot-only layout and HE_RVT_COLD
+// has no effect there (the shader is never given the define, see MaterialShaderLibrary's rvtColdWin gate).
 //
 // Displacement (Thema 207): MaterialShaderLibrary::tessControl/tessEval (SpirV)
 // read the FRAGMENT's bindings — HeLighting 0 (both stages), U 1, heTex0 2,
@@ -69,6 +84,10 @@ constexpr uint32_t kClusterGridBinding   = 25; // HeClusterGrid   { uvec2 clGrid
 constexpr uint32_t kClusterIdxBinding    = 26; // HeClusterIdx    { uint clIdx[]; }
 constexpr uint32_t kLandscapeWeightsBinding = 14; // heLandscapeWeights (MaterialGraph.cpp)
 constexpr uint32_t kFogVolumeBinding        = 34; // heFogVolume (MaterialShaderLibrary.cpp, HE_FOG_VOLUME)
+constexpr uint32_t kRvtFirstBinding = 40;         // heRvtTable; 41..43 the pool (== HE::kRvtTableBinding in RvtLookup.h)
+constexpr uint32_t kRvtBindingCount = 4;
+constexpr uint32_t kRvtColdFirstBinding = 44;      // heRvtAlbedoC; 45/46 the rest (== HE::kRvtAlbedoColdBinding)
+constexpr uint32_t kRvtColdBindingCount = 3;
 
 inline constexpr Binding kBindings[] = {
 	{  0, DescKind::UniformBuffer,        kStageFragment | kStageTess }, // HeLighting
@@ -125,10 +144,19 @@ inline constexpr Binding kBindings[] = {
 	{ kClusterLightsBinding, DescKind::StorageBuffer, kStageFragment },
 	{ kClusterGridBinding,   DescKind::StorageBuffer, kStageFragment },
 	{ kClusterIdxBinding,    DescKind::StorageBuffer, kStageFragment },
+	// ── Thema 333: the Runtime Virtual Texture (keep these LAST, after the cluster lists) ──
+	{ 40, DescKind::CombinedImageSampler, kStageFragment }, // heRvtTable  (usampler2D, texelFetch only)
+	{ 41, DescKind::CombinedImageSampler, kStageFragment }, // heRvtAlbedo (sampler2DArray, sRGB view)
+	{ 42, DescKind::CombinedImageSampler, kStageFragment }, // heRvtNormal
+	{ 43, DescKind::CombinedImageSampler, kStageFragment }, // heRvtSurface
+	// ── Thema 333 step 9: cold (BC7) pages, texelFetch only, same descriptor kind as the four above ──
+	{ 44, DescKind::CombinedImageSampler, kStageFragment }, // heRvtAlbedoC
+	{ 45, DescKind::CombinedImageSampler, kStageFragment }, // heRvtNormalC
+	{ 46, DescKind::CombinedImageSampler, kStageFragment }, // heRvtSurfaceC
 };
 
 constexpr uint32_t kBindingCount           = sizeof(kBindings) / sizeof(kBindings[0]);
-constexpr uint32_t kPreClusterBindingCount = kBindingCount - 3;
+constexpr uint32_t kPreClusterBindingCount = kBindingCount - 3 - kRvtBindingCount - kRvtColdBindingCount;
 
 // Descriptors of one kind in one set — what the per-frame pool must hold per
 // allocated set (times the sets it serves).
@@ -154,13 +182,24 @@ constexpr uint32_t kDynamicOffsetCount = 3;
 // Combined image samplers the FRAGMENT stage sees — what the device's
 // per-stage sampler and sampled-image limits are held against (a combined
 // descriptor counts against both).
-constexpr uint32_t fragmentSamplerCount(bool withLandscapeWeights = true, bool withFogVolume = true)
+constexpr bool isRvtBinding(uint32_t binding)
+{
+	return binding >= kRvtFirstBinding && binding < kRvtFirstBinding + kRvtBindingCount;
+}
+constexpr bool isRvtColdBinding(uint32_t binding)
+{
+	return binding >= kRvtColdFirstBinding && binding < kRvtColdFirstBinding + kRvtColdBindingCount;
+}
+constexpr uint32_t fragmentSamplerCount(bool withLandscapeWeights = true, bool withFogVolume = true,
+                                         bool withRvt = false, bool withRvtCold = false)
 {
 	uint32_t n = 0;
 	for (uint32_t i = 0; i < kBindingCount; ++i)
 		if (kBindings[i].kind == DescKind::CombinedImageSampler && (kBindings[i].stages & kStageFragment)
 		    && (withLandscapeWeights || kBindings[i].binding != kLandscapeWeightsBinding)
-		    && (withFogVolume || kBindings[i].binding != kFogVolumeBinding))
+		    && (withFogVolume || kBindings[i].binding != kFogVolumeBinding)
+		    && (withRvt || !isRvtBinding(kBindings[i].binding))
+		    && (withRvtCold || !isRvtColdBinding(kBindings[i].binding)))
 			++n;
 	return n;
 }
@@ -183,9 +222,28 @@ constexpr bool landscapeWeightsFit(uint32_t maxPerStageSamplers, uint32_t maxPer
 	    && fragmentSamplerCount(true, withFogVolume) <= maxPerStageSampledImages;
 }
 
-static_assert(kBindingCount == 26, "material set 0: 23 canonical bindings + 3 cluster lists");
+// Do the four RVT rows fit on top of the layout `withLandscapeWeights`/`withFogVolume` already decided on? If not, the
+// renderer builds the layout without them and the backend reports no RVT support.
+constexpr bool rvtFit(uint32_t maxPerStageSamplers, uint32_t maxPerStageSampledImages, bool withLandscapeWeights,
+                      bool withFogVolume = true)
+{
+	return fragmentSamplerCount(withLandscapeWeights, withFogVolume, true) <= maxPerStageSamplers
+	    && fragmentSamplerCount(withLandscapeWeights, withFogVolume, true) <= maxPerStageSampledImages;
+}
+
+// Do the three cold rows ALSO fit, on top of the hot RVT layout rvtFit already decided on? If not, the renderer builds
+// the layout with hot RVT but without these three, and VulkanRenderer::SetRvtColdVulkanFits(false) keeps the SPIR-V from
+// ever declaring heRvtAlbedoC/NormalC/SurfaceC (Thema 333 step 9).
+constexpr bool rvtColdFit(uint32_t maxPerStageSamplers, uint32_t maxPerStageSampledImages, bool withLandscapeWeights,
+                          bool withFogVolume = true)
+{
+	return fragmentSamplerCount(withLandscapeWeights, withFogVolume, true, true) <= maxPerStageSamplers
+	    && fragmentSamplerCount(withLandscapeWeights, withFogVolume, true, true) <= maxPerStageSampledImages;
+}
+
+static_assert(kBindingCount == 33, "material set 0: 23 canonical bindings + 3 cluster lists + 4 RVT rows + 3 cold RVT rows");
 static_assert(countOf(DescKind::UniformBuffer) == 5);        // b0, b1, b3, b8, b9
-static_assert(countOf(DescKind::CombinedImageSampler) == 18); // b2, b4-b7, b10-b18, b31-b34
+static_assert(countOf(DescKind::CombinedImageSampler) == 25); // b2, b4-b7, b10-b18, b31-b34, b40-b46
 static_assert(countOf(DescKind::StorageBuffer) == 3);         // b24-b26
 static_assert(fragmentSamplerCount(true, true) == 18 && fragmentSamplerCount(true, false) == 17
               && fragmentSamplerCount(false, false) == 16,
@@ -193,7 +251,13 @@ static_assert(fragmentSamplerCount(true, true) == 18 && fragmentSamplerCount(tru
 static_assert(!landscapeWeightsFit(16, 16, false) && landscapeWeightsFit(17, 17, false));
 static_assert(!fogVolumeFit(17, 17) && fogVolumeFit(18, 18));
 static_assert(countOf(DescKind::StorageBuffer, kPreClusterBindingCount) == 0,
-              "the cluster lists must be the last rows (negative control slices them off)");
+              "the cluster lists come right after the canonical rows (negative control slices them off)");
+static_assert(rvtFit(22, 22, true, true) && !rvtFit(21, 22, true, true) && !rvtFit(22, 21, true, true)
+           && rvtFit(20, 20, false, false) && !rvtFit(16, 16, false, false));
+static_assert(fragmentSamplerCount(true, true, true) == 22 && fragmentSamplerCount(true, true, true, true) == 25,
+              "the cold rows add exactly 3, on top of rvtFit's 22 (with landscape+fog)");
+static_assert(rvtColdFit(25, 25, true, true) && !rvtColdFit(24, 25, true, true) && !rvtColdFit(25, 24, true, true)
+           && rvtColdFit(23, 23, false, false) && !rvtColdFit(22, 23, false, false));
 
 // ── Deferred lighting resolve, set 0 (Thema 150, docs/deferred-renderer-plan.md
 // §10.3/§10.5) ─────────────────────────────────────────────────────────────────

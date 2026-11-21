@@ -29,6 +29,8 @@
 #  include <bc7enc/stb_dxt.h>
 #endif
 #include <algorithm>
+#include <atomic>
+#include <thread>
 #include <iterator>
 #include <fstream>
 #include <string>
@@ -857,23 +859,46 @@ static std::vector<uint8_t> cookTexture(HAsset::Reader& r, uint8_t targetFormat,
     };
     // Encode `slices` consecutive mip chains of `count` levels each, starting at w x h,
     // from tightly packed RGBA8 `src`. False when any level fails.
+    // Slices are independent chains and the encoders are stateless, so an array's slices are
+    // encoded on a few threads (a 13-slice 2048^2 BC7 array is minutes on one); the output
+    // order stays slice-major. A single chain (a plain texture) is encoded inline.
     auto encodeChains = [&](const uint8_t* src, uint32_t slices, uint32_t count,
                             std::vector<uint8_t>& dst) -> bool
     {
-        size_t off = 0;
-        for (uint32_t s = 0; s < slices; ++s)
+        size_t chainBytes = 0;   // RGBA8 bytes of one slice's chain
+        { uint32_t lw = width, lh = height;
+          for (uint32_t l = 0; l < count; ++l)
+          { chainBytes += static_cast<size_t>(lw) * lh * 4; lw = std::max<uint32_t>(1, lw >> 1); lh = std::max<uint32_t>(1, lh >> 1); } }
+        auto encodeSlice = [&](uint32_t s, std::vector<uint8_t>& out) -> bool
         {
+            size_t off = static_cast<size_t>(s) * chainBytes;
             uint32_t lw = width, lh = height;
             for (uint32_t l = 0; l < count; ++l)
             {
                 std::vector<uint8_t> enc = encodeLevel(src + off, lw, lh);
                 if (enc.empty()) return false;
-                dst.insert(dst.end(), enc.begin(), enc.end());
+                out.insert(out.end(), enc.begin(), enc.end());
                 off += static_cast<size_t>(lw) * lh * 4;
                 lw = std::max<uint32_t>(1, lw >> 1);
                 lh = std::max<uint32_t>(1, lh >> 1);
             }
-        }
+            return true;
+        };
+        std::vector<std::vector<uint8_t>> parts(slices);
+        std::atomic<uint32_t> next{0};
+        std::atomic<bool> failed{false};
+        auto worker = [&]
+        {
+            for (uint32_t s; !failed && (s = next.fetch_add(1)) < slices;)
+                if (!encodeSlice(s, parts[s])) failed = true;
+        };
+        const uint32_t threads = std::min<uint32_t>(slices, std::max(1u, std::thread::hardware_concurrency()));
+        std::vector<std::thread> pool;
+        for (uint32_t t = 1; t < threads; ++t) pool.emplace_back(worker);
+        worker();
+        for (auto& t : pool) t.join();
+        if (failed) return false;
+        for (const auto& p : parts) dst.insert(dst.end(), p.begin(), p.end());
         return true;
     };
 
@@ -948,6 +973,15 @@ static std::vector<uint8_t> cookTexture(HAsset::Reader& r, uint8_t targetFormat,
         w.addChunk(HAsset::CHUNK_TXSM, b.data(), b.size());
     }
     return w.toBytes(r.assetType());
+}
+
+std::vector<uint8_t> Hpak::cookTextureBlob(const std::vector<uint8_t>& blob, uint8_t format,
+                                                 uint8_t quality)
+{
+    HAsset::Reader r;
+    if (!r.openData(blob) || static_cast<HE::AssetType>(r.assetType()) != HE::AssetType::Texture) return blob;
+    std::vector<uint8_t> cooked = cookTexture(r, format, quality, /*cookArrays=*/true);
+    return cooked.empty() ? blob : cooked;
 }
 
 // Pack-time asset cook: transform an already-ref-rewritten .hasset blob into a
@@ -1387,9 +1421,29 @@ int HpakWriter::addDirectories(const std::vector<SourceRoot>& roots,
         return true;
     };
 
-    for (auto& pe : pending)
+    // ── Cook pass: every asset through the pipeline, one line each, BEFORE anything is stored ──
+    // What the pipeline makes of an asset (references rewritten, textures and static meshes converted,
+    // import source stripped) is held until the pack pass below compresses and stores it, so the
+    // build window can show "cook" and "pack" as the two steps they are. The source bytes were already
+    // in memory (`pending`); they are released as soon as this pass is over.
+    struct Cooked
     {
-        if (progress) progress(count, total, pe.relPath);
+        std::vector<uint8_t>             blob;
+        size_t                           blobSize = 0;
+        Hpak::CachedEntry                info;          // srcHash, inHash, deps
+        bool                             carried = false; // level 1: the previous archive's entry is taken as it is
+        HpakReader::StoredEntry          carriedEntry;
+    };
+    std::vector<Cooked> cooked(pending.size());
+    const auto kb = [](size_t n) { return std::to_string((n + 1023) / 1024) + " KB"; };
+    // A caller that does not ask for the phase change (hpak_packer, tests) sees one progress run, as ever:
+    // the pack pass's. Only a caller with onPhase gets a run per pass.
+    const bool cookProgress = progress && settings.onPhase;
+    for (size_t i = 0; i < pending.size(); ++i)
+    {
+        Pending& pe = pending[i];
+        Cooked&  ck = cooked[i];
+        if (cookProgress) progress(count, total, pe.relPath);
         const uint64_t inHash = Hpak::hash64(pe.bytes.data(), pe.bytes.size());
 
         // ── Level 1: nothing changed since the last pack → skip the pipeline ─────
@@ -1408,13 +1462,12 @@ int HpakWriter::addDirectories(const std::vector<SourceRoot>& roots,
                     && ((se.flags & Hpak::kFlagEncrypted) != 0) == wantEncrypted
                     && (se.flags & Hpak::kFlagUsesDict) == 0)
                 {
-                    addPackedEntry(pe.id, se);
-                    ++m_reused;
+                    ck.carried      = true;
+                    ck.carriedEntry = std::move(se);
+                    ck.info         = cit->second;
                     warnUnresolved(pe.relPath, cit->second.deps);
-                    m_srcHashes.emplace_back(pe.id, cit->second.srcHash);
-                    m_entryInfos.emplace_back(pe.id, cit->second);
                     ++count;
-                    if (settings.onAsset) settings.onAsset(pe.relPath, true);
+                    if (settings.onCook) settings.onCook("cached  " + pe.relPath);
                     continue;
                 }
             }
@@ -1433,7 +1486,6 @@ int HpakWriter::addDirectories(const std::vector<SourceRoot>& roots,
         // Hash the final (cooked) blob: incremental reuse keys on exactly the
         // bytes that get stored, so a cook change re-packs the entry.
         const uint64_t srcHash = Hpak::hash64(blob.data(), blob.size());
-        m_srcHashes.emplace_back(pe.id, srcHash);
 
         // One row per path: the same material is often referenced several times.
         std::sort(deps.refs.begin(), deps.refs.end(),
@@ -1447,7 +1499,47 @@ int HpakWriter::addDirectories(const std::vector<SourceRoot>& roots,
                            [](const auto& a, const auto& b) { return a.first == b.first; }),
                            deps.parents.end());
         warnUnresolved(pe.relPath, deps);
-        m_entryInfos.emplace_back(pe.id, Hpak::CachedEntry{ srcHash, inHash, std::move(deps) });
+        if (settings.onCook)
+        {
+            // Only what changed is "cooked": a blob that comes out as it went in (a text asset
+            // with no references to rewrite, say) is reported as it is.
+            const bool changed = blob.size() != pe.bytes.size() || blob != pe.bytes;
+            settings.onCook(changed
+                ? "cooked  " + pe.relPath + "  " + kb(pe.bytes.size()) + " -> " + kb(blob.size())
+                : "unchanged  " + pe.relPath + "  " + kb(blob.size()));
+        }
+        ck.blobSize = blob.size();
+        ck.blob     = std::move(blob);
+        ck.info     = Hpak::CachedEntry{ srcHash, inHash, std::move(deps) };
+        ++count;
+    }
+    if (cookProgress) progress(count, total, {});
+    // The source bytes are no longer needed (blobByPath is not read below).
+    for (Pending& pe : pending) std::vector<uint8_t>().swap(pe.bytes);
+
+    // ── Pack pass: compress, encrypt and store, in the order of `pending` ──────
+    if (settings.onPhase) settings.onPhase("pack");
+    count = 0;
+    for (size_t i = 0; i < pending.size(); ++i)
+    {
+        Pending& pe = pending[i];
+        Cooked&  ck = cooked[i];
+        if (progress) progress(count, total, pe.relPath);
+
+        if (ck.carried)
+        {
+            addPackedEntry(pe.id, ck.carriedEntry);
+            ++m_reused;
+            m_srcHashes.emplace_back(pe.id, ck.info.srcHash);
+            m_entryInfos.emplace_back(pe.id, std::move(ck.info));
+            ++count;
+            if (settings.onAsset) settings.onAsset(pe.relPath, true);
+            continue;
+        }
+
+        m_srcHashes.emplace_back(pe.id, ck.info.srcHash);
+        const uint64_t srcHash = ck.info.srcHash;
+        m_entryInfos.emplace_back(pe.id, std::move(ck.info));
 
         // ── Level 2: the output is what the previous archive already holds ──────
         bool reused = false;
@@ -1466,7 +1558,7 @@ int HpakWriter::addDirectories(const std::vector<SourceRoot>& roots,
                 if (cache->previousPak->readStoredEntry(pe.id, se)
                     && ((se.flags & Hpak::kFlagEncrypted) != 0) == wantEncrypted
                     && (se.flags & Hpak::kFlagUsesDict) == 0
-                    && se.origSize == static_cast<uint32_t>(blob.size()))
+                    && se.origSize == static_cast<uint32_t>(ck.blobSize))
                 {
                     addPackedEntry(pe.id, se);
                     reused = true;
@@ -1474,7 +1566,8 @@ int HpakWriter::addDirectories(const std::vector<SourceRoot>& roots,
                 }
             }
         }
-        if (!reused) addEntry(pe.id, blob, settings);
+        if (!reused) addEntry(pe.id, ck.blob, settings);
+        std::vector<uint8_t>().swap(ck.blob);   // stored (or reused): the cooked bytes can go
         ++count;
         if (settings.onAsset) settings.onAsset(pe.relPath, reused);
     }

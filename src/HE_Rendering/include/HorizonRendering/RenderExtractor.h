@@ -350,12 +350,23 @@ public:
         m_shadowMapRes   = std::max(resolution, 1);
     }
 
+    // Static meshes the cooking analysis cleared are extracted from a flat block
+    // (HorizonScene/CookedStatic.h) instead of rebuilt from the registry each walk.
+    // Off by default (HE_COOK_STATIC=1 turns it on at construction; a world loaded from a scene
+    // exported with the project's cooking setting on asks for it itself, CookedStatic::enabled): the block is a
+    // read-only mirror, and a value written to a cooked entity is not seen until
+    // un-cooking exists. Needs no FrameKey field: the block follows the structure
+    // epoch and the content epoch the key already holds, and a reused walk reads no row.
+    void setCookStatic(bool on) { m_cookStatic = on; }
+
     // Whether the backend implements the volumetric fog passes (IRenderer::Capabilities::
     // supportsVolumetricFog). The walk's RenderWorld::fogVolume.enabled is gated on it, so a
     // backend that never calls this (default false) keeps the analytic fog everywhere.
     void setVolumetricFogCapable(bool capable) { m_fogCapable = capable; }
 
 private:
+    bool m_cookStatic = false;
+
     // Overwrites the extracted sun/moon directional lights (and out.ambient /
     // out.sunDirection) from the day-night state pushed via setDayNight.
     // A member because that state lives on the extractor; every other extract()

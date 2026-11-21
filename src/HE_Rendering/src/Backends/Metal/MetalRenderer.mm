@@ -1,3 +1,11 @@
+#include <atomic>
+#include <condition_variable>
+#include <deque>
+#include <memory>
+#include <mutex>
+#include <thread>
+#include <ContentManager/BlockEncode.h>
+#include <chrono>
 #include "Backends/Metal/MetalRenderer.h"
 #include <Window/Window.h>
 #include <ContentManager/ContentManager.h>
@@ -18,6 +26,7 @@
 #include <HorizonRendering/SkyNoise3D.h>      // HE::BuildSkyNoise3D
 #include <HorizonRendering/SsaoKernel.h>      // HE::BuildSSAOKernel / BuildSSAONoise
 #include <MaterialGraph/MaterialGraph.h> // kMatMaxGraphTextures
+#include <MaterialGraph/RvtLookup.h>     // kRvtFeedbackSlots
 #include <HorizonRendering/GiInstanceSurface.h> // shared GI-hit surface resolution
 #include <HorizonRendering/GraphTextureMisses.h> // graph-texture misses forgotten per content epoch
 #include <Renderer/UIFont.h>             // shared baked UI font atlas
@@ -2889,6 +2898,8 @@ struct GILand {
 	float4   autoWet;  // auto: rgb puddle colour, a puddle share of flat ground
 	float4   autoSlope;// auto: Rock Slope, Rock Blend, Dirt Amount, Puddle Max Slope
 	float4   autoSnow; // auto: Snow Height, Snow Blend, Snow Max Slope
+	float4   rvtA;     // drawn from the RVT: the consumer's RvtVolumeA (origin xz, extent, texel metres at mip 0)
+	float4   rvtB;     // RvtVolumeB (page px, border + 256 * volume, pages per side at mip 0, mip count; w = 0: not from pages)
 };
 
 constant int kGIProbeOctSize = 8; // must match MetalRenderer::kGIProbeOctSize
@@ -2921,12 +2932,42 @@ static float3 giAutoLandAlbedo(const device GILand& L, float3 pos, float3 n)
 // slope and height instead (hitN = the world normal facing the ray).
 // Returns false when this instance is not a landscape (caller keeps its flat
 // per-instance albedo).
+// A landscape drawn from the Runtime Virtual Texture: the hit's colour from the pages (the real ground, textures and all)
+// instead of the means. RvtLookup.h's page math, nearest page at the mip whose texel matches `footprint` (metres the
+// reflected pixel covers there); the table already points a missing page at its nearest coarser one.
+static bool giRvtAlbedo(const device GILand& L, texture2d<uint> table, texture2d_array<float> hot,
+                        texture2d_array<float> cold, float3 hitPos, float footprint, thread float3& albedoOut)
+{
+	if (L.rvtB.w < 0.5) return false;
+	const float2 uv = (hitPos.xz - L.rvtA.xy) / max(L.rvtA.z, 1e-3);
+	if (uv.x < 0.0 || uv.y < 0.0 || uv.x >= 1.0 || uv.y >= 1.0) return false;
+	const int mipCount = max(int(L.rvtB.w + 0.5), 1);
+	const int pps0     = max(int(L.rvtB.z + 0.5), 1);
+	const int mip = clamp(int(floor(log2(max(footprint / max(L.rvtA.w, 1e-4), 1.0)))), 0, mipCount - 1);
+	const int pps = max(pps0 >> mip, 1);
+	const uint2 pg = uint2(clamp(int2(uv * float(pps)), int2(0), int2(pps - 1)));
+	const uint e = table.read(pg, uint(mip)).r;
+	if (e == 0xFFFFFFFFu) return false;
+	const uint slot = e & 0x7FFFFFu;
+	const int  ppsE = max(pps0 >> int(e >> 24), 1);
+	const float2 g  = uv * float(ppsE);
+	const float ps = L.rvtB.x, bd = fmod(L.rvtB.y, 256.0);
+	const float2 tuv = (bd + (g - floor(g)) * ps) / (ps + 2.0 * bd);
+	constexpr sampler s(coord::normalized, address::clamp_to_edge, filter::linear);
+	albedoOut = (e & 0x800000u) != 0u ? cold.sample(s, tuv, slot, level(0.0)).rgb
+	                                  : hot.sample(s, tuv, slot, level(0.0)).rgb;
+	return true;
+}
+
 static bool giLandscapeAlbedo(const device GILand* lands, int li, int landCount,
                               array<texture2d<float>, 4> weightTex,
-                              float3 hitPos, float3 hitN, thread float3& albedoOut)
+                              float3 hitPos, float3 hitN, thread float3& albedoOut,
+                              array<texture2d<uint>, 4> rvtTables, texture2d_array<float> rvtHot,
+                              texture2d_array<float> rvtCold, float footprint)
 {
 	if (li < 0 || li >= landCount || li >= 4) return false;
 	const device GILand& L = lands[li];
+	if (giRvtAlbedo(L, rvtTables[li], rvtHot, rvtCold, hitPos, footprint, albedoOut)) return true;
 	if (L.cfg.w < -0.5) { albedoOut = giAutoLandAlbedo(L, hitPos, hitN); return true; }
 	const int layers = int(L.cfg.w);
 	if (layers <= 0) return false;
@@ -3057,7 +3098,10 @@ kernel void giReflRay(uint2 gid [[thread_position_in_grid]],
                       const device uint* instanceMesh             [[buffer(4)]],
                       const device GILand* lands                  [[buffer(5)]],
                       const device int* instanceLand              [[buffer(6)]],
-                      array<texture2d<float>, 4> landWeights      [[texture(9)]])
+                      array<texture2d<float>, 4> landWeights      [[texture(9)]],
+                      array<texture2d<uint>, 4>  rvtTables        [[texture(13)]],
+                      texture2d_array<float>     rvtHot           [[texture(17)]],
+                      texture2d_array<float>     rvtCold          [[texture(18)]])
 {
 	if (float(gid.x) >= P.texSize.x || float(gid.y) >= P.texSize.y) return;
 	// Nearest sampling: interpolated oct-encoded normals / depths at geometry
@@ -3196,8 +3240,11 @@ kernel void giReflRay(uint2 gid [[thread_position_in_grid]],
 			// there is a guess). Non-landscape hits leave `albedo` untouched.
 			{
 				float3 painted;
+				// Metres one reflected pixel covers at the hit (camera -> mirror -> hit, ~60 degree view; widened by the
+				// lobe, GGX alpha = rough^2: a mirror adds nothing): the RVT mip a hit reads, like the rasterizer's choice.
+				const float footprint = (length(Pw - P.camPos.xyz) + dist) * 1.155 / max(P.texSize.y, 1.0) + dist * rough * rough;
 				if (giLandscapeAlbedo(lands, instanceLand[instId], int(P.land.x),
-				                      landWeights, hitPos, hitN, painted))
+				                      landWeights, hitPos, hitN, painted, rvtTables, rvtHot, rvtCold, footprint))
 					albedo = painted;
 			}
 
@@ -3350,6 +3397,8 @@ struct GILand {
 	float4   autoWet;
 	float4   autoSlope;
 	float4   autoSnow;
+	float4   rvtA;     // as the HW kernel's GILand: RvtVolumeA / RvtVolumeB of a landscape drawn from the RVT
+	float4   rvtB;
 };
 
 // Auto landscape material at a hit — copy of the HW kernel's giAutoLandAlbedo
@@ -3373,12 +3422,42 @@ static float3 giAutoLandAlbedo(const device GILand& L, float3 pos, float3 n)
 // Albedo of a landscape hit sampled at the PAINT — see the HW kernel's copy for
 // why the hit POSITION is enough to recover the UV; an auto landscape follows
 // the hit's slope and height. false = not a landscape.
+// A landscape drawn from the Runtime Virtual Texture: the hit's colour from the pages (the real ground, textures and all)
+// instead of the means. RvtLookup.h's page math, nearest page at the mip whose texel matches `footprint` (metres the
+// reflected pixel covers there); the table already points a missing page at its nearest coarser one.
+static bool giRvtAlbedo(const device GILand& L, texture2d<uint> table, texture2d_array<float> hot,
+                        texture2d_array<float> cold, float3 hitPos, float footprint, thread float3& albedoOut)
+{
+	if (L.rvtB.w < 0.5) return false;
+	const float2 uv = (hitPos.xz - L.rvtA.xy) / max(L.rvtA.z, 1e-3);
+	if (uv.x < 0.0 || uv.y < 0.0 || uv.x >= 1.0 || uv.y >= 1.0) return false;
+	const int mipCount = max(int(L.rvtB.w + 0.5), 1);
+	const int pps0     = max(int(L.rvtB.z + 0.5), 1);
+	const int mip = clamp(int(floor(log2(max(footprint / max(L.rvtA.w, 1e-4), 1.0)))), 0, mipCount - 1);
+	const int pps = max(pps0 >> mip, 1);
+	const uint2 pg = uint2(clamp(int2(uv * float(pps)), int2(0), int2(pps - 1)));
+	const uint e = table.read(pg, uint(mip)).r;
+	if (e == 0xFFFFFFFFu) return false;
+	const uint slot = e & 0x7FFFFFu;
+	const int  ppsE = max(pps0 >> int(e >> 24), 1);
+	const float2 g  = uv * float(ppsE);
+	const float ps = L.rvtB.x, bd = fmod(L.rvtB.y, 256.0);
+	const float2 tuv = (bd + (g - floor(g)) * ps) / (ps + 2.0 * bd);
+	constexpr sampler s(coord::normalized, address::clamp_to_edge, filter::linear);
+	albedoOut = (e & 0x800000u) != 0u ? cold.sample(s, tuv, slot, level(0.0)).rgb
+	                                  : hot.sample(s, tuv, slot, level(0.0)).rgb;
+	return true;
+}
+
 static bool giLandscapeAlbedo(const device GILand* lands, int li, int landCount,
                               array<texture2d<float>, 4> weightTex,
-                              float3 hitPos, float3 hitN, thread float3& albedoOut)
+                              float3 hitPos, float3 hitN, thread float3& albedoOut,
+                              array<texture2d<uint>, 4> rvtTables, texture2d_array<float> rvtHot,
+                              texture2d_array<float> rvtCold, float footprint)
 {
 	if (li < 0 || li >= landCount || li >= 4) return false;
 	const device GILand& L = lands[li];
+	if (giRvtAlbedo(L, rvtTables[li], rvtHot, rvtCold, hitPos, footprint, albedoOut)) return true;
 	if (L.cfg.w < -0.5) { albedoOut = giAutoLandAlbedo(L, hitPos, hitN); return true; }
 	const int layers = int(L.cfg.w);
 	if (layers <= 0) return false;
@@ -3903,7 +3982,10 @@ kernel void giReflRaySw(uint2 gid [[thread_position_in_grid]],
                         const device GiInst* insts [[buffer(2)]],
                         constant GIReflParams& P    [[buffer(3)]],
                         const device GILand* lands  [[buffer(4)]],
-                        array<texture2d<float>, 4> landWeights [[texture(9)]])
+                        array<texture2d<float>, 4> landWeights [[texture(9)]],
+                        array<texture2d<uint>, 4>  rvtTables   [[texture(13)]],
+                        texture2d_array<float>     rvtHot      [[texture(17)]],
+                        texture2d_array<float>     rvtCold     [[texture(18)]])
 {
 	if (float(gid.x) >= P.texSize.x || float(gid.y) >= P.texSize.y) return;
 	constexpr sampler smp(coord::normalized, address::clamp_to_edge, filter::nearest);
@@ -3990,8 +4072,9 @@ kernel void giReflRaySw(uint2 gid [[thread_position_in_grid]],
 			// (auto material: its slope/height masks, hence after hitN).
 			{
 				float3 painted;
+				const float footprint = (length(Pw - P.camPos.xyz) + dist) * 1.155 / max(P.texSize.y, 1.0) + dist * rough * rough;
 				if (giLandscapeAlbedo(lands, insts[hitInst].offsets.z, int(P.land.x),
-				                      landWeights, hitPos, hitN, painted))
+				                      landWeights, hitPos, hitN, painted, rvtTables, rvtHot, rvtCold, footprint))
 					albedo = painted;
 			}
 			// Occlusion ray skipped when the sun term is black anyway (night) —
@@ -7168,6 +7251,9 @@ void MetalRenderer::Shutdown()
 	DestroySkyViewLut();
 	if (m_moonTexture)         { CFBridgingRelease(m_moonTexture);          m_moonTexture = nullptr; }
 	if (m_dummyTexture)    { CFBridgingRelease(m_dummyTexture);    m_dummyTexture = nullptr; }
+	DestroyRvtPool();
+	DrainRetiredTextures();
+	if (m_rvtDummyTable)   { CFBridgingRelease(m_rvtDummyTable);   m_rvtDummyTable = nullptr; }
 	if (m_whiteArrayTexture) { CFBridgingRelease(m_whiteArrayTexture); m_whiteArrayTexture = nullptr; }
 	if (m_linearSampler)   { CFBridgingRelease(m_linearSampler);   m_linearSampler = nullptr; }
 	if (m_materialSampler) { CFBridgingRelease(m_materialSampler); m_materialSampler = nullptr; }
@@ -7967,6 +8053,15 @@ void MetalRenderer::CreateScenePipeline()
 		[dummyArr replaceRegion:MTLRegionMake2D(0, 0, 1, 1) mipmapLevel:0 slice:0
 		              withBytes:&white bytesPerRow:4 bytesPerImage:4];
 		m_whiteArrayTexture = (void*)CFBridgingRetain(dummyArr);
+		// The page table's stand-in (RVT, Thema 333): one entry, "no page" (0xFFFFFFFF), so a lookup that runs before the first
+		// table lands shows the neutral colours.
+		MTLTextureDescriptor* dummyTblDesc = [MTLTextureDescriptor
+			texture2DDescriptorWithPixelFormat:MTLPixelFormatR32Uint width:1 height:1 mipmapped:NO];
+		dummyTblDesc.usage       = MTLTextureUsageShaderRead;
+		dummyTblDesc.storageMode = MTLStorageModeShared;
+		id<MTLTexture> dummyTbl = [device newTextureWithDescriptor:dummyTblDesc];
+		[dummyTbl replaceRegion:MTLRegionMake2D(0, 0, 1, 1) mipmapLevel:0 withBytes:&white bytesPerRow:4];
+		m_rvtDummyTable = (void*)CFBridgingRetain(dummyTbl);
 		// Its texture3d twin for the froxel fog volume's slot (fragment texture 17): Metal
 		// validates the texture TYPE, and heApplyFogT's volume is a 3D texture. (S = 0, T = 1:
 		// "no fog" if anything ever did read it.)
@@ -8299,6 +8394,7 @@ void MetalRenderer::ExtractFrame(float aspect)
 	                        env.cloudCoverage);
 	m_extractor.setContentManager(m_contentManager);
 	m_extractor.extract(*m_world, m_renderWorld, aspect, &m_editorCamera);
+	ApplyRvtSwaps();
 }
 
 void MetalRenderer::RefineObjectBounds()
@@ -8845,9 +8941,10 @@ void MetalRenderer::EncodeGISwAccelBuild()
 // Rebuilt per frame: it is a handful of 192-byte entries, and the weightmap
 // TEXTURES come from the same UUID-keyed cache the raster path uses (uploaded
 // once, re-uploaded only when the paint changes).
-int MetalRenderer::BuildGILandscapeTable(std::vector<void*>& outWeightTex)
+int MetalRenderer::BuildGILandscapeTable(std::vector<void*>& outWeightTex, std::vector<void*>* outRvtTables)
 {
 	outWeightTex.clear();
+	if (outRvtTables) outRvtTables->clear();
 	RetireGIObject(m_giLandBuf); m_giLandBuf = nullptr;
 	if (m_renderWorld.landscapes.empty() || !m_device) return 0;
 
@@ -8872,8 +8969,31 @@ int MetalRenderer::BuildGILandscapeTable(std::vector<void*>& outWeightTex)
 		g.autoWet   = ls.autoWet;
 		g.autoSlope = ls.autoSlope;
 		g.autoSnow  = ls.autoSnow;
+		// Drawn from the RVT right now: the hit reads the pages (RvtLookup.h's math, in giRvtAlbedo). The volume's two
+		// vectors are the consumer material's own parameters, the table the one SetRvtPageTable keeps for it.
+		void* rvtTable = nullptr;
+		if (outRvtTables && m_rvtPool[0] && m_contentManager)
+			if (const auto sw = m_rvtSwaps.find(ls.terrainEntity); sw != m_rvtSwaps.end())
+				if (const auto t = m_rvtTables.find(sw->second.consumerMat); t != m_rvtTables.end() && t->second.tex)
+					if (const MaterialAsset* cm = m_contentManager->getMaterial(sw->second.consumerMat))
+					{
+						const auto slotOf = [&](const char* name) -> int {
+							for (size_t k = 0; k < cm->graphParamNames.size(); ++k)
+								if (cm->graphParamNames[k] == name) return static_cast<int>(k);
+							return -1;
+						};
+						const int a = slotOf("RvtVolumeA"), b = slotOf("RvtVolumeB");
+						if (a >= 0 && b >= 0 && cm->shaderParamData.size() >= size_t(std::max(a, b) + 1) * 4)
+						{
+							const float* d = cm->shaderParamData.data();
+							g.rvtA = glm::vec4(d[a * 4], d[a * 4 + 1], d[a * 4 + 2], d[a * 4 + 3]);
+							g.rvtB = glm::vec4(d[b * 4], d[b * 4 + 1], d[b * 4 + 2], d[b * 4 + 3]);
+							rvtTable = t->second.tex;
+						}
+					}
 		gpu.push_back(g);
 		outWeightTex.push_back(wm);
+		if (outRvtTables) outRvtTables->push_back(rvtTable);
 	}
 	if (gpu.empty()) return 0;
 	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
@@ -10114,6 +10234,12 @@ void* MetalRenderer::ResolveGraphTexture(const HE::UUID& texId, const std::strin
 	// EngineContent download landing after this first ask (Thema 210).
 	HE::forgetGraphTextureMisses(m_graphTexCache, m_graphTexMissEpoch, m_contentManager->contentEpoch(),
 	                             [](void* tex) { return tex == nullptr; });
+	if (array)   // the idle release of big arrays (EvictIdleGraphArrays): who used it last, a normal frame or a page frame
+	{
+		const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+		GraphTexUse& u = m_graphTexUse[key];
+		(m_editorCamera.rvtMaterial != HE::UUID{} ? u.page : u.normal) = now;
+	}
 	if (auto it = m_graphTexCache.find(key); it != m_graphTexCache.end())
 		return it->second ? it->second : (array ? m_whiteArrayTexture : nullptr);
 	const TextureAsset* asset = m_contentManager->resolveTextureRef(texId, path);
@@ -10361,18 +10487,18 @@ bool MetalRenderer::EncodeMaterialPreview(void* renderEncoder, const HE::UUID& m
 	if (!shVert.empty())
 	{
 		[enc setVertexBytes:&lit length:sizeof(lit) atIndex:2];
-		float vpad[64] = { 0 };
+		float vpad[HE::kMatParamFloats] = { 0 };
 		if (ma && !ma->shaderParamData.empty())
 			std::memcpy(vpad, ma->shaderParamData.data(),
-			            std::min(ma->shaderParamData.size(), size_t(64)) * sizeof(float));
+			            std::min(ma->shaderParamData.size(), size_t(HE::kMatParamFloats)) * sizeof(float));
 		[enc setVertexBytes:vpad length:sizeof(vpad) atIndex:3];
 	}
 
 	if (ma && !ma->shaderParamData.empty())
 	{
-		float padded[64] = { 0 };
+		float padded[HE::kMatParamFloats] = { 0 };
 		std::memcpy(padded, ma->shaderParamData.data(),
-		            std::min(ma->shaderParamData.size(), size_t(64)) * sizeof(float));
+		            std::min(ma->shaderParamData.size(), size_t(HE::kMatParamFloats)) * sizeof(float));
 		[enc setFragmentBytes:padded length:sizeof(padded) atIndex:2];
 	}
 	// The scene's material PSO declares the whole lighting preamble (GI masks,
@@ -11908,6 +12034,23 @@ bool MetalRenderer::CaptureViewport(std::vector<uint8_t>& rgba, uint32_t& width,
 	}
 }
 
+// The copy of a finished page into a two-channel layer: the viewport target is BGRA8 and a blit cannot change the format.
+// mode 1 = normal (x, z), mode 2 = surface (R, G). Exact: an 8-bit value goes through a float and back unchanged.
+static const char* kRvtPackMSL = R"MSL(
+#include <metal_stdlib>
+using namespace metal;
+kernel void rvtPack(texture2d<float, access::read> src [[texture(0)]],
+                    texture2d_array<float, access::write> dst [[texture(1)]],
+                    constant uint4& p [[buffer(0)]],
+                    uint2 gid [[thread_position_in_grid]])
+{
+	if (gid.x >= p.x || gid.y >= p.x) return;
+	const float4 c = src.read(gid);
+	dst.write(float4(p.z == 1u ? float2(c.x, c.z) : float2(c.x, c.y), 0.0, 1.0), gid, p.y);
+}
+)MSL";
+
+
 // ─── One still from somebody else's camera ────────────────────────────────────
 // The contract is in IRenderer.h. How it is kept here: the live viewport's two
 // textures are SET ASIDE (not retired — they are handed straight back), so
@@ -11970,7 +12113,80 @@ bool MetalRenderer::RenderSceneImage(const EditorCameraOverride& camera, uint32_
 	// A minimised window makes EncodeFrame return before it draws anything;
 	// m_viewportColor is then still null and CaptureViewport says so.
 	uint32_t   gotW = 0, gotH = 0;
-	const bool ok   = CaptureViewport(rgba, gotW, gotH) && gotW == width && gotH == height;
+	bool       ok   = false;
+	if (camera.rvtSlot >= 0)
+	{
+		// A virtual texture page (Thema 333): the finished picture goes, on the GPU and without a readback, into its pool
+		// slice. Same pixel format on both sides (BGRA8Unorm) and top-row-first on both: a plain copy, no flip, no swizzle.
+		// The copy rides the queue behind the frame that drew the picture, so nothing waits here.
+		rgba.clear();
+		uint32_t hotSlice = 0xFFFFFFFFu;
+		ok = camera.rvtLayer >= 0 && camera.rvtLayer < 3 && m_rvtPool[camera.rvtLayer]
+		  && uint32_t(camera.rvtSlot) < m_rvtSlots && width == m_rvtPagePx && height == m_rvtPagePx && m_viewportColor;
+		if (ok)
+		{
+			const uint32_t slot = uint32_t(camera.rvtSlot);
+			hotSlice = RvtHotFor(slot);
+			ok = hotSlice != 0xFFFFFFFFu;
+			if (ok && camera.rvtLayer == 0)
+			{
+				// A new picture of this page: an encode of the old one is stale, a cold page is hot again, its age starts over.
+				++m_rvtSlotVer[slot];
+				m_rvtSlotPainted[slot] = m_rvtRealFrames;
+				if (m_rvtSlotCold[slot]) { m_rvtSlotCold[slot] = 0; ++m_rvtStateVer; }
+			}
+		}
+		if (ok)
+		{
+			id<MTLTexture> src = (__bridge id<MTLTexture>)m_viewportColor;
+			id<MTLTexture> dst = (__bridge id<MTLTexture>)m_rvtPool[camera.rvtLayer];
+			const bool packed = m_rvtPack && camera.rvtLayer > 0;
+			ok = src.width == width && src.height == height && (packed || src.pixelFormat == dst.pixelFormat);
+			if (ok && packed)
+			{
+				if (!m_rvtPackPso)
+				{
+					NSError* err = nil;
+					id<MTLDevice> dev = (__bridge id<MTLDevice>)m_device;
+					id<MTLLibrary> lib = [dev newLibraryWithSource:[NSString stringWithUTF8String:kRvtPackMSL] options:nil error:&err];
+					id<MTLFunction> fn = lib ? [lib newFunctionWithName:@"rvtPack"] : nil;
+					id<MTLComputePipelineState> pso = fn ? [dev newComputePipelineStateWithFunction:fn error:&err] : nil;
+					if (pso) m_rvtPackPso = (void*)CFBridgingRetain(pso);
+					else     HE_LOG_ERROR(RHI, "%s", "MetalRenderer: the RVT page pack kernel failed to build");
+				}
+				ok = m_rvtPackPso != nullptr;
+				if (ok)
+				{
+					id<MTLCommandBuffer>         cb  = [(__bridge id<MTLCommandQueue>)m_commandQueue commandBuffer];
+					id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+					const uint32_t args[4] = { width, hotSlice, uint32_t(camera.rvtLayer == 1 ? 1 : 2), 0 };
+					[enc setComputePipelineState:(__bridge id<MTLComputePipelineState>)m_rvtPackPso];
+					[enc setTexture:src atIndex:0];
+					[enc setTexture:dst atIndex:1];
+					[enc setBytes:args length:sizeof(args) atIndex:0];
+					[enc dispatchThreadgroups:MTLSizeMake((width + 7) / 8, (height + 7) / 8, 1) threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
+					[enc endEncoding];
+					[cb commit];
+				}
+			}
+			else if (ok)
+			{
+				id<MTLCommandBuffer>      cb   = [(__bridge id<MTLCommandQueue>)m_commandQueue commandBuffer];
+				id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+				[blit copyFromTexture:src sourceSlice:0 sourceLevel:0
+				         sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(width, height, 1)
+				            toTexture:dst destinationSlice:NSUInteger(hotSlice) destinationLevel:0
+				    destinationOrigin:MTLOriginMake(0, 0, 0)];
+				[blit endEncoding];
+				[cb commit];
+			}
+		}
+	}
+	else
+		ok = CaptureViewport(rgba, gotW, gotH) && gotW == width && gotH == height;
+	if (camera.rvtSlot >= 0 && !ok)
+		HE_LOG_WARN(RHI, "MetalRenderer: RVT page for slot %d layer %d failed (pool %u of %u slices, page %u px, picture %ux%u)",
+		            camera.rvtSlot, camera.rvtLayer, m_rvtAllocSlots, m_rvtSlots, m_rvtPagePx, width, height);
 
 	// The screenshot pair goes the retired way (the command buffer that drew it
 	// is complete — CaptureViewport waited — but the convention is one release
@@ -11994,11 +12210,709 @@ bool MetalRenderer::RenderSceneImage(const EditorCameraOverride& camera, uint32_
 	return ok;
 }
 
+// ─── Runtime Virtual Texture (Thema 333, docs/rvt-design-2026-11-04.md) ────────────────────────────────────
+// The contract is in IRenderer.h; D3D11's is the reference (D3D11Renderer.cpp), OpenGL's the closest sibling. What is Metal's own:
+//  * the HOT pool is BGRA8Unorm, the format of the viewport target a page is drawn into, so a page goes in with a blit; the
+//    albedo array is READ through an sRGB view of the same memory (texelFetch then returns linear, like the other backends);
+//  * the fragment stage is at the 16-sampler cap: the resources are textures 18..24 with no sampler (MaterialShaderLibrary
+//    pins them and gives them inline constexpr samplers; texture 17 is heFogVolume's);
+//  * Metal is top-row-first like the pool, so no flip (GL's blit flips);
+//  * the hot arrays start with a few slices and grow (new arrays, a GPU copy, the old ones retired) with the pages in use, and
+//    a page that has not been painted for HE_RVT_COLD_AFTER real frames (default 120) is read back, encoded to ASTC 4x4 on a
+//    worker thread and kept in the COLD arrays (a quarter of the bytes), its hot slice freed; the table entry then carries bit 23.
+//    A page painted again goes back to a hot slice. The hot arrays shrink when most of their slices are free.
+static bool AllocRvtArrays(id<MTLDevice> device, uint32_t slices, uint32_t pagePx, bool pack, void* out[3], void** outSrgb)
+{
+	for (int layer = 0; layer < 3; ++layer)
+	{
+		const bool rg = pack && layer > 0;   // normal (x, z) and surface (R, G) in two channels
+		MTLTextureDescriptor* d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:(rg ? MTLPixelFormatRG8Unorm : kSwapchainFormat)
+		                                                                             width:pagePx height:pagePx mipmapped:NO];
+		d.textureType = MTLTextureType2DArray;
+		d.arrayLength = slices;
+		d.usage       = MTLTextureUsageShaderRead | (rg ? MTLTextureUsageShaderWrite : MTLTextureUsagePixelFormatView);
+		d.storageMode = MTLStorageModePrivate;
+		id<MTLTexture> t = [device newTextureWithDescriptor:d];
+		if (!t) { for (int k = 0; k < layer; ++k) { CFBridgingRelease(out[k]); out[k] = nullptr; } return false; }
+		out[layer] = (void*)CFBridgingRetain(t);
+	}
+	id<MTLTexture> srgb = [(__bridge id<MTLTexture>)out[0] newTextureViewWithPixelFormat:MTLPixelFormatBGRA8Unorm_sRGB];
+	if (!srgb) { for (int k = 0; k < 3; ++k) { CFBridgingRelease(out[k]); out[k] = nullptr; } return false; }
+	*outSrgb = (void*)CFBridgingRetain(srgb);
+	return true;
+}
+
+// The encoder thread, and the readbacks that are still on their way to it.
+struct MetalRenderer::RvtColdWork
+{
+	struct Todo   { uint32_t slot, ver; std::vector<uint8_t> rgba[3]; };
+	struct Done   { uint32_t slot, ver; std::vector<uint8_t> blocks[3]; };
+	struct Flight { uint32_t slot, ver; void* buffer; std::shared_ptr<std::atomic<bool>> ready; };   // buffer: retained id<MTLBuffer>, 3 pages of BGRA
+	std::mutex              mutex;
+	std::condition_variable cv;
+	std::deque<Todo>        todo;
+	std::deque<Done>        done;
+	std::vector<Flight>     flights;
+	std::thread             worker;
+	bool                    quit = false;
+	uint32_t                pagePx = 0;
+
+	void start(uint32_t px)
+	{
+		pagePx = px;
+		worker = std::thread([this] {
+			for (;;)
+			{
+				Todo job;
+				{
+					std::unique_lock<std::mutex> lock(mutex);
+					// Idle for a few seconds: give the encoder's tables back (an ASTC context is tens of MB), the next page makes new ones.
+					if (!cv.wait_for(lock, std::chrono::seconds(3), [this] { return quit || !todo.empty(); }))
+					{
+						lock.unlock();
+						HE::releaseBlockEncoderCache();
+						lock.lock();
+						cv.wait(lock, [this] { return quit || !todo.empty(); });
+					}
+					if (quit) return;
+					job = std::move(todo.front());
+					todo.pop_front();
+				}
+				Done out; out.slot = job.slot; out.ver = job.ver;
+				bool ok = true;
+				for (int layer = 0; layer < 3 && ok; ++layer)
+					ok = HE::encodeBlocks(HE::BlockFormat::Astc4x4, job.rgba[layer].data(), pagePx, pagePx, /*srgb=*/false, /*quality=*/0, out.blocks[layer]);   // one encoder context for all three layers (an astcenc context is ~10 MB): the albedo bytes are sRGB-encoded either way, the sRGB format decodes them
+				if (!ok) out.blocks[0].clear();   // an empty result: the page stays hot
+				std::lock_guard<std::mutex> lock(mutex);
+				done.push_back(std::move(out));
+			}
+		});
+	}
+	void stop()
+	{
+		{ std::lock_guard<std::mutex> lock(mutex); quit = true; }
+		cv.notify_all();
+		if (worker.joinable()) worker.join();
+		for (Flight& f : flights) if (f.buffer) CFBridgingRelease(f.buffer);
+		flights.clear();
+	}
+};
+
+uint32_t MetalRenderer::RvtLayerChannels(int layer) const
+{
+	if (!m_rvtPack) return 0xFu;
+	return layer == 1 ? 0x5u : layer == 2 ? 0x3u : 0xFu;   // normal: R and B (x, z); surface: R and G; albedo: all
+}
+
+bool MetalRenderer::CreateRvtPool(uint32_t slots, uint32_t pagePx)
+{
+	DestroyRvtPool();
+	if (!m_device || slots == 0 || slots > 2048 || pagePx < 8 || pagePx > 1024 || (pagePx & 3u)) return false;
+	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+	static const uint32_t startSlots = [] { const char* e = std::getenv("HE_RVT_POOL_START"); return e && *e ? uint32_t(std::max(1, std::atoi(e))) : 64u; }();
+	const uint32_t alloc = std::min(slots, startSlots);
+	static const bool packWanted = [] { const char* e = std::getenv("HE_RVT_PACK"); return !(e && *e == '0'); }();
+	m_rvtPack = packWanted;
+	if (!AllocRvtArrays(device, alloc, pagePx, m_rvtPack, m_rvtPool, &m_rvtPoolAlbedoSrgb)) { DestroyRvtPool(); return false; }
+	m_rvtSlots      = slots;
+	m_rvtAllocSlots = alloc;
+	m_rvtPagePx     = pagePx;
+	m_rvtSlotHot.assign(slots, -1);
+	m_rvtSlotCold.assign(slots, 0);
+	m_rvtSlotBusy.assign(slots, 0);
+	m_rvtSlotVer.assign(slots, 0);
+	m_rvtSlotPainted.assign(slots, 0);
+	m_rvtHotFree.clear();
+	for (uint32_t i = alloc; i-- > 0;) m_rvtHotFree.push_back(i);   // pop_back hands out the lowest first
+	// The cold pool: Apple GPU (ASTC), the encoder in this build, not switched off.
+	static const bool coldWanted = [] { const char* e = std::getenv("HE_RVT_COLD"); return !(e && *e == '0'); }();
+	m_rvtColdOn = false;
+	if (coldWanted && [device supportsFamily:MTLGPUFamilyApple2])
+	{
+		std::vector<uint8_t> probe(16 * 16 * 4, 128), blocks;
+		m_rvtColdOn = HE::encodeBlocks(HE::BlockFormat::Astc4x4, probe.data(), 16, 16, false, 0, blocks);
+	}
+	HE_LOG_INFO(RHI, "MetalRenderer: RVT pool up to %u pages of %u px, %u hot slices allocated now (%.0f MB of %.0f MB at full size), cold ASTC pool %s (starts at %s hot pages in use), layers %s; device now holds %.0f MB of %.0f MB recommended",
+	            slots, pagePx, alloc, double(alloc) * pagePx * pagePx * (m_rvtPack ? 8.0 : 12.0) / (1024.0 * 1024.0),
+	            double(slots) * pagePx * pagePx * (m_rvtPack ? 8.0 : 12.0) / (1024.0 * 1024.0), m_rvtColdOn ? "on" : "off", std::getenv("HE_RVT_COLD_MIN") ? std::getenv("HE_RVT_COLD_MIN") : "256", m_rvtPack ? "RGBA8 + RG8 + RG8" : "RGBA8 x 3",
+	            double(device.currentAllocatedSize) / (1024.0 * 1024.0),
+	            double(device.recommendedMaxWorkingSetSize) / (1024.0 * 1024.0));
+	return true;
+}
+
+bool MetalRenderer::GrowRvtPool(uint32_t needHot)
+{
+	if (needHot <= m_rvtAllocSlots) return true;
+	if (needHot > m_rvtSlots || !m_device || !m_commandQueue) return false;
+	const uint32_t grown = std::min(m_rvtSlots, std::max((needHot + 31u) & ~31u, m_rvtAllocSlots + m_rvtAllocSlots / 2));
+	void* nt[3] = { nullptr, nullptr, nullptr };
+	void* nSrgb = nullptr;
+	if (!AllocRvtArrays((__bridge id<MTLDevice>)m_device, grown, m_rvtPagePx, m_rvtPack, nt, &nSrgb)) return false;
+	// What the old arrays hold goes across on the GPU, queued ahead of the page copy that asked for the growth.
+	id<MTLCommandBuffer>      cb   = [(__bridge id<MTLCommandQueue>)m_commandQueue commandBuffer];
+	id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+	for (int layer = 0; layer < 3; ++layer)
+		[blit copyFromTexture:(__bridge id<MTLTexture>)m_rvtPool[layer] sourceSlice:0 sourceLevel:0
+		            toTexture:(__bridge id<MTLTexture>)nt[layer] destinationSlice:0 destinationLevel:0
+		           sliceCount:m_rvtAllocSlots levelCount:1];
+	[blit endEncoding];
+	[cb commit];
+	RetireTexture(m_rvtPoolAlbedoSrgb);
+	for (int layer = 0; layer < 3; ++layer) { RetireTexture(m_rvtPool[layer]); m_rvtPool[layer] = nt[layer]; }
+	m_rvtPoolAlbedoSrgb = nSrgb;
+	for (uint32_t i = grown; i-- > m_rvtAllocSlots;) m_rvtHotFree.push_back(i);
+	HE_LOG_INFO(RHI, "MetalRenderer: RVT hot pool grew %u -> %u of %u pages (%.0f MB)", m_rvtAllocSlots, grown, m_rvtSlots,
+	            double(grown) * m_rvtPagePx * m_rvtPagePx * (m_rvtPack ? 8.0 : 12.0) / (1024.0 * 1024.0));
+	m_rvtAllocSlots = grown;
+	return true;
+}
+
+uint32_t MetalRenderer::RvtHotFor(uint32_t slot)
+{
+	if (m_rvtSlotHot[slot] >= 0) return uint32_t(m_rvtSlotHot[slot]);
+	if (m_rvtHotFree.empty() && !GrowRvtPool(m_rvtAllocSlots + 1)) return 0xFFFFFFFFu;
+	const uint32_t hot = m_rvtHotFree.back();
+	m_rvtHotFree.pop_back();
+	m_rvtSlotHot[slot] = int32_t(hot);
+	++m_rvtStateVer;
+	return hot;
+}
+
+bool MetalRenderer::GrowRvtCold(uint32_t needSlices)
+{
+	if (needSlices <= m_rvtColdAlloc) return true;
+	if (needSlices > m_rvtSlots || !m_device || !m_commandQueue) return false;
+	const uint32_t grown = std::min(m_rvtSlots, std::max((needSlices + 31u) & ~31u, m_rvtColdAlloc + m_rvtColdAlloc / 2));
+	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+	void* nt[3] = { nullptr, nullptr, nullptr };
+	for (int layer = 0; layer < 3; ++layer)
+	{
+		MTLTextureDescriptor* d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:(layer == 0 ? MTLPixelFormatASTC_4x4_sRGB : MTLPixelFormatASTC_4x4_LDR)
+		                                                                             width:m_rvtPagePx height:m_rvtPagePx mipmapped:NO];
+		d.textureType = MTLTextureType2DArray;
+		d.arrayLength = grown;
+		d.usage       = MTLTextureUsageShaderRead;
+		d.storageMode = MTLStorageModeShared;   // unified memory: the encoded blocks are written in place
+		id<MTLTexture> t = [device newTextureWithDescriptor:d];
+		if (!t) { for (int k = 0; k < layer; ++k) CFBridgingRelease(nt[k]); return false; }
+		nt[layer] = (void*)CFBridgingRetain(t);
+	}
+	if (m_rvtColdAlloc > 0)
+	{
+		id<MTLCommandBuffer>      cb   = [(__bridge id<MTLCommandQueue>)m_commandQueue commandBuffer];
+		id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+		for (int layer = 0; layer < 3; ++layer)
+			[blit copyFromTexture:(__bridge id<MTLTexture>)m_rvtCold[layer] sourceSlice:0 sourceLevel:0
+			            toTexture:(__bridge id<MTLTexture>)nt[layer] destinationSlice:0 destinationLevel:0
+			           sliceCount:m_rvtColdAlloc levelCount:1];
+		[blit endEncoding];
+		[cb commit];
+	}
+	for (int layer = 0; layer < 3; ++layer) { RetireTexture(m_rvtCold[layer]); m_rvtCold[layer] = nt[layer]; }
+	m_rvtColdAlloc = grown;
+	return true;
+}
+
+void MetalRenderer::StopRvtColdWork()
+{
+	if (!m_rvtWork) return;
+	m_rvtWork->stop();
+	delete m_rvtWork;
+	m_rvtWork = nullptr;
+}
+
+void MetalRenderer::DestroyRvtPool()
+{
+	StopRvtColdWork();
+	m_rvtSwaps.clear();   // the pool the consumers read is gone: draw the landscapes themselves again
+	// The GPU may still be reading these in a frame in flight: retire, do not release.
+	for (auto& kv : m_rvtTables) RetireTexture(kv.second.tex);
+	m_rvtTables.clear();
+	RetireTexture(m_rvtPoolAlbedoSrgb); m_rvtPoolAlbedoSrgb = nullptr;
+	for (void*& t : m_rvtPool) { RetireTexture(t); t = nullptr; }
+	for (void*& t : m_rvtCold) { RetireTexture(t); t = nullptr; }
+	m_rvtColdAlloc = 0;
+	m_rvtColdOn = false;
+	if (m_rvtPackPso) { CFBridgingRelease(m_rvtPackPso); m_rvtPackPso = nullptr; }
+	m_rvtSlots = m_rvtAllocSlots = m_rvtPagePx = 0;
+	m_rvtSlotHot.clear(); m_rvtSlotCold.clear(); m_rvtSlotBusy.clear(); m_rvtSlotVer.clear(); m_rvtSlotPainted.clear(); m_rvtHotFree.clear();
+}
+
+void MetalRenderer::SetRvtLandscape(uint32_t terrainEntity, const HE::UUID& landscapeMaterial, const HE::UUID& consumerMaterial)
+{
+	if (consumerMaterial == HE::UUID{}) m_rvtSwaps.erase(terrainEntity);
+	else                               m_rvtSwaps[terrainEntity] = { landscapeMaterial, consumerMaterial };
+	HE_LOG_INFO(RHI, "MetalRenderer: RVT swap %s; device now holds %.0f MB", consumerMaterial == HE::UUID{} ? "off" : "on",
+	            double(((__bridge id<MTLDevice>)m_device).currentAllocatedSize) / (1024.0 * 1024.0));
+}
+
+void MetalRenderer::SetRvtNearChunks(uint32_t terrainEntity, const std::vector<uint32_t>& chunkEntities)
+{
+	m_rvtNear.set(terrainEntity, chunkEntities);
+}
+
+// The feedback ring: buffers the GPU writes in a frame and the completion handler harvests. Shared so a handler that runs
+// after the renderer is gone touches nothing of it (the same rule as the GPU timer's state).
+struct MetalRenderer::RvtFeedbackShared
+{
+	std::mutex             lock;
+	std::vector<uint32_t>  keys;          // harvested, not yet read (ReadRvtFeedback)
+	std::vector<id<MTLBuffer>> ring;      // 3 buffers: one per frame in flight
+	std::vector<uint8_t>   busy;          // per ring buffer: bound to a frame that has not completed
+	id<MTLBuffer>          sink = nil;    // bound when every ring buffer is busy: written, never read
+};
+
+void* MetalRenderer::RvtFeedbackBindTarget()
+{
+	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+	if (!m_rvtFb && device)
+	{
+		m_rvtFb = std::make_shared<RvtFeedbackShared>();
+		const NSUInteger bytes = HE::kRvtFeedbackSlots * sizeof(uint32_t);
+		for (int i = 0; i < 3; ++i)
+		{
+			id<MTLBuffer> b = [device newBufferWithLength:bytes options:MTLResourceStorageModeShared];
+			std::memset(b.contents, 0xFF, bytes);
+			m_rvtFb->ring.push_back(b);
+		}
+		m_rvtFb->busy.assign(3, 0);
+		m_rvtFb->sink = [device newBufferWithLength:bytes options:MTLResourceStorageModePrivate];
+	}
+	if (m_rvtFbCurrent) return m_rvtFbCurrent;
+	return m_rvtFb ? (__bridge void*)m_rvtFb->sink : nullptr;
+}
+
+void MetalRenderer::BeginRvtFeedbackFrame()
+{
+	m_rvtFbPhase = (m_rvtFbPhase + 1) & 63u;
+	m_rvtFbCurrent = nullptr;
+	m_rvtFbCurrentIdx = -1;
+	if (!RvtFeedbackBindTarget()) return;
+	std::lock_guard<std::mutex> g(m_rvtFb->lock);
+	for (int i = 0; i < int(m_rvtFb->ring.size()); ++i)
+		if (!m_rvtFb->busy[size_t(i)]) { m_rvtFb->busy[size_t(i)] = 1; m_rvtFbCurrentIdx = i; break; }
+	m_rvtFbCurrent = (__bridge void*)(m_rvtFbCurrentIdx >= 0 ? m_rvtFb->ring[size_t(m_rvtFbCurrentIdx)] : m_rvtFb->sink);
+}
+
+void MetalRenderer::EndRvtFeedbackFrame(void* cmdBufPtr)
+{
+	if (!m_rvtFb || m_rvtFbCurrentIdx < 0) return;
+	id<MTLCommandBuffer> cb = (__bridge id<MTLCommandBuffer>)cmdBufPtr;
+	std::shared_ptr<RvtFeedbackShared> fb = m_rvtFb;
+	const int idx = m_rvtFbCurrentIdx;
+	m_rvtFbCurrentIdx = -1;
+	if (!cb) { std::lock_guard<std::mutex> g(fb->lock); fb->busy[size_t(idx)] = 0; return; }
+	[cb addCompletedHandler:^(id<MTLCommandBuffer>) {
+		std::lock_guard<std::mutex> g(fb->lock);
+		uint32_t* p = static_cast<uint32_t*>(fb->ring[size_t(idx)].contents);
+		size_t got = 0;
+		for (uint32_t i = 0; i < HE::kRvtFeedbackSlots; ++i)
+			if (p[i] != 0xFFFFFFFFu) { fb->keys.push_back(p[i]); p[i] = 0xFFFFFFFFu; ++got; }
+		if (std::getenv("HE_RVT_FEEDBACK_DEBUG")) HE_LOG_INFO(RHI, "MetalRenderer: RVT feedback harvested %zu key(s) from ring %d", got, idx);
+		if (fb->keys.size() > 65536) fb->keys.erase(fb->keys.begin(), fb->keys.end() - 65536);   // nobody reads: stay bounded
+		fb->busy[size_t(idx)] = 0;
+	}];
+}
+
+bool MetalRenderer::ReadRvtFeedback(std::vector<uint32_t>& keys)
+{
+	static const bool on = [] { const char* e = std::getenv("HE_RVT_FEEDBACK"); return !(e && *e == '0'); }();
+	if (!on || !m_rvtFb) return on && m_rvtPool[0] != nullptr;
+	std::lock_guard<std::mutex> g(m_rvtFb->lock);
+	keys.insert(keys.end(), m_rvtFb->keys.begin(), m_rvtFb->keys.end());
+	m_rvtFb->keys.clear();
+	return true;
+}
+
+void MetalRenderer::ReleaseRvtConsumer(const HE::UUID& consumerMaterial)
+{
+	for (auto it = m_rvtSwaps.begin(); it != m_rvtSwaps.end();)
+		it = it->second.consumerMat == consumerMaterial ? m_rvtSwaps.erase(it) : std::next(it);
+	const auto t = m_rvtTables.find(consumerMaterial);
+	if (t == m_rvtTables.end()) return;
+	RetireTexture(t->second.tex);
+	m_rvtTables.erase(t);
+	HE_LOG_INFO(RHI, "MetalRenderer: RVT consumer released; device now holds %.0f MB",
+	            double(((__bridge id<MTLDevice>)m_device).currentAllocatedSize) / (1024.0 * 1024.0));
+}
+
+// The table the shader reads: the manager's entries (slot | effective mip << 24) with each slot turned into "which array, which
+// slice": a hot page is its hot slice, a cold page is bit 23 plus its slot (the cold arrays are indexed by slot). A NEW texture per
+// upload, the old one retired (kept three frames): a frame in flight may still be reading the table it was encoded with, and a
+// replaceRegion into that texture would show it half old, half new. The table is a few KB and an upload happens only when a page
+// came, went or changed temperature, so the allocation is cheap next to the tear it prevents.
+void MetalRenderer::UploadRvtTable(RvtTable& t)
+{
+	if (t.src.empty() || !m_device) return;
+	MTLTextureDescriptor* d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR32Uint
+	                                                                             width:t.side height:t.side mipmapped:NO];
+	d.mipmapLevelCount = t.src.size();
+	d.usage            = MTLTextureUsageShaderRead;
+	d.storageMode      = MTLStorageModeShared;   // unified memory: the CPU writes the entries in place
+	id<MTLTexture> nt = [(__bridge id<MTLDevice>)m_device newTextureWithDescriptor:d];
+	if (!nt) return;
+	std::vector<uint32_t> mapped;
+	for (size_t m = 0; m < t.src.size(); ++m)
+	{
+		const std::vector<uint32_t>& in = t.src[m];
+		mapped.resize(in.size());
+		for (size_t i = 0; i < in.size(); ++i)
+		{
+			const uint32_t e = in[i];
+			if (e == 0xFFFFFFFFu) { mapped[i] = e; continue; }
+			const uint32_t slot = e & 0xFFFFFFu, eff = e >> 24;
+			if (slot >= m_rvtSlots)                  mapped[i] = 0xFFFFFFFFu;
+			else if (m_rvtSlotCold[slot])            mapped[i] = (eff << 24) | 0x800000u | slot;
+			else if (m_rvtSlotHot[slot] >= 0)        mapped[i] = (eff << 24) | uint32_t(m_rvtSlotHot[slot]);
+			else                                     mapped[i] = 0xFFFFFFFFu;   // never painted here: no page
+		}
+		const NSUInteger ms = t.side >> m;
+		[nt replaceRegion:MTLRegionMake2D(0, 0, ms, ms) mipmapLevel:m withBytes:mapped.data() bytesPerRow:ms * 4];
+	}
+	RetireTexture(t.tex);
+	t.tex = (void*)CFBridgingRetain(nt);
+	t.stateVer = m_rvtStateVer;
+}
+
+bool MetalRenderer::SetRvtPageTable(const HE::UUID& consumerMaterial, const std::vector<std::vector<uint32_t>>& mips)
+{
+	if (!m_rvtSlots || !m_device || mips.empty() || mips.size() > 12) return false;
+	uint32_t side = 1;
+	while (uint64_t(side) * side < mips[0].size()) ++side;
+	if (uint64_t(side) * side != mips[0].size() || (side & (side - 1)) != 0 || side > 4096) return false;   // a power of two
+	for (size_t m = 0; m < mips.size(); ++m)
+	{
+		const uint32_t ms = side >> m;
+		if (ms == 0 || mips[m].size() != size_t(ms) * ms) return false;
+	}
+	RvtTable& t = m_rvtTables[consumerMaterial];
+	const bool reshaped = !t.tex || t.side != side || t.mips != mips.size();
+	t.src   = mips;
+	t.side  = side;
+	t.mips  = static_cast<uint32_t>(mips.size());
+	UploadRvtTable(t);
+	if (!t.tex) { m_rvtTables.erase(consumerMaterial); return false; }
+	if (reshaped)
+		HE_LOG_INFO(RHI, "MetalRenderer: RVT page table %ux%u, %zu mips; device now holds %.0f MB",
+		            side, side, mips.size(), double(((__bridge id<MTLDevice>)m_device).currentAllocatedSize) / (1024.0 * 1024.0));
+	return true;
+}
+
+bool MetalRenderer::ReadbackRvtPageTable(const HE::UUID& consumerMaterial, std::vector<std::vector<uint32_t>>& mips)
+{
+	const auto found = m_rvtTables.find(consumerMaterial);
+	if (found == m_rvtTables.end() || !found->second.tex) return false;
+	mips = found->second.src;   // the manager's form: what the witness compares against (the shader's form is rewritten per slot)
+	return true;
+}
+
+bool MetalRenderer::ReadbackRvtSlot(int layer, uint32_t slot, std::vector<uint8_t>& rgba)
+{
+	// A cold page lives as ASTC blocks only: the witnesses read pages straight after painting them, hot.
+	if (layer < 0 || layer >= 3 || !m_rvtPool[layer] || slot >= m_rvtSlots || m_rvtSlotHot[slot] < 0 || !m_device || !m_commandQueue) return false;
+	@autoreleasepool
+	{
+		const NSUInteger px = m_rvtPagePx;
+		id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+		// A private pool cannot be read on the CPU: blit the slice into a managed staging texture (CaptureViewport's way).
+		const bool rg = m_rvtPack && layer > 0;
+		MTLTextureDescriptor* desc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:(rg ? MTLPixelFormatRG8Unorm : kSwapchainFormat)
+		                                                                                width:px height:px mipmapped:NO];
+		desc.storageMode = MTLStorageModeManaged;
+		desc.usage       = MTLTextureUsageShaderRead;
+		id<MTLTexture> staging = [device newTextureWithDescriptor:desc];
+		if (!staging) return false;
+		id<MTLCommandBuffer>      cb   = [(__bridge id<MTLCommandQueue>)m_commandQueue commandBuffer];
+		id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+		[blit copyFromTexture:(__bridge id<MTLTexture>)m_rvtPool[layer] sourceSlice:NSUInteger(m_rvtSlotHot[slot]) sourceLevel:0
+		         sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(px, px, 1)
+		            toTexture:staging destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)];
+		[blit synchronizeTexture:staging slice:0 level:0];
+		[blit endEncoding];
+		[cb commit];
+		[cb waitUntilCompleted];
+		if (rg)
+		{
+			// Two channels in the pool: normal (x, z) comes back as R and B, the surface as R and G, the rest zero (RvtLayerChannels).
+			std::vector<uint8_t> two(size_t(px) * px * 2);
+			[staging getBytes:two.data() bytesPerRow:px * 2 fromRegion:MTLRegionMake2D(0, 0, px, px) mipmapLevel:0];
+			rgba.assign(size_t(px) * px * 4, 0);
+			for (size_t i = 0; i < size_t(px) * px; ++i)
+			{
+				rgba[i * 4 + 0] = two[i * 2 + 0];
+				rgba[i * 4 + (layer == 1 ? 2 : 1)] = two[i * 2 + 1];
+				rgba[i * 4 + 3] = 255;
+			}
+			return true;
+		}
+		std::vector<uint8_t> bgra(size_t(px) * px * 4);
+		[staging getBytes:bgra.data() bytesPerRow:px * 4 fromRegion:MTLRegionMake2D(0, 0, px, px) mipmapLevel:0];
+		rgba.resize(bgra.size());
+		for (size_t i = 0; i < size_t(px) * px; ++i)   // the stored bytes, in the RGBA order the contract promises
+		{
+			rgba[i * 4 + 0] = bgra[i * 4 + 2];
+			rgba[i * 4 + 1] = bgra[i * 4 + 1];
+			rgba[i * 4 + 2] = bgra[i * 4 + 0];
+			rgba[i * 4 + 3] = bgra[i * 4 + 3];
+		}
+		return true;
+	}
+}
+
+// Once per frame (EncodeFrame, before the draws): real frames also age the pages.
+void MetalRenderer::UpdateRvtCold(bool realFrame)
+{
+	if (!m_rvtSlots || !m_rvtPool[0]) return;
+	if (realFrame) ++m_rvtRealFrames;
+	const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+	// Compressing pays only for a big working set: a page saves ~160 KB, and the encoder (astcenc's tables, its thread) costs
+	// ~40 MB of CPU memory the moment it exists (measured: Malloc Small, not given back). Below HE_RVT_COLD_MIN hot pages (default 256, about 55 MB of hot pool)
+	// nothing is compressed and the encoder is never started.
+	static const uint32_t coldMin = [] { const char* e = std::getenv("HE_RVT_COLD_MIN"); return e && *e ? uint32_t(std::max(0, std::atoi(e))) : 256u; }();
+	if (m_rvtColdOn && !m_rvtWork && realFrame && m_rvtAllocSlots - uint32_t(m_rvtHotFree.size()) >= coldMin)
+	{
+		m_rvtWork = new RvtColdWork();
+		m_rvtWork->start(m_rvtPagePx);
+		HE_LOG_INFO(RHI, "MetalRenderer: RVT cold pool: %u hot pages in use, compressing the pages that stand still", m_rvtAllocSlots - uint32_t(m_rvtHotFree.size()));
+	}
+	if (m_rvtColdOn && m_rvtWork && realFrame)
+	{
+		static const uint64_t coldAfter = [] { const char* e = std::getenv("HE_RVT_COLD_AFTER"); return e && *e ? uint64_t(std::max(1, std::atoi(e))) : 120ull; }();
+		RvtColdWork& w = *m_rvtWork;
+		const size_t px = m_rvtPagePx, pageBytes = px * px * 4;
+		// What a page's three layers are in the readback buffer: BGRA (4 B per texel) each, or BGRA + two RG8 (the packed pool).
+		const size_t layerBytes[3] = { px * px * 4, px * px * (m_rvtPack ? 2u : 4u), px * px * (m_rvtPack ? 2u : 4u) };
+		const size_t layerOffset[3] = { 0, layerBytes[0], layerBytes[0] + layerBytes[1] };
+		const size_t bufferBytes = layerOffset[2] + layerBytes[2];
+
+		// 1. Encodes that came back: the page goes cold if it was not painted again meanwhile.
+		std::deque<RvtColdWork::Done> finished;
+		{ std::lock_guard<std::mutex> lock(w.mutex); finished.swap(w.done); }
+		for (RvtColdWork::Done& d : finished)
+		{
+			m_rvtSlotBusy[d.slot] = 0;
+			if (d.blocks[0].empty() || d.ver != m_rvtSlotVer[d.slot] || m_rvtSlotHot[d.slot] < 0 || m_rvtSlotCold[d.slot]) continue;
+			if (!GrowRvtCold(d.slot + 1)) continue;
+			const size_t bx = (px + 3) / 4, rowBytes = bx * 16, imageBytes = rowBytes * ((px + 3) / 4);
+			for (int layer = 0; layer < 3; ++layer)
+				[(__bridge id<MTLTexture>)m_rvtCold[layer] replaceRegion:MTLRegionMake2D(0, 0, px, px) mipmapLevel:0 slice:d.slot
+				                                               withBytes:d.blocks[layer].data() bytesPerRow:rowBytes bytesPerImage:imageBytes];
+			m_rvtHotFree.push_back(uint32_t(m_rvtSlotHot[d.slot]));
+			m_rvtSlotHot[d.slot] = -1;
+			m_rvtSlotCold[d.slot] = 1;
+			++m_rvtStateVer;
+		}
+
+		// 2. Readbacks the GPU has finished go to the encoder thread.
+		for (auto it = w.flights.begin(); it != w.flights.end();)
+		{
+			if (!it->ready->load()) { ++it; continue; }
+			RvtColdWork::Todo job; job.slot = it->slot; job.ver = it->ver;
+			const uint8_t* bgra = static_cast<const uint8_t*>([(__bridge id<MTLBuffer>)it->buffer contents]);
+			for (int layer = 0; layer < 3; ++layer)
+			{
+				job.rgba[layer].resize(pageBytes);
+				const uint8_t* src = bgra + layerOffset[layer];
+				if (m_rvtPack && layer > 0)   // (x, z) or (R, G) in the first two channels, as the shader's cold branch reads them
+					for (size_t i = 0; i < px * px; ++i)
+					{
+						job.rgba[layer][i * 4 + 0] = src[i * 2 + 0];
+						job.rgba[layer][i * 4 + 1] = src[i * 2 + 1];
+						job.rgba[layer][i * 4 + 2] = 0;
+						job.rgba[layer][i * 4 + 3] = 255;
+					}
+				else
+					for (size_t i = 0; i < px * px; ++i)
+					{
+						job.rgba[layer][i * 4 + 0] = src[i * 4 + 2];
+						job.rgba[layer][i * 4 + 1] = src[i * 4 + 1];
+						job.rgba[layer][i * 4 + 2] = src[i * 4 + 0];
+						job.rgba[layer][i * 4 + 3] = src[i * 4 + 3];
+					}
+			}
+			CFBridgingRelease(it->buffer);
+			{ std::lock_guard<std::mutex> lock(w.mutex); w.todo.push_back(std::move(job)); }
+			w.cv.notify_one();
+			it = w.flights.erase(it);
+		}
+
+		// 3. Pages that have been still long enough: read them back (at most two a frame, six in flight).
+		int started = 0;
+		for (uint32_t slot = 0; slot < m_rvtSlots && started < 2 && w.flights.size() < 6; ++slot)
+		{
+			if (m_rvtSlotHot[slot] < 0 || m_rvtSlotCold[slot] || m_rvtSlotBusy[slot]) continue;
+			if (m_rvtRealFrames - m_rvtSlotPainted[slot] < coldAfter) continue;
+			id<MTLBuffer> buf = [device newBufferWithLength:bufferBytes options:MTLResourceStorageModeShared];
+			if (!buf) break;
+			id<MTLCommandBuffer>      cb   = [(__bridge id<MTLCommandQueue>)m_commandQueue commandBuffer];
+			id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+			for (int layer = 0; layer < 3; ++layer)
+				[blit copyFromTexture:(__bridge id<MTLTexture>)m_rvtPool[layer] sourceSlice:NSUInteger(m_rvtSlotHot[slot]) sourceLevel:0
+				         sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(px, px, 1)
+				             toBuffer:buf destinationOffset:layerOffset[layer] destinationBytesPerRow:layerBytes[layer] / px destinationBytesPerImage:layerBytes[layer]];
+			[blit endEncoding];
+			auto ready = std::make_shared<std::atomic<bool>>(false);
+			[cb addCompletedHandler:^(id<MTLCommandBuffer>) { ready->store(true); }];
+			[cb commit];
+			w.flights.push_back({ slot, m_rvtSlotVer[slot], (void*)CFBridgingRetain(buf), ready });
+			m_rvtSlotBusy[slot] = 1;
+			++started;
+		}
+	}
+
+	// 4. Tables whose entries are out of date (a page changed temperature or got a hot slice).
+	for (auto& kv : m_rvtTables)
+		if (kv.second.stateVer != m_rvtStateVer) UploadRvtTable(kv.second);
+
+	// 5. The hot arrays shrink when most of their slices are free: the used ones move to the front of smaller arrays.
+	if (realFrame && now >= m_rvtNextShrinkAt)
+	{
+		m_rvtNextShrinkAt = now + 2.0;
+		const uint32_t used = m_rvtAllocSlots - uint32_t(m_rvtHotFree.size());
+		const uint32_t want = std::max(16u, (used * 2 + 7u) & ~7u);
+		if (m_rvtColdOn && m_rvtWork && m_rvtAllocSlots > 16 && used * 3 <= m_rvtAllocSlots && want < m_rvtAllocSlots && !(m_rvtWork && !m_rvtWork->flights.empty()))
+		{
+			void* nt[3] = { nullptr, nullptr, nullptr };
+			void* nSrgb = nullptr;
+			if (AllocRvtArrays(device, want, m_rvtPagePx, m_rvtPack, nt, &nSrgb))
+			{
+				id<MTLCommandBuffer>      cb   = [(__bridge id<MTLCommandQueue>)m_commandQueue commandBuffer];
+				id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+				uint32_t next = 0;
+				for (uint32_t slot = 0; slot < m_rvtSlots; ++slot)
+					if (m_rvtSlotHot[slot] >= 0)
+					{
+						for (int layer = 0; layer < 3; ++layer)
+							[blit copyFromTexture:(__bridge id<MTLTexture>)m_rvtPool[layer] sourceSlice:NSUInteger(m_rvtSlotHot[slot]) sourceLevel:0
+							         sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(m_rvtPagePx, m_rvtPagePx, 1)
+							            toTexture:(__bridge id<MTLTexture>)nt[layer] destinationSlice:next destinationLevel:0
+							    destinationOrigin:MTLOriginMake(0, 0, 0)];
+						m_rvtSlotHot[slot] = int32_t(next++);
+					}
+				[blit endEncoding];
+				[cb commit];
+				RetireTexture(m_rvtPoolAlbedoSrgb);
+				for (int layer = 0; layer < 3; ++layer) { RetireTexture(m_rvtPool[layer]); m_rvtPool[layer] = nt[layer]; }
+				m_rvtPoolAlbedoSrgb = nSrgb;
+				m_rvtHotFree.clear();
+				for (uint32_t i = want; i-- > next;) m_rvtHotFree.push_back(i);
+				HE_LOG_INFO(RHI, "MetalRenderer: RVT hot pool shrank %u -> %u slices (%u in use)", m_rvtAllocSlots, want, next);
+				m_rvtAllocSlots = want;
+				++m_rvtStateVer;
+				for (auto& kv : m_rvtTables) UploadRvtTable(kv.second);
+			}
+		}
+	}
+
+	// A line every few seconds while the numbers move: how much the cold pool holds and what the hot one costs.
+	if (realFrame && now >= m_rvtNextColdLogAt)
+	{
+		uint32_t cold = 0, hot = 0;
+		for (uint32_t s = 0; s < m_rvtSlots; ++s) { cold += m_rvtSlotCold[s]; hot += m_rvtSlotHot[s] >= 0 ? 1u : 0u; }
+		static uint32_t lastCold = ~0u, lastHot = ~0u;
+		if (cold != lastCold || hot != lastHot)
+		{
+			lastCold = cold; lastHot = hot;
+			m_rvtNextColdLogAt = now + 3.0;
+			const double page = double(m_rvtPagePx) * m_rvtPagePx * (m_rvtPack ? 8.0 : 12.0), blockPage = double((m_rvtPagePx + 3) / 4) * ((m_rvtPagePx + 3) / 4) * 16.0 * 3.0;
+			HE_LOG_INFO(RHI, "MetalRenderer: RVT pages: %u cold (ASTC, %.1f MB allocated), %u hot in %u slices (%.1f MB), a page is %.0f KB hot / %.0f KB cold; device now holds %.0f MB",
+			            cold, double(m_rvtColdAlloc) * blockPage / (1024.0 * 1024.0), hot, m_rvtAllocSlots,
+			            double(m_rvtAllocSlots) * page / (1024.0 * 1024.0), page / 1024.0, blockPage / 1024.0,
+			            double(device.currentAllocatedSize) / (1024.0 * 1024.0));
+		}
+	}
+}
+
+// The consumer's table and the pools on fragment textures 18..24, for a draw whose material owns a table. Every other draw
+// reads the inert defaults BindMaterialPreambleSlots left there (and never looks). Texture 17 is heFogVolume's.
+void MetalRenderer::BindRvtForDraw(void* renderEncoder, const HE::UUID& material)
+{
+	if (m_rvtTables.empty() || !m_rvtPool[0]) return;
+	const auto t = m_rvtTables.find(material);
+	if (t == m_rvtTables.end() || !t->second.tex) return;
+	id<MTLRenderCommandEncoder> enc = (__bridge id<MTLRenderCommandEncoder>)renderEncoder;
+	[enc setFragmentTexture:(__bridge id<MTLTexture>)t->second.tex     atIndex:18];
+	[enc setFragmentTexture:(__bridge id<MTLTexture>)m_rvtPoolAlbedoSrgb atIndex:19];
+	[enc setFragmentTexture:(__bridge id<MTLTexture>)m_rvtPool[1]      atIndex:20];
+	[enc setFragmentTexture:(__bridge id<MTLTexture>)m_rvtPool[2]      atIndex:21];
+	if (void* fb = RvtFeedbackBindTarget())
+		[enc setFragmentBuffer:(__bridge id<MTLBuffer>)fb offset:0 atIndex:kRvtFeedbackBufferIndex];
+	if (m_rvtCold[0])
+		for (int layer = 0; layer < 3; ++layer)
+			[enc setFragmentTexture:(__bridge id<MTLTexture>)m_rvtCold[layer] atIndex:NSUInteger(22 + layer)];
+}
+
+// The landscapes drawn from the virtual texture (SetRvtLandscape): their terrain chunks take the consumer material, and not
+// the object's own parameter block (laid out for the old material; it would overwrite the volume parameters). Done on the
+// renderer's view of the frame after a walk, never in the world; idempotent (a second pass finds the consumer, not the original).
+void MetalRenderer::ApplyRvtSwaps()
+{
+	// A virtual texture page (RenderSceneImage with rvtSlot >= 0): the layer's view material replaces every object's own,
+	// after the walk. Section lists would override it; terrain has none.
+	if (m_editorCamera.rvtMaterial != HE::UUID{})
+	{
+		for (RenderObject& o : m_renderWorld.objects)
+		{
+			o.materialAssetId = m_editorCamera.rvtMaterial;
+			o.sections.clear();
+		}
+		return;
+	}
+	if (m_rvtSwaps.empty() || !m_rvtPool[0]) return;
+	for (RenderObject& o : m_renderWorld.objects)
+		if (o.terrainChunk)
+			if (const auto sw = m_rvtSwaps.find(o.terrainEntity); sw != m_rvtSwaps.end() && o.materialAssetId == sw->second.landscapeMat)
+			{
+				// The native near view: a chunk close to the camera keeps the landscape's own material (SetRvtNearChunks).
+				if (m_rvtNear.keeps(o)) continue;
+				o.materialAssetId = sw->second.consumerMat;
+				o.paramOverride.clear();
+				o.sections.clear();
+			}
+}
+
 void MetalRenderer::RetireTexture(void* texture)
 {
 	if (!texture) return;
 	// 3 frames: current draw list + Metal's in-flight buffers (triple buffering)
 	m_retiredTextures.push_back({ texture, 3 });
+}
+
+void MetalRenderer::EvictIdleGraphArrays()
+{
+	static const double idleS = [] { const char* e = std::getenv("HE_RVT_ARRAY_IDLE_S"); return e && *e ? std::atof(e) : 20.0; }();
+	// Memory pressure gate: the release costs a reload (~90 ms for the three Mix arrays, one frame, measured) the next time a
+	// page is painted, which in a game is when the player starts to move after standing still. So the arrays go only when the
+	// device is actually short: allocated > HE_RVT_ARRAY_PRESSURE (default 0.6) of recommendedMaxWorkingSetSize. 0 = no gate.
+	static const double pressure = [] { const char* e = std::getenv("HE_RVT_ARRAY_PRESSURE"); return e && *e ? std::atof(e) : 0.6; }();
+	if (idleS <= 0.0 || m_graphTexUse.empty() || !m_rvtPool[0]) return;   // only while a virtual texture pool exists
+	const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+	if (now < m_graphTexEvictAt) return;
+	m_graphTexEvictAt = now + 1.0;
+	if (pressure > 0.0)
+	{
+		id<MTLDevice> dev = (__bridge id<MTLDevice>)m_device;
+		const double budget = double(dev.recommendedMaxWorkingSetSize);
+		if (budget > 0.0 && double(dev.currentAllocatedSize) < pressure * budget) return;
+	}
+	for (auto it = m_graphTexUse.begin(); it != m_graphTexUse.end();)
+	{
+		const auto c = m_graphTexCache.find(it->first);
+		void* tex = c != m_graphTexCache.end() ? c->second : nullptr;
+		const bool idle = now - std::max(it->second.normal, it->second.page) > idleS;
+		if (tex && idle && ((__bridge id<MTLTexture>)tex).allocatedSize >= (64u << 20))
+		{
+			HE_LOG_INFO(RHI, "MetalRenderer: texture array %s idle for %.0f s, released (%.0f MB)", it->first.c_str(), idleS,
+			            double(((__bridge id<MTLTexture>)tex).allocatedSize) / (1024.0 * 1024.0));
+			RetireTexture(tex);
+			m_logAfterArrayRelease = true;
+			m_graphTexCache.erase(c);
+			it = m_graphTexUse.erase(it);
+		}
+		else if (!tex && idle) it = m_graphTexUse.erase(it);
+		else ++it;
+	}
 }
 
 void MetalRenderer::AgeRetiredTextures()
@@ -12009,6 +12923,12 @@ void MetalRenderer::AgeRetiredTextures()
 		{
 			CFBridgingRelease(it->texture);
 			it = m_retiredTextures.erase(it);
+			if (m_logAfterArrayRelease && m_retiredTextures.empty())
+			{
+				m_logAfterArrayRelease = false;
+				HE_LOG_INFO(RHI, "MetalRenderer: released texture arrays are gone; device now holds %.0f MB",
+				            double(((__bridge id<MTLDevice>)m_device).currentAllocatedSize) / (1024.0 * 1024.0));
+			}
 		}
 		else
 			++it;
@@ -14823,8 +15743,8 @@ void* MetalRenderer::EncodeUIPass(void* renderEncoderPtr, int width, int height,
 			if (const MaterialAsset* ma = m_contentManager
 				? m_contentManager->getMaterial(obj.materialAssetId) : nullptr)
 			{
-				float padded[64] = { 0 };
-				const size_t n = std::min(ma->shaderParamData.size(), size_t(64));
+				float padded[HE::kMatParamFloats] = { 0 };
+				const size_t n = std::min(ma->shaderParamData.size(), size_t(HE::kMatParamFloats));
 				std::memcpy(padded, ma->shaderParamData.data(), n * sizeof(float));
 				[enc setFragmentBytes:padded length:sizeof(padded) atIndex:2];
 				const uint32_t arrMask = HE::matGlslTextureArrayMask(ma->customShaderFragGlsl);
@@ -15033,11 +15953,17 @@ void MetalRenderer::DestroySkyViewLut()
 // the camera, so a reflection ray that misses the scene returns the sky the
 // viewer sees — clouds and weather included — instead of m_skyEnvCube's
 // cloudless CPU atmosphere. Every frame the reflections trace (clouds drift
-// with the clock); two of the six 512² faces per frame after the first full bake. No
-// low-res cloud composite: that buffer is screen-space, a face is not.
-static constexpr int kSkyReflCubeSize = 512;
+// with the clock); one of the six 256² faces per frame after the first full bake. No
+// low-res cloud composite: that buffer is screen-space, a face is not. A face with full clouds
+// costs ~1.2 ms at 256² and ~2.4 ms at 512² (Catania, M5): 512² with two faces a frame was most
+// of the reflection pass; the sky in a glossy reflection does not need it (2026-11-20).
+static constexpr int kSkyReflCubeSize = 256;
 void MetalRenderer::EncodeSkyReflCube(void* cmdBufPtr)
 {
+	// Once per frame: the deferred frame traces twice (opaque, then the water pre-pass) and the sky is the same for both.
+	// The bake was the bulk of the reflection cost (~2.4 ms a 512² face with full clouds), not the trace.
+	if (m_skyReflThisFrame) return;
+	m_skyReflThisFrame = true;
 	m_skyReflValid = false;
 	static const bool s_off = [] {
 		const char* e = std::getenv("HE_GIREFL_SKY");
@@ -15178,6 +16104,16 @@ void MetalRenderer::BindMaterialPreambleSlots(void* renderEncoder, bool frameSta
 	[encoder setFragmentTexture:(__bridge id<MTLTexture>)(frameState && m_fogFrameActive && m_fogIntegrated
 	                                                       ? m_fogIntegrated : m_fogDummy3D)
 	                    atIndex:HE::MaterialShaderLibrary::kMetalFogVolumeTextureIndex];
+	// Runtime Virtual Texture (Thema 333): the page table and the three pool arrays of a material with an RvtSample node, at
+	// textures 18..21 with NO sampler (MaterialShaderLibrary pins them to inline constexpr samplers). Inert defaults here, the
+	// real ones per draw (BindRvtForDraw). The array slots get the 2D-ARRAY dummy: Metal validates the texture TYPE.
+	[encoder setFragmentTexture:(__bridge id<MTLTexture>)m_rvtDummyTable atIndex:18];
+	for (int slot = 19; slot <= 24; ++slot)   // 19..21 the hot pool's arrays, 22..24 the cold pool's (step 6j)
+		[encoder setFragmentTexture:(__bridge id<MTLTexture>)m_whiteArrayTexture atIndex:slot];
+	// The lookup's feedback buffer (HE_RVT_FEEDBACK): this frame's, or the sink outside a frame (previews, pages). Every encoder
+	// that may draw a consumer needs one bound: the shader writes it unconditionally.
+	if (void* fb = RvtFeedbackBindTarget())
+		[encoder setFragmentBuffer:(__bridge id<MTLBuffer>)fb offset:0 atIndex:kRvtFeedbackBufferIndex];
 }
 
 void MetalRenderer::EncodeSkinnedObjects(void* renderEncoder, const glm::mat4& viewProj,
@@ -15333,6 +16269,7 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 	m_extractor.extract(*m_world, m_renderWorld,
 	                    static_cast<float>(width) / static_cast<float>(height),
 	                    &m_editorCamera);
+	ApplyRvtSwaps();
 	m_extractor.extractUI(*m_world, static_cast<float>(width), static_cast<float>(height),
 	                      m_renderWorld);
 
@@ -15671,9 +16608,9 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 				{
 					[encoder setFragmentBytes:&matLight length:sizeof(matLight)
 					                  atIndex:HE::MaterialShaderLibrary::kMetalLightingBufferIndex];
-					float padded[64] = { 0 };
+					float padded[HE::kMatParamFloats] = { 0 };
 					std::memcpy(padded, t.params.data(),
-					            std::min(t.params.size(), size_t(64)) * sizeof(float));
+					            std::min(t.params.size(), size_t(HE::kMatParamFloats)) * sizeof(float));
 					[encoder setFragmentBytes:padded length:sizeof(padded) atIndex:2];
 					for (int i = 0; i < t.gtexCount; ++i)
 						if (t.gtex[i])
@@ -15932,9 +16869,9 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 					// material's shared shaderParamData — never batched, so per-draw.
 					const std::vector<float>& src =
 						!dc.paramOverride.empty() ? dc.paramOverride : *cMaterialParams;
-					float padded[64] = { 0 };
+					float padded[HE::kMatParamFloats] = { 0 };
 					std::memcpy(padded, src.data(),
-					            std::min(src.size(), size_t(64)) * sizeof(float));
+					            std::min(src.size(), size_t(HE::kMatParamFloats)) * sizeof(float));
 					[encoder setFragmentBytes:padded length:sizeof(padded) atIndex:2];
 				}
 				// Node-graph project textures at fragment texture units 1..4 (+ linear
@@ -15963,6 +16900,7 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 						[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:13];
 					}
 				}
+				BindRvtForDraw((__bridge void*)encoder, dc.materialAssetId);
 				[encoder setVertexBuffer:vertexBuf offset:0 atIndex:0];
 				[encoder setVertexBytes:&ui length:sizeof(ui) atIndex:1];
 				// WPO materials read HeLighting (time) + HeParams in the VERTEX stage too
@@ -15970,12 +16908,12 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 				if (cMaterialPipeline && cMaterialWpo)
 				{
 					[encoder setVertexBytes:&matLight length:sizeof(matLight) atIndex:2];
-					float vpad[64] = { 0 };
+					float vpad[HE::kMatParamFloats] = { 0 };
 					const std::vector<float>* vsrc =
 						!dc.paramOverride.empty() ? &dc.paramOverride : cMaterialParams;
 					if (vsrc)
 						std::memcpy(vpad, vsrc->data(),
-						            std::min(vsrc->size(), size_t(64)) * sizeof(float));
+						            std::min(vsrc->size(), size_t(HE::kMatParamFloats)) * sizeof(float));
 					[encoder setVertexBytes:vpad length:sizeof(vpad) atIndex:3];
 				}
 				[encoder setFragmentTexture:texture atIndex:0];
@@ -16164,9 +17102,9 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 			{
 				[encoder setFragmentBytes:&matLight length:sizeof(matLight)
 				                  atIndex:HE::MaterialShaderLibrary::kMetalLightingBufferIndex];
-				float padded[64] = { 0 };
+				float padded[HE::kMatParamFloats] = { 0 };
 				std::memcpy(padded, t.params.data(),
-				            std::min(t.params.size(), size_t(64)) * sizeof(float));
+				            std::min(t.params.size(), size_t(HE::kMatParamFloats)) * sizeof(float));
 				[encoder setFragmentBytes:padded length:sizeof(padded) atIndex:2];
 				for (int i = 0; i < t.gtexCount; ++i)
 					if (t.gtex[i])
@@ -16333,6 +17271,8 @@ void MetalRenderer::FillMaterialLighting(HE::MaterialShaderLibrary::Lighting& ma
 	// untouched — graph materials, the deferred resolve and the SSR composite
 	// all read this. Scene-pass fill only; previews keep the zero.
 	matLight.viewMode[0] = UnlitViewActive() ? 1.0f : 0.0f;
+	matLight.viewMode[1] = m_viewMode == HE::ViewMode::RvtMips ? 1.0f : 0.0f;   // heRvtMipView (RvtLookup.h)
+	matLight.viewMode[2] = float(m_rvtFbPhase);                                 // which pixel of 8x8 reports (HE_RVT_FEEDBACK)
 	FillFogLighting(matLight);
 }
 
@@ -17299,8 +18239,8 @@ void MetalRenderer::EncodeGIReflections(void* cmdBufPtr, int width, int height)
 		// Painted landscapes: the table + one weightmap texture each, so a hit on
 		// a terrain reads the PAINT at that point instead of one averaged colour
 		// for the whole landscape (see GiLandscape.h).
-		std::vector<void*> landTex;
-		const int landCount = BuildGILandscapeTable(landTex);
+		std::vector<void*> landTex, landRvt;
+		const int landCount = BuildGILandscapeTable(landTex, &landRvt);
 		// The real sky (clouds, weather) for rays that miss — see EncodeSkyReflCube.
 		// Baked on this command buffer ahead of the trace encoder below.
 		EncodeSkyReflCube((__bridge void*)cmdBuf);
@@ -17385,6 +18325,13 @@ void MetalRenderer::EncodeGIReflections(void* cmdBufPtr, int width, int height)
 			[enc setTexture:(__bridge id<MTLTexture>)(i < (int)landTex.size() && landTex[i]
 			                                          ? landTex[i] : m_dummyTexture)
 			        atIndex:9 + i];
+		// A landscape drawn from the RVT: its page table at 13..16 and the pool's albedo (hot sRGB view, cold ASTC) at
+		// 17/18, so a hit reads the real ground (giRvtAlbedo). Typed dummies where there is none (Metal checks the type).
+		for (int i = 0; i < HE::kGiMaxLandscapes; ++i)
+			[enc setTexture:(__bridge id<MTLTexture>)(i < (int)landRvt.size() && landRvt[i] ? landRvt[i] : m_rvtDummyTable)
+			        atIndex:13 + i];
+		[enc setTexture:(__bridge id<MTLTexture>)(m_rvtPoolAlbedoSrgb ? m_rvtPoolAlbedoSrgb : m_whiteArrayTexture) atIndex:17];
+		[enc setTexture:(__bridge id<MTLTexture>)(m_rvtCold[0] ? m_rvtCold[0] : m_whiteArrayTexture) atIndex:18];
 		const MTLSize tgSize  = MTLSizeMake(8, 8, 1);
 		const MTLSize tgCount = MTLSizeMake(static_cast<NSUInteger>((tw + 7) / 8),
 		                                    static_cast<NSUInteger>((th + 7) / 8), 1);
@@ -17541,6 +18488,7 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 	m_extractor.extract(*m_world, m_renderWorld,
 	                    static_cast<float>(width) / static_cast<float>(height),
 	                    &m_editorCamera);
+	ApplyRvtSwaps();
 
 	// Rasterised with this frame's subpixel jitter when TAA is on (no-op
 	// otherwise). The clean matrix stays available for the velocity pass, which
@@ -17586,6 +18534,9 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 		// is already an encoded texel.
 		matLight.specAA[0] = m_specularAA ? m_specularAAStrength : 0.0f;
 		matLight.specAA[1] = 1.0f;
+		// The RVT mip view tints the base colour the G-buffer stores (heRvtMipView, RvtLookup.h).
+		matLight.viewMode[1] = m_viewMode == HE::ViewMode::RvtMips ? 1.0f : 0.0f;
+		matLight.viewMode[2] = float(m_rvtFbPhase);   // the feedback's pixel of each 8x8 cell (HE_RVT_FEEDBACK)
 		// The G-buffer's WPO vertex stage reads this block too: without the wind
 		// the deferred path would draw every Wind Sway material standing still.
 		HE::FillMaterialWind(GetEnvironment(), matLight);
@@ -17810,9 +18761,9 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 				{
 					const std::vector<float>& src =
 						!dc.paramOverride.empty() ? dc.paramOverride : *cMaterialParams;
-					float padded[64] = { 0 };
+					float padded[HE::kMatParamFloats] = { 0 };
 					std::memcpy(padded, src.data(),
-					            std::min(src.size(), size_t(64)) * sizeof(float));
+					            std::min(src.size(), size_t(HE::kMatParamFloats)) * sizeof(float));
 					[encoder setFragmentBytes:padded length:sizeof(padded) atIndex:2];
 				}
 				if (cMaterialPipelineGB)
@@ -17835,18 +18786,19 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 						[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:13];
 					}
 				}
+				BindRvtForDraw((__bridge void*)encoder, dc.materialAssetId);
 				[encoder setVertexBuffer:vertexBuf offset:0 atIndex:0];
 				[encoder setVertexBytes:&ui length:sizeof(ui) atIndex:1];
 #if defined(HE_HAVE_SHADERC)
 				if (cMaterialPipelineGB && cMaterialWpo)
 				{
 					[encoder setVertexBytes:&matLight length:sizeof(matLight) atIndex:2];
-					float vpad[64] = { 0 };
+					float vpad[HE::kMatParamFloats] = { 0 };
 					const std::vector<float>* vsrc =
 						!dc.paramOverride.empty() ? &dc.paramOverride : cMaterialParams;
 					if (vsrc)
 						std::memcpy(vpad, vsrc->data(),
-						            std::min(vsrc->size(), size_t(64)) * sizeof(float));
+						            std::min(vsrc->size(), size_t(HE::kMatParamFloats)) * sizeof(float));
 					[encoder setVertexBytes:vpad length:sizeof(vpad) atIndex:3];
 				}
 #endif
@@ -17985,7 +18937,9 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 			{
 				AgeRetiredTextures();
 				AgeRetiredGIObjects();
+				EvictIdleGraphArrays();
 			}
+			UpdateRvtCold(!m_captureOnly);   // tables in step with the pages' temperature, cold pages harvested (real frames age them)
 
 			// Project shadow resolution changed (SetShadowSettings): swap the
 			// cascade depth array here, before any pass of this frame touches
@@ -18078,6 +19032,8 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 		// closed and handed to the last command buffer's completion just before
 		// the commit below. No path between here and there returns early.
 		m_uploadRing->beginFrame();
+		BeginRvtFeedbackFrame();   // this frame's feedback buffer, harvested by its completion (EndRvtFeedbackFrame below)
+		m_skyReflThisFrame = false;   // EncodeSkyReflCube bakes at most once per frame
 
 		// ── Per-pass GPU timing setup (only while a profiler capture records) ──
 		// Builds one over-allocated counter sample buffer for this frame; the major
@@ -18192,7 +19148,12 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 		// window sizing without recomputing it — harmless (== pw/ph) when !isPrimary.
 		int shW = pw, shH = ph;
 		m_fogFrameActive = false;   // EncodeFogVolume turns it on for a primary frame that runs the volume
-		if (isPrimary)
+		// The scene's GPU work (extract, shadows, GI, G-buffer, post, offscreen tonemap) only when somebody sees the result: an
+		// offscreen viewport the editor did not show this frame (SetSceneVisible(false), another tab in front) keeps its last
+		// image, and the swapchain below still draws the UI. Direct-to-window (the game) always renders, and so does a capture
+		// (RenderSceneImage: screenshots, thumbnails, RVT pages), which is asked for exactly because somebody wants the picture.
+		const bool sceneWork = isPrimary && (m_captureOnly || !(m_sceneHidden && m_viewportReqW > 0 && m_viewportReqH > 0));
+		if (sceneWork)
 		{
 			// Shadow cascades MUST be fit with the SAME aspect the scene pass uses
 			// (below), else render≠sample cascade matrices → shadow swimming.
@@ -18243,7 +19204,7 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 		// Step the GPU weather-particle pool once per frame (primary only), before the
 		// scene render encoder reads it. Metal tracks the compute→vertex dependency on
 		// the shared buffer within this command buffer. No-op when the path is disabled.
-		if (isPrimary)
+		if (sceneWork)
 			SimulateGpuParticles((__bridge void*)cmdBuf);
 		flushPass("GIAccel");   // detailed: commit the Shadow (+ particle sim) command buffer
 
@@ -18254,7 +19215,7 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 		// scene pass — EncodeGIShadowRays rasterizes its G-buffer with THIS
 		// extraction's camera, and a mismatched aspect misaligns the shadow mask
 		// against the scene pass's screen-space sampling.
-		if (isPrimary)
+		if (sceneWork)
 			EncodeGIAccelBuild((__bridge void*)cmdBuf,
 			                   shH > 0 ? static_cast<float>(shW) / static_cast<float>(shH) : 1.0f);
 		flushPass("GIShadow");   // detailed: commit the GIAccel command buffer (empty if GI off)
@@ -18266,7 +19227,7 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 		// what the scene pass will use (offscreen-viewport-or-window sizing),
 		// computed above for the CSM cascade fit. No-op (early return) unless GI
 		// is enabled/supported and EncodeGIAccelBuild actually built a TLAS.
-		if (isPrimary)
+		if (sceneWork)
 			EncodeGIShadowRays((__bridge void*)cmdBuf, std::max(1, shW / 2), std::max(1, shH / 2));
 		flushPass("GIProbes");   // detailed: commit the GIShadow command buffer (empty if GI off)
 
@@ -18275,12 +19236,12 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 		// unless GI is enabled/supported/has a built TLAS; lazily builds the probe
 		// grid + atlases on first call. Replaces AO + flat/IBL ambient in
 		// fragmentMain when active — see EncodeScene's giActive gate below.
-		if (isPrimary)
+		if (sceneWork)
 			EncodeGIProbeUpdate((__bridge void*)cmdBuf);
 		flushPass("SSAO");   // detailed: commit the GIProbes command buffer (empty if GI off)
 
 		const bool offscreen = isPrimary && m_viewportReqW > 0 && m_viewportReqH > 0;
-		if (isPrimary)
+		if (sceneWork)
 		{
 			// Output size (what the user sees) vs. RENDER size (what the scene is
 			// rasterized at). Render scale (A4) separates the two: everything
@@ -18414,6 +19375,9 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 
 			if (deferredActive)
 			{
+				// Detailed capture: the deferred block gets its own buckets (it used to be counted as "SSAO", which then held
+				// the G-buffer, the resolve and the reflections too).
+				flushPass("GBuffer");
 				EnsureGBufferTargets(sceneW, sceneH);
 				MTLRenderPassDescriptor* gbPass = [MTLRenderPassDescriptor renderPassDescriptor];
 				id<MTLTexture> gbTex[4] = { (__bridge id<MTLTexture>)m_gbColor0,
@@ -18477,6 +19441,7 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 				// Screen-space motion, straight after the pass whose depth it
 				// tests against (A2). Only runs when TAA is the active mode.
 				EncodeVelocity((__bridge void*)cmdBuf, sceneW, sceneH);
+				flushPass("Reflections");   // detailed: commit the G-buffer (+ decals, tile resolve, velocity)
 
 				// Reflections: the GI compute trace fills m_giReflTex first,
 				// then the shared composite (SSR trace + additive env-specular
@@ -18485,7 +19450,9 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 				if (deferredTile && (m_ssrFrameActive || m_giReflFrameActive))
 				{
 					EncodeGIReflections((__bridge void*)cmdBuf, sceneW, sceneH);
+					flushPass("SSRComposite");   // detailed: commit the GI reflection trace
 					EncodeSSRPasses((__bridge void*)cmdBuf, sceneW, sceneH);
+					flushPass("WaterRefl");      // detailed: commit the SSR trace + composite
 					// The forward tail (water and every other translucent graph material) is
 					// not in the G-buffer, so the composite above never touched it and slots
 					// 9/10 stayed empty: the water mirrored only the flat sky cube. Its
@@ -18625,6 +19592,7 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 					m_extractor.extract(*m_world, m_renderWorld,
 					                    static_cast<float>(sceneW) / static_cast<float>(std::max(1, sceneH)),
 					                    &m_editorCamera);
+					ApplyRvtSwaps();
 					m_prepassViewProj = m_renderWorld.camera.projection * m_renderWorld.camera.view;
 					// The sky's clock, HE_SKY_TIME included (EncodeScene's drawSky): on the wall
 					// clock alone the pinned A/B captures drew the low-res clouds at another
@@ -18941,6 +19909,8 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 			if (!ticket.empty())
 				[cmdBuf addCompletedHandler:^(id<MTLCommandBuffer>) { ring->release(ticket); }];
 		}
+		EndRvtFeedbackFrame((__bridge void*)cmdBuf);
+		m_rvtFbCurrent = nullptr;   // outside the frame the sink is bound (a page or a preview must not write a harvested buffer)
 
 		// Publish GPU timing once the buffer completes (background thread). All
 		// captured state is by-value / shared_ptr so it outlives the renderer if it
@@ -19452,6 +20422,10 @@ IRenderer::Capabilities MetalRenderer::GetCapabilities() const
 	// at runtime — no cross-compiler, no deferred path.
 	c.supportsDeferredRendering  = true;
 	c.supportsRawCapture         = true;   // RenderSceneImage's rawOutput (kTonemapMSL)
+#if defined(HE_HAVE_SHADERC)
+	// A page is that raw capture blitted into the pool; the consumer is a graph material (MSL from the cross-compiler).
+	c.supportsRvt                = m_device != nullptr;
+#endif
 	// SSR: deferred tile mode traces the stored G-buffer lag-free; every other
 	// Metal configuration (forward, or non-Apple GPUs' two-pass deferred falls
 	// back to forward SSR too once the path is forward) runs the Option-A

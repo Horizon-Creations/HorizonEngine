@@ -1,6 +1,7 @@
 #include "HorizonScene/TransformHierarchy.h"
 #include <JobSystem/JobSystem.h>
 #include "HorizonScene/HorizonWorld.h"
+#include "HorizonScene/CookedStatic.h"
 #include "HorizonScene/Components/TransformComponent.h"
 #include "HorizonScene/Components/HierarchyComponent.h"
 #include <Diagnostics/Log.h>
@@ -39,6 +40,19 @@ namespace {
     {
         size_t recomputed = 0;   // world matrices written
         size_t rebuilt    = 0;   // local matrices rebuilt: entities whose position/rotation/scale moved
+        // The cooked static block of this registry, if it has one (HorizonScene/CookedStatic.h): every
+        // world matrix this pass writes is shown to it, so a row whose entity moved leaves the block
+        // before the extract reads it, whoever wrote the position.
+        CookedStatic* cooked = nullptr;
+
+        Work() = default;
+        explicit Work(entt::registry& reg) : cooked(reg.ctx().find<CookedStatic>()) {}
+
+        void wrote(entt::entity e, const glm::mat4& world)
+        {
+            ++recomputed;
+            if (cooked) cooked->worldWritten(e, world);
+        }
     };
 
     bool localCacheMatches(const TransformComponent& t)
@@ -76,7 +90,7 @@ namespace {
             world          = parentWorld * refreshLocal(*t, work);
             t->worldMatrix = world;
             t->dirty       = false;
-            ++work.recomputed;
+            work.wrote(e, world);
         }
         if (auto* h = reg.try_get<HierarchyComponent>(e))
             for (entt::entity child : h->children)
@@ -86,7 +100,7 @@ namespace {
     // The whole hierarchy, then the entities that hang off nothing.
     Work walkAll(entt::registry& reg, entt::entity root)
     {
-        Work work;
+        Work work(reg);
         propagateFrom(reg, root, glm::mat4(1.0f), work);
 
         // Entities outside the root hierarchy (no HierarchyComponent)
@@ -94,7 +108,7 @@ namespace {
         {
             t.worldMatrix = refreshLocal(t, work);
             t.dirty       = false;
-            ++work.recomputed;
+            work.wrote(e, t.worldMatrix);
         }
         return work;
     }
@@ -231,7 +245,7 @@ namespace {
             // Outside the hierarchy: local IS world.
             t->worldMatrix = refreshLocal(*t, work);
             t->dirty       = false;
-            ++work.recomputed;
+            work.wrote(c, t->worldMatrix);
             return;
         }
 
@@ -515,7 +529,7 @@ void propagateTransforms(HorizonWorld& world)
 
     {
         HE_PROFILE_SCOPE_N("Transforms::subtrees");
-        Work work;
+        Work work(reg);
         for (entt::entity c : st.flagged)
             recomputeFlagged(reg, root, c, work);
         stats.recomputed = work.recomputed;

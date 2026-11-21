@@ -1590,6 +1590,7 @@ ImGuiStyle::ImGuiStyle()
     HoverDelayNormal            = 0.40f;            // Delay for IsItemHovered(ImGuiHoveredFlags_DelayNormal). "
     HoverFlagsForTooltipMouse   = ImGuiHoveredFlags_Stationary | ImGuiHoveredFlags_DelayShort | ImGuiHoveredFlags_AllowWhenDisabled;    // Default flags when using IsItemHovered(ImGuiHoveredFlags_ForTooltip) or BeginItemTooltip()/SetItemTooltip() while using mouse.
     HoverFlagsForTooltipNav     = ImGuiHoveredFlags_NoSharedDelay | ImGuiHoveredFlags_DelayNormal | ImGuiHoveredFlags_AllowWhenDisabled;  // Default flags when using IsItemHovered(ImGuiHoveredFlags_ForTooltip) or BeginItemTooltip()/SetItemTooltip() while using keyboard/gamepad.
+    TooltipShowDelay            = 0.0f;             // [Horizon] see imgui.h
 
     // [Internal]
     _MainScale                  = 1.0f;
@@ -4963,6 +4964,8 @@ static ImGuiHoveredFlags ApplyHoverFlagsForTooltip(ImGuiHoveredFlags user_flags,
 // This is roughly matching the behavior of internal-facing ItemHoverable()
 // - we allow hovering to be true when ActiveId==window->MoveID, so that clicking on non-interactive items such as a Text() item still returns true with IsItemHovered()
 // - this should work even for non-interactive items that have no ID, so we cannot use LastItemId
+static ImGuiID s_tooltipHoverKey = 0;   // [Horizon] item of the last IsItemHovered() that returned true
+
 bool ImGui::IsItemHovered(ImGuiHoveredFlags flags)
 {
     ImGuiContext& g = *GImGui;
@@ -5060,6 +5063,8 @@ bool ImGui::IsItemHovered(ImGuiHoveredFlags flags)
             return false;
     }
 
+    // [Horizon] Which item the pointer is on, for the per-element tooltip show-delay in BeginTooltipEx().
+    s_tooltipHoverKey = (g.LastItemData.ID != 0) ? g.LastItemData.ID : window->GetIDFromPos(g.LastItemData.Rect.Min);
     return true;
 }
 
@@ -12804,6 +12809,26 @@ bool ImGui::BeginTooltipEx(ImGuiTooltipFlags tooltip_flags, ImGuiWindowFlags ext
     ImFormatString(window_name, IM_COUNTOF(window_name), window_name_template, g.TooltipOverrideCount);
     ImGuiWindowFlags flags = ImGuiWindowFlags_Tooltip | ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoDocking;
     Begin(window_name, NULL, flags | extra_window_flags);
+    // [Horizon] Show-delay for every tooltip, not only the ones that ask IsItemHovered for a delay (there are ~170
+    // call sites, most with a plain IsItemHovered()). The tooltip window is still begun, so callers that ignore the
+    // return value and call EndTooltip() unconditionally stay valid; it is just hidden until the tooltip has been
+    // submitted on consecutive frames, for the same hovered item, for TooltipShowDelay seconds. A gap frame (pointer
+    // left) or another item under the pointer restarts the clock.
+    if (!is_dragdrop_tooltip && g.Style.TooltipShowDelay > 0.0f)
+    {
+        static int    s_lastFrame = -10;
+        static ImGuiID s_lastKey  = 0;
+        static float  s_submitted = 0.0f;
+        if (g.FrameCount != s_lastFrame)
+        {
+            const bool continuous = (g.FrameCount == s_lastFrame + 1) && s_tooltipHoverKey == s_lastKey;
+            s_submitted = continuous ? s_submitted + g.IO.DeltaTime : 0.0f;
+            s_lastFrame = g.FrameCount;
+            s_lastKey   = s_tooltipHoverKey;
+        }
+        if (s_submitted < g.Style.TooltipShowDelay)
+            SetWindowHiddenAndSkipItemsForCurrentFrame(g.CurrentWindow);
+    }
     // 2023-03-09: Added bool return value to the API, but currently always returning true.
     // If this ever returns false we need to update BeginDragDropSource() accordingly.
     //if (!ret)

@@ -48,6 +48,16 @@ struct IncrementalCache {
     std::unordered_map<HE::UUID, uint64_t>     srcHashes; // uuid → hash64(rewritten blob)
     std::unordered_map<HE::UUID, CachedEntry>  entries;   // uuid → what produced it
 };
+
+// Block-compresses one texture .hasset to `format` (an HE::TextureFormat value: 1 ASTC, 2 BC7,
+// 3 BC3, ...) exactly the way an export does it: an RGBA8 ARRAY (mips baked per slice) gets every
+// slice and level encoded as it stands and its slice means baked into CHUNK_TXSM, a plain
+// single-level 2D texture gets its mip chain built and encoded. For authoring tools
+// (landscape_tex_gen --compress). The result is platform-specific (BC7 is no Apple format), so it
+// is not what shared EngineContent holds. Returns `blob` unchanged when it cannot be cooked
+// (already compressed, no encoder for `format` built), so a caller checks the result.
+HE_API std::vector<uint8_t> cookTextureBlob(const std::vector<uint8_t>& blob, uint8_t format,
+                                            uint8_t quality);
 } // namespace Hpak
 
 // Pack raw .hasset blobs into a single .hpak archive.

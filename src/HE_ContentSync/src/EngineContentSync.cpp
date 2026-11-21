@@ -1,4 +1,5 @@
 #include "ContentSync/EngineContentSync.h"
+#include "ContentSync/CacheFreshness.h"
 #include "ContentSync/ContentServerClient.h"
 #include "ContentSync/CsLog.h"
 #include "ContentSync/SftpClient.h"
@@ -10,6 +11,8 @@
 
 #include <filesystem>
 #include <fstream>
+#include <atomic>
+#include <chrono>
 #include <memory>
 #include <sstream>
 
@@ -19,6 +22,31 @@ namespace HE::Cs {
 
 namespace {
 constexpr const char* kManifestRemoteName = "manifest.json";
+
+// The content server is tried FIRST, SFTP is the fallback for whatever it cannot deliver. After a failed
+// CONNECTION (it is down, the port is closed — not a 404 for one file) it is left alone for a minute, so the
+// files behind it do not each wait out the connect timeout again before SFTP gets its turn.
+constexpr std::int64_t kServerPauseMs = 60'000;
+std::atomic<std::int64_t> g_serverPausedUntilMs{0};
+
+std::int64_t steadyNowMs()
+{
+	return std::chrono::duration_cast<std::chrono::milliseconds>(
+		std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+bool serverUsable(const ContentServerEndpoint& server)
+{
+	return server.configured() && steadyNowMs() >= g_serverPausedUntilMs.load();
+}
+
+void noteServerResult(const SftpResult& r)
+{
+	if (r.ok) g_serverPausedUntilMs.store(0);
+	else if (r.transient) g_serverPausedUntilMs.store(steadyNowMs() + kServerPauseMs);
+}
+
+const char* const kServerPausedText = "the content server was unreachable a moment ago; it is tried again shortly";
 
 // The on-disk copy of the catalogue, kept beside the downloads it describes so
 // both are equally per-machine and equally survivable.
@@ -72,37 +100,60 @@ EngineContentSync& EngineContentSync::instance()
 
 bool EngineContentSync::refreshManifestBlocking()
 {
-	// The new HTTP content server (Thema 194) wins when configured — it is what this topic is
-	// for, SFTP stays the fallback for installs that never set config.json's
-	// "EngineContentServerUrl". Both feed the same refreshManifestWith, so single-flighting
-	// (m_refreshMutex), the cache write and the rename guard are identical either way.
-	// Retried on a failed CONNECTION only, same as the SFTP path below (see
-	// sftpWithConnectRetry): a 4xx/404 from the server itself is not transient and
-	// comes back from contentServerGetManifest with `transient` unset.
-	const ContentServerEndpoint& server = contentServerEndpoint();
-	if (server.configured())
-	{
-		return refreshManifestWith([&server](const std::string& localPath)
-		{
-			return sftpWithConnectRetry(
-				[&] { return contentServerGetManifest(server, localPath); });
-		});
-	}
+	// The HTTP content server (Thema 194) first, when configured (config.json's "EngineContentServerUrl");
+	// SFTP when it is not, and as the fallback when the server cannot be reached or does not answer. Both
+	// feed the same refreshManifestWith, so single-flighting (m_refreshMutex), the cache write and the
+	// rename guard are identical either way.
+	const ContentServerEndpoint& server   = contentServerEndpoint();
+	const SftpEndpoint&          endpoint = engineContentEndpoint();
 
-	const SftpEndpoint& endpoint = engineContentEndpoint();
-	if (!endpoint.configured())
+	// Once per run: where EngineContent comes from, in this order (the log never said, so "which server?" had no answer).
+	static const bool s_sourcesLogged = [&]
+	{
+		if (server.configured())
+			HE_LOG_INFO(ContentSync, "EngineContent: content server http://%s:%u is tried first%s", server.host.c_str(),
+			            static_cast<unsigned>(server.port), endpoint.configured() ? ", SFTP is the fallback" : "");
+		else
+			HE_LOG_INFO(ContentSync, "EngineContent: no content server configured (EngineContentServerUrl) — SFTP only");
+		return true;
+	}();
+	(void)s_sourcesLogged;
+
+	if (!server.configured() && !endpoint.configured())
 	{
 		HE_LOG_WARN(ContentSync, "%s",
 		            "EngineContent manifest refresh skipped — neither the content server nor the SFTP endpoint is configured");
 		return false;
 	}
 
-	// Retried on a failed CONNECTION only (see sftpWithConnectRetry): the probe
-	// that just succeeded does not make this second connection a given.
-	return refreshManifestWith([&endpoint](const std::string& localPath)
+	return refreshManifestWith([&](const std::string& localPath)
 	{
-		return sftpWithConnectRetry(
-			[&] { return sftpGetFile(endpoint, kManifestRemoteName, localPath); });
+		SftpResult first;
+		if (serverUsable(server))
+		{
+			// One attempt when SFTP can take over; the connect retries only when nothing can.
+			first = sftpWithConnectRetry([&] { return contentServerGetManifest(server, localPath); },
+			                             endpoint.configured() ? 1 : 3);
+			noteServerResult(first);
+			if (first.ok)
+				HE_LOG_INFO(ContentSync, "EngineContent: manifest from the content server http://%s:%u", server.host.c_str(),
+				            static_cast<unsigned>(server.port));
+			if (first.ok || !endpoint.configured()) return first;
+			HE_LOG_WARN(ContentSync, "Content server could not deliver the manifest (%s) — trying SFTP",
+			            HE::Cs::detail::scrub(first.error).c_str());
+		}
+		else if (!endpoint.configured())
+		{
+			return SftpResult{ false, kServerPausedText, true };
+		}
+
+		// Retried on a failed CONNECTION only (see sftpWithConnectRetry): the probe that just
+		// succeeded does not make this second connection a given.
+		const SftpResult viaSftp = sftpWithConnectRetry([&] { return sftpGetFile(endpoint, kManifestRemoteName, localPath); });
+		if (viaSftp.ok)
+			HE_LOG_INFO(ContentSync, "EngineContent: manifest from SFTP %s@%s:%u", endpoint.username.c_str(), endpoint.host.c_str(),
+			            static_cast<unsigned>(endpoint.port));
+		return viaSftp;
 	});
 }
 
@@ -175,6 +226,28 @@ bool EngineContentSync::refreshManifestWith(const ManifestFetchFn& fetch)
 		reportFailure({ SyncFailureKind::ManifestCache, {},
 		                "The catalogue could not be written to the cache folder." });
 	HE_LOG_INFO(ContentSync, "EngineContent manifest refreshed (%zu entries)", entryCount);
+
+	// A cached file the server has replaced since (same name, new content) is dropped so the on-demand
+	// download fetches the current one; without this the cache kept the old copy for ever.
+	{
+		EngineContentManifest snapshot;
+		{
+			std::lock_guard<std::mutex> lock(m_manifestMutex);
+			snapshot = m_manifest;
+		}
+		const std::size_t dropped = discardStaleCachedFiles(
+			GlobalState::engineContentCacheDir(), snapshot,
+			[this](const std::string& rel)
+			{
+				std::lock_guard<std::mutex> lock(m_mutex);
+				if (m_current.relativePath == rel) return true;
+				for (const Job& j : m_pending)
+					if (j.relativePath == rel) return true;
+				return false;
+			},
+			[](const std::string& line) { HE_LOG_INFO(ContentSync, "%s", line.c_str()); });
+		if (dropped) HE_LOG_INFO(ContentSync, "%zu out-of-date cached EngineContent file(s) removed", dropped);
+	}
 	return true;
 }
 
@@ -291,18 +364,16 @@ void EngineContentSync::enqueueDownload(const std::string& relativePath, HE::UUI
 
 void EngineContentSync::drainQueue()
 {
-	// Same choice as refreshManifestBlocking: the content server wins when configured. Checked
-	// once for the whole batch, not per file — a mid-batch config.json edit would need a
-	// restart to take effect anyway (contentServerEndpoint() itself is cached for the process).
-	const ContentServerEndpoint server           = contentServerEndpoint();
-	const bool                  useContentServer = server.configured();
+	// Same order as refreshManifestBlocking: the content server first when configured, SFTP for what it
+	// cannot deliver (and for everything while it is paused after a failed connection).
+	const ContentServerEndpoint server   = contentServerEndpoint();
+	const bool                  haveSftp = engineContentEndpoint().configured();
 
-	// One session for the whole batch (a scene with many passive references
+	// One SFTP session for the whole batch (a scene with many passive references
 	// queues them all at once), not one handshake per file. It lives exactly as
-	// long as this drain: the next batch connects anew. Only constructed for the SFTP path —
-	// an HTTP-configured build never opens an SSH session it will not use.
+	// long as this drain: the next batch connects anew. Opened on first use only —
+	// a batch the content server delivers whole never opens an SSH session.
 	std::unique_ptr<SftpConnection> sftpConn;
-	if (!useContentServer) sftpConn = std::make_unique<SftpConnection>(engineContentEndpoint());
 
 	for (;;)
 	{
@@ -339,9 +410,27 @@ void EngineContentSync::drainQueue()
 			m_status.currentBytesDone  = done;
 			m_status.currentBytesTotal = total;
 		};
-		const SftpResult result = useContentServer
-			? contentServerGetFile(server, relativePath, localPath.string(), onProgress)
-			: sftpConn->getFile(relativePath, localPath.string(), onProgress);
+		SftpResult result;
+		bool       delivered = false;
+		if (serverUsable(server))
+		{
+			result = contentServerGetFile(server, relativePath, localPath.string(), onProgress);
+			noteServerResult(result);
+			delivered = result.ok || !haveSftp;
+			if (!delivered)
+				HE_LOG_WARN(ContentSync, "Content server could not deliver '%s' (%s) — trying SFTP",
+				            relativePath.c_str(), HE::Cs::detail::scrub(result.error).c_str());
+		}
+		else if (server.configured() && !haveSftp)
+		{
+			result    = SftpResult{ false, kServerPausedText, true };
+			delivered = true;
+		}
+		if (!delivered)
+		{
+			if (!sftpConn) sftpConn = std::make_unique<SftpConnection>(engineContentEndpoint());
+			result = sftpConn->getFile(relativePath, localPath.string(), onProgress);
+		}
 
 		if (!result.ok)
 		{
@@ -350,6 +439,24 @@ void EngineContentSync::drainQueue()
 			// m_current is only ever touched by this thread between here and the
 			// swap below, so reading its trigger without the queue lock is safe.
 			reportFailure({ SyncFailureKind::Download, relativePath, why, m_current.trigger });
+		}
+		else
+		{
+			// Hash what actually landed, not what the manifest promised: a manifest refresh that
+			// is stale relative to the server's current bytes (or a truncated/corrupted transfer)
+			// must still show up as a mismatch on the next refresh, not get locked in as "fresh"
+			// by recording a hash nobody checked the file against. Gated on the entry having a
+			// hash at all — a raw file (contentHash 0) is never hash-compared, so hashing it here
+			// would only cost a full read for a record nothing ever reads back.
+			bool hasManifestHash = false;
+			{
+				std::lock_guard<std::mutex> lock(m_manifestMutex);
+				for (const auto& e : m_manifest.entries)
+					if (e.relativePath == relativePath) { hasManifestHash = e.contentHash != 0; break; }
+			}
+			std::uint64_t landedHash = 0;
+			if (hasManifestHash && fnv1a64File(localPath, landedHash))
+				recordCachedFile(GlobalState::engineContentCacheDir(), relativePath, landedHash);
 		}
 
 		// Take the callbacks and settle the status under ONE lock, before firing

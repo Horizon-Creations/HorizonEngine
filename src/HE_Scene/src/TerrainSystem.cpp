@@ -625,8 +625,9 @@ namespace TerrainSystem
             if (tc.layerWeights.empty())
             {
                 tc.weightmapTextureId = HE::UUID{};   // unpainted → shader uses layer 0
-                if (tc.weightsDirty) markWeightGatedFoliage(reg, te);   // painted -> cleared (undo, reset)
+                if (tc.weightsDirty) { markWeightGatedFoliage(reg, te); tc.rvtJournal.noteAll(); }   // painted -> cleared (undo, reset)
                 tc.weightsDirty = false;
+                tc.weightsDirtyFromStroke = false;
                 setUnpaintedLayerAverage(tc);
                 continue;
             }
@@ -636,12 +637,19 @@ namespace TerrainSystem
                 tc.layerWeights.clear();              // defensive: never upload a short blob
                 tc.weightmapTextureId = HE::UUID{};
                 tc.weightsDirty = false;
+                tc.weightsDirtyFromStroke = false;
+                tc.rvtJournal.noteAll();
                 setUnpaintedLayerAverage(tc);
                 continue;
             }
             const bool have = tc.weightmapTextureId != HE::UUID{}
                            && cm.getTexture(tc.weightmapTextureId) != nullptr;
             if (have && !tc.weightsDirty) continue;
+            // A stroke (paint()/paintGroup()) notes its own rect and sets weightsDirtyFromStroke,
+            // so it must not be widened here even with another stroke's rect already pending from
+            // the same tick. Everything else that sets weightsDirty (a fill, a load, an undo) said
+            // nothing about where, independent of whatever is already in the journal.
+            if (!tc.weightsDirtyFromStroke) tc.rvtJournal.noteAll();
             computeAverageLayerWeights(tc);           // paint changed → refresh the mean
             markWeightGatedFoliage(reg, te);
 
@@ -662,6 +670,7 @@ namespace TerrainSystem
             else
                 tc.weightmapTextureId = cm.registerTexture(std::move(tex));
             tc.weightsDirty = false;
+            tc.weightsDirtyFromStroke = false;
         }
 
         // ── Chunk material follows the Landscape entity's material ───────────
@@ -909,6 +918,9 @@ namespace TerrainSystem
 
             tc.builtRes           = res;
             tc.builtChunksPerSide = g.chunksPerSide;
+            // The ground picture changed under the Runtime Virtual Texture: all of it for a full rebuild, the brush rect for a region.
+            if (rebuildAll) tc.rvtJournal.noteAll();
+            else if (tc.regionDirty) tc.rvtJournal.noteRect(tc.dirtyMinX, tc.dirtyMinZ, tc.dirtyMaxX, tc.dirtyMaxZ);
             tc.dirty              = false;
             tc.regionDirty        = false;
 
@@ -1400,5 +1412,34 @@ namespace TerrainSystem
                     }
                 }
         }
+    }
+
+    void releaseWorld(HorizonWorld& world, ContentManager& cm, IRenderer* renderer)
+    {
+        auto& reg = world.registry();
+        std::vector<HE::UUID> ids;
+        const auto take = [&](const HE::UUID& id) { if (id != HE::UUID{}) ids.push_back(id); };
+        for (auto [e, cc] : reg.view<TerrainChunkComponent>().each())
+        {
+            take(cc.tessMeshId);
+            take(cc.stitchMeshId);
+            if (const auto* lod = reg.try_get<LODComponent>(e))
+            {
+                for (const LODLevel& lv : lod->levels) take(lv.meshId);
+                take(lod->refinedMeshId);
+                take(lod->stitchedMeshId);
+            }
+        }
+        std::sort(ids.begin(), ids.end(), [](const HE::UUID& a, const HE::UUID& b) { return a.hi != b.hi ? a.hi < b.hi : a.lo < b.lo; });
+        ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
+        for (const HE::UUID& id : ids)
+        {
+            if (renderer) renderer->InvalidateMesh(id);
+            cm.unloadAsset(id);
+        }
+        g_pendingTerrainColliders.erase(&world);
+        g_tessMeshes.erase(&world);
+        g_stitchMeshes.erase(&world);
+        g_tessCaches.erase(&reg);
     }
 }

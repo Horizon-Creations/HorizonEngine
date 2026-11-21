@@ -106,12 +106,28 @@ TEST_CASE("CollabController: a joiner receives the host's actual scene")
 
     bool worldReplaced = false;
     client.onWorldReplaced([&] { worldReplaced = true; });
+    // The "about to clear" hook runs first, while the joiner's old content still
+    // stands (RvtLandscape detaches there, before clear() recycles entity ids).
+    clientWorld.createEntity("LocalOnly");
+    const std::size_t localCount = countEntities(clientWorld);
+    int replacingCalls = 0;
+    std::size_t countAtReplacing = 0;
+    bool replacedAlreadyDone = true;
+    client.onWorldReplacing([&] {
+        ++replacingCalls;
+        countAtReplacing = countEntities(clientWorld);
+        replacedAlreadyDone = worldReplaced;
+    });
 
     REQUIRE(client.joinSession("127.0.0.1", host.port(), host.joinCode(), "Bob"));
 
     REQUIRE(pumpUntil(host, client, [&] {
         return client.status() == CollabController::Status::Joined;
     }));
+
+    CHECK(replacingCalls == 1);
+    CHECK(countAtReplacing == localCount);
+    CHECK_FALSE(replacedAlreadyDone);
 
     // The scene really crossed the wire and deserialized.
     CHECK(countEntities(clientWorld) == hostCount);

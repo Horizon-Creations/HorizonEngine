@@ -13,8 +13,11 @@
 #include "NotificationStore.h"          // the result line of Bake Impostor
 #include <HorizonScene/HorizonScene.h>
 #include <HorizonScene/Components/LandscapeWorldComponent.h> // not in HorizonScene.h: the Tile Landscape section
+#include <HorizonScene/CookedStatic.h>   // an entity under edit leaves the cooked block
 #include <HorizonScene/EntityActive.h>   // the "Active" switch at the top of the panel
 #include <HorizonScene/Components/NetworkComponent.h> // not in HorizonScene.h: the Network section
+#include <HorizonScene/Components/MobilityComponent.h> // not in HorizonScene.h: the Mobility section
+#include <HorizonScene/CookAnalysis.h>                    // the Mobility section's "why is it not cooked"
 #include <HorizonScene/FoliagePaint.h>   // density-mask coverage + reset
 #include <HorizonScene/LayerMeshPresets.h>   // the engine's layer meshes as ready-made settings
 #include <HorizonScene/NavigationSystem.h>
@@ -937,6 +940,11 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 	const bool quiet = (collect != nullptr) || removeMatching;
 	bool structuralChange = false;
 
+	// The controls below write the entity's fields raw (mesh, material, shadows), which nothing
+	// can observe. An entity in front of the inspector is being edited: it leaves the cooked block
+	// (a no-op unless cooking is on) and is walked like any entity, this frame's edit included.
+	HE::uncookEntity(registry, entity);
+
 	// Which placed prefabs this entity belongs to — drawn as a section under
 	// the name and as a marker on every component header that has an override.
 	// Only for the real scene: a scratch world (null undo) has no placements.
@@ -1617,6 +1625,23 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			if (changed) t->dirty = true;
 		}
 		if (removed) { if (undo) undo->snapshotNow(removeLabel.c_str()); registry.remove<TransformComponent>(entity); }
+
+		// ── Mobility (the entity-cooking override), right under the Transform it is about ──
+		// One switch: Movable or Static. An entity without the component shows what the engine
+		// derives for it (Static when nothing blocks cooking); a click then writes the component.
+		if (componentHeader("Mobility", false, removed))
+		{
+			MobilityComponent* mob = registry.try_get<MobilityComponent>(entity);
+			const bool isStatic = mob ? mob->mode == MobilityComponent::Mode::Static
+			                          : HE::analyzeCookability(registry, entity).cookable();
+			Row::labelCell("Mobility##mobilityrow");   // the label column of the Details panel, no-op elsewhere
+			if (EditorWidgets::button(isStatic ? "Static##mobility" : "Movable##mobility", ImVec2(-FLT_MIN, 0.0f)))
+			{
+				if (undo) undo->snapshotNow("Mobility");
+				if (!mob) { mob = &registry.emplace<MobilityComponent>(entity); structuralChange = true; }
+				mob->mode = isStatic ? MobilityComponent::Mode::Movable : MobilityComponent::Mode::Static;
+			}
+		}
 	}
 
 	// ── Transform 2D ────────────────────────────────────────────────────────
@@ -4280,6 +4305,7 @@ constexpr AddRow kGameplayRows[] = {
 	addRow<ScriptComponent>("Script"),
 	addRow<SaveStateComponent>("Save State"),
 	addRow<StreamingComponent>("Streaming"),
+	addRow<MobilityComponent>("Mobility"),
 };
 constexpr AddRow kNavigationRows[] = {
 	addRow<NavMeshComponent>("Nav Mesh"),

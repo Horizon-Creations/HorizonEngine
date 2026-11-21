@@ -11,6 +11,7 @@
 #include <MaterialGraph/MaterialGraph.h> // HE::MatParamKind
 #include <MaterialGraph/WeatherMaterialFunctions.h>
 #include <Types/TypeRegistry.h>              // struct/enum defs mirror in on load
+#include <material/MaterialShaderLibrary.h>  // the per-draw shader key
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -721,6 +722,32 @@ TEST_CASE("ContentManager replaceStaticMesh keeps the UUID, swaps the payload")
 	CHECK_FALSE(cm.replaceMaterial(id, MaterialAsset{}));
 	CHECK_FALSE(cm.replaceStaticMesh(HE::UUID::generate(), StaticMeshAsset{}));
 	CHECK(cm.getStaticMesh(id)->indices.size() == 6);
+}
+
+TEST_CASE("MaterialShaderLibrary: the per-draw shader key follows the text, even an in-place edit of the same length")
+{
+	TempContentDir dir("he_test_shader_key");
+	ContentManager cm(dir.path.string());
+	MaterialAsset mat;
+	mat.customShaderFragGlsl = "void main() { float a = 0.5; }";
+	mat.customShaderGBufGlsl = "void main() { float g = 0.5; }";
+	const HE::UUID id = cm.registerMaterial(std::move(mat));
+
+	HE::MaterialShaderLibrary lib;
+	uint64_t k1 = 0, k2 = 0, g1 = 0;
+	std::string frag, vert;
+	REQUIRE(lib.resolveShaders(cm, id, k1, frag, vert));
+	REQUIRE(lib.resolveShaders(cm, id, k2, frag, vert));
+	CHECK(k1 == k2);                                         // unchanged text, the remembered key
+	CHECK(k1 == std::hash<std::string>{}(frag));             // and it is the plain hash of the text
+	REQUIRE(lib.resolveGBufferShaders(cm, id, g1, frag, vert));
+	CHECK(g1 != k1);                                         // the G-buffer key is its own
+
+	// A writer that rewrites the text in place, same length, nobody told: a new key all the same.
+	cm.getMaterialMutable(id)->customShaderFragGlsl = "void main() { float a = 0.7; }";
+	REQUIRE(lib.resolveShaders(cm, id, k2, frag, vert));
+	CHECK(k2 != k1);
+	CHECK(k2 == std::hash<std::string>{}(frag));
 }
 
 TEST_CASE("ContentManager registers a runtime material and mesh distinctly")
@@ -3608,6 +3635,42 @@ TEST_CASE("Remote EngineContent: a local file is never shadowed by the remote en
 
 	CHECK(cm.loadAsset("Engine/Textures/Rock.hasset") == texId);   // read from disk, at once
 	CHECK(rock.calls == 0);                                         // no download asked for
+}
+
+TEST_CASE("Remote EngineContent: a file indexed and then deleted is asked for again, not given up on")
+{
+	// The editor indexes the engine folders at startup; the EngineContent sync then removes a cached file
+	// the server has a newer copy of ("is out of date … it downloads again when it is used"). The index
+	// still lists the id, so registering the remote entry used to be skipped as "resolvable some other
+	// way" — and every later load of the path ended in "Cannot load asset … no readable .hasset" with no
+	// download ever started.
+	TempContentDir project, engineDir("he_test_remote_engine"), staging("he_test_remote_stage");
+	HE::UUID texId;
+	{
+		ContentManager src(staging.path.string());
+		TextureAsset t;
+		t.type = HE::AssetType::Texture; t.name = "Rock"; t.path = "Rock.hasset";
+		t.width = t.height = 1; t.channels = 4; t.data = { 9, 8, 7, 255 };
+		t.id = texId = HE::UUID::generate();
+		REQUIRE(src.saveAsset(t));
+	}
+	fs::create_directories(engineDir.path / "Textures");
+	fs::copy_file(staging.path / "Rock.hasset", engineDir.path / "Textures" / "Rock.hasset");
+
+	ContentManager cm(project.path.string());
+	cm.setEngineContentRoot(engineDir.path.string());
+	cm.scanContentDirectory();                                    // the startup index sees the file…
+	fs::remove(engineDir.path / "Textures" / "Rock.hasset");      // …and the sync removes it as stale
+
+	FakeRemote rock;
+	const std::string path = "Engine/Textures/Rock.hasset";
+	registerFake(cm, rock, texId, path, staging.path / "Rock.hasset", engineDir.path, "Textures/Rock.hasset");
+
+	CHECK(cm.loadAsset(path) == HE::UUID{});   // not there yet…
+	CHECK(rock.calls == 1);                    // …and the download is under way
+	rock.arrive();
+	REQUIRE(pumpUntil(cm, [&] { return cm.isLoaded(texId); }));
+	CHECK(cm.loadAsset(path) == texId);
 }
 
 TEST_CASE("Remote EngineContent: an arriving material pulls its textures and its parent")

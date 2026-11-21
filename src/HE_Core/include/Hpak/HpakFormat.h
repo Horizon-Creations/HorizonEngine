@@ -279,6 +279,13 @@ struct PackSettings {
     // assets shadowed by an override never reach it — the list a caller builds from
     // this IS the pak's asset list. Same thread as the pack call.
     std::function<void(const std::string& relPath, bool reused)> onAsset;
+    // Called by HpakWriter::addDirectories once per asset that went through the cook pass (rewrite of
+    // references, texture/mesh cook, import-source strip) with one human line: "cooked  path  1.2 MB -> 340 KB",
+    // "unchanged  path", or "cached  path" when the previous pak's entry was carried over. Same thread as the pack call.
+    std::function<void(const std::string& line)> onCook;
+    // Called by HpakWriter::addDirectories when the cook pass is over and the pack pass (compress, encrypt, store)
+    // starts: "pack". Same thread as the pack call.
+    std::function<void(const char* phase)> onPhase;
     // Called by HpakWriter::addDirectories for each HpakWriter::warnings() line, as
     // it is found: a reference no root can satisfy, or a UUID collision that kept
     // a file out. Both used to be silent, and a pak missing the landscape texture

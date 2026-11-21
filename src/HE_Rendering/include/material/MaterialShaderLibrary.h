@@ -9,7 +9,9 @@
 
 #include <Types/Enums.h> // HE::RendererBackend (precompiledFor)
 #include <Types/UUID.h>
+#include <array>
 #include <cstdint>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -240,6 +242,16 @@ public:
     // reflection/cloud-shadow, see OpenGLRenderer::GetOrBuildMaterialProgram's setupProgram
     // lambda) — 21 is the next free one.
     static constexpr int kGlFogVolumeTextureUnit = 21;
+
+    // RVT cold pages on Vulkan (Thema 333 step 9): unlike D3D11/D3D12 (texelFetch/Load costs no live sampler, SRV
+    // t-registers are plentiful), a GLSL sampler2DArray is ONE combined-image-sampler descriptor in Vulkan no matter how
+    // the shader reads it, so the three cold arrays are three more fragment-stage samplers on top of hot RVT's four
+    // (VulkanMaterialLayout.h: rvtFit 21 -> rvtColdFit 24). VulkanRenderer calls this once, after checking the device's
+    // actual maxPerStageDescriptorSamplers/SampledImages and deciding whether its descriptor set layout can hold the cold
+    // rows at all — fragment()'s SpirV path leaves the cold branch out of the SPIR-V when it cannot, so the compiled
+    // shader never statically references a binding its layout lacks (an invalid pipeline otherwise). D3D11/D3D12/Metal
+    // are never gated by this: it only ever narrows the Vulkan path.
+    static void SetRvtColdVulkanFits(bool fits) { s_rvtColdVulkanFits = fits; }
 
     struct Compiled
     {
@@ -620,9 +632,22 @@ private:
     const Compiled& fragmentVariant(uint64_t sourceHash, const std::string& glsl, Backend backend,
                                     bool clustered);
 
+    // SetRvtColdVulkanFits above; conservative default so a renderer that never calls it (D3D11/D3D12/Metal — this flag
+    // only narrows the Vulkan SpirV path) never risks compiling a shader that statically references a binding its
+    // descriptor layout lacks.
+    static inline bool s_rvtColdVulkanFits = false;
+
     std::unordered_map<int, Compiled>      m_vertCache;  // key = (int)backend (+0x100 instanced)
     std::unordered_map<uint64_t, Compiled> m_fragCache;  // key = mix(sourceHash, backend, clustered)
     std::unordered_map<uint64_t, Compiled> m_cvertCache; // key = mix(bodyHash, backend, instanced)
+    // The resolve* functions run for every draw of every frame and used to hash the whole shader text each time (tens of KB,
+    // the largest CPU item of a G-buffer pass). The hash is kept per material and text kind with a copy of the text it was
+    // taken from: an equal text (size + memcmp, an order of magnitude cheaper than hashing) reuses it, any change rehashes.
+    // No version counter is needed, so a writer that replaces the text without telling anyone is still seen.
+    struct HashedText { std::string text; uint64_t hash = 0; };
+    mutable std::mutex m_textHashLock;
+    mutable std::unordered_map<UUID, std::array<HashedText, 3>> m_textHashes;   // [0] fragment, [1] G-buffer fragment, [2] WPO vertex
+    uint64_t textHash(const UUID& materialId, int kind, const std::string& text) const;
     std::unordered_map<int, Compiled>      m_uiVertCache; // key = (int)backend
     std::unordered_map<int, Compiled>      m_resolveCache; // key = (int)backend (+64 clustered)
     std::unordered_map<int, Compiled>      m_resolveTileCache; // key = (int)backend (+64 clustered)

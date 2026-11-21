@@ -8,6 +8,7 @@
 #include "Trails/TrailClipmap.h"           // the runtime trail texture answers its own path in loadAsset
 #include "Renderer/UIFont.h"           // uiRasterizeIcon: the editor icon textures
 #include "ContentManager/HAsset.h"
+#include "ContentManager/GpuArrayCook.h"     // editor: texture arrays cooked for the GPU on load
 #include "ContentManager/AssetRefRetarget.h" // move/rename: carry path references over
 #include "Sequence/SequenceJson.h"        // CHUNK_SEQU <-> SequenceAsset
 #include "LandscapeFoliage/LandscapeFoliageLayerJson.h" // CHUNK_LFOL <-> LandscapeFoliageLayerAsset
@@ -1202,7 +1203,11 @@ HE::UUID ContentManager::loadAsset(const std::string& relativePath)
 	const std::string fullPath = resolveAbsolutePath(relativePath);
 
 	HAsset::Reader reader;
-	if (!reader.open(fullPath))
+	// A big loose RGBA8 texture array comes cooked for the GPU when the editor asked for it (GpuArrayCook.h).
+	std::vector<uint8_t> gpuCooked;
+	const bool opened = HE::readGpuCookedArray(fullPath, gpuCooked) ? reader.openData(gpuCooked)
+	                                                                 : reader.open(fullPath);
+	if (!opened)
 	{
 		// The most-reported "why is my asset not there" path: the reference is
 		// fine, the file simply is not where the content root says it should be.
@@ -1426,8 +1431,19 @@ void ContentManager::launchPathLoad(const std::string& relativePath, const std::
 		result.fullPath     = fullPath;
 		result.callback     = std::move(cb);
 
-		std::ifstream f(fullPath, std::ios::binary | std::ios::ate);
-		if (f)
+		// A big loose RGBA8 texture array is read as the GPU wants it when the editor asked for that
+		// (GpuArrayCook.h): the cooked file from the cache, or encoded here on the worker, once.
+		const bool gpuCooked = HE::readGpuCookedArray(fullPath, result.fileBytes);
+		std::ifstream f;
+		if (!gpuCooked) f.open(fullPath, std::ios::binary | std::ios::ate);
+		if (gpuCooked)
+		{
+			progress->bytesTotal.store(result.fileBytes.size(), std::memory_order_relaxed);
+			progress->bytesRead.store(result.fileBytes.size(), std::memory_order_relaxed);
+			result.bytes = result.fileBytes.size();
+			result.asset = splitChunks(result.fileBytes);
+		}
+		else if (f)
 		{
 			// Read in blocks rather than in one istreambuf_iterator gulp: the caller
 			// gets a live byte count (asyncProgress → the editor's progress bar for a
@@ -1732,8 +1748,16 @@ void ContentManager::loadUuidAsync(HE::UUID id, std::function<void(HE::UUID)> ca
 		// registry (async path-based load; coalesced by path).
 		if (const auto d = m_diskRegistry.find(id); d != m_diskRegistry.end())
 		{
-			loadPathAsync(d->second, std::move(callback), requester);
-			return;
+			// The file this entry names may have been removed since it was indexed (a stale cached
+			// copy the sync dropped). When the manifest can bring it back, forget the entry and take
+			// the remote route below instead of failing a load that can never succeed.
+			std::error_code ec;
+			if (!m_remoteAssets.count(id) || std::filesystem::exists(resolveAbsolutePath(d->second), ec))
+			{
+				loadPathAsync(d->second, std::move(callback), requester);
+				return;
+			}
+			m_diskRegistry.erase(d);
 		}
 		// A remote-only EngineContent asset (see registerRemoteAsset): materialize
 		// it first, then load it the normal way. Coalesced by the same synthetic-key
@@ -1913,7 +1937,19 @@ void ContentManager::registerRemoteAsset(HE::UUID id, std::string relativePath,
 {
 	// Already resolvable some other way — a real local/override/mounted file
 	// always wins, and there is nothing for a materializer to add.
-	if (isLoaded(id) || m_diskRegistry.count(id)) return;
+	if (isLoaded(id)) return;
+	if (const auto d = m_diskRegistry.find(id); d != m_diskRegistry.end())
+	{
+		// The index only says what the folders held WHEN THEY WERE SCANNED. The EngineContent sync
+		// removes a cached file the server has a newer copy of ("downloads again when it is used"),
+		// often right after the startup scan: the id then still maps to a file that is gone, and
+		// skipping the registration here left that asset with no way to ever be fetched — every
+		// load of it ended in "Cannot load asset … no readable .hasset". Only a file that is really
+		// there counts as resolvable.
+		std::error_code ec;
+		if (std::filesystem::exists(resolveAbsolutePath(d->second), ec)) return;
+		m_diskRegistry.erase(d);
+	}
 
 	RemoteAssetEntry entry;
 	m_remoteByPath[relativePath] = id;

@@ -188,6 +188,12 @@ namespace
 	  "Where this entity lives when the scene is split into cells: in a cell that "
 	  "loads around the camera, or always loaded in the base scene.",
 	  "", "scenes#streaming" },
+	{ "Component/Mobility", "Mobility",
+	  "Whether this entity may ever change at run time. Static lets the engine "
+	  "reduce it to flat render/physics data (entity cooking) once nothing else "
+	  "about it objects; Movable keeps it a full entity. With no Mobility "
+	  "component the engine decides on its own from what the entity carries.",
+	  "", "rendering#performance" },
 	{ "Component/LOD", "LOD",
 	  "Swaps this entity's mesh for cheaper versions as the camera gets further "
 	  "away.",
@@ -2155,6 +2161,19 @@ namespace
 	  "waypoint a script looks up by name. Auto leaves the choice to the split. Takes "
 	  "effect the next time the scene is split.",
 	  "", "scenes#streaming" },
+	{ "Mobility/Static", "",
+	  "This entity never moves, scripts or reparents, so it may be cooked into "
+	  "flat render/physics data at export and at startup. Click to make it "
+	  "Movable. Static on an entity that still carries a script, an animator or "
+	  "a dynamic body does not cook it either way; the analysis reports the "
+	  "contradiction instead. Without a choice of its own, an entity shows "
+	  "Static when nothing about it blocks cooking.",
+	  "", "rendering#performance" },
+	{ "Mobility/Movable", "",
+	  "Keeps this entity a full entity, never cooked — use it to pin an entity "
+	  "that is still changed from outside the paths cooking watches (code that "
+	  "writes the transform directly, for instance). Click to make it Static.",
+	  "", "rendering#performance" },
 	{ "Save State/Enabled", "",
 	  "Include this entity in savegames. Off, it is whatever the scene file says "
 	  "every time the game is loaded.",
@@ -2869,6 +2888,14 @@ namespace
 	  "The triangle edges of every mesh, unlit. Shows how dense a model is and "
 	  "where the LOD switches; the sky and particles stay as they are.",
 	  "Alt+2", "editor#viewport" },
+	{ "Viewport View Mode/RVT Mip Levels", "",
+	  "Unlit, with every landscape drawn from the Runtime Virtual Texture coloured "
+	  "by the detail level of the page it reads: red finest (mip 0), then orange, "
+	  "yellow, green, cyan, blue, magenta for ever coarser pages. Dark stripes mark "
+	  "pixels that want a finer page than the pool holds there, so they show a "
+	  "coarser one. Surfaces without RVT stay plain Unlit; with the virtual texture "
+	  "off (Preferences > World > Virtual Texture) nothing is coloured.",
+	  "", "editor#viewport" },
 	{ "Viewport View Mode/Base Color", "",
 	  "The G-buffer's base colour, straight from the material. Needs the "
 	  "Deferred render path (Preferences > Rendering) — the forward path has "
@@ -4866,6 +4893,18 @@ namespace
 	  "the engine's own wordmark, and the engine does not advertise itself "
 	  "inside your game. Saved to Config/ProjectSettings.json.",
 	  "", "export#overview" },
+	{ "Project General/Cook static entities", "Cook static entities",
+	  "On by default. When on, the export finds the meshes that never change while the game runs "
+	  "(no script, animation, physics body, replication or level of detail, and no "
+	  "such parent) and ships that list inside each scene. The game then draws them "
+	  "from a flat block of ready data instead of walking every entity each frame, "
+	  "and skips the analysis at load. A scene exported without it loads and draws "
+	  "exactly as before.\n\n"
+	  "An entity that a script or the engine API changes afterwards, or that gets a "
+	  "script, an animator or a body, falls back to normal handling on its own. "
+	  "Saved to Config/ProjectSettings.json as game.cookStaticEntities. The editor "
+	  "viewport is not affected; HE_COOK_STATIC=1 is the editor's switch.",
+	  "", "export#overview" },
 	{ "Project General/Splash image", "Splash image",
 	  "A PNG the splash shows, project-relative (Content/Splash.png). The export "
 	  "copies it beside project.hcfg as Splash.png; the game reads it from "
@@ -5233,6 +5272,58 @@ namespace
 	  "floor under the slope bias — the number that matters on flat ground under "
 	  "a high sun.",
 	  "", "rendering#shadows" },
+	// ── World ▸ Virtual Texture ──────────────────────────────────────────────
+	{ "Virtual Texture/Runtime Virtual Texture", "Runtime Virtual Texture",
+	  "Draws the landscape from pages instead of running its material for every pixel of every frame. The landscape's "
+	  "material is rendered once into small tiles of a shared pool (a page: colour, normal and surface at a fixed ground "
+	  "resolution); from then on the landscape only reads them, and the material runs again only where something changed — "
+	  "a sculpt or paint stroke, an edited parameter. A frame in which nothing changed paints nothing.\n\n"
+	  "Off by default: with it off the landscape draws exactly what it always drew. Saved to Config/ProjectSettings.json and "
+	  "read as you edit, by the editor and by the exported game. Needs a graphics backend that supports it (D3D11, D3D12, "
+	  "Vulkan, OpenGL and Metal do; the software renderer does not yet) — the page above says so where it does not. The "
+	  "environment variable HE_RVT=1 or 0 forces it on or off over this switch.",
+	  "", "rendering#performance" },
+	{ "Virtual Texture/Native near view", "Native near view",
+	  "Keeps the landscape's own material close to the camera. A page has a fixed ground resolution (the texel size), the "
+	  "material has its textures' resolution, which is far finer: from close up the pages are blurry whatever their level. "
+	  "With this on, every landscape chunk nearer than the distance where one finest-level texel covers one screen pixel draws "
+	  "its own material, and only the chunks beyond it are drawn from pages. That distance follows the texel size and the "
+	  "camera (about 290 m for 0.25 m texels on a 1080-pixel-high image); a finer texel size moves it closer and saves more.\n\n"
+	  "The price: the near chunks run the full material again, and its large texture arrays stay in memory. Off draws every "
+	  "chunk from pages. Applies at once.",
+	  "", "rendering#performance" },
+	{ "Virtual Texture/Pool size", "Pool size",
+	  "How many pages the pool holds, shared by every landscape: each page is 136 x 136 pixels in three layers, about "
+	  "0.22 MB, so 512 pages are 108 MB of video memory. A pool that is too small shows up on this page as a request "
+	  "count and an orange line: the farthest pages are then not painted and that part of the landscape stays on its "
+	  "own material.\n\n"
+	  "Changing it rebuilds the pool and repaints every page, so pick it once.",
+	  "", "rendering#performance" },
+	{ "Virtual Texture/Texel size", "Texel size",
+	  "How much ground one pixel of the finest page covers. 0.25 m is a pixel the size of a hand span on the screen from a "
+	  "walking camera; each finer step (12.5, 6.3, 3.1, 1.6 cm) doubles the detail. The finest level is only kept within a "
+	  "few metres of the camera (the near radius shrinks with the texel: about 4 m at 1.6 cm), each coarser level twice as "
+	  "far, so a finer texel costs pages close by, not over the whole landscape. 0.5 m and 1 m are the coarse end. Where the "
+	  "backend reports which pages the image actually reads (Metal), those are painted, within the same distance bands. "
+	  "A landscape too large for the finest choice (over 2048 pages a side) gets the finest texel that fits.\n\n"
+	  "Changing it rebuilds the pool and repaints every page, so pick it once.",
+	  "", "rendering#performance" },
+	{ "Virtual Texture/Near radius", "Near radius",
+	  "How far around the camera the landscape is kept at the finest level, in metres. Beyond it coarser levels are used, "
+	  "four times fewer pages per step. A larger radius needs more pages (see the pool size) and paints more after a "
+	  "change; changes to it apply at once, without rebuilding anything.",
+	  "", "rendering#performance" },
+	{ "Virtual Texture/Activation radius", "Activation radius",
+	  "How near a landscape must be to the camera, measured to its edge, to be drawn from pages. A farther one keeps "
+	  "drawing its own material and holds no pages, so a world of many landscapes only pays for the ones around you. "
+	  "It is drawn from pages again once it comes back in range, from a slightly larger radius than it switched on at, so "
+	  "it does not flicker at the border. Applies at once.",
+	  "", "rendering#performance" },
+	{ "Virtual Texture/Pages per frame", "Pages per frame",
+	  "The most pages one frame may paint, over every landscape together: the budget that spreads a first fill or the "
+	  "repaint after a stroke over several frames instead of one long one. A higher number finishes sooner and makes the "
+	  "frames it works in longer. The status line on this page shows what the last painting cost.",
+	  "", "rendering#performance" },
 	// ── Physics ▸ Simulation ─────────────────────────────────────────────────
 	{ "Physics/Fixed rate", "Fixed rate",
 	  "How many simulation steps a second of game time is cut into, whatever "
@@ -10407,6 +10498,7 @@ namespace
 		{ "Multiplayer/",      "editor-settings", "Settings Reference", "Project: multiplayer" },
 		{ "Render Defaults/",  "editor-settings", "Settings Reference", "Project: render defaults" },
 		{ "Shadows/",          "editor-settings", "Settings Reference", "Project: shadows" },
+		{ "Virtual Texture/",  "editor-settings", "Settings Reference", "Project: virtual texture" },
 		{ "Physics/",          "editor-settings", "Settings Reference", "Project: physics" },
 		{ "Audio Buses/",      "editor-settings", "Settings Reference", "Project: audio buses" },
 		{ "Permissions/",    "editor-settings", "Settings Reference", "Project permissions" },
@@ -10515,7 +10607,7 @@ namespace
 		"Animator State Machine", "Root Motion", "Animation Layers",
 		"Inverse Kinematics",
 		"Property Animator", "Sequence Player", "Particle System",
-		"Save State", "Streaming", "LOD", "Environment", "Weather", "UI Canvas", "UI Element",
+		"Save State", "Streaming", "Mobility", "LOD", "Environment", "Weather", "UI Canvas", "UI Element",
 		"UI Text", "UI Image", "UI Button",
 	};
 

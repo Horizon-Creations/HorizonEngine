@@ -22,6 +22,8 @@
 #include <algorithm>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <string>
 #include <vector>
 
@@ -470,6 +472,67 @@ TEST_CASE("Cook: a cooked texture array carries the slice means of its RGBA8 sou
 	CHECK(flat.sliceMeans.empty());
 	REQUIRE(cookViaPak(arr, 3, 0, "offmeans", off, /*cookArrays=*/false));
 	CHECK(off.sliceMeans.empty());
+}
+
+TEST_CASE("cookTextureBlob: an array .hasset becomes the compressed array in place, slices stay in order")
+{
+	namespace fs = std::filesystem;
+	const fs::path dir = fs::temp_directory_path() / "he_bcn_blob";
+	he_test::removeAllQuiet(dir);
+	fs::create_directories(dir);
+	// Eight slices so the encoder's worker threads each take several; phase raises R slice by slice.
+	std::vector<TextureAsset> src;
+	for (int s = 0; s < 8; ++s) src.push_back(rampTexture(32, 16, s * 12));
+	std::vector<const TextureAsset*> ptrs;
+	for (const auto& t : src) ptrs.push_back(&t);
+	TextureAsset arr;
+	REQUIRE(HE::buildTextureArray(ptrs, arr, /*bakeMips=*/true));
+	arr.type = HE::AssetType::Texture; arr.name = "blob_arr"; arr.path = "blob_arr.hasset"; arr.srgb = true;
+	TextureAsset flat = rampTexture(8, 8);
+	flat.name = "blob_flat"; flat.path = "blob_flat.hasset";
+	{
+		ContentManager cmw(dir.string());
+		REQUIRE(cmw.saveAsset(arr));
+		REQUIRE(cmw.saveAsset(flat));
+	}
+	const auto slurp = [](const fs::path& p) {
+		std::ifstream in(p, std::ios::binary);
+		return std::vector<uint8_t>(std::istreambuf_iterator<char>(in), {}); };
+	const std::vector<uint8_t> arrBlob = slurp(dir / "blob_arr.hasset"), flatBlob = slurp(dir / "blob_flat.hasset");
+
+	// A format no encoder knows: handed back untouched. A plain 2D texture is cooked too (as an export does).
+	CHECK(Hpak::cookTextureBlob(flatBlob, 3, 0) != flatBlob);
+	CHECK(Hpak::cookTextureBlob(arrBlob, 99, 0) == arrBlob);
+
+	const std::vector<uint8_t> cooked = Hpak::cookTextureBlob(arrBlob, 3, 0);
+	REQUIRE(cooked != arrBlob);
+	{
+		std::ofstream out(dir / "blob_arr.hasset", std::ios::binary | std::ios::trunc);
+		out.write(reinterpret_cast<const char*>(cooked.data()), static_cast<std::streamsize>(cooked.size()));
+	}
+	ContentManager cm(dir.string());
+	const TextureAsset* t = cm.getTexture(cm.loadAsset("blob_arr.hasset"));
+	REQUIRE(t);
+	CHECK(t->format == TextureFormat::BC3);
+	CHECK(t->layers == 8);
+	CHECK(t->srgb);
+	CHECK(t->mipLevels == arr.mipLevels);
+	CHECK(HE::textureArrayPayloadValid(*t));
+	REQUIRE(t->sliceMeans.size() == 8 * 3);
+	// The decoded slices are in the order they went in: R rises with the phase (12 per slice stays inside a byte).
+	float prev = -1.0f;
+	for (uint32_t s = 0; s < 8; ++s)
+	{
+		float rgb[3];
+		REQUIRE(HE::textureArraySliceMean(*t, s, rgb));
+		CAPTURE(s);
+		CHECK(rgb[0] > prev);
+		prev = rgb[0];
+		CHECK(t->sliceMeans[s * 3] == doctest::Approx(rgb[0]).epsilon(0.1));
+	}
+	// Already compressed: handed back as it is, not encoded a second time.
+	CHECK(Hpak::cookTextureBlob(cooked, 3, 0) == cooked);
+	he_test::removeAllQuiet(dir);
 }
 
 #endif // HE_HAVE_STB_DXT

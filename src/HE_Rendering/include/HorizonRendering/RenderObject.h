@@ -119,6 +119,9 @@ struct RenderObject {
     // A piece of a landscape (TerrainChunkComponent). The GI sun-shadow kernel traces the
     // landscape's height field instead of these meshes when one is available.
     bool         terrainChunk = false;
+    // The landscape entity this chunk belongs to (TerrainChunkComponent::terrain), valid when terrainChunk. What the Runtime
+    // Virtual Texture swap is keyed on: landscapeIndex above exists only for the landscapes the GI can sample.
+    uint32_t     terrainEntity = 0xFFFFFFFFu;
     // Foliage cluster. -1 = an ordinary object, one entity = one entry. >= 0 = this
     // ONE object stands for a whole run of instances (one bucket of a foliage layer):
     // the index into RenderWorld::instanceBlocks that holds their storage, range and

@@ -1,6 +1,7 @@
 #pragma once
 #include <Types/UUID.h>
 #include "HorizonScene/WaterField.h"
+#include <algorithm>
 #include <cstdint>
 #include <memory>
 #include <vector>
@@ -123,6 +124,15 @@ struct TerrainComponent {
     // the chunks' draw calls so the layer-blend node can sample it.
     HE::UUID weightmapTextureId{};
     bool     weightsDirty = false;   // re-upload the texture on the next tick
+    // Set alongside weightsDirty by paint()/paintGroup() ONLY, carrying forward false if a
+    // wide edit (fillLayer/fillGroup/enableGroupMix/disableGroupMix, TerrainSync) was already
+    // pending when the stroke ran — a stroke on top of one must not narrow the journal back
+    // down. Every known wide writer clears it explicitly, which is the signal TerrainSystem
+    // needs to call rvtJournal.noteAll() even if a stroke's rect is already pending from the
+    // same tick (Thema 333 step 29). A writer that mutates layerWeights/weightsDirty directly
+    // without going through one of those (or a fresh load, where it defaults false already)
+    // is not covered — none exists today, but one would need to clear this flag too.
+    bool     weightsDirtyFromStroke = false;
     // Mean of layerWeights over the whole terrain, normalised (Σ = 1). Recomputed
     // with the texture upload — consumers that shade the landscape FLAT, with no
     // texel to sample (the GI ray kernels colour a hit per instance), blend the
@@ -136,6 +146,25 @@ struct TerrainComponent {
     // regenerates only the touched chunks (not all 64+) per stroke. Cleared after.
     bool     regionDirty = false;
     float    dirtyMinX = 0.0f, dirtyMinZ = 0.0f, dirtyMaxX = 0.0f, dirtyMaxZ = 0.0f;
+    // What changed in the ground PICTURE (heights, layer weights) since the Runtime Virtual Texture driver last drained
+    // it (Thema 333 step 4). Not serialised, and NOT cleared by TerrainSystem (it clears dirty/regionDirty/weightsDirty
+    // when it has rebuilt): the stroke, the rebuild and the driver are three different moments, and callers other than
+    // the world tick call updateTerrains too (the editor's brush tools do). Edits with a known extent note a rect
+    // (terrain-local XZ), everything else notes "all"; TerrainSystem notes "all" itself for a rebuild or a weight upload
+    // no edit announced, so a writer that never heard of this still gets its pages repainted.
+    struct RvtJournal
+    {
+        bool  any = false, all = false;
+        float minX = 0.0f, minZ = 0.0f, maxX = 0.0f, maxZ = 0.0f;
+        void noteAll() { any = all = true; }
+        void noteRect(float mnX, float mnZ, float mxX, float mxZ)
+        {
+            if (all) return;
+            if (!any) { minX = mnX; minZ = mnZ; maxX = mxX; maxZ = mxZ; any = true; return; }
+            minX = std::min(minX, mnX); minZ = std::min(minZ, mnZ); maxX = std::max(maxX, mxX); maxZ = std::max(maxZ, mxZ);
+        }
+        void clear() { *this = RvtJournal{}; }
+    } rvtJournal;
     // Chunk grid the chunk entities were last built for — a change (resolution/size)
     // forces a full rebuild of the chunk set.
     uint32_t builtRes = 0, builtChunksPerSide = 0;

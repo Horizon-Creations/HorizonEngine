@@ -83,6 +83,36 @@ bool assetMayReference(const fs::path& path)
 	}
 }
 
+// The id a .hasset carries in its META chunk (v2+: u16 type, u64 hi, u64 lo), read without
+// loading anything — the same few bytes ContentManager's own file index reads. False for a file
+// that is not an asset, a v1 file (no id) or one without a META chunk.
+bool peekAssetId(const fs::path& path, HE::UUID& out)
+{
+	std::ifstream f(path, std::ios::binary);
+	HAsset::FileHeader hdr{};
+	if (!f || !f.read(reinterpret_cast<char*>(&hdr), sizeof(hdr))) return false;
+	if (std::memcmp(hdr.magic, HAsset::k_magic, 4) != 0 || hdr.version < 2) return false;
+	for (uint32_t i = 0; i < hdr.chunk_count; ++i)
+	{
+		HAsset::ChunkHeader ch{};
+		if (!f.read(reinterpret_cast<char*>(&ch), sizeof(ch))) return false;
+		if (ch.id != HAsset::CHUNK_META)
+		{
+			f.seekg(static_cast<std::streamoff>(ch.size), std::ios::cur);
+			if (!f) return false;
+			continue;
+		}
+		uint16_t type = 0;
+		HE::UUID id{};
+		if (ch.size < sizeof(type) + 16 || !f.read(reinterpret_cast<char*>(&type), sizeof(type)) ||
+		    !f.read(reinterpret_cast<char*>(&id.hi), 8) || !f.read(reinterpret_cast<char*>(&id.lo), 8))
+			return false;
+		out = id;
+		return id != HE::UUID{};
+	}
+	return false;
+}
+
 // Asset ids in a scene: [hi, lo] arrays of two unsigned numbers and {"hi":…,"lo":…}.
 void collectIds(const nlohmann::json& j, std::vector<HE::UUID>& out)
 {
@@ -109,6 +139,13 @@ struct Walker
 	Result                                           result;
 	std::unordered_map<std::string, const CatalogueEntry*> byPath;
 	std::unordered_map<HE::UUID, const CatalogueEntry*>    byId;
+	// Ids of the library files already on this machine ("Engine/<rest>"), read from the files
+	// themselves, built on the first scene that holds an id the catalogue does not know. A scene
+	// names an engine asset by id; the server's catalogue lists only what was published, but the
+	// editor ships assets of its own (the terrain's mix material) the server never heard of, and
+	// those lead on to assets that ARE served — if the walk can see through the id to the file.
+	std::unordered_map<HE::UUID, std::string>              localIds;
+	bool                                                   localIndexed = false;
 
 	explicit Walker(const Options& o) : opt(o)
 	{
@@ -148,7 +185,7 @@ struct Walker
 		for (std::string& p : findEngineReferences(bytes.data(), bytes.size()))
 			out.push_back(std::move(p));
 
-		if (ext == ".hescene" && !byId.empty())
+		if (ext == ".hescene")
 		{
 			const nlohmann::json j = nlohmann::json::parse(bytes, nullptr, /*allow_exceptions=*/false);
 			if (!j.is_discarded())
@@ -156,8 +193,42 @@ struct Walker
 				std::vector<HE::UUID> ids;
 				collectIds(j, ids);
 				for (const HE::UUID& id : ids)
+				{
 					if (const auto it = byId.find(id); it != byId.end())
+					{
 						out.push_back(std::string(kEnginePrefix) + it->second->path);
+						continue;
+					}
+					if (id == HE::UUID{}) continue;
+					if (!localIndexed) indexLocalIds();
+					if (const auto it = localIds.find(id); it != localIds.end())
+						out.push_back(it->second);
+				}
+			}
+		}
+	}
+
+	void indexLocalIds()
+	{
+		localIndexed = true;
+		// Same precedence as locateEngineFile: a project override, the library, the cache.
+		const std::pair<fs::path, const std::string*> roots[] = {
+			{ fs::path(opt.projectContentRoot) / "Engine", &opt.projectContentRoot },
+			{ fs::path(opt.engineRoot), &opt.engineRoot },
+			{ fs::path(opt.cacheRoot), &opt.cacheRoot },
+		};
+		std::error_code ec;
+		for (const auto& [root, gate] : roots)
+		{
+			if (gate->empty() || !fs::is_directory(root, ec)) continue;
+			for (fs::recursive_directory_iterator it(root, fs::directory_options::skip_permission_denied, ec), e;
+			     !ec && it != e; it.increment(ec))
+			{
+				std::error_code fe;
+				if (!it->is_regular_file(fe) || lowerExt(it->path()) != ".hasset") continue;
+				HE::UUID id{};
+				if (!peekAssetId(it->path(), id)) continue;
+				localIds.emplace(id, std::string(kEnginePrefix) + fs::relative(it->path(), root, fe).generic_string());
 			}
 		}
 	}

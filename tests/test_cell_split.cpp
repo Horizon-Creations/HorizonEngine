@@ -667,7 +667,7 @@ TEST_CASE("splitSceneIntoCells: which components may move into a cell, and which
 
 	for (const char* key : { "mesh", "material", "lod", "collider", "decal", "inactive",
 	                         "prefab", "particlesystem", "skeletalmesh", "animator", "animatorblend",
-	                         "propertyanimator" })
+	                         "propertyanimator", "mobility" })
 		CHECK_MESSAGE(moves(key), "should move: ", key);
 	CHECK(moves("light", { { "type", 1 } }));       // point
 	CHECK(moves("light", { { "type", 2 } }));       // spot
