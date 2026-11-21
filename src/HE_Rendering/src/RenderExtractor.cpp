@@ -811,7 +811,9 @@ void windWaterParams(const MaterialAsset& ma, const MaterialComponent* mc,
 		hf.key     = kLandscapeGiHeightfieldKey;
 		// The clipmap's local space is centred on its window, same as a TerrainComponent's (see
 		// LandscapeTileTerrain.h): a pure translation to the window's centre, origin-relative.
-		const glm::vec3 centreRel(static_cast<float>(g.centreAbsolute.x - world.origin().x), 0.0f,
+		// y: the clipmap's heights are ABSOLUTE metres, so local y = relative y + origin.y (a floating origin that is not at
+		// height 0 would otherwise put the whole field origin.y too high).
+		const glm::vec3 centreRel(static_cast<float>(g.centreAbsolute.x - world.origin().x), static_cast<float>(-world.origin().y),
 		                          static_cast<float>(g.centreAbsolute.z - world.origin().z));
 		glm::mat4 worldMatrix(1.0f);
 		worldMatrix[3] = glm::vec4(centreRel, 1.0f);

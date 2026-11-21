@@ -1664,6 +1664,8 @@ private:
 	// EncodeScene asks the application's provider (IRenderer::SetLandscapeProvider) once for the frame of the camera the scene pass rasterises
 	// with, and EncodeLandscape encodes it into that pass, after the skinned meshes and before the sky. Forward geometry: no shadows, SSAO or GI, not in the G-buffer.
 	void EncodeLandscape(void* renderEncoder, const glm::mat4& viewProj, const HE::LandscapeRenderFrame& frame);
+	GpuMesh  m_giLandMesh;                       // the tile landscape's GI height clipmap as a mesh with its BLAS (EncodeGIAccelBuild)
+	uint64_t m_giLandMeshVersion = 0;            // GiHeightfield::version it was made from
 	HE::UUID m_landscapeMaterialLoadTried{};     // the group material this renderer tried to load from its path
 	bool EnsureLandscape();
 	void EncodeLandscapePass(void* renderEncoder, const glm::mat4& clip, bool giGBuffer);

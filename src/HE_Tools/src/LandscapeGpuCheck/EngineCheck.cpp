@@ -401,6 +401,48 @@ int runMaterialCheck(HE::RendererBackend backend, HE::RenderPath path, const std
 					if (darker < 150) fail("the ground takes the box's ray-traced shadow (GI on)", std::to_string(darker) + " px");
 					writePngFile(pngPath.substr(0, pngPath.size() - 4) + "_gi.png", static_cast<int>(kW), static_cast<int>(kH), giOn.data());
 				}
+				// ... and the ground CASTS with GI on: its height clipmap is in the ray-tracing structure. The box under the ramp again,
+				// seen from under the ramp, against the same frame without the ground there.
+				{
+					world.setLandscapeRuntime(&rt);
+					for (const auto t2 = std::chrono::steady_clock::now(); !rt.giHeightfield().active() && std::chrono::steady_clock::now() - t2 < std::chrono::seconds(60);)
+					{
+						rt.updateAt(camPos, glm::vec3(0.0f), 5.0, origin);
+						std::this_thread::sleep_for(std::chrono::milliseconds(1));
+					}
+					const auto hangEnt = world.createEntity("HangingGi");
+					TransformComponent htf;
+					htf.position = glm::vec3(glm::dvec3(boxX, kBase + kSlope * (boxX - kPivot) - 50.0, boxZ) - origin);
+					htf.scale = glm::vec3(30.0f);
+					reg.emplace<TransformComponent>(hangEnt, htf);
+					reg.emplace<MeshComponent>(hangEnt, MeshComponent{ HE::kDefaultCubeMeshId });
+					const EditorCameraOverride over = ov;
+					const glm::vec3 underEye = htf.position + glm::vec3(80.0f, 5.0f, 80.0f);
+					ov.view = glm::lookAt(underEye, htf.position, glm::vec3(0, 1, 0));
+					ov.position = underEye;
+					const auto centreLum = [&](const std::vector<uint8_t>& img) {   // lookAt puts the box on the centre pixel
+						double s = 0.0;
+						for (uint32_t y = kH / 2 - 4; y <= kH / 2 + 4; ++y)
+							for (uint32_t x = kW / 2 - 4; x <= kW / 2 + 4; ++x) s += lum(&img[(static_cast<size_t>(y) * kW + x) * 4]);
+						return s / 81.0;
+					};
+					std::vector<uint8_t> with, without;
+					const bool gotA = rt.giHeightfield().active() && settle(with);
+					landscapePasses("0");
+					const bool gotB = gotA && settle(without);
+					landscapePasses(nullptr);
+					if (!gotB) fail("the landscape's GI height clipmap is there and the frames come back (GI, under the ground)");
+					else
+					{
+						std::printf("  the ground casts, GI on: a box under the ground is %.0f/255, and %.0f/255 when the ground is not in the ray-tracing structure\n",
+						            centreLum(with), centreLum(without));
+						if (centreLum(with) > centreLum(without) * 0.8) fail("a box under the ground stands in the ground's ray-traced shadow");
+						writePngFile(pngPath.substr(0, pngPath.size() - 4) + "_gi_under.png", static_cast<int>(kW), static_cast<int>(kH), with.data());
+					}
+					ov = over;
+					world.destroyEntity(hangEnt);
+					world.setLandscapeRuntime(nullptr);
+				}
 				gi.enabled = false;
 				renderer->SetGISettings(gi);
 				shoot(giOff);   // back on the cascades before the fog frame

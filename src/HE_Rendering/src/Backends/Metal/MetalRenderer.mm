@@ -7314,6 +7314,11 @@ void MetalRenderer::Shutdown()
 	if (m_landscapeShadowPipeline) { CFBridgingRelease(m_landscapeShadowPipeline); m_landscapeShadowPipeline = nullptr; }
 	if (m_landscapeGiPipeline)     { CFBridgingRelease(m_landscapeGiPipeline);     m_landscapeGiPipeline = nullptr; }
 	m_landscapeShadowTried = m_landscapeGiTried = false;
+	if (m_giLandMesh.blas)      CFBridgingRelease(m_giLandMesh.blas);
+	if (m_giLandMesh.vertexBuf) CFBridgingRelease(m_giLandMesh.vertexBuf);
+	if (m_giLandMesh.indexBuf)  CFBridgingRelease(m_giLandMesh.indexBuf);
+	m_giLandMesh = GpuMesh{};
+	m_giLandMeshVersion = 0;
 	if (m_uiBackdrop) { CFBridgingRelease(m_uiBackdrop); m_uiBackdrop = nullptr; }
 	m_uiBackdropW = m_uiBackdropH = 0;
 	if (m_bloomBrightPipeline)  { CFBridgingRelease(m_bloomBrightPipeline);  m_bloomBrightPipeline = nullptr; }
@@ -9240,6 +9245,62 @@ void MetalRenderer::EncodeGIAccelBuild(void* cmdBufPtr, float aspect)
 			instanceBaseColor.push_back(glm::vec4(albedo, metallic));
 			instanceBaseColor.push_back(glm::vec4(emissive, roughness));
 			instanceLandIndex.push_back(obj.landscapeIndex); // paint sampling at the hit
+		}
+		// The tile landscape's ground: its GI height clipmap (the 2 km around the camera, RenderExtractor's
+		// extractLandscapeGiHeightfield) as one more instance, so rays hit it: the ground shadows itself and what stands behind
+		// it, and light bounces off it. A mesh of at most 513 x 513 vertices, made again when the clipmap is another one.
+		for (const GiHeightfield& hf : m_renderWorld.heightfields)
+		{
+			if (hf.key != kLandscapeGiHeightfieldKey || !hf.data || hf.res < 2 || hf.data->size() < static_cast<size_t>(hf.res) * hf.res) continue;
+			if (const char* e = std::getenv("HE_LANDSCAPE_PASSES"); e && *e == '0') break;   // the A/B switch of EncodeLandscapePass
+			if (m_giLandMeshVersion != hf.version || !m_giLandMesh.vertexBuf)
+			{
+				const uint32_t stride = std::max(1u, (hf.res - 1 + 511) / 512), n = (hf.res - 1) / stride + 1;
+				const float sx = hf.size.x / static_cast<float>(n - 1), sz = hf.size.y / static_cast<float>(n - 1);
+				const auto hAt = [&](uint32_t i, uint32_t j) {
+					return (*hf.data)[static_cast<size_t>(std::min(j * stride, hf.res - 1)) * hf.res + std::min(i * stride, hf.res - 1)];
+				};
+				std::vector<float> v(static_cast<size_t>(n) * n * 8);
+				for (uint32_t j = 0; j < n; ++j)
+					for (uint32_t i = 0; i < n; ++i)
+					{
+						float* o = &v[(static_cast<size_t>(j) * n + i) * 8];
+						o[0] = -0.5f * hf.size.x + static_cast<float>(i) * sx;   // local space is centred on the clipmap's window
+						o[1] = hAt(i, j);
+						o[2] = -0.5f * hf.size.y + static_cast<float>(j) * sz;
+						const glm::vec3 nrm = glm::normalize(glm::vec3(hAt(i > 0 ? i - 1 : i, j) - hAt(std::min(i + 1, n - 1), j), 2.0f * sx,
+						                                               hAt(i, j > 0 ? j - 1 : j) - hAt(i, std::min(j + 1, n - 1))));
+						o[3] = nrm.x; o[4] = nrm.y; o[5] = nrm.z;
+						o[6] = o[7] = 0.0f;
+					}
+				std::vector<uint32_t> idx;
+				idx.reserve(static_cast<size_t>(n - 1) * (n - 1) * 6);
+				for (uint32_t j = 0; j + 1 < n; ++j)
+					for (uint32_t i = 0; i + 1 < n; ++i)
+					{
+						const uint32_t a = j * n + i, b = a + 1, c = a + n, d = c + 1;
+						idx.insert(idx.end(), { a, c, b, b, c, d });
+					}
+				RetireGIObject(m_giLandMesh.blas);        // frames in flight still trace the old one
+				RetireGIObject(m_giLandMesh.vertexBuf);
+				RetireGIObject(m_giLandMesh.indexBuf);
+				m_giLandMesh = GpuMesh{};
+				m_giLandMesh.vertexBuf = (void*)CFBridgingRetain([device newBufferWithBytes:v.data() length:v.size() * sizeof(float) options:MTLResourceStorageModeShared]);
+				m_giLandMesh.indexBuf  = (void*)CFBridgingRetain([device newBufferWithBytes:idx.data() length:idx.size() * sizeof(uint32_t) options:MTLResourceStorageModeShared]);
+				m_giLandMesh.indexCount = static_cast<int>(idx.size());
+				m_giLandMesh.blas = BuildBLAS(m_giLandMesh);
+				m_giLandMeshVersion = hf.version;
+			}
+			if (!m_giLandMesh.blas) break;
+			const glm::mat4 toWorld = glm::inverse(hf.worldToLocal);
+			instanceBlasIndex.push_back(static_cast<uint32_t>(uniqueBlas.size()));
+			uniqueBlas.push_back((__bridge id<MTLAccelerationStructure>)m_giLandMesh.blas);
+			uniqueMeshBufs.emplace_back((__bridge id<MTLBuffer>)m_giLandMesh.vertexBuf, (__bridge id<MTLBuffer>)m_giLandMesh.indexBuf);
+			instanceTransform.push_back(toWorld);
+			instanceBaseColor.push_back(glm::vec4(0.30f, 0.33f, 0.24f, 0.0f));   // the bounce's colour: a ground's mean, not the material's (not built)
+			instanceBaseColor.push_back(glm::vec4(0.0f, 0.0f, 0.0f, 1.0f));
+			instanceLandIndex.push_back(-1);
+			break;
 		}
 		if (uniqueBlas.empty()) return;
 
