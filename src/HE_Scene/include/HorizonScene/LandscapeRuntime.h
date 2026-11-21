@@ -30,6 +30,10 @@ namespace HE
 
 class LandscapeEditSource;   // LandscapeEdit.h
 
+// What a world may have for LandscapeStoreConfig::keepAll (LandscapeWorldComponent::streaming off): 32 x 32 tiles, 16 km a side.
+// Every resident tile is a layer of the atlas's height and weight arrays, about half a megabyte of GPU memory each (0.5 GB at this cap).
+constexpr int kLandscapeKeepAllMaxTiles = 1024;
+
 // ── The world-scale landscape of a running scene (Thema 326, step 2, part A) ──────
 // Owns the pieces and runs them in order, once a frame: the camera drives the LandscapeStore (tiles in memory), the
 // LandscapeAtlas follows the store (which tile in which GPU layer), and buildFrame() turns the camera's frustum into the
@@ -227,6 +231,7 @@ private:
 	void       placeWindow();
 	bool       m_windowed = false;                         // the world has more tiles a side than the render window
 	bool       m_windowKeepsAtlas = false;
+	bool       m_failedKeepAll = false;                    // the streaming switch at the failed try (m_failedPack)
 	LandscapeTileKey m_winTile{ 0, 0 };                    // the window's corner; m_quadtree's world is the window
 	std::shared_ptr<const LandscapeCoarseWorld> m_winCoarse;
 	bool       m_editable = false;

@@ -635,6 +635,7 @@ namespace
 			comps["landscapeWorld"] = {
 				{ "enabled",      lw->enabled },
 				{ "pack",         lw->pack },
+				{ "streaming",    lw->streaming },
 				{ "loadRadius",   lw->loadRadius },
 				{ "budgetMB",     lw->budgetMB },
 				{ "heightMinM",   lw->heightMinM },
@@ -1654,6 +1655,7 @@ namespace
 			LandscapeWorldComponent lw;
 			lw.enabled      = c.value("enabled",      lw.enabled);
 			lw.pack         = c.value("pack",         lw.pack);
+			lw.streaming    = c.value("streaming",    lw.streaming);   // absent in a scene from before the switch: streamed, as it was
 			lw.loadRadius   = c.value("loadRadius",   lw.loadRadius);
 			lw.budgetMB     = c.value("budgetMB",     lw.budgetMB);
 			lw.heightMinM   = c.value("heightMinM",   lw.heightMinM);

@@ -149,10 +149,21 @@ bool LandscapeRuntime::beginWith(std::shared_ptr<const LandscapeTileSource> sour
 	q.maxY = config.heightMinM + config.heightScaleM;
 	if (std::abs(q.cellSize(q.tileLevels + 1) - coarse->cellM(0)) > 1e-3f * coarse->cellM(0))
 		return fail(error, "the coarse world's raster does not equal the first coarse quadtree level's cell size");
+	int needWindow = 2 * static_cast<int>(std::ceil(config.store.loadRadius * config.store.keepFactor / g.tileM)) + 2;
+	if (config.store.keepAll)
+	{
+		// No streaming: every tile is resident, so every tile is a layer of the atlas's GPU arrays and an entry of the slot table.
+		const size_t tiles = static_cast<size_t>(source->tilesX()) * static_cast<size_t>(source->tilesZ());
+		if (tiles > static_cast<size_t>(kLandscapeKeepAllMaxTiles))
+			return fail(error, "the world has " + std::to_string(tiles) + " tiles: without streaming at most " + std::to_string(kLandscapeKeepAllMaxTiles)
+			                       + " can be kept (each is a layer of the GPU atlas). Switch streaming on for this world");
+		config.store.loadRadius = std::max(config.store.loadRadius, static_cast<float>(q.minLoadRadius()));
+		needWindow = std::max(source->tilesX(), source->tilesZ());
+		while (config.atlasWindow < needWindow) config.atlasWindow *= 2;   // a power of two the whole world fits: every tile its own entry
+	}
 	if (!q.fitsStore(config.store.loadRadius))
 		return fail(error, "loadRadius " + std::to_string(config.store.loadRadius) + " m is below the " + std::to_string(q.minLoadRadius()) +
 		                       " m the fine levels need");
-	const int needWindow = 2 * static_cast<int>(std::ceil(config.store.loadRadius * config.store.keepFactor / g.tileM)) + 2;
 	if (config.atlasWindow < needWindow)
 		return fail(error, "atlasWindow " + std::to_string(config.atlasWindow) + " is below the " + std::to_string(needWindow) + " tiles the loaded disc spans");
 
@@ -257,10 +268,12 @@ void LandscapeRuntime::update(HorizonWorld& world, float dt, double budgetMs, co
 	if (!comp) { if (active()) reset(); m_failedPack.clear(); return; }
 	// It failed before with the same path AND the same project root (beginFromPack resolves a relative path against m_projectRoot): a
 	// changed path, or a project root that now resolves it differently, is a new try.
-	if (!active() && comp->pack == m_failedPack && m_projectRoot == m_failedProjectRoot) return;
-	if (!active() || m_pack != comp->pack)
+	// ... and so is the streaming switch: a world too large to keep whole starts once streaming is on again.
+	if (!active() && comp->pack == m_failedPack && m_projectRoot == m_failedProjectRoot && m_failedKeepAll == !comp->streaming) return;
+	if (!active() || m_pack != comp->pack || m_config.store.keepAll == comp->streaming)   // the pack, or the streaming switch, changed
 	{
 		LandscapeRuntimeConfig cfg;
+		cfg.store.keepAll = !comp->streaming;
 		cfg.store.loadRadius = comp->loadRadius;
 		cfg.store.byteBudget = static_cast<size_t>(comp->budgetMB) * 1024 * 1024;
 		cfg.heightMinM = comp->heightMinM;
@@ -274,6 +287,7 @@ void LandscapeRuntime::update(HorizonWorld& world, float dt, double budgetMs, co
 			HE_LOG_WARN(World, "Landscape: %s", err.c_str());
 			m_failedPack = comp->pack;
 			m_failedProjectRoot = m_projectRoot;
+			m_failedKeepAll = !comp->streaming;
 			return;
 		}
 		m_failedPack.clear();

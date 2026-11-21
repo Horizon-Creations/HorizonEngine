@@ -296,10 +296,13 @@ void drawSection(AppContext& ctx, Entity entity, const std::function<void()>& af
 	Row::inputText("Pack File##tlw", &lw->pack); edit();
 	EditorWidgets::helpForKey("Tile Landscape/Pack File");
 	if (EditorWidgets::button("Browse...##tlwpack")) openDialog(ctx, 1);
+	EditorWidgets::checkbox("Stream Tiles##tlw", &lw->streaming); edit();
+	ImGui::BeginDisabled(!lw->streaming);   // without streaming the whole world is loaded: no radius, no budget
 	Row::dragFloat("Load Radius##tlw", &lw->loadRadius, 100.0f, 500.0f, 50000.0f, "%.0f m"); edit();
 	int budget = static_cast<int>(lw->budgetMB);
 	if (Row::dragInt("Memory Budget##tlw", &budget, 8.0f, 16, 16384)) lw->budgetMB = static_cast<uint32_t>(std::max(16, budget));
 	edit();
+	ImGui::EndDisabled();
 	Row::dragFloat("Height Min##tlw", &lw->heightMinM, 1.0f, -20000.0f, 20000.0f, "%.1f m"); edit();
 	Row::dragFloat("Height Range##tlw", &lw->heightScaleM, 1.0f, 1.0f, 40000.0f, "%.1f m"); edit();
 	static const char* const kGroups[] = { "Flat colours", "Mountains", "Forest", "Grassland", "Desert" };

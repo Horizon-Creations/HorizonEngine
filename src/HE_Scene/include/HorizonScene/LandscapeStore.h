@@ -43,6 +43,9 @@ struct LandscapeAnchor
 
 struct LandscapeStoreConfig
 {
+	// No streaming: every tile of the world is wanted and kept, nearest the anchors first; loadRadius, keepFactor and byteBudget are
+	// not used (the budget is the world). LandscapeWorldComponent::streaming == false.
+	bool   keepAll      = false;
 	float  loadRadius   = 8000.0f;
 	float  keepFactor   = 1.25f;                 // unload radius = loadRadius * keepFactor (>= 1)
 	size_t byteBudget   = 350ull * 1024 * 1024;  // decoded tiles, resident + loading

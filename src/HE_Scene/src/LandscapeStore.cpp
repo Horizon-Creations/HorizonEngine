@@ -66,7 +66,7 @@ void LandscapeStore::setConfig(const LandscapeStoreConfig& config)
 	m_tileBytes = std::max<size_t>(1, g.decodedBytes(m_config.maxLevels));
 	// A world with water carries two more rasters per tile (coverage u8, owner u16, at the weights' level 0): three bytes a texel.
 	if (m_source->water() && m_config.maxLevels != 0) m_tileBytes += static_cast<size_t>(g.weightDim(0)) * g.weightDim(0) * 3;
-	m_maxTiles  = m_config.byteBudget / m_tileBytes;
+	m_maxTiles  = m_config.keepAll ? static_cast<size_t>(m_source->tilesX()) * static_cast<size_t>(m_source->tilesZ()) : m_config.byteBudget / m_tileBytes;
 	m_stats.maxTiles = m_maxTiles;
 	m_dirty = true;
 }
@@ -206,15 +206,17 @@ void LandscapeStore::plan(const std::vector<LandscapeAnchor>& anchors)
 		const glm::dvec3 pts[2] = { a.position, a.position + glm::dvec3(a.velocity) * static_cast<double>(m_config.lookaheadSec) };
 		for (const glm::dvec3& p : pts)
 		{
-			const int x0 = std::max(0, static_cast<int>(std::floor((p.x - reach) / tileM)));
-			const int x1 = std::min(tx - 1, static_cast<int>(std::floor((p.x + reach) / tileM)));
-			const int z0 = std::max(0, static_cast<int>(std::floor((p.z - reach) / tileM)));
-			const int z1 = std::min(tz - 1, static_cast<int>(std::floor((p.z + reach) / tileM)));
+			// keepAll: the whole world is the kept ring. The distance still orders the loads, nearest the anchors first.
+			const bool all = m_config.keepAll;
+			const int x0 = all ? 0 : std::max(0, static_cast<int>(std::floor((p.x - reach) / tileM)));
+			const int x1 = all ? tx - 1 : std::min(tx - 1, static_cast<int>(std::floor((p.x + reach) / tileM)));
+			const int z0 = all ? 0 : std::max(0, static_cast<int>(std::floor((p.z - reach) / tileM)));
+			const int z1 = all ? tz - 1 : std::min(tz - 1, static_cast<int>(std::floor((p.z + reach) / tileM)));
 			for (int z = z0; z <= z1; ++z)
 				for (int x = x0; x <= x1; ++x)
 				{
 					const double d = distToSquare(p.x, p.z, x * tileM, z * tileM, (x + 1) * tileM, (z + 1) * tileM) / s;
-					if (d > Rk) continue;
+					if (!all && d > Rk) continue;
 					const auto [it, inserted] = cand.emplace(LandscapeTileKey{ x, z }, d);
 					if (!inserted && d < it->second) it->second = d;
 				}
@@ -226,7 +228,7 @@ void LandscapeStore::plan(const std::vector<LandscapeAnchor>& anchors)
 	for (const auto& [k, d] : cand)
 	{
 		m_keep.insert(k);
-		if (d <= R) wanted.emplace_back(d, k);
+		if (m_config.keepAll || d <= R) wanted.emplace_back(d, k);
 	}
 	std::sort(wanted.begin(), wanted.end(), [](const auto& a, const auto& b) {
 		if (a.first != b.first) return a.first < b.first;

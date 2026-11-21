@@ -12,6 +12,10 @@
 struct LandscapeWorldComponent {
 	bool        enabled       = true;
 	std::string pack;                    // project-relative or absolute path of the pack file
+	// Off = no streaming: every tile of the world is loaded and kept, whatever the camera does (loadRadius and budgetMB are not used).
+	// The far levels and the far image are there all the same, so the picture is the streamed one. For worlds of up to
+	// HE::kLandscapeKeepAllMaxTiles tiles (each resident tile is a layer of the GPU atlas); a larger one is refused with a message.
+	bool        streaming     = true;
 	float       loadRadius    = 8000.0f; // metres around the camera whose tiles are kept in memory
 	uint32_t    budgetMB      = 350;     // decoded tiles in memory, resident and loading
 	// Heights are 16 bit; a stored value v is metres = heightMinM + v / 65535 * heightScaleM. The pack does not carry this yet.

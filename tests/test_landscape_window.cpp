@@ -9,7 +9,10 @@
 
 #include <glm/gtc/matrix_transform.hpp>
 
+#include <HorizonScene/Components/LandscapeWorldComponent.h>
+#include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/LandscapeEdit.h>
+#include <HorizonScene/SceneSerializer.h>
 
 #include <array>
 #include <atomic>
@@ -536,4 +539,76 @@ TEST_CASE("pack coarse regions: a runtime draws from them, and an edit on such a
 	rt.reset();
 	std::filesystem::remove(copy);
 	std::filesystem::remove(file);
+}
+
+// ── streaming switched off: every tile loaded and kept ───────────────────────
+TEST_CASE("landscape without streaming: every tile of the world is loaded and kept wherever the camera is, and a world too large for that is refused")
+{
+	const auto src = std::make_shared<FormulaSource>(12);   // 144 tiles, 6 km
+	LandscapeRuntime rt;
+	LandscapeRuntimeConfig cfg;
+	cfg.store.keepAll = true;
+	cfg.store.loadRadius = 600.0f;                          // below what streaming would need: not used without it
+	cfg.store.byteBudget = 1;                               // nor is the budget
+	std::string err;
+	REQUIRE_MESSAGE(rt.begin(src, cfg, &err), err);
+	const glm::dvec3 corner(100.0, 900.0, 100.0);
+	REQUIRE(settle(rt, corner));
+	CHECK(rt.store()->residentKeys().size() == 144);
+	CHECK(rt.atlas()->stats().used == 144);
+	CHECK(rt.store()->isResident({ 11, 11 }));              // the tile farthest from the camera too
+	const uint64_t loads = rt.store()->stats().loadsStarted, evictions = rt.store()->stats().evictions;
+	// The camera at the other end of the world, and far outside it: nothing is loaded again, nothing is dropped.
+	for (const glm::dvec3& cam : { glm::dvec3(6000.0, 900.0, 6000.0), glm::dvec3(90000.0, 900.0, -40000.0), corner })
+	{
+		REQUIRE(settle(rt, cam));
+		CHECK(rt.store()->residentKeys().size() == 144);
+	}
+	CHECK(rt.store()->stats().loadsStarted == loads);
+	CHECK(rt.store()->stats().evictions == evictions);
+	// The far levels are there all the same: the frame still has coarse patches for ground the fine levels do not reach.
+	LandscapeFrame f;
+	rt.buildFrame(viewProj(corner, glm::dvec3(0.0)), glm::dvec3(0.0), false, f);
+	REQUIRE(f.active);
+	REQUIRE(f.coarse);
+	CHECK_FALSE(f.patches.empty());
+
+	// 40 x 40 tiles are more layers than the atlas is allowed to have: refused, with a sentence that says what to do.
+	const auto large = std::make_shared<FormulaSource>(40);
+	LandscapeRuntime rt2;
+	CHECK_FALSE(rt2.begin(large, cfg, &err));
+	CHECK(err.find("streaming") != std::string::npos);
+	// The same world streams.
+	LandscapeRuntime rt3;
+	REQUIRE(rt3.begin(large, LandscapeRuntimeConfig{}));
+
+	// A long thin world: the slot table grows to hold its long side (every tile needs its own entry).
+	// 1 x 100 would do, but the formula source is square: 30 x 30 = 900 tiles is under the cap and inside the default table.
+	const auto wide = std::make_shared<FormulaSource>(30);
+	LandscapeRuntime rt4;
+	REQUIRE_MESSAGE(rt4.begin(wide, cfg, &err), err);
+	CHECK(rt4.config().atlasWindow >= 30);
+}
+
+TEST_CASE("landscape without streaming: the component's switch is saved with the scene, and a scene from before it streams")
+{
+	HorizonWorld world;
+	const Entity e = world.createEntity("Landscape");
+	auto& lw = world.registry().emplace<LandscapeWorldComponent>(e);
+	lw.pack = "World/ground.pack";
+	lw.streaming = false;
+	SceneSerializer ser;
+	std::vector<uint8_t> bytes;
+	REQUIRE(ser.saveToMemory(world, bytes));
+	HorizonWorld back;
+	REQUIRE(ser.loadFromMemory(back, bytes));
+	bool found = false;
+	for (auto b : back.registry().view<LandscapeWorldComponent>())
+	{
+		found = true;
+		CHECK_FALSE(back.registry().get<LandscapeWorldComponent>(b).streaming);
+		CHECK(back.registry().get<LandscapeWorldComponent>(b).pack == "World/ground.pack");
+	}
+	CHECK(found);
+	CHECK(LandscapeWorldComponent{}.streaming);   // the default, and what a scene without the key gets
 }
