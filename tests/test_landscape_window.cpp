@@ -9,9 +9,15 @@
 
 #include <glm/gtc/matrix_transform.hpp>
 
+#include <HorizonScene/LandscapeEdit.h>
+
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <filesystem>
+#include <fstream>
+#include <random>
 #include <thread>
 
 using namespace HE;
@@ -322,4 +328,163 @@ TEST_CASE("landscape runtime: a world that fits the window is its own window, an
 		CHECK_FALSE(rt.begin(src, cfg, &err));
 		CHECK(err.find("renderWindowTiles") != std::string::npos);
 	}
+}
+
+// ── on disk: a pack that keeps its coarse world in regions ───────────────────
+namespace
+{
+std::filesystem::path regionPackPath(const char* name)
+{
+	return std::filesystem::temp_directory_path() / (std::string("he_landscape_regions_") + name + "_" + std::to_string(std::random_device{}()) + ".bin");
+}
+
+void writeWorldPack(const std::filesystem::path& path, const ProceduralLandscapeSource& src, int regionTiles)
+{
+	LandscapePackWriter w;
+	REQUIRE(w.begin(path.string(), src.geometry(), src.tilesX(), src.tilesZ(), src.coarse()->heightLevel, 0.0f, 3000.0f));
+	w.setCoarseRegions(regionTiles);
+	for (int z = 0; z < src.tilesZ(); ++z)
+		for (int x = 0; x < src.tilesX(); ++x) REQUIRE(w.add({ x, z }, encodeLandscapeTile(src.generate({ x, z }))));
+	REQUIRE(w.finish());
+}
+
+bool sameCoarse(const LandscapeCoarseWorld& a, const LandscapeCoarseWorld& b)
+{
+	if (a.tilesX != b.tilesX || a.tilesZ != b.tilesZ || a.heights.size() != b.heights.size() || a.weights != b.weights) return false;
+	for (size_t k = 0; k < a.heights.size(); ++k)
+		if (a.heights[k].w != b.heights[k].w || a.heights[k].h != b.heights[k].h || a.heights[k].v != b.heights[k].v) return false;
+	return true;
+}
+} // namespace
+
+TEST_CASE("pack coarse regions: a window read from regions is the whole coarse world's window, the pack holds no whole one, and its other sections stay")
+{
+	ProceduralLandscapeParams p;
+	p.geometry.hCells = 32;
+	p.geometry.wTexels = 16;
+	p.geometry.channels = 4;
+	p.tilesX = 6;
+	p.tilesZ = 5;   // regions of 2: 3 x 3 of them, the last row one tile deep
+	const ProceduralLandscapeSource src(p);
+	const auto wholeFile = regionPackPath("whole"), regionFile = regionPackPath("regions");
+	writeWorldPack(wholeFile, src, 0);
+	writeWorldPack(regionFile, src, 2);
+	std::string err;
+	{
+		auto whole = LandscapePackSource::open(wholeFile.string(), &err);
+		REQUIRE_MESSAGE(whole, err);
+		auto regions = LandscapePackSource::open(regionFile.string(), &err);
+		REQUIRE_MESSAGE(regions, err);
+		REQUIRE(whole->coarse());
+		CHECK(whole->coarseRegionTiles() == 0);
+		CHECK(regions->coarse() == nullptr);              // nothing of it is decoded when the pack opens
+		CHECK(regions->coarseRegionTiles() == 2);
+		CHECK(regions->coarseHeightLevel() == whole->coarseHeightLevel());
+		CHECK(regions->identity() == whole->identity());  // the same world: the tiles and where they lie are the same
+
+		// The whole world as a window, a window across region borders, one inside a single region, one at the clipped corner.
+		const auto all = regions->coarseWindow({ 0, 0 }, 6, 5);
+		REQUIRE(all);
+		CHECK(sameCoarse(*all, *whole->coarse()));
+		for (const auto& [ox, oz, tx, tz] : { std::array<int, 4>{ 1, 1, 4, 3 }, std::array<int, 4>{ 2, 2, 2, 2 }, std::array<int, 4>{ 4, 4, 2, 1 }, std::array<int, 4>{ 0, 3, 6, 2 } })
+		{
+			const auto win = regions->coarseWindow({ ox, oz }, tx, tz);
+			REQUIRE(win);
+			// Compared grid 0 and the weights with the crop of the whole world (the grids above depend on the corner's alignment, see landscapeCoarseCrop).
+			const LandscapeCoarseWorld crop = landscapeCoarseCrop(*whole->coarse(), { ox, oz }, tx, tz);
+			CHECK_MESSAGE(win->heights[0].v == crop.heights[0].v, "window " << ox << "," << oz << " " << tx << "x" << tz);
+			CHECK(win->weights == crop.weights);
+		}
+		LandscapeTile t;
+		CHECK(regions->load({ 5, 4 }, -1, t));
+	}
+
+	// The tail sections are rewritten behind the regions, which stay.
+	LandscapeFarPaint paint;
+	paint.layerAo.fill(1.0f);
+	paint.layerColor.fill(glm::vec3(0.3f, 0.5f, 0.2f));
+	LandscapeFarBakeOptions o;
+	o.painter = landscapeFarWeightPainter(paint);
+	LandscapeFarTable farTable;
+	LandscapeFarBakeStats st;
+	bakeLandscapeFar(src, {}, o, nullptr, farTable, st);
+	REQUIRE_MESSAGE(landscapePackSetTails(regionFile.string(), nullptr, &farTable, &err), err);
+	{
+		auto regions = LandscapePackSource::open(regionFile.string(), &err);
+		REQUIRE_MESSAGE(regions, err);
+		CHECK(regions->farImage() != nullptr);
+		CHECK(regions->coarseRegionTiles() == 2);
+		auto whole = LandscapePackSource::open(wholeFile.string(), &err);
+		const auto all = regions->coarseWindow({ 0, 0 }, 6, 5);
+		REQUIRE(all);
+		CHECK(sameCoarse(*all, *whole->coarse()));
+	}
+	// A region whose blob is damaged gives no window (and so no landscape), not garbage.
+	{
+		const auto size = std::filesystem::file_size(regionFile);
+		auto regions = LandscapePackSource::open(regionFile.string(), &err);
+		REQUIRE(regions);
+		const uint64_t core = regions->coreSize();
+		regions.reset();
+		std::fstream f(regionFile, std::ios::binary | std::ios::in | std::ios::out);
+		f.seekp(static_cast<std::streamoff>(core - 20 - 40));   // inside the last region's weight blob
+		const char junk[8] = { 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55 };
+		f.write(junk, sizeof(junk));
+		f.close();
+		CHECK(std::filesystem::file_size(regionFile) == size);
+		regions = LandscapePackSource::open(regionFile.string(), &err);
+		if (regions) CHECK(regions->coarseWindow({ 4, 4 }, 2, 1) == nullptr);
+	}
+	std::filesystem::remove(wholeFile);
+	std::filesystem::remove(regionFile);
+}
+
+TEST_CASE("pack coarse regions: a runtime draws from them, and an edit on such a pack reaches the window's coarse world")
+{
+	ProceduralLandscapeParams p;   // the real geometry: a runtime needs it for its load radius
+	p.tilesX = p.tilesZ = 4;
+	const ProceduralLandscapeSource src(p);
+	const auto file = regionPackPath("runtime");
+	writeWorldPack(file, src, 2);
+	LandscapeRuntime rt;
+	rt.setEditable(true);
+	std::string err;
+	REQUIRE_MESSAGE(rt.beginFromPack(file.string(), LandscapeRuntimeConfig{}, &err), err);
+	REQUIRE(rt.edits());
+	REQUIRE(rt.windowCoarse());
+	CHECK(rt.edits()->coarse() == nullptr);   // neither the pack nor its overlay has a whole coarse world
+	CHECK(sameCoarse(*rt.windowCoarse(), *src.coarse()));
+	const glm::dvec3 cam(1000.0, 900.0, 1000.0), origin(0.0);
+	REQUIRE(settle(rt, cam));
+	LandscapeFrame f;
+	rt.buildFrame(viewProj(cam, origin), origin, false, f);
+	REQUIRE(f.active);
+	CHECK_FALSE(f.patches.empty());
+
+	// An edited tile: after the stroke the window's coarse world holds its share.
+	auto tile = std::make_shared<LandscapeTile>();
+	REQUIRE(rt.edits()->load({ 2, 1 }, -1, *tile));
+	for (uint16_t& h : tile->heights[0]) h = 54321;
+	tile->buildMips();
+	rt.edits()->set({ { { 2, 1 }, tile } });
+	rt.coarseChanged();
+	const int cpt = rt.windowCoarse()->cellsPerTile;
+	CHECK(rt.windowCoarse()->heights[0].at(2 * cpt + cpt / 2, 1 * cpt + cpt / 2) == 54321);
+	CHECK(rt.windowCoarse()->heights[0].at(0, 0) == src.coarse()->heights[0].at(0, 0));
+
+	// Baked into the pack, the copy keeps its regions and holds the edited tile's share.
+	const auto copy = regionPackPath("baked");
+	std::filesystem::copy_file(file, copy);
+	REQUIRE_MESSAGE(landscapePackBakeEdits(copy.string(), *rt.edits(), &err), err);
+	{
+		auto baked = LandscapePackSource::open(copy.string(), &err);
+		REQUIRE_MESSAGE(baked, err);
+		CHECK(baked->coarseRegionTiles() == 2);
+		const auto win = baked->coarseWindow({ 0, 0 }, 4, 4);
+		REQUIRE(win);
+		CHECK(win->heights[0].at(2 * cpt + cpt / 2, 1 * cpt + cpt / 2) == 54321);
+	}
+	rt.reset();
+	std::filesystem::remove(copy);
+	std::filesystem::remove(file);
 }

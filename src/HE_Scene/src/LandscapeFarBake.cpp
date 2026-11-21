@@ -86,10 +86,14 @@ LandscapeFarLayout planLandscapeFar(const LandscapeGeometry& geometry, int tiles
 {
 	LandscapeFarLayout l{ tilesX, tilesZ, std::max(1, regionTiles), std::max<int>(1, geometry.wTexels) };
 	// The mip chain adds a third. Halve until the image fits the budget and the largest texture.
-	const auto bytes = [&] { return static_cast<uint64_t>(l.width()) * static_cast<uint64_t>(l.height()) * 4ull * 4ull / 3ull; };
+	// What is ever in memory and in one texture is a render window's part of the image (LandscapeRuntimeConfig::renderWindowTiles), not
+	// the world's: a world larger than the window gets the resolution of a world the window's size.
+	const uint64_t wx = static_cast<uint64_t>(std::min(tilesX, kLandscapePackWholeCoarseMaxTiles)), wz = static_cast<uint64_t>(std::min(tilesZ, kLandscapePackWholeCoarseMaxTiles));
+	const auto bytes = [&] { return wx * wz * static_cast<uint64_t>(l.texelsPerTile) * static_cast<uint64_t>(l.texelsPerTile) * 4ull * 4ull / 3ull; };
+	const auto side = [&] { return static_cast<int>(std::max(wx, wz)) * l.texelsPerTile; };
 	// Not below the coarsest weight mip a tile stores: that is the last level a painter can read.
 	const int floorTexels = std::max(1, geometry.weightDim(std::max(0, geometry.weightLevels() - 1)));
-	while (l.texelsPerTile > floorTexels && (bytes() > budgetBytes || l.width() > maxSide || l.height() > maxSide)) l.texelsPerTile /= 2;
+	while (l.texelsPerTile > floorTexels && (bytes() > budgetBytes || side() > maxSide)) l.texelsPerTile /= 2;
 	return l;
 }
 
@@ -123,7 +127,7 @@ void bakeLandscapeFar(const LandscapeTileSource& source, const LandscapeFarTileH
 					if (key.x < l.tilesX && key.z < l.tilesZ) h = fnvValue(h, tileHash ? tileHash(key) : 0);
 				}
 			LandscapeFarRegion& r = out.regions[i];
-			if (usePrevious && previous->regions[i].hash == h && previous->regions[i].rgba.size() == imageBytes)
+			if (usePrevious && previous->regions[i].hash == h && previous->regions[i].baked())
 			{
 				r = previous->regions[i];
 				++stats.reused;
@@ -131,6 +135,7 @@ void bakeLandscapeFar(const LandscapeTileSource& source, const LandscapeFarTileH
 			else if (options.painter(source, l, rx, rz, r.rgba) && r.rgba.size() == imageBytes)
 			{
 				r.hash = h;
+				out.compact(i);   // kept stored from here on: the table of a large world is then its file's size, not its pixels'
 				++stats.baked;
 			}
 			else

@@ -81,6 +81,25 @@ void LandscapeEditSource::set(const std::vector<std::pair<LandscapeTileKey, Land
 	m_dirty = true;
 }
 
+std::shared_ptr<const LandscapeCoarseWorld> LandscapeEditSource::coarseWindow(LandscapeTileKey origin, int tx, int tz) const
+{
+	if (m_coarse.valid() || m_base->coarse()) return LandscapeTileSource::coarseWindow(origin, tx, tz);   // a crop of coarse(), patched or not
+	std::shared_ptr<const LandscapeCoarseWorld> window = m_base->coarseWindow(origin, tx, tz);
+	if (!window) return nullptr;
+	// The edited tiles inside the window, with keys relative to its corner.
+	std::vector<std::pair<LandscapeTileKey, LandscapeTilePtr>> inside;
+	{
+		std::lock_guard<std::mutex> lock(m_mutex);
+		for (const auto& [k, tile] : m_tiles)
+			if (k.first >= origin.x && k.second >= origin.z && k.first < origin.x + window->tilesX && k.second < origin.z + window->tilesZ)
+				inside.emplace_back(LandscapeTileKey{ k.first - origin.x, k.second - origin.z }, tile);
+	}
+	if (inside.empty()) return window;
+	auto patched = std::make_shared<LandscapeCoarseWorld>(*window);
+	landscapeCoarsePatch(*patched, inside);
+	return patched;
+}
+
 LandscapeTilePtr LandscapeEditSource::edited(LandscapeTileKey key) const
 {
 	std::lock_guard<std::mutex> lock(m_mutex);
@@ -250,8 +269,9 @@ bool landscapePackBakeEdits(const std::string& packPath, const LandscapeEditSour
 		float minM = 0.0f, scaleM = 0.0f;
 		pack->heightRange(minM, scaleM);
 		LandscapePackWriter w;
-		if (!w.begin(tmp, pack->geometry(), pack->tilesX(), pack->tilesZ(), pack->coarse() ? pack->coarse()->heightLevel : -1, minM, scaleM))
+		if (!w.begin(tmp, pack->geometry(), pack->tilesX(), pack->tilesZ(), pack->coarseHeightLevel(), minM, scaleM))
 			return fail("cannot write beside the pack");
+		w.setCoarseRegions(pack->coarseRegionTiles());   // laid out as the pack is: whole, or in regions of the same size
 		if (pack->water()) w.setWaterTable(*pack->water());
 		if (pack->hlod()) w.setHlodTable(*pack->hlod());
 		if (pack->farImage()) w.setFarTable(*pack->farImage());

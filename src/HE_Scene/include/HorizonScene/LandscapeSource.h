@@ -187,6 +187,15 @@ constexpr uint32_t kLandscapePackVersion = 2;
 constexpr size_t   kLandscapePackHeaderBytesV1 = 32;
 constexpr size_t   kLandscapePackHeaderBytes   = 64;   // version 2
 constexpr size_t   kLandscapePackIndexEntryBytes = 12;
+//   A world with more than kLandscapePackWholeCoarseMaxTiles tiles a side keeps its coarse world in REGIONS instead: the header's levels
+//   are set, its coarse offset and sizes are 0, and after the water table comes a section with a trailer of the same shape and the magic
+//   'HLCR':  u32 magic  u32 version (1)  u32 regionTiles  u32 regionsX  u32 regionsZ, then per region (row-major)  u64 offset
+//   u32 heightSize  u32 weightSize, then the regions' grid blobs (heights (tiles * cells + 1) squared, weights tiles * texels squared,
+//   both clipped at the world's end). It lies in front of the far image and belongs to the pack's core: a rewrite of the tail
+//   sections keeps it. A reader from before it sees a coarse section of size 0 and refuses the pack.
+constexpr uint32_t kLandscapePackCoarseRegionMagic = 0x52434c48u;   // 'HLCR'
+constexpr int      kLandscapeCoarseRegionTiles = 64;                // the step a render window moves in
+constexpr int      kLandscapePackWholeCoarseMaxTiles = 256;         // a render window: up to here the coarse world is one piece
 constexpr uint32_t kLandscapePackHlodMagic = 0x46444c48u;   // 'HLDF'
 constexpr size_t   kLandscapePackHlodTrailerBytes = 20;
 
@@ -210,6 +219,11 @@ public:
 	void setHlodTable(const LandscapeHlodTable& table) { m_hlod = table; }
 	// The baked far image. Before finish(); an empty table writes nothing.
 	void setFarTable(const LandscapeFarTable& table) { m_far = table; }
+	// How the coarse world is laid out: 0 = whole, n > 0 = in regions of n x n tiles, < 0 (the default) = whole up to
+	// kLandscapePackWholeCoarseMaxTiles tiles a side and regions of kLandscapeCoarseRegionTiles beyond. Before finish().
+	// shortcut: the writer still holds the whole coarse world until finish() (2.7 GB for 1000 km), write a region when its last tile
+	// was added once worlds of that size are built.
+	void setCoarseRegions(int regionTiles) { m_coarseRegionTiles = regionTiles; }
 	bool finish();
 	size_t tilesWritten() const { return m_written; }
 
@@ -229,6 +243,7 @@ private:
 	bool                  m_hasWater = false;
 	LandscapeHlodTable    m_hlod;
 	LandscapeFarTable     m_far;
+	int                   m_coarseRegionTiles = -1;
 	LandscapeCoarseWorld  m_coarse;     // grid 0 and the weights; the point-sampled grids are made when it is read
 	std::vector<uint8_t>  m_coarseSeen; // per tile
 };
@@ -245,7 +260,13 @@ public:
 	int  tilesX() const override { return m_tilesX; }
 	int  tilesZ() const override { return m_tilesZ; }
 	bool load(LandscapeTileKey key, int maxLevels, LandscapeTile& out) const override;
+	// Null for a pack that keeps its coarse world in regions (a world larger than a render window): ask coarseWindow.
 	const LandscapeCoarseWorld* coarse() const override { return m_coarse.valid() ? &m_coarse : nullptr; }
+	std::shared_ptr<const LandscapeCoarseWorld> coarseWindow(LandscapeTileKey origin, int tilesX, int tilesZ) const override;
+	// Tiles a side of one coarse region, 0 for a pack that keeps the coarse world whole; and the tile mip the coarse heights are made of
+	// (-1: the pack has no coarse world). What a rewrite of the pack hands its writer so the copy is laid out the same way.
+	int  coarseRegionTiles() const { return m_regions.regionTiles; }
+	int  coarseHeightLevel() const { return m_coarse.valid() ? m_coarse.heightLevel : m_regions.offset.empty() ? -1 : m_regions.heightLevel; }
 	const LandscapeWaterTable* water() const override { return m_hasWater ? &m_water : nullptr; }
 	const LandscapeHlodTable* hlod() const override { return m_hlod.cellCount() > 0 ? &m_hlod : nullptr; }
 	const LandscapeFarTable* farImage() const override { return m_far.empty() ? nullptr : &m_far; }
@@ -283,6 +304,13 @@ private:
 	uint64_t              m_fileSize = 0;
 	uint64_t              m_coreSize = 0;
 	uint64_t              m_identity = 1;
+	struct CoarseRegions
+	{
+		int regionTiles = 0, regionsX = 0, regionsZ = 0, heightLevel = 0, weightLevel = 0;
+		std::vector<uint64_t> offset;                 // of the region's height blob; the weight blob follows it
+		std::vector<uint32_t> heightSize, weightSize;
+	};
+	CoarseRegions         m_regions;                  // empty: the coarse world is m_coarse, whole
 	int                   m_fd = -1;                 // POSIX pread: no lock between workers
 	mutable std::mutex    m_mutex;                   // Windows: one HANDLE, one reader at a time
 	void*                 m_handle = nullptr;         // Windows HANDLE opened with FILE_SHARE_DELETE (see .cpp)

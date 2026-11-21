@@ -43,8 +43,29 @@ bool LandscapeFarTable::empty() const
 {
 	if (!layout.valid()) return true;
 	for (const LandscapeFarRegion& r : regions)
-		if (!r.rgba.empty()) return false;
+		if (r.baked()) return false;
 	return true;
+}
+
+bool LandscapeFarTable::regionPixels(size_t index, std::vector<uint8_t>& out) const
+{
+	if (index >= regions.size()) return false;
+	const LandscapeFarRegion& r = regions[index];
+	const size_t bytes = static_cast<size_t>(layout.regionSide()) * static_cast<size_t>(layout.regionSide()) * 4;
+	if (r.rgba.size() == bytes) { out = r.rgba; return true; }
+	if (r.blob.empty()) return false;
+	int w = 0, h = 0, ch = 0;
+	return decodeLandscapeWeightGrid(r.blob.data(), r.blob.size(), out, w, h, ch) && w == layout.regionSide() && h == layout.regionSide() && ch == 4;
+}
+
+void LandscapeFarTable::compact(size_t index)
+{
+	if (index >= regions.size()) return;
+	LandscapeFarRegion& r = regions[index];
+	const int side = layout.regionSide();
+	if (r.rgba.size() != static_cast<size_t>(side) * static_cast<size_t>(side) * 4) return;
+	r.blob = encodeLandscapeWeightGrid(r.rgba, side, side, 4);
+	if (!r.blob.empty()) { r.rgba.clear(); r.rgba.shrink_to_fit(); }
 }
 
 std::vector<uint8_t> LandscapeFarTable::encode() const
@@ -59,8 +80,10 @@ std::vector<uint8_t> LandscapeFarTable::encode() const
 	const int side = layout.regionSide();
 	for (const LandscapeFarRegion& r : regions)
 	{
-		const bool baked = r.rgba.size() == static_cast<size_t>(side) * static_cast<size_t>(side) * 4;
-		const std::vector<uint8_t> blob = baked ? encodeLandscapeWeightGrid(r.rgba, side, side, 4) : std::vector<uint8_t>{};
+		// The pixels if the region holds them (they are what was painted last), else its stored form as it is.
+		const bool pixels = r.rgba.size() == static_cast<size_t>(side) * static_cast<size_t>(side) * 4;
+		const std::vector<uint8_t> blob = pixels ? encodeLandscapeWeightGrid(r.rgba, side, side, 4) : r.blob;
+		const bool baked = !blob.empty();
 		put64(b, baked ? r.hash : 0);
 		put32(b, static_cast<uint32_t>(blob.size()));
 		b.insert(b.end(), blob.begin(), blob.end());
@@ -92,8 +115,13 @@ bool LandscapeFarTable::decode(const std::vector<uint8_t>& bytes, LandscapeFarTa
 		if (size > bytes.size() - at) return fail();
 		if (size > 0)
 		{
-			int w = 0, h = 0, ch = 0;
-			if (!decodeLandscapeWeightGrid(bytes.data() + at, size, r.rgba, w, h, ch) || w != side || h != side || ch != 4) return fail();
+			// Kept stored and decoded when a window needs it (regionPixels). What can be judged without decoding is judged now: the grid
+			// blob's own 28-byte head (LandscapeTile.h, "Grids") has to say a weight grid of four channels, this size, this long.
+			const uint8_t* g = bytes.data() + at;
+			if (size < 28 || get32(g) != 0x31474c48u || g[7] != 2 || g[8] != 4 || get32(g + 12) != static_cast<uint32_t>(side)
+			    || get32(g + 16) != static_cast<uint32_t>(side) || get32(g + 24) != size - 28)
+				return fail();
+			r.blob.assign(g, g + size);
 		}
 		at += size;
 	}
@@ -116,16 +144,16 @@ void LandscapeFarTable::assemble(int& width, int& height, std::vector<std::vecto
 	height = tilesZ * layout.texelsPerTile;
 	const int side = layout.regionSide();
 	std::vector<uint8_t> top(static_cast<size_t>(width) * static_cast<size_t>(height) * 4, 0);
+	std::vector<uint8_t> pixels;
 	for (int rz = wz0 / side; rz < layout.regionsZ() && rz * side < wz0 + height; ++rz)
 		for (int rx = wx0 / side; rx < layout.regionsX() && rx * side < wx0 + width; ++rx)
 		{
-			const LandscapeFarRegion& r = regions[static_cast<size_t>(rz) * static_cast<size_t>(layout.regionsX()) + static_cast<size_t>(rx)];
-			if (r.rgba.empty()) continue;
+			if (!regionPixels(static_cast<size_t>(rz) * static_cast<size_t>(layout.regionsX()) + static_cast<size_t>(rx), pixels)) continue;
 			// The part of the region inside the window (the last region may also hang over the world's edge).
 			const int x0 = std::max(rx * side, wx0), x1 = std::min((rx + 1) * side, wx0 + width);
 			const int z0 = std::max(rz * side, wz0), z1 = std::min((rz + 1) * side, wz0 + height);
 			for (int z = z0; z < z1; ++z)
-				std::copy_n(r.rgba.begin() + static_cast<std::ptrdiff_t>((static_cast<size_t>(z - rz * side) * static_cast<size_t>(side) + static_cast<size_t>(x0 - rx * side)) * 4),
+				std::copy_n(pixels.begin() + static_cast<std::ptrdiff_t>((static_cast<size_t>(z - rz * side) * static_cast<size_t>(side) + static_cast<size_t>(x0 - rx * side)) * 4),
 				            static_cast<size_t>(x1 - x0) * 4,
 				            top.begin() + static_cast<std::ptrdiff_t>((static_cast<size_t>(z - wz0) * static_cast<size_t>(width) + static_cast<size_t>(x0 - wx0)) * 4));
 		}

@@ -39,6 +39,9 @@ public:
 	bool load(LandscapeTileKey key, int maxLevels, LandscapeTile& out) const override;   // job pool: the map is behind a mutex
 	bool heightRange(float& minM, float& scaleM) const override { return m_base->heightRange(minM, scaleM); }
 	const LandscapeCoarseWorld* coarse() const override { return m_coarse.valid() ? &m_coarse : m_base->coarse(); }
+	// The base's window with the edited tiles inside it laid over. For a base that has a whole coarse world this is a crop of the
+	// patched copy; for one that has none (a pack in coarse regions) the window is patched as it is asked for.
+	std::shared_ptr<const LandscapeCoarseWorld> coarseWindow(LandscapeTileKey origin, int tilesX, int tilesZ) const override;
 	const LandscapeWaterTable* water() const override { return m_base->water(); }
 	const LandscapeHlodTable* hlod() const override { return m_base->hlod(); }
 	const LandscapeFarTable* farImage() const override { return m_base->farImage(); }

@@ -525,13 +525,15 @@ void brushInViewport(AppContext& ctx, const RenderWorld& sceneSnapshot, const Im
 	const glm::dvec3 ro = glm::dvec3(a) / a.w + origin, rd = glm::normalize(glm::dvec3(b) / b.w - glm::dvec3(a) / a.w);
 
 	// Where it meets the ground: marched on the coarse world (always in memory, 32 m), then refined on the tiles under it.
-	const HE::LandscapeCoarseWorld* coarse = e.runtime->edits()->coarse();
+	// The runtime's render window, not the source's whole coarse world: a world larger than the window has no whole one.
+	const HE::LandscapeCoarseWorld* coarse = e.runtime->windowCoarse();
 	if (!coarse || !coarse->valid()) return;
 	const double minM = session->params().heightMinM, scaleM = session->params().heightScaleM;
+	const double cornerX = e.runtime->windowTile().x * static_cast<double>(coarse->tileM), cornerZ = e.runtime->windowTile().z * static_cast<double>(coarse->tileM);
 	const auto coarseH = [&](double x, double z) {
 		const HE::LandscapeGrid16& g = coarse->heights[0];
 		const double cell = coarse->cellM(0);
-		const double fx = std::clamp(x / cell, 0.0, static_cast<double>(g.w - 1)), fz = std::clamp(z / cell, 0.0, static_cast<double>(g.h - 1));
+		const double fx = std::clamp((x - cornerX) / cell, 0.0, static_cast<double>(g.w - 1)), fz = std::clamp((z - cornerZ) / cell, 0.0, static_cast<double>(g.h - 1));
 		const int x0 = std::min(static_cast<int>(fx), g.w - 2), z0 = std::min(static_cast<int>(fz), g.h - 2);
 		const double tx = fx - x0, tz = fz - z0;
 		const double h = (g.at(x0, z0) * (1 - tx) + g.at(x0 + 1, z0) * tx) * (1 - tz) + (g.at(x0, z0 + 1) * (1 - tx) + g.at(x0 + 1, z0 + 1) * tx) * tz;

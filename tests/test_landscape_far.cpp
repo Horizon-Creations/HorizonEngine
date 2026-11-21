@@ -95,6 +95,8 @@ TEST_CASE("planLandscapeFar: a small world keeps the weights' raster, a 100 km o
 	CHECK(world.texelsPerTile == 16);    // 32: 6272 px = 210 MB with mips, over the budget
 	CHECK(world.width() == 196 * 16);
 	CHECK(world.regionsX() == 25);       // 196 / 8 rounded up: the last region hangs over the edge
+	// A world larger than a render window (256 tiles) is planned like one the window's size: its resolution does not fall with its size.
+	CHECK(HE::planLandscapeFar(g, 2000, 2000, 128ull << 20, 8192, 8).texelsPerTile == HE::planLandscapeFar(g, 256, 256, 128ull << 20, 8192, 8).texelsPerTile);
 	// The texture limit bites before the budget does.
 	CHECK(HE::planLandscapeFar(g, 196, 196, 1ull << 40, 4096, 8).texelsPerTile == 16);
 	// Never below the coarsest weight mip a tile stores (128 m: 4 texels), however small the budget: the painter reads that mip.
@@ -215,8 +217,8 @@ TEST_CASE("bakeLandscapeFar: only the regions whose tiles, painter or layout cha
 	HE::bakeLandscapeFar(src, tileHash, o4, nullptr, second, stats);
 	CHECK(stats.cancelled);
 	CHECK(stats.baked == 3);
-	CHECK_FALSE(second.regions[2].rgba.empty());
-	CHECK(second.regions[3].rgba.empty());
+	CHECK(second.regions[2].baked());
+	CHECK_FALSE(second.regions[3].baked());
 
 	// A painter that fails leaves its region unbaked and is counted.
 	HE::LandscapeFarBakeOptions o5 = o;
@@ -226,7 +228,10 @@ TEST_CASE("bakeLandscapeFar: only the regions whose tiles, painter or layout cha
 	HE::bakeLandscapeFar(src, tileHash, o5, nullptr, second, stats);
 	CHECK(stats.failed == 1);
 	CHECK(stats.baked == 8);
-	CHECK(second.regions[4].rgba.empty());
+	CHECK_FALSE(second.regions[4].baked());
+	// A painted region is kept stored, not as pixels: the table of a large world is its file's size.
+	CHECK(second.regions[0].rgba.empty());
+	CHECK_FALSE(second.regions[0].blob.empty());
 }
 
 TEST_CASE("LandscapeFarTable: round trip, damaged bytes refused, the assembled image puts every region where its tiles are")
@@ -242,7 +247,11 @@ TEST_CASE("LandscapeFarTable: round trip, damaged bytes refused, the assembled i
 	for (size_t i = 0; i < table.regions.size(); ++i)
 	{
 		CHECK(back.regions[i].hash == table.regions[i].hash);
-		CHECK(back.regions[i].rgba == table.regions[i].rgba);
+		std::vector<uint8_t> a, b;
+		REQUIRE(table.regionPixels(i, a));
+		REQUIRE(back.regionPixels(i, b));   // decoded when asked for, not when the table was read
+		CHECK(a == b);
+		CHECK(back.regions[i].rgba.empty());
 	}
 	// Every truncation and a wrong magic are refused, and leave nothing behind.
 	for (size_t cut = 0; cut < bytes.size(); cut += std::max<size_t>(1, bytes.size() / 97))
@@ -268,11 +277,12 @@ TEST_CASE("LandscapeFarTable: round trip, damaged bytes refused, the assembled i
 	CHECK(mips[4].size() == 5u * 5u * 4u);
 	CHECK(mips[6].size() == 4u);
 	const int side = table.layout.regionSide();
-	const HE::LandscapeFarRegion& r = table.regions[2 * 3 + 1];
+	std::vector<uint8_t> regionRgba;
+	REQUIRE(table.regionPixels(2 * 3 + 1, regionRgba));
 	for (const int px : { 0, 7, 15 })
 	{
 		const uint8_t* fromWorld = &mips[0][(static_cast<size_t>(4 * 16 + px) * 80 + static_cast<size_t>(3 * 16 + px)) * 4];
-		const uint8_t* fromRegion = &r.rgba[(static_cast<size_t>(0 * 16 + px) * static_cast<size_t>(side) + static_cast<size_t>(1 * 16 + px)) * 4];
+		const uint8_t* fromRegion = &regionRgba[(static_cast<size_t>(0 * 16 + px) * static_cast<size_t>(side) + static_cast<size_t>(1 * 16 + px)) * 4];
 		for (int c = 0; c < 4; ++c) CHECK(fromWorld[c] == fromRegion[c]);
 	}
 }

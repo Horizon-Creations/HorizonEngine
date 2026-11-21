@@ -194,6 +194,8 @@ public:
 	void coarseChanged();
 	// The render window's corner tile and whether the world is larger than the window at all.
 	LandscapeTileKey windowTile() const { return m_winTile; }
+	// The window's coarse world (its tile (0, 0) is windowTile()): the far levels' heights and weights, always in memory. Null before begin.
+	const LandscapeCoarseWorld* windowCoarse() const { return m_winCoarse.get(); }
 	bool windowed() const { return m_windowed; }
 
 	const LandscapeStore*  store() const { return m_store.get(); }

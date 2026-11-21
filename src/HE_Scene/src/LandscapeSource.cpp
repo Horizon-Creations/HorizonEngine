@@ -364,7 +364,11 @@ bool LandscapePackWriter::finish()
 	if (!m_open) return false;
 	uint64_t coarseOffset = 0;
 	uint32_t heightSize = 0, weightSize = 0;
-	if (m_withCoarse)
+	// A world larger than a render window keeps its coarse world in regions (below, after the water table), read window by window;
+	// a smaller one keeps it whole, as every pack before did.
+	const int regionTiles = !m_withCoarse ? 0 : m_coarseRegionTiles >= 0 ? m_coarseRegionTiles
+	                        : (m_tilesX > kLandscapePackWholeCoarseMaxTiles || m_tilesZ > kLandscapePackWholeCoarseMaxTiles) ? kLandscapeCoarseRegionTiles : 0;
+	if (m_withCoarse && regionTiles == 0)
 	{
 		const auto hb = encodeLandscapeHeightGrid(m_coarse.heights[0].v, m_coarse.heights[0].w, m_coarse.heights[0].h);
 		const auto wb = encodeLandscapeWeightGrid(m_coarse.weights, m_coarse.weightsW, m_coarse.weightsH, m_coarse.channels);
@@ -383,6 +387,45 @@ bool LandscapePackWriter::finish()
 		waterOffset = m_pos;
 		m_out.write(reinterpret_cast<const char*>(tb.data()), static_cast<std::streamsize>(tb.size()));
 		m_pos += tb.size();
+	}
+	// The coarse world in regions (LandscapeSource.h, "Pack file"): a 20-byte head, the index, then each region's two grid blobs, written
+	// as they are encoded (the section can be gigabytes) and the index filled in afterwards.
+	if (regionTiles > 0)
+	{
+		const int rxN = (m_tilesX + regionTiles - 1) / regionTiles, rzN = (m_tilesZ + regionTiles - 1) / regionTiles;
+		const uint64_t sectionAt = m_pos;
+		std::vector<uint8_t> head(20 + static_cast<size_t>(rxN) * rzN * 16, 0);
+		put32(&head[0], kLandscapePackCoarseRegionMagic);
+		put32(&head[4], 1);
+		put32(&head[8], static_cast<uint32_t>(regionTiles));
+		put32(&head[12], static_cast<uint32_t>(rxN));
+		put32(&head[16], static_cast<uint32_t>(rzN));
+		m_out.write(reinterpret_cast<const char*>(head.data()), static_cast<std::streamsize>(head.size()));
+		m_pos += head.size();
+		for (int rz = 0; rz < rzN; ++rz)
+			for (int rx = 0; rx < rxN; ++rx)
+			{
+				const LandscapeCoarseWorld part = landscapeCoarseCrop(m_coarse, { rx * regionTiles, rz * regionTiles }, regionTiles, regionTiles);
+				const auto hb = encodeLandscapeHeightGrid(part.heights[0].v, part.heights[0].w, part.heights[0].h);
+				const auto wb = encodeLandscapeWeightGrid(part.weights, part.weightsW, part.weightsH, part.channels);
+				if (hb.empty() || wb.empty()) return false;
+				uint8_t* e = &head[20 + (static_cast<size_t>(rz) * rxN + rx) * 16];
+				put64(e, m_pos);
+				put32(e + 8, static_cast<uint32_t>(hb.size()));
+				put32(e + 12, static_cast<uint32_t>(wb.size()));
+				m_out.write(reinterpret_cast<const char*>(hb.data()), static_cast<std::streamsize>(hb.size()));
+				m_out.write(reinterpret_cast<const char*>(wb.data()), static_cast<std::streamsize>(wb.size()));
+				m_pos += hb.size() + wb.size();
+			}
+		m_out.seekp(static_cast<std::streamoff>(sectionAt));
+		m_out.write(reinterpret_cast<const char*>(head.data()), static_cast<std::streamsize>(head.size()));
+		m_out.seekp(static_cast<std::streamoff>(m_pos));
+		uint8_t trailer[kLandscapePackHlodTrailerBytes];
+		put64(trailer, sectionAt);
+		put64(trailer + 8, m_pos - sectionAt);
+		put32(trailer + 16, kLandscapePackCoarseRegionMagic);
+		m_out.write(reinterpret_cast<const char*>(trailer), sizeof(trailer));
+		m_pos += sizeof(trailer);
 	}
 	// The tail sections: the far image first, the cell HLOD table last (LandscapeSource.h, "Pack file").
 	if (!m_far.empty()) m_pos += writeTail(m_out, m_pos, m_far.encode(), kLandscapeFarMagic);
@@ -585,9 +628,48 @@ std::shared_ptr<LandscapePackSource> LandscapePackSource::open(const std::string
 			tailEnd = off;
 		}
 	}
-	src->m_coreSize = tailEnd;
-	// The coarse world (version 2): both grids are decoded now and stay in memory.
-	if (version == 2 && head[25] != 255)
+	src->m_coreSize = tailEnd;   // the coarse regions below belong to the core: a rewrite of the tail sections keeps them
+	// The coarse world in regions: only the index is read now, a region when a window asks for it (coarseWindow).
+	if (version == 2 && tailEnd >= indexEnd + kLandscapePackHlodTrailerBytes)
+	{
+		uint8_t tr[kLandscapePackHlodTrailerBytes];
+		if (src->readAt(tailEnd - sizeof(tr), tr, sizeof(tr)) && get32(tr + 16) == kLandscapePackCoarseRegionMagic)
+		{
+			const uint64_t off = get64(tr), size = get64(tr + 8);
+			if (off < indexEnd || size < 20 || off + size + sizeof(tr) != tailEnd) return fail("pack coarse regions point outside the file");
+			uint8_t rh[20];
+			if (!src->readAt(off, rh, sizeof(rh)) || get32(rh) != kLandscapePackCoarseRegionMagic || get32(rh + 4) != 1) return fail("pack coarse regions are damaged");
+			CoarseRegions& r = src->m_regions;
+			const uint32_t rt = get32(rh + 8), rx = get32(rh + 12), rz = get32(rh + 16);
+			if (rt == 0 || rt > 4096 || rx != (tx + rt - 1) / rt || rz != (tz + rt - 1) / rt || size < 20 + static_cast<uint64_t>(rx) * rz * 16)
+				return fail("pack coarse regions do not fit the world");
+			r.regionTiles = static_cast<int>(rt);
+			r.regionsX = static_cast<int>(rx);
+			r.regionsZ = static_cast<int>(rz);
+			std::vector<uint8_t> idx(static_cast<size_t>(rx) * rz * 16);
+			if (!src->readAt(off + 20, idx.data(), idx.size())) return fail("pack coarse regions cannot be read");
+			r.offset.resize(static_cast<size_t>(rx) * rz);
+			r.heightSize.resize(r.offset.size());
+			r.weightSize.resize(r.offset.size());
+			for (size_t i = 0; i < r.offset.size(); ++i)
+			{
+				r.offset[i] = get64(&idx[i * 16]);
+				r.heightSize[i] = get32(&idx[i * 16 + 8]);
+				r.weightSize[i] = get32(&idx[i * 16 + 12]);
+				if (r.heightSize[i] == 0 || r.weightSize[i] == 0 || r.offset[i] < off || r.offset[i] + r.heightSize[i] + r.weightSize[i] > off + size)
+					return fail("pack coarse regions point outside their section");
+			}
+		}
+	}
+	if (version == 2 && head[25] != 255 && !src->m_regions.offset.empty())
+	{
+		src->m_regions.heightLevel = head[25];
+		src->m_regions.weightLevel = head[26];
+		if (src->m_regions.heightLevel >= src->m_geometry.heightLevels() || src->m_regions.weightLevel >= src->m_geometry.weightLevels())
+			return fail("pack coarse levels do not fit its geometry");
+	}
+	// The coarse world kept whole (version 2, every pack up to a render window's size): both grids are decoded now and stay in memory.
+	else if (version == 2 && head[25] != 255)
 	{
 		const uint64_t off = get64(head + 32);
 		const uint32_t hSize = get32(head + 40), wSize = get32(head + 44);
@@ -628,6 +710,51 @@ uint32_t LandscapePackSource::storedSize(LandscapeTileKey key) const
 uint64_t LandscapePackSource::storedOffset(LandscapeTileKey key) const
 {
 	return inWorld(*this, key) ? m_offset[static_cast<size_t>(key.z) * m_tilesX + key.x] : 0;
+}
+
+std::shared_ptr<const LandscapeCoarseWorld> LandscapePackSource::coarseWindow(LandscapeTileKey origin, int tx, int tz) const
+{
+	if (m_regions.offset.empty()) return LandscapeTileSource::coarseWindow(origin, tx, tz);   // kept whole: a crop of it
+	origin.x = std::clamp(origin.x, 0, m_tilesX - 1);
+	origin.z = std::clamp(origin.z, 0, m_tilesZ - 1);
+	tx = std::clamp(tx, 1, m_tilesX - origin.x);
+	tz = std::clamp(tz, 1, m_tilesZ - origin.z);
+	// The window, assembled from the regions it touches. Each is read and decoded here, on the caller's thread: a window move is rare
+	// (every 32 km) and a region is two small blobs.
+	LandscapeCoarseWorld win;
+	initCoarse(win, m_geometry, tx, tz, LandscapeCoarseLayout{ m_regions.heightLevel, m_regions.weightLevel });
+	const int cpt = win.cellsPerTile, tpt = win.texelsPerTile, C = win.channels, rt = m_regions.regionTiles;
+	std::vector<uint8_t> blob;
+	std::vector<uint16_t> hv;
+	std::vector<uint8_t> wv;
+	for (int rz = origin.z / rt; rz < m_regions.regionsZ && rz * rt < origin.z + tz; ++rz)
+		for (int rx = origin.x / rt; rx < m_regions.regionsX && rx * rt < origin.x + tx; ++rx)
+		{
+			const size_t i = static_cast<size_t>(rz) * m_regions.regionsX + rx;
+			const int regX = std::min(rt, m_tilesX - rx * rt), regZ = std::min(rt, m_tilesZ - rz * rt);   // tiles this region holds
+			int w = 0, h = 0, ch = 0;
+			blob.resize(m_regions.heightSize[i]);
+			if (!readAt(m_regions.offset[i], blob.data(), blob.size()) || !decodeLandscapeHeightGrid(blob.data(), blob.size(), hv, w, h)
+			    || w != regX * cpt + 1 || h != regZ * cpt + 1)
+				return nullptr;
+			// The tiles of the region inside the window, in cells: [x0, x1] x [z0, z1] of the world, edge samples included.
+			const int tx0 = std::max(rx * rt, origin.x), tx1 = std::min(rx * rt + regX, origin.x + tx);
+			const int tz0 = std::max(rz * rt, origin.z), tz1 = std::min(rz * rt + regZ, origin.z + tz);
+			for (int z = tz0 * cpt; z <= tz1 * cpt; ++z)
+				std::memcpy(&win.heights[0].v[static_cast<size_t>(z - origin.z * cpt) * win.heights[0].w + static_cast<size_t>(tx0 - origin.x) * cpt],
+				            &hv[static_cast<size_t>(z - rz * rt * cpt) * w + static_cast<size_t>(tx0 - rx * rt) * cpt],
+				            (static_cast<size_t>(tx1 - tx0) * cpt + 1) * sizeof(uint16_t));
+			blob.resize(m_regions.weightSize[i]);
+			if (!readAt(m_regions.offset[i] + m_regions.heightSize[i], blob.data(), blob.size()) || !decodeLandscapeWeightGrid(blob.data(), blob.size(), wv, w, h, ch)
+			    || w != regX * tpt || h != regZ * tpt || ch != C)
+				return nullptr;
+			for (int z = tz0 * tpt; z < tz1 * tpt; ++z)
+				std::memcpy(&win.weights[(static_cast<size_t>(z - origin.z * tpt) * win.weightsW + static_cast<size_t>(tx0 - origin.x) * tpt) * C],
+				            &wv[(static_cast<size_t>(z - rz * rt * tpt) * w + static_cast<size_t>(tx0 - rx * rt) * tpt) * C],
+				            static_cast<size_t>(tx1 - tx0) * tpt * C);
+		}
+	buildCoarseChain(win);
+	return std::make_shared<const LandscapeCoarseWorld>(std::move(win));
 }
 
 bool LandscapePackSource::readStored(LandscapeTileKey key, std::vector<uint8_t>& blob) const

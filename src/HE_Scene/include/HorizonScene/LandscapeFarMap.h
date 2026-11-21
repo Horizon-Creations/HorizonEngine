@@ -37,7 +37,12 @@ struct LandscapeFarLayout
 struct LandscapeFarRegion
 {
 	uint64_t             hash = 0;   // of everything the image was made from (LandscapeFarBake.h); only meaningful with an image
-	std::vector<uint8_t> rgba;       // regionSide^2 * 4, row-major from the region's corner; texels past the world's edge are 0. Empty: not baked
+	std::vector<uint8_t> rgba;       // regionSide^2 * 4, row-major from the region's corner; texels past the world's edge are 0
+	// The same image as it is stored (a weight grid blob). A table read from a pack, and one that was just baked, keeps its regions like
+	// this and decodes one when a window is assembled from it: the table of a world far larger than a render window is then megabytes,
+	// not the gigabyte its pixels are. A region is baked when it has either.
+	std::vector<uint8_t> blob;
+	bool baked() const { return !rgba.empty() || !blob.empty(); }
 };
 
 class LandscapeFarTable
@@ -48,6 +53,10 @@ public:
 
 	// Nothing to draw from: no layout, or not one region baked.
 	bool empty() const;
+	// The pixels of region `index` (regionSide^2 * 4), decoded if they are kept stored. False: not baked, or its stored form is damaged.
+	bool regionPixels(size_t index, std::vector<uint8_t>& out) const;
+	// Keeps region `index` stored only (drops the pixels after encoding them). What a bake does after painting a region.
+	void compact(size_t index);
 	// Little endian: u32 magic 'HLFM'  u32 version (1)  u32 tilesX  u32 tilesZ  u32 regionTiles  u32 texelsPerTile, then per region
 	// u64 hash  u32 size  and `size` bytes of a weight grid blob (LandscapeTile.h, "Grids": 4 channels, regionSide squared); size 0 = not baked.
 	std::vector<uint8_t> encode() const;
