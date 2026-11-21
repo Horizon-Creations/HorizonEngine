@@ -1,5 +1,6 @@
 #pragma once
 #include <glm/glm.hpp>
+#include <Types/UUID.h>
 
 #include <cstdint>
 #include <functional>
@@ -111,6 +112,11 @@ struct LandscapeRenderFrame
 	glm::dvec3 uvOrigin{ 0.0 };
 	glm::vec3  cameraRel{ 0.0f };                        // origin-relative
 	float      slabDistance = 0.0f;                      // camera to the height slab: the vertical term of every morph distance
+	// The ground's material (the landscape entity's, else its texture group's Auto Landscape material). A backend that can draws the
+	// patches with it: the material's fragment with its layer weights from the tile atlas (MaterialShaderLibrary::landscapeFragment),
+	// lit, shadowed and fogged like every other surface. Null, or a backend that cannot (yet): the fixed layer blend of
+	// LandscapeShaderSource.h.
+	HE::UUID   materialId{};
 };
 
 // What the application hands a renderer: called by the backend once per main scene frame with the view-projection it is about to

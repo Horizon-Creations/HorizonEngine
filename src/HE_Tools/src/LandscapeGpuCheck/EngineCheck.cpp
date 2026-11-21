@@ -4,6 +4,7 @@
 #include <ContentManager/ContentManager.h>
 #include <Diagnostics/Log.h>
 #include <HorizonScene/Components/LightComponent.h>
+#include <MaterialGraph/MaterialGraph.h>
 #include <HorizonScene/Components/MaterialComponent.h>
 #include <HorizonScene/Components/MeshComponent.h>
 #include <HorizonScene/Components/TransformComponent.h>
@@ -155,6 +156,186 @@ int runEngineCheck(HE::RendererBackend backend, HE::RenderPath path, const std::
 			if (expectedGround < static_cast<int>(kW * kH / 10)) fail("the camera sees the ground");
 			if (arrayRoot.empty() && groundGreen < expectedGround * 97 / 100) fail("the landscape is drawn where the plane is", std::to_string(groundGreen) + " of " + std::to_string(expectedGround));
 			if (skyGreen > expectedSky * 3 / 100) fail("nothing green above the horizon", std::to_string(skyGreen) + " of " + std::to_string(expectedSky));
+		}
+		renderer->SetLandscapeProvider({});
+		renderer->Shutdown();
+	}
+	catch (const std::exception& e)
+	{
+		std::printf("  the renderer could not start here: %s\n", e.what());
+		return 3;
+	}
+	std::printf("  %s\n", failures == 0 ? "OK" : "FAILED");
+	return failures == 0 ? 0 : 1;
+}
+
+// The ground drawn with a MATERIAL (LandscapeRenderFrame::materialId): the real renderer, the ramp world (all paint on layer 0), and a graph
+// material whose Landscape Layer Blend makes layer 0 blue and layer 1 red, colours the fixed blend does not have (its layer 0 is green).
+//   * material:  the ground is blue. Blue means the material's fragment ran AND read 100 % layer 0 from the tile atlas (no weights: black;
+//                the wrong page or channel: red). Control: the same frame without the material is green and has no blue.
+//   * shadow:    a box stands on the ground. With its shadow switched on, ground pixels are darker than with it switched off (the box itself
+//                is in both frames, so only its shadow differs). GI is off here: the sun's shadow is the cascade map's.
+//   * fog:       with fog in the scene the ground's colour moves.
+int runMaterialCheck(HE::RendererBackend backend, const std::string& packPath, const std::string& pngPath)
+{
+	const char* bname = backend == HE::RendererBackend::Metal ? "Metal" : backend == HE::RendererBackend::D3D11 ? "D3D11"
+	                  : backend == HE::RendererBackend::D3D12 ? "D3D12" : backend == HE::RendererBackend::Vulkan ? "Vulkan" : "OpenGL";
+	std::printf("[%s engine, the ground drawn with a material]\n", bname);
+	if (!RendererFactory::Available(backend)) { std::printf("  not in this binary\n"); return 0; }
+	int failures = 0;
+	const auto fail = [&](const char* what, const std::string& detail = {}) { ++failures; std::printf("    FAIL  %s %s\n", what, detail.c_str()); };
+	try
+	{
+		HE::WindowProps wp;
+		wp.title = "landscape_gpu_check (material)";
+		wp.width = kW;
+		wp.height = kH;
+		wp.vsync = false;
+		wp.api = backend;
+		wp.startHidden = true;
+		auto window = std::make_unique<HE::Window>(wp);
+		std::unique_ptr<IRenderer> renderer = RendererFactory::Create(backend);
+		if (!renderer->GetCapabilities().landscapeMaterial)
+		{
+			std::printf("  NOT CHECKED: this backend draws the tile landscape with its fixed blend only\n");
+			return 0;
+		}
+		ContentManager content;
+		renderer->SetContentManager(&content);
+		renderer->Initialize(window.get());
+		renderer->SetRenderPath(HE::RenderPath::Forward);
+		IRenderer::GISettings gi;
+		gi.enabled = false;
+		renderer->SetGISettings(gi);
+		IRenderer::ShadowSettings shadow;
+		shadow.distance = 600.0f;
+		renderer->SetShadowSettings(shadow);
+
+		HorizonWorld world;
+		const glm::dvec3 origin{ 2048.0, 100.0, 1024.0 }, camPos{ 2900.0, 650.0, 3072.0 };
+		world.setOrigin(origin);
+		renderer->SetWorld(&world);
+		auto& reg = world.registry();
+		{
+			const auto sunEnt = world.createEntity("Sun");
+			TransformComponent sunTf;
+			sunTf.rotation = glm::vec3(-45.0f, -45.0f, 0.0f);
+			reg.emplace<TransformComponent>(sunEnt, sunTf);
+			LightComponent sun;
+			sun.type = HE::LightType::Directional;
+			reg.emplace<LightComponent>(sunEnt, sun);
+		}
+		// 30 x 60 x 30 m, standing on the ramp 110 m in front of the camera
+		const double boxX = 3010.0, boxZ = 3090.0;
+		const auto boxEnt = world.createEntity("Caster");
+		{
+			TransformComponent tf;
+			tf.position = glm::vec3(glm::dvec3(boxX, kBase + kSlope * (boxX - kPivot) + 30.0, boxZ) - origin);
+			tf.scale = glm::vec3(30.0f, 60.0f, 30.0f);
+			reg.emplace<TransformComponent>(boxEnt, tf);
+			reg.emplace<MeshComponent>(boxEnt, MeshComponent{ HE::kDefaultCubeMeshId });
+		}
+
+		using HE::MaterialGraph;
+		using HE::MatNodeType;
+		MaterialGraph g;
+		const int outId = g.addNode(MatNodeType::Output);
+		const int blend = g.addNode(MatNodeType::LandscapeLayerBlend);
+		g.findNode(blend)->s = "Layer 1\nLayer 2";
+		const int blue = g.addNode(MatNodeType::ConstColor), red = g.addNode(MatNodeType::ConstColor);
+		g.findNode(blue)->p[0] = 0.0f; g.findNode(blue)->p[1] = 0.0f; g.findNode(blue)->p[2] = 1.0f;
+		g.findNode(red)->p[0] = 1.0f; g.findNode(red)->p[1] = 0.0f; g.findNode(red)->p[2] = 0.0f;
+		g.connect(blue, 0, blend, 0);
+		g.connect(red, 0, blend, 1);
+		g.connect(blend, 0, outId, HE::kMatOutputBaseColorPin);
+		MaterialAsset ma;
+		ma.type = HE::AssetType::Material;
+		ma.name = "LandscapeMarker";
+		ma.nodeGraphJson = HE::materialGraphToJson(g);
+		const HE::UUID marker = content.registerMaterial(std::move(ma));
+		content.regenerateMaterialFromGraph(marker);
+
+		HE::LandscapeRuntime rt;
+		HE::LandscapeRuntimeConfig cfg;
+		cfg.store.byteBudget = 80ull * 1024 * 1024;
+		std::string err;
+		if (!rt.beginFromPack(packPath, cfg, &err)) { std::printf("  runtime: %s\n", err.c_str()); return 1; }
+		const auto t0 = std::chrono::steady_clock::now();
+		for (;;)
+		{
+			rt.updateAt(camPos, glm::vec3(0.0f), 5.0, origin);
+			if (rt.store()->settled() && rt.atlas()->stats().used == rt.store()->residentKeys().size()) break;
+			if (std::chrono::steady_clock::now() - t0 > std::chrono::seconds(120)) { std::printf("  the store did not settle\n"); return 1; }
+			std::this_thread::sleep_for(std::chrono::milliseconds(1));
+		}
+		renderer->SetLandscapeProvider(rt.renderProvider(world));
+
+		const glm::vec3 eye = glm::vec3(camPos - origin);
+		EditorCameraOverride ov;
+		ov.active = true;
+		ov.view = glm::lookAt(eye, eye + glm::normalize(glm::vec3(1.0f, -0.45f, 0.15f)), glm::vec3(0, 1, 0));
+		ov.position = eye;
+		ov.fovDegrees = 70.0f;
+		ov.nearPlane = 2.0f;
+		ov.farPlane = 20000.0f;
+		const auto shoot = [&](std::vector<uint8_t>& rgba) {
+			bool got = false;
+			for (int frame = 0; frame < 6; ++frame)      // pipelines build, the cascades settle
+			{
+				rgba.clear();
+				got = renderer->RenderSceneImage(ov, kW, kH, rgba);
+			}
+			return got && rgba.size() == static_cast<size_t>(kW) * kH * 4;
+		};
+		const auto isBlue = [](const uint8_t* c) { return c[2] > c[0] + 20 && c[2] > c[1] + 20; };
+		const auto isGreen = [](const uint8_t* c) { return c[1] > c[0] + 6 && c[1] > c[2] + 6; };
+		const auto lum = [](const uint8_t* c) { return 0.3 * c[0] + 0.59 * c[1] + 0.11 * c[2]; };
+		const size_t px = static_cast<size_t>(kW) * kH;
+
+		std::vector<uint8_t> lit, flat, unshadowed, fogged;
+		rt.setMaterialId(marker);
+		if (!shoot(lit)) fail("RenderSceneImage gave an image");
+		else
+		{
+			writePngFile(pngPath, static_cast<int>(kW), static_cast<int>(kH), lit.data());
+			size_t blueLit = 0, blueFlat = 0, greenFlat = 0;
+			for (size_t i = 0; i < px; ++i) blueLit += isBlue(&lit[i * 4]) ? 1 : 0;
+			rt.setMaterialId({});
+			if (!shoot(flat)) fail("RenderSceneImage gave an image (fixed blend)");
+			else
+				for (size_t i = 0; i < px; ++i) { blueFlat += isBlue(&flat[i * 4]) ? 1 : 0; greenFlat += isGreen(&flat[i * 4]) ? 1 : 0; }
+			std::printf("  material: %zu of %zu px are the material's layer 0 (blue); without the material %zu blue, %zu green\n", blueLit, px, blueFlat, greenFlat);
+			if (blueLit < px * 2 / 5) fail("the ground is drawn by the material, with its weights from the tile atlas", std::to_string(blueLit) + " px");
+			if (blueFlat > px / 100 || greenFlat < px * 2 / 5) fail("control: without the material the ground is the fixed blend's green");
+
+			rt.setMaterialId(marker);
+			reg.get<MeshComponent>(boxEnt).castsShadow = false;
+			if (!shoot(unshadowed)) fail("RenderSceneImage gave an image (no caster)");
+			else
+			{
+				size_t darker = 0;
+				for (size_t i = 0; i < px; ++i)
+					darker += isBlue(&lit[i * 4]) && isBlue(&unshadowed[i * 4]) && lum(&lit[i * 4]) < 0.8 * lum(&unshadowed[i * 4]) ? 1 : 0;
+				std::printf("  shadow: %zu ground px are darker with the box's shadow on than with it off\n", darker);
+				if (darker < 150) fail("the ground takes the box's shadow", std::to_string(darker) + " px");
+			}
+			reg.get<MeshComponent>(boxEnt).castsShadow = true;
+
+			IRenderer::EnvironmentSettings env = renderer->GetEnvironment();
+			env.fogDensity = 0.004f;
+			env.fogHeightFalloff = 0.0f;   // the ramp stands 600 m up: with a falloff the fog would lie far below it
+			renderer->SetEnvironmentSettings(env);
+			if (!shoot(fogged)) fail("RenderSceneImage gave an image (fog)");
+			else
+			{
+				double gap = 0.0;
+				size_t n = 0;
+				for (size_t i = 0; i < px; ++i)
+					if (isBlue(&lit[i * 4])) { gap += std::abs(lum(&fogged[i * 4]) - lum(&lit[i * 4])); ++n; }
+				std::printf("  fog: the ground moves by %.1f/255 on average with fog in the scene\n", gap / static_cast<double>(std::max<size_t>(n, 1)));
+				if (gap / static_cast<double>(std::max<size_t>(n, 1)) < 4.0) fail("the ground is fogged");
+				writePngFile(pngPath.substr(0, pngPath.size() - 4) + "_fog.png", static_cast<int>(kW), static_cast<int>(kH), fogged.data());
+			}
 		}
 		renderer->SetLandscapeProvider({});
 		renderer->Shutdown();

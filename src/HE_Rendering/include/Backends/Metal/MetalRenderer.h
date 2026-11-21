@@ -1664,6 +1664,8 @@ private:
 	// EncodeScene asks the application's provider (IRenderer::SetLandscapeProvider) once for the frame of the camera the scene pass rasterises
 	// with, and EncodeLandscape encodes it into that pass, after the skinned meshes and before the sky. Forward geometry: no shadows, SSAO or GI, not in the G-buffer.
 	void EncodeLandscape(void* renderEncoder, const glm::mat4& viewProj, const HE::LandscapeRenderFrame& frame);
+	void* GetOrBuildLandscapeMaterialPipeline(const HE::UUID& materialId);
+	std::unordered_map<uint64_t, void*> m_landscapeMaterialPipelines;   // key = the material's shader key, salted; null = does not build
 	MetalLandscape m_landscape;
 	bool           m_landscapeFailed = false;   // init failed once: not tried again
 

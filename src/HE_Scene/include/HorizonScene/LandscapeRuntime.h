@@ -192,6 +192,11 @@ public:
 	// edits() is that overlay (null otherwise) and packFile() the pack it belongs to. tilesReplaced puts tiles into the store in place
 	// (a stroke in progress), coarseChanged says the overlay's coarse world changed (the far levels are uploaded again).
 	void setEditable(bool on) { m_editable = on; }
+	// The material the ground is drawn with (LandscapeRenderFrame::materialId). update() sets it every frame from the scene (the
+	// landscape entity's MaterialComponent, else the texture group's material); a caller that drives the runtime without a scene
+	// (updateAt: tools, tests) sets it here.
+	void setMaterialId(const HE::UUID& id) { m_materialId = id; }
+	const HE::UUID& materialId() const { return m_materialId; }
 	LandscapeEditSource* edits() const { return m_edits.get(); }
 	const std::filesystem::path& packFile() const { return m_packFile; }
 	void tilesReplaced(const std::vector<std::pair<LandscapeTileKey, std::shared_ptr<const LandscapeTile>>>& tiles);
@@ -251,6 +256,7 @@ private:
 	std::vector<glm::dvec3>                  m_navAnchors;
 	uint64_t                                 m_foliageKey = 0;   // of the layer settings last given to m_foliage; 0 = none
 	std::vector<glm::dvec3>                  m_physicsAnchors;
+	HE::UUID                                 m_materialId{};                    // the ground's material this frame (update())
 	uint32_t                                 m_landscapeEntity = 0xFFFFFFFEu;   // PhysicsWorld::kGroundOwner until a component names the entity
 	std::vector<LandscapeAtlas::Upload>      m_pendingUploads;
 	std::vector<LandscapeAtlas::Release>     m_pendingReleases;

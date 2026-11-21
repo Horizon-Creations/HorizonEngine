@@ -281,6 +281,9 @@ public:
         // never send the near ground back to the far levels. False = the application has to announce such a change as a
         // new landscape (LandscapeRuntime::setWindowKeepsAtlas), which empties the atlas once.
         bool landscapeCoarseRevision = false;
+        // The tile landscape is drawn with LandscapeRenderFrame::materialId (the material's fragment, weights from the tile atlas),
+        // so the ground is lit, shadowed and fogged like every other surface. false: the fixed layer blend, whatever the frame names.
+        bool landscapeMaterial = false;
         // CreateRvtPool / EditorCameraOverride::rvtSlot work: the backend can hold the page pool of the Runtime
         // Virtual Textures and fill a slice of it from RenderSceneImage (Thema 333). False = the landscape keeps
         // running its material directly.

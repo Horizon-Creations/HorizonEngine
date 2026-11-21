@@ -280,13 +280,28 @@ void MetalLandscape::encode(void* renderEncoder, const LandscapeRenderFrame& f, 
 		g.tex[2] = static_cast<float>(f.uvOrigin.x * k - std::floor(f.uvOrigin.x * k)); g.tex[3] = static_cast<float>(f.uvOrigin.z * k - std::floor(f.uvOrigin.z * k));
 
 		id<MTLRenderCommandEncoder> enc = (__bridge id<MTLRenderCommandEncoder>)renderEncoder;
-		[enc setRenderPipelineState:m.pipeline];
 		[enc setDepthStencilState:m.depth];
 		[enc setVertexBytes:&g length:sizeof(g) atIndex:kBuf];
 		[enc setFragmentBytes:&g length:sizeof(g) atIndex:kBuf];
 		[enc setVertexTexture:m.tileHeights atIndex:kTex + 0];
 		[enc setVertexTexture:m.slotTable atIndex:kTex + 1];
 		[enc setVertexTexture:m.coarseHeights atIndex:kTex + 2];
+		if (shading.materialPipeline)
+		{
+			// A material draws the patches (MaterialShaderLibrary::landscapeVertex / landscapeFragment): the vertex stage reads what
+			// kLandscapeMSL's does, where it does; the fragment's weights sit on the slots a material has free, 13 and 25-30
+			// (18-24 are the virtual texture's and stay the caller's).
+			[enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)shading.materialPipeline];
+			[enc setFragmentTexture:m.slotTable atIndex:13];
+			for (int p = 0; p < 3; ++p)
+			{
+				[enc setFragmentTexture:m.weights[p] atIndex:25 + static_cast<NSUInteger>(p)];
+				[enc setFragmentTexture:m.coarseWeights[p] atIndex:28 + static_cast<NSUInteger>(p)];
+			}
+		}
+		else
+		{
+		[enc setRenderPipelineState:m.pipeline];
 		[enc setFragmentTexture:m.slotTable atIndex:kTex + 0];
 		for (int p = 0; p < 3; ++p)
 		{
@@ -297,6 +312,7 @@ void MetalLandscape::encode(void* renderEncoder, const LandscapeRenderFrame& f, 
 		[enc setFragmentTexture:g.texMaps[0] > 0.5f ? (__bridge id<MTLTexture>)shading.normalArray : m.noArray atIndex:kTex + 8];
 		[enc setFragmentTexture:g.texMaps[1] > 0.5f ? (__bridge id<MTLTexture>)shading.maskArray : m.noArray atIndex:kTex + 9];
 		[enc setFragmentTexture:m.farAlbedo ? m.farAlbedo : m.coarseWeights[0] atIndex:kTex + 10];   // no far image: any 2D texture, the shader does not read it
+		}
 
 		const uint32_t total = w.quadrantFirst[3] + w.quadrantCount[3];
 		for (const LandscapeRenderPatch& p : f.patches)

@@ -7309,6 +7309,8 @@ void MetalRenderer::Shutdown()
 	m_uiFontAtlases.clear();
 	for (auto& [k, pso] : m_uiMaterialPipelines) if (pso) CFBridgingRelease(pso);
 	m_uiMaterialPipelines.clear();
+	for (auto& [k, pso] : m_landscapeMaterialPipelines) if (pso) CFBridgingRelease(pso);
+	m_landscapeMaterialPipelines.clear();
 	if (m_uiBackdrop) { CFBridgingRelease(m_uiBackdrop); m_uiBackdrop = nullptr; }
 	m_uiBackdropW = m_uiBackdropH = 0;
 	if (m_bloomBrightPipeline)  { CFBridgingRelease(m_bloomBrightPipeline);  m_bloomBrightPipeline = nullptr; }
@@ -16312,6 +16314,43 @@ void MetalRenderer::EncodeSkinnedObjects(void* renderEncoder, const glm::mat4& v
 	[encoder setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_scenePipeline];
 }
 
+// The forward pipeline that draws the tile landscape's patches with a material: the landscape's vertex stage (same heights and morph as
+// its own shader) and the material's fragment with its layer weights from the tile atlas. Built on first use, on this thread (one
+// compile per material, the fixed blend is not shown in between); a material without a shader, or whose variant does not build, gives
+// null for good and the landscape keeps its fixed blend.
+void* MetalRenderer::GetOrBuildLandscapeMaterialPipeline(const HE::UUID& materialId)
+{
+#if defined(HE_HAVE_SHADERC)
+	uint64_t key = 0; std::string fragGlsl, vertBody;
+	if (!ResolveMaterialShader(materialId, key, fragGlsl, vertBody)) return nullptr;
+	key ^= m_forwardClustered ? 0x7A11E5C1A57E12EDull : 0x7A11E5F02A12D000ull;
+	if (auto it = m_landscapeMaterialPipelines.find(key); it != m_landscapeMaterialPipelines.end()) return it->second;
+
+	using Backend = HE::MaterialShaderLibrary::Backend;
+	const auto& v = m_matShaderLib.landscapeVertex(Backend::Metal);
+	const auto& f = m_matShaderLib.landscapeFragment(key, fragGlsl, Backend::Metal, m_forwardClustered);
+	void* result = nullptr;
+	NSError* err = nil;
+	if (v.ok && f.ok)
+	{
+		id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+		id<MTLLibrary> vLib = [device newLibraryWithSource:[NSString stringWithUTF8String:v.source.c_str()] options:nil error:&err];
+		id<MTLLibrary> fLib = vLib ? [device newLibraryWithSource:[NSString stringWithUTF8String:f.source.c_str()] options:nil error:&err] : nil;
+		if (vLib && fLib)
+			if (id<MTLRenderPipelineState> pso = [device newRenderPipelineStateWithDescriptor:MakeMaterialPipelineDescriptor(vLib, fLib, false, false, false) error:&err])
+				result = (void*)CFBridgingRetain(pso);
+	}
+	if (!result)
+		HE_LOG_WARN(RHI, "MetalRenderer: the landscape keeps its fixed blend, its material's variant did not build: %s%s%s",
+		            v.log.c_str(), f.log.c_str(), err ? err.localizedDescription.UTF8String : "");
+	m_landscapeMaterialPipelines[key] = result;
+	return result;
+#else
+	(void)materialId;
+	return nullptr;
+#endif
+}
+
 void MetalRenderer::EncodeLandscape(void* renderEncoder, const glm::mat4& viewProj, const HE::LandscapeRenderFrame& frame)
 {
 	if (!frame.active || m_landscapeFailed) return;   // asked for at the top of EncodeScene; no landscape in this scene: nothing compiled, nothing drawn
@@ -16327,6 +16366,37 @@ void MetalRenderer::EncodeLandscape(void* renderEncoder, const glm::mat4& viewPr
 	}
 
 	MetalLandscape::Shading sh;
+	// The ground's material, when it has a shader and its landscape variant builds: bound here like a mesh draw of that material
+	// (parameters, the graph's textures, the virtual texture), the landscape adds its own images. Lighting, shadow masks, fog and the
+	// rest of the preamble are on the encoder already. Not on a page camera (rvtSlot): that draws the page material on meshes.
+#if defined(HE_HAVE_SHADERC)
+	if (frame.materialId != HE::UUID{} && m_editorCamera.rvtSlot < 0)
+		if (void* pso = GetOrBuildLandscapeMaterialPipeline(frame.materialId))
+		{
+			id<MTLRenderCommandEncoder> enc = (__bridge id<MTLRenderCommandEncoder>)renderEncoder;
+			float padded[HE::kMatParamFloats] = { 0 };
+			if (const MaterialAsset* ma = m_contentManager ? m_contentManager->getMaterial(frame.materialId) : nullptr)
+			{
+				std::memcpy(padded, ma->shaderParamData.data(), std::min(ma->shaderParamData.size(), size_t(HE::kMatParamFloats)) * sizeof(float));
+				// copied out before the next resolve: a load invalidates the asset pointer
+				const uint32_t arrMask = HE::matGlslTextureArrayMask(ma->customShaderFragGlsl);
+				const std::vector<HE::UUID> ids = ma->graphTextureIds;
+				const std::vector<std::string> paths = ma->graphTexturePaths;
+				const size_t nTex = std::min<size_t>(HE::kMatMaxGraphTextures, std::max(paths.size(), ids.size()));
+				for (size_t i = 0; i < nTex; ++i)
+					if (void* t = ResolveGraphTexture(i < ids.size() ? ids[i] : HE::UUID{}, i < paths.size() ? paths[i] : std::string{}, (arrMask >> i) & 1u))
+					{
+						[enc setFragmentTexture:(__bridge id<MTLTexture>)t atIndex:(i + 1)];
+						[enc setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_materialSampler atIndex:(i + 1)];
+					}
+			}
+			[enc setFragmentBytes:padded length:sizeof(padded) atIndex:2];
+			void* tex0 = nullptr;
+			if (ResolveMaterialTexture(frame.materialId, tex0) && tex0) [enc setFragmentTexture:(__bridge id<MTLTexture>)tex0 atIndex:0];
+			BindRvtForDraw(renderEncoder, frame.materialId);
+			sh.materialPipeline = pso;
+		}
+#endif
 	sh.sunDir = glm::normalize(m_renderWorld.sunDirection);
 	sh.ambient = m_renderWorld.ambient;
 	for (const LightData& l : m_renderWorld.lights)
@@ -20535,6 +20605,9 @@ IRenderer::Capabilities MetalRenderer::GetCapabilities() const
 	c.supportsDeferredRendering  = true;
 	c.supportsRawCapture         = true;   // RenderSceneImage's rawOutput (kTonemapMSL)
 	c.landscapeCoarseRevision    = true;   // MetalLandscape.mm: new coarse and far images, the atlas stays
+#if defined(HE_HAVE_SHADERC)
+	c.landscapeMaterial          = true;   // EncodeLandscape: the ground's material draws the patches
+#endif
 #if defined(HE_HAVE_SHADERC)
 	// A page is that raw capture blitted into the pool; the consumer is a graph material (MSL from the cross-compiler).
 	c.supportsRvt                = m_device != nullptr;

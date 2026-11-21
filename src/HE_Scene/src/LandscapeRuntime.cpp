@@ -9,6 +9,7 @@
 #include "HorizonScene/Components/CameraComponent.h"
 #include "HorizonScene/Components/FoliageComponent.h"
 #include "HorizonScene/Components/LandscapeWorldComponent.h"
+#include "HorizonScene/Components/MaterialComponent.h"
 #include "HorizonScene/Components/NavAgentComponent.h"
 #include "HorizonScene/Components/NavMeshComponent.h"
 #include "HorizonScene/Components/TransformComponent.h"
@@ -266,6 +267,14 @@ void LandscapeRuntime::update(HorizonWorld& world, float dt, double budgetMs, co
 		if (c.enabled && !c.pack.empty()) { comp = &c; m_landscapeEntity = static_cast<uint32_t>(e); break; }
 	}
 	if (!comp) { if (active()) reset(); m_failedPack.clear(); return; }
+	// The ground's material, read every frame (it can be changed while the landscape runs): the entity's own, as a TerrainComponent's
+	// landscape has it, else the texture group's Auto Landscape material. None (a null id): the flat layer colours.
+	{
+		const auto* mc = world.registry().try_get<MaterialComponent>(static_cast<entt::entity>(m_landscapeEntity));
+		m_materialId = mc ? mc->materialAssetId : HE::UUID{};
+		if (m_materialId == HE::UUID{} && comp->textureGroup >= 0 && comp->textureGroup < kAutoLandscapeGroupCount)
+			m_materialId = autoLandscapeGroup(static_cast<AutoLandscapeGroupId>(comp->textureGroup)).materialId;
+	}
 	// It failed before with the same path AND the same project root (beginFromPack resolves a relative path against m_projectRoot): a
 	// changed path, or a project root that now resolves it differently, is a new try.
 	// ... and so is the streaming switch: a world too large to keep whole starts once streaming is on again.
@@ -559,6 +568,7 @@ void LandscapeRuntime::buildRenderFrame(const glm::dmat4& viewProjRelative, cons
 	out.uvOrigin = f.uvOrigin;
 	out.cameraRel = glm::vec3(f.cameraAbsolute - f.origin);
 	out.slabDistance = f.slabDistance;
+	out.materialId = m_materialId;
 	out.patches.reserve(f.patches.size());
 	for (const LandscapeFrame::Patch& p : f.patches)
 	{

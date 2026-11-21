@@ -28,6 +28,9 @@ public:
 		glm::vec3 ambient{ 0.12f, 0.14f, 0.18f };
 		void* normalArray = nullptr, *maskArray = nullptr;   // the same group's normal and mask arrays (nullptr = not used)
 		void* albedoArray = nullptr;   // id<MTLTexture> (2D array) of the world-UV ground, resolved by the renderer; nullptr = flat colours
+		// id<MTLRenderPipelineState> of the ground's material (landscapeVertex + landscapeFragment), for the target of this encoder; the
+		// caller has bound everything a material draw needs but the landscape's own images. nullptr = the fixed layer blend.
+		void* materialPipeline = nullptr;
 	};
 	struct Stats
 	{
