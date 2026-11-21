@@ -15150,6 +15150,7 @@ IRenderer::Capabilities OpenGLRenderer::GetCapabilities() const
 	// enough, but the shader cross-compiler must be built in.
 	c.supportsDeferredRendering  = true;
 	c.supportsRawCapture         = true;   // RenderSceneImage's rawOutput (kTonemapFS)
+	c.landscapeCoarseRevision    = true;   // OpenGLLandscape.cpp: new coarse and far images, the atlas stays
 	c.supportsRvt                = m_rvtSupported;   // a page is that raw capture blitted into the pool (the programs come from the cross-compiler)
 	// SSR: the FORWARD variant only (docs/ssr-cross-backend-plan.md checkpoint
 	// A) — the reflection MRT pre-pass plus last frame's HDR copy, exactly

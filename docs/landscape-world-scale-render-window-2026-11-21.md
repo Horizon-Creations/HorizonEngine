@@ -35,8 +35,12 @@ by its file, and reads that data from disk window by window.
 
 * **D3D11 / D3D12**: the `uvOrigin` line is the only change there and nothing ran. A window move on those backends takes the same
   "new generation" path a new landscape takes, which they have always had; not run for this.
-* **A window move pops**: the atlas begins again, so for about 25 frames the near ground is drawn from the far levels. Once per 32 km
-  travelled, only on worlds larger than the window. Marked `shortcut:` in `placeWindow`.
+* **A window move still pops on D3D11 / D3D12** (the atlas begins again, about 25 frames of far levels near the camera, once per 32 km,
+  only on worlds larger than the window). **Fixed the same day on OpenGL, Metal and Vulkan**: the move changes
+  `LandscapeRenderStatic::coarseRevision` only, the backend makes its coarse and far images again and keeps the tile atlas; scene 6
+  uploads 30 of the 191 near tiles across a move (the ones the step brought in) and the picture is still 0 pixels from the world drawn
+  whole. Which path a runtime takes is `LandscapeRuntime::setWindowKeepsAtlas`, set from
+  `IRenderer::Capabilities::landscapeCoarseRevision`. What D3D needs: `landscape-world-scale-windows-handoff-2026-11-21.md`, item 2a.
 * **No real pack larger than the window was written or flown.** The 512 km world is a formula source; the region format is tested on
   small worlds with regions of 2 tiles. Nothing was timed.
 * **Still whole in memory for a huge world:** the pack's tile index (12 B a tile: 46 MB at 1000 km), the cell HLOD table, the pack

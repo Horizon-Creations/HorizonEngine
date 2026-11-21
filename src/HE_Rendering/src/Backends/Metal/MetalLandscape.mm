@@ -145,6 +145,30 @@ void MetalLandscape::encode(void* renderEncoder, const LandscapeRenderFrame& f, 
 
 	@autoreleasepool
 	{
+		// The baked far image, when the world has one: the only image of ours that is filtered, with the mip chain the runtime made. Made
+		// with the landscape's images, and again whenever the coarse revision says the far data changed (an edit, a window that moved).
+		// Always a NEW texture: a frame in flight keeps the one it was encoded with.
+		const auto makeFar = [&] {
+			m.farAlbedo = nil;
+			if (w.farW <= 0 || w.farH <= 0 || w.farMips.empty()) return;
+			bool whole = true;
+			for (size_t l = 0; l < w.farMips.size(); ++l)
+				whole = whole && w.farMips[l].size() == static_cast<size_t>(std::max(1, w.farW >> l)) * static_cast<size_t>(std::max(1, w.farH >> l)) * 4;
+			if (!whole) { ++m.stats.rejected; return; }   // a level of the wrong size: drawn from the coarse weights instead
+			MTLTextureDescriptor* d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm_sRGB
+			                                                                              width:static_cast<NSUInteger>(w.farW)
+			                                                                             height:static_cast<NSUInteger>(w.farH) mipmapped:NO];
+			d.mipmapLevelCount = w.farMips.size();
+			d.usage = MTLTextureUsageShaderRead;
+			d.storageMode = m.storage();
+			m.farAlbedo = [m.device newTextureWithDescriptor:d];
+			for (size_t l = 0; l < w.farMips.size(); ++l)
+			{
+				const NSUInteger lw = static_cast<NSUInteger>(std::max(1, w.farW >> l)), lh = static_cast<NSUInteger>(std::max(1, w.farH >> l));
+				[m.farAlbedo replaceRegion:MTLRegionMake2D(0, 0, lw, lh) mipmapLevel:l withBytes:w.farMips[l].data() bytesPerRow:lw * 4];
+			}
+		};
+
 		// ── the images of a landscape that began (or the first frame) ─────────────
 		if (m.world != f.world && (!m.world || m.world->generation != w.generation))
 		{
@@ -171,38 +195,26 @@ void MetalLandscape::encode(void* renderEncoder, const LandscapeRenderFrame& f, 
 				                      mipmapLevel:0 withBytes:(have ? w.coarseWeights[static_cast<size_t>(p)].data() : none.data())
 				                      bytesPerRow:static_cast<NSUInteger>(std::max(w.coarseWeightW, 1)) * 4];   // a page the world does not have is zero
 			}
-			// The baked far image, when the world has one: the only image of ours that is filtered, with the mip chain the runtime made.
-			if (w.farW > 0 && w.farH > 0 && !w.farMips.empty())
-			{
-				bool whole = true;
-				for (size_t l = 0; l < w.farMips.size(); ++l)
-					whole = whole && w.farMips[l].size() == static_cast<size_t>(std::max(1, w.farW >> l)) * static_cast<size_t>(std::max(1, w.farH >> l)) * 4;
-				if (whole)
-				{
-					MTLTextureDescriptor* d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm_sRGB
-					                                                                              width:static_cast<NSUInteger>(w.farW)
-					                                                                             height:static_cast<NSUInteger>(w.farH) mipmapped:NO];
-					d.mipmapLevelCount = w.farMips.size();
-					d.usage = MTLTextureUsageShaderRead;
-					d.storageMode = m.storage();
-					m.farAlbedo = [m.device newTextureWithDescriptor:d];
-					for (size_t l = 0; l < w.farMips.size(); ++l)
-					{
-						const NSUInteger lw = static_cast<NSUInteger>(std::max(1, w.farW >> l)), lh = static_cast<NSUInteger>(std::max(1, w.farH >> l));
-						[m.farAlbedo replaceRegion:MTLRegionMake2D(0, 0, lw, lh) mipmapLevel:l withBytes:w.farMips[l].data() bytesPerRow:lw * 4];
-					}
-				}
-				else
-					++m.stats.rejected;   // a level of the wrong size: drawn from the coarse weights instead
-			}
-			m.indices = [m.device newBufferWithBytes:w.patchIndices.data() length:w.patchIndices.size() * sizeof(uint16_t) options:MTLResourceStorageModeShared];
+			makeFar();
+			m.indices =[m.device newBufferWithBytes:w.patchIndices.data() length:w.patchIndices.size() * sizeof(uint16_t) options:MTLResourceStorageModeShared];
 			m.world = f.world;
 			m.coarseRevision = w.coarseRevision;
 			++m.stats.generations;
 		}
 		else if (m.coarseRevision != w.coarseRevision)
 		{
-			// An edited tile changed the coarse world (same landscape, same sizes): the far levels' images again, the atlas stays as it is.
+			// The far data changed and nothing else: an edited tile, or the render window moved (then the coarse images may have another
+			// size). New coarse images and a new far image; the tile atlas and the slot table stay exactly as they are, which is the
+			// point: the near ground never falls back to the far levels for this. New textures, not new contents: a frame in flight
+			// keeps the ones it was encoded with.
+			if (w.coarseHeights.size() == static_cast<size_t>(w.coarseW) * static_cast<size_t>(w.coarseH))
+				m.coarseHeights = m.make2D(MTLPixelFormatR16Uint, w.coarseW, w.coarseH, 0);
+			for (int p = 0; p < 3; ++p)
+				if (static_cast<size_t>(p) < w.coarseWeights.size()
+				    && w.coarseWeights[static_cast<size_t>(p)].size() == static_cast<size_t>(w.coarseWeightW) * static_cast<size_t>(w.coarseWeightH) * 4)
+					m.coarseWeights[p] = m.make2D(MTLPixelFormatRGBA8Unorm, w.coarseWeightW, w.coarseWeightH, 0);
+			makeFar();
+			m.world = f.world;   // the constants below come from `w` anyway; this lets the previous window's data go
 			if (w.coarseHeights.size() == static_cast<size_t>(w.coarseW) * static_cast<size_t>(w.coarseH))
 				[m.coarseHeights replaceRegion:MTLRegionMake2D(0, 0, static_cast<NSUInteger>(w.coarseW), static_cast<NSUInteger>(w.coarseH))
 				                   mipmapLevel:0 withBytes:w.coarseHeights.data() bytesPerRow:static_cast<NSUInteger>(w.coarseW) * 2];

@@ -198,16 +198,22 @@ void LandscapeRuntime::placeWindow()
 	m_winCoarse = std::move(coarse);
 	m_quadtree.tilesX = winX;
 	m_quadtree.tilesZ = winZ;
-	// To a renderer this is another landscape: every image is made again, and so the atlas starts empty (its tiles are uploaded again
-	// over the next frames, nearest the camera's far levels show meanwhile).
-	// shortcut: one pop per 32 km travelled on worlds larger than the window, keep the atlas across a window move (the slot table and the
-	// tile images do not change) when a backend can take new coarse images of another size without a new generation.
+	m_renderStatic.reset();
+	if (m_windowKeepsAtlas)
+	{
+		// Only the far data is another: the tiles' images and the slot table do not change when the window moves (a tile's table entry
+		// is the same in both windows, the corner being a multiple of the table's size). So the renderer is told "the far data changed"
+		// and nothing near the camera is touched: no tile is uploaded again, nothing falls back to the far levels.
+		++m_coarseRevision;
+		return;
+	}
+	// A backend that cannot swap the far data alone (IRenderer::Capabilities::landscapeCoarseRevision) only knows "another landscape":
+	// every image is made again, and so the atlas starts empty and its tiles are uploaded again over the next frames.
 	m_generation = ++g_generation;
 	m_atlas = std::make_unique<LandscapeAtlas>(m_store->stats().maxTiles, m_config.atlasWindow);
 	m_pendingUploads.clear();
 	m_pendingReleases.clear();
 	m_pendingTable.clear();
-	m_renderStatic.reset();
 }
 
 void LandscapeRuntime::coarseChanged()

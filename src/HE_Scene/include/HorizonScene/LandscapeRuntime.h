@@ -192,6 +192,10 @@ public:
 	const std::filesystem::path& packFile() const { return m_packFile; }
 	void tilesReplaced(const std::vector<std::pair<LandscapeTileKey, std::shared_ptr<const LandscapeTile>>>& tiles);
 	void coarseChanged();
+	// What a move of the render window is to the renderer. True: only the far data changed (coarseRevision), the tile atlas and the slot
+	// table stay, nothing near the camera is uploaded again. False (the default, safe with any backend): another landscape, the atlas
+	// begins again. Set it from IRenderer::Capabilities::landscapeCoarseRevision of the backend that draws this runtime.
+	void setWindowKeepsAtlas(bool keeps) { m_windowKeepsAtlas = keeps; }
 	// The render window's corner tile and whether the world is larger than the window at all.
 	LandscapeTileKey windowTile() const { return m_winTile; }
 	// The window's coarse world (its tile (0, 0) is windowTile()): the far levels' heights and weights, always in memory. Null before begin.
@@ -222,6 +226,7 @@ private:
 	uint64_t   m_coarseRevision = 0;
 	void       placeWindow();
 	bool       m_windowed = false;                         // the world has more tiles a side than the render window
+	bool       m_windowKeepsAtlas = false;
 	LandscapeTileKey m_winTile{ 0, 0 };                    // the window's corner; m_quadtree's world is the window
 	std::shared_ptr<const LandscapeCoarseWorld> m_winCoarse;
 	bool       m_editable = false;

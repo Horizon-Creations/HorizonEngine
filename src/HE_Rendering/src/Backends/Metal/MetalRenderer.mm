@@ -20422,6 +20422,7 @@ IRenderer::Capabilities MetalRenderer::GetCapabilities() const
 	// at runtime — no cross-compiler, no deferred path.
 	c.supportsDeferredRendering  = true;
 	c.supportsRawCapture         = true;   // RenderSceneImage's rawOutput (kTonemapMSL)
+	c.landscapeCoarseRevision    = true;   // MetalLandscape.mm: new coarse and far images, the atlas stays
 #if defined(HE_HAVE_SHADERC)
 	// A page is that raw capture blitted into the pool; the consumer is a graph material (MSL from the cross-compiler).
 	c.supportsRvt                = m_device != nullptr;

@@ -39,6 +39,7 @@ public:
 		if (m_instance) vkDestroyInstance(m_instance, nullptr);
 	}
 	const char* name() const override { return "Vulkan"; }
+	bool refreshesCoarse() const override { return true; }
 
 	bool init(std::string& error) override
 	{

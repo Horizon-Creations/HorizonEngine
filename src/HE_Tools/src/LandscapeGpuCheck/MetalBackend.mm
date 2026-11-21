@@ -31,6 +31,7 @@ public:
 	const char* name() const override { return "Metal"; }
 	bool depthIsNdc() const override { return true; }
 	bool takesFarImage() const override { return true; }
+	bool refreshesCoarse() const override { return true; }
 
 	bool init(std::string& error) override
 	{

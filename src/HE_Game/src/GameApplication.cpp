@@ -1668,6 +1668,8 @@ void GameApplication::updateLandscape(float dt)
 		renderer()->SetLandscapeProvider([this](const glm::dmat4& vp, bool zeroToOne, HE::LandscapeRenderFrame& out) {
 			if (m_world) m_landscape.buildRenderFrame(vp, m_world->origin(), zeroToOne, out);
 		});
+		// A backend that can swap the far data alone lets a render window move without emptying the tile atlas.
+		m_landscape.setWindowKeepsAtlas(renderer()->GetCapabilities().landscapeCoarseRevision);
 		m_landscapeBound = true;
 	}
 	// Ground for the physics world and a navmesh for the agents, both around the camera and the things that move. The physics world is

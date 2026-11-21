@@ -1392,6 +1392,7 @@ IRenderer::Capabilities VulkanRenderer::GetCapabilities() const
     // (createFogPipelines, eager at Initialize) AND the HDR chain exists to host the Apply
     // split. Never a blanket "Vulkan + shaderc": a failed step leaves the analytic fog.
     c.supportsVolumetricFog = m_fogReady && m_postFxReady;
+    c.landscapeCoarseRevision   = true;   // VulkanLandscape.cpp: new coarse images, the atlas stays
     c.supportsRawCapture        = m_postFxReady;   // RenderSceneImage's rawOutput rides the tonemap pass
     c.supportsRvt               = m_postFxReady && m_matReady && m_matRvt;   // a page is that raw capture copied into the pool
     return c;

@@ -52,6 +52,7 @@ struct VulkanLandscape::Impl
 	VkDeviceMemory        vboMem = VK_NULL_HANDLE, iboMem = VK_NULL_HANDLE;
 	std::vector<uint16_t> table;      // CPU mirror of the slot table: a change is one copy of the whole (small) image
 	std::shared_ptr<const LandscapeRenderStatic> world;   // what the images were made for
+	uint64_t coarseRevision = 0;                           // ... and the far data's state the coarse images hold
 	Stats stats;
 	bool ok = false;
 
@@ -415,7 +416,50 @@ void VulkanLandscape::upload(HE::LandscapeRenderFrame& f)
 		}
 		for (Img& im : m.img) m.toRead(cb, im);
 		m.world = f.world;
+		m.coarseRevision = w.coarseRevision;
 		++m.stats.generations;
+	}
+	else if (m.world && m.coarseRevision != w.coarseRevision)
+	{
+		// The far data changed and nothing else: an edited tile, or the render window moved (then the coarse images may have another
+		// size). The four coarse images are made again; the tile atlas and the slot table stay exactly as they are, which is the point:
+		// the near ground never falls back to the far levels for this. A frame in flight may still read the old ones: submit, wait
+		// (once per stroke or per 32 km travelled), then free them.
+		m.env.flush();
+		m.env.waitIdle();
+		m.destroyImage(m.img[kCoarseH]);
+		for (unsigned p = 0; p < 3; ++p) m.destroyImage(m.img[kCoarseW + p]);
+		const bool haveCoarse = w.coarseHeights.size() == static_cast<size_t>(w.coarseW) * static_cast<size_t>(w.coarseH) && w.coarseW > 0 && w.coarseH > 0;
+		if (!haveCoarse) ++m.stats.rejected;
+		const uint32_t chw = haveCoarse ? static_cast<uint32_t>(w.coarseW) : 1u, chh = haveCoarse ? static_cast<uint32_t>(w.coarseH) : 1u;
+		const uint32_t cww = static_cast<uint32_t>(std::max(w.coarseWeightW, 1)), cwh = static_cast<uint32_t>(std::max(w.coarseWeightH, 1));
+		bool good = batch() != VK_NULL_HANDLE && m.makeImage(m.img[kCoarseH], VK_FORMAT_R16_UINT, chw, chh, 1, false);
+		for (unsigned p = 0; p < 3; ++p) good = good && m.makeImage(m.img[kCoarseW + p], VK_FORMAT_R8G8B8A8_UNORM, cww, cwh, 1, false);
+		if (good)
+		{
+			m.clearImage(cb, m.img[kCoarseH]);
+			for (unsigned p = 0; p < 3; ++p) m.clearImage(cb, m.img[kCoarseW + p]);
+			if (haveCoarse) good = m.copyLayer(cb, m.img[kCoarseH], 0, chw, chh, w.coarseHeights.data(), w.coarseHeights.size() * 2);
+			for (unsigned p = 0; p < 3 && good; ++p)
+			{
+				const size_t bytes = static_cast<size_t>(cww) * cwh * 4;
+				if (p < w.coarseWeights.size() && w.coarseWeights[p].size() == bytes) good = m.copyLayer(cb, m.img[kCoarseW + p], 0, cww, cwh, w.coarseWeights[p].data(), bytes);
+			}
+		}
+		if (!good)
+		{
+			// Without coarse images nothing can be drawn: the landscape starts over at the next frame (its generation block).
+			m.env.flush();
+			m.env.waitIdle();
+			m.destroyImages();
+			++m.stats.rejected;
+			drop();
+			return;
+		}
+		m.toRead(cb, m.img[kCoarseH]);
+		for (unsigned p = 0; p < 3; ++p) m.toRead(cb, m.img[kCoarseW + p]);
+		m.world = f.world;
+		m.coarseRevision = w.coarseRevision;
 	}
 	if (!m.world) { drop(); return; }
 

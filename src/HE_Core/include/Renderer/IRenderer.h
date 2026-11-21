@@ -272,6 +272,12 @@ public:
         // RenderSceneImage honours EditorCameraOverride::rawOutput / rawSrgb: the picture is the materials' own
         // colour, no tonemap, bloom, AA or other post. The far-landscape bake needs it (Thema 228).
         bool supportsRawCapture = false;
+        // The tile landscape's far data can change without the landscape being another one: the backend looks at
+        // LandscapeRenderStatic::coarseRevision and makes its coarse images (and far image) again, of whatever size they
+        // now are, while the tile atlas and the slot table stay. With it a render window that moves, and a brush stroke,
+        // never send the near ground back to the far levels. False = the application has to announce such a change as a
+        // new landscape (LandscapeRuntime::setWindowKeepsAtlas), which empties the atlas once.
+        bool landscapeCoarseRevision = false;
         // CreateRvtPool / EditorCameraOverride::rvtSlot work: the backend can hold the page pool of the Runtime
         // Virtual Textures and fill a slice of it from RenderSceneImage (Thema 333). False = the landscape keeps
         // running its material directly.

@@ -201,6 +201,33 @@ void OpenGLLandscape::draw(const LandscapeRenderFrame& f, const glm::mat4& viewP
 	const LandscapeRenderStatic& w = *f.world;
 	StateGuard guard;
 
+	// The baked far image, when the world has one: the only image here that is filtered, with the mip chain the runtime made. Made with
+	// the landscape's images, and again whenever the coarse revision says the far data changed (an edit, a render window that moved).
+	const auto makeFar = [&] {
+		if (m.farAlbedo) { glDeleteTextures(1, &m.farAlbedo); m.farAlbedo = 0; }
+		if (w.farW <= 0 || w.farH <= 0 || w.farMips.empty()) return;
+		m.farAlbedo = makeTexture(GL_TEXTURE_2D);
+		bool whole = true;
+		for (size_t l = 0; l < w.farMips.size(); ++l)
+		{
+			const int lw = std::max(1, w.farW >> l), lh = std::max(1, w.farH >> l);
+			if (w.farMips[l].size() != static_cast<size_t>(lw) * static_cast<size_t>(lh) * 4) { whole = false; break; }
+			glTexImage2D(GL_TEXTURE_2D, static_cast<GLint>(l), GL_SRGB8_ALPHA8, lw, lh, 0, GL_RGBA, GL_UNSIGNED_BYTE, w.farMips[l].data());
+		}
+		if (whole)
+		{
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, static_cast<GLint>(w.farMips.size()) - 1);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+		}
+		else
+		{
+			glDeleteTextures(1, &m.farAlbedo);   // a level of the wrong size: drawn from the coarse weights instead
+			m.farAlbedo = 0;
+			++m.stats.rejected;
+		}
+	};
+
 	// ── the images of a landscape that began (or the first frame) ─────────────
 	if (m.world != f.world && (!m.world || m.world->generation != w.generation))
 	{
@@ -234,30 +261,7 @@ void OpenGLLandscape::draw(const LandscapeRenderFrame& f, const glm::mat4& viewP
 			             have ? w.coarseWeights[static_cast<size_t>(p)].data() : none.data());   // a page the world does not have is zero
 		}
 
-		// The baked far image, when the world has one: the only image here that is filtered, with the mip chain the runtime made.
-		if (w.farW > 0 && w.farH > 0 && !w.farMips.empty())
-		{
-			m.farAlbedo = makeTexture(GL_TEXTURE_2D);
-			bool whole = true;
-			for (size_t l = 0; l < w.farMips.size(); ++l)
-			{
-				const int lw = std::max(1, w.farW >> l), lh = std::max(1, w.farH >> l);
-				if (w.farMips[l].size() != static_cast<size_t>(lw) * static_cast<size_t>(lh) * 4) { whole = false; break; }
-				glTexImage2D(GL_TEXTURE_2D, static_cast<GLint>(l), GL_SRGB8_ALPHA8, lw, lh, 0, GL_RGBA, GL_UNSIGNED_BYTE, w.farMips[l].data());
-			}
-			if (whole)
-			{
-				glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, static_cast<GLint>(w.farMips.size()) - 1);
-				glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
-				glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-			}
-			else
-			{
-				glDeleteTextures(1, &m.farAlbedo);   // a level of the wrong size: drawn from the coarse weights instead
-				m.farAlbedo = 0;
-				++m.stats.rejected;
-			}
-		}
+		makeFar();
 
 		// the grid: (i, j) as two floats; the indices are the shared patch mesh
 		const int n = w.patchCells + 1;
@@ -281,20 +285,24 @@ void OpenGLLandscape::draw(const LandscapeRenderFrame& f, const glm::mat4& viewP
 	}
 	else if (m.coarseRevision != w.coarseRevision)
 	{
-		// An edited tile changed the coarse world (same landscape, same sizes): the far levels' images again, the atlas stays as it is.
+		// The far data changed and nothing else: an edited tile, or the render window moved (then the coarse images may have another
+		// size). The coarse images and the far image are made again; the tile atlas and the slot table stay exactly as they are, which
+		// is the point: the near ground never falls back to the far levels for this.
 		glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
 		if (w.coarseHeights.size() == static_cast<size_t>(w.coarseW) * static_cast<size_t>(w.coarseH))
 		{
 			glBindTexture(GL_TEXTURE_2D, m.coarseHeights);
-			glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w.coarseW, w.coarseH, GL_RED_INTEGER, GL_UNSIGNED_SHORT, w.coarseHeights.data());
+			glTexImage2D(GL_TEXTURE_2D, 0, GL_R16UI, w.coarseW, w.coarseH, 0, GL_RED_INTEGER, GL_UNSIGNED_SHORT, w.coarseHeights.data());
 		}
 		for (int p = 0; p < 3; ++p)
 			if (static_cast<size_t>(p) < w.coarseWeights.size()
 			    && w.coarseWeights[static_cast<size_t>(p)].size() == static_cast<size_t>(w.coarseWeightW) * static_cast<size_t>(w.coarseWeightH) * 4)
 			{
 				glBindTexture(GL_TEXTURE_2D, m.coarseWeights[p]);
-				glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w.coarseWeightW, w.coarseWeightH, GL_RGBA, GL_UNSIGNED_BYTE, w.coarseWeights[static_cast<size_t>(p)].data());
+				glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w.coarseWeightW, w.coarseWeightH, 0, GL_RGBA, GL_UNSIGNED_BYTE, w.coarseWeights[static_cast<size_t>(p)].data());
 			}
+		makeFar();
+		m.world = f.world;   // the uniforms below come from `w` anyway; this lets the previous window's data go
 		m.coarseRevision = w.coarseRevision;
 	}
 

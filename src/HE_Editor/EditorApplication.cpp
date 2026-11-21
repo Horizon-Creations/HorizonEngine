@@ -4206,6 +4206,8 @@ void EditorApplication::OnRender(float dt)
 				renderer()->SetLandscapeProvider([this](const glm::dmat4& vp, bool zeroToOne, HE::LandscapeRenderFrame& out) {
 					if (m_editorWorld) m_landscape.buildRenderFrame(vp, m_editorWorld->origin(), zeroToOne, out);
 				});
+				// A backend that can swap the far data alone lets a render window move without emptying the tile atlas.
+				m_landscape.setWindowKeepsAtlas(renderer()->GetCapabilities().landscapeCoarseRevision);
 				m_landscapeBound = true;
 			}
 			if (m_landscapePhysics != m_physicsWorld.get())

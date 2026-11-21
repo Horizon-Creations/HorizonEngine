@@ -673,7 +673,7 @@ int runBackend(gpucheck::Backend& be, const std::string& packPath, const std::fi
 		tally.check(stayed, "a dab in an open stroke leaves every tile resident (nothing falls back to the far levels)");
 		tally.check(nearMoved > 200, "a dab on a tile in the atlas shows at once");
 		// A backend that re-uploads the coarse world on a coarse revision shows the far stroke; the others keep the far levels as they were.
-		if (be.takesFarImage()) tally.check(farMoved > 30, "a stroke outside the atlas shows on the far levels once it ends");
+		if (be.refreshesCoarse()) tally.check(farMoved > 30, "a stroke outside the atlas shows on the far levels once it ends");
 		else std::printf("  %-26s this backend does not upload the coarse world again yet: the far stroke moved %zu px\n", "", farMoved);
 		writePng((outDir / (std::string("landscape_") + be.name() + "_edit.png")).string(), farStroke);
 	}
@@ -683,7 +683,11 @@ int runBackend(gpucheck::Backend& be, const std::string& packPath, const std::fi
 		constexpr int kTilesWide = 320;   // 164 km: more than the window of 256
 		const auto src = std::make_shared<FormulaSource>(kTilesWide);
 		const double tileM = src->geometry().tileM;
-		const glm::dvec3 start(150.5 * tileM, 2600.0, 160.5 * tileM), end(250.5 * tileM, 2600.0, 160.5 * tileM);
+		// One kilometre across the edge of the window's middle band: the window moves, and nearly every tile near the camera is the same
+		// tile before and after. Those must not be uploaded again.
+		const glm::dvec3 start(191.5 * tileM, 2600.0, 160.5 * tileM), end(193.5 * tileM, 2600.0, 160.5 * tileM);
+		uint64_t uploadsAcross = 0;
+		size_t residentAfter = 0;
 		const auto shot = [&](int windowTiles, gpucheck::RenderOut& out, LandscapeTileKey& window, bool& moved) {
 			LandscapeRuntime rt;
 			LandscapeRuntimeConfig cfg;
@@ -691,6 +695,7 @@ int runBackend(gpucheck::Backend& be, const std::string& packPath, const std::fi
 			cfg.renderWindowTiles = windowTiles;
 			std::string err;
 			if (!rt.begin(src, cfg, &err)) { std::printf("  runtime: %s\n", err.c_str()); return false; }
+			rt.setWindowKeepsAtlas(be.refreshesCoarse());   // what the application does from the renderer's capabilities
 			// First where the window does not have to move, and a frame from there so the backend holds that landscape's images ...
 			Camera c0{ start, { 0.7, -0.3, 0.6 }, { start.x - 300.0, 0.0, start.z - 300.0 } };
 			if (!settle(rt, c0.pos, c0.origin)) return false;
@@ -698,13 +703,16 @@ int runBackend(gpucheck::Backend& be, const std::string& packPath, const std::fi
 			gpucheck::RenderOut warm;
 			if (!be.render(in0, warm)) return false;
 			const LandscapeTileKey before = rt.windowTile();
-			// ... then 51 km on, where it has: the picture that is compared is drawn right after the move.
+			// ... then a kilometre on, where it has: the picture that is compared is drawn right after the move.
 			Camera c1{ end, { 0.7, -0.3, 0.6 }, { end.x - 300.0, 0.0, end.z - 300.0 } };
 			if (!settle(rt, c1.pos, c1.origin)) return false;
 			window = rt.windowTile();
 			moved = window != before;
 			gpucheck::RenderIn in1 = makeInput(c1, be.depthIsNdc(), rt);
-			return be.render(in1, out);
+			if (!be.render(in1, out)) return false;
+			uploadsAcross = out.uploads - warm.uploads;       // tiles the backend copied into its atlas because of the step
+			residentAfter = rt.store()->residentKeys().size();
+			return true;
 		};
 		gpucheck::RenderOut whole, windowed;
 		LandscapeTileKey w0, w1;
@@ -724,6 +732,10 @@ int runBackend(gpucheck::Backend& be, const std::string& packPath, const std::fi
 		tally.check(moved1 && w1.x == 64, "the window moved with the camera, by a whole slot table");
 		tally.check(ground > whole.depth.size() / 5, "the world fills part of the image (render window)");
 		tally.check(differ * 1000 <= whole.depth.size(), "a window that has just moved draws the world as the whole world does");
+		std::printf("  %-26s the move uploaded %llu tile(s) of the %zu near the camera%s\n", "", static_cast<unsigned long long>(uploadsAcross), residentAfter,
+		            be.refreshesCoarse() ? "" : " (this backend has to begin the atlas again: every tile, once)");
+		// Smooth: only the tiles the kilometre brought in are uploaded. An atlas that began again would upload every one of them.
+		if (be.refreshesCoarse()) tally.check(uploadsAcross * 2 < residentAfter, "a window move uploads no tile that was already there (the near ground stays)");
 		writePng((outDir / (std::string("landscape_") + be.name() + "_window.png")).string(), windowed);
 	}
 	std::printf("  %s\n", tally.failures == 0 ? "OK" : "FAILED");

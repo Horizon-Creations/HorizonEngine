@@ -289,6 +289,55 @@ TEST_CASE("landscape runtime: a world larger than the render window is drawn as 
 	CHECK(f.worldMaxX == doctest::Approx(232.0 * tileM));
 }
 
+TEST_CASE("landscape runtime: with a backend that swaps the far data alone, a window move keeps the atlas: no new landscape, no tile uploaded again")
+{
+	const auto src = std::make_shared<FormulaSource>(1000);
+	LandscapeRuntime rt;
+	REQUIRE(rt.begin(src, LandscapeRuntimeConfig{}));
+	rt.setWindowKeepsAtlas(true);   // IRenderer::Capabilities::landscapeCoarseRevision
+	const double tileM = 512.0;
+	// Tile 639 is the last of the middle band of the window at 448 (448 + 128 + 64 - 1).
+	// The window is placed around tile 585 first (a camera that starts at 639 would get the window at 512 at once), then walked to the band's edge.
+	const glm::dvec3 cam(639.5 * tileM, 2200.0, 585.5 * tileM), origin(639.0 * tileM, 0.0, 585.0 * tileM);
+	rt.updateAt({ 585.5 * tileM, 2200.0, 585.5 * tileM }, glm::vec3(0.0f), 5.0);
+	REQUIRE(rt.windowTile().x == 448);
+	REQUIRE(settle(rt, cam));
+	REQUIRE(rt.windowTile().x == 448);
+	LandscapeRenderFrame f0;
+	rt.buildRenderFrame(viewProj(cam, origin), origin, false, f0);   // takes the first uploads
+	REQUIRE(f0.active);
+	const size_t used = rt.atlas()->stats().used;
+	REQUIRE(used > 50);
+	const LandscapeTileKey under{ 639, 585 };   // the tile under the camera
+	REQUIRE(rt.atlas()->contains(under));
+	const uint16_t slot = rt.atlas()->slotOf(under);
+
+	// One kilometre on: the window moves by a slot table.
+	const glm::dvec3 cam2 = cam + glm::dvec3(2.0 * tileM, 0.0, 0.0);
+	rt.updateAt(cam2, glm::vec3(0.0f), 5.0);
+	CHECK(rt.windowTile().x == 512);
+	CHECK(rt.atlas()->stats().used * 4 >= used * 3);   // the atlas did NOT begin again (the store dropped the tiles a kilometre behind)
+	CHECK(rt.atlas()->contains(under));
+	CHECK(rt.atlas()->slotOf(under) == slot);        // the tile under the camera keeps its slot and its image
+	REQUIRE(settle(rt, cam2));
+	LandscapeRenderFrame f1;
+	rt.buildRenderFrame(viewProj(cam2, origin), origin, false, f1);
+	REQUIRE(f1.active);
+	CHECK(f1.world->generation == f0.world->generation);          // the same landscape to the renderer: its atlas images stay
+	CHECK(f1.world->coarseRevision != f0.world->coarseRevision);  // ... with other far data, which it makes again
+	CHECK(f1.world->tilesX == 256);
+	CHECK(f1.world->coarseHeights != f0.world->coarseHeights);
+	// What is uploaded after the move is what the kilometre brought in: not the tile under the camera, and far fewer than the atlas holds.
+	bool nearAgain = false;
+	for (const LandscapeRenderUpload& u : f1.uploads) nearAgain = nearAgain || u.slot == slot;
+	CHECK_FALSE(nearAgain);
+	CHECK(f1.uploads.size() * 2 < used);
+	// The slot table entries the renderer holds are still right: the entry of the near tile, by its key in the NEW window.
+	const int D = f1.world->tableWindow;
+	const LandscapeTileKey win = rt.windowTile();
+	CHECK(((under.z & (D - 1)) * D + (under.x & (D - 1))) == (((under.z - win.z) & (D - 1)) * D + ((under.x - win.x) & (D - 1))));
+}
+
 TEST_CASE("landscape runtime: a world that fits the window is its own window, and the window's size has to fit the slot table")
 {
 	// 300 tiles (154 km) with the window switched off: the whole world, however large.

@@ -61,6 +61,10 @@ public:
 	virtual bool depthIsNdc() const { return false; }
 	// The backend's landscape class uploads and reads the baked far image (LandscapeRenderStatic::farMips). The others draw as without one.
 	virtual bool takesFarImage() const { return false; }
+	// The backend's landscape class looks at LandscapeRenderStatic::coarseRevision: it makes its coarse images again and leaves the tile
+	// atlas alone (what IRenderer::Capabilities::landscapeCoarseRevision says of the real renderer). Then a brush stroke shows on the far
+	// levels and a render window moves without a single tile being uploaded again.
+	virtual bool refreshesCoarse() const { return false; }
 	virtual bool init(std::string& error) = 0;
 	virtual bool render(const RenderIn& in, RenderOut& out) = 0;
 };
