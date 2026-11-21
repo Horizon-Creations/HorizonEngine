@@ -5,6 +5,7 @@
 #include <ContentManager/Assets.h>
 #include "ShaderCompiler.h" // he::shaderc
 #include "FogVolumeShaderSource.h"
+#include <HorizonRendering/LandscapeShaderSource.h>
 #include <MaterialGraph/MaterialGraph.h> // matSplitDisplacement
 
 #include <cstdio>
@@ -1587,6 +1588,192 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::uiVertex(Backend b
     return m_uiVertCache.emplace(key, std::move(out)).first->second;
 }
 
+// ─── The tile landscape as a material's geometry (Thema 326) ─────────────────
+namespace
+{
+// The frame-wide numbers both stages read: the head of LsGlobals as every landscape backend fills it (LandscapeShaderSource.h), so the
+// buffer bound for the landscape's own shader serves this one too. Nothing behind uCoarseGrid is declared: it is not read here.
+constexpr const char* kLandscapeGlobalsBlock = R"(layout(std140, set = 0, binding = 50) uniform LsGlobals {
+    mat4  uViewProj;
+    vec4  uCameraRel;
+    vec4  uWorld;
+    vec4  uHeightInfo;
+    vec3  uOrigin;
+    ivec4 uTile;
+    ivec4 uHeightRect[8];
+    ivec4 uCoarseGrid[16];
+};
+)";
+
+constexpr const char* kLandscapeMaterialVertexHead = R"(layout(std140, set = 0, binding = 58) uniform LsPatch {
+    ivec4 uPatch;
+    vec4  uPatchPos;
+    vec4  uMorph;
+};
+layout(set = 0, binding = 59) uniform usampler2DArray uTileHeights;
+layout(set = 0, binding = 51) uniform usampler2D      uSlotTable;
+layout(set = 0, binding = 60) uniform usampler2D      uCoarseHeights;
+layout(location = 0) out vec3 vNormal;
+layout(location = 1) out vec3 vColor;
+layout(location = 2) out vec2 vUV;
+layout(location = 3) out vec3 vWorldPos;
+)";
+
+// The landscape's own main() with the varyings of a material. Position and morph are kLandscapeVS's, line for line (the seams between
+// levels depend on it). The normal is new: the landscape's shader takes it from derivatives in the fragment, a material reads vNormal.
+// It comes from the height lattice of the patch's level and leans toward the next coarser lattice's with the morph, so it changes
+// continuously where the level changes.
+constexpr const char* kLandscapeMaterialVertexMain = R"(
+vec3 heLsNormal(ivec2 g, int s, float cell)
+{
+    float hx0 = heightAt(g + ivec2(-s, 0)), hx1 = heightAt(g + ivec2(s, 0));
+    float hz0 = heightAt(g + ivec2(0, -s)), hz1 = heightAt(g + ivec2(0, s));
+    return normalize(vec3(hx0 - hx1, 2.0 * float(s) * cell, hz0 - hz1));
+}
+
+void main()
+{
+    ivec2 ij = ivec2(gl_VertexIndex % 65, gl_VertexIndex / 65);
+    float cell = uPatchPos.z / 64.0;
+    vec2 xz = uPatchPos.xy + vec2(ij) * cell;
+    ivec2 g = uPatch.yz + ij;
+    float h = heightAt(g);
+
+    vec2 d2 = xz - uCameraRel.xz;
+    float d = sqrt(dot(d2, d2) + uCameraRel.w * uCameraRel.w);
+    float m = clamp((d - uMorph.x) / max(uMorph.y - uMorph.x, 1e-3), 0.0, 1.0);
+    bool oi = (ij.x & 1) == 1;
+    bool oj = (ij.y & 1) == 1;
+    if (m > 0.0 && (oi || oj))
+    {
+        ivec2 a, b;
+        if (oi && !oj)      { a = g + ivec2(-1, 0);  b = g + ivec2(1, 0); }
+        else if (!oi && oj) { a = g + ivec2(0, -1);  b = g + ivec2(0, 1); }
+        else                { a = g + ivec2(-1, -1); b = g + ivec2(1, 1); }
+        h = mix(h, 0.5 * (heightAt(a) + heightAt(b)), m);
+    }
+    vec3 n = heLsNormal(g, 1, cell);
+    if (m > 0.0) n = normalize(mix(n, heLsNormal(g, 2, cell), m));
+
+    vec3 rel = vec3(xz.x, h - uOrigin.y, xz.y);
+    vNormal   = n;
+    vColor    = vec3(1.0);
+    vUV       = (xz + uOrigin.xz) / uWorld.xy;
+    vWorldPos = rel;
+    gl_Position = uViewProj * vec4(rel, 1.0);
+}
+)";
+
+// What replaces heLandscapeWeights in a material's fragment. The material reads its weights as ONE image, the pages (four layers each)
+// side by side, over uv 0..1; this answers the same three calls from the tile atlas. A texel of the virtual image is a weight texel of a
+// tile: through the slot table to the tile's slice, or, where the tile is not in the atlas, the coarse world's texel over the same
+// ground. Only texelFetch: no sampler is spent (the Metal stage has none left), the bilinear weights are made here.
+constexpr const char* kLandscapeMaterialFragmentHead = R"(layout(set = 0, binding = 51) uniform usampler2D     heLsSlotTable;
+layout(set = 0, binding = 52) uniform sampler2DArray heLsTileWeights0;
+layout(set = 0, binding = 53) uniform sampler2DArray heLsTileWeights1;
+layout(set = 0, binding = 54) uniform sampler2DArray heLsTileWeights2;
+layout(set = 0, binding = 55) uniform sampler2D      heLsCoarseWeights0;
+layout(set = 0, binding = 56) uniform sampler2D      heLsCoarseWeights1;
+layout(set = 0, binding = 57) uniform sampler2D      heLsCoarseWeights2;
+ivec2 heLsPageSize() { return ivec2(int(uHeightInfo.y), int(uHeightInfo.z)) * uTile.y; }
+ivec2 heLsWeightSize() { ivec2 s = heLsPageSize(); return ivec2(s.x * 3, s.y); }
+vec4 heLsTexel(int page, ivec2 p)
+{
+    ivec2 size = heLsPageSize();
+    p = clamp(p, ivec2(0), size - ivec2(1));
+    ivec2 tile = p / uTile.y;
+    int mask = int(uHeightInfo.w) - 1;
+    uint slot = texelFetch(heLsSlotTable, ivec2(tile.x & mask, tile.y & mask), 0).r;
+    if (slot == 65535u)
+    {
+        ivec2 cs = textureSize(heLsCoarseWeights0, 0);
+        ivec2 c = clamp(ivec2((vec2(p) + 0.5) / vec2(size) * vec2(cs)), ivec2(0), cs - ivec2(1));
+        return page == 0 ? texelFetch(heLsCoarseWeights0, c, 0) : page == 1 ? texelFetch(heLsCoarseWeights1, c, 0) : texelFetch(heLsCoarseWeights2, c, 0);
+    }
+    ivec3 at = ivec3(p - tile * uTile.y, int(slot));
+    return page == 0 ? texelFetch(heLsTileWeights0, at, 0) : page == 1 ? texelFetch(heLsTileWeights1, at, 0) : texelFetch(heLsTileWeights2, at, 0);
+}
+vec4 heLsWeight(vec2 uv)
+{
+    float fx = clamp(uv.x, 0.0, 1.0) * 3.0;
+    int page = min(int(fx), 2);
+    vec2 q = vec2(fx - float(page), uv.y) * vec2(heLsPageSize()) - 0.5;
+    ivec2 i = ivec2(floor(q));
+    vec2 f = q - vec2(i);
+    return mix(mix(heLsTexel(page, i), heLsTexel(page, i + ivec2(1, 0)), f.x),
+               mix(heLsTexel(page, i + ivec2(0, 1)), heLsTexel(page, i + ivec2(1, 1)), f.x), f.y);
+}
+vec4 heLsWeightLod(vec2 uv, float lod) { return heLsWeight(uv); }
+)";
+
+void replaceAll(std::string& s, std::string_view from, std::string_view to)
+{
+    for (size_t at = s.find(from); at != std::string::npos; at = s.find(from, at + to.size())) s.replace(at, from.size(), to);
+}
+} // namespace
+
+std::string MaterialShaderLibrary::landscapeVertexSource()
+{
+    const std::string_view vs = HE::glsl::kLandscapeVS, marker = "//#LANDSCAPE_BODY#";
+    const size_t at = vs.find(marker), mainAt = vs.find("void main()");
+    if (at == std::string_view::npos || mainAt == std::string_view::npos || mainAt < at) return {};
+    // the height functions of the landscape's own vertex stage, as they are
+    return std::string("#version 450\n") + kLandscapeGlobalsBlock + kLandscapeMaterialVertexHead
+         + std::string(vs.substr(at + marker.size(), mainAt - at - marker.size())) + kLandscapeMaterialVertexMain;
+}
+
+std::string MaterialShaderLibrary::landscapeFragmentSource(const std::string& glsl)
+{
+    std::string s = glsl;
+    // The block goes behind the varyings (the first use of the weights is in main); a material that reads no weights gets the block
+    // alone, for the edge test below.
+    const std::string_view decl = "layout(set = 0, binding = 14) uniform sampler2D heLandscapeWeights;\n";
+    const std::string head = std::string(kLandscapeGlobalsBlock) + kLandscapeMaterialFragmentHead;
+    if (const size_t at = s.find(decl); at != std::string::npos) s.replace(at, decl.size(), head);
+    else if (const size_t mainAt = s.find("void main() {"); mainAt != std::string::npos) s.insert(mainAt, head);
+    else return {};
+    replaceAll(s, "textureSize(heLandscapeWeights, 0)", "heLsWeightSize()");
+    replaceAll(s, "textureLod(heLandscapeWeights, ", "heLsWeightLod(");
+    replaceAll(s, "texture(heLandscapeWeights, ", "heLsWeight(");
+    if (s.find("heLandscapeWeights") != std::string::npos) return {};   // a read this does not know: refuse, the caller keeps the landscape's own shader
+    // The top node of the quadtree is bigger than the world: nothing is drawn beyond its edge (kLandscapeFS does the same).
+    const std::string_view mainOpen = "void main() {\n";
+    const size_t mainAt = s.find(mainOpen);
+    if (mainAt == std::string::npos) return {};
+    s.insert(mainAt + mainOpen.size(), "    if (vUV.x < 0.0 || vUV.y < 0.0 || vUV.x > 1.0 || vUV.y > 1.0) discard;\n");
+    return s;
+}
+
+const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::landscapeVertex(Backend backend)
+{
+    const int key = static_cast<int>(backend) + 0x200;
+    if (auto it = m_uiVertCache.find(key); it != m_uiVertCache.end()) return it->second;
+
+    using namespace he::shaderc;
+    Compiled out;
+    const std::string src = landscapeVertexSource();
+    if (src.empty()) out.log = "landscapeVertex: kLandscapeVS has no body marker";
+    else if (backend == Backend::Metal)
+    {
+        // Where MetalLandscape binds them for kLandscapeMSL: buffers 20/21, textures 20 heights, 21 slot table, 22 coarse heights.
+        // The three images are read with texelFetch alone, so they take inline samplers and no sampler slot.
+        MslOptions opts;
+        opts.constexprLinearSamplers = { { 0u, 59u }, { 0u, 51u }, { 0u, 60u } };
+        out = toCompiled(compileMslPinned(src, Stage::Vertex,
+            { { Stage::Vertex, 0, 50, 20 }, { Stage::Vertex, 0, 58, 21 },
+              { Stage::Vertex, 0, 59, 20 }, { Stage::Vertex, 0, 51, 21 }, { Stage::Vertex, 0, 60, 22 } }, opts));
+    }
+    else
+        out = toCompiled(compile(src, Stage::Vertex, toTarget(backend)));
+    return m_uiVertCache.emplace(key, std::move(out)).first->second;
+}
+
+const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::landscapeFragment(
+    uint64_t sourceHash, const std::string& glsl, Backend backend, bool clustered)
+{
+    return fragmentVariant(sourceHash, glsl, backend, clustered, /*landscape=*/true);
+}
+
 namespace
 {
 // ─── Deferred lighting resolve ───────────────────────────────────────────────
@@ -3068,17 +3255,25 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fragmentClustered(
 }
 
 const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fragmentVariant(
-    uint64_t sourceHash, const std::string& glsl, Backend backend, bool clustered)
+    uint64_t sourceHash, const std::string& glslIn, Backend backend, bool clustered, bool landscape)
 {
     // Mix the source hash with the backend so each backend gets its own cache slot
     // without the two ever colliding; the clustered variant gets its own salt on
-    // top (backend + 1 + 8 — never a plain variant's multiplier).
-    const uint64_t salt = static_cast<uint64_t>(backend) + 1 + (clustered ? 8 : 0);
+    // top (backend + 1 + 8 — never a plain variant's multiplier), the landscape one 16.
+    const uint64_t salt = static_cast<uint64_t>(backend) + 1 + (clustered ? 8 : 0) + (landscape ? 16 : 0);
     const uint64_t key = sourceHash ^ (0x9E3779B97F4A7C15ULL * salt);
     if (auto it = m_fragCache.find(key); it != m_fragCache.end()) return it->second;
 
     using namespace he::shaderc;
     Compiled out;
+    // The landscape variant: the same text with its weights read from the tile atlas (landscapeFragmentSource).
+    const std::string landscapeText = landscape ? landscapeFragmentSource(glslIn) : std::string();
+    const std::string& glsl = landscape ? landscapeText : glslIn;
+    if (landscape && landscapeText.empty())
+    {
+        out.log = "landscapeFragment: the fragment reads heLandscapeWeights in a form the tile variant does not know";
+        return m_fragCache.emplace(key, std::move(out)).first->second;
+    }
     if (clustered && (backend == Backend::GLSL410 || backend == Backend::GLSLES300))
     {
         // No SSBOs below GL 4.3 / in ES 3.0. Refuse loudly: handing back the
@@ -3246,6 +3441,17 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fragmentVariant(
         // The RVT feedback buffer (binding 47, declared only under HE_RVT_FEEDBACK) → fragment buffer 7 (MetalRenderer::
         // kRvtFeedbackBufferIndex, bound on every material encoder by BindMaterialPreambleSlots).
         pins.push_back({ Stage::Fragment, 0, 47, 7 });
+        // The landscape variant (landscapeFragmentSource): LsGlobals on fragment buffer 20, where MetalLandscape binds it anyway; the
+        // slot table on texture 13 (heLandscapeWeights', which this variant does not declare), the tile and coarse weight pages on
+        // 25-30, the last free ones. All seven are read with texelFetch and take inline samplers: the stage has no sampler slot left.
+        MslOptions mslOpts = kMaterialMslOptions();
+        if (landscape)
+        {
+            pins.push_back({ Stage::Fragment, 0, 50, 20 });
+            pins.push_back({ Stage::Fragment, 0, 51, 13 });
+            for (uint32_t i = 0; i < 6; ++i) pins.push_back({ Stage::Fragment, 0, 52 + i, 25 + i });
+            for (uint32_t b = 51; b <= 57; ++b) mslOpts.constexprLinearSamplers.push_back({ 0u, b });
+        }
         // The RVT lookup may read cold (block-compressed) pages on Metal: HE_RVT_COLD declares the three cold arrays and the branch
         // (RvtLookup.h). HE_RVT_COLD=0 leaves it out of the shader (the hot-only A/B, and a Mac without ASTC sampling).
         static const bool rvtCold = [] { const char* e = std::getenv("HE_RVT_COLD"); return !(e && *e == '0'); }();
@@ -3263,10 +3469,10 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fragmentVariant(
             if (rvtPack) defs += "#define HE_RVT_RGNORMAL 1\n";
             if (rvtFeedback) defs += "#define HE_RVT_FEEDBACK 1\n";
             if (eol != std::string::npos) withCold.insert(eol + 1, defs);
-            out = toCompiled(compileMslPinned(withCold, Stage::Fragment, pins, kMaterialMslOptions()));
+            out = toCompiled(compileMslPinned(withCold, Stage::Fragment, pins, mslOpts));
         }
         else
-            out = toCompiled(compileMslPinned(injected, Stage::Fragment, pins, kMaterialMslOptions()));
+            out = toCompiled(compileMslPinned(injected, Stage::Fragment, pins, mslOpts));
     }
     else if (backend == Backend::HLSL)
     {

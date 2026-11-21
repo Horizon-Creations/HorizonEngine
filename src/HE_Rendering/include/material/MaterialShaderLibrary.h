@@ -581,6 +581,23 @@ public:
     // vNormal = +Z, vWorldPos = (screen px, 0) — sane defaults for UI shading.
     const Compiled& uiVertex(Backend backend);
 
+    // ── The tile landscape as a material's geometry (Thema 326) ──────────────────────────────────────────────────────────────
+    // landscapeVertex: the patch vertex stage of HorizonRendering/LandscapeShaderSource.h (same heights, same CDLOD morph, so the same
+    // seams) writing the four varyings every material fragment reads: vNormal from the height lattice, vUV = the position in the
+    // landscape's render window (0..1), vWorldPos origin-relative. No vertex buffer: the grid position is gl_VertexIndex.
+    // GLSL bindings (set 0): 50 LsGlobals (shared with the fragment), 58 LsPatch, 59 tile heights, 51 slot table (shared), 60 coarse
+    // heights; on Metal vertex buffers 20/21 and vertex textures 20-22, which is where MetalLandscape binds them for its own shader.
+    const Compiled& landscapeVertex(Backend backend);
+    // landscapeFragment: a material's fragment whose layer weights come from the tile atlas. The material's text reads ONE 2D
+    // heLandscapeWeights over the whole landscape; here those reads go through the slot table to a tile's weight slices, or to the
+    // coarse world's where the tile is not in the atlas (landscapeFragmentSource). The text handed in is the material's own and is
+    // not changed, so what is baked into an asset stays what it was. GLSL bindings (set 0): 50 LsGlobals, 51 slot table, 52-54 tile
+    // weight pages, 55-57 coarse weight pages; on Metal fragment buffer 20 and textures 13 (the weightmap's, which this variant does
+    // not have) and 25-30, none of them with a sampler slot.
+    const Compiled& landscapeFragment(uint64_t sourceHash, const std::string& glsl, Backend backend, bool clustered);
+    static std::string landscapeVertexSource();
+    static std::string landscapeFragmentSource(const std::string& glsl);
+
     // ── Volumetric fog kernels (Thema 225, docs/volumetric-fog-plan.md §10) ──────────────
     // GLSL-450 sources in src/material/FogVolumeShaderSource.h, cross-compiled like every
     // other pass here. Metal, GL and Vulkan (Backend::SpirV: compute + fragment, canonical
@@ -634,7 +651,7 @@ private:
     bool m_spirvFogVolume = true;
     bool m_hlslFogVolume  = false;
     const Compiled& fragmentVariant(uint64_t sourceHash, const std::string& glsl, Backend backend,
-                                    bool clustered);
+                                    bool clustered, bool landscape = false);
 
     // SetRvtColdVulkanFits above; conservative default so a renderer that never calls it (D3D11/D3D12/Metal — this flag
     // only narrows the Vulkan SpirV path) never risks compiling a shader that statically references a binding its

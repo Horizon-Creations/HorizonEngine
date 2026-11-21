@@ -1993,6 +1993,59 @@ TEST_CASE("PSHD encode/decode roundtrip preserves variants")
 }
 
 #if defined(HE_TESTS_HAVE_SHADERC)
+TEST_CASE("tile landscape variant: the patch vertex and the Auto Landscape fragment with its weights from the tile atlas cross-compile, on Metal inside the slots that are free")
+{
+	using B = HE::MaterialShaderLibrary::Backend;
+	HE::MaterialShaderLibrary lib;
+
+	for (const B b : { B::Metal, B::SpirV })
+	{
+		const auto& v = lib.landscapeVertex(b);
+		CHECK_MESSAGE(v.ok, "landscapeVertex failed: ", v.log);
+	}
+	// the four varyings of every material fragment, written by the landscape's own position code
+	const std::string vs = HE::MaterialShaderLibrary::landscapeVertexSource();
+	for (const char* s : { "location = 0) out vec3 vNormal", "location = 1) out vec3 vColor", "location = 2) out vec2 vUV", "location = 3) out vec3 vWorldPos",
+	                       "float heightOfTile(", "uCameraRel.w * uCameraRel.w" })
+		CHECK_MESSAGE(vs.find(s) != std::string::npos, s);
+	const std::string& vmsl = lib.landscapeVertex(B::Metal).source;
+	CHECK(vmsl.find("[[buffer(20)]]") != std::string::npos);
+	CHECK(vmsl.find("[[buffer(21)]]") != std::string::npos);
+	CHECK(vmsl.find("[[texture(22)]]") != std::string::npos);
+	CHECK(vmsl.find("[[sampler(") == std::string::npos);
+
+	HE_TEST::RvtOffScope rvtOff;
+	const HE::MatShaderGen gen = HE::generateFragment(HE::buildAutoLandscapeGraph().graph, HE::weatherFunctionLoader());
+	REQUIRE(gen.glsl.find("heLandscapeWeights") != std::string::npos);
+	const std::string before = gen.glsl;
+	const std::string ls = HE::MaterialShaderLibrary::landscapeFragmentSource(gen.glsl);
+	REQUIRE(!ls.empty());
+	CHECK(gen.glsl == before);                                   // the material's own text is what it was (it is what an asset bakes)
+	CHECK(ls.find("heLandscapeWeights") == std::string::npos);   // every read goes through the atlas
+	CHECK(ls.find("heLsWeight(") != std::string::npos);
+	CHECK(ls.find("discard;") != std::string::npos);
+	// a read in a form the rewrite does not know is refused, not passed on half rewritten
+	CHECK(HE::MaterialShaderLibrary::landscapeFragmentSource(gen.glsl + "\n// texelFetch(heLandscapeWeights, ivec2(0), 0)\n").empty());
+
+	for (const bool clustered : { false, true })
+	{
+		const auto& f = lib.landscapeFragment(0x326, gen.glsl, B::Metal, clustered);
+		REQUIRE_MESSAGE(f.ok, "landscapeFragment (Metal) failed: ", f.log);
+		CHECK(f.source.find("[[buffer(20)]]") != std::string::npos);
+		for (const int t : { 13, 25, 26, 27, 28, 29, 30 })
+			CHECK_MESSAGE(f.source.find("[[texture(" + std::to_string(t) + ")]]") != std::string::npos, t);
+		for (int s = 16; s < 31; ++s)   // Metal has sixteen samplers a stage
+			CHECK_MESSAGE(f.source.find("[[sampler(" + std::to_string(s) + ")]]") == std::string::npos, s);
+		// the plain variant of the same text is another shader with the weightmap where it was
+		const auto& plain = clustered ? lib.fragmentClustered(0x326, gen.glsl, B::Metal) : lib.fragment(0x326, gen.glsl, B::Metal);
+		REQUIRE(plain.ok);
+		CHECK(plain.source != f.source);
+		CHECK(plain.source.find("heLsWeight") == std::string::npos);
+	}
+	const auto& spv = lib.landscapeFragment(0x326, gen.glsl, B::SpirV, false);
+	CHECK_MESSAGE(spv.ok, "landscapeFragment (SPIR-V) failed: ", spv.log);
+}
+
 TEST_CASE("UI quad vertex cross-compiles for Metal and GL")
 {
 	// The screen-space vertex that pairs material fragments with in-game UI
