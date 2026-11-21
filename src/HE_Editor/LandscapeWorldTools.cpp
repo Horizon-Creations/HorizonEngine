@@ -402,6 +402,7 @@ struct EditState
 	int   layer = 0;
 	bool  stroke = false;
 	float flattenTo = 0.0f;
+	glm::dvec3 rampFrom{ 0.0 };
 	std::string status;
 	bool  statusError = false;
 };
@@ -452,7 +453,7 @@ std::string saveEdits()
 #ifdef HE_IMGUI_ENABLED
 namespace
 {
-const char* const kToolNames[] = { "Raise", "Lower", "Smooth", "Flatten", "Paint Layer", "Roughen" };
+const char* const kToolNames[] = { "Raise", "Lower", "Smooth", "Flatten", "Paint Layer", "Roughen", "Ramp" };
 
 void drawEditBlock(AppContext& ctx)
 {
@@ -467,7 +468,7 @@ void drawEditBlock(AppContext& ctx)
 	EditorWidgets::checkbox("Edit Tiles##tlwe", &e.on);
 	if (e.on && ctx.editorConfig.mode != EditorMode::Landscape)
 		ImGui::TextDisabled("The brush works in the Landscape mode: there the left button belongs to it.");
-	Row::combo("Tile Brush##tlwe", &e.tool, kToolNames, 6);
+	Row::combo("Tile Brush##tlwe", &e.tool, kToolNames, 7);
 	Row::dragFloat("Brush Radius##tlwe", &e.radius, 0.5f, 1.0f, 800.0f, "%.1f m");
 	Row::dragFloat("Brush Falloff##tlwe", &e.falloff, 0.5f, 0.0f, 400.0f, "%.1f m");
 	Row::dragFloat("Brush Strength##tlwe", &e.strength, 0.01f, 0.01f, 5.0f, "%.2f");
@@ -600,6 +601,7 @@ void brushInViewport(AppContext& ctx, const RenderWorld& sceneSnapshot, const Im
 		session->beginStroke();
 		e.stroke = true;
 		e.flattenTo = static_cast<float>(groundH(p.x, p.z));
+		e.rampFrom = p;   // Ramp: from where the button went down (absolute), at the ground's height there
 	}
 	TerrainComponent& tc = session->terrain();
 	const float lx = static_cast<float>(p.x - session->centre().x), lz = static_cast<float>(p.z - session->centre().z);
@@ -611,6 +613,12 @@ void brushInViewport(AppContext& ctx, const RenderWorld& sceneSnapshot, const Im
 		break;
 	case 2: TerrainSculpt::apply(tc, lx, lz, TerrainSculpt::Op::Smooth, e.radius, e.falloff, std::clamp(e.strength * dt * 6.0f, 0.0f, 1.0f)); break;
 	case 3: TerrainSculpt::apply(tc, lx, lz, TerrainSculpt::Op::Set, e.radius, e.falloff, e.flattenTo); break;
+	case 6:
+		// Toward the straight line from the stroke's start to the cursor, as the Landscape mode's Ramp does. The part of the corridor
+		// outside the editing region (a ramp longer than the region) is left alone.
+		TerrainSculpt::ramp(tc, static_cast<float>(e.rampFrom.x - session->centre().x), static_cast<float>(e.rampFrom.z - session->centre().z), e.flattenTo,
+		                    lx, lz, static_cast<float>(groundH(p.x, p.z)), e.radius, e.falloff, std::clamp(e.strength * dt * 6.0f, 0.0f, 1.0f));
+		break;
 	case 5: TerrainSculpt::apply(tc, lx, lz, TerrainSculpt::Op::Roughen, e.radius, e.falloff, e.strength * dt * 20.0f); break;   // the op's stable per-vertex hash, as far as Raise would lift
 	default: TerrainPaint::paint(tc, lx, lz, std::clamp(e.layer, 0, 11), e.radius, e.falloff, std::clamp(e.strength * dt * 6.0f, 0.0f, 1.0f)); break;
 	}

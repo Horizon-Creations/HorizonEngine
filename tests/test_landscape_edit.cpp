@@ -75,6 +75,37 @@ std::filesystem::path tempFile(const char* name)
 }
 } // namespace
 
+TEST_CASE("TerrainSculpt::ramp: the corridor between two points becomes the straight line between their heights, nothing outside it moves")
+{
+	TerrainComponent tc;
+	tc.sizeX = tc.sizeZ = 128.0f;
+	tc.resolution = 129;   // a vertex every metre, local -64..64 (2^n + 1: ensureHeights keeps it)
+	TerrainSculpt::ensureHeights(tc);
+	const std::vector<float> before = tc.sculptHeights;
+	// from (-30, 0) at 2 m to (30, 0) at 14 m, 5 m wide with no falloff, all the way
+	const auto r = TerrainSculpt::ramp(tc, -30.0f, 0.0f, 2.0f, 30.0f, 0.0f, 14.0f, 5.0f, 0.0f, 1.0f);
+	REQUIRE(r.ok);
+	CHECK(r.changed > 0u);
+	CHECK(tc.regionDirty);
+	REQUIRE(tc.resolution == 129u);
+	const auto at = [&](int x, int z) { return tc.sculptHeights[static_cast<size_t>(z + 64) * 129 + static_cast<size_t>(x + 64)]; };
+	CHECK(at(-30, 0) == doctest::Approx(2.0f));
+	CHECK(at(0, 0) == doctest::Approx(8.0f));     // half way
+	CHECK(at(30, 0) == doctest::Approx(14.0f));
+	CHECK(at(0, 3) == doctest::Approx(8.0f));     // inside the corridor's width
+	CHECK(at(0, 10) == doctest::Approx(before[static_cast<size_t>(74) * 129 + 64]));   // beside it: untouched
+	CHECK(at(-45, 0) == doctest::Approx(before[static_cast<size_t>(64) * 129 + 19]));  // before its start: untouched
+	// a segment of no length is refused, and a half blend goes half way
+	CHECK_FALSE(TerrainSculpt::ramp(tc, 1.0f, 1.0f, 0.0f, 1.0f, 1.0f, 5.0f, 5.0f, 0.0f, 1.0f).ok);
+	TerrainComponent half;
+	half.sizeX = half.sizeZ = 128.0f;
+	half.resolution = 129;
+	TerrainSculpt::ensureHeights(half);
+	const float h0 = half.sculptHeights[static_cast<size_t>(64) * 129 + 64];
+	TerrainSculpt::ramp(half, -30.0f, 0.0f, 2.0f, 30.0f, 0.0f, 14.0f, 5.0f, 0.0f, 0.5f);
+	CHECK(half.sculptHeights[static_cast<size_t>(64) * 129 + 64] == doctest::Approx(h0 + 0.5f * (8.0f - h0)));
+}
+
 TEST_CASE("landscapeWriteRegionTerrain: an untouched region changes no tile, a dab changes the tiles that hold its samples and keeps shared borders equal")
 {
 	const auto src = world();
