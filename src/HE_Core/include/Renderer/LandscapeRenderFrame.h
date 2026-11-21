@@ -26,6 +26,10 @@ namespace HE
 struct LandscapeRenderStatic
 {
 	uint64_t generation = 0;
+	// Counts the changes to the coarse world (and nothing else) within one generation: an edited tile changes the far levels. A backend
+	// that sees another value uploads coarseHeights and coarseWeights again and leaves the tile atlas alone; one that does not look
+	// keeps drawing the far levels as they were.
+	uint64_t coarseRevision = 0;
 
 	float    tileM = 0.0f;
 	float    heightMinM = 0.0f, heightScaleM = 0.0f;     // metres of a stored height 0 and of 65535 above it

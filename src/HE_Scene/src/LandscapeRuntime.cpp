@@ -1,4 +1,5 @@
 #include "HorizonScene/LandscapeRuntime.h"
+#include "HorizonScene/LandscapeEdit.h"
 
 #include <atomic>
 
@@ -87,10 +88,22 @@ bool LandscapeRuntime::beginFromPack(const std::string& path, const LandscapeRun
 	// against m_projectRoot; a path it cannot find (no project root set, or none of the three tries is a file) is opened exactly as
 	// written, so a tool or test that already hands in a resolved/CWD-relative path keeps working.
 	const std::filesystem::path resolved = findLandscapePack(path, m_projectRoot);
-	auto pack = LandscapePackSource::open(resolved.empty() ? path : resolved.string(), &err);
+	const std::filesystem::path packFile = resolved.empty() ? std::filesystem::path(path) : resolved;
+	auto pack = LandscapePackSource::open(packFile.string(), &err);
 	if (!pack) return (reset(), fail(error, "landscape pack '" + path + "': " + err));
-	const bool ok = begin(std::move(pack), config, error);
-	if (ok) m_pack = path;
+	// Edits live in a file beside the pack (LandscapeEdit.h): whoever opens the pack shows them. An editable runtime gets the overlay
+	// even without one, so the first dab has somewhere to go.
+	std::shared_ptr<const LandscapeTileSource> source = pack;
+	const std::filesystem::path editsFile = landscapeEditsFile(packFile);
+	std::error_code ec;
+	if (m_editable || std::filesystem::is_regular_file(editsFile, ec))
+	{
+		auto overlay = std::make_shared<LandscapeEditSource>(std::move(pack));
+		overlay->loadFile(editsFile);
+		source = std::move(overlay);
+	}
+	const bool ok = begin(std::move(source), config, error);
+	if (ok) { m_pack = path; m_packFile = packFile; }
 	return ok;
 }
 
@@ -131,6 +144,9 @@ bool LandscapeRuntime::beginWith(std::shared_ptr<const LandscapeTileSource> sour
 		return fail(error, "atlasWindow " + std::to_string(config.atlasWindow) + " is below the " + std::to_string(needWindow) + " tiles the loaded disc spans");
 
 	m_source = std::move(source);
+	// An overlay handed in directly (a tool, a test) is edited like one made from a pack. The source is const to everyone who reads it;
+	// editing is the one writer, on the main thread.
+	m_edits = std::const_pointer_cast<LandscapeEditSource>(std::dynamic_pointer_cast<const LandscapeEditSource>(m_source));
 	m_config = config;
 	m_quadtree = q;
 	m_store = std::make_unique<LandscapeStore>(m_source, config.store);
@@ -154,6 +170,8 @@ void LandscapeRuntime::reset()
 	m_store.reset();
 	m_atlas.reset();
 	m_source.reset();
+	m_edits.reset();
+	m_packFile.clear();
 	m_pack.clear();
 	m_pendingUploads.clear();
 	m_pendingReleases.clear();
@@ -272,6 +290,11 @@ void LandscapeRuntime::updateAt(const glm::dvec3& cameraAbsolute, const glm::vec
 	}
 }
 
+void LandscapeRuntime::tilesReplaced(const std::vector<std::pair<LandscapeTileKey, std::shared_ptr<const LandscapeTile>>>& tiles)
+{
+	if (active()) m_store->replace(tiles);
+}
+
 void LandscapeRuntime::tileChanged(const std::vector<LandscapeTileKey>& keys)
 {
 	if (!active()) return;
@@ -373,9 +396,10 @@ void LandscapeRuntime::buildRenderFrame(const glm::dmat4& viewProjRelative, cons
 	const LandscapeCoarseWorld* coarse = f.coarse;
 	if (!coarse || !coarse->valid()) return;
 
-	if (!m_renderStatic || m_renderStatic->generation != f.coarseGeneration)
+	if (!m_renderStatic || m_renderStatic->generation != f.coarseGeneration || m_renderStatic->coarseRevision != m_coarseRevision)
 	{
 		auto w = std::make_shared<LandscapeRenderStatic>();
+		w->coarseRevision = m_coarseRevision;
 		const LandscapeGeometry& g = m_source->geometry();
 		const LandscapeTileImageLayout tl = LandscapeTileImageLayout::forGeometry(g);
 		const LandscapeCoarseImageLayout cl = LandscapeCoarseImageLayout::forCoarse(*coarse);

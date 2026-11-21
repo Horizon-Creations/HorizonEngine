@@ -115,6 +115,21 @@ void buildCoarseChain(LandscapeCoarseWorld& c)
 }
 } // namespace
 
+void landscapeCoarsePatch(LandscapeCoarseWorld& coarse, const std::vector<std::pair<LandscapeTileKey, std::shared_ptr<const LandscapeTile>>>& tiles)
+{
+	if (!coarse.valid()) return;
+	const LandscapeCoarseLayout layout{ coarse.heightLevel, coarse.weightLevel };
+	bool any = false;
+	for (const auto& [key, tile] : tiles)
+	{
+		if (!tile || key.x < 0 || key.z < 0 || key.x >= coarse.tilesX || key.z >= coarse.tilesZ) continue;
+		placeCoarse(coarse, key, landscapeCoarseSampleOf(*tile, layout));
+		any = true;
+	}
+	// shortcut: the whole chain again (a few ms for 100 km), patch the touched cells of each grid when edits get frequent.
+	if (any) buildCoarseChain(coarse);
+}
+
 const LandscapeCoarseWorld* ProceduralLandscapeSource::coarse() const
 {
 	std::call_once(m_coarseOnce, [this] {
@@ -559,6 +574,14 @@ uint32_t LandscapePackSource::storedSize(LandscapeTileKey key) const
 uint64_t LandscapePackSource::storedOffset(LandscapeTileKey key) const
 {
 	return inWorld(*this, key) ? m_offset[static_cast<size_t>(key.z) * m_tilesX + key.x] : 0;
+}
+
+bool LandscapePackSource::readStored(LandscapeTileKey key, std::vector<uint8_t>& blob) const
+{
+	const uint32_t size = storedSize(key);
+	if (size == 0) return false;
+	blob.resize(size);
+	return readAt(storedOffset(key), blob.data(), blob.size());
 }
 
 uint64_t LandscapePackSource::storedHash(LandscapeTileKey key) const

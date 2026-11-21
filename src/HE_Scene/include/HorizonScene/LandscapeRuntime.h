@@ -28,6 +28,8 @@ class PhysicsWorld;
 namespace HE
 {
 
+class LandscapeEditSource;   // LandscapeEdit.h
+
 // ── The world-scale landscape of a running scene (Thema 326, step 2, part A) ──────
 // Owns the pieces and runs them in order, once a frame: the camera drives the LandscapeStore (tiles in memory), the
 // LandscapeAtlas follows the store (which tile in which GPU layer), and buildFrame() turns the camera's frustum into the
@@ -171,6 +173,14 @@ public:
 	// tile is resident. Physics, foliage, navigation and water do not yet react (later steps); the coarse world does not either,
 	// since nothing before the edit overlay (step 15) can make it stale. A runtime that is not active ignores this.
 	void tileChanged(const std::vector<LandscapeTileKey>& keys);
+	// Editing (LandscapeEdit.h). A runtime that is editable, or whose pack has an edits file beside it, runs on an overlay of the pack:
+	// edits() is that overlay (null otherwise) and packFile() the pack it belongs to. tilesReplaced puts tiles into the store in place
+	// (a stroke in progress), coarseChanged says the overlay's coarse world changed (the far levels are uploaded again).
+	void setEditable(bool on) { m_editable = on; }
+	LandscapeEditSource* edits() const { return m_edits.get(); }
+	const std::filesystem::path& packFile() const { return m_packFile; }
+	void tilesReplaced(const std::vector<std::pair<LandscapeTileKey, std::shared_ptr<const LandscapeTile>>>& tiles);
+	void coarseChanged() { ++m_coarseRevision; }
 
 	const LandscapeStore*  store() const { return m_store.get(); }
 	const LandscapeAtlas*  atlas() const { return m_atlas.get(); }
@@ -193,6 +203,10 @@ private:
 	bool       m_haveCamera = false;
 	bool       m_hasLastCamera = false;
 	uint64_t   m_generation = 0;
+	uint64_t   m_coarseRevision = 0;
+	bool       m_editable = false;
+	std::shared_ptr<LandscapeEditSource> m_edits;   // m_source, when it is an overlay
+	std::filesystem::path m_packFile;
 	std::shared_ptr<const LandscapeRenderStatic> m_renderStatic;   // for m_generation
 	std::string m_pack;
 	std::string m_failedPack;   // a pack that could not start: not tried again until the component names another

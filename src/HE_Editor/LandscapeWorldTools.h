@@ -4,6 +4,9 @@
 #include <string>
 
 struct AppContext;
+struct ImVec2;
+class  RenderWorld;
+namespace HE { class LandscapeRuntime; }
 
 // ── The Details panel's "Tile Landscape" section (Thema 326, step 6) ───────────────────────────────────────
 // What the editor offers for a world-scale landscape (LandscapeWorldComponent): the component's own settings, and the three ways to make
@@ -12,7 +15,9 @@ struct AppContext;
 // world is minutes), shows a progress bar and can be cancelled; when it ends the component points at the new pack and the runtime starts
 // again from it.
 //
-// Not here: painting by hand on tiles, and the water of a migrated terrain (see LandscapePackBuild.h).
+// Sculpting and painting by hand: "Edit Tiles" arms a brush in the Scene viewport that works on the tiles under it and writes them back
+// (HE::LandscapeEditSession); the edits are a file beside the pack and are baked into the shipped pack by the export.
+// Not here: the water of a migrated terrain (see LandscapePackBuild.h), and the Landscape mode's other tools (foliage, water, mountain).
 namespace LandscapeWorldTools
 {
 	// Once a frame, from the editor's main loop (next to the landscape runtime's update): takes in a build that finished, points the
@@ -53,4 +58,16 @@ namespace LandscapeWorldTools
 	Entity      migrationSource(HorizonWorld& world, Entity nearEntity);
 	// Forgets the section's remembered state (tests; a project switch).
 	void        resetState();
+
+	// ── Sculpt and paint on the tiles (HE::LandscapeEditSession) ──
+	// The runtime the brush edits: the editor's own, handed in once (the world only holds it const). Null takes it away.
+	void        setRuntime(HE::LandscapeRuntime* runtime);
+	// Drawn inside the Scene viewport next to TerrainTools::sculptInViewport: the brush cursor on the tile landscape and the stroke under the
+	// left button, while "Edit Tiles" is on in the section. A stroke is one undo step of the section's own Undo Stroke / Redo Stroke.
+	void        brushInViewport(AppContext& ctx, const RenderWorld& sceneSnapshot, const ImVec2& rectMin, const ImVec2& rectMax,
+	                            bool navigating, bool viewportHovered, float dt);
+	// Writes the edits beside the pack ("<pack>.edits"); "" or why it failed. Called by the section's button and when the scene is saved.
+	std::string saveEdits();
+	// True while there are edits no file holds yet.
+	bool        editsUnsaved();
 }

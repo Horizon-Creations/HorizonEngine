@@ -15,6 +15,7 @@
 #include <HorizonScene/Components/TerrainComponent.h>      // vertex snap skips the landscape
 #include <HorizonScene/Components/TerrainChunkComponent.h>
 #include "TerrainTools.h"                // Landscape brush cursor + sculpt stroke
+#include "LandscapeWorldTools.h"         // the tile landscape's brush
 #include "CollabPresenceBar.h"           // name tags for the other people in the session
 #include "McpCameraGizmos.h"             // …and for the MCP clients' screenshot cameras
 #include "ViewportToolbar.h"             // the strip along the top of the Scene window
@@ -1852,6 +1853,8 @@ void render(AppContext& ctx, float dt)
 				TerrainTools::sculptInViewport(ctx, s_sceneSnapshot, rectMin, rectMax,
 					navigating, viewportHovered, dt,
 					[](const HE::UUID& meshId) { s_aabbCache.erase(meshId); });
+				// The tile landscape's own brush ("Edit Tiles" in its Details section): a world has one kind of landscape or the other.
+				LandscapeWorldTools::brushInViewport(ctx, s_sceneSnapshot, rectMin, rectMax, navigating, viewportHovered, dt);
 
 				// ── Collaboration name tags ────────────────────────────────
 				// Last, so they sit over the gizmo and the brush cursor: this is

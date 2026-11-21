@@ -1,0 +1,497 @@
+// Sculpt and paint on a tile landscape that write back (Thema 326): LandscapeEdit.h. The overlay in front of the source, the way from an
+// edited region terrain back into tiles, the session a tool drives (strokes, undo), the edits file beside the pack and baking it in.
+#include "doctest.h"
+#include <HorizonScene/LandscapeEdit.h>
+#include <HorizonScene/LandscapeRuntime.h>
+#include <HorizonScene/LandscapeSource.h>
+#include <HorizonScene/LandscapeTileTerrain.h>
+#include <HorizonScene/TerrainPaint.h>
+#include <HorizonScene/TerrainSculpt.h>
+
+#include <glm/gtc/matrix_transform.hpp>
+
+#include <atomic>
+#include <chrono>
+#include <filesystem>
+#include <fstream>
+#include <random>
+#include <thread>
+
+using namespace HE;
+
+namespace
+{
+// The real geometry (512 m tiles, 257 heights, 128 weight texels, 12 channels): region sizes and shared borders are the real ones.
+std::shared_ptr<ProceduralLandscapeSource> world(int tiles = 12)
+{
+	ProceduralLandscapeParams p;
+	p.tilesX = p.tilesZ = tiles;
+	return std::make_shared<ProceduralLandscapeSource>(p);
+}
+
+// Counts what is read from the base, so "an edited tile never reads the base" can be seen.
+class CountingSource final : public LandscapeTileSource
+{
+public:
+	explicit CountingSource(std::shared_ptr<const LandscapeTileSource> base) : m_base(std::move(base)) {}
+	const LandscapeGeometry& geometry() const override { return m_base->geometry(); }
+	int  tilesX() const override { return m_base->tilesX(); }
+	int  tilesZ() const override { return m_base->tilesZ(); }
+	bool load(LandscapeTileKey key, int maxLevels, LandscapeTile& out) const override
+	{
+		if (key.x == 1 && key.z == 1) ++loadsOfOneOne;
+		return m_base->load(key, maxLevels, out);
+	}
+	bool heightRange(float& a, float& b) const override { return m_base->heightRange(a, b); }
+	const LandscapeCoarseWorld* coarse() const override { return m_base->coarse(); }
+	mutable std::atomic<int> loadsOfOneOne{ 0 };
+
+private:
+	std::shared_ptr<const LandscapeTileSource> m_base;
+};
+
+LandscapeTilePtr fullTile(const LandscapeTileSource& s, LandscapeTileKey k)
+{
+	auto t = std::make_shared<LandscapeTile>();
+	REQUIRE(s.load(k, -1, *t));
+	return t;
+}
+
+bool settle(LandscapeRuntime& rt, const glm::dvec3& cam, int ms = 30000)
+{
+	const auto t0 = std::chrono::steady_clock::now();
+	for (;;)
+	{
+		rt.updateAt(cam, glm::vec3(0.0f), 5.0);
+		if (rt.store()->settled() && rt.atlas()->stats().used == rt.store()->residentKeys().size()) return true;
+		if (std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count() > ms) return false;
+		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+	}
+}
+
+std::filesystem::path tempFile(const char* name)
+{
+	return std::filesystem::temp_directory_path() / (std::string("he_landscape_edit_") + name + "_" + std::to_string(std::random_device{}()));
+}
+} // namespace
+
+TEST_CASE("landscapeWriteRegionTerrain: an untouched region changes no tile, a dab changes the tiles that hold its samples and keeps shared borders equal")
+{
+	const auto src = world();
+	const LandscapeGeometry g = src->geometry();
+	LandscapeTileTerrainParams params;
+	REQUIRE(src->heightRange(params.heightMinM, params.heightScaleM));
+	const auto current = [&](LandscapeTileKey k) { return fullTile(*src, k); };
+	const LandscapeTileKey origin{ 3, 4 };
+	LandscapeRegionTerrain region;
+	REQUIRE(landscapeRegionTerrain(current, origin, 2, params, nullptr, region));
+	const uint32_t res = region.terrain.resolution;
+	REQUIRE(res == 2u * g.hCells + 1u);
+
+	// The round trip is exact: 16 bit -> metres -> 16 bit.
+	std::vector<std::pair<LandscapeTileKey, LandscapeTilePtr>> out;
+	REQUIRE(landscapeWriteRegionTerrain(region.terrain, g, origin, 2, params, current, out));
+	CHECK(out.empty());
+
+	// One sample inside tile (3, 4): that tile alone.
+	TerrainComponent edited = region.terrain;
+	edited.sculptHeights[static_cast<size_t>(100) * res + 100] += 25.0f;
+	REQUIRE(landscapeWriteRegionTerrain(edited, g, origin, 2, params, current, out));
+	REQUIRE(out.size() == 1);
+	CHECK(out[0].first == origin);
+	CHECK(out[0].second->heights.size() == static_cast<size_t>(g.heightLevels()));   // every mip is there again
+	const float step = params.heightScaleM / 65535.0f;
+	const int dim = g.hCells + 1;
+	const float got = params.heightMinM + static_cast<float>(out[0].second->heights[0][static_cast<size_t>(100) * dim + 100]) * step;
+	CHECK(got == doctest::Approx(edited.sculptHeights[static_cast<size_t>(100) * res + 100]).epsilon(0.0).scale(1.0).epsilon(step));
+
+	// The sample in the very middle is the corner four tiles share: all four change, and all four hold the same value there.
+	edited = region.terrain;
+	edited.sculptHeights[static_cast<size_t>(g.hCells) * res + g.hCells] += 40.0f;
+	REQUIRE(landscapeWriteRegionTerrain(edited, g, origin, 2, params, current, out));
+	REQUIRE(out.size() == 4);
+	uint16_t corner[4] = {};
+	for (const auto& [key, tile] : out)
+	{
+		const int cx = key.x == origin.x ? g.hCells : 0, cz = key.z == origin.z ? g.hCells : 0;
+		corner[(key.z - origin.z) * 2 + (key.x - origin.x)] = tile->heights[0][static_cast<size_t>(cz) * dim + cx];
+	}
+	CHECK(corner[0] == corner[1]);
+	CHECK(corner[0] == corner[2]);
+	CHECK(corner[0] == corner[3]);
+	CHECK(corner[0] != fullTile(*src, origin)->heights[0][static_cast<size_t>(g.hCells) * dim + g.hCells]);
+
+	// Paint: one weight texel of page 2 (channel 9) in tile (4, 5).
+	edited = region.terrain;
+	const uint32_t wr = edited.weightRes;
+	REQUIRE(wr == 2u * g.wTexels);
+	uint8_t& texel = edited.layerWeights3[(static_cast<size_t>(g.wTexels + 7) * wr + g.wTexels + 5) * 4 + 1];
+	texel = static_cast<uint8_t>(texel ^ 0x55);
+	REQUIRE(landscapeWriteRegionTerrain(edited, g, origin, 2, params, current, out));
+	REQUIRE(out.size() == 1);
+	CHECK(out[0].first == LandscapeTileKey{ 4, 5 });
+	CHECK(out[0].second->weights[0][(static_cast<size_t>(7) * g.wTexels + 5) * g.channels + 9] == texel);
+
+	// A terrain that is not this region is refused.
+	CHECK_FALSE(landscapeWriteRegionTerrain(edited, g, origin, 4, params, current, out));
+	// A height outside the 16 bit range is clamped, not wrapped.
+	edited = region.terrain;
+	edited.sculptHeights[static_cast<size_t>(50) * res + 50] = params.heightMinM + params.heightScaleM * 2.0f;
+	REQUIRE(landscapeWriteRegionTerrain(edited, g, origin, 2, params, current, out));
+	REQUIRE(out.size() == 1);
+	CHECK(out[0].second->heights[0][static_cast<size_t>(50) * dim + 50] == 65535);
+}
+
+TEST_CASE("LandscapeEditSource: an edited tile answers from the overlay and never reads the base, the coarse world follows, a removed edit gives the base back")
+{
+	const auto base = std::make_shared<CountingSource>(world());
+	LandscapeEditSource edits(base);
+	const LandscapeGeometry g = edits.geometry();
+	const LandscapeTileKey key{ 1, 1 };
+	CHECK(edits.coarse() == base->coarse());   // no edit: the base's coarse world, not a copy
+	CHECK_FALSE(edits.dirty());
+
+	auto tile = std::make_shared<LandscapeTile>(*fullTile(*base, key));
+	for (uint16_t& h : tile->heights[0]) h = 40000;
+	tile->buildMips();
+	const int readsBefore = base->loadsOfOneOne.load();
+	edits.set({ { key, tile } });
+	CHECK(edits.dirty());
+	LandscapeTile got;
+	REQUIRE(edits.load(key, -1, got));
+	CHECK(got.heights[0] == tile->heights[0]);
+	REQUIRE(edits.load(key, 2, got));   // the store asks for the first levels only
+	CHECK(got.heights.size() == 2);
+	CHECK(base->loadsOfOneOne.load() == readsBefore);
+	REQUIRE(edits.load({ 2, 2 }, -1, got));   // the others still come from the base
+	CHECK(got.heights[0] == fullTile(*base, { 2, 2 })->heights[0]);
+	CHECK(edits.editedKeys().size() == 1);
+
+	// The coarse world: a copy, with the tile's share in it. The middle of the tile on grid 0.
+	const LandscapeCoarseWorld* coarse = edits.coarse();
+	REQUIRE(coarse);
+	CHECK(coarse != base->coarse());
+	const int cpt = coarse->cellsPerTile;
+	CHECK(coarse->heights[0].at(key.x * cpt + cpt / 2, key.z * cpt + cpt / 2) == 40000);
+	CHECK(base->coarse()->heights[0].at(key.x * cpt + cpt / 2, key.z * cpt + cpt / 2) != 40000);
+	// ... and on the grids above, which are sampled from it.
+	REQUIRE(coarse->heights.size() > 1);
+	CHECK(coarse->heights[1].at((key.x * cpt + cpt / 2) / 2, (key.z * cpt + cpt / 2) / 2) == 40000);
+
+	// The hash follows the content; an unedited tile asks the base's.
+	const auto baseHash = [](LandscapeTileKey) { return uint64_t{ 7 }; };
+	CHECK(edits.contentHash(key, baseHash) != 7);
+	CHECK(edits.contentHash({ 2, 2 }, baseHash) == 7);
+
+	// Taken away: the base's tile, and the base's share of the coarse world.
+	edits.set({ { key, nullptr } });
+	REQUIRE(edits.load(key, -1, got));
+	CHECK(got.heights[0] == fullTile(*base, key)->heights[0]);
+	CHECK(edits.coarse()->heights[0].at(key.x * cpt + cpt / 2, key.z * cpt + cpt / 2) == base->coarse()->heights[0].at(key.x * cpt + cpt / 2, key.z * cpt + cpt / 2));
+	CHECK(edits.editedKeys().empty());
+}
+
+TEST_CASE("LandscapeEditSource: the edits file round-trips, a file cut short keeps its whole records, an empty overlay removes it")
+{
+	const auto base = world();
+	const std::filesystem::path file = tempFile("sidecar");
+	std::vector<uint8_t> bytes;
+	{
+		LandscapeEditSource edits(base);
+		for (const LandscapeTileKey key : { LandscapeTileKey{ 0, 0 }, LandscapeTileKey{ 5, 7 } })
+		{
+			auto tile = std::make_shared<LandscapeTile>(*fullTile(*base, key));
+			tile->heights[0][10] = static_cast<uint16_t>(tile->heights[0][10] ^ 0x1234);
+			tile->buildMips();
+			edits.set({ { key, tile } });
+		}
+		std::string err;
+		REQUIRE_MESSAGE(edits.save(file, &err), err);
+		CHECK_FALSE(edits.dirty());
+		std::ifstream in(file, std::ios::binary);
+		bytes.assign((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+
+		LandscapeEditSource again(base);
+		CHECK(again.loadFile(file) == 2);
+		CHECK_FALSE(again.dirty());
+		REQUIRE(again.edited({ 5, 7 }));
+		CHECK(*again.edited({ 5, 7 }) == *edits.edited({ 5, 7 }));
+		CHECK(*again.edited({ 0, 0 }) == *edits.edited({ 0, 0 }));
+	}
+	// Cut in the middle of the second record: the first one stands.
+	{
+		std::ofstream out(file, std::ios::binary | std::ios::trunc);
+		out.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size() - 100));
+	}
+	LandscapeEditSource cut(base);
+	CHECK(cut.loadFile(file) == 1);
+	CHECK(cut.edited({ 0, 0 }) != nullptr);
+	// Not an edits file at all.
+	{
+		std::ofstream out(file, std::ios::binary | std::ios::trunc);
+		out << "this is not a landscape edits file";
+	}
+	LandscapeEditSource junk(base);
+	CHECK(junk.loadFile(file) == 0);
+	// Saving an overlay with nothing in it removes the file.
+	REQUIRE(junk.save(file));
+	CHECK_FALSE(std::filesystem::exists(file));
+}
+
+TEST_CASE("LandscapeEditSession: a stroke reaches the store in place, the far levels and the atlas follow, and undo and redo swap whole strokes")
+{
+	const auto base = world();
+	const auto edits = std::make_shared<LandscapeEditSource>(base);
+	LandscapeRuntime rt;
+	LandscapeRuntimeConfig cfg;
+	REQUIRE(rt.begin(edits, cfg));
+	REQUIRE(rt.edits() == edits.get());   // an overlay handed in is the one that is edited
+	const glm::dvec3 cam(3000.0, 900.0, 3000.0), origin(0.0);
+	const glm::dmat4 vp = glm::perspective(glm::radians(70.0), 16.0 / 9.0, 1.0, 40000.0)
+	                      * glm::lookAt(cam, cam + glm::dvec3(1, -0.1, 0.2), glm::dvec3(0.0, 1.0, 0.0));
+	REQUIRE(settle(rt, cam));
+	LandscapeRenderFrame f0;
+	rt.buildRenderFrame(vp, origin, false, f0);
+	REQUIRE(f0.active);
+	const uint64_t generation = f0.world->generation;
+
+	LandscapeEditSession session(rt, *edits);
+	// A 30 m brush in the middle of tile (5, 5): one tile is enough.
+	const double bx = 5.5 * 512.0, bz = 5.5 * 512.0;
+	REQUIRE(session.focus(bx, bz, 30.0));
+	CHECK(session.terrain().resolution == 257);
+	float before = 0.0f;
+	REQUIRE(session.heightAt(bx, bz, before));
+
+	session.beginStroke();
+	TerrainComponent& tc = session.terrain();
+	const uint32_t mid = tc.resolution / 2;
+	tc.sculptHeights[static_cast<size_t>(mid) * tc.resolution + mid] += 60.0f;
+	CHECK(session.commit() == 1);
+	// In place: the tile stayed resident, with the new content, and the atlas uploads it again into the slot it has.
+	const LandscapeTileKey key{ 5, 5 };
+	REQUIRE(rt.store()->isResident(key));
+	const uint16_t slot = rt.atlas()->slotOf(key);
+	rt.updateAt(cam, glm::vec3(0.0f), 1.0);
+	LandscapeRenderFrame f1;
+	rt.buildRenderFrame(vp, origin, false, f1);
+	bool again = false;
+	for (const LandscapeRenderUpload& u : f1.uploads) again = again || u.slot == slot;
+	CHECK(again);
+	CHECK(f1.tableUpdates.empty());                 // same slot: nothing in the table moves, nothing falls back to the far levels
+	CHECK(f1.world->generation == generation);
+	CHECK(f1.world->coarseRevision == f0.world->coarseRevision);   // the coarse world waits for the end of the stroke
+
+	// A second dab of the same stroke, then the end.
+	tc.sculptHeights[static_cast<size_t>(mid + 3) * tc.resolution + mid] += 60.0f;
+	session.endStroke();
+	CHECK(session.canUndo());
+	CHECK_FALSE(session.canRedo());
+	float after = 0.0f;
+	REQUIRE(session.focus(bx, bz, 30.0));
+	REQUIRE(session.heightAt(bx, bz, after));
+	CHECK(after == doctest::Approx(before + 60.0f).epsilon(0.001));
+	REQUIRE(settle(rt, cam));
+	LandscapeRenderFrame f2;
+	rt.buildRenderFrame(vp, origin, false, f2);
+	CHECK(f2.world->generation == generation);                      // never "a new landscape": that would empty every backend's atlas
+	CHECK(f2.world->coarseRevision != f0.world->coarseRevision);    // the far levels are uploaded again
+	CHECK(f2.world->coarseHeights != f0.world->coarseHeights);
+	REQUIRE(edits->edited(key));
+	CHECK(edits->dirty());
+
+	// Undo takes the whole stroke (both dabs) back, redo brings it again.
+	REQUIRE(session.undo());
+	CHECK(edits->edited(key) == nullptr);
+	REQUIRE(session.focus(bx, bz, 30.0));
+	float undone = 0.0f;
+	REQUIRE(session.heightAt(bx, bz, undone));
+	CHECK(undone == doctest::Approx(before).epsilon(0.0001));
+	CHECK_FALSE(session.canUndo());
+	REQUIRE(session.redo());
+	REQUIRE(edits->edited(key));
+	REQUIRE(session.focus(bx, bz, 30.0));
+	REQUIRE(session.heightAt(bx, bz, after));
+	CHECK(after == doctest::Approx(before + 60.0f).epsilon(0.001));
+	CHECK_FALSE(session.redo());
+}
+
+TEST_CASE("LandscapeEditSession: the region follows the brush, takes 2 or 4 tiles near a border, and refuses a brush no region holds")
+{
+	const auto base = world();
+	const auto edits = std::make_shared<LandscapeEditSource>(base);
+	LandscapeRuntime rt;
+	REQUIRE(rt.begin(edits, LandscapeRuntimeConfig{}));
+	LandscapeEditSession session(rt, *edits);
+
+	// On the border between tiles 4 and 5 in x: two tiles a side (never three).
+	REQUIRE(session.focus(5.0 * 512.0, 5.5 * 512.0, 40.0));
+	CHECK(session.terrain().resolution == 513);
+	// A large brush across a corner: four.
+	REQUIRE(session.focus(5.0 * 512.0, 5.0 * 512.0, 600.0));
+	CHECK(session.terrain().resolution == 1025);
+	// More than a 4 x 4 region can hold with a sample to spare.
+	CHECK_FALSE(session.focus(5.0 * 512.0, 5.0 * 512.0, 1100.0));
+	CHECK_FALSE(session.hasRegion());
+	// Outside the world.
+	CHECK_FALSE(session.focus(-50.0, 100.0, 10.0));
+	// At the world's own edge the region ends with the world.
+	REQUIRE(session.focus(10.0, 10.0, 60.0));
+	CHECK(session.terrain().resolution == 257);
+
+	// A dab that crosses a tile border is written to both tiles, and their shared samples agree.
+	REQUIRE(session.focus(5.0 * 512.0, 5.5 * 512.0, 40.0));
+	TerrainComponent& tc = session.terrain();
+	const uint32_t res = tc.resolution;
+	for (uint32_t x = res / 2 - 3; x <= res / 2 + 3; ++x) tc.sculptHeights[static_cast<size_t>(100) * res + x] += 30.0f;
+	CHECK(session.commit() == 2);
+	const LandscapeTilePtr left = edits->edited({ 4, 5 }), right = edits->edited({ 5, 5 });
+	REQUIRE(left);
+	REQUIRE(right);
+	const int dim = edits->geometry().hCells + 1;
+	for (int z = 0; z < dim; ++z) CHECK(left->heights[0][static_cast<size_t>(z) * dim + dim - 1] == right->heights[0][static_cast<size_t>(z) * dim]);
+}
+
+TEST_CASE("landscapePackBakeEdits: the pack takes the edited tiles and keeps its other sections, and a runtime shows an edits file beside a pack")
+{
+	ProceduralLandscapeParams p;
+	p.geometry.hCells = 32;
+	p.geometry.wTexels = 16;
+	p.geometry.channels = 4;
+	p.tilesX = p.tilesZ = 3;
+	p.seaLevelM = 1500.0f;
+	const ProceduralLandscapeSource src(p);
+	const std::filesystem::path packFile = tempFile("pack.bin");
+	{
+		LandscapePackWriter w;
+		REQUIRE(w.begin(packFile.string(), src.geometry(), 3, 3, 3, 0.0f, 3000.0f));
+		w.setWaterTable(*src.water());
+		for (int z = 0; z < 3; ++z)
+			for (int x = 0; x < 3; ++x) REQUIRE(w.add({ x, z }, encodeLandscapeTile(src.generate({ x, z }))));
+		REQUIRE(w.finish());
+	}
+	std::string err;
+	LandscapeTile editedTile;
+	{
+		auto pack = LandscapePackSource::open(packFile.string(), &err);
+		REQUIRE_MESSAGE(pack, err);
+		LandscapeEditSource edits(pack);
+		auto tile = std::make_shared<LandscapeTile>(*fullTile(*pack, { 1, 2 }));
+		for (uint16_t& h : tile->heights[0]) h = 12345;
+		tile->buildMips();
+		editedTile = *tile;
+		edits.set({ { { 1, 2 }, tile } });
+		REQUIRE_MESSAGE(edits.save(landscapeEditsFile(packFile), &err), err);
+
+		// A copy, as the export makes one, baked from an overlay of the ORIGINAL.
+		const std::filesystem::path copy = tempFile("copy.bin");
+		std::filesystem::copy_file(packFile, copy);
+		REQUIRE_MESSAGE(landscapePackBakeEdits(copy.string(), edits, &err), err);
+		auto baked = LandscapePackSource::open(copy.string(), &err);
+		REQUIRE_MESSAGE(baked, err);
+		LandscapeTile t;
+		REQUIRE(baked->load({ 1, 2 }, -1, t));
+		CHECK(t.heights[0] == editedTile.heights[0]);
+		REQUIRE(baked->load({ 0, 0 }, -1, t));
+		CHECK(t == *fullTile(*pack, { 0, 0 }));          // the others byte for byte
+		CHECK(baked->water() != nullptr);                // the water table came along
+		float minM = 0.0f, scaleM = 0.0f;
+		CHECK(baked->heightRange(minM, scaleM));
+		CHECK(scaleM == 3000.0f);
+		REQUIRE(baked->coarse());
+		const int cpt = baked->coarse()->cellsPerTile;
+		CHECK(baked->coarse()->heights[0].at(1 * cpt + cpt / 2, 2 * cpt + cpt / 2) == 12345);   // and its coarse world is the edited one
+		baked.reset();
+		std::filesystem::remove(copy);
+	}
+
+	std::filesystem::remove(landscapeEditsFile(packFile));
+	std::filesystem::remove(packFile);
+}
+
+TEST_CASE("landscape runtime: a pack with an edits file beside it is shown edited, and an editable runtime has an overlay from the start")
+{
+	const auto src = world(4);   // the real geometry: a runtime needs it for its load radius
+	const std::filesystem::path packFile = tempFile("rt.bin");
+	{
+		LandscapePackWriter w;
+		REQUIRE(w.begin(packFile.string(), src->geometry(), 4, 4, 4, 0.0f, 3000.0f));
+		for (int z = 0; z < 4; ++z)
+			for (int x = 0; x < 4; ++x) REQUIRE(w.add({ x, z }, encodeLandscapeTile(src->generate({ x, z }))));
+		REQUIRE(w.finish());
+	}
+	std::string err;
+	// No edits file: a plain runtime reads the pack itself, an editable one gets an (empty) overlay.
+	{
+		LandscapeRuntime plain;
+		REQUIRE_MESSAGE(plain.beginFromPack(packFile.string(), LandscapeRuntimeConfig{}, &err), err);
+		CHECK(plain.edits() == nullptr);
+		LandscapeRuntime editable;
+		editable.setEditable(true);
+		REQUIRE_MESSAGE(editable.beginFromPack(packFile.string(), LandscapeRuntimeConfig{}, &err), err);
+		REQUIRE(editable.edits());
+		CHECK(editable.edits()->editedKeys().empty());
+		CHECK(editable.packFile() == packFile);
+
+		// An edit through that runtime, saved where the next one finds it.
+		auto tile = std::make_shared<LandscapeTile>(*fullTile(*src, { 1, 2 }));
+		for (uint16_t& h : tile->heights[0]) h = 22222;
+		tile->buildMips();
+		editable.edits()->set({ { { 1, 2 }, tile } });
+		REQUIRE_MESSAGE(editable.edits()->save(landscapeEditsFile(editable.packFile()), &err), err);
+	}
+	// Now any runtime, editable or not, shows the edited tile.
+	{
+		LandscapeRuntime rt;
+		REQUIRE_MESSAGE(rt.beginFromPack(packFile.string(), LandscapeRuntimeConfig{}, &err), err);
+		REQUIRE(rt.edits());
+		CHECK(rt.edits()->edited({ 1, 2 }) != nullptr);
+		CHECK_FALSE(rt.edits()->dirty());
+		LandscapeTile t;
+		REQUIRE(rt.store()->source().load({ 1, 2 }, -1, t));
+		CHECK(t.heights[0][0] == 22222);
+	}
+	std::filesystem::remove(landscapeEditsFile(packFile));
+	std::filesystem::remove(packFile);
+}
+
+TEST_CASE("LandscapeEditSession: the single landscape's own brushes work on the region and reach the tiles (sculpt and paint)")
+{
+	const auto base = world();
+	const auto edits = std::make_shared<LandscapeEditSource>(base);
+	LandscapeRuntime rt;
+	REQUIRE(rt.begin(edits, LandscapeRuntimeConfig{}));
+	LandscapeEditSession session(rt, *edits);
+	const double bx = 6.5 * 512.0, bz = 6.5 * 512.0;
+	REQUIRE(session.focus(bx, bz, 60.0));
+	float before = 0.0f;
+	REQUIRE(session.heightAt(bx, bz, before));
+	const float lx = static_cast<float>(bx - session.centre().x), lz = static_cast<float>(bz - session.centre().z);
+
+	// Raise by 12 m at the centre: the brush must not have resized the terrain behind the session's back (ensureHeights snaps to 2^k + 1).
+	const uint32_t res = session.terrain().resolution, wres = session.terrain().weightRes;
+	const TerrainSculpt::Result r = TerrainSculpt::apply(session.terrain(), lx, lz, TerrainSculpt::Op::Raise, 40.0f, 20.0f, 12.0f);
+	REQUIRE(r.ok);
+	CHECK(r.changed > 0);
+	CHECK(session.terrain().resolution == res);
+	CHECK(session.commit() == 1);
+	float after = 0.0f;
+	REQUIRE(session.heightAt(bx, bz, after));
+	CHECK(after == doctest::Approx(before + 12.0f).epsilon(0.001));
+	const LandscapeTilePtr sculpted = edits->edited({ 6, 6 });
+	REQUIRE(sculpted);
+	const LandscapeTilePtr was = fullTile(*base, { 6, 6 });
+	CHECK(sculpted->heights[0] != was->heights[0]);
+	CHECK(sculpted->weights[0] == was->weights[0]);   // a sculpt dab leaves the paint alone
+
+	// Paint layer 2 at full strength: the weights of the tile change, the heights do not change again.
+	REQUIRE(TerrainPaint::paint(session.terrain(), lx, lz, 2, 40.0f, 20.0f, 1.0f));
+	CHECK(session.terrain().weightRes == wres);
+	CHECK(session.commit() == 1);
+	const LandscapeTilePtr painted = edits->edited({ 6, 6 });
+	REQUIRE(painted);
+	CHECK(painted->heights[0] == sculpted->heights[0]);
+	CHECK(painted->weights[0] != sculpted->weights[0]);
+	const int wt = edits->geometry().wTexels, C = edits->geometry().channels;
+	CHECK(painted->weights[0][(static_cast<size_t>(wt / 2) * wt + wt / 2) * C + 2] > 200);   // the middle of the tile is layer 2 now
+}

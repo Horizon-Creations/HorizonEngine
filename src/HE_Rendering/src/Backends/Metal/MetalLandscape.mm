@@ -56,6 +56,7 @@ struct MetalLandscape::Impl
 	id<MTLTexture> farAlbedo = nil;   // the baked far image (sRGB8 + A, mipped), fragment texture 30; nil = the world has none
 	id<MTLTexture> noArray = nil;   // bound at 27 when there is no albedo array: the shader does not read it, Metal wants something there
 	std::shared_ptr<const LandscapeRenderStatic> world;
+	uint64_t coarseRevision = 0;   // the coarse world's state the images hold
 	Stats stats;
 	bool ok = false;
 
@@ -196,7 +197,22 @@ void MetalLandscape::encode(void* renderEncoder, const LandscapeRenderFrame& f, 
 			}
 			m.indices = [m.device newBufferWithBytes:w.patchIndices.data() length:w.patchIndices.size() * sizeof(uint16_t) options:MTLResourceStorageModeShared];
 			m.world = f.world;
+			m.coarseRevision = w.coarseRevision;
 			++m.stats.generations;
+		}
+		else if (m.coarseRevision != w.coarseRevision)
+		{
+			// An edited tile changed the coarse world (same landscape, same sizes): the far levels' images again, the atlas stays as it is.
+			if (w.coarseHeights.size() == static_cast<size_t>(w.coarseW) * static_cast<size_t>(w.coarseH))
+				[m.coarseHeights replaceRegion:MTLRegionMake2D(0, 0, static_cast<NSUInteger>(w.coarseW), static_cast<NSUInteger>(w.coarseH))
+				                   mipmapLevel:0 withBytes:w.coarseHeights.data() bytesPerRow:static_cast<NSUInteger>(w.coarseW) * 2];
+			for (int p = 0; p < 3; ++p)
+				if (static_cast<size_t>(p) < w.coarseWeights.size()
+				    && w.coarseWeights[static_cast<size_t>(p)].size() == static_cast<size_t>(w.coarseWeightW) * static_cast<size_t>(w.coarseWeightH) * 4)
+					[m.coarseWeights[p] replaceRegion:MTLRegionMake2D(0, 0, static_cast<NSUInteger>(w.coarseWeightW), static_cast<NSUInteger>(w.coarseWeightH))
+					                      mipmapLevel:0 withBytes:w.coarseWeights[static_cast<size_t>(p)].data()
+					                      bytesPerRow:static_cast<NSUInteger>(w.coarseWeightW) * 4];
+			m.coarseRevision = w.coarseRevision;
 		}
 
 		// ── the frame's uploads, then its table changes ──

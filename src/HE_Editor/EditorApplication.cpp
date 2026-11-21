@@ -4193,6 +4193,7 @@ void EditorApplication::OnRender(float dt)
 			// Every call, not just the first bind below: RenderExtractor reads this to build the GI
 			// shadow kernel's height clipmap (step 4).
 			m_editorWorld->setLandscapeRuntime(&m_landscape);
+			if (!m_landscapeToolsBound) { LandscapeWorldTools::setRuntime(&m_landscape); m_landscapeToolsBound = true; }   // the tile brush edits this runtime
 			LandscapeWorldTools::pump(*m_editorWorld);   // before the update: a rebuilt pack is opened again this frame
 			if (contentManager().contentRoot() != m_landscapeContentRoot)
 			{
@@ -16448,6 +16449,10 @@ bool EditorApplication::saveSceneToPath(const std::string& path)
 	// serialisation, and without the "Could not save" dialog below: nothing is wrong,
 	// the save simply has to wait, and the gate has already said so.
 	if (HE::ProjectWriteGate::refuse("save the scene")) return false;
+
+	// Sculpted and painted tiles of a tile landscape live beside its pack, not in the scene: saving the scene saves them too.
+	if (const std::string why = LandscapeWorldTools::saveEdits(); !why.empty())
+		HE_LOG_WARN(Editor, "Tile landscape edits were not saved: %s", why.c_str());
 
 	// The file must not lag the assets it was built from — see the header.
 	// Before the write, so the sync's result IS what lands on disk; the world

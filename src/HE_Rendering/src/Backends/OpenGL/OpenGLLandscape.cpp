@@ -22,6 +22,7 @@ struct OpenGLLandscape::Impl
 	GLuint farAlbedo = 0;   // the baked far image (sRGB8 + A, mipped, filtered); 0 = the world has none
 	GLuint noArray = 0;   // bound where there is no albedo array: the shader does not read it, but an unloadable texture on a sampler is a driver warning
 	std::shared_ptr<const LandscapeRenderStatic> world;   // what the images were made for
+	uint64_t coarseRevision = 0;                           // ... and the coarse world's state they hold
 	Stats stats;
 
 	// uniform locations
@@ -275,7 +276,26 @@ void OpenGLLandscape::draw(const LandscapeRenderFrame& f, const glm::mat4& viewP
 		glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m.ibo);
 		glBufferData(GL_ELEMENT_ARRAY_BUFFER, static_cast<GLsizeiptr>(w.patchIndices.size() * sizeof(uint16_t)), w.patchIndices.data(), GL_STATIC_DRAW);
 		m.world = f.world;
+		m.coarseRevision = w.coarseRevision;
 		++m.stats.generations;
+	}
+	else if (m.coarseRevision != w.coarseRevision)
+	{
+		// An edited tile changed the coarse world (same landscape, same sizes): the far levels' images again, the atlas stays as it is.
+		glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+		if (w.coarseHeights.size() == static_cast<size_t>(w.coarseW) * static_cast<size_t>(w.coarseH))
+		{
+			glBindTexture(GL_TEXTURE_2D, m.coarseHeights);
+			glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w.coarseW, w.coarseH, GL_RED_INTEGER, GL_UNSIGNED_SHORT, w.coarseHeights.data());
+		}
+		for (int p = 0; p < 3; ++p)
+			if (static_cast<size_t>(p) < w.coarseWeights.size()
+			    && w.coarseWeights[static_cast<size_t>(p)].size() == static_cast<size_t>(w.coarseWeightW) * static_cast<size_t>(w.coarseWeightH) * 4)
+			{
+				glBindTexture(GL_TEXTURE_2D, m.coarseWeights[p]);
+				glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w.coarseWeightW, w.coarseWeightH, GL_RGBA, GL_UNSIGNED_BYTE, w.coarseWeights[static_cast<size_t>(p)].data());
+			}
+		m.coarseRevision = w.coarseRevision;
 	}
 
 	// ── the frame's uploads, then its table changes (a slot's image is in before the table says so) ──

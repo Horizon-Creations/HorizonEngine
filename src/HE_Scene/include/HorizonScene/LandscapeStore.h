@@ -119,6 +119,10 @@ public:
 	// drain()). A key never in the map is a no-op. There is no per-tile revision yet: add one with the first consumer that caches a
 	// TilePtr past an eviction and needs to tell it went stale (foliage or physics fan-out).
 	void invalidate(const std::vector<LandscapeTileKey>& keys);
+	// An edit in progress: a resident tile takes the new content in place and stays resident (the atlas sees another tile behind the
+	// key and uploads it again into the same slot), so nothing falls back to the far levels between two dabs. A tile that is loading
+	// is invalidated instead (it reads the source again, which has the edit); one the store does not hold is left alone.
+	void replace(const std::vector<std::pair<LandscapeTileKey, TilePtr>>& tiles);
 
 private:
 	struct Entry

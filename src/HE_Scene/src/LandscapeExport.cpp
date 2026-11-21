@@ -1,5 +1,6 @@
 #include "HorizonScene/LandscapeExport.h"
 #include "HorizonScene/HorizonWorld.h"
+#include "HorizonScene/LandscapeEdit.h"
 #include "HorizonScene/LandscapeRuntime.h"
 #include "HorizonScene/Components/LandscapeWorldComponent.h"
 #include <ContentManager/ContentManager.h>
@@ -112,9 +113,16 @@ namespace
 		if (cacheFile.empty() || !readFile(cacheFile, bytes) || !LandscapeFarTable::decode(bytes, previous))
 			if (source->farImage()) previous = *source->farImage();
 
+		// The world as its author sees it: the pack with its edits (LandscapeEdit.h) on top. An edited tile hashes by its own bytes.
+		LandscapeEditSource edited(source);
+		const size_t editedTiles = pack.editsFile.empty() ? 0 : edited.loadFile(pack.editsFile);
+		const LandscapeFarTileHash packHash = landscapePackTileHash(*source);
+		const LandscapeFarTileHash hash = editedTiles ? LandscapeFarTileHash([&](LandscapeTileKey k) { return edited.contentHash(k, packHash); }) : packHash;
+		const LandscapeTileSource& world = editedTiles ? static_cast<const LandscapeTileSource&>(edited) : *source;
+
 		LandscapeFarTable table;
 		LandscapeFarBakeStats st;
-		bakeLandscapeFar(*source, landscapePackTileHash(*source), bo, previous.empty() ? nullptr : &previous, table, st);
+		bakeLandscapeFar(world, hash, bo, previous.empty() ? nullptr : &previous, table, st);
 		plan.farBake.regions += st.regions;
 		plan.farBake.baked += st.baked;
 		plan.farBake.reused += st.reused;
@@ -201,6 +209,13 @@ size_t prepareLandscapePacksForExport(HorizonWorld& world, const std::filesystem
 			LandscapeExportPack p;
 			p.source = source;
 			p.dest = destinationFor(source, plan);
+			// Sculpted and painted tiles live beside the pack (LandscapeEdit.h); the shipped copy gets them baked in, so a game needs no second file.
+			std::error_code ec;
+			if (const std::filesystem::path edits = landscapeEditsFile(source); std::filesystem::is_regular_file(edits, ec))
+			{
+				p.editsFile = edits;
+				say(0, "Landscape edits: " + edits.filename().generic_string() + " is baked into the shipped pack");
+			}
 			plan.packs.push_back(std::move(p));
 			it = plan.packs.end() - 1;
 		}
@@ -244,6 +259,15 @@ size_t prepareLandscapePacksForExport(HorizonWorld& world, const std::filesystem
 
 bool finishExportedPack(const LandscapeExportPack& pack, const std::filesystem::path& copied, std::string* error)
 {
+	// The edits first: the tiles of the copy become the edited ones (the overlay reads the PROJECT's pack, the copy is what is rewritten).
+	if (!pack.editsFile.empty())
+	{
+		std::string err;
+		auto base = LandscapePackSource::open(pack.source.string(), &err);
+		if (!base) { if (error) *error = "landscape edits: " + err; return false; }
+		LandscapeEditSource edits(std::move(base));
+		if (edits.loadFile(pack.editsFile) > 0 && !landscapePackBakeEdits(copied.string(), edits, error)) return false;
+	}
 	const bool hlod = pack.hlod && pack.hlod->cellCount() > 0;
 	const bool farImage = pack.farTable && !pack.farTable->empty();
 	if (!hlod && !farImage) return true;

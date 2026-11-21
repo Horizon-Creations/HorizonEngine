@@ -64,6 +64,7 @@ private:
 	std::vector<uint16_t> m_table;                    // window x window slots
 	std::vector<LandscapeTileKey> m_tableOwner;       // which tile an entry belongs to (to tell it from an alias)
 	std::unordered_map<LandscapeTileKey, uint16_t, LandscapeTileKeyHash> m_slotOf;
+	std::unordered_map<LandscapeTileKey, const LandscapeTile*, LandscapeTileKeyHash> m_tileOf;   // what each slot was uploaded from (LandscapeStore::replace)
 	std::vector<uint16_t> m_free;
 	Stats    m_stats;
 };

@@ -22,7 +22,10 @@
 
 #include <ContentManager/ContentManager.h>
 #include <HorizonScene/HorizonWorld.h>
+#include <HorizonScene/LandscapeEdit.h>
 #include <HorizonScene/LandscapeFarBake.h>
+#include <HorizonScene/TerrainPaint.h>
+#include <HorizonScene/TerrainSculpt.h>
 #include <HorizonScene/LandscapeRuntime.h>
 #include <HorizonScene/LandscapeWater.h>
 #include <HorizonScene/LandscapeWorldProxies.h>
@@ -526,6 +529,78 @@ int runBackend(gpucheck::Backend& be, const std::string& packPath, const std::fi
 		writePng((outDir / (std::string("landscape_") + be.name() + "_far.png")).string(), withReal);
 		writePng((outDir / (std::string("landscape_") + be.name() + "_far_marker.png")).string(), withMarker);
 		writePng((outDir / (std::string("landscape_") + be.name() + "_far_without.png")).string(), without);
+	}
+	// ── scene 5: sculpt and paint that write back (LandscapeEdit.h): a dab shows in the atlas at once, the far levels after the stroke ──
+	{
+		ProceduralLandscapeParams p;
+		p.tilesX = p.tilesZ = kFarTiles;
+		const auto edits = std::make_shared<LandscapeEditSource>(std::make_shared<ProceduralLandscapeSource>(p));
+		LandscapeRuntime rt;
+		LandscapeRuntimeConfig cfg;
+		cfg.store.byteBudget = 16ull * 1024 * 1024;
+		std::string err;
+		if (!rt.begin(edits, cfg, &err)) { std::printf("  runtime: %s\n", err.c_str()); return 1; }
+		Camera c{ { 2000.0, 3400.0, 2000.0 }, { 0.7, -0.25, 0.7 }, { 0.0, 0.0, 0.0 } };
+		const auto shot = [&](gpucheck::RenderOut& out) {
+			if (!settle(rt, c.pos, c.origin)) { std::printf("  the store did not settle (edit)\n"); return false; }
+			gpucheck::RenderIn in = makeInput(c, be.depthIsNdc(), rt);
+			return be.render(in, out);
+		};
+		// Paints layer 3 (the brightest flat colour) over a 300 m disc and raises it, as one stroke.
+		LandscapeEditSession session(rt, *edits);
+		const auto dab = [&](double x, double z, bool endStroke) {
+			if (!session.focus(x, z, 300.0)) return false;
+			session.beginStroke();
+			const float lx = static_cast<float>(x - session.centre().x), lz = static_cast<float>(z - session.centre().z);
+			TerrainPaint::paint(session.terrain(), lx, lz, 3, 250.0f, 50.0f, 1.0f);
+			TerrainSculpt::apply(session.terrain(), lx, lz, TerrainSculpt::Op::Raise, 250.0f, 50.0f, 80.0f);
+			const size_t n = session.commit();
+			if (endStroke) session.endStroke();
+			return n > 0;
+		};
+		const auto differing = [](const gpucheck::RenderOut& a, const gpucheck::RenderOut& b) {
+			size_t n = 0;
+			for (size_t i = 0; i + 3 < a.rgba.size() && i + 3 < b.rgba.size(); i += 4)
+			{
+				int worst = 0;
+				for (size_t k = 0; k < 3; ++k) worst = std::max(worst, std::abs(static_cast<int>(a.rgba[i + k]) - static_cast<int>(b.rgba[i + k])));
+				n += worst > 16 ? 1 : 0;
+			}
+			return n;
+		};
+		gpucheck::RenderOut before, nearDab, farStroke;
+		if (!shot(before)) { std::printf("  render failed (edit)\n"); return 1; }
+		// Near the camera (a tile in the atlas): the dab is committed and the stroke left open, so only the in-place path can show it.
+		const bool nearOk = dab(2700.0, 2700.0, false);
+		const size_t residentBefore = rt.store()->residentKeys().size();
+		rt.updateAt(c.pos, glm::vec3(0.0f), 5.0, c.origin);
+		const bool stayed = rt.store()->residentKeys().size() == residentBefore;
+		gpucheck::RenderIn in = makeInput(c, be.depthIsNdc(), rt);
+		if (!be.render(in, nearDab)) { std::printf("  render failed (edit, near dab)\n"); return 1; }
+		// Far from it (outside the atlas): a whole stroke; the far levels follow when it ends. Where: the ground the ray through the
+		// upper middle of the picture meets, so the stroke is certainly in view (a fixed point may lie behind a ridge).
+		glm::dvec3 farAt(8200.0, 0.0, 8200.0);
+		{
+			const LandscapeCoarseWorld* cw = edits->coarse();
+			const glm::dvec3 dir = glm::normalize(glm::dvec3(0.7, -0.17, 0.7));
+			for (double t = 3500.0; t < 16000.0; t += 40.0)
+			{
+				const glm::dvec3 q = c.pos + dir * t;
+				const int gx = std::clamp(static_cast<int>(q.x / cw->cellM(0)), 0, cw->heights[0].w - 1), gz = std::clamp(static_cast<int>(q.z / cw->cellM(0)), 0, cw->heights[0].h - 1);
+				if (q.y <= static_cast<double>(cw->heights[0].at(gx, gz)) / 65535.0 * static_cast<double>(p.heightScale)) { farAt = q; break; }
+			}
+		}
+		const bool farOk = dab(farAt.x, farAt.z, true);
+		if (!shot(farStroke)) { std::printf("  render failed (edit, far stroke)\n"); return 1; }
+		const size_t nearMoved = differing(before, nearDab), farMoved = differing(nearDab, farStroke);
+		std::printf("  %-26s a dab near the camera moved %zu px with the stroke still open; a stroke on the far ground (%.0f m away) moved %zu more px\n", "edit", nearMoved, glm::length(farAt - c.pos), farMoved);
+		tally.check(nearOk && farOk, "both dabs changed tiles");
+		tally.check(stayed, "a dab in an open stroke leaves every tile resident (nothing falls back to the far levels)");
+		tally.check(nearMoved > 200, "a dab on a tile in the atlas shows at once");
+		// A backend that re-uploads the coarse world on a coarse revision shows the far stroke; the others keep the far levels as they were.
+		if (be.takesFarImage()) tally.check(farMoved > 30, "a stroke outside the atlas shows on the far levels once it ends");
+		else std::printf("  %-26s this backend does not upload the coarse world again yet: the far stroke moved %zu px\n", "", farMoved);
+		writePng((outDir / (std::string("landscape_") + be.name() + "_edit.png")).string(), farStroke);
 	}
 	std::printf("  %s\n", tally.failures == 0 ? "OK" : "FAILED");
 	return tally.failures == 0 ? 0 : 1;

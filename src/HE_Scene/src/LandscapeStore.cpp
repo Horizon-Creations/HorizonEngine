@@ -106,6 +106,17 @@ void LandscapeStore::invalidate(const std::vector<LandscapeTileKey>& keys)
 	}
 }
 
+void LandscapeStore::replace(const std::vector<std::pair<LandscapeTileKey, TilePtr>>& tiles)
+{
+	for (const auto& [key, tile] : tiles)
+	{
+		const auto it = m_tiles.find(key);
+		if (it == m_tiles.end() || !tile) continue;
+		if (it->second.state == Entry::State::Resident) it->second.tile = tile;
+		else invalidate({ key });
+	}
+}
+
 LandscapeStore::TilePtr LandscapeStore::tile(LandscapeTileKey key) const
 {
 	const auto it = m_tiles.find(key);

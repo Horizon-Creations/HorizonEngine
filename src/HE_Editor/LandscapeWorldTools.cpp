@@ -6,7 +6,12 @@
 #include <HorizonScene/Components/NameComponent.h>
 #include <HorizonScene/Components/TerrainComponent.h>
 #include <HorizonScene/HorizonWorld.h>
+#include <HorizonScene/LandscapeEdit.h>
 #include <HorizonScene/LandscapePackBuild.h>
+#include <HorizonScene/LandscapeRuntime.h>
+#include <HorizonScene/TerrainPaint.h>
+#include <HorizonScene/TerrainSculpt.h>
+#include <HorizonRendering/RenderWorld.h>
 #include <HorizonScene/TransformHierarchy.h>
 #include <Diagnostics/Logger.h>
 
@@ -34,6 +39,8 @@ namespace LandscapeWorldTools
 {
 namespace
 {
+void drawEditBlock();   // the "Sculpt and Paint" block of the section; with the tile brush at the end of this file
+
 enum class Kind { Generate, Migrate, Import };
 
 struct State
@@ -327,6 +334,8 @@ void drawSection(AppContext& ctx, Entity entity, const std::function<void()>& af
 	}
 	ImGui::TextDisabled("%.1f km x %.1f km, 512 m tiles", s.gen.tilesX * 0.512, s.gen.tilesZ * 0.512);
 
+	drawEditBlock();
+
 	ImGui::SeparatorText("Migrate");
 	const Entity terrain = migrationSource(*ctx.world, entity);
 	if (terrain == entt::null)
@@ -372,6 +381,233 @@ void drawSection(AppContext& ctx, Entity entity, const std::function<void()>& af
 }
 #else
 void drawSection(AppContext&, Entity, const std::function<void()>&) {}
+#endif
+
+// ── Sculpt and paint on the tiles ────────────────────────────────────────────────────────────────────────�
+// The brushes are the single landscape's own (TerrainSculpt, TerrainPaint); what they work on is the region terrain an
+// HE::LandscapeEditSession hands out for the tiles under the cursor, and every dab is written back at once (LandscapeEdit.h).
+namespace
+{
+struct EditState
+{
+	HE::LandscapeRuntime* runtime = nullptr;
+	HE::LandscapeEditSource* editsOf = nullptr;                // what `session` was made for: a reopened pack is another overlay
+	std::unique_ptr<HE::LandscapeEditSession> session;
+	bool  on = false;
+	int   tool = 0;                                            // kToolNames
+	float radius = 40.0f, falloff = 20.0f, strength = 0.5f;
+	int   layer = 0;
+	bool  stroke = false;
+	float flattenTo = 0.0f;
+	std::string status;
+	bool  statusError = false;
+};
+EditState& es() { static EditState s; return s; }
+
+// The session of the runtime's present overlay, or null when there is nothing to edit.
+HE::LandscapeEditSession* sessionNow()
+{
+	EditState& e = es();
+	HE::LandscapeEditSource* edits = e.runtime && e.runtime->active() ? e.runtime->edits() : nullptr;
+	if (edits != e.editsOf)
+	{
+		e.session.reset();
+		e.stroke = false;
+		e.editsOf = edits;
+		if (edits) e.session = std::make_unique<HE::LandscapeEditSession>(*e.runtime, *edits);
+	}
+	return e.session.get();
+}
+} // namespace
+
+void setRuntime(HE::LandscapeRuntime* runtime)
+{
+	EditState& e = es();
+	e.session.reset();
+	e.editsOf = nullptr;
+	e.stroke = false;
+	e.runtime = runtime;
+	if (runtime) runtime->setEditable(true);
+}
+
+bool editsUnsaved()
+{
+	const EditState& e = es();
+	return e.runtime && e.runtime->active() && e.runtime->edits() && e.runtime->edits()->dirty();
+}
+
+std::string saveEdits()
+{
+	EditState& e = es();
+	if (!e.runtime || !e.runtime->active() || !e.runtime->edits() || e.runtime->packFile().empty()) return {};
+	if (e.session && e.stroke) { e.session->endStroke(); e.stroke = false; }
+	if (!e.runtime->edits()->dirty()) return {};
+	std::string err;
+	return e.runtime->edits()->save(HE::landscapeEditsFile(e.runtime->packFile()), &err) ? std::string() : err;
+}
+
+#ifdef HE_IMGUI_ENABLED
+namespace
+{
+const char* const kToolNames[] = { "Raise", "Lower", "Smooth", "Flatten", "Paint Layer" };
+
+void drawEditBlock()
+{
+	EditState& e = es();
+	ImGui::SeparatorText("Sculpt and Paint");
+	HE::LandscapeEditSession* session = sessionNow();
+	if (!session)
+	{
+		ImGui::TextDisabled("Open a pack to edit its tiles.");
+		return;
+	}
+	EditorWidgets::checkbox("Edit Tiles##tlwe", &e.on);
+	Row::combo("Tile Brush##tlwe", &e.tool, kToolNames, 5);
+	Row::dragFloat("Brush Radius##tlwe", &e.radius, 0.5f, 1.0f, 800.0f, "%.1f m");
+	Row::dragFloat("Brush Falloff##tlwe", &e.falloff, 0.5f, 0.0f, 400.0f, "%.1f m");
+	Row::dragFloat("Brush Strength##tlwe", &e.strength, 0.01f, 0.01f, 5.0f, "%.2f");
+	if (e.tool == 4) Row::dragInt("Paint Layer##tlwe", &e.layer, 0.1f, 0, 11);
+	ImGui::BeginDisabled(!session->canUndo());
+	if (EditorWidgets::button("Undo Stroke##tlwe")) session->undo();
+	ImGui::EndDisabled();
+	ImGui::SameLine();
+	ImGui::BeginDisabled(!session->canRedo());
+	if (EditorWidgets::button("Redo Stroke##tlwe")) session->redo();
+	ImGui::EndDisabled();
+	ImGui::SameLine();
+	ImGui::BeginDisabled(!editsUnsaved());
+	if (EditorWidgets::button("Save Tile Edits##tlwe"))
+	{
+		e.status = saveEdits();
+		e.statusError = !e.status.empty();
+		if (!e.statusError) e.status = "Edits saved beside the pack.";
+	}
+	ImGui::EndDisabled();
+	const size_t edited = e.runtime->edits()->editedKeys().size();
+	// Heights are 16 bit: a change below half a step is lost when a dab is written back, so say how large a step is.
+	const double stepCm = static_cast<double>(session->params().heightScaleM) / 65535.0 * 100.0;
+	ImGui::TextDisabled("%zu edited tile(s)%s. One height step is %.1f cm.", edited, editsUnsaved() ? ", not saved" : "", stepCm);
+	if (!e.status.empty())
+	{
+		if (e.statusError) ImGui::TextColored(ImVec4(0.95f, 0.45f, 0.40f, 1.0f), "%s", e.status.c_str());
+		else ImGui::TextDisabled("%s", e.status.c_str());
+	}
+}
+} // namespace
+
+void brushInViewport(AppContext& ctx, const RenderWorld& sceneSnapshot, const ImVec2& rectMin, const ImVec2& rectMax,
+                     bool navigating, bool viewportHovered, float dt)
+{
+	EditState& e = es();
+	HE::LandscapeEditSession* session = e.on && ctx.world ? sessionNow() : nullptr;
+	ImGuiIO& io = ImGui::GetIO();
+	const bool down = ImGui::IsMouseDown(ImGuiMouseButton_Left) && !io.KeyAlt;
+	// The button came up, or the brush went away under a stroke: close it, whatever else this frame does.
+	if (e.stroke && (!session || !down))
+	{
+		if (e.session) e.session->endStroke();
+		e.stroke = false;
+	}
+	if (!session || navigating) return;
+
+	// The mouse ray in absolute metres (the snapshot's camera is relative to the world's floating origin).
+	const ImVec2 mouse = ImGui::GetMousePos();
+	if (mouse.x < rectMin.x || mouse.x > rectMax.x || mouse.y < rectMin.y || mouse.y > rectMax.y) return;
+	const glm::dvec3 origin = ctx.world->origin();
+	const glm::mat4 VP = sceneSnapshot.camera.projection * sceneSnapshot.camera.view;
+	const glm::dmat4 invVP = glm::inverse(glm::dmat4(VP));
+	const double u = (mouse.x - rectMin.x) / (rectMax.x - rectMin.x), v = (mouse.y - rectMin.y) / (rectMax.y - rectMin.y);
+	glm::dvec4 a = invVP * glm::dvec4(2.0 * u - 1.0, 1.0 - 2.0 * v, -1.0, 1.0), b = invVP * glm::dvec4(2.0 * u - 1.0, 1.0 - 2.0 * v, 1.0, 1.0);
+	const glm::dvec3 ro = glm::dvec3(a) / a.w + origin, rd = glm::normalize(glm::dvec3(b) / b.w - glm::dvec3(a) / a.w);
+
+	// Where it meets the ground: marched on the coarse world (always in memory, 32 m), then refined on the tiles under it.
+	const HE::LandscapeCoarseWorld* coarse = e.runtime->edits()->coarse();
+	if (!coarse || !coarse->valid()) return;
+	const double minM = session->params().heightMinM, scaleM = session->params().heightScaleM;
+	const auto coarseH = [&](double x, double z) {
+		const HE::LandscapeGrid16& g = coarse->heights[0];
+		const double cell = coarse->cellM(0);
+		const double fx = std::clamp(x / cell, 0.0, static_cast<double>(g.w - 1)), fz = std::clamp(z / cell, 0.0, static_cast<double>(g.h - 1));
+		const int x0 = std::min(static_cast<int>(fx), g.w - 2), z0 = std::min(static_cast<int>(fz), g.h - 2);
+		const double tx = fx - x0, tz = fz - z0;
+		const double h = (g.at(x0, z0) * (1 - tx) + g.at(x0 + 1, z0) * tx) * (1 - tz) + (g.at(x0, z0 + 1) * (1 - tx) + g.at(x0 + 1, z0 + 1) * tx) * tz;
+		return minM + h / 65535.0 * scaleM;
+	};
+	double t = 0.0, tPrev = 0.0;
+	bool hit = false;
+	for (; t < 30000.0; tPrev = t, t += std::max(8.0, t * 0.01))
+	{
+		const glm::dvec3 p = ro + rd * t;
+		if (p.y <= coarseH(p.x, p.z)) { hit = t > 0.0; break; }
+	}
+	if (!hit) return;
+	const float reach = e.radius + e.falloff;
+	const auto groundH = [&](double x, double z) {
+		float h = 0.0f;
+		return session->heightAt(x, z, h) ? static_cast<double>(h) : coarseH(x, z);
+	};
+	glm::dvec3 p = ro + rd * t;
+	const bool focused = session->focus(p.x, p.z, reach);
+	for (int i = 0; i < 16; ++i)   // bisect between the last point above the ground and the first below it
+	{
+		const double mid = 0.5 * (tPrev + t);
+		const glm::dvec3 q = ro + rd * mid;
+		if (q.y <= groundH(q.x, q.z)) t = mid; else tPrev = mid;
+	}
+	p = ro + rd * t;
+	const bool usable = focused && session->focus(p.x, p.z, reach);
+
+	// The cursor: the inner and the outer ring on the ground; red when no editing region holds a brush this large here.
+	ImDrawList* dl = ImGui::GetWindowDrawList();
+	const auto project = [&](const glm::dvec3& w, ImVec2& out) {
+		glm::vec4 clip = VP * glm::vec4(glm::vec3(w - origin), 1.0f);
+		if (clip.w <= 0.0f) return false;
+		clip /= clip.w;
+		out = ImVec2(rectMin.x + (clip.x * 0.5f + 0.5f) * (rectMax.x - rectMin.x), rectMin.y + (0.5f - clip.y * 0.5f) * (rectMax.y - rectMin.y));
+		return true;
+	};
+	for (int ring = 0; ring < 2; ++ring)
+	{
+		const double r = ring == 0 ? e.radius : reach;
+		const ImU32 col = !usable ? IM_COL32(255, 110, 90, 220) : ring == 0 ? IM_COL32(255, 255, 255, 210) : IM_COL32(180, 180, 180, 120);
+		ImVec2 prev{};
+		bool prevOk = false;
+		for (int i = 0; i <= 48; ++i)
+		{
+			const double ang = 6.283185307179586 * i / 48.0;
+			const double x = p.x + r * std::cos(ang), z = p.z + r * std::sin(ang);
+			ImVec2 cur{};
+			const bool ok = project({ x, groundH(x, z), z }, cur);
+			if (ok && prevOk) dl->AddLine(prev, cur, col, ring == 0 ? 1.5f : 1.0f);
+			prev = cur;
+			prevOk = ok;
+		}
+	}
+	if (!usable || !viewportHovered || !down) return;
+
+	// The dab. Local space is the region terrain's: centred on the session's centre.
+	if (!e.stroke)
+	{
+		session->beginStroke();
+		e.stroke = true;
+		e.flattenTo = static_cast<float>(groundH(p.x, p.z));
+	}
+	TerrainComponent& tc = session->terrain();
+	const float lx = static_cast<float>(p.x - session->centre().x), lz = static_cast<float>(p.z - session->centre().z);
+	const bool invert = io.KeyCtrl;   // Ctrl turns Raise and Lower around, as it does in the Landscape mode
+	switch (e.tool)
+	{
+	case 0: case 1:
+		TerrainSculpt::apply(tc, lx, lz, (e.tool == 0) != invert ? TerrainSculpt::Op::Raise : TerrainSculpt::Op::Lower, e.radius, e.falloff, e.strength * dt * 20.0f);
+		break;
+	case 2: TerrainSculpt::apply(tc, lx, lz, TerrainSculpt::Op::Smooth, e.radius, e.falloff, std::clamp(e.strength * dt * 6.0f, 0.0f, 1.0f)); break;
+	case 3: TerrainSculpt::apply(tc, lx, lz, TerrainSculpt::Op::Set, e.radius, e.falloff, e.flattenTo); break;
+	default: TerrainPaint::paint(tc, lx, lz, std::clamp(e.layer, 0, 11), e.radius, e.falloff, std::clamp(e.strength * dt * 6.0f, 0.0f, 1.0f)); break;
+	}
+	session->commit();
+}
+#else
+void brushInViewport(AppContext&, const RenderWorld&, const ImVec2&, const ImVec2&, bool, bool, float) {}
 #endif
 
 } // namespace LandscapeWorldTools

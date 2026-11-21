@@ -251,6 +251,8 @@ public:
 	uint64_t storedOffset(LandscapeTileKey key) const;
 	// FNV-1a of a tile's stored bytes: changes when the tile does. 0 for no tile or a read error.
 	uint64_t storedHash(LandscapeTileKey key) const;
+	// The tile's blob as it is stored (an encodeLandscapeTile result), for a rewrite that copies it. False for no tile or a read error.
+	bool readStored(LandscapeTileKey key, std::vector<uint8_t>& blob) const;
 	// Bytes of the file without its tail sections (the cell HLOD table, the far image): where a rewrite of them starts.
 	uint64_t coreSize() const { return m_coreSize; }
 
@@ -275,6 +277,10 @@ private:
 	mutable std::mutex    m_mutex;                   // Windows: one HANDLE, one reader at a time
 	void*                 m_handle = nullptr;         // Windows HANDLE opened with FILE_SHARE_DELETE (see .cpp)
 };
+
+// Puts these tiles' share into a coarse world again (grid 0 and the weights, then the point-sampled grids above): what an edited tile
+// needs so the far levels show it. Tiles need the mips the coarse world is made of (LandscapeTile::buildMips). Keys outside are skipped.
+void landscapeCoarsePatch(LandscapeCoarseWorld& coarse, const std::vector<std::pair<LandscapeTileKey, std::shared_ptr<const LandscapeTile>>>& tiles);
 
 // Rewrites the tail sections of an existing pack in ONE copy of the file (written to a sibling, renamed over). For each of the two: null
 // keeps what the pack has, an empty table removes the section, anything else replaces it. False (and the pack untouched) for a file that

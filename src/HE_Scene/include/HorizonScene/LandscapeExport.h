@@ -31,6 +31,7 @@ struct LandscapeExportPack
 	bool hlodDone = false;                          // a bake ran for this pack (a second scene with cells does not run another)
 	std::shared_ptr<LandscapeFarTable> farTable;    // the baked far image (LandscapeFarBake.h); null: switched off, or nothing came out
 	bool farDone = false;                           // the same for the far image
+	std::filesystem::path editsFile;                // "<pack>.edits" beside the project's pack, when there is one: baked into the copy
 };
 
 struct LandscapeExportPlan

@@ -54,8 +54,21 @@ void LandscapeAtlas::sync(const LandscapeStore& store, std::vector<Upload>& uplo
 			m_tableOwner[e] = { -1, -1 };
 			table.push_back({ e, kNoSlot });
 		}
+		m_tileOf.erase(it->first);
 		it = m_slotOf.erase(it);
 		++m_stats.releases;
+	}
+
+	// 1b. a tile the store replaced in place (an edit): the same slot, uploaded again, no table change
+	for (const auto& [k, slot] : m_slotOf)
+	{
+		const LandscapeStore::TilePtr t = store.tile(k);
+		const auto was = m_tileOf.find(k);
+		if (!t || (was != m_tileOf.end() && was->second == t.get())) continue;
+		if (uploads.size() >= maxUploads) { ++m_stats.deferred; continue; }
+		m_tileOf[k] = t.get();
+		uploads.push_back({ k, slot, t });
+		++m_stats.uploads;
 	}
 
 	// 2. new tiles. Nearest-first is not known here; the store's resident set is small and mostly already in the atlas.
@@ -77,6 +90,7 @@ void LandscapeAtlas::sync(const LandscapeStore& store, std::vector<Upload>& uplo
 		m_tableOwner[e] = k;
 		table.push_back({ e, slot });
 		uploads.push_back({ k, slot, store.tile(k) });
+		m_tileOf[k] = uploads.back().tile.get();
 		++m_stats.uploads;
 	}
 	m_stats.used = m_slotOf.size();
