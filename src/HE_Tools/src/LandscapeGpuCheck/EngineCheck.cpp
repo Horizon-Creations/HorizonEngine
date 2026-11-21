@@ -148,7 +148,7 @@ int runEngineCheck(HE::RendererBackend backend, HE::RenderPath path, const std::
 			if (farMarker)
 			{
 				// The real renderer's frame, not the offscreen class: its own texture bindings must leave the far image's slot alone.
-				const bool takes = backend == HE::RendererBackend::Metal || backend == HE::RendererBackend::OpenGL;
+				const bool takes = backend == HE::RendererBackend::Metal || backend == HE::RendererBackend::OpenGL || backend == HE::RendererBackend::Vulkan;
 				std::printf("  far image: %d px in the marker's colour (%s)\n", marker, takes ? "this backend reads it" : "this backend does not take it yet");
 				if (takes && marker < static_cast<int>(kW * kH / 200)) fail("ground beyond the atlas is drawn from the far image", std::to_string(marker) + " px");
 				if (!takes && marker != 0) fail("a backend that does not take the far image shows none of it", std::to_string(marker) + " px");

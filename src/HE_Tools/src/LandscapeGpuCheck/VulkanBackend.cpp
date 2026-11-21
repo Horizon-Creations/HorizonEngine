@@ -40,6 +40,7 @@ public:
 	}
 	const char* name() const override { return "Vulkan"; }
 	bool refreshesCoarse() const override { return true; }
+	bool takesFarImage() const override { return true; }
 
 	bool init(std::string& error) override
 	{

@@ -27,6 +27,7 @@ struct Img
 };
 
 constexpr unsigned kHeights = 0, kTable = 1, kCoarseH = 2, kWeights = 3 /* x3 */, kCoarseW = 6 /* x3 */, kImages = 9;
+// The baked far image is not one of these: its mip count varies with the world, so it gets its own Img (see Impl::farAlbedo).
 } // namespace
 
 struct VulkanLandscape::Impl
@@ -42,12 +43,14 @@ struct VulkanLandscape::Impl
 	VkDeviceMemory        uboMem[kMaxFrames] = {};
 	void*                 uboMapped[kMaxFrames] = {};
 	VkSampler             nearest = VK_NULL_HANDLE;
+	VkSampler             farSampler = VK_NULL_HANDLE;   // linear + mipped + clamp, for the baked far image only (its uv does not repeat)
 	// One pipeline per render pass it is drawn in (the LDR swapchain pass and the HDR scene pass differ in colour format only; a pass that was
 	// recreated has a new handle, which rebuilds the pipeline).
 	struct Pipe { VkRenderPass pass = VK_NULL_HANDLE; VkPipeline pipe = VK_NULL_HANDLE; };
 	std::vector<Pipe>     pipes;
 
 	Img                   img[kImages];
+	Img                   farAlbedo;   // the baked far image (sRGB, mipped); view is null when the world has none
 	VkBuffer              vbo = VK_NULL_HANDLE, ibo = VK_NULL_HANDLE;
 	VkDeviceMemory        vboMem = VK_NULL_HANDLE, iboMem = VK_NULL_HANDLE;
 	std::vector<uint16_t> table;      // CPU mirror of the slot table: a change is one copy of the whole (small) image
@@ -86,13 +89,13 @@ struct VulkanLandscape::Impl
 		b = VK_NULL_HANDLE; m = VK_NULL_HANDLE;
 	}
 
-	bool makeImage(Img& im, VkFormat fmt, uint32_t w, uint32_t h, uint32_t layers, bool array)
+	bool makeImage(Img& im, VkFormat fmt, uint32_t w, uint32_t h, uint32_t layers, bool array, uint32_t mipLevels = 1)
 	{
 		VkImageCreateInfo ici{ VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
 		ici.imageType = VK_IMAGE_TYPE_2D;
 		ici.format = fmt;
 		ici.extent = { std::max(w, 1u), std::max(h, 1u), 1 };
-		ici.mipLevels = 1;
+		ici.mipLevels = std::max(mipLevels, 1u);
 		ici.arrayLayers = std::max(layers, 1u);
 		ici.samples = VK_SAMPLE_COUNT_1_BIT;
 		ici.tiling = VK_IMAGE_TILING_OPTIMAL;
@@ -110,7 +113,7 @@ struct VulkanLandscape::Impl
 		vci.image = im.image;
 		vci.viewType = array ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D;
 		vci.format = fmt;
-		vci.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, ici.arrayLayers };
+		vci.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, ici.mipLevels, 0, ici.arrayLayers };
 		if (vkCreateImageView(env.device, &vci, nullptr, &im.view) != VK_SUCCESS) return false;
 		im.layout = VK_IMAGE_LAYOUT_UNDEFINED;
 		return true;
@@ -125,6 +128,7 @@ struct VulkanLandscape::Impl
 	void destroyImages()
 	{
 		for (Img& im : img) destroyImage(im);
+		destroyImage(farAlbedo);
 		destroyBuffer(vbo, vboMem);
 		destroyBuffer(ibo, iboMem);
 		table.clear();
@@ -144,7 +148,7 @@ struct VulkanLandscape::Impl
 		b.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
 		b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 		b.image = im.image;
-		b.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, VK_REMAINING_ARRAY_LAYERS };
+		b.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, VK_REMAINING_MIP_LEVELS, 0, VK_REMAINING_ARRAY_LAYERS };
 		vkCmdPipelineBarrier(cb, fresh ? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT : (VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT),
 		                     VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &b);
 		im.layout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
@@ -159,24 +163,42 @@ struct VulkanLandscape::Impl
 		b.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 		b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 		b.image = im.image;
-		b.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, VK_REMAINING_ARRAY_LAYERS };
+		b.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, VK_REMAINING_MIP_LEVELS, 0, VK_REMAINING_ARRAY_LAYERS };
 		vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0,
 		                     nullptr, 0, nullptr, 1, &b);
 		im.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 	}
 
-	// Stages `bytes` and copies them into one layer (and the whole extent) of `im`.
-	bool copyLayer(VkCommandBuffer cb, Img& im, uint32_t layer, uint32_t w, uint32_t h, const void* data, size_t bytes)
+	// Stages `bytes` and copies them into one layer and mip level (and the whole extent of that level) of `im`.
+	bool copyLayer(VkCommandBuffer cb, Img& im, uint32_t layer, uint32_t w, uint32_t h, const void* data, size_t bytes, uint32_t mip = 0)
 	{
 		VkBuffer src = VK_NULL_HANDLE; VkDeviceSize off = 0;
 		if (!env.stage(data, bytes, src, off)) return false;
 		toTransfer(cb, im);
 		VkBufferImageCopy r{};
 		r.bufferOffset = off;
-		r.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, layer, 1 };
+		r.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, mip, layer, 1 };
 		r.imageExtent = { w, h, 1 };
 		vkCmdCopyBufferToImage(cb, src, im.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &r);
 		return true;
+	}
+	// The baked far image (LandscapeRenderStatic::farMips), when the world has one: the only image here with more than one mip level, made
+	// with the landscape's images and again whenever the coarse revision says the far data changed (an edit, a render window that moved).
+	// A level of the wrong size leaves the world without a far image, like OpenGLLandscape::makeFar / MetalLandscape's.
+	void makeFar(VkCommandBuffer cb, const LandscapeRenderStatic& w)
+	{
+		destroyImage(farAlbedo);
+		if (w.farW <= 0 || w.farH <= 0 || w.farMips.empty()) return;
+		const uint32_t mips = static_cast<uint32_t>(w.farMips.size());
+		bool whole = makeImage(farAlbedo, VK_FORMAT_R8G8B8A8_SRGB, static_cast<uint32_t>(w.farW), static_cast<uint32_t>(w.farH), 1, false, mips);
+		for (uint32_t l = 0; l < mips && whole; ++l)
+		{
+			const int lw = std::max(1, w.farW >> l), lh = std::max(1, w.farH >> l);
+			const size_t bytes = static_cast<size_t>(lw) * static_cast<size_t>(lh) * 4;
+			whole = w.farMips[l].size() == bytes && copyLayer(cb, farAlbedo, 0, static_cast<uint32_t>(lw), static_cast<uint32_t>(lh), w.farMips[l].data(), bytes, l);
+		}
+		if (whole) toRead(cb, farAlbedo);
+		else { destroyImage(farAlbedo); ++stats.rejected; }
 	}
 	void clearImage(VkCommandBuffer cb, Img& im)
 	{
@@ -307,6 +329,11 @@ bool VulkanLandscape::init(const Env& env, std::string* error)
 	sci.magFilter = VK_FILTER_NEAREST; sci.minFilter = VK_FILTER_NEAREST; sci.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
 	sci.addressModeU = sci.addressModeV = sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
 	if (vkCreateSampler(m.env.device, &sci, nullptr, &m.nearest) != VK_SUCCESS) return fail("landscape: sampler");
+	VkSamplerCreateInfo fsci{ VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };   // the baked far image: linear + mipped, clamped (its uv does not repeat)
+	fsci.magFilter = VK_FILTER_LINEAR; fsci.minFilter = VK_FILTER_LINEAR; fsci.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+	fsci.addressModeU = fsci.addressModeV = fsci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+	fsci.maxLod = VK_LOD_CLAMP_NONE;
+	if (vkCreateSampler(m.env.device, &fsci, nullptr, &m.farSampler) != VK_SUCCESS) return fail("landscape: far sampler");
 	m.ok = true;
 	return true;
 #endif
@@ -329,12 +356,13 @@ void VulkanLandscape::shutdown()
 		m.sets[i] = VK_NULL_HANDLE;
 	}
 	if (m.nearest) vkDestroySampler(m.env.device, m.nearest, nullptr);
+	if (m.farSampler) vkDestroySampler(m.env.device, m.farSampler, nullptr);
 	if (m.pool) vkDestroyDescriptorPool(m.env.device, m.pool, nullptr);
 	if (m.pipeLayout) vkDestroyPipelineLayout(m.env.device, m.pipeLayout, nullptr);
 	if (m.setLayout) vkDestroyDescriptorSetLayout(m.env.device, m.setLayout, nullptr);
 	if (m.vs) vkDestroyShaderModule(m.env.device, m.vs, nullptr);
 	if (m.fs) vkDestroyShaderModule(m.env.device, m.fs, nullptr);
-	m.nearest = VK_NULL_HANDLE; m.pool = VK_NULL_HANDLE; m.pipeLayout = VK_NULL_HANDLE; m.setLayout = VK_NULL_HANDLE;
+	m.nearest = VK_NULL_HANDLE; m.farSampler = VK_NULL_HANDLE; m.pool = VK_NULL_HANDLE; m.pipeLayout = VK_NULL_HANDLE; m.setLayout = VK_NULL_HANDLE;
 	m.vs = VK_NULL_HANDLE; m.fs = VK_NULL_HANDLE;
 	m.ok = false;
 }
@@ -415,6 +443,7 @@ void VulkanLandscape::upload(HE::LandscapeRenderFrame& f)
 			return;
 		}
 		for (Img& im : m.img) m.toRead(cb, im);
+		m.makeFar(cb, w);
 		m.world = f.world;
 		m.coarseRevision = w.coarseRevision;
 		++m.stats.generations;
@@ -422,9 +451,9 @@ void VulkanLandscape::upload(HE::LandscapeRenderFrame& f)
 	else if (m.world && m.coarseRevision != w.coarseRevision)
 	{
 		// The far data changed and nothing else: an edited tile, or the render window moved (then the coarse images may have another
-		// size). The four coarse images are made again; the tile atlas and the slot table stay exactly as they are, which is the point:
-		// the near ground never falls back to the far levels for this. A frame in flight may still read the old ones: submit, wait
-		// (once per stroke or per 32 km travelled), then free them.
+		// size). The coarse images and the far image are made again; the tile atlas and the slot table stay exactly as they are, which
+		// is the point: the near ground never falls back to the far levels for this. A frame in flight may still read the old ones:
+		// submit, wait (once per stroke or per 32 km travelled), then free them.
 		m.env.flush();
 		m.env.waitIdle();
 		m.destroyImage(m.img[kCoarseH]);
@@ -458,6 +487,7 @@ void VulkanLandscape::upload(HE::LandscapeRenderFrame& f)
 		}
 		m.toRead(cb, m.img[kCoarseH]);
 		for (unsigned p = 0; p < 3; ++p) m.toRead(cb, m.img[kCoarseW + p]);
+		m.makeFar(cb, w);
 		m.world = f.world;
 		m.coarseRevision = w.coarseRevision;
 	}
@@ -507,7 +537,7 @@ void VulkanLandscape::draw(VkCommandBuffer cmd, VkRenderPass pass, VkExtent2D ex
 
 	vkls::Globals g;
 	vkls::fillGlobals(g, f, viewProj, shading.sunDir, shading.sunColor, shading.ambient, shading.albedoArray != VK_NULL_HANDLE,
-	                  shading.normalArray != VK_NULL_HANDLE, shading.maskArray != VK_NULL_HANDLE);
+	                  shading.normalArray != VK_NULL_HANDLE, shading.maskArray != VK_NULL_HANDLE, m.farAlbedo.view != VK_NULL_HANDLE);
 	std::memcpy(m.uboMapped[frameIndex], &g, sizeof(g));
 
 	// Set 0 of this frame in flight (its fence has been waited on): the block and the thirteen images; an array the renderer could not resolve is the
@@ -522,9 +552,8 @@ void VulkanLandscape::draw(VkCommandBuffer cmd, VkRenderPass pass, VkExtent2D ex
 		shading.albedoArray ? shading.albedoArray : m.env.whiteArray,
 		shading.normalArray ? shading.normalArray : m.env.whiteArray,
 		shading.maskArray ? shading.maskArray : m.env.whiteArray,
-		// The baked far image is not uploaded on Vulkan yet (uTexMaps.z stays 0, the shader draws from the coarse weights as before): the
-		// binding the shared GLSL declares gets a 2D image that is always there.
-		m.img[kCoarseW].view };
+		// No far image: any complete 2D texture, the shader does not read it (uTexMaps.z is then 0).
+		m.farAlbedo.view ? m.farAlbedo.view : m.img[kCoarseW].view };
 	VkWriteDescriptorSet wr[glsl::kLandscapeVkBindingCount] = {};
 	for (unsigned i = 0; i < glsl::kLandscapeVkBindingCount; ++i)
 	{
@@ -539,7 +568,8 @@ void VulkanLandscape::draw(VkCommandBuffer cmd, VkRenderPass pass, VkExtent2D ex
 		}
 		else
 		{
-			ii[i] = { i >= glsl::kLandscapeVkBindingAlbedo ? m.env.arraySampler : m.nearest, views[i], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+			const VkSampler smp = i == glsl::kLandscapeVkBindingFar ? m.farSampler : i >= glsl::kLandscapeVkBindingAlbedo ? m.env.arraySampler : m.nearest;
+			ii[i] = { smp, views[i], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
 			wr[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
 			wr[i].pImageInfo = &ii[i];
 		}

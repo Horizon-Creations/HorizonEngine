@@ -59,8 +59,9 @@ inline bool worldUsable(const HE::LandscapeRenderStatic& w)
 
 // `albedoBound` / `normalBound` / `maskBound`: the renderer resolved LandscapeRenderStatic::albedoArrayPath / normalArrayPath / maskArrayPath to a
 // real array (not the white stand-in). The normal and mask arrays only count with the albedo array, like on GL and Metal.
+// `farBound`: the baked far image (LandscapeRenderStatic::farMips) was uploaded and is bound at uFarAlbedo, independent of the albedo array.
 inline void fillGlobals(Globals& g, const HE::LandscapeRenderFrame& f, const glm::mat4& viewProj, const glm::vec3& sunDir, const glm::vec3& sunColor,
-                        const glm::vec3& ambient, bool albedoBound, bool normalBound, bool maskBound)
+                        const glm::vec3& ambient, bool albedoBound, bool normalBound, bool maskBound, bool farBound)
 {
 	const HE::LandscapeRenderStatic& w = *f.world;
 	g = Globals{};
@@ -90,6 +91,7 @@ inline void fillGlobals(Globals& g, const HE::LandscapeRenderFrame& f, const glm
 	g.tex[3] = static_cast<float>(f.uvOrigin.z * k - std::floor(f.uvOrigin.z * k));
 	g.texMaps[0] = on && normalBound && !w.normalArrayPath.empty() ? 1.0f : 0.0f;
 	g.texMaps[1] = on && maskBound && !w.maskArrayPath.empty() ? 1.0f : 0.0f;
+	g.texMaps[2] = farBound ? 1.0f : 0.0f;
 }
 
 inline void fillPatch(PatchPush& d, const HE::LandscapeRenderPatch& p)
