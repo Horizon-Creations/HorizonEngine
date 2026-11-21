@@ -1526,8 +1526,14 @@ void startExport(AppContext& ctx)
                     if (!ctx.contentManager) return;
                     HE::LandscapeExportOptions lo;
                     lo.bakeHlod = s_exportBakeCellHlod;
+                    // The far image of the tile landscape rides on the same switch and budget as the far material of the chunked one. Only
+                    // the regions that changed since the last export are painted; the last table lives under Saved/, which is not shipped.
+                    lo.bakeFar = s_exportBakeFarLandscape;
+                    lo.farBudgetBytes = static_cast<uint64_t>(std::max(16, s_exportFarLandscapeMB)) << 20;
+                    lo.farCacheDir = projectRoot / "Saved" / "LandscapeFar";
+                    // cookLogLines, not Build::log: Build::begin() below would clear it (see bakeFarLandscapes).
                     HE::prepareLandscapePacksForExport(w, projectRoot, *ctx.contentManager, lo, landscapePlan,
-                        [&](int level, const std::string& text) { Build::log(level, label + ": " + text); });
+                        [&](int level, const std::string& text) { cookLogLines.push_back((level ? "Warning: " : "") + label + ": " + text); });
                 };
                 std::vector<uint8_t> sceneBinary;
                 bool sceneOk = true;

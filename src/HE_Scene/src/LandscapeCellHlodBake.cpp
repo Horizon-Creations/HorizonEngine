@@ -135,63 +135,7 @@ LandscapeHlodTable bakeCellProxies(const CellManifest& manifest, const CellStrea
 
 bool landscapePackSetHlod(const std::string& packPath, const LandscapeHlodTable& table, std::string* error)
 {
-	const auto fail = [&](const char* why) { if (error) *error = why; return false; };
-	std::string err;
-	auto pack = LandscapePackSource::open(packPath, &err);
-	if (!pack) return fail("not a landscape pack");
-	const bool hadHlod = pack->hlod() != nullptr;
-	pack.reset();   // the file is renamed over below: no open handle on it (Windows)
-
-	std::error_code ec;
-	uint64_t size = std::filesystem::file_size(packPath, ec);
-	if (ec) return fail("pack size unreadable");
-
-	// An existing HLOD section ends the file with its trailer: cut the file back to where that table began.
-	if (hadHlod && size >= kLandscapePackHlodTrailerBytes)
-	{
-		uint8_t tr[kLandscapePackHlodTrailerBytes];
-		std::ifstream in(packPath, std::ios::binary);
-		in.seekg(static_cast<std::streamoff>(size - sizeof(tr)));
-		in.read(reinterpret_cast<char*>(tr), sizeof(tr));
-		if (!in) return fail("pack trailer unreadable");
-		uint64_t off = 0;
-		for (int i = 7; i >= 0; --i) off = (off << 8) | tr[i];
-		if (off > size) return fail("pack trailer is damaged");
-		size = off;
-	}
-	// Written to a sibling and renamed over the pack: a crash leaves either the old or the new file, never half of one.
-	const std::string tmp = packPath + ".hlod.tmp";
-	{
-		std::ifstream in(packPath, std::ios::binary);
-		std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
-		if (!in || !out) return fail("cannot write next to the pack");
-		constexpr size_t kChunk = 1u << 20;
-		std::vector<char> buf(kChunk);
-		uint64_t left = size;
-		while (left > 0)
-		{
-			const size_t n = static_cast<size_t>(std::min<uint64_t>(left, kChunk));
-			in.read(buf.data(), static_cast<std::streamsize>(n));
-			if (static_cast<size_t>(in.gcount()) != n) return fail("pack read failed");
-			out.write(buf.data(), static_cast<std::streamsize>(n));
-			left -= n;
-		}
-		if (table.cellCount() > 0)
-		{
-			const std::vector<uint8_t> hb = table.encode();
-			uint8_t tr[kLandscapePackHlodTrailerBytes];
-			const uint64_t sz = hb.size();
-			for (int i = 0; i < 8; ++i) { tr[i] = static_cast<uint8_t>(size >> (8 * i)); tr[8 + i] = static_cast<uint8_t>(sz >> (8 * i)); }
-			for (int i = 0; i < 4; ++i) tr[16 + i] = static_cast<uint8_t>(kLandscapePackHlodMagic >> (8 * i));
-			out.write(reinterpret_cast<const char*>(hb.data()), static_cast<std::streamsize>(hb.size()));
-			out.write(reinterpret_cast<const char*>(tr), sizeof(tr));
-		}
-		out.flush();
-		if (!out) { std::filesystem::remove(tmp, ec); return fail("pack write failed"); }
-	}
-	std::filesystem::rename(tmp, packPath, ec);
-	if (ec) { std::filesystem::remove(tmp, ec); return fail("cannot replace the pack"); }
-	return true;
+	return landscapePackSetTails(packPath, &table, nullptr, error);   // the far image, if the pack has one, stays
 }
 
 } // namespace HE

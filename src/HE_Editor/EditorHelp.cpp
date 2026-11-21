@@ -8512,6 +8512,12 @@ namespace
 	  "editor's own renderer (Metal, OpenGL, Vulkan, D3D11 and D3D12 all hand back "
 	  "the material's colour without tonemap or post effects); a renderer that "
 	  "cannot makes the export say so and the far levels keep the real material. "
+	  "A Tile Landscape gets a far image too: one picture of the whole world, what "
+	  "its layer blend comes to, written into the shipped copy of its pack and read "
+	  "with one texture access for all ground beyond the streamed tiles. It is made "
+	  "in regions of 8 x 8 tiles and only the regions whose tiles changed since the "
+	  "last export are made again (the last result is kept under Saved/LandscapeFar); "
+	  "the export log's cook step says how many were baked and how many unchanged. "
 	  "Saved in the profile.",
 	  "", "export#overview" },
 	{ "Export/Bake streaming cell proxies", "Bake streaming cell proxies",

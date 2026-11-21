@@ -1,5 +1,6 @@
 #pragma once
 #include "HorizonScene/LandscapeCellHlod.h"
+#include "HorizonScene/LandscapeFarMap.h"
 #include "HorizonScene/LandscapeTile.h"
 #include "HorizonScene/LandscapeWaterData.h"
 
@@ -108,6 +109,8 @@ public:
 	virtual const LandscapeWaterTable* water() const { return nullptr; }
 	// The baked HLOD proxies of the world's entity cells (LandscapeCellHlod.h), or null when the world has none.
 	virtual const LandscapeHlodTable* hlod() const { return nullptr; }
+	// The baked far image (LandscapeFarMap.h), or null when the world has none (it is then shaded from the coarse weights).
+	virtual const LandscapeFarTable* farImage() const { return nullptr; }
 };
 
 // ── Procedural world ─────────────────────────────────────────────────────────
@@ -168,6 +171,9 @@ private:
 //   the file: u64 hlodOffset  u64 hlodSize  u32 magic 'HLDF' (kLandscapePackHlodMagic). A tail section, not a version bump: a pack without it
 //   ends in the water table or the coarse world, which a reader finds by the magic not being there, and an older reader never looks past
 //   the sections its header names, so it reads a pack with a trailer as before.
+//   The baked far image (LandscapeFarMap.h, LandscapeFarTable::encode) is a second tail section of the same shape with the magic 'HLFM'
+//   (kLandscapeFarMagic). It is written BEFORE the cell HLOD section, so the HLOD trailer stays the last 20 bytes (a reader from before the
+//   far image still finds it); the far trailer is the 20 bytes in front of where the HLOD table starts, or the last 20 without one.
 // coarseHeightLevel 255 = the pack has no coarse world. Grid sizes: heights (tilesX * (hCells >> level) + 1) x (tilesZ * ...),
 // weights (tilesX * (wTexels >> level)) x (tilesZ * ...).
 constexpr uint32_t kLandscapePackMagic   = 0x31504c48u;
@@ -196,6 +202,8 @@ public:
 	void setWaterTable(const LandscapeWaterTable& table) { m_water = table; m_hasWater = true; }
 	// The baked HLOD proxies of the entity cells. Before finish(); an empty table writes nothing.
 	void setHlodTable(const LandscapeHlodTable& table) { m_hlod = table; }
+	// The baked far image. Before finish(); an empty table writes nothing.
+	void setFarTable(const LandscapeFarTable& table) { m_far = table; }
 	bool finish();
 	size_t tilesWritten() const { return m_written; }
 
@@ -214,6 +222,7 @@ private:
 	LandscapeWaterTable   m_water;
 	bool                  m_hasWater = false;
 	LandscapeHlodTable    m_hlod;
+	LandscapeFarTable     m_far;
 	LandscapeCoarseWorld  m_coarse;     // grid 0 and the weights; the point-sampled grids are made when it is read
 	std::vector<uint8_t>  m_coarseSeen; // per tile
 };
@@ -233,12 +242,17 @@ public:
 	const LandscapeCoarseWorld* coarse() const override { return m_coarse.valid() ? &m_coarse : nullptr; }
 	const LandscapeWaterTable* water() const override { return m_hasWater ? &m_water : nullptr; }
 	const LandscapeHlodTable* hlod() const override { return m_hlod.cellCount() > 0 ? &m_hlod : nullptr; }
+	const LandscapeFarTable* farImage() const override { return m_far.empty() ? nullptr : &m_far; }
 	int  version() const { return m_version; }
 	bool heightRange(float& minM, float& scaleM) const override { minM = m_heightMinM; scaleM = m_heightScaleM; return m_heightScaleM > 0.0f; }
 	bool has(LandscapeTileKey key) const;
 	// Stored bytes of a tile, 0 for none, and where in the file they start (for tools that read the file themselves).
 	uint32_t storedSize(LandscapeTileKey key) const;
 	uint64_t storedOffset(LandscapeTileKey key) const;
+	// FNV-1a of a tile's stored bytes: changes when the tile does. 0 for no tile or a read error.
+	uint64_t storedHash(LandscapeTileKey key) const;
+	// Bytes of the file without its tail sections (the cell HLOD table, the far image): where a rewrite of them starts.
+	uint64_t coreSize() const { return m_coreSize; }
 
 private:
 	LandscapePackSource() = default;
@@ -252,12 +266,19 @@ private:
 	LandscapeWaterTable   m_water;
 	bool                  m_hasWater = false;
 	LandscapeHlodTable    m_hlod;
+	LandscapeFarTable     m_far;
 	std::vector<uint64_t> m_offset;
 	std::vector<uint32_t> m_size;
 	uint64_t              m_fileSize = 0;
+	uint64_t              m_coreSize = 0;
 	int                   m_fd = -1;                 // POSIX pread: no lock between workers
 	mutable std::mutex    m_mutex;                   // Windows: one HANDLE, one reader at a time
 	void*                 m_handle = nullptr;         // Windows HANDLE opened with FILE_SHARE_DELETE (see .cpp)
 };
+
+// Rewrites the tail sections of an existing pack in ONE copy of the file (written to a sibling, renamed over). For each of the two: null
+// keeps what the pack has, an empty table removes the section, anything else replaces it. False (and the pack untouched) for a file that
+// is not a pack or cannot be written beside.
+bool landscapePackSetTails(const std::string& packPath, const LandscapeHlodTable* hlod, const LandscapeFarTable* farTable, std::string* error = nullptr);
 
 } // namespace HE

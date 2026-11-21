@@ -131,7 +131,7 @@ uniform vec4  uLayerColor[12];       // flat colour of each of the twelve layers
 uniform vec3  uSunDir;               // towards the sun
 uniform vec3  uSunColor;
 uniform vec3  uAmbient;
-uniform vec4  uTexMaps;              // x = 1 when uNormalArray is the group's normal array, y = 1 when uMaskArray is its mask array
+uniform vec4  uTexMaps;              // x = 1 when uNormalArray is the group's normal array, y = 1 when uMaskArray is its mask array, z = 1 when uFarAlbedo is the far image
 uniform vec4  uTex;                  // x = 1 / metres of one texture tile, y = 1 when uAlbedoArray is the group's albedo array, zw = fract(origin.xz * x)
 uniform usampler2D      uSlotTable;
 uniform sampler2DArray  uTileWeights0;   // RGBA8, layers 0-3 of every tile's twelve
@@ -143,6 +143,7 @@ uniform sampler2D       uCoarseWeights2;
 uniform sampler2DArray  uAlbedoArray;    // the texture group's albedo array: slices 0-3 are layers 0-3, repeated in world coordinates
 uniform sampler2DArray  uNormalArray;    // its normal array (tangent space, OpenGL convention: green = +V = +z in the world) and
 uniform sampler2DArray  uMaskArray;      // its mask array (R = AO, G = roughness, B = height; only AO is used yet), the same slices and coordinates
+uniform sampler2D       uFarAlbedo;      // sRGB8 + A, the baked far image over the whole world, mipped and filtered; read when uTexMaps.z is 1
 //#LANDSCAPE_BODY#
 
 void main()
@@ -155,6 +156,27 @@ void main()
     int mask = int(uHeightInfo.w) - 1;
     uint slot = texelFetch(uSlotTable, ivec2(tile.x & mask, tile.y & mask), 0).r;
 
+    // Every derivative is taken here, before the branches on the slot: inside them (non-uniform control flow) an implicit one is undefined,
+    // so the filtered accesses below pass theirs explicitly.
+    vec2 fuv = abs2 / uWorld.xy;
+    vec2 fdx = dFdx(fuv), fdy = dFdy(fuv);
+    vec2 uv = vWorldRel.xz * uTex.x + uTex.zw;
+    vec2 udx = dFdx(uv), udy = dFdy(uv);
+    vec3 n = normalize(cross(dFdx(vWorldRel), dFdy(vWorldRel)));
+    if (n.y < 0.0) n = -n;
+
+    vec3 albedo;
+    float ao = 1.0;
+    if (uTexMaps.z > 0.5 && slot == 65535u)
+    {
+        // The baked far image (HorizonScene/LandscapeFarMap.h): a tile that is not in the atlas (the coarse levels, or one still streaming)
+        // is ONE filtered access, rgb = what the blend below comes to over that ground, a = its AO. No weights, no arrays.
+        vec4 fc = textureGrad(uFarAlbedo, fuv, fdx, fdy);
+        albedo = fc.rgb;
+        ao = fc.a;
+    }
+    else
+    {
     vec4 w0, w1, w2;
     if (slot == 65535u)
     {
@@ -179,36 +201,32 @@ void main()
     vec3 c0 = uLayerColor[0].rgb, c1 = uLayerColor[1].rgb, c2 = uLayerColor[2].rgb, c3 = uLayerColor[3].rgb;
     if (uTex.y > 0.5)
     {
-        vec2 uv = vWorldRel.xz * uTex.x + uTex.zw;
-        c0 = texture(uAlbedoArray, vec3(uv, 0.0)).rgb;
-        c1 = texture(uAlbedoArray, vec3(uv, 1.0)).rgb;
-        c2 = texture(uAlbedoArray, vec3(uv, 2.0)).rgb;
-        c3 = texture(uAlbedoArray, vec3(uv, 3.0)).rgb;
+        c0 = textureGrad(uAlbedoArray, vec3(uv, 0.0), udx, udy).rgb;
+        c1 = textureGrad(uAlbedoArray, vec3(uv, 1.0), udx, udy).rgb;
+        c2 = textureGrad(uAlbedoArray, vec3(uv, 2.0), udx, udy).rgb;
+        c3 = textureGrad(uAlbedoArray, vec3(uv, 3.0), udx, udy).rgb;
     }
-    vec3 albedo = w0.x * c0 + w0.y * c1 + w0.z * c2 + w0.w * c3
-                + w1.x * uLayerColor[4].rgb + w1.y * uLayerColor[5].rgb + w1.z * uLayerColor[6].rgb + w1.w * uLayerColor[7].rgb
-                + w2.x * uLayerColor[8].rgb + w2.y * uLayerColor[9].rgb + w2.z * uLayerColor[10].rgb + w2.w * uLayerColor[11].rgb;
-    vec3 n = normalize(cross(dFdx(vWorldRel), dFdy(vWorldRel)));
-    if (n.y < 0.0) n = -n;
+    albedo = w0.x * c0 + w0.y * c1 + w0.z * c2 + w0.w * c3
+           + w1.x * uLayerColor[4].rgb + w1.y * uLayerColor[5].rgb + w1.z * uLayerColor[6].rgb + w1.w * uLayerColor[7].rgb
+           + w2.x * uLayerColor[8].rgb + w2.y * uLayerColor[9].rgb + w2.z * uLayerColor[10].rgb + w2.w * uLayerColor[11].rgb;
     // Normal and AO of layers 0-3 from their maps, in the same world coordinates; the other layers contribute a flat normal and no occlusion.
-    float ao = 1.0;
     if (uTex.y > 0.5)
     {
-        vec2 uv = vWorldRel.xz * uTex.x + uTex.zw;
         float wsum = w0.x + w0.y + w0.z + w0.w;
         if (uTexMaps.x > 0.5)
         {
             vec3 nm = vec3(0.0, 0.0, 1.0) * (1.0 - wsum)
-                    + w0.x * (texture(uNormalArray, vec3(uv, 0.0)).xyz * 2.0 - 1.0) + w0.y * (texture(uNormalArray, vec3(uv, 1.0)).xyz * 2.0 - 1.0)
-                    + w0.z * (texture(uNormalArray, vec3(uv, 2.0)).xyz * 2.0 - 1.0) + w0.w * (texture(uNormalArray, vec3(uv, 3.0)).xyz * 2.0 - 1.0);
+                    + w0.x * (textureGrad(uNormalArray, vec3(uv, 0.0), udx, udy).xyz * 2.0 - 1.0) + w0.y * (textureGrad(uNormalArray, vec3(uv, 1.0), udx, udy).xyz * 2.0 - 1.0)
+                    + w0.z * (textureGrad(uNormalArray, vec3(uv, 2.0), udx, udy).xyz * 2.0 - 1.0) + w0.w * (textureGrad(uNormalArray, vec3(uv, 3.0), udx, udy).xyz * 2.0 - 1.0);
             nm = normalize(nm);
             vec3 t = normalize(vec3(1.0, 0.0, 0.0) - n * n.x);   // +u is +x, +v is +z
             vec3 b = cross(t, n);
             n = normalize(t * nm.x + b * nm.y + n * nm.z);
         }
         if (uTexMaps.y > 0.5)
-            ao = (1.0 - wsum) + w0.x * texture(uMaskArray, vec3(uv, 0.0)).r + w0.y * texture(uMaskArray, vec3(uv, 1.0)).r
-               + w0.z * texture(uMaskArray, vec3(uv, 2.0)).r + w0.w * texture(uMaskArray, vec3(uv, 3.0)).r;
+            ao = (1.0 - wsum) + w0.x * textureGrad(uMaskArray, vec3(uv, 0.0), udx, udy).r + w0.y * textureGrad(uMaskArray, vec3(uv, 1.0), udx, udy).r
+               + w0.z * textureGrad(uMaskArray, vec3(uv, 2.0), udx, udy).r + w0.w * textureGrad(uMaskArray, vec3(uv, 3.0), udx, udy).r;
+    }
     }
     float ndl = max(dot(n, normalize(uSunDir)), 0.0);
     fragColor = vec4(albedo * (uAmbient * ao + uSunColor * ndl), 1.0);
@@ -223,7 +241,7 @@ void main()
 //     C++ mirror is vkls::Globals in Backends/Vulkan/VulkanLandscape.h (static_assert on the size and on every offset). The block is anonymous,
 //     so the body's names (uViewProj ...) resolve as block members and need no #define.
 //   * the per-patch uniforms (uPatch, uPatchPos, uMorph) are a push-constant block (48 bytes, vertex stage), one vkCmdPushConstants per patch.
-//   * the images are combined image samplers at set 0, bindings 1-12 (kLandscapeVkBinding* below); nothing is filtered but the three texture
+//   * the images are combined image samplers at set 0, bindings 1-13 (kLandscapeVkBinding* below); nothing is filtered but the three texture
 //     group arrays (albedo, normal, mask), whose sampler is the renderer's linear / repeat / mip one.
 //   * the matrix the vertex shader gets is the Vulkan clip one (HE::kVulkanClipFix applied by the caller: y down, depth 0..1), unlike D3D and
 //     Metal, whose scene passes rasterise the GL matrix; so no depth caveat near the camera.
@@ -237,7 +255,8 @@ inline constexpr unsigned kLandscapeVkBindingCoarseWeights = 7;  // FS  sampler2
 inline constexpr unsigned kLandscapeVkBindingAlbedo = 10;        // FS  sampler2DArray, the texture group's (not ours)
 inline constexpr unsigned kLandscapeVkBindingNormal = 11;        // FS  sampler2DArray, ditto
 inline constexpr unsigned kLandscapeVkBindingMask = 12;          // FS  sampler2DArray, ditto
-inline constexpr unsigned kLandscapeVkBindingCount = 13;
+inline constexpr unsigned kLandscapeVkBindingFar = 13;           // FS  sampler2D, the baked far image (a stand-in while uTexMaps.z is 0)
+inline constexpr unsigned kLandscapeVkBindingCount = 14;
 
 // Both stages declare the same LsGlobals text, so the two reflect one layout. Every vec3 is followed by a member that starts a new 16-byte row (or
 // by another vec3), so std140 puts nothing where the C++ struct does not. (Raw strings, so scripts/validate_embedded_shaders.py finds them.)
@@ -302,6 +321,7 @@ layout(set = 0, binding = 9)  uniform sampler2D      uCoarseWeights2;
 layout(set = 0, binding = 10) uniform sampler2DArray uAlbedoArray;
 layout(set = 0, binding = 11) uniform sampler2DArray uNormalArray;
 layout(set = 0, binding = 12) uniform sampler2DArray uMaskArray;
+layout(set = 0, binding = 13) uniform sampler2D      uFarAlbedo;
 )GLSL";
 
 // prelude + the stage's body after the marker. Empty when the marker is missing (a change to the GLSL that dropped it): the caller refuses to build.
@@ -343,7 +363,7 @@ struct LsGlobals
     float4   sunDir;         // xyz = towards the sun
     float4   sunColor;
     float4   ambient;
-    float4   texMaps;        // x = 1 when the normal array is bound, y = 1 when the mask array is
+    float4   texMaps;        // x = 1 when the normal array is bound, y = 1 when the mask array is, z = 1 when the far image (texture 30) is
     float4   tex;            // x = 1 / metres of one texture tile, y = 1 when the albedo array is bound, zw = fract(origin.xz * x)
 };
 
@@ -442,7 +462,8 @@ fragment float4 fragmentMain(LsVertexOut in [[stage_in]],
                              texture2d<float, access::read> c2t [[texture(26)]],
                              texture2d_array<float> albedoArr [[texture(27)]],
                              texture2d_array<float> normalArr [[texture(28)]],
-                             texture2d_array<float> maskArr [[texture(29)]])
+                             texture2d_array<float> maskArr [[texture(29)]],
+                             texture2d<float> farTex [[texture(30)]])
 {
     float2 abs2 = in.worldRel.xz + G.origin.xz;
     if (abs2.x > G.world.x || abs2.y > G.world.y || abs2.x < 0.0 || abs2.y < 0.0) discard_fragment();
@@ -452,6 +473,27 @@ fragment float4 fragmentMain(LsVertexOut in [[stage_in]],
     int mask = int(G.heightInfo.w) - 1;
     uint slot = slots.read(uint2(uint(tile.x & mask), uint(tile.y & mask))).r;
 
+    // Every derivative before the branches on the slot, the filtered accesses below pass theirs explicitly (see the GLSL).
+    constexpr sampler smp(coord::normalized, address::repeat, filter::linear, mip_filter::linear);
+    constexpr sampler farSmp(coord::normalized, address::clamp_to_edge, filter::linear, mip_filter::linear);
+    float2 fuv = abs2 / G.world.xy;
+    float2 fdx = dfdx(fuv), fdy = dfdy(fuv);
+    float2 uv = in.worldRel.xz * G.tex.x + G.tex.zw;
+    float2 udx = dfdx(uv), udy = dfdy(uv);
+    float3 n = normalize(cross(dfdx(in.worldRel), dfdy(in.worldRel)));
+    if (n.y < 0.0) n = -n;
+
+    float3 albedo;
+    float ao = 1.0;
+    if (G.texMaps.z > 0.5 && slot == 65535u)
+    {
+        // The baked far image: one filtered access instead of the layer blend (see the GLSL).
+        float4 fc = farTex.sample(farSmp, fuv, gradient2d(fdx, fdy));
+        albedo = fc.rgb;
+        ao = fc.a;
+    }
+    else
+    {
     float4 w0, w1, w2;
     if (slot == 65535u)
     {
@@ -474,38 +516,32 @@ fragment float4 fragmentMain(LsVertexOut in [[stage_in]],
     float3 c0 = G.layerColor[0].rgb, c1 = G.layerColor[1].rgb, c2 = G.layerColor[2].rgb, c3 = G.layerColor[3].rgb;
     if (G.tex.y > 0.5)
     {
-        constexpr sampler smp(coord::normalized, address::repeat, filter::linear, mip_filter::linear);
-        float2 uv = in.worldRel.xz * G.tex.x + G.tex.zw;
-        c0 = albedoArr.sample(smp, uv, 0).rgb;
-        c1 = albedoArr.sample(smp, uv, 1).rgb;
-        c2 = albedoArr.sample(smp, uv, 2).rgb;
-        c3 = albedoArr.sample(smp, uv, 3).rgb;
+        c0 = albedoArr.sample(smp, uv, 0, gradient2d(udx, udy)).rgb;
+        c1 = albedoArr.sample(smp, uv, 1, gradient2d(udx, udy)).rgb;
+        c2 = albedoArr.sample(smp, uv, 2, gradient2d(udx, udy)).rgb;
+        c3 = albedoArr.sample(smp, uv, 3, gradient2d(udx, udy)).rgb;
     }
-    float3 albedo = w0.x * c0 + w0.y * c1 + w0.z * c2 + w0.w * c3
-                  + w1.x * G.layerColor[4].rgb + w1.y * G.layerColor[5].rgb + w1.z * G.layerColor[6].rgb + w1.w * G.layerColor[7].rgb
-                  + w2.x * G.layerColor[8].rgb + w2.y * G.layerColor[9].rgb + w2.z * G.layerColor[10].rgb + w2.w * G.layerColor[11].rgb;
-    float3 n = normalize(cross(dfdx(in.worldRel), dfdy(in.worldRel)));
-    if (n.y < 0.0) n = -n;
+    albedo = w0.x * c0 + w0.y * c1 + w0.z * c2 + w0.w * c3
+           + w1.x * G.layerColor[4].rgb + w1.y * G.layerColor[5].rgb + w1.z * G.layerColor[6].rgb + w1.w * G.layerColor[7].rgb
+           + w2.x * G.layerColor[8].rgb + w2.y * G.layerColor[9].rgb + w2.z * G.layerColor[10].rgb + w2.w * G.layerColor[11].rgb;
     // Normal and AO of layers 0-3 from their maps (see the GLSL).
-    float ao = 1.0;
     if (G.tex.y > 0.5)
     {
-        constexpr sampler smp(coord::normalized, address::repeat, filter::linear, mip_filter::linear);
-        float2 uv = in.worldRel.xz * G.tex.x + G.tex.zw;
         float wsum = w0.x + w0.y + w0.z + w0.w;
         if (G.texMaps.x > 0.5)
         {
             float3 nm = float3(0.0, 0.0, 1.0) * (1.0 - wsum)
-                      + w0.x * (normalArr.sample(smp, uv, 0).xyz * 2.0 - 1.0) + w0.y * (normalArr.sample(smp, uv, 1).xyz * 2.0 - 1.0)
-                      + w0.z * (normalArr.sample(smp, uv, 2).xyz * 2.0 - 1.0) + w0.w * (normalArr.sample(smp, uv, 3).xyz * 2.0 - 1.0);
+                      + w0.x * (normalArr.sample(smp, uv, 0, gradient2d(udx, udy)).xyz * 2.0 - 1.0) + w0.y * (normalArr.sample(smp, uv, 1, gradient2d(udx, udy)).xyz * 2.0 - 1.0)
+                      + w0.z * (normalArr.sample(smp, uv, 2, gradient2d(udx, udy)).xyz * 2.0 - 1.0) + w0.w * (normalArr.sample(smp, uv, 3, gradient2d(udx, udy)).xyz * 2.0 - 1.0);
             nm = normalize(nm);
             float3 t = normalize(float3(1.0, 0.0, 0.0) - n * n.x);
             float3 b = cross(t, n);
             n = normalize(t * nm.x + b * nm.y + n * nm.z);
         }
         if (G.texMaps.y > 0.5)
-            ao = (1.0 - wsum) + w0.x * maskArr.sample(smp, uv, 0).r + w0.y * maskArr.sample(smp, uv, 1).r
-               + w0.z * maskArr.sample(smp, uv, 2).r + w0.w * maskArr.sample(smp, uv, 3).r;
+            ao = (1.0 - wsum) + w0.x * maskArr.sample(smp, uv, 0, gradient2d(udx, udy)).r + w0.y * maskArr.sample(smp, uv, 1, gradient2d(udx, udy)).r
+               + w0.z * maskArr.sample(smp, uv, 2, gradient2d(udx, udy)).r + w0.w * maskArr.sample(smp, uv, 3, gradient2d(udx, udy)).r;
+    }
     }
     float ndl = max(dot(n, normalize(G.sunDir.xyz)), 0.0);
     return float4(albedo * (G.ambient.xyz * ao + G.sunColor.xyz * ndl), 1.0);

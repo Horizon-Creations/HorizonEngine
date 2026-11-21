@@ -1,7 +1,10 @@
 #include "HorizonScene/LandscapeExport.h"
 #include "HorizonScene/HorizonWorld.h"
+#include "HorizonScene/LandscapeRuntime.h"
 #include "HorizonScene/Components/LandscapeWorldComponent.h"
 #include <ContentManager/ContentManager.h>
+#include <ContentManager/TextureBlockDecode.h>
+#include <MaterialGraph/AutoLandscapeMaterial.h>
 
 #include <algorithm>
 #include <fstream>
@@ -67,6 +70,107 @@ namespace
 	}
 }
 
+namespace
+{
+	// The mean of slice `slice` of the array at `path`: from the pack-time means if the asset carries them, else from its pixels.
+	bool sliceMean(ContentManager& content, const char* path, uint32_t slice, float rgb[3])
+	{
+		if (!path || !*path) return false;
+		const UUID id = content.idForPath(path);
+		if (id == UUID{}) return false;
+		content.ensureResident(id);
+		const TextureAsset* t = content.getTexture(id);
+		if (!t || slice >= t->layers) return false;
+		if (t->sliceMeans.size() == static_cast<size_t>(t->layers) * 3)
+		{
+			for (int i = 0; i < 3; ++i) rgb[i] = t->sliceMeans[static_cast<size_t>(slice) * 3 + static_cast<size_t>(i)];
+			return true;
+		}
+		return textureArraySliceMean(*t, slice, rgb);
+	}
+
+	// Bakes the far image of one pack (once an export), painting only the regions that are not in the cache as they are now.
+	void bakeFarImage(LandscapeExportPack& pack, int textureGroup, ContentManager& content, const LandscapeExportOptions& options,
+	                  LandscapeExportPlan& plan, const std::function<void(int, const std::string&)>& say)
+	{
+		std::string err;
+		const auto source = LandscapePackSource::open(pack.source.string(), &err);
+		if (!source) { say(1, "Landscape far image: not baked, the pack cannot be read (" + err + ")"); return; }
+
+		const LandscapeFarPaint paint = landscapeFarPaintFor(textureGroup, content);
+		LandscapeFarBakeOptions bo;
+		bo.budgetBytes = options.farBudgetBytes;
+		bo.painter = landscapeFarWeightPainter(paint);
+		bo.painterHash = landscapeFarPaintHash(paint);
+		bo.progress = options.farProgress;
+
+		// The last export's table, else what the pack itself carries: both are only a cache, every region is checked by its hash.
+		LandscapeFarTable previous;
+		const std::filesystem::path cacheFile = options.farCacheDir.empty() ? std::filesystem::path{}
+		                                                                    : options.farCacheDir / (pack.source.stem().generic_string() + ".far");
+		std::vector<uint8_t> bytes;
+		if (cacheFile.empty() || !readFile(cacheFile, bytes) || !LandscapeFarTable::decode(bytes, previous))
+			if (source->farImage()) previous = *source->farImage();
+
+		LandscapeFarTable table;
+		LandscapeFarBakeStats st;
+		bakeLandscapeFar(*source, landscapePackTileHash(*source), bo, previous.empty() ? nullptr : &previous, table, st);
+		plan.farBake.regions += st.regions;
+		plan.farBake.baked += st.baked;
+		plan.farBake.reused += st.reused;
+		plan.farBake.failed += st.failed;
+		plan.farBake.cancelled = plan.farBake.cancelled || st.cancelled;
+		if (st.cancelled) { say(1, "Landscape far image: cancelled after " + std::to_string(st.baked + st.reused) + " of " + std::to_string(st.regions) + " region(s), the pack ships without one"); return; }
+
+		const std::vector<uint8_t> encoded = table.encode();
+		if (!cacheFile.empty() && st.baked > 0)
+		{
+			// Beside, then renamed over: a crash leaves the old cache or the new one.
+			std::error_code ec;
+			std::filesystem::create_directories(cacheFile.parent_path(), ec);
+			const std::filesystem::path tmp = cacheFile.string() + ".tmp";
+			std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
+			out.write(reinterpret_cast<const char*>(encoded.data()), static_cast<std::streamsize>(encoded.size()));
+			out.close();
+			if (out) std::filesystem::rename(tmp, cacheFile, ec);
+			if (!out || ec) say(1, "Landscape far image: the cache " + cacheFile.generic_string() + " could not be written, the next export paints everything again");
+		}
+		const float texelM = source->geometry().tileM / static_cast<float>(table.layout.texelsPerTile);
+		say(0, "Landscape far image: " + std::to_string(st.regions) + " region(s) of " + std::to_string(table.layout.regionTiles) + " x "
+		       + std::to_string(table.layout.regionTiles) + " tiles: " + std::to_string(st.baked) + " baked, " + std::to_string(st.reused) + " unchanged"
+		       + (st.failed ? ", " + std::to_string(st.failed) + " failed" : std::string()) + "; " + std::to_string(table.layout.width()) + " x "
+		       + std::to_string(table.layout.height()) + " px (" + std::to_string(static_cast<int>(texelM)) + " m a texel), "
+		       + std::to_string(encoded.size() / 1024) + " KB in the pack");
+		if (!table.empty()) pack.farTable = std::make_shared<LandscapeFarTable>(std::move(table));
+	}
+}
+
+LandscapeFarPaint landscapeFarPaintFor(int textureGroup, ContentManager& content)
+{
+	LandscapeFarPaint paint;
+	const std::array<glm::vec4, 12> flat = LandscapeRuntimeConfig::defaultLayerColors();
+	for (size_t i = 0; i < 12; ++i) paint.layerColor[i] = glm::vec3(flat[i]);
+	paint.layerAo.fill(1.0f);
+	if (textureGroup < 0 || textureGroup >= kAutoLandscapeGroupCount) return paint;
+	// The tile shader reads slices 0-3 of the group's albedo and mask arrays for layers 0-3 (kLandscapeFS). All four or none: a mix of
+	// mean and flat colours would match neither state of the runtime.
+	const AutoLandscapeGroup& grp = autoLandscapeGroup(static_cast<AutoLandscapeGroupId>(textureGroup));
+	float albedo[4][3], mask[4][3];
+	bool haveAlbedo = true, haveMask = true;
+	for (uint32_t s = 0; s < 4; ++s)
+	{
+		haveAlbedo = haveAlbedo && sliceMean(content, grp.arrayPaths[0], s, albedo[s]);
+		haveMask = haveMask && sliceMean(content, grp.arrayPaths[2], s, mask[s]);
+	}
+	if (haveAlbedo)
+		for (size_t s = 0; s < 4; ++s)
+		{
+			paint.layerColor[s] = { albedo[s][0], albedo[s][1], albedo[s][2] };
+			if (haveMask) paint.layerAo[s] = mask[s][0];   // R = AO
+		}
+	return paint;
+}
+
 size_t prepareLandscapePacksForExport(HorizonWorld& world, const std::filesystem::path& projectRoot, ContentManager& content,
                                       const LandscapeExportOptions& options, LandscapeExportPlan& plan, const LandscapeExportLog& log)
 {
@@ -123,6 +227,12 @@ size_t prepareLandscapePacksForExport(HorizonWorld& world, const std::filesystem
 			       + (st.meshesMissing ? ", " + std::to_string(st.meshesMissing) + " mesh asset(s) missing" : std::string()));
 		}
 
+		if (options.bakeFar && !it->farDone)
+		{
+			it->farDone = true;
+			bakeFarImage(*it, lw.textureGroup, content, options, plan, say);
+		}
+
 		if (lw.pack != it->dest)
 		{
 			lw.pack = it->dest;
@@ -134,8 +244,11 @@ size_t prepareLandscapePacksForExport(HorizonWorld& world, const std::filesystem
 
 bool finishExportedPack(const LandscapeExportPack& pack, const std::filesystem::path& copied, std::string* error)
 {
-	if (!pack.hlod || pack.hlod->cellCount() == 0) return true;
-	return landscapePackSetHlod(copied.string(), *pack.hlod, error);
+	const bool hlod = pack.hlod && pack.hlod->cellCount() > 0;
+	const bool farImage = pack.farTable && !pack.farTable->empty();
+	if (!hlod && !farImage) return true;
+	// One rewrite of the copy for both sections. What was not baked in this export is left as the project's pack has it.
+	return landscapePackSetTails(copied.string(), hlod ? pack.hlod.get() : nullptr, farImage ? pack.farTable.get() : nullptr, error);
 }
 
 } // namespace HE

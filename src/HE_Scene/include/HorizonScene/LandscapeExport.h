@@ -1,6 +1,7 @@
 #pragma once
 #include "HorizonScene/LandscapeCellHlod.h"
 #include "HorizonScene/LandscapeCellHlodBake.h"
+#include "HorizonScene/LandscapeFarBake.h"
 
 #include <filesystem>
 #include <functional>
@@ -28,18 +29,27 @@ struct LandscapeExportPack
 	std::string dest;                               // relative to the game's data folder, forward slashes
 	std::shared_ptr<LandscapeHlodTable> hlod;       // null: nothing baked (no cells, switched off, or nothing static in them)
 	bool hlodDone = false;                          // a bake ran for this pack (a second scene with cells does not run another)
+	std::shared_ptr<LandscapeFarTable> farTable;    // the baked far image (LandscapeFarBake.h); null: switched off, or nothing came out
+	bool farDone = false;                           // the same for the far image
 };
 
 struct LandscapeExportPlan
 {
 	std::vector<LandscapeExportPack> packs;
 	CellHlodBakeStats bake;                         // summed over the bakes that ran
+	LandscapeFarBakeStats farBake;                  // the same for the far images (`cancelled` if any was)
 };
 
 struct LandscapeExportOptions
 {
 	bool bakeHlod = true;
 	CellHlodBakeOptions bakeOptions;
+	// The far image: what the ground beyond the tile atlas is drawn from (LandscapeFarMap.h). Only the regions that changed since the last
+	// export are painted: the last table is kept in `farCacheDir` (one file a pack, "<pack name>.far"; empty = no cache, paint everything).
+	bool     bakeFar = true;
+	uint64_t farBudgetBytes = 128ull << 20;
+	std::filesystem::path farCacheDir;
+	std::function<bool(int done, int total)> farProgress;   // after every region; false cancels the bake (the pack then ships without one)
 };
 
 using LandscapeExportLog = std::function<void(int level, const std::string& text)>;   // 0 info, 1 warning (Build::log)
@@ -57,7 +67,12 @@ std::filesystem::path findLandscapePack(const std::string& pack, const std::file
 size_t prepareLandscapePacksForExport(HorizonWorld& world, const std::filesystem::path& projectRoot, ContentManager& content,
                                       const LandscapeExportOptions& options, LandscapeExportPlan& plan, const LandscapeExportLog& log = {});
 
-// The step the exporter runs on the shipped copy: appends the baked table (a null or empty one writes nothing). Defined here because the pack
+// What the far image's first painter needs for a landscape of texture group `textureGroup` (LandscapeWorldComponent): the runtime's flat
+// layer colours, and for layers 0-3 of a group whose arrays load the mean colour of their albedo slice and the mean AO of their mask slice,
+// which is what the tile shader's filtered accesses come to at a distance. A group whose arrays are not there keeps the flat colours.
+LandscapeFarPaint landscapeFarPaintFor(int textureGroup, ContentManager& content);
+
+// The step the exporter runs on the shipped copy: appends the baked tables (a null or empty one writes nothing). Defined here because the pack
 // format lives here and the exporter (HE_Core) cannot see it.
 bool finishExportedPack(const LandscapeExportPack& pack, const std::filesystem::path& copied, std::string* error);
 

@@ -47,6 +47,11 @@ struct LandscapeRenderStatic
 	int      coarseWeightW = 0, coarseWeightH = 0;
 	std::vector<uint16_t>             coarseHeights;     // coarseW * coarseH
 	std::vector<std::vector<uint8_t>> coarseWeights;     // [page], coarseWeightW * coarseWeightH * 4
+	// The baked far image (HorizonScene/LandscapeFarMap.h): RGBA8 over the whole world, rgb = albedo (sRGB), a = AO, with its mip chain
+	// (level i is max(1, farW >> i) wide), FILTERED. Empty = the world has none; pixels outside the atlas are then shaded from the coarse
+	// weights as before. A backend that does not take it yet leaves uTexMaps.z at 0 and draws the same way.
+	int      farW = 0, farH = 0;
+	std::vector<std::vector<uint8_t>> farMips;
 
 	float    layerColor[12][4] = {};                     // the flat colour of each layer (used where the array below is missing)
 	// World-UV ground (the material with world coordinates): layers 0-3 are the first four slices of this albedo texture array (asset path,

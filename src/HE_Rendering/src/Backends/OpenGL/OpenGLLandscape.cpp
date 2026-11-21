@@ -19,6 +19,7 @@ struct OpenGLLandscape::Impl
 	GLuint tileHeights = 0, slotTable = 0, coarseHeights = 0;
 	GLuint weights[3] = { 0, 0, 0 };
 	GLuint coarseWeights[3] = { 0, 0, 0 };
+	GLuint farAlbedo = 0;   // the baked far image (sRGB8 + A, mipped, filtered); 0 = the world has none
 	GLuint noArray = 0;   // bound where there is no albedo array: the shader does not read it, but an unloadable texture on a sampler is a driver warning
 	std::shared_ptr<const LandscapeRenderStatic> world;   // what the images were made for
 	Stats stats;
@@ -26,24 +27,24 @@ struct OpenGLLandscape::Impl
 	// uniform locations
 	GLint uViewProj = -1, uCameraRel = -1, uWorld = -1, uHeightInfo = -1, uOrigin = -1, uTile = -1, uHeightRect = -1, uCoarseGrid = -1;
 	GLint uPatch = -1, uPatchPos = -1, uMorph = -1, uLayerColor = -1, uSunDir = -1, uSunColor = -1, uAmbient = -1, uTex = -1, uTexMaps = -1, uAlbedoArray = -1, uNormalArray = -1, uMaskArray = -1;
-	GLint uTileHeights = -1, uSlotTable = -1, uCoarseHeights = -1, uTileWeights[3] = { -1, -1, -1 }, uCoarseWeights[3] = { -1, -1, -1 };
+	GLint uTileHeights = -1, uSlotTable = -1, uCoarseHeights = -1, uTileWeights[3] = { -1, -1, -1 }, uCoarseWeights[3] = { -1, -1, -1 }, uFarAlbedo = -1;
 	bool ok = false;
 
 	void destroyImages()
 	{
-		const GLuint t[9] = { tileHeights, slotTable, coarseHeights, weights[0], weights[1], weights[2], coarseWeights[0], coarseWeights[1], coarseWeights[2] };
+		const GLuint t[10] = { tileHeights, slotTable, coarseHeights, weights[0], weights[1], weights[2], coarseWeights[0], coarseWeights[1], coarseWeights[2], farAlbedo };
 		for (GLuint id : t)
 			if (id) glDeleteTextures(1, &id);
 		tileHeights = slotTable = coarseHeights = 0;
 		weights[0] = weights[1] = weights[2] = 0;
-		coarseWeights[0] = coarseWeights[1] = coarseWeights[2] = 0;
+		coarseWeights[0] = coarseWeights[1] = coarseWeights[2] = farAlbedo = 0;
 		world.reset();
 	}
 };
 
 namespace
 {
-constexpr int kUnits = 12;   // tile heights, slot table, coarse heights, three tile weight pages, three coarse weight pages, the albedo, normal and mask arrays (not ours)
+constexpr int kUnits = 13;   // tile heights, slot table, coarse heights, three tile weight pages, three coarse weight pages, the albedo, normal and mask arrays (not ours), the baked far image
 
 GLuint compile(GLenum type, const char* src, std::string& error)
 {
@@ -160,6 +161,7 @@ bool OpenGLLandscape::init(std::string* error)
 	m.uTileHeights = loc("uTileHeights"); m.uSlotTable = loc("uSlotTable"); m.uCoarseHeights = loc("uCoarseHeights");
 	m.uTileWeights[0] = loc("uTileWeights0"); m.uTileWeights[1] = loc("uTileWeights1"); m.uTileWeights[2] = loc("uTileWeights2");
 	m.uCoarseWeights[0] = loc("uCoarseWeights0"); m.uCoarseWeights[1] = loc("uCoarseWeights1"); m.uCoarseWeights[2] = loc("uCoarseWeights2");
+	m.uFarAlbedo = loc("uFarAlbedo");
 
 	{
 		const uint8_t white[4] = { 255, 255, 255, 255 };
@@ -231,6 +233,31 @@ void OpenGLLandscape::draw(const LandscapeRenderFrame& f, const glm::mat4& viewP
 			             have ? w.coarseWeights[static_cast<size_t>(p)].data() : none.data());   // a page the world does not have is zero
 		}
 
+		// The baked far image, when the world has one: the only image here that is filtered, with the mip chain the runtime made.
+		if (w.farW > 0 && w.farH > 0 && !w.farMips.empty())
+		{
+			m.farAlbedo = makeTexture(GL_TEXTURE_2D);
+			bool whole = true;
+			for (size_t l = 0; l < w.farMips.size(); ++l)
+			{
+				const int lw = std::max(1, w.farW >> l), lh = std::max(1, w.farH >> l);
+				if (w.farMips[l].size() != static_cast<size_t>(lw) * static_cast<size_t>(lh) * 4) { whole = false; break; }
+				glTexImage2D(GL_TEXTURE_2D, static_cast<GLint>(l), GL_SRGB8_ALPHA8, lw, lh, 0, GL_RGBA, GL_UNSIGNED_BYTE, w.farMips[l].data());
+			}
+			if (whole)
+			{
+				glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, static_cast<GLint>(w.farMips.size()) - 1);
+				glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+				glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+			}
+			else
+			{
+				glDeleteTextures(1, &m.farAlbedo);   // a level of the wrong size: drawn from the coarse weights instead
+				m.farAlbedo = 0;
+				++m.stats.rejected;
+			}
+		}
+
 		// the grid: (i, j) as two floats; the indices are the shared patch mesh
 		const int n = w.patchCells + 1;
 		std::vector<float> grid(static_cast<size_t>(n) * static_cast<size_t>(n) * 2);
@@ -279,8 +306,9 @@ void OpenGLLandscape::draw(const LandscapeRenderFrame& f, const glm::mat4& viewP
 
 	// ── draw ───────────────────────────────────────────────────────────────────
 	const GLuint images[kUnits] = { m.tileHeights, m.slotTable, m.coarseHeights, m.weights[0], m.weights[1], m.weights[2], m.coarseWeights[0], m.coarseWeights[1], m.coarseWeights[2], shading.albedoArray ? shading.albedoArray : m.noArray,
-	                          shading.normalArray ? shading.normalArray : m.noArray, shading.maskArray ? shading.maskArray : m.noArray };
-	const GLenum targets[kUnits] = { GL_TEXTURE_2D_ARRAY, GL_TEXTURE_2D, GL_TEXTURE_2D, GL_TEXTURE_2D_ARRAY, GL_TEXTURE_2D_ARRAY, GL_TEXTURE_2D_ARRAY, GL_TEXTURE_2D, GL_TEXTURE_2D, GL_TEXTURE_2D, GL_TEXTURE_2D_ARRAY, GL_TEXTURE_2D_ARRAY, GL_TEXTURE_2D_ARRAY };
+	                          shading.normalArray ? shading.normalArray : m.noArray, shading.maskArray ? shading.maskArray : m.noArray,
+	                          m.farAlbedo ? m.farAlbedo : m.coarseWeights[0] };   // no far image: any complete 2D texture, the shader does not read it
+	const GLenum targets[kUnits] = { GL_TEXTURE_2D_ARRAY, GL_TEXTURE_2D, GL_TEXTURE_2D, GL_TEXTURE_2D_ARRAY, GL_TEXTURE_2D_ARRAY, GL_TEXTURE_2D_ARRAY, GL_TEXTURE_2D, GL_TEXTURE_2D, GL_TEXTURE_2D, GL_TEXTURE_2D_ARRAY, GL_TEXTURE_2D_ARRAY, GL_TEXTURE_2D_ARRAY, GL_TEXTURE_2D };
 	for (int i = 0; i < kUnits; ++i)
 	{
 		glActiveTexture(GL_TEXTURE0 + kFirstUnit + i);
@@ -295,6 +323,7 @@ void OpenGLLandscape::draw(const LandscapeRenderFrame& f, const glm::mat4& viewP
 	glUniform1i(m.uAlbedoArray, kFirstUnit + 9);
 	glUniform1i(m.uNormalArray, kFirstUnit + 10);
 	glUniform1i(m.uMaskArray, kFirstUnit + 11);
+	glUniform1i(m.uFarAlbedo, kFirstUnit + 12);
 	// World UVs: a texture tile every `textureMeters` of absolute x/z. The shader works origin-relative, so the origin's part of the
 	// coordinate comes in as a fraction computed here in double (a float at 100 km would be 8 mm coarse, a visible shimmer).
 	{
@@ -302,7 +331,7 @@ void OpenGLLandscape::draw(const LandscapeRenderFrame& f, const glm::mat4& viewP
 		const double k = tex ? 1.0 / static_cast<double>(w.textureMeters) : 1.0;
 		const double fx = f.origin.x * k - std::floor(f.origin.x * k), fz = f.origin.z * k - std::floor(f.origin.z * k);
 		glUniform4f(m.uTex, static_cast<float>(k), tex ? 1.0f : 0.0f, static_cast<float>(fx), static_cast<float>(fz));
-		glUniform4f(m.uTexMaps, tex && shading.normalArray && !w.normalArrayPath.empty() ? 1.0f : 0.0f, tex && shading.maskArray && !w.maskArrayPath.empty() ? 1.0f : 0.0f, 0.0f, 0.0f);
+		glUniform4f(m.uTexMaps, tex && shading.normalArray && !w.normalArrayPath.empty() ? 1.0f : 0.0f, tex && shading.maskArray && !w.maskArrayPath.empty() ? 1.0f : 0.0f, m.farAlbedo ? 1.0f : 0.0f, 0.0f);
 	}
 
 	glUniformMatrix4fv(m.uViewProj, 1, GL_FALSE, glm::value_ptr(viewProj));

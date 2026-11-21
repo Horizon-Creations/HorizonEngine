@@ -1,5 +1,7 @@
 #include "HorizonScene/LandscapeRuntime.h"
 
+#include <atomic>
+
 #include "HorizonScene/LandscapeGpuLayout.h"
 #include "HorizonScene/LandscapePatchMesh.h"
 
@@ -133,7 +135,10 @@ bool LandscapeRuntime::beginWith(std::shared_ptr<const LandscapeTileSource> sour
 	m_quadtree = q;
 	m_store = std::make_unique<LandscapeStore>(m_source, config.store);
 	m_atlas = std::make_unique<LandscapeAtlas>(m_store->stats().maxTiles, config.atlasWindow);
-	++m_generation;
+	// One counter for the process, not one a runtime: a renderer keeps its images while the generation is the one it built them for, and
+	// two runtimes that both said "1" (the editor's world and a play world, a tool's second scene) would be one landscape to it.
+	static std::atomic<uint64_t> s_generation{ 0 };
+	m_generation = ++s_generation;
 	m_renderStatic.reset();
 	return true;
 }
@@ -412,6 +417,7 @@ void LandscapeRuntime::buildRenderFrame(const glm::dmat4& viewProjRelative, cons
 		w->coarseWeightW = cl.weightW;
 		w->coarseWeightH = cl.weightH;
 		landscapePackCoarse(*coarse, cl, w->coarseHeights, w->coarseWeights);
+		if (const LandscapeFarTable* farTable = m_source->farImage()) farTable->assemble(w->farW, w->farH, w->farMips);
 		for (int i = 0; i < 12; ++i)
 			for (int c = 0; c < 4; ++c) w->layerColor[i][c] = m_config.layerColors[static_cast<size_t>(i)][c];
 		if (m_config.textureGroup >= 0 && m_config.textureGroup < kAutoLandscapeGroupCount)

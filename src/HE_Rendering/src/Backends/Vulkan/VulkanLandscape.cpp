@@ -267,7 +267,7 @@ bool VulkanLandscape::init(const Env& env, std::string* error)
 		return false;
 	}
 
-	// Set 0: the block and the twelve images (binding numbers in LandscapeShaderSource.h).
+	// Set 0: the block and the thirteen images (binding numbers in LandscapeShaderSource.h).
 	VkDescriptorSetLayoutBinding b[glsl::kLandscapeVkBindingCount]{};
 	for (unsigned i = 0; i < glsl::kLandscapeVkBindingCount; ++i)
 	{
@@ -466,7 +466,7 @@ void VulkanLandscape::draw(VkCommandBuffer cmd, VkRenderPass pass, VkExtent2D ex
 	                  shading.normalArray != VK_NULL_HANDLE, shading.maskArray != VK_NULL_HANDLE);
 	std::memcpy(m.uboMapped[frameIndex], &g, sizeof(g));
 
-	// Set 0 of this frame in flight (its fence has been waited on): the block and the twelve images; an array the renderer could not resolve is the
+	// Set 0 of this frame in flight (its fence has been waited on): the block and the thirteen images; an array the renderer could not resolve is the
 	// white stand-in (the shader reads it only where uTex / uTexMaps say so).
 	VkDescriptorBufferInfo bi{ m.ubo[frameIndex], 0, sizeof(vkls::Globals) };
 	VkDescriptorImageInfo ii[glsl::kLandscapeVkBindingCount] = {};
@@ -477,7 +477,10 @@ void VulkanLandscape::draw(VkCommandBuffer cmd, VkRenderPass pass, VkExtent2D ex
 		m.img[kCoarseW].view, m.img[kCoarseW + 1].view, m.img[kCoarseW + 2].view,
 		shading.albedoArray ? shading.albedoArray : m.env.whiteArray,
 		shading.normalArray ? shading.normalArray : m.env.whiteArray,
-		shading.maskArray ? shading.maskArray : m.env.whiteArray };
+		shading.maskArray ? shading.maskArray : m.env.whiteArray,
+		// The baked far image is not uploaded on Vulkan yet (uTexMaps.z stays 0, the shader draws from the coarse weights as before): the
+		// binding the shared GLSL declares gets a 2D image that is always there.
+		m.img[kCoarseW].view };
 	VkWriteDescriptorSet wr[glsl::kLandscapeVkBindingCount] = {};
 	for (unsigned i = 0; i < glsl::kLandscapeVkBindingCount; ++i)
 	{

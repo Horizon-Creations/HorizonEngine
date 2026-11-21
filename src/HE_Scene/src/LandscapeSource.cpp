@@ -26,6 +26,18 @@ uint32_t get32(const uint8_t* p) { return p[0] | (p[1] << 8) | (p[2] << 16) | (s
 uint64_t get64(const uint8_t* p) { return static_cast<uint64_t>(get32(p)) | (static_cast<uint64_t>(get32(p + 4)) << 32); }
 
 bool inWorld(const LandscapeTileSource& s, LandscapeTileKey k) { return k.x >= 0 && k.z >= 0 && k.x < s.tilesX() && k.z < s.tilesZ(); }
+
+// A tail section at `pos`: the bytes, then the 20-byte trailer that names them. Returns what was written.
+uint64_t writeTail(std::ofstream& out, uint64_t pos, const std::vector<uint8_t>& bytes, uint32_t magic)
+{
+	uint8_t trailer[kLandscapePackHlodTrailerBytes];
+	put64(trailer, pos);
+	put64(trailer + 8, bytes.size());
+	put32(trailer + 16, magic);
+	out.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+	out.write(reinterpret_cast<const char*>(trailer), sizeof(trailer));
+	return bytes.size() + sizeof(trailer);
+}
 } // namespace
 
 // ── coarse world ─────────────────────────────────────────────────────────────
@@ -310,17 +322,9 @@ bool LandscapePackWriter::finish()
 		m_out.write(reinterpret_cast<const char*>(tb.data()), static_cast<std::streamsize>(tb.size()));
 		m_pos += tb.size();
 	}
-	if (m_hlod.cellCount() > 0)
-	{
-		const std::vector<uint8_t> hb = m_hlod.encode();
-		uint8_t trailer[kLandscapePackHlodTrailerBytes];
-		put64(trailer, m_pos);
-		put64(trailer + 8, hb.size());
-		put32(trailer + 16, kLandscapePackHlodMagic);
-		m_out.write(reinterpret_cast<const char*>(hb.data()), static_cast<std::streamsize>(hb.size()));
-		m_out.write(reinterpret_cast<const char*>(trailer), sizeof(trailer));
-		m_pos += hb.size() + sizeof(trailer);
-	}
+	// The tail sections: the far image first, the cell HLOD table last (LandscapeSource.h, "Pack file").
+	if (!m_far.empty()) m_pos += writeTail(m_out, m_pos, m_far.encode(), kLandscapeFarMagic);
+	if (m_hlod.cellCount() > 0) m_pos += writeTail(m_out, m_pos, m_hlod.encode(), kLandscapePackHlodMagic);
 	std::vector<uint8_t> head(kLandscapePackHeaderBytes + m_offset.size() * kLandscapePackIndexEntryBytes, 0);
 	put64(&head[56], waterOffset);
 	put32(&head[0], kLandscapePackMagic);
@@ -482,18 +486,37 @@ std::shared_ptr<LandscapePackSource> LandscapePackSource::open(const std::string
 		}
 	}
 	// The cell HLOD table: a trailer at the end of the file names it (LandscapeSource.h, "Pack file"). No magic: a pack without one.
-	if (version == 2 && fileSize >= indexEnd + kLandscapePackHlodTrailerBytes)
+	// `tailEnd` is where the next tail section (towards the front) would end: the far image sits in front of the HLOD table.
+	uint64_t tailEnd = fileSize;
+	if (version == 2 && tailEnd >= indexEnd + kLandscapePackHlodTrailerBytes)
 	{
 		uint8_t tr[kLandscapePackHlodTrailerBytes];
-		if (src->readAt(fileSize - sizeof(tr), tr, sizeof(tr)) && get32(tr + 16) == kLandscapePackHlodMagic)
+		if (src->readAt(tailEnd - sizeof(tr), tr, sizeof(tr)) && get32(tr + 16) == kLandscapePackHlodMagic)
 		{
 			const uint64_t off = get64(tr), size = get64(tr + 8);
-			if (off < indexEnd || size == 0 || off + size + sizeof(tr) != fileSize) return fail("pack HLOD table points outside the file");
+			if (off < indexEnd || size == 0 || off + size + sizeof(tr) != tailEnd) return fail("pack HLOD table points outside the file");
 			std::vector<uint8_t> hb(static_cast<size_t>(size));
 			if (!src->readAt(off, hb.data(), hb.size())) return fail("pack HLOD table cannot be read");
 			if (!LandscapeHlodTable::decode(hb, src->m_hlod)) return fail("pack HLOD table is damaged");
+			tailEnd = off;
 		}
 	}
+	// The baked far image, the same way.
+	if (version == 2 && tailEnd >= indexEnd + kLandscapePackHlodTrailerBytes)
+	{
+		uint8_t tr[kLandscapePackHlodTrailerBytes];
+		if (src->readAt(tailEnd - sizeof(tr), tr, sizeof(tr)) && get32(tr + 16) == kLandscapeFarMagic)
+		{
+			const uint64_t off = get64(tr), size = get64(tr + 8);
+			if (off < indexEnd || size == 0 || off + size + sizeof(tr) != tailEnd) return fail("pack far image points outside the file");
+			std::vector<uint8_t> fb(static_cast<size_t>(size));
+			if (!src->readAt(off, fb.data(), fb.size())) return fail("pack far image cannot be read");
+			if (!LandscapeFarTable::decode(fb, src->m_far)) return fail("pack far image is damaged");
+			if (src->m_far.layout.tilesX != src->m_tilesX || src->m_far.layout.tilesZ != src->m_tilesZ) return fail("pack far image is of another world");
+			tailEnd = off;
+		}
+	}
+	src->m_coreSize = tailEnd;
 	// The coarse world (version 2): both grids are decoded now and stay in memory.
 	if (version == 2 && head[25] != 255)
 	{
@@ -536,6 +559,62 @@ uint32_t LandscapePackSource::storedSize(LandscapeTileKey key) const
 uint64_t LandscapePackSource::storedOffset(LandscapeTileKey key) const
 {
 	return inWorld(*this, key) ? m_offset[static_cast<size_t>(key.z) * m_tilesX + key.x] : 0;
+}
+
+uint64_t LandscapePackSource::storedHash(LandscapeTileKey key) const
+{
+	const uint32_t size = storedSize(key);
+	if (size == 0) return 0;
+	std::vector<uint8_t> blob(size);
+	if (!readAt(storedOffset(key), blob.data(), blob.size())) return 0;
+	uint64_t h = 1469598103934665603ull;
+	for (const uint8_t b : blob) h = (h ^ b) * 1099511628211ull;
+	return h ? h : 1;   // 0 means "no tile"
+}
+
+bool landscapePackSetTails(const std::string& packPath, const LandscapeHlodTable* hlod, const LandscapeFarTable* farTable, std::string* error)
+{
+	const auto fail = [&](const char* why) { if (error) *error = why; return false; };
+	// What the pack has now: a section the caller did not name is kept.
+	LandscapeHlodTable keptHlod;
+	LandscapeFarTable  keptFar;
+	uint64_t           core = 0;
+	{
+		auto pack = LandscapePackSource::open(packPath);
+		if (!pack) return fail("not a landscape pack");
+		if (!hlod && pack->hlod()) keptHlod = *pack->hlod();
+		if (!farTable && pack->farImage()) keptFar = *pack->farImage();
+		core = pack->coreSize();
+	}   // closed: the file is renamed over below (Windows)
+	const LandscapeHlodTable& h = hlod ? *hlod : keptHlod;
+	const LandscapeFarTable&  f = farTable ? *farTable : keptFar;
+
+	// Written to a sibling and renamed over the pack: a crash leaves either the old or the new file, never half of one.
+	const std::string tmp = packPath + ".tail.tmp";
+	std::error_code ec;
+	{
+		std::ifstream in(packPath, std::ios::binary);
+		std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
+		if (!in || !out) return fail("cannot write next to the pack");
+		constexpr size_t kChunk = 1u << 20;
+		std::vector<char> buf(kChunk);
+		for (uint64_t left = core; left > 0;)
+		{
+			const size_t n = static_cast<size_t>(std::min<uint64_t>(left, kChunk));
+			in.read(buf.data(), static_cast<std::streamsize>(n));
+			if (static_cast<size_t>(in.gcount()) != n) { out.close(); std::filesystem::remove(tmp, ec); return fail("pack read failed"); }
+			out.write(buf.data(), static_cast<std::streamsize>(n));
+			left -= n;
+		}
+		uint64_t pos = core;
+		if (!f.empty()) pos += writeTail(out, pos, f.encode(), kLandscapeFarMagic);
+		if (h.cellCount() > 0) pos += writeTail(out, pos, h.encode(), kLandscapePackHlodMagic);
+		out.flush();
+		if (!out) { out.close(); std::filesystem::remove(tmp, ec); return fail("pack write failed"); }
+	}
+	std::filesystem::rename(tmp, packPath, ec);
+	if (ec) { std::filesystem::remove(tmp, ec); return fail("cannot replace the pack"); }
+	return true;
 }
 
 bool LandscapePackSource::load(LandscapeTileKey key, int maxLevels, LandscapeTile& out) const

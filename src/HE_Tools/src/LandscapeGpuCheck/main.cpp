@@ -22,6 +22,7 @@
 
 #include <ContentManager/ContentManager.h>
 #include <HorizonScene/HorizonWorld.h>
+#include <HorizonScene/LandscapeFarBake.h>
 #include <HorizonScene/LandscapeRuntime.h>
 #include <HorizonScene/LandscapeWater.h>
 #include <HorizonScene/LandscapeWorldProxies.h>
@@ -59,6 +60,7 @@ constexpr float  kMin = 0.0f, kScale = 3000.0f;
 constexpr double kSlope = 0.1, kBase = 600.0, kPivot = 3072.0;
 constexpr int    kTiles = 32;                     // the ramp world: 16.4 km, more than the atlas holds, so moving evicts and reuses slots
 constexpr int    kHillsTiles = 12;
+constexpr int    kFarTiles = 24;                  // the far image scene: 12.3 km, most of it outside a small atlas
 constexpr double kWorld = kTiles * 512.0;
 constexpr int    kW = 480, kH = 270;
 
@@ -107,6 +109,24 @@ public:
 
 private:
 	LandscapeTile m_base;
+};
+
+// A world with a baked far image on top of a source that has none (scene 4): everything else is the base's.
+class FarSource final : public LandscapeTileSource
+{
+public:
+	FarSource(std::shared_ptr<const LandscapeTileSource> base, std::shared_ptr<const LandscapeFarTable> table) : m_base(std::move(base)), m_table(std::move(table)) {}
+	const LandscapeGeometry& geometry() const override { return m_base->geometry(); }
+	int  tilesX() const override { return m_base->tilesX(); }
+	int  tilesZ() const override { return m_base->tilesZ(); }
+	bool load(LandscapeTileKey key, int maxLevels, LandscapeTile& out) const override { return m_base->load(key, maxLevels, out); }
+	bool heightRange(float& minM, float& scaleM) const override { return m_base->heightRange(minM, scaleM); }
+	const LandscapeCoarseWorld* coarse() const override { return m_base->coarse(); }
+	const LandscapeFarTable* farImage() const override { return m_table.get(); }
+
+private:
+	std::shared_ptr<const LandscapeTileSource> m_base;
+	std::shared_ptr<const LandscapeFarTable>   m_table;
 };
 
 bool settle(LandscapeRuntime& rt, const glm::dvec3& cam, const glm::dvec3& origin, int ms = 120000)
@@ -424,6 +444,88 @@ int runBackend(gpucheck::Backend& be, const std::string& packPath, const std::fi
 		tally.check(lAo < lNone - 1.0, "an AO of 0.5 darkens the ambient light");
 		writePng((outDir / (std::string("landscape_") + be.name() + "_worlduv.png")).string(), textured);
 		drawn("worlduv")[be.name()] = textured;
+	}
+	// ── scene 4: the baked far image (LandscapeFarMap.h): ground outside the atlas is one access into it ──
+	{
+		ProceduralLandscapeParams p;
+		p.tilesX = p.tilesZ = kFarTiles;
+		const auto base = std::make_shared<ProceduralLandscapeSource>(p);
+		// What an export bakes for this view: the layer blend with the runtime's flat colours (no array is bound in this scene).
+		LandscapeFarPaint paint;
+		const auto flatColours = LandscapeRuntimeConfig::defaultLayerColors();
+		for (size_t i = 0; i < 12; ++i) paint.layerColor[i] = glm::vec3(flatColours[i]);
+		paint.layerAo.fill(1.0f);
+		const auto bake = [&](const LandscapeFarPainter& painter) {
+			LandscapeFarBakeOptions o;
+			o.painter = painter;
+			auto t = std::make_shared<LandscapeFarTable>();
+			LandscapeFarBakeStats st;
+			bakeLandscapeFar(*base, [](LandscapeTileKey) { return uint64_t{ 1 }; }, o, nullptr, *t, st);
+			return st.baked == st.regions && st.regions > 0 ? t : nullptr;
+		};
+		const auto real = bake(landscapeFarWeightPainter(paint));
+		// A colour no layer has (no green at all): where it shows, the far image is what was read.
+		const auto marker = bake([](const LandscapeTileSource&, const LandscapeFarLayout& l, int, int, std::vector<uint8_t>& rgba) {
+			rgba.resize(static_cast<size_t>(l.regionSide()) * static_cast<size_t>(l.regionSide()) * 4);
+			for (size_t i = 0; i < rgba.size(); i += 4) { rgba[i] = 255; rgba[i + 1] = 0; rgba[i + 2] = 255; rgba[i + 3] = 255; }
+			return true;
+		});
+		if (!real || !marker) { std::printf("  the far image did not bake\n"); return 1; }
+
+		Camera c{ { 2000.0, 3400.0, 2000.0 }, { 0.7, -0.25, 0.7 }, { 0.0, 0.0, 0.0 } };
+		const auto shot = [&](const std::shared_ptr<const LandscapeFarTable>& table, gpucheck::RenderOut& out) {
+			LandscapeRuntime rt;
+			LandscapeRuntimeConfig cfg;
+			cfg.store.byteBudget = 16ull * 1024 * 1024;   // a small atlas, so most of the view lies outside it
+			std::string err;
+			if (!rt.begin(std::make_shared<FarSource>(base, table), cfg, &err)) { std::printf("  runtime: %s\n", err.c_str()); return false; }
+			if (!settle(rt, c.pos, c.origin)) { std::printf("  the store did not settle (far image)\n"); return false; }
+			gpucheck::RenderIn in = makeInput(c, be.depthIsNdc(), rt);
+			return be.render(in, out);
+		};
+		gpucheck::RenderOut without, withReal, withMarker;
+		if (!shot(nullptr, without) || !shot(real, withReal) || !shot(marker, withMarker)) { std::printf("  render failed (far image)\n"); return 1; }
+
+		const auto isMarker = [](const gpucheck::RenderOut& o, size_t i) { return o.rgba[i * 4 + 1] < 6 && o.rgba[i * 4] > 20 && o.rgba[i * 4 + 2] > 20; };
+		size_t ground = 0, farPx = 0, controlMarker = 0, nearChanged = 0;
+		double sumReal[3] = { 0, 0, 0 }, sumWithout[3] = { 0, 0, 0 };
+		int worstAll = 0;
+		for (size_t i = 0; i < without.depth.size(); ++i)
+		{
+			if (without.depth[i] >= 1.0f) continue;
+			++ground;
+			controlMarker += isMarker(without, i) ? 1 : 0;
+			int worst = 0;
+			for (size_t k = 0; k < 3; ++k) worst = std::max(worst, std::abs(static_cast<int>(withMarker.rgba[i * 4 + k]) - static_cast<int>(without.rgba[i * 4 + k])));
+			worstAll = std::max(worstAll, worst);
+			if (isMarker(withMarker, i))
+			{
+				++farPx;
+				for (size_t k = 0; k < 3; ++k) { sumReal[k] += withReal.rgba[i * 4 + k]; sumWithout[k] += without.rgba[i * 4 + k]; }
+			}
+			else
+				nearChanged += worst > 2 ? 1 : 0;
+		}
+		if (be.takesFarImage())
+		{
+			double meanGap = 0.0;
+			for (int k = 0; k < 3; ++k) meanGap = std::max(meanGap, farPx ? std::abs(sumReal[k] - sumWithout[k]) / static_cast<double>(farPx) : 255.0);
+			std::printf("  %-26s ground %zu px, drawn from the far image %zu, atlas pixels a marker image moved %zu; baked image against the coarse weights: mean gap %.2f/255\n",
+			            "far image", ground, farPx, nearChanged, meanGap);
+			tally.check(controlMarker == 0, "without a far image nothing has the marker's colour");
+			tally.check(farPx > ground / 20, "ground outside the atlas is drawn from the far image");
+			tally.check(ground - farPx > 100, "ground inside the atlas is not");
+			tally.check(nearChanged == 0, "the far image changes no pixel of a tile that is in the atlas");
+			tally.check(meanGap < 4.0, "the baked image is what the layer blend comes to over the same ground", "mean gap " + std::to_string(meanGap));
+		}
+		else
+		{
+			std::printf("  %-26s this backend does not take the far image yet; a marker image moved the picture by at most %d/255\n", "far image", worstAll);
+			tally.check(worstAll <= 1, "a backend that does not take the far image draws as without one");
+		}
+		writePng((outDir / (std::string("landscape_") + be.name() + "_far.png")).string(), withReal);
+		writePng((outDir / (std::string("landscape_") + be.name() + "_far_marker.png")).string(), withMarker);
+		writePng((outDir / (std::string("landscape_") + be.name() + "_far_without.png")).string(), without);
 	}
 	std::printf("  %s\n", tally.failures == 0 ? "OK" : "FAILED");
 	return tally.failures == 0 ? 0 : 1;

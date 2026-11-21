@@ -30,6 +30,7 @@ public:
 	~MetalBackend() override { m_landscape.shutdown(); }
 	const char* name() const override { return "Metal"; }
 	bool depthIsNdc() const override { return true; }
+	bool takesFarImage() const override { return true; }
 
 	bool init(std::string& error) override
 	{

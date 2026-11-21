@@ -67,11 +67,11 @@ TEST_CASE("landscape shader source: the uniforms are the ones the frame contract
 		CHECK_MESSAGE(vs.count(u) == 1, "vertex shader lacks " << u);
 	for (const char* u : { "uWorld", "uHeightInfo", "uOrigin", "uTile", "uLayerColor", "uSunDir", "uSunColor", "uAmbient", "uSlotTable",
 	                       "uTileWeights0", "uTileWeights1", "uTileWeights2", "uCoarseWeights0", "uCoarseWeights1", "uCoarseWeights2",
-	                       "uTex", "uTexMaps", "uAlbedoArray", "uNormalArray", "uMaskArray" })
+	                       "uTex", "uTexMaps", "uAlbedoArray", "uNormalArray", "uMaskArray", "uFarAlbedo" })
 		CHECK_MESSAGE(fs.count(u) == 1, "fragment shader lacks " << u);
 	// nothing else sneaks in unannounced: a new uniform needs the frame contract, the doc and this list
 	CHECK(vs.size() == 14);
-	CHECK(fs.size() == 20);
+	CHECK(fs.size() == 21);
 }
 
 TEST_CASE("landscape shader source: the morph distance is horizontal plus the slab term, never the vertex's own height")
@@ -97,7 +97,7 @@ TEST_CASE("landscape shader source: the MSL port has every GLSL uniform as a mem
 	for (const std::string& u : uniformsOf(HE::glsl::kLandscapeFS)) uniforms.insert(u);
 	// the images are textures in MSL, not struct members
 	const std::set<std::string> images = { "uTileHeights", "uSlotTable", "uCoarseHeights", "uTileWeights0", "uTileWeights1", "uTileWeights2",
-	                                       "uCoarseWeights0", "uCoarseWeights1", "uCoarseWeights2", "uAlbedoArray", "uNormalArray", "uMaskArray" };
+	                                       "uCoarseWeights0", "uCoarseWeights1", "uCoarseWeights2", "uAlbedoArray", "uNormalArray", "uMaskArray", "uFarAlbedo" };
 	int members = 0;
 	for (const std::string& u : uniforms)
 	{
@@ -109,12 +109,12 @@ TEST_CASE("landscape shader source: the MSL port has every GLSL uniform as a mem
 		++members;
 	}
 	CHECK(members == 17);                                   // the vertex stage's 11 plus the fragment stage's 5 (layer colours, sun colour and direction, ambient, tex)
-	// entry points (MetalLandscape.mm looks them up by name) and the indices it binds: buffers 20 and 21, vertex textures 20-22, fragment 20-29
+	// entry points (MetalLandscape.mm looks them up by name) and the indices it binds: buffers 20 and 21, vertex textures 20-22, fragment 20-30 (30 = the baked far image)
 	CHECK(msl.find("vertex LsVertexOut vertexMain") != std::string::npos);
 	CHECK(msl.find("fragment float4 fragmentMain") != std::string::npos);
 	for (const char* b : { "[[buffer(20)]]", "[[buffer(21)]]" }) CHECK(msl.find(b) != std::string::npos);
-	for (int t = 20; t <= 29; ++t) CHECK(msl.find("[[texture(" + std::to_string(t) + ")]]") != std::string::npos);
-	CHECK(msl.find("[[texture(30)]]") == std::string::npos);
+	for (int t = 20; t <= 30; ++t) CHECK(msl.find("[[texture(" + std::to_string(t) + ")]]") != std::string::npos);
+	CHECK(msl.find("[[texture(31)]]") == std::string::npos);   // 30 is the last index a stage has
 	CHECK(msl.find("[[texture(19)]]") == std::string::npos);   // nothing below 20: MetalRenderer owns those
 	// the same distance for the morph as the GLSL: horizontal plus the slab term, never the vertex's own height
 	const size_t at = msl.find("float d = sqrt(");
@@ -132,7 +132,7 @@ TEST_CASE("landscape shader source: the HLSL port has every GLSL uniform as a me
 	std::set<std::string> uniforms = uniformsOf(HE::glsl::kLandscapeVS);
 	for (const std::string& u : uniformsOf(HE::glsl::kLandscapeFS)) uniforms.insert(u);
 	const std::set<std::string> images = { "uTileHeights", "uSlotTable", "uCoarseHeights", "uTileWeights0", "uTileWeights1", "uTileWeights2",
-	                                       "uCoarseWeights0", "uCoarseWeights1", "uCoarseWeights2", "uAlbedoArray", "uNormalArray", "uMaskArray" };
+	                                       "uCoarseWeights0", "uCoarseWeights1", "uCoarseWeights2", "uAlbedoArray", "uNormalArray", "uMaskArray", "uFarAlbedo" };
 	// `patch` is an HLSL keyword: the per-patch block spells uPatch as lsPatch, everything else as the MSL does
 	int members = 0;
 	for (const std::string& u : uniforms)
@@ -277,7 +277,8 @@ TEST_CASE("landscape shader source (Vulkan): LsGlobals is the same block in both
 		{ "uTileWeights1", HE::glsl::kLandscapeVkBindingTileWeights + 1 }, { "uTileWeights2", HE::glsl::kLandscapeVkBindingTileWeights + 2 },
 		{ "uCoarseWeights0", HE::glsl::kLandscapeVkBindingCoarseWeights }, { "uCoarseWeights1", HE::glsl::kLandscapeVkBindingCoarseWeights + 1 },
 		{ "uCoarseWeights2", HE::glsl::kLandscapeVkBindingCoarseWeights + 2 }, { "uAlbedoArray", HE::glsl::kLandscapeVkBindingAlbedo },
-		{ "uNormalArray", HE::glsl::kLandscapeVkBindingNormal }, { "uMaskArray", HE::glsl::kLandscapeVkBindingMask } };
+		{ "uNormalArray", HE::glsl::kLandscapeVkBindingNormal }, { "uMaskArray", HE::glsl::kLandscapeVkBindingMask },
+		{ "uFarAlbedo", HE::glsl::kLandscapeVkBindingFar } };
 	CHECK(HE::glsl::kLandscapeVkBindingCount == bindings.size() + 1);
 	for (const auto& [name, binding] : bindings)
 	{

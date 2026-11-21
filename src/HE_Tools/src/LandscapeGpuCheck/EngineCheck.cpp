@@ -179,13 +179,16 @@ int runReflectionCheck(const std::string& packPath, const std::string& pngPath)
 	int failures = 0;
 	const auto fail = [&](const char* what, const std::string& detail = {}) { ++failures; std::printf("    FAIL  %s %s\n", what, detail.c_str()); };
 
-	bool pipelinesBuilt = false;
+	// [0] the GI pipelines linked, [1] this OpenGL has no GI at all (below 4.3: no compute shaders, every Mac).
+	bool seen[2] = { false, false };
+	bool& pipelinesBuilt = seen[0];
 	const int sink = HE::Log::addSink(
 		[](const HE::Log::Record& r, void* user) {
-			if (r.category == HE::Log::Cat::RHI && std::strstr(r.message, "GI pipelines built"))
-				*static_cast<bool*>(user) = true;
+			if (r.category != HE::Log::Cat::RHI) return;
+			if (std::strstr(r.message, "GI pipelines built")) static_cast<bool*>(user)[0] = true;
+			if (std::strstr(r.message, "GI unavailable")) static_cast<bool*>(user)[1] = true;
 		},
-		&pipelinesBuilt);
+		seen);
 
 	try
 	{
@@ -331,8 +334,10 @@ int runReflectionCheck(const std::string& packPath, const std::string& pngPath)
 		HE::Log::removeSink(sink);
 		return 3;
 	}
-	if (!pipelinesBuilt) fail("GI pipelines built (log line never appeared)");
 	HE::Log::removeSink(sink);
+	// Not a failure of the landscape: the kernel under test cannot exist on this context, so there is nothing to judge.
+	if (seen[1]) { std::printf("  NOT CHECKED: this OpenGL has no GI (below 4.3), the reflection kernel does not run here\n"); return 0; }
+	if (!pipelinesBuilt) fail("GI pipelines built (log line never appeared)");
 	std::printf("  %s\n", failures == 0 ? "OK" : "FAILED");
 	return failures == 0 ? 0 : 1;
 }

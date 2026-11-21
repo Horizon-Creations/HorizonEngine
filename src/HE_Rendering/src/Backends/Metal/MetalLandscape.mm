@@ -41,7 +41,7 @@ static_assert(sizeof(Globals) == 64 + 4 * 16 + 16 + 8 * 16 + 16 * 16 + 12 * 16 +
 static_assert(sizeof(PatchData) == 48, "LsPatch: the MSL struct and this one have to be the same size");
 
 constexpr NSUInteger kBuf = 20, kPatchBuf = 21;      // constant buffers (vertex: 20, 21; fragment: 20)
-constexpr NSUInteger kTex = 20;                       // first texture index (vertex: 20-22; fragment: 20-29, 27-29 = the albedo, normal and mask arrays)
+constexpr NSUInteger kTex = 20;                       // first texture index (vertex: 20-22; fragment: 20-30, 27-29 = the albedo, normal and mask arrays, 30 = the baked far image)
 } // namespace
 
 struct MetalLandscape::Impl
@@ -53,6 +53,7 @@ struct MetalLandscape::Impl
 	id<MTLTexture> tileHeights = nil, slotTable = nil, coarseHeights = nil;
 	id<MTLTexture> weights[3] = { nil, nil, nil };
 	id<MTLTexture> coarseWeights[3] = { nil, nil, nil };
+	id<MTLTexture> farAlbedo = nil;   // the baked far image (sRGB8 + A, mipped), fragment texture 30; nil = the world has none
 	id<MTLTexture> noArray = nil;   // bound at 27 when there is no albedo array: the shader does not read it, Metal wants something there
 	std::shared_ptr<const LandscapeRenderStatic> world;
 	Stats stats;
@@ -60,7 +61,7 @@ struct MetalLandscape::Impl
 
 	void destroyImages()
 	{
-		tileHeights = slotTable = coarseHeights = nil;
+		tileHeights = slotTable = coarseHeights = farAlbedo = nil;
 		for (int i = 0; i < 3; ++i) weights[i] = coarseWeights[i] = nil;
 		indices = nil;
 		world.reset();
@@ -169,6 +170,30 @@ void MetalLandscape::encode(void* renderEncoder, const LandscapeRenderFrame& f, 
 				                      mipmapLevel:0 withBytes:(have ? w.coarseWeights[static_cast<size_t>(p)].data() : none.data())
 				                      bytesPerRow:static_cast<NSUInteger>(std::max(w.coarseWeightW, 1)) * 4];   // a page the world does not have is zero
 			}
+			// The baked far image, when the world has one: the only image of ours that is filtered, with the mip chain the runtime made.
+			if (w.farW > 0 && w.farH > 0 && !w.farMips.empty())
+			{
+				bool whole = true;
+				for (size_t l = 0; l < w.farMips.size(); ++l)
+					whole = whole && w.farMips[l].size() == static_cast<size_t>(std::max(1, w.farW >> l)) * static_cast<size_t>(std::max(1, w.farH >> l)) * 4;
+				if (whole)
+				{
+					MTLTextureDescriptor* d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm_sRGB
+					                                                                              width:static_cast<NSUInteger>(w.farW)
+					                                                                             height:static_cast<NSUInteger>(w.farH) mipmapped:NO];
+					d.mipmapLevelCount = w.farMips.size();
+					d.usage = MTLTextureUsageShaderRead;
+					d.storageMode = m.storage();
+					m.farAlbedo = [m.device newTextureWithDescriptor:d];
+					for (size_t l = 0; l < w.farMips.size(); ++l)
+					{
+						const NSUInteger lw = static_cast<NSUInteger>(std::max(1, w.farW >> l)), lh = static_cast<NSUInteger>(std::max(1, w.farH >> l));
+						[m.farAlbedo replaceRegion:MTLRegionMake2D(0, 0, lw, lh) mipmapLevel:l withBytes:w.farMips[l].data() bytesPerRow:lw * 4];
+					}
+				}
+				else
+					++m.stats.rejected;   // a level of the wrong size: drawn from the coarse weights instead
+			}
 			m.indices = [m.device newBufferWithBytes:w.patchIndices.data() length:w.patchIndices.size() * sizeof(uint16_t) options:MTLResourceStorageModeShared];
 			m.world = f.world;
 			++m.stats.generations;
@@ -221,6 +246,7 @@ void MetalLandscape::encode(void* renderEncoder, const LandscapeRenderFrame& f, 
 		const double k = tex ? 1.0 / static_cast<double>(w.textureMeters) : 1.0;
 		g.texMaps[0] = tex && shading.normalArray && !w.normalArrayPath.empty() ? 1.0f : 0.0f;
 		g.texMaps[1] = tex && shading.maskArray && !w.maskArrayPath.empty() ? 1.0f : 0.0f;
+		g.texMaps[2] = m.farAlbedo ? 1.0f : 0.0f;
 		g.tex[0] = static_cast<float>(k); g.tex[1] = tex ? 1.0f : 0.0f;
 		g.tex[2] = static_cast<float>(f.origin.x * k - std::floor(f.origin.x * k)); g.tex[3] = static_cast<float>(f.origin.z * k - std::floor(f.origin.z * k));
 
@@ -241,6 +267,7 @@ void MetalLandscape::encode(void* renderEncoder, const LandscapeRenderFrame& f, 
 		[enc setFragmentTexture:tex ? (__bridge id<MTLTexture>)shading.albedoArray : m.noArray atIndex:kTex + 7];
 		[enc setFragmentTexture:g.texMaps[0] > 0.5f ? (__bridge id<MTLTexture>)shading.normalArray : m.noArray atIndex:kTex + 8];
 		[enc setFragmentTexture:g.texMaps[1] > 0.5f ? (__bridge id<MTLTexture>)shading.maskArray : m.noArray atIndex:kTex + 9];
+		[enc setFragmentTexture:m.farAlbedo ? m.farAlbedo : m.coarseWeights[0] atIndex:kTex + 10];   // no far image: any 2D texture, the shader does not read it
 
 		const uint32_t total = w.quadrantFirst[3] + w.quadrantCount[3];
 		for (const LandscapeRenderPatch& p : f.patches)

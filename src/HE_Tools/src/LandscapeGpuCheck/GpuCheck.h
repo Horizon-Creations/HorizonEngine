@@ -59,6 +59,8 @@ public:
 	// Metal's scene pass rasterises with the plain GL view-projection (HE::kMetalClipFix is NOT applied), so its depth buffer holds the GL ndc z;
 	// landscape patches have to follow, or they would not sort with the scene's objects and the sky.
 	virtual bool depthIsNdc() const { return false; }
+	// The backend's landscape class uploads and reads the baked far image (LandscapeRenderStatic::farMips). The others draw as without one.
+	virtual bool takesFarImage() const { return false; }
 	virtual bool init(std::string& error) = 0;
 	virtual bool render(const RenderIn& in, RenderOut& out) = 0;
 };

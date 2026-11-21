@@ -30,6 +30,7 @@ public:
 		if (m_window) SDL_DestroyWindow(m_window);
 	}
 	const char* name() const override { return "OpenGL"; }
+	bool takesFarImage() const override { return true; }
 
 	bool init(std::string& error) override
 	{
