@@ -72,6 +72,81 @@ TerrainComponent alignedTerrain(bool paint)
 }
 } // namespace
 
+TEST_CASE("pack build: a migrated terrain brings its water: the bodies as the pack's water table, the cells as the tiles' water rasters")
+{
+	const fs::path dir = tempDir("migratewater");
+	TerrainComponent tc = alignedTerrain(false);
+	// A field of 64 x 64 cells over the 2048 m: 32 m a cell, which is the small tile's weight texel, so a cell is exactly a tile texel.
+	water::Field& f = tc.water;
+	f.res = 64;
+	f.coverage.assign(64u * 64u, 0);
+	f.owner.assign(64u * 64u, 0);
+	const uint16_t lake = f.createBody(140.0f), pond = f.createBody(260.0f);
+	REQUIRE(lake != 0);
+	REQUIRE(pond != 0);
+	REQUIRE(lake != pond);
+	// The lake crosses the border of tiles (0, 1) and (1, 1) in x (cells 10..21, the border is at 16); the pond sits inside tile (3, 0).
+	for (uint32_t z = 20; z < 28; ++z)
+		for (uint32_t x = 10; x < 22; ++x) { f.coverage[z * 64 + x] = 200; f.owner[z * 64 + x] = lake; }
+	for (uint32_t z = 2; z < 5; ++z)
+		for (uint32_t x = 50; x < 54; ++x) { f.coverage[z * 64 + x] = 255; f.owner[z * 64 + x] = pond; }
+	f.clipToGround = false;
+	f.shoreOvershoot = 0.75f;
+
+	LandscapeMigrateParams mp;
+	mp.geometry = smallGeometry();
+	mp.yOffsetM = 5.0f;   // the terrain entity stands 5 m up: the ground and the water levels are lifted alike
+	const auto r = migrateTerrainToPack(tc, (dir / "world.hlp").string(), mp);
+	REQUIRE_MESSAGE(r.ok, r.error);
+	std::string err;
+	const auto pack = LandscapePackSource::open((dir / "world.hlp").string(), &err);
+	REQUIRE_MESSAGE(pack, err);
+
+	// The table: both bodies with their ids, the levels absolute, the landscape-wide settings.
+	REQUIRE(pack->water());
+	REQUIRE(pack->water()->bodies.size() == 2);
+	REQUIRE(pack->water()->find(lake));
+	REQUIRE(pack->water()->find(pond));
+	CHECK(pack->water()->find(lake)->level == doctest::Approx(145.0f));
+	CHECK(pack->water()->find(pond)->level == doctest::Approx(265.0f));
+	CHECK_FALSE(pack->water()->clipToGround);
+	CHECK(pack->water()->shoreOvershoot == doctest::Approx(0.75f));
+
+	// The rasters: every tile texel is the field's cell at that place.
+	int wet = 0, wrong = 0, dryTiles = 0;
+	for (int tz = 0; tz < 4; ++tz)
+		for (int tx = 0; tx < 4; ++tx)
+		{
+			LandscapeTile t;
+			REQUIRE(pack->load({ tx, tz }, 1, t));
+			if (!t.hasWater()) { ++dryTiles; continue; }
+			for (int z = 0; z < 16; ++z)
+				for (int x = 0; x < 16; ++x)
+				{
+					const size_t cell = static_cast<size_t>(tz * 16 + z) * 64 + static_cast<size_t>(tx * 16 + x);
+					wrong += t.waterCoverage[static_cast<size_t>(z) * 16 + x] != f.coverage[cell] || t.waterOwner[static_cast<size_t>(z) * 16 + x] != f.owner[cell] ? 1 : 0;
+					wet += t.waterCoverage[static_cast<size_t>(z) * 16 + x] != 0 ? 1 : 0;
+				}
+		}
+	CHECK(wrong == 0);
+	CHECK(wet == 8 * 12 + 3 * 4);   // every painted cell arrived, none twice
+	CHECK(dryTiles == 13);          // three tiles carry water, the others no water rasters at all
+	// The lake's two halves: one sheet later, because both tiles name the same body.
+	LandscapeTile left, right;
+	REQUIRE(pack->load({ 0, 1 }, 1, left));
+	REQUIRE(pack->load({ 1, 1 }, 1, right));
+	CHECK(left.waterOwner[static_cast<size_t>(4) * 16 + 15] == lake);
+	CHECK(right.waterOwner[static_cast<size_t>(4) * 16 + 0] == lake);
+
+	// A terrain without water migrates to a pack without a table, as before.
+	const TerrainComponent dry = alignedTerrain(false);
+	const auto r2 = migrateTerrainToPack(dry, (dir / "dry.hlp").string(), mp);
+	REQUIRE_MESSAGE(r2.ok, r2.error);
+	const auto dryPack = LandscapePackSource::open((dir / "dry.hlp").string(), &err);
+	REQUIRE_MESSAGE(dryPack, err);
+	CHECK(dryPack->water() == nullptr);
+}
+
 TEST_CASE("pack build: a migrated terrain comes back out of the store as the same landscape")
 {
 	const fs::path dir = tempDir("migrate");

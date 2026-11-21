@@ -24,9 +24,10 @@ namespace HE
 // time on plain threads (the job pool belongs to the frame). No ImGui, no scene, no renderer in here: the editor's Landscape World section
 // (LandscapeWorldTools.h) drives these from a LandscapeBuildJob.
 //
-// Not covered here, on purpose: painting by hand on tiles (a pack appends its tiles back to back behind a fixed index, so a tile that
-// changes size cannot be rewritten in place; that needs a writable store and is the next editor step) and the water of a migrated
-// TerrainComponent (its water::Field is not cut into tiles; the migrated pack has no water table).
+// A migrated TerrainComponent brings its water: the bodies of its water::Field become the pack's water table, the cells the tiles'
+// water rasters. Painting by hand on tiles is not here but in LandscapeEdit.h (an overlay beside the pack; a pack appends its tiles
+// back to back behind a fixed index, so a tile that changes size cannot be rewritten in place).
+// Not covered: the terrain's foliage masks and its material overrides (the tile world has neither yet).
 
 // Called after each batch with (tiles written, tiles in all); return false to cancel (the pack file is removed).
 using LandscapeBuildProgress = std::function<bool(size_t done, size_t total)>;

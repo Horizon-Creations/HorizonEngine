@@ -32,7 +32,8 @@ struct MadeTile
 
 // Tiles are made on plain threads in batches and appended in key order. The packer only ever sees finished blobs.
 LandscapeBuildResult buildPack(const std::string& path, const LandscapeGeometry& g, int tilesX, int tilesZ, float heightMinM, float heightScaleM,
-                               const LandscapeBuildOptions& opt, const std::function<LandscapeTile(LandscapeTileKey)>& makeTile)
+                               const LandscapeBuildOptions& opt, const std::function<LandscapeTile(LandscapeTileKey)>& makeTile,
+                               const LandscapeWaterTable* water = nullptr)
 {
 	LandscapeBuildResult r;
 	r.tilesX = tilesX;
@@ -57,6 +58,7 @@ LandscapeBuildResult buildPack(const std::string& path, const LandscapeGeometry&
 	{
 		LandscapePackWriter pack;
 		if (!pack.begin(tmp, g, tilesX, tilesZ, 4, heightMinM, heightScaleM)) { r.error = "Cannot write \"" + tmp + "\"."; return r; }
+		if (water && !water->bodies.empty()) pack.setWaterTable(*water);   // the bodies the tiles' owner rasters name
 		unsigned threads = opt.threads ? opt.threads : std::max(1u, std::thread::hardware_concurrency() > 1 ? std::thread::hardware_concurrency() - 1 : 1u);
 		threads = std::min(threads, 64u);
 		const size_t batch = static_cast<size_t>(threads) * 2;
@@ -233,6 +235,29 @@ LandscapeBuildResult migrateTerrainToPack(const TerrainComponent& tc, const std:
 	const int tilesZ = std::max(1, static_cast<int>(std::ceil(static_cast<double>(tc.sizeZ) / g.tileM - 1e-6)));
 	const double yOff = static_cast<double>(params.yOffsetM);
 
+	// The terrain's water comes along: its bodies become the pack's water table (levels lifted by the terrain's height in the world,
+	// like the ground), its cells the tiles' water rasters below.
+	const water::Field& wf = tc.water;
+	const bool haveWater = wf.res > 0 && !wf.bodies.empty() && wf.coverage.size() == static_cast<size_t>(wf.res) * wf.res && wf.owner.size() == wf.coverage.size();
+	LandscapeWaterTable waterTable;
+	if (haveWater)
+	{
+		waterTable.clipToGround = wf.clipToGround;
+		waterTable.shoreOvershoot = wf.shoreOvershoot;
+		waterTable.tessellation = wf.tessellation;
+		for (const water::Body& b : wf.bodies)
+		{
+			LandscapeWaterBody wb;
+			wb.id = b.id;
+			wb.level = b.level + params.yOffsetM;
+			wb.physics = b.physics;
+			wb.underwaterFog = b.underwaterFog;
+			wb.underwaterCaustics = b.underwaterCaustics;
+			wb.tessellation = b.tessellation;
+			waterTable.bodies.push_back(wb);
+		}
+	}
+
 	const auto make = [&](LandscapeTileKey key) {
 		LandscapeTile t;
 		t.geometry = g;
@@ -270,10 +295,33 @@ LandscapeBuildResult migrateTerrainToPack(const TerrainComponent& tc, const std:
 				normaliseTo255(s, C, out);
 			}
 		t.weights.push_back(std::move(w0));
+		// Water: the terrain's field (coverage and owner per cell) cut into the tile, at the weights' raster. A field cell is taken as
+		// it is (nearest), not blended: an owner id is a name, and coverage 0 has to stay "no water". A tile no water touches carries
+		// no water rasters at all (a dry tile beside a lake).
+		if (haveWater)
+		{
+			const int fr = static_cast<int>(tc.water.res);
+			std::vector<uint8_t> cov(static_cast<size_t>(W) * W, 0);
+			std::vector<uint16_t> own(static_cast<size_t>(W) * W, 0);
+			bool any = false;
+			for (int z = 0; z < W; ++z)
+				for (int x = 0; x < W; ++x)
+				{
+					const double px = x0 + (x + 0.5) * rasterW, pz = z0 + (z + 0.5) * rasterW;   // the texel's centre, from the terrain's corner
+					if (px < 0.0 || pz < 0.0 || px >= tc.sizeX || pz >= tc.sizeZ) continue;       // the tile hangs over the terrain's edge
+					const int fx = std::min(fr - 1, static_cast<int>(px / tc.sizeX * fr)), fz = std::min(fr - 1, static_cast<int>(pz / tc.sizeZ * fr));
+					const size_t src = static_cast<size_t>(fz) * fr + fx;
+					if (tc.water.coverage[src] == 0 || tc.water.owner[src] == 0) continue;
+					cov[static_cast<size_t>(z) * W + x] = tc.water.coverage[src];
+					own[static_cast<size_t>(z) * W + x] = tc.water.owner[src];
+					any = true;
+				}
+			if (any) { t.waterCoverage = std::move(cov); t.waterOwner = std::move(own); }
+		}
 		t.buildMips();
 		return t;
 	};
-	return buildPack(path, g, tilesX, tilesZ, minM, scaleM, options, make);
+	return buildPack(path, g, tilesX, tilesZ, minM, scaleM, options, make, haveWater ? &waterTable : nullptr);
 }
 
 // ── Height map import ────────────────────────────────────────────────────────
