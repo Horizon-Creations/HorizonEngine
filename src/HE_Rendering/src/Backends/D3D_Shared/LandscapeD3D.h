@@ -83,8 +83,9 @@ inline void fillGlobals(Globals& g, const HE::LandscapeRenderFrame& f, const glm
 	const double k = on ? 1.0 / static_cast<double>(w.textureMeters) : 1.0;
 	g.tex[0] = static_cast<float>(k);
 	g.tex[1] = on ? 1.0f : 0.0f;
-	g.tex[2] = static_cast<float>(f.origin.x * k - std::floor(f.origin.x * k));
-	g.tex[3] = static_cast<float>(f.origin.z * k - std::floor(f.origin.z * k));
+	// uvOrigin, not origin: the absolute floating origin (origin is the render window's, LandscapeRenderFrame.h).
+	g.tex[2] = static_cast<float>(f.uvOrigin.x * k - std::floor(f.uvOrigin.x * k));
+	g.tex[3] = static_cast<float>(f.uvOrigin.z * k - std::floor(f.uvOrigin.z * k));
 	g.texMaps[0] = on && normalBound && !w.normalArrayPath.empty() ? 1.0f : 0.0f;
 	g.texMaps[1] = on && maskBound && !w.maskArrayPath.empty() ? 1.0f : 0.0f;
 }

@@ -105,6 +105,12 @@ public:
 	virtual bool heightRange(float& minM, float& scaleM) const { (void)minM; (void)scaleM; return false; }
 	// The always-resident coarse world, or null when the source has none (a version 1 pack). Valid as long as the source.
 	virtual const LandscapeCoarseWorld* coarse() const { return nullptr; }
+	// The coarse world of a WINDOW of tiles: tilesX x tilesZ from `origin` (clipped to the world by the caller), with its own grids above
+	// grid 0. This is what a runtime draws the far levels from (LandscapeRuntime's render window), so that a world larger than memory
+	// never needs its whole coarse world at once. The default crops coarse(); a source that can read the window from disk or compute it
+	// overrides this and may then have no coarse() at all. Null: the source has no far data. `origin` is a multiple of 64 tiles whenever
+	// the window is not the whole world, so the point-sampled grids of a window are the same samples as the whole world's.
+	virtual std::shared_ptr<const LandscapeCoarseWorld> coarseWindow(LandscapeTileKey origin, int tilesX, int tilesZ) const;
 	// The bodies of water the tiles' owner ids name, or null when the world has no water (then its tiles carry none).
 	virtual const LandscapeWaterTable* water() const { return nullptr; }
 	// The baked HLOD proxies of the world's entity cells (LandscapeCellHlod.h), or null when the world has none.
@@ -281,6 +287,11 @@ private:
 	mutable std::mutex    m_mutex;                   // Windows: one HANDLE, one reader at a time
 	void*                 m_handle = nullptr;         // Windows HANDLE opened with FILE_SHARE_DELETE (see .cpp)
 };
+
+// The part of a coarse world that lies over tilesX x tilesZ tiles from `origin` (clipped to the world), as a coarse world of its own:
+// grid 0 and the weights copied, the grids above sampled from the copy. With `origin` a multiple of 2^(grids - 1) cells (64 tiles is
+// one for every world a runtime draws) they are the whole world's own samples.
+LandscapeCoarseWorld landscapeCoarseCrop(const LandscapeCoarseWorld& coarse, LandscapeTileKey origin, int tilesX, int tilesZ);
 
 // Puts these tiles' share into a coarse world again (grid 0 and the weights, then the point-sampled grids above): what an edited tile
 // needs so the far levels show it. Tiles need the mips the coarse world is made of (LandscapeTile::buildMips). Keys outside are skipped.

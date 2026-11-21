@@ -63,6 +63,10 @@ uint64_t foliageKey(const std::vector<FoliageLayer>& layers, bool visible)
 	return h | 1;   // never 0
 }
 
+// One counter for the process, not one a runtime: a renderer keeps its images while the generation is the one it built them for, and
+// two runtimes that both said "1" (the editor's world and a play world, a tool's second scene) would be one landscape to it.
+std::atomic<uint64_t> g_generation{ 0 };
+
 bool fail(std::string* error, const std::string& why)
 {
 	if (error) *error = why;
@@ -116,7 +120,14 @@ bool LandscapeRuntime::beginWith(std::shared_ptr<const LandscapeTileSource> sour
 	const LandscapeGeometry& geo = source->geometry();
 	if (geo.heightLevels() > 8) return fail(error, "the tile has " + std::to_string(geo.heightLevels()) + " height mips: the shader holds 8");
 	if (geo.channels > 12) return fail(error, "the tile has " + std::to_string(geo.channels) + " weight channels: the shader holds 12 (three pages)");
-	const LandscapeCoarseWorld* coarse = source->coarse();
+	// The render window (see the header): the first tiles until an update says where the camera is. A world that fits is its own window.
+	const int W = configIn.renderWindowTiles;
+	if (W != 0 && (W < 4 * configIn.atlasWindow || W % configIn.atlasWindow != 0))
+		return fail(error, "renderWindowTiles has to be 0 or a multiple of atlasWindow, at least four of them");
+	const bool windowed = W > 0 && (source->tilesX() > W || source->tilesZ() > W);
+	const int winX = windowed ? std::min(source->tilesX(), W) : source->tilesX(), winZ = windowed ? std::min(source->tilesZ(), W) : source->tilesZ();
+	const std::shared_ptr<const LandscapeCoarseWorld> winCoarse = source->coarseWindow({ 0, 0 }, winX, winZ);
+	const LandscapeCoarseWorld* coarse = winCoarse.get();
 	if (!coarse || !coarse->valid()) return fail(error, "the tile source has no coarse world (a version 1 pack): the far levels have no data");
 	if (coarse->heights.size() > 16) return fail(error, "the coarse world has " + std::to_string(coarse->heights.size()) + " grids: the shader holds 16");
 	const LandscapeGeometry& g = source->geometry();
@@ -127,7 +138,7 @@ bool LandscapeRuntime::beginWith(std::shared_ptr<const LandscapeTileSource> sour
 		float mn = 0.0f, sc = 0.0f;
 		if (source->heightRange(mn, sc)) { config.heightMinM = mn; config.heightScaleM = sc; }
 	}
-	LandscapeQuadtreeConfig q = LandscapeQuadtreeConfig::fromGeometry(g, source->tilesX(), source->tilesZ());
+	LandscapeQuadtreeConfig q = LandscapeQuadtreeConfig::fromGeometry(g, winX, winZ);   // the quadtree's world is the window
 	// The tile levels are exactly those below the coarse world's raster: one number, taken from the pack.
 	q.tileLevels = coarse->heightLevel - 1;
 	if (q.tileLevels < 0) return fail(error, "the coarse world starts at tile level 0: no tile level would be drawn");
@@ -151,14 +162,60 @@ bool LandscapeRuntime::beginWith(std::shared_ptr<const LandscapeTileSource> sour
 	m_edits = std::const_pointer_cast<LandscapeEditSource>(std::dynamic_pointer_cast<const LandscapeEditSource>(m_source));
 	m_config = config;
 	m_quadtree = q;
+	m_windowed = windowed;
+	m_winTile = { 0, 0 };
+	m_winCoarse = winCoarse;
 	m_store = std::make_unique<LandscapeStore>(m_source, config.store);
 	m_atlas = std::make_unique<LandscapeAtlas>(m_store->stats().maxTiles, config.atlasWindow);
-	// One counter for the process, not one a runtime: a renderer keeps its images while the generation is the one it built them for, and
-	// two runtimes that both said "1" (the editor's world and a play world, a tool's second scene) would be one landscape to it.
-	static std::atomic<uint64_t> s_generation{ 0 };
-	m_generation = ++s_generation;
+	m_generation = ++g_generation;
 	m_renderStatic.reset();
 	return true;
+}
+
+// Keeps the render window around the camera. It moves in steps of the slot table's size (so a tile's table entry is the same in window
+// coordinates as in the world's) and only when the camera has left the middle band, so a walk back and forth does not move it twice.
+void LandscapeRuntime::placeWindow()
+{
+	if (!m_windowed) return;
+	const int W = m_config.renderWindowTiles, D = m_config.atlasWindow;
+	const int worldX = m_source->tilesX(), worldZ = m_source->tilesZ();
+	const double tileM = m_quadtree.tileM;
+	const auto place = [&](double cam, int current, int world) {
+		if (world <= W) return 0;
+		const int camTile = static_cast<int>(std::floor(cam / tileM));
+		const int inWindow = camTile - current;
+		if (inWindow >= W / 2 - D && inWindow < W / 2 + D) return current;   // still in the middle band
+		const int want = static_cast<int>(std::floor((camTile - W / 2) / static_cast<double>(D) + 0.5)) * D;
+		const int last = ((world - W + D - 1) / D) * D;                       // the last origin that still reaches the world's end
+		return std::clamp(want, 0, last);
+	};
+	const LandscapeTileKey want{ place(m_camera.x, m_winTile.x, worldX), place(m_camera.z, m_winTile.z, worldZ) };
+	if (want == m_winTile) return;
+	const int winX = std::min(W, worldX - want.x), winZ = std::min(W, worldZ - want.z);
+	std::shared_ptr<const LandscapeCoarseWorld> coarse = m_source->coarseWindow(want, winX, winZ);
+	if (!coarse || !coarse->valid()) return;   // the source cannot say what is there: the window stays where it has data
+	m_winTile = want;
+	m_winCoarse = std::move(coarse);
+	m_quadtree.tilesX = winX;
+	m_quadtree.tilesZ = winZ;
+	// To a renderer this is another landscape: every image is made again, and so the atlas starts empty (its tiles are uploaded again
+	// over the next frames, nearest the camera's far levels show meanwhile).
+	// shortcut: one pop per 32 km travelled on worlds larger than the window, keep the atlas across a window move (the slot table and the
+	// tile images do not change) when a backend can take new coarse images of another size without a new generation.
+	m_generation = ++g_generation;
+	m_atlas = std::make_unique<LandscapeAtlas>(m_store->stats().maxTiles, m_config.atlasWindow);
+	m_pendingUploads.clear();
+	m_pendingReleases.clear();
+	m_pendingTable.clear();
+	m_renderStatic.reset();
+}
+
+void LandscapeRuntime::coarseChanged()
+{
+	++m_coarseRevision;
+	if (!active()) return;
+	// The window's coarse world again: a crop is a copy, and an overlay hands out another object once it has its first edit.
+	if (auto coarse = m_source->coarseWindow(m_winTile, m_quadtree.tilesX, m_quadtree.tilesZ); coarse && coarse->valid()) m_winCoarse = std::move(coarse);
 }
 
 void LandscapeRuntime::reset()
@@ -263,6 +320,7 @@ void LandscapeRuntime::updateAt(const glm::dvec3& cameraAbsolute, const glm::vec
 	if (!active()) return;
 	m_camera = cameraAbsolute;
 	m_haveCamera = true;
+	placeWindow();
 	LandscapeAnchor a;
 	a.position = cameraAbsolute;
 	a.velocity = velocity;
@@ -330,14 +388,21 @@ void LandscapeRuntime::buildFrame(const glm::dmat4& viewProjRelative, const glm:
 {
 	out = LandscapeFrame{};
 	if (!active() || !m_haveCamera) return;
-	const LandscapeCoarseWorld* coarse = m_source->coarse();
+	const LandscapeCoarseWorld* coarse = m_winCoarse.get();
+	// Everything a renderer sees is in WINDOW coordinates: absolute minus the window's corner. The quadtree's world is the window, the
+	// origin and the camera are moved by the same amount, and the atlas (whose keys are the world's) is asked with the corner added.
+	// A world that fits the window has its corner at 0 and these are the absolute numbers.
+	const glm::dvec3 corner(m_winTile.x * static_cast<double>(m_quadtree.tileM), 0.0, m_winTile.z * static_cast<double>(m_quadtree.tileM));
+	const glm::dvec3 absoluteOrigin = origin;
+	const glm::dvec3 originW = origin - corner, cameraW = m_camera - corner;
 
-	// The frustum in absolute space: n . (p - o) + d = n . p + (d - n . o)
+	// The frustum in window space: n . (p - o) + d = n . p + (d - n . o)
 	LandscapeFrustum fr = LandscapeFrustum::fromViewProjection(viewProjRelative, zeroToOne);
-	for (glm::dvec4& p : fr.planes) p.w -= p.x * origin.x + p.y * origin.y + p.z * origin.z;
+	for (glm::dvec4& p : fr.planes) p.w -= p.x * originW.x + p.y * originW.y + p.z * originW.z;
 
 	const LandscapeAtlas* atlas = m_atlas.get();
-	const auto patches = selectLandscapePatches(m_quadtree, m_camera, &fr, [atlas](int tx, int tz) { return atlas->contains({ tx, tz }); });
+	const LandscapeTileKey win = m_winTile;
+	const auto patches = selectLandscapePatches(m_quadtree, cameraW, &fr, [atlas, win](int tx, int tz) { return atlas->contains({ tx + win.x, tz + win.z }); });
 
 	out.active = true;
 	out.patches.reserve(patches.size());
@@ -350,8 +415,8 @@ void LandscapeRuntime::buildFrame(const glm::dmat4& viewProjRelative, const glm:
 		d.quadrants = p.quadrants;
 		d.coarse = p.level > m_quadtree.tileLevels;
 		d.gridIndex = d.coarse ? std::min(p.level - (m_quadtree.tileLevels + 1), static_cast<int>(coarse->heights.size()) - 1) : 0;
-		d.x0 = static_cast<float>(p.x0 - origin.x);
-		d.z0 = static_cast<float>(p.z0 - origin.z);
+		d.x0 = static_cast<float>(p.x0 - originW.x);
+		d.z0 = static_cast<float>(p.z0 - originW.z);
 		d.size = p.size;
 		const float lo = m_quadtree.rangeOf(p.level - 1), hi = m_quadtree.rangeOf(p.level);
 		d.morphStart = lo + (hi - lo) * m_quadtree.morphStart;
@@ -368,9 +433,11 @@ void LandscapeRuntime::buildFrame(const glm::dmat4& viewProjRelative, const glm:
 	out.slotCapacity = static_cast<uint16_t>(m_atlas->capacity());
 	out.coarse = coarse;
 	out.coarseGeneration = m_generation;
-	out.origin = origin;
-	out.cameraAbsolute = m_camera;
-	out.slabDistance = landscapeMorphDistance(m_quadtree, m_camera, m_camera.x, m_camera.z);   // dx = dz = 0: the vertical term alone
+	out.origin = originW;
+	out.cameraAbsolute = cameraW;
+	out.uvOrigin = absoluteOrigin;
+	out.windowTile = m_winTile;
+	out.slabDistance = landscapeMorphDistance(m_quadtree, cameraW, cameraW.x, cameraW.z);   // dx = dz = 0: the vertical term alone
 	out.worldMaxX = static_cast<float>(m_quadtree.tilesX * static_cast<double>(m_quadtree.tileM));
 	out.worldMaxZ = static_cast<float>(m_quadtree.tilesZ * static_cast<double>(m_quadtree.tileM));
 	out.tileM = m_quadtree.tileM;
@@ -443,7 +510,8 @@ void LandscapeRuntime::buildRenderFrame(const glm::dmat4& viewProjRelative, cons
 		w->coarseWeightW = cl.weightW;
 		w->coarseWeightH = cl.weightH;
 		landscapePackCoarse(*coarse, cl, w->coarseHeights, w->coarseWeights);
-		if (const LandscapeFarTable* farTable = m_source->farImage()) farTable->assemble(w->farW, w->farH, w->farMips);
+		if (const LandscapeFarTable* farTable = m_source->farImage())
+			farTable->assemble(w->farW, w->farH, w->farMips, m_winTile.x, m_winTile.z, m_quadtree.tilesX, m_quadtree.tilesZ);
 		for (int i = 0; i < 12; ++i)
 			for (int c = 0; c < 4; ++c) w->layerColor[i][c] = m_config.layerColors[static_cast<size_t>(i)][c];
 		if (m_config.textureGroup >= 0 && m_config.textureGroup < kAutoLandscapeGroupCount)
@@ -468,6 +536,7 @@ void LandscapeRuntime::buildRenderFrame(const glm::dmat4& viewProjRelative, cons
 	out.active = true;
 	out.world = m_renderStatic;
 	out.origin = f.origin;
+	out.uvOrigin = f.uvOrigin;
 	out.cameraRel = glm::vec3(f.cameraAbsolute - f.origin);
 	out.slabDistance = f.slabDistance;
 	out.patches.reserve(f.patches.size());

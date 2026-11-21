@@ -264,7 +264,8 @@ void MetalLandscape::encode(void* renderEncoder, const LandscapeRenderFrame& f, 
 		g.texMaps[1] = tex && shading.maskArray && !w.maskArrayPath.empty() ? 1.0f : 0.0f;
 		g.texMaps[2] = m.farAlbedo ? 1.0f : 0.0f;
 		g.tex[0] = static_cast<float>(k); g.tex[1] = tex ? 1.0f : 0.0f;
-		g.tex[2] = static_cast<float>(f.origin.x * k - std::floor(f.origin.x * k)); g.tex[3] = static_cast<float>(f.origin.z * k - std::floor(f.origin.z * k));
+		// uvOrigin, not origin: the absolute floating origin (origin is the render window's, LandscapeRenderFrame.h).
+		g.tex[2] = static_cast<float>(f.uvOrigin.x * k - std::floor(f.uvOrigin.x * k)); g.tex[3] = static_cast<float>(f.uvOrigin.z * k - std::floor(f.uvOrigin.z * k));
 
 		id<MTLRenderCommandEncoder> enc = (__bridge id<MTLRenderCommandEncoder>)renderEncoder;
 		[enc setRenderPipelineState:m.pipeline];

@@ -43,6 +43,11 @@ struct LandscapeRuntimeConfig
 {
 	LandscapeStoreConfig store;               // loadRadius, byte budget, ...
 	int      atlasWindow = 64;                // tiles per side of the slot table, a power of two
+	// The render window: a world with more tiles a side than this is drawn as a window of this many around the camera (131 km for the
+	// default tile), which moves with it in steps of atlasWindow tiles. Everything always in memory for the far levels (the coarse
+	// world, the far image) is then the window's, not the world's, so the world's size is bounded by its file and not by memory. A
+	// multiple of atlasWindow, at least four of them; 0 = always the whole world. A world that fits is drawn exactly as without one.
+	int      renderWindowTiles = 256;
 	size_t   maxUploadsPerFrame = 8;
 	float    heightMinM = 0.0f;               // metres of a stored height 0 ...
 	float    heightScaleM = 3000.0f;          // ... and of 65535 above it
@@ -82,8 +87,14 @@ struct LandscapeFrame
 	uint16_t                          slotCapacity = 0;
 	const LandscapeCoarseWorld*       coarse = nullptr;      // valid as long as the runtime is; upload once (coarseGeneration)
 	uint64_t                          coarseGeneration = 0;  // changes when the runtime began again
-	glm::dvec3                        origin{ 0.0 };         // absolute = relative + origin
+	// WINDOW coordinates (LandscapeRuntime's render window): the frame's "world" is the window, so `origin`, `cameraAbsolute`, the patches'
+	// node indices, `worldMax*` and `tilesX/Z` are all relative to the window's corner tile `windowTile`. For a world that fits the
+	// window the corner is (0, 0) and these are the absolute numbers. `uvOrigin` is the floating origin in ABSOLUTE metres: what the
+	// world-UV phase of the ground textures is made from, so a window move does not shift them.
+	glm::dvec3                        origin{ 0.0 };         // window position = relative + origin
 	glm::dvec3                        cameraAbsolute{ 0.0 };
+	glm::dvec3                        uvOrigin{ 0.0 };
+	LandscapeTileKey                  windowTile{ 0, 0 };
 	float                             slabDistance = 0.0f;   // camera to the height slab [minY, maxY]: the vertical term of every morph distance
 	float                             worldMaxX = 0.0f, worldMaxZ = 0.0f;   // absolute extent: fragments beyond are discarded
 	float                             tileM = 0.0f;
@@ -180,7 +191,10 @@ public:
 	LandscapeEditSource* edits() const { return m_edits.get(); }
 	const std::filesystem::path& packFile() const { return m_packFile; }
 	void tilesReplaced(const std::vector<std::pair<LandscapeTileKey, std::shared_ptr<const LandscapeTile>>>& tiles);
-	void coarseChanged() { ++m_coarseRevision; }
+	void coarseChanged();
+	// The render window's corner tile and whether the world is larger than the window at all.
+	LandscapeTileKey windowTile() const { return m_winTile; }
+	bool windowed() const { return m_windowed; }
 
 	const LandscapeStore*  store() const { return m_store.get(); }
 	const LandscapeAtlas*  atlas() const { return m_atlas.get(); }
@@ -204,6 +218,10 @@ private:
 	bool       m_hasLastCamera = false;
 	uint64_t   m_generation = 0;
 	uint64_t   m_coarseRevision = 0;
+	void       placeWindow();
+	bool       m_windowed = false;                         // the world has more tiles a side than the render window
+	LandscapeTileKey m_winTile{ 0, 0 };                    // the window's corner; m_quadtree's world is the window
+	std::shared_ptr<const LandscapeCoarseWorld> m_winCoarse;
 	bool       m_editable = false;
 	std::shared_ptr<LandscapeEditSource> m_edits;   // m_source, when it is an overlay
 	std::filesystem::path m_packFile;

@@ -349,7 +349,8 @@ void OpenGLLandscape::draw(const LandscapeRenderFrame& f, const glm::mat4& viewP
 	{
 		const bool tex = shading.albedoArray != 0 && !w.albedoArrayPath.empty() && w.textureMeters > 0.0f;
 		const double k = tex ? 1.0 / static_cast<double>(w.textureMeters) : 1.0;
-		const double fx = f.origin.x * k - std::floor(f.origin.x * k), fz = f.origin.z * k - std::floor(f.origin.z * k);
+		// uvOrigin, not origin: the absolute floating origin (origin is the render window's, LandscapeRenderFrame.h).
+		const double fx = f.uvOrigin.x * k - std::floor(f.uvOrigin.x * k), fz = f.uvOrigin.z * k - std::floor(f.uvOrigin.z * k);
 		glUniform4f(m.uTex, static_cast<float>(k), tex ? 1.0f : 0.0f, static_cast<float>(fx), static_cast<float>(fz));
 		glUniform4f(m.uTexMaps, tex && shading.normalArray && !w.normalArrayPath.empty() ? 1.0f : 0.0f, tex && shading.maskArray && !w.maskArrayPath.empty() ? 1.0f : 0.0f, m.farAlbedo ? 1.0f : 0.0f, 0.0f);
 	}

@@ -104,7 +104,11 @@ struct LandscapeRenderFrame
 	std::vector<LandscapeRenderPatch>       patches;
 	std::vector<LandscapeRenderUpload>      uploads;
 	std::vector<LandscapeRenderTableUpdate> tableUpdates;
-	glm::dvec3 origin{ 0.0 };                            // absolute = relative + origin
+	// `origin` is in the coordinates the static images are laid out in: the render window's (HorizonScene/LandscapeRuntime.h), which for
+	// a world that fits the window are the absolute ones. `uvOrigin` is the floating origin in ABSOLUTE metres: use it, not `origin`, for
+	// the world-UV phase of the ground textures (uTex.zw), or the textures would jump when the window moves.
+	glm::dvec3 origin{ 0.0 };                            // image-space position = relative + origin
+	glm::dvec3 uvOrigin{ 0.0 };
 	glm::vec3  cameraRel{ 0.0f };                        // origin-relative
 	float      slabDistance = 0.0f;                      // camera to the height slab: the vertical term of every morph distance
 };

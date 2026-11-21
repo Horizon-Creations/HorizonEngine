@@ -115,7 +115,54 @@ void buildCoarseChain(LandscapeCoarseWorld& c)
 }
 } // namespace
 
-void landscapeCoarsePatch(LandscapeCoarseWorld& coarse, const std::vector<std::pair<LandscapeTileKey, std::shared_ptr<const LandscapeTile>>>& tiles)
+LandscapeCoarseWorld landscapeCoarseCrop(const LandscapeCoarseWorld& c, LandscapeTileKey origin, int tilesX, int tilesZ)
+{
+	LandscapeCoarseWorld out;
+	if (!c.valid()) return out;
+	origin.x = std::clamp(origin.x, 0, std::max(0, c.tilesX - 1));
+	origin.z = std::clamp(origin.z, 0, std::max(0, c.tilesZ - 1));
+	tilesX = std::clamp(tilesX, 1, c.tilesX - origin.x);
+	tilesZ = std::clamp(tilesZ, 1, c.tilesZ - origin.z);
+	out.tilesX = tilesX;
+	out.tilesZ = tilesZ;
+	out.tileM = c.tileM;
+	out.heightLevel = c.heightLevel;
+	out.cellsPerTile = c.cellsPerTile;
+	out.weightLevel = c.weightLevel;
+	out.texelsPerTile = c.texelsPerTile;
+	out.channels = c.channels;
+	const LandscapeGrid16& src = c.heights[0];
+	LandscapeGrid16 g0;
+	g0.w = tilesX * c.cellsPerTile + 1;
+	g0.h = tilesZ * c.cellsPerTile + 1;
+	g0.v.resize(static_cast<size_t>(g0.w) * g0.h);
+	for (int z = 0; z < g0.h; ++z)
+		std::memcpy(&g0.v[static_cast<size_t>(z) * g0.w],
+		            &src.v[static_cast<size_t>(origin.z * c.cellsPerTile + z) * src.w + static_cast<size_t>(origin.x * c.cellsPerTile)],
+		            static_cast<size_t>(g0.w) * sizeof(uint16_t));
+	out.heights.push_back(std::move(g0));
+	out.weightsW = tilesX * c.texelsPerTile;
+	out.weightsH = tilesZ * c.texelsPerTile;
+	const size_t row = static_cast<size_t>(out.weightsW) * static_cast<size_t>(c.channels);
+	out.weights.resize(row * static_cast<size_t>(out.weightsH));
+	if (c.weights.size() == static_cast<size_t>(c.weightsW) * c.weightsH * c.channels)
+		for (int z = 0; z < out.weightsH; ++z)
+			std::memcpy(&out.weights[static_cast<size_t>(z) * row],
+			            &c.weights[(static_cast<size_t>(origin.z * c.texelsPerTile + z) * c.weightsW + static_cast<size_t>(origin.x * c.texelsPerTile)) * c.channels], row);
+	buildCoarseChain(out);
+	return out;
+}
+
+std::shared_ptr<const LandscapeCoarseWorld> LandscapeTileSource::coarseWindow(LandscapeTileKey origin, int tx, int tz) const
+{
+	const LandscapeCoarseWorld* c = coarse();
+	if (!c || !c->valid()) return nullptr;
+	// The whole world: the source's own, not a copy (it lives as long as the source, which the caller holds).
+	if (origin.x == 0 && origin.z == 0 && tx >= c->tilesX && tz >= c->tilesZ) return std::shared_ptr<const LandscapeCoarseWorld>(c, [](const LandscapeCoarseWorld*) {});
+	return std::make_shared<const LandscapeCoarseWorld>(landscapeCoarseCrop(*c, origin, tx, tz));
+}
+
+void landscapeCoarsePatch(LandscapeCoarseWorld& coarse,const std::vector<std::pair<LandscapeTileKey, std::shared_ptr<const LandscapeTile>>>& tiles)
 {
 	if (!coarse.valid()) return;
 	const LandscapeCoarseLayout layout{ coarse.heightLevel, coarse.weightLevel };

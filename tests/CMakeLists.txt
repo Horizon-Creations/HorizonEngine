@@ -302,6 +302,7 @@ add_executable(he_tests
     test_landscape_export.cpp
     test_landscape_far.cpp
     test_landscape_edit.cpp
+    test_landscape_window.cpp
     test_landscape_cell_regions.cpp
     test_landscape_pack_build.cpp
     test_landscape_region_streaming.cpp

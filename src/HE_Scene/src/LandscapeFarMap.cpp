@@ -100,26 +100,34 @@ bool LandscapeFarTable::decode(const std::vector<uint8_t>& bytes, LandscapeFarTa
 	return at == bytes.size() ? true : fail();
 }
 
-void LandscapeFarTable::assemble(int& width, int& height, std::vector<std::vector<uint8_t>>& mips) const
+void LandscapeFarTable::assemble(int& width, int& height, std::vector<std::vector<uint8_t>>& mips,
+                                 int originTileX, int originTileZ, int tilesX, int tilesZ) const
 {
 	width = height = 0;
 	mips.clear();
 	if (empty()) return;
-	width = layout.width();
-	height = layout.height();
+	// The window in texels of the whole world's image, clipped to it.
+	originTileX = std::clamp(originTileX, 0, layout.tilesX - 1);
+	originTileZ = std::clamp(originTileZ, 0, layout.tilesZ - 1);
+	tilesX = tilesX < 0 ? layout.tilesX - originTileX : std::clamp(tilesX, 1, layout.tilesX - originTileX);
+	tilesZ = tilesZ < 0 ? layout.tilesZ - originTileZ : std::clamp(tilesZ, 1, layout.tilesZ - originTileZ);
+	const int wx0 = originTileX * layout.texelsPerTile, wz0 = originTileZ * layout.texelsPerTile;
+	width = tilesX * layout.texelsPerTile;
+	height = tilesZ * layout.texelsPerTile;
 	const int side = layout.regionSide();
 	std::vector<uint8_t> top(static_cast<size_t>(width) * static_cast<size_t>(height) * 4, 0);
-	for (int rz = 0; rz < layout.regionsZ(); ++rz)
-		for (int rx = 0; rx < layout.regionsX(); ++rx)
+	for (int rz = wz0 / side; rz < layout.regionsZ() && rz * side < wz0 + height; ++rz)
+		for (int rx = wx0 / side; rx < layout.regionsX() && rx * side < wx0 + width; ++rx)
 		{
 			const LandscapeFarRegion& r = regions[static_cast<size_t>(rz) * static_cast<size_t>(layout.regionsX()) + static_cast<size_t>(rx)];
 			if (r.rgba.empty()) continue;
-			const int x0 = rx * side, z0 = rz * side;
-			const int w = std::min(side, width - x0), h = std::min(side, height - z0);   // the last region may hang over the world's edge
-			for (int z = 0; z < h; ++z)
-				std::copy_n(r.rgba.begin() + static_cast<std::ptrdiff_t>(static_cast<size_t>(z) * static_cast<size_t>(side) * 4),
-				            static_cast<size_t>(w) * 4,
-				            top.begin() + static_cast<std::ptrdiff_t>((static_cast<size_t>(z0 + z) * static_cast<size_t>(width) + static_cast<size_t>(x0)) * 4));
+			// The part of the region inside the window (the last region may also hang over the world's edge).
+			const int x0 = std::max(rx * side, wx0), x1 = std::min((rx + 1) * side, wx0 + width);
+			const int z0 = std::max(rz * side, wz0), z1 = std::min((rz + 1) * side, wz0 + height);
+			for (int z = z0; z < z1; ++z)
+				std::copy_n(r.rgba.begin() + static_cast<std::ptrdiff_t>((static_cast<size_t>(z - rz * side) * static_cast<size_t>(side) + static_cast<size_t>(x0 - rx * side)) * 4),
+				            static_cast<size_t>(x1 - x0) * 4,
+				            top.begin() + static_cast<std::ptrdiff_t>((static_cast<size_t>(z - wz0) * static_cast<size_t>(width) + static_cast<size_t>(x0 - wx0)) * 4));
 		}
 	mips.push_back(std::move(top));
 	const std::array<float, 256>& lin = srgbToLinear();

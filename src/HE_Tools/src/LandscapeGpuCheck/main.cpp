@@ -114,6 +114,81 @@ private:
 	LandscapeTile m_base;
 };
 
+// A world of any size for nothing (scene 6): heights are a formula of the absolute position, all paint on layer 0, and there is no
+// coarse() at all, only coarseWindow() computed for the window asked for. What a pack too large for memory looks like to the runtime.
+class FormulaSource final : public LandscapeTileSource
+{
+public:
+	explicit FormulaSource(int tiles) : m_tiles(tiles)
+	{
+		ProceduralLandscapeParams p;
+		p.tilesX = p.tilesZ = 1;
+		m_base = ProceduralLandscapeSource(p).generate({ 0, 0 });
+		const int ch = m_base.geometry.channels;
+		for (auto& level : m_base.weights)
+			for (size_t t = 0; t + static_cast<size_t>(ch) <= level.size(); t += static_cast<size_t>(ch))
+				for (int c = 0; c < ch; ++c) level[t + static_cast<size_t>(c)] = c == 0 ? 255 : 0;
+	}
+	static uint16_t heightAt(double x, double z) { return static_cast<uint16_t>(std::lround(30000.0 + 9000.0 * std::sin(x / 900.0) * std::cos(z / 1300.0))); }
+	const LandscapeGeometry& geometry() const override { return m_base.geometry; }
+	int  tilesX() const override { return m_tiles; }
+	int  tilesZ() const override { return m_tiles; }
+	bool heightRange(float& minM, float& scaleM) const override { minM = 0.0f; scaleM = 3000.0f; return true; }
+	bool load(LandscapeTileKey key, int maxLevels, LandscapeTile& out) const override
+	{
+		if (key.x < 0 || key.z < 0 || key.x >= m_tiles || key.z >= m_tiles) return false;
+		out = m_base;
+		const double spacing = out.geometry.tileM / out.geometry.hCells;
+		for (size_t level = 0; level < out.heights.size(); ++level)
+		{
+			const int dim = out.geometry.heightDim(static_cast<int>(level));
+			for (int j = 0; j < dim; ++j)
+				for (int i = 0; i < dim; ++i)
+					out.heights[level][static_cast<size_t>(j) * static_cast<size_t>(dim) + static_cast<size_t>(i)] =
+					    heightAt((static_cast<double>(key.x) * out.geometry.hCells + static_cast<double>(i) * (1 << level)) * spacing,
+					             (static_cast<double>(key.z) * out.geometry.hCells + static_cast<double>(j) * (1 << level)) * spacing);
+		}
+		if (maxLevels >= 0)
+		{
+			out.heights.resize(std::min<size_t>(out.heights.size(), static_cast<size_t>(maxLevels)));
+			out.weights.resize(std::min<size_t>(out.weights.size(), static_cast<size_t>(maxLevels)));
+		}
+		return true;
+	}
+	std::shared_ptr<const LandscapeCoarseWorld> coarseWindow(LandscapeTileKey origin, int tx, int tz) const override
+	{
+		const LandscapeGeometry& g = m_base.geometry;
+		const LandscapeCoarseLayout layout = LandscapeCoarseLayout::forGeometry(g, 4);
+		LandscapeCoarseWorld c;
+		c.tilesX = tx;
+		c.tilesZ = tz;
+		c.tileM = g.tileM;
+		c.heightLevel = layout.heightLevel;
+		c.cellsPerTile = g.hCells >> layout.heightLevel;
+		c.weightLevel = layout.weightLevel;
+		c.texelsPerTile = g.wTexels >> layout.weightLevel;
+		c.channels = g.channels;
+		const double cell = g.tileM / c.cellsPerTile;
+		LandscapeGrid16 g0;
+		g0.w = tx * c.cellsPerTile + 1;
+		g0.h = tz * c.cellsPerTile + 1;
+		g0.v.resize(static_cast<size_t>(g0.w) * g0.h);
+		for (int z = 0; z < g0.h; ++z)
+			for (int x = 0; x < g0.w; ++x)
+				g0.v[static_cast<size_t>(z) * g0.w + x] = heightAt((static_cast<double>(origin.x) * c.cellsPerTile + x) * cell, (static_cast<double>(origin.z) * c.cellsPerTile + z) * cell);
+		c.heights.push_back(std::move(g0));
+		c.weightsW = tx * c.texelsPerTile;
+		c.weightsH = tz * c.texelsPerTile;
+		c.weights.assign(static_cast<size_t>(c.weightsW) * c.weightsH * c.channels, 0);
+		for (size_t t = 0; t < c.weights.size(); t += c.channels) c.weights[t] = 255;
+		return std::make_shared<const LandscapeCoarseWorld>(landscapeCoarseCrop(c, { 0, 0 }, tx, tz));   // builds the grids above grid 0
+	}
+
+private:
+	int           m_tiles;
+	LandscapeTile m_base;
+};
+
 // A world with a baked far image on top of a source that has none (scene 4): everything else is the base's.
 class FarSource final : public LandscapeTileSource
 {
@@ -601,6 +676,55 @@ int runBackend(gpucheck::Backend& be, const std::string& packPath, const std::fi
 		if (be.takesFarImage()) tally.check(farMoved > 30, "a stroke outside the atlas shows on the far levels once it ends");
 		else std::printf("  %-26s this backend does not upload the coarse world again yet: the far stroke moved %zu px\n", "", farMoved);
 		writePng((outDir / (std::string("landscape_") + be.name() + "_edit.png")).string(), farStroke);
+	}
+	// ── scene 6: the render window (LandscapeRuntimeConfig::renderWindowTiles): a world larger than the window, drawn as a window that
+	//    has just moved, is the picture of the same world drawn whole ──
+	{
+		constexpr int kTilesWide = 320;   // 164 km: more than the window of 256
+		const auto src = std::make_shared<FormulaSource>(kTilesWide);
+		const double tileM = src->geometry().tileM;
+		const glm::dvec3 start(150.5 * tileM, 2600.0, 160.5 * tileM), end(250.5 * tileM, 2600.0, 160.5 * tileM);
+		const auto shot = [&](int windowTiles, gpucheck::RenderOut& out, LandscapeTileKey& window, bool& moved) {
+			LandscapeRuntime rt;
+			LandscapeRuntimeConfig cfg;
+			cfg.store.byteBudget = 80ull * 1024 * 1024;
+			cfg.renderWindowTiles = windowTiles;
+			std::string err;
+			if (!rt.begin(src, cfg, &err)) { std::printf("  runtime: %s\n", err.c_str()); return false; }
+			// First where the window does not have to move, and a frame from there so the backend holds that landscape's images ...
+			Camera c0{ start, { 0.7, -0.3, 0.6 }, { start.x - 300.0, 0.0, start.z - 300.0 } };
+			if (!settle(rt, c0.pos, c0.origin)) return false;
+			gpucheck::RenderIn in0 = makeInput(c0, be.depthIsNdc(), rt);
+			gpucheck::RenderOut warm;
+			if (!be.render(in0, warm)) return false;
+			const LandscapeTileKey before = rt.windowTile();
+			// ... then 51 km on, where it has: the picture that is compared is drawn right after the move.
+			Camera c1{ end, { 0.7, -0.3, 0.6 }, { end.x - 300.0, 0.0, end.z - 300.0 } };
+			if (!settle(rt, c1.pos, c1.origin)) return false;
+			window = rt.windowTile();
+			moved = window != before;
+			gpucheck::RenderIn in1 = makeInput(c1, be.depthIsNdc(), rt);
+			return be.render(in1, out);
+		};
+		gpucheck::RenderOut whole, windowed;
+		LandscapeTileKey w0, w1;
+		bool moved0 = false, moved1 = false;
+		if (!shot(0, whole, w0, moved0) || !shot(256, windowed, w1, moved1)) { std::printf("  render failed (render window)\n"); return 1; }
+		size_t ground = 0, differ = 0;
+		for (size_t i = 0; i < whole.depth.size(); ++i)
+		{
+			ground += whole.depth[i] < 1.0f ? 1 : 0;
+			int worst = 0;
+			for (size_t k = 0; k < 3; ++k) worst = std::max(worst, std::abs(static_cast<int>(whole.rgba[i * 4 + k]) - static_cast<int>(windowed.rgba[i * 4 + k])));
+			differ += worst > 2 ? 1 : 0;
+		}
+		std::printf("  %-26s window corner (%d, %d) of a %d-tile world: %zu of %zu pixels more than 2/255 apart from the world drawn whole (ground %zu px)\n",
+		            "render window", w1.x, w1.z, kTilesWide, differ, whole.depth.size(), ground);
+		tally.check(!moved0 && w0 == LandscapeTileKey{ 0, 0 }, "with the window switched off the world is drawn whole");
+		tally.check(moved1 && w1.x == 64, "the window moved with the camera, by a whole slot table");
+		tally.check(ground > whole.depth.size() / 5, "the world fills part of the image (render window)");
+		tally.check(differ * 1000 <= whole.depth.size(), "a window that has just moved draws the world as the whole world does");
+		writePng((outDir / (std::string("landscape_") + be.name() + "_window.png")).string(), windowed);
 	}
 	std::printf("  %s\n", tally.failures == 0 ? "OK" : "FAILED");
 	return tally.failures == 0 ? 0 : 1;

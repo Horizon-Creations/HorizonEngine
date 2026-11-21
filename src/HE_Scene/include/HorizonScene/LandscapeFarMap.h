@@ -57,7 +57,9 @@ public:
 	// The world as one image with its mip chain down to 1 x 1 (level i is max(1, width >> i) wide), the 2 x 2 mean taken in linear light.
 	// shortcut: every region resident in one image (39 MB for 100 km at 16 texels a tile), stream it per region with the coarse world when
 	// worlds outgrow that.
-	void assemble(int& width, int& height, std::vector<std::vector<uint8_t>>& mips) const;
+	// `originTileX/Z`, `tilesX/Z`: only this window of tiles (clipped to the world); the default is the whole world.
+	void assemble(int& width, int& height, std::vector<std::vector<uint8_t>>& mips,
+	              int originTileX = 0, int originTileZ = 0, int tilesX = -1, int tilesZ = -1) const;
 };
 
 constexpr uint32_t kLandscapeFarMagic   = 0x4d464c48u;   // 'HLFM'
