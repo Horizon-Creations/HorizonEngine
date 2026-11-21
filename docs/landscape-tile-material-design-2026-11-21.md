@@ -86,9 +86,11 @@ is fogged. Branch `claude/landscape-weltmassstab-100km`, commits `b8b5c66a5`, `d
   node that adds the origin (a new `HeLighting` member the backends fill), used by the Auto Landscape graph for its texturing, with the
   engine content regenerated. `WorldPos` itself must stay relative (Camera Distance, RVT and lighting use it).
 * No timing at all. The vertex stage reads up to 11 heights a vertex, the far ground runs the whole material.
-* GI on (Metal): the ground is NOT in the ray-tracing acceleration structure, and the cascades are off while GI owns the sun, so with
-  GI on the ground casts no shadow (mountains do not shadow valleys) and bounces no light. It receives. Needs the GI height clipmap
-  (`extractLandscapeGiHeightfield`) as a mesh in the TLAS.
+* GI on (Metal): the ground IS in the ray-tracing structure since `e4857a0c0` (the GI height clipmap as a mesh, `m_giLandMesh` in
+  `EncodeGIAccelBuild`; verified: a box under the ground 113/255 against 218/255 without). Limits: the 2 km of the clipmap only, every
+  second height (4 m) where the ground is drawn at 2 m, so shadow acne on rough ground is possible and was only seen on a plane; the
+  bounce colour is one constant, not the material; the software ray path (`EncodeGISwAccelBuild`) does not have it; a scene with no
+  mesh at all builds no structure.
 * The shadow pass has no fragment stage, so the top node's ground beyond the world's edge casts too.
 * SSAO and velocity pre-passes do not have the ground.
 * The first frame with a new material compiles on the render thread (one hitch).
@@ -98,13 +100,39 @@ is fogged. Branch `claude/landscape-weltmassstab-100km`, commits `b8b5c66a5`, `d
 * GL 4.1 / Vulkan / D3D: fixed blend. Windows: nothing of this ran.
 * Editor by hand: not opened.
 
+**Vulkan: surveyed, not built** (VR = `src/HE_Rendering/src/Backends/Vulkan/VulkanRenderer.cpp`, VL = `VulkanLandscape.cpp`)
+* Material pipelines: `GetOrBuildMaterialPipeline` VR:3402 (key has no landscape bit; vertex hard-wired to standard/custom VR:3520;
+  refuses a fragment with `heLandscapeWeights` when `!m_matLandscapeWeights` VR:3442). One set, `m_matSetLayout` from
+  `vkmat::kBindings` (`VulkanMaterialLayout.h:92`), built in `createMaterialResources` VR:3072; `m_matPipelineLayout` has NO push
+  constants. The sampler fit counts layout ROWS, with `static_assert`s (`VulkanMaterialLayout.h:193-260`) and
+  `kPreClusterBindingCount == 23` (VR:10970): do not add 50-60 to `kBindings`, make a second layout for the landscape (the material's
+  rows plus 50-60) with its own pipeline layout.
+* A material draw's set is written in the `bindMatSlot` lambda (VR:10792-11075) inside `drawDCVk` (VR:10610), per-frame cache by a
+  hash of the writes; three dynamic offsets (bindings 1/3/9). The landscape needs the same writes plus its own.
+* `VulkanLandscape` exposes nothing (images, views, samplers, vbo, UINT16 ibo, UBO are private in `Impl`, VL:33-60), writes ONE
+  LsGlobals UBO and ONE set per frame inside `draw()` (VL:538-577) and pushes `PatchPush` as a push constant (VL:593). More than one
+  landscape draw a frame (shadow layers, GI pre-pass, scene) needs LsGlobals per pass. `LsPatch` is a uniform block at 58 in the
+  material's vertex stage: easiest is a SPIR-V form of `landscapeVertexSource` with `layout(push_constant)`.
+* Call sites: `landscapeBegin` VR:10046 (provider asked once, `zeroToOne = true`, `kVulkanClipFix` applied), `landscapeDraw` VR:10087,
+  called at VR:10170 and VR:10181 (early returns, BEFORE the HeLighting fill and pool reset at VR:10347: a material draw there reads
+  last frame's lighting) and VR:11485. Shadow layers: `drawDepthLayer` VR:8643, early return on no objects VR:8589. GI pre-pass:
+  `runGi` VR:14322, raster at VR:14529-14583, early returns VR:14343-14367.
+* R16_UINT images (51, 59, 60) need the landscape's NEAREST sampler.
+
+**OpenGL: surveyed, not built** (GLR = `OpenGLRenderer.cpp`)
+* `GetOrBuildMaterialProgram` GLR:3992, GLSL410 on the Mac; units by name in `setupProgram` GLR:4101-4166; `DrawLandscape` GLR:12322.
+* Binding 51 has two names (`uSlotTable` in the vertex, `heLsSlotTable` in the fragment): each needs a unit.
+* **Possible existing fault**: `OpenGLLandscape::kFirstUnit = 21` (units 21-33) overlaps the materials' 21 (fog volume) and 22-25 (RVT).
+  Not looked into: whether every material draw after the landscape rebinds those units.
+
 **Next steps**
-1. Terrain into the Metal TLAS (GI on: ground casts and bounces).
-2. Vulkan: descriptor bindings 50-60 in the material layout, draw in the scene pass, landscape in shadow and G-buffer passes.
-3. GL: same (4.1 has no binding qualifiers above the unit count: units are assigned by uniform name).
+1. Vulkan as above (MoltenVK on the Mac can run `landscape_gpu_check --only vulkan`), then OpenGL.
+2. The floating origin (above): the generator's position node.
+3. Mountain on the tile brush (the Landscape mode's is a generator with its own drag state, `TerrainTools.cpp:703`); Ramp and Roughen
+   are there (`TerrainSculpt::ramp`).
 4. D3D11/12: registers for 50-60 (SM 5.0 has none free in the material fragment: weights must go through `Load` on t-registers only).
 5. Time it (`he_perf_capture.py`), then decide on the far image from the material.
-6. Tools on tiles: Ramp, Mountain, foliage mask, water, heightmap import.
+6. Tools on tiles still missing: foliage mask, water, heightmap import onto an existing world.
 
 ## Not verified at design time (kept for the record)
 
