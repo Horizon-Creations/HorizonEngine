@@ -52,8 +52,10 @@ LandscapeFarPainter landscapeFarWeightPainter(const LandscapeFarPaint& paint)
 			{
 				const LandscapeTileKey key{ rx * layout.regionTiles + tx, rz * layout.regionTiles + tz };
 				if (key.x >= layout.tilesX || key.z >= layout.tilesZ) continue;
-				// A tile the world does not have stays black: nothing is drawn there either.
-				if (!source.load(key, level + 1, tile) || static_cast<int>(tile.weights.size()) <= level) continue;
+				// A tile the world does not have stays black: nothing is drawn there either. One that loads without the level asked for
+				// (a layout finer or coarser than the tile's pyramid) is a region that cannot be painted, not a black one.
+				if (!source.load(key, level + 1, tile)) continue;
+				if (static_cast<int>(tile.weights.size()) <= level) return false;
 				const std::vector<uint8_t>& w = tile.weights[static_cast<size_t>(level)];
 				if (w.size() < static_cast<size_t>(tpt) * static_cast<size_t>(tpt) * g.channels) return false;
 				for (int z = 0; z < tpt; ++z)
@@ -85,7 +87,9 @@ LandscapeFarLayout planLandscapeFar(const LandscapeGeometry& geometry, int tiles
 	LandscapeFarLayout l{ tilesX, tilesZ, std::max(1, regionTiles), std::max<int>(1, geometry.wTexels) };
 	// The mip chain adds a third. Halve until the image fits the budget and the largest texture.
 	const auto bytes = [&] { return static_cast<uint64_t>(l.width()) * static_cast<uint64_t>(l.height()) * 4ull * 4ull / 3ull; };
-	while (l.texelsPerTile > 1 && (bytes() > budgetBytes || l.width() > maxSide || l.height() > maxSide)) l.texelsPerTile /= 2;
+	// Not below the coarsest weight mip a tile stores: that is the last level a painter can read.
+	const int floorTexels = std::max(1, geometry.weightDim(std::max(0, geometry.weightLevels() - 1)));
+	while (l.texelsPerTile > floorTexels && (bytes() > budgetBytes || l.width() > maxSide || l.height() > maxSide)) l.texelsPerTile /= 2;
 	return l;
 }
 

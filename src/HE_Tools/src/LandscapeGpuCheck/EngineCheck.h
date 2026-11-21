@@ -19,7 +19,10 @@ struct EngineCamera
 
 // `arrayRoot` (optional): an EngineContent folder that holds Textures/Landscape/T_Landscape_Forest_Albedo_Array.hasset. Then the renderer draws the ground in
 // world coordinates from that array (texture group Forest) and the check is that the ground is NOT the flat colour any more but has texture in it.
-int runEngineCheck(HE::RendererBackend backend, HE::RenderPath path, const std::string& packPath, const std::string& pngPath, const std::string& arrayRoot = {});
+// `farMarker`: the pack carries a far image of a colour no layer has (magenta). A backend that takes the far image (Metal, OpenGL) must then show
+// it on the ground beyond the atlas and keep the ground near the camera green; the others must show none of it.
+int runEngineCheck(HE::RendererBackend backend, HE::RenderPath path, const std::string& packPath, const std::string& pngPath, const std::string& arrayRoot = {},
+                   bool farMarker = false);
 
 // GL-only: a mirror standing on the tile landscape with GI reflections on, checking that the GI
 // pipelines link (the 'GI pipelines built' log line) and that the mirror's pixel moves when

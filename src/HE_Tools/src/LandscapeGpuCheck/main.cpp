@@ -720,6 +720,25 @@ int main(int argc, char** argv)
 		std::filesystem::remove(pack);
 		return mrc;
 	}
+	// A copy of the pack that carries a far image in a colour no layer has: what the engine pass "far image" draws.
+	std::string markerPack = pack + ".far";
+	{
+		RampSource src;
+		LandscapeFarBakeOptions o;
+		o.budgetBytes = 4ull << 20;   // one colour needs no resolution
+		o.painter = [](const LandscapeTileSource&, const LandscapeFarLayout& l, int, int, std::vector<uint8_t>& rgba) {
+			rgba.resize(static_cast<size_t>(l.regionSide()) * static_cast<size_t>(l.regionSide()) * 4);
+			for (size_t i = 0; i < rgba.size(); i += 4) { rgba[i] = 255; rgba[i + 1] = 0; rgba[i + 2] = 255; rgba[i + 3] = 255; }
+			return true;
+		};
+		LandscapeFarTable table;
+		LandscapeFarBakeStats st;
+		bakeLandscapeFar(src, {}, o, nullptr, table, st);
+		std::error_code ec;
+		std::filesystem::copy_file(pack, markerPack, std::filesystem::copy_options::overwrite_existing, ec);
+		std::string err;
+		if (ec || !landscapePackSetTails(markerPack, nullptr, &table, &err)) { std::printf("far image pack: %s (the engine's far image pass is left out)\n", err.c_str()); markerPack.clear(); }
+	}
 	int rc = 0, ran = 0;
 	const auto start = [&](std::unique_ptr<gpucheck::Backend> be) {
 		std::string err;
@@ -739,6 +758,12 @@ int main(int argc, char** argv)
 		{
 			++ran;
 			rc = std::max(rc, gpucheck::runEngineCheck(backend, HE::RenderPath::Forward, pack, (outDir / (std::string("landscape_") + name + "_engine_worlduv.png")).string(), arrayRoot));
+		}
+		// The same world with a far image of the marker colour in its pack, through the real renderer.
+		if (!markerPack.empty())
+		{
+			++ran;
+			rc = std::max(rc, gpucheck::runEngineCheck(backend, HE::RenderPath::Forward, markerPack, (outDir / (std::string("landscape_") + name + "_engine_far.png")).string(), {}, true));
 		}
 	};
 	if (only.empty() || only == "gl")
@@ -803,6 +828,7 @@ int main(int argc, char** argv)
 			if (!ok) rc = std::max(rc, 1);
 		}
 	std::filesystem::remove(pack);
+	if (!markerPack.empty()) std::filesystem::remove(markerPack);
 	if (ran == 0) { std::printf("no backend ran\n"); return 3; }
 	return rc;
 }

@@ -31,12 +31,12 @@ constexpr double kSlope = 0.1, kBase = 600.0, kPivot = 3072.0, kWorld = 32 * 512
 constexpr uint32_t kW = 480, kH = 270;
 }
 
-int runEngineCheck(HE::RendererBackend backend, HE::RenderPath path, const std::string& packPath, const std::string& pngPath, const std::string& arrayRoot)
+int runEngineCheck(HE::RendererBackend backend, HE::RenderPath path, const std::string& packPath, const std::string& pngPath, const std::string& arrayRoot, bool farMarker)
 {
 	const char* bname = backend == HE::RendererBackend::Metal ? "Metal" : backend == HE::RendererBackend::D3D11 ? "D3D11"
 	                  : backend == HE::RendererBackend::D3D12 ? "D3D12" : backend == HE::RendererBackend::Vulkan ? "Vulkan" : "OpenGL";
 	const char* pname = path == HE::RenderPath::Deferred ? "deferred" : "forward";
-	std::printf("[%s engine, %s]\n", bname, pname);
+	std::printf("[%s engine, %s%s]\n", bname, pname, farMarker ? ", far image" : "");
 	if (!RendererFactory::Available(backend)) { std::printf("  not in this binary\n"); return 0; }
 
 	int failures = 0;
@@ -102,7 +102,7 @@ int runEngineCheck(HE::RendererBackend backend, HE::RenderPath path, const std::
 			// where the plane is, from the camera's own matrix (the extractor builds perspective(fov, aspect, near, far) in GL convention)
 			const glm::mat4 proj = glm::perspective(glm::radians(70.0f), static_cast<float>(kW) / static_cast<float>(kH), 2.0f, 20000.0f);
 			const glm::dmat4 inv = glm::inverse(glm::dmat4(proj * ov.view));
-			int expectedGround = 0, groundGreen = 0, expectedSky = 0, skyGreen = 0;
+			int expectedGround = 0, groundGreen = 0, expectedSky = 0, skyGreen = 0, marker = 0;
 			double contrast = 0.0;   // mean |luminance step| between horizontal neighbours on the nearest ground: a flat lit plane is smooth, a texture is not
 			int contrastN = 0;
 			for (uint32_t py = 0; py < kH; ++py)
@@ -122,6 +122,7 @@ int runEngineCheck(HE::RendererBackend backend, HE::RenderPath path, const std::
 					}
 					const uint8_t* c = &rgba[(static_cast<size_t>(py) * kW + px) * 4];
 					const bool green = c[1] > c[0] + 6 && c[1] > c[2] + 6;
+					marker += c[0] > c[1] + 30 && c[2] > c[1] + 30 ? 1 : 0;   // magenta survives the tonemap as "green is the smallest by far"
 					if (hit && t < 4000.0)
 					{
 						++expectedGround; groundGreen += green ? 1 : 0;
@@ -142,6 +143,14 @@ int runEngineCheck(HE::RendererBackend backend, HE::RenderPath path, const std::
 				std::printf("  world-uv ground from the Forest array: green %.1f %%, mean step between neighbours %.2f/255\n", 100.0 * groundGreen / std::max(expectedGround, 1), contrast / std::max(contrastN, 1));
 				if (groundGreen > expectedGround / 5) fail("the ground is no longer the flat green", std::to_string(groundGreen) + " of " + std::to_string(expectedGround));
 				if (contrast / std::max(contrastN, 1) < 0.6) fail("the ground has texture in it");
+			}
+			if (farMarker)
+			{
+				// The real renderer's frame, not the offscreen class: its own texture bindings must leave the far image's slot alone.
+				const bool takes = backend == HE::RendererBackend::Metal || backend == HE::RendererBackend::OpenGL;
+				std::printf("  far image: %d px in the marker's colour (%s)\n", marker, takes ? "this backend reads it" : "this backend does not take it yet");
+				if (takes && marker < static_cast<int>(kW * kH / 200)) fail("ground beyond the atlas is drawn from the far image", std::to_string(marker) + " px");
+				if (!takes && marker != 0) fail("a backend that does not take the far image shows none of it", std::to_string(marker) + " px");
 			}
 			if (expectedGround < static_cast<int>(kW * kH / 10)) fail("the camera sees the ground");
 			if (arrayRoot.empty() && groundGreen < expectedGround * 97 / 100) fail("the landscape is drawn where the plane is", std::to_string(groundGreen) + " of " + std::to_string(expectedGround));
@@ -176,12 +185,17 @@ int runReflectionCheck(const std::string& packPath, const std::string& pngPath)
 	std::printf("[OpenGL engine, GI reflection against the tile landscape]\n");
 	if (!RendererFactory::Available(HE::RendererBackend::OpenGL)) { std::printf("  not in this binary\n"); return 0; }
 
-	int failures = 0;
-	const auto fail = [&](const char* what, const std::string& detail = {}) { ++failures; std::printf("    FAIL  %s %s\n", what, detail.c_str()); };
-
-	// [0] the GI pipelines linked, [1] this OpenGL has no GI at all (below 4.3: no compute shaders, every Mac).
+	// [0] the GI pipelines linked, [1] this OpenGL has no GI at all (below 4.3: no compute shaders, every Mac). The renderer says [1] while it
+	// starts, before anything is judged: from then on nothing here is a failure of the landscape.
 	bool seen[2] = { false, false };
 	bool& pipelinesBuilt = seen[0];
+	int failures = 0;
+	const auto fail = [&](const char* what, const std::string& detail = {}) {
+		if (seen[1]) return;
+		++failures;
+		std::printf("    FAIL  %s %s\n", what, detail.c_str());
+	};
+
 	const int sink = HE::Log::addSink(
 		[](const HE::Log::Record& r, void* user) {
 			if (r.category != HE::Log::Cat::RHI) return;

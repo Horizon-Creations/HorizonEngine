@@ -89,16 +89,16 @@ HE::LandscapeHlodTable oneProxy()
 TEST_CASE("planLandscapeFar: a small world keeps the weights' raster, a 100 km one is scaled down to the budget and the texture limit")
 {
 	HE::LandscapeGeometry g;   // the default tile: 128 weight texels
-	const HE::LandscapeFarLayout small = HE::planLandscapeFar(g, 20, 20, 128ull << 20, 8192, 8);
-	CHECK(small.texelsPerTile == 128);   // 2560 px a side, 35 MB with mips
+	const HE::LandscapeFarLayout tenKm = HE::planLandscapeFar(g, 20, 20, 128ull << 20, 8192, 8);
+	CHECK(tenKm.texelsPerTile == 128);   // 2560 px a side, 35 MB with mips
 	const HE::LandscapeFarLayout world = HE::planLandscapeFar(g, 196, 196, 128ull << 20, 8192, 8);
 	CHECK(world.texelsPerTile == 16);    // 32: 6272 px = 210 MB with mips, over the budget
 	CHECK(world.width() == 196 * 16);
 	CHECK(world.regionsX() == 25);       // 196 / 8 rounded up: the last region hangs over the edge
 	// The texture limit bites before the budget does.
 	CHECK(HE::planLandscapeFar(g, 196, 196, 1ull << 40, 4096, 8).texelsPerTile == 16);
-	// Never below one texel a tile, however small the budget.
-	CHECK(HE::planLandscapeFar(g, 196, 196, 1, 8192, 8).texelsPerTile == 1);
+	// Never below the coarsest weight mip a tile stores (128 m: 4 texels), however small the budget: the painter reads that mip.
+	CHECK(HE::planLandscapeFar(g, 196, 196, 1, 8192, 8).texelsPerTile == 4);
 }
 
 TEST_CASE("landscapeFarWeightPainter: a far texel is the tile shader's blend of the weights it covers")

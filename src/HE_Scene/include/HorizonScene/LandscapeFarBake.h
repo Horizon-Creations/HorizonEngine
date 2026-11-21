@@ -58,7 +58,7 @@ struct LandscapeFarBakeStats
 };
 
 // The layout a world gets: the finest power-of-two texels per tile (at most the weights' own) whose assembled image stays inside the byte
-// budget and `maxSide`. Never below one texel a tile.
+// budget and `maxSide`. Never below the coarsest weight mip a tile stores (the 128 m raster), which is the last level a painter can read.
 LandscapeFarLayout planLandscapeFar(const LandscapeGeometry& geometry, int tilesX, int tilesZ, uint64_t budgetBytes, int maxSide, int regionTiles);
 
 // `previous` may be null or of another layout (then everything is painted). On a cancel `out` holds what was done so far, the rest unbaked.
