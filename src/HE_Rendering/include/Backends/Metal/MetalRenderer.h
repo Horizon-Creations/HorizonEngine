@@ -1672,7 +1672,10 @@ private:
 	void EncodeLandscapePass(void* renderEncoder, const glm::mat4& clip, int kind, const glm::mat4& aux0 = glm::mat4(1.0f), const glm::mat4& aux1 = glm::mat4(1.0f));
 	void* m_landscapePassPipeline[kLandscapePassKinds] = {};   // the ground's vertex stage for each of those targets
 	bool  m_landscapePassTried[kLandscapePassKinds] = {};
-	void* GetOrBuildLandscapeMaterialPipeline(const HE::UUID& materialId);
+	void* GetOrBuildLandscapeMaterialPipeline(const HE::UUID& materialId, bool gbuffer = false);
+	void* BindLandscapeMaterial(void* renderEncoder, const HE::LandscapeRenderFrame& frame, bool gbuffer);
+	bool  EncodeLandscapeGBuffer(void* renderEncoder, const glm::mat4& viewProj);
+	bool  m_landscapeInGBuffer = false;          // this frame's G-buffer pass drew the ground: the scene pass does not draw it again
 	std::unordered_map<uint64_t, void*> m_landscapeMaterialPipelines;   // key = the material's shader key, salted; null = does not build
 	MetalLandscape m_landscape;
 	bool           m_landscapeFailed = false;   // init failed once: not tried again

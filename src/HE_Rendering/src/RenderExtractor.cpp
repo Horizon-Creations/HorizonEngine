@@ -28,6 +28,8 @@
 #include <HorizonScene/Components/WeatherComponent.h>
 #include <HorizonScene/Components/FoliageComponent.h>
 #include <HorizonScene/Components/TerrainComponent.h>       // landscape layer weightmap
+#include <HorizonScene/Components/LandscapeWorldComponent.h> // the tile landscape's GI entry
+#include <MaterialGraph/AutoLandscapeMaterial.h>
 #include <HorizonScene/Components/TerrainChunkComponent.h>  // chunk → parent landscape
 #include <HorizonScene/LandscapeRuntime.h>                  // GI height clipmap of a tile landscape
 #include <HorizonScene/WaterQuery.h>                         // queryUnderwaterCamera's WaterIndex
@@ -489,6 +491,41 @@ void windWaterParams(const MaterialAsset& ma, const MaterialComponent* mc,
 			                    static_cast<int32_t>(out.landscapes.size()));
 			out.landscapes.push_back(ls);
 		}
+
+		// The TILE landscape's entry (LandscapeWorldComponent): its ground is no mesh entity, the GI kernels reach it through the
+		// height clipmap a backend puts into its ray structure. With an Auto Landscape material (its own, else its texture group's)
+		// a hit on it is coloured like a hit on a TerrainComponent's auto landscape: grass, dirt, rock and snow by slope and height,
+		// from the means of the material's own albedo array. Another material: no entry, the backend's flat ground colour.
+		out.tileLandscapeIndex = -1;
+		if (contentManager)
+			for (auto [le, lw] : reg.view<LandscapeWorldComponent>().each())
+			{
+				if (!lw.enabled || lw.pack.empty()) continue;
+				const auto* lmat = reg.try_get<MaterialComponent>(le);
+				HE::UUID mid = lmat ? lmat->materialAssetId : HE::UUID{};
+				if (mid == HE::UUID{} && lw.textureGroup >= 0 && lw.textureGroup < HE::kAutoLandscapeGroupCount)
+					mid = HE::autoLandscapeGroup(static_cast<HE::AutoLandscapeGroupId>(lw.textureGroup)).materialId;
+				const MaterialAsset* ma = mid != HE::UUID{} ? contentManager->getMaterial(mid) : nullptr;
+				if (!ma) break;   // not loaded yet (the renderer loads the group's on its first frame)
+				HE::GiLandscape ls;
+				ls.terrainEntity = static_cast<uint32_t>(le);
+				auto ov = [lmat](const std::string& name, float& v) {
+					if (lmat)
+						for (const auto& o : lmat->paramOverrides)
+							if (o.name == name) { v = o.value[0]; return true; }
+					return false;
+				};
+				const int slot = HE::giAutoLandscapeParams(*ma, ov, ls, puddleScale);
+				if (slot < 0 || ls.layerCount != HE::kGiLandAuto) break;
+				// Copied out: resolving may loadAsset, which moves `ma`.
+				const HE::UUID texId = static_cast<size_t>(slot) < ma->graphTextureIds.size() ? ma->graphTextureIds[slot] : HE::UUID{};
+				const std::string texPath = static_cast<size_t>(slot) < ma->graphTexturePaths.size() ? ma->graphTexturePaths[slot] : std::string{};
+				const TextureAsset* arr = contentManager->resolveTextureRef(texId, texPath);
+				if (!arr || !HE::giAutoLandscapeSliceMeans(*arr, ls)) break;
+				out.tileLandscapeIndex = static_cast<int32_t>(out.landscapes.size());
+				out.landscapes.push_back(ls);
+				break;
+			}
 
 		auto meshView = reg.view<TransformComponent, MeshComponent>();
 		// The entities in the order the view hands them out, which is the order of out.objects.

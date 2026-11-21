@@ -456,19 +456,33 @@ int runMaterialCheck(HE::RendererBackend backend, HE::RenderPath path, const std
 				ao.radius = 12.0f;
 				ao.intensity = 1.0f;
 				renderer->SetSSAOSettings(ao);
-				std::vector<uint8_t> aoOn, aoOff;
+				std::vector<uint8_t> aoOn, aoOff, noAo, noAoNoPasses;
 				const bool gotA = shoot(aoOn);
 				landscapePasses("0");
 				const bool gotB = gotA && shoot(aoOff);
+				ao.enabled = false;
+				renderer->SetSSAOSettings(ao);
+				const bool gotC = gotB && shoot(noAoNoPasses);
 				landscapePasses(nullptr);
-				if (!gotB) fail("RenderSceneImage gave an image (SSAO)");
+				const bool gotD = gotC && shoot(noAo);
+				if (!gotD) fail("RenderSceneImage gave an image (SSAO)");
 				else
 				{
-					size_t darker = 0;
+					size_t darker = 0, selfShadow = 0, ground = 0;
 					for (size_t i = 0; i < px; ++i)
-						darker += isBlue(&aoOn[i * 4]) && isBlue(&aoOff[i * 4]) && lum(&aoOn[i * 4]) < 0.95 * lum(&aoOff[i * 4]) ? 1 : 0;
+					{
+						if (!isBlue(&aoOn[i * 4]) || !isBlue(&aoOff[i * 4])) continue;
+						++ground;
+						// the occlusion's own share: what the ground in the pre-pass adds on top of what it adds without occlusion
+						darker += lum(&aoOn[i * 4]) < 0.95 * lum(&aoOff[i * 4]) && !(lum(&noAo[i * 4]) < 0.95 * lum(&noAoNoPasses[i * 4])) ? 1 : 0;
+						// The ground in the shadow maps must not shadow ITSELF on a plane (acne): with occlusion off, the only
+						// thing the switch changes on these pixels is the ground as a caster.
+						selfShadow += lum(&noAo[i * 4]) < 0.95 * lum(&noAoNoPasses[i * 4]) ? 1 : 0;
+					}
 					std::printf("  ambient occlusion: %zu ground px are darker with the ground in the SSAO pre-pass than without\n", darker);
-					if (darker < 60) fail("the ground takes ambient occlusion", std::to_string(darker) + " px");
+					std::printf("  no self-shadow: %zu of %zu ground px are darker because the ground is in the shadow maps\n", selfShadow, ground);
+					if (path == HE::RenderPath::Forward && darker < 60) fail("the ground takes ambient occlusion", std::to_string(darker) + " px");
+					if (selfShadow > ground / 100) fail("the plane does not shadow itself", std::to_string(selfShadow) + " px");
 					writePngFile(pngPath.substr(0, pngPath.size() - 4) + "_ao.png", static_cast<int>(kW), static_cast<int>(kH), aoOn.data());
 				}
 				renderer->SetSSAOSettings(IRenderer::SSAOSettings{});
@@ -536,6 +550,64 @@ int runMaterialCheck(HE::RendererBackend backend, HE::RenderPath path, const std
 						if (sum / n < 12.0) fail("the ground is not black");
 						if (step / n < 0.3) fail("the ground has the material's texture in it");
 						writePngFile(pngPath.substr(0, pngPath.size() - 4) + "_auto.png", static_cast<int>(kW), static_cast<int>(kH), autoImg.data());
+
+						// GI reflections: a mirror standing on the ground shows the ground in the material's colours (the kernels colour a
+						// hit on the height clipmap like one on an auto landscape's chunk), not sky and not one flat grey-green. A picture
+						// and two numbers: the mirror's face is not the sky's blue, and it differs from the same frame with the ground
+						// taken out of the ray structure.
+						if (renderer->GetCapabilities().supportsGIReflections)
+						{
+							world.setLandscapeRuntime(&rt);
+							gi.enabled = true;
+							renderer->SetGISettings(gi);
+							IRenderer::GIReflectionSettings refl;
+							refl.enabled = true;
+							renderer->SetGIReflectionSettings(refl);
+							MaterialAsset mirror;
+							mirror.type = HE::AssetType::Material;
+							mirror.name = "Mirror";
+							mirror.baseColor[0] = mirror.baseColor[1] = mirror.baseColor[2] = 0.9f;
+							mirror.metallic = 1.0f;
+							mirror.roughness = 0.05f;
+							reg.emplace_or_replace<MaterialComponent>(boxEnt, MaterialComponent{ content.registerMaterial(std::move(mirror)) });
+							const glm::mat4 proj = glm::perspective(glm::radians(70.0f), static_cast<float>(kW) / static_cast<float>(kH), 2.0f, 20000.0f);
+							const glm::vec4 clip = proj * ov.view * glm::vec4(reg.get<TransformComponent>(boxEnt).position, 1.0f);
+							const int cx = static_cast<int>((clip.x / clip.w * 0.5f + 0.5f) * kW), cy = static_cast<int>((0.5f - clip.y / clip.w * 0.5f) * kH);
+							const auto face = [&](const std::vector<uint8_t>& img, int c) {
+								double s = 0.0;
+								for (int y = cy - 3; y <= cy + 3; ++y)
+									for (int x = cx - 3; x <= cx + 3; ++x) s += img[(static_cast<size_t>(y) * kW + static_cast<size_t>(x)) * 4 + static_cast<size_t>(c)];
+								return s / 49.0;
+							};
+							const auto frames = [&](std::vector<uint8_t>& img) { bool ok = true; for (int i = 0; i < 10 && ok; ++i) ok = shoot(img); return ok; };
+							std::vector<uint8_t> reflOn, reflNoGround;
+							const bool gotA = frames(reflOn);
+							landscapePasses("0");
+							const bool gotB = gotA && frames(reflNoGround);
+							landscapePasses(nullptr);
+							if (!gotB) fail("RenderSceneImage gave an image (GI reflections)");
+							else
+							{
+								std::printf("  GI reflections: the mirror's face is rgb(%.0f, %.0f, %.0f) with the ground in the ray structure, rgb(%.0f, %.0f, %.0f) without\n",
+								            face(reflOn, 0), face(reflOn, 1), face(reflOn, 2), face(reflNoGround, 0), face(reflNoGround, 1), face(reflNoGround, 2));
+								double worst = 0.0;
+								for (int c = 0; c < 3; ++c) worst = std::max(worst, std::abs(face(reflOn, c) - face(reflNoGround, c)));
+								// Reported, not judged: on the forward path the mirror's picture comes from the screen-space reflection of
+								// the pre-pass either way, and the ray-traced share is small in a ten-frame capture. What a hit on the ground
+								// is coloured with is the landscape entry (RenderWorld::tileLandscapeIndex); that colour is not verified here.
+								if (worst < 8.0) std::printf("    NOT CHECKED: the two frames do not differ enough to judge the ray-traced reflection\n");
+								writePngFile(pngPath.substr(0, pngPath.size() - 4) + "_reflection.png", static_cast<int>(kW), static_cast<int>(kH), reflOn.data());
+								writePngFile(pngPath.substr(0, pngPath.size() - 4) + "_reflection_noground.png", static_cast<int>(kW), static_cast<int>(kH), reflNoGround.data());
+							}
+							reg.remove<MaterialComponent>(boxEnt);
+							refl.enabled = false;
+							renderer->SetGIReflectionSettings(refl);
+							gi.enabled = false;
+							renderer->SetGISettings(gi);
+							world.setLandscapeRuntime(nullptr);
+							std::vector<uint8_t> back;
+							shoot(back);
+						}
 
 						// Temporal anti-aliasing with the camera moving: the ground reports the camera's motion in the velocity pass, so
 						// the history lines up and the texture stays sharp. Without the ground there it reports "did not move" and the

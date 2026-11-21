@@ -9299,9 +9299,15 @@ void MetalRenderer::EncodeGIAccelBuild(void* cmdBufPtr, float aspect)
 			uniqueBlas.push_back((__bridge id<MTLAccelerationStructure>)m_giLandMesh.blas);
 			uniqueMeshBufs.emplace_back((__bridge id<MTLBuffer>)m_giLandMesh.vertexBuf, (__bridge id<MTLBuffer>)m_giLandMesh.indexBuf);
 			instanceTransform.push_back(toWorld);
-			instanceBaseColor.push_back(glm::vec4(0.30f, 0.33f, 0.24f, 0.0f));   // the bounce's colour: a ground's mean, not the material's (not built)
+			// What a hit shows: with an Auto Landscape material the kernels colour it per hit from slope and height, as on a
+			// TerrainComponent's chunk (RenderWorld::tileLandscapeIndex); this flat colour is for any other material.
+			// The probes' diffuse bounce takes the flat colour either way: the material's ground mean when there is an entry.
+			const int32_t land = m_renderWorld.tileLandscapeIndex;
+			const glm::vec3 flat = land >= 0 && static_cast<size_t>(land) < m_renderWorld.landscapes.size()
+			                     ? glm::vec3(m_renderWorld.landscapes[static_cast<size_t>(land)].layerColor[0]) : glm::vec3(0.30f, 0.33f, 0.24f);
+			instanceBaseColor.push_back(glm::vec4(flat, 0.0f));
 			instanceBaseColor.push_back(glm::vec4(0.0f, 0.0f, 0.0f, 1.0f));
-			instanceLandIndex.push_back(-1);
+			instanceLandIndex.push_back(land);
 			break;
 		}
 		if (uniqueBlas.empty()) return;
@@ -16394,17 +16400,19 @@ void MetalRenderer::EncodeSkinnedObjects(void* renderEncoder, const glm::mat4& v
 // its own shader) and the material's fragment with its layer weights from the tile atlas. Built on first use, on this thread (one
 // compile per material, the fixed blend is not shown in between); a material without a shader, or whose variant does not build, gives
 // null for good and the landscape keeps its fixed blend.
-void* MetalRenderer::GetOrBuildLandscapeMaterialPipeline(const HE::UUID& materialId)
+void* MetalRenderer::GetOrBuildLandscapeMaterialPipeline(const HE::UUID& materialId, bool gbuffer)
 {
 #if defined(HE_HAVE_SHADERC)
+	// `gbuffer`: the material's G-buffer fragment for the deferred pass (attributes, lit by the resolve) instead of its lit one.
 	uint64_t key = 0; std::string fragGlsl, vertBody;
-	if (!ResolveMaterialShader(materialId, key, fragGlsl, vertBody)) return nullptr;
-	key ^= m_forwardClustered ? 0x7A11E5C1A57E12EDull : 0x7A11E5F02A12D000ull;
+	if (gbuffer ? !ResolveMaterialShaderGB(materialId, key, fragGlsl, vertBody) : !ResolveMaterialShader(materialId, key, fragGlsl, vertBody)) return nullptr;
+	const bool clustered = m_forwardClustered && !gbuffer;
+	key ^= gbuffer ? 0x7A11E56B0FFE2000ull : clustered ? 0x7A11E5C1A57E12EDull : 0x7A11E5F02A12D000ull;
 	if (auto it = m_landscapeMaterialPipelines.find(key); it != m_landscapeMaterialPipelines.end()) return it->second;
 
 	using Backend = HE::MaterialShaderLibrary::Backend;
 	const auto& v = m_matShaderLib.landscapeVertex(Backend::Metal);
-	const auto& f = m_matShaderLib.landscapeFragment(key, fragGlsl, Backend::Metal, m_forwardClustered);
+	const auto& f = m_matShaderLib.landscapeFragment(key, fragGlsl, Backend::Metal, clustered);
 	void* result = nullptr;
 	NSError* err = nil;
 	if (v.ok && f.ok)
@@ -16413,7 +16421,7 @@ void* MetalRenderer::GetOrBuildLandscapeMaterialPipeline(const HE::UUID& materia
 		id<MTLLibrary> vLib = [device newLibraryWithSource:[NSString stringWithUTF8String:v.source.c_str()] options:nil error:&err];
 		id<MTLLibrary> fLib = vLib ? [device newLibraryWithSource:[NSString stringWithUTF8String:f.source.c_str()] options:nil error:&err] : nil;
 		if (vLib && fLib)
-			if (id<MTLRenderPipelineState> pso = [device newRenderPipelineStateWithDescriptor:MakeMaterialPipelineDescriptor(vLib, fLib, false, false, false) error:&err])
+			if (id<MTLRenderPipelineState> pso = [device newRenderPipelineStateWithDescriptor:MakeMaterialPipelineDescriptor(vLib, fLib, gbuffer, false, gbuffer && m_deferredTileMode) error:&err])
 				result = (void*)CFBridgingRetain(pso);
 	}
 	if (!result)
@@ -16488,14 +16496,13 @@ void MetalRenderer::EncodeLandscapePass(void* renderEncoder, const glm::mat4& cl
 	m_landscape.encode(renderEncoder, frame, clip, sh);
 }
 
-void MetalRenderer::EncodeLandscape(void* renderEncoder, const glm::mat4& viewProj, const HE::LandscapeRenderFrame& frame)
+// The ground's material, when it has a shader and its landscape variant builds: bound like a mesh draw of that material (parameters,
+// the graph's textures, the virtual texture); the landscape adds its own images. Lighting and the rest of the preamble are the
+// encoder's already. Returns the pipeline to draw the patches with (the lit one, or the G-buffer one for the deferred pass), or null:
+// the fixed blend. Not on a page camera (rvtSlot): that draws the page material on meshes.
+void* MetalRenderer::BindLandscapeMaterial(void* renderEncoder, const HE::LandscapeRenderFrame& frame, bool gbuffer)
 {
-	if (!frame.active || !EnsureLandscape()) return;   // asked for at the top of EncodeScene; no landscape in this scene: nothing compiled, nothing drawn
-
-	MetalLandscape::Shading sh;
-	// The ground's material, when it has a shader and its landscape variant builds: bound here like a mesh draw of that material
-	// (parameters, the graph's textures, the virtual texture), the landscape adds its own images. Lighting, shadow masks, fog and the
-	// rest of the preamble are on the encoder already. Not on a page camera (rvtSlot): that draws the page material on meshes.
+	void* result = nullptr;
 #if defined(HE_HAVE_SHADERC)
 	// The texture group's material is named by no entity, so nothing may have loaded it: once per id, from its path.
 	if (frame.materialId != HE::UUID{} && !frame.materialPath.empty() && m_contentManager && frame.materialId != m_landscapeMaterialLoadTried
@@ -16507,7 +16514,7 @@ void MetalRenderer::EncodeLandscape(void* renderEncoder, const glm::mat4& viewPr
 			HE_LOG_WARN(RHI, "MetalRenderer: the landscape's material %s is not there; the ground keeps its fixed blend", frame.materialPath.c_str());
 	}
 	if (frame.materialId != HE::UUID{} && m_editorCamera.rvtSlot < 0)
-		if (void* pso = GetOrBuildLandscapeMaterialPipeline(frame.materialId))
+		if (void* pso = GetOrBuildLandscapeMaterialPipeline(frame.materialId, gbuffer))
 		{
 			id<MTLRenderCommandEncoder> enc = (__bridge id<MTLRenderCommandEncoder>)renderEncoder;
 			float padded[HE::kMatParamFloats] = { 0 };
@@ -16530,9 +16537,37 @@ void MetalRenderer::EncodeLandscape(void* renderEncoder, const glm::mat4& viewPr
 			void* tex0 = nullptr;
 			if (ResolveMaterialTexture(frame.materialId, tex0) && tex0) [enc setFragmentTexture:(__bridge id<MTLTexture>)tex0 atIndex:0];
 			BindRvtForDraw(renderEncoder, frame.materialId);
-			sh.materialPipeline = pso;
+			result = pso;
 		}
+#else
+	(void)renderEncoder; (void)frame; (void)gbuffer;
 #endif
+	return result;
+}
+
+// The ground in the deferred pass: its material's G-buffer fragment, so the resolve lights it with everything else and what reads
+// the G-buffer (ambient occlusion, screen-space reflections, decals) has it. False: not drawn here (no material variant), the
+// scene pass draws it forward as before; the frame's uploads are applied either way.
+bool MetalRenderer::EncodeLandscapeGBuffer(void* renderEncoder, const glm::mat4& viewProj)
+{
+	if (!m_landscapeProvider || m_landscapeFailed) return false;
+	HE::LandscapeRenderFrame frame;
+	m_landscapeProvider(glm::dmat4(viewProj), /*zeroToOne=*/false, frame);
+	if (!frame.active || !EnsureLandscape()) return false;
+	MetalLandscape::Shading sh;
+	sh.materialPipeline = BindLandscapeMaterial(renderEncoder, frame, /*gbuffer=*/true);
+	const bool drawn = sh.materialPipeline != nullptr;
+	if (!drawn) frame.patches.clear();
+	m_landscape.encode(renderEncoder, frame, viewProj, sh);
+	return drawn;
+}
+
+void MetalRenderer::EncodeLandscape(void* renderEncoder, const glm::mat4& viewProj, const HE::LandscapeRenderFrame& frame)
+{
+	if (!frame.active || !EnsureLandscape()) return;   // asked for at the top of EncodeScene; no landscape in this scene: nothing compiled, nothing drawn
+
+	MetalLandscape::Shading sh;
+	sh.materialPipeline = BindLandscapeMaterial(renderEncoder, frame, /*gbuffer=*/false);
 	sh.sunDir = glm::normalize(m_renderWorld.sunDirection);
 	sh.ambient = m_renderWorld.ambient;
 	for (const LightData& l : m_renderWorld.lights)
@@ -17339,7 +17374,10 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 	SamplePoint(renderEncoder, "Skinned");
 
 	// World-scale landscape (Thema 326): forward patches into the same target and depth, before the sky fills what they leave.
-	EncodeLandscape(renderEncoder, viewProj, landscapeFrame);
+	// On a deferred frame the G-buffer pass has drawn the ground already (EncodeLandscapeGBuffer) and the resolve has lit it.
+	const bool groundInGBuffer = m_landscapeInGBuffer;
+	m_landscapeInGBuffer = false;
+	if (!groundInGBuffer) EncodeLandscape(renderEncoder, viewProj, landscapeFrame);
 	SamplePoint(renderEncoder, "Landscape");
 
 	// Sky LAST — fills the background pixels the geometry didn't cover.
@@ -18813,12 +18851,15 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 	const glm::mat4 viewProj = JitteredViewProj(
 		m_renderWorld.camera.projection * m_renderWorld.camera.view, width, height);
 
-	if (m_renderWorld.objects.empty()) return;
+	// A tile landscape is geometry too: with one, the pass runs for the ground alone.
+	const bool land = m_landscapeProvider && !m_landscapeFailed;
+	m_landscapeInGBuffer = false;
+	if (m_renderWorld.objects.empty() && !land) return;
 
 	RefineObjectBounds();
 
 	CullCameraObjects();
-	if (m_sortedIndices.empty()) return;
+	if (m_sortedIndices.empty() && !land) return;
 
 	void* const defaultPipeline = m_gbufferPipeline;
 	[encoder setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)defaultPipeline];
@@ -18846,6 +18887,11 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 		matLight.ambient[0]  = am.r;          matLight.ambient[1]  = am.g;          matLight.ambient[2]  = am.b;
 		matLight.giParams[0] = static_cast<float>(width);
 		matLight.giParams[1] = static_cast<float>(height);
+		// The floating origin: a graph's World Position is evaluated HERE on the deferred path (FillMaterialLightWindow, which
+		// sets it for the lit passes, is not called for this reduced block).
+		matLight.worldOrigin[0] = static_cast<float>(m_renderWorld.worldOrigin.x);
+		matLight.worldOrigin[1] = static_cast<float>(m_renderWorld.worldOrigin.y);
+		matLight.worldOrigin[2] = static_cast<float>(m_renderWorld.worldOrigin.z);
 		// Specular AA (A6): the G-buffer IS a geometry pass, so graph materials
 		// widen the roughness they store here — the resolve could not, its normal
 		// is already an encoded texel.
@@ -19221,6 +19267,8 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 				dc.forEachInstance([&](const glm::mat4& t) { drawInstance(t); });
 		}
 	});
+	// The tile landscape's ground, last (its own pipeline and depth state; nothing of this pass draws after it).
+	if (land && m_editorCamera.rvtSlot < 0) m_landscapeInGBuffer = EncodeLandscapeGBuffer(renderEncoder, viewProj);
 	if (wire) [encoder setTriangleFillMode:MTLTriangleFillModeFill];
 }
 

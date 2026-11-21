@@ -527,6 +527,9 @@ public:
     // The world's floating origin (HorizonWorld::origin): every position in here is relative to it. For the materials' absolute
     // World Position (MaterialShaderLibrary::Lighting::worldOrigin).
     glm::dvec3 worldOrigin{ 0.0 };
+    // The entry of `landscapes` that is the tile landscape's ground (RenderExtractor), -1 = none: what a backend gives the
+    // instance it makes of the GI height clipmap, so a ray's hit on the ground is coloured like one on a landscape chunk.
+    int32_t tileLandscapeIndex = -1;
 
     // Flat ambient fill added to every lit surface, set by the extractor. A weak
     // floor is always present (so the scene is never fully black); under heavy
