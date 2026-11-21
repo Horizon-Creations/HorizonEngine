@@ -584,6 +584,31 @@ void VulkanLandscape::draw(VkCommandBuffer cmd, VkRenderPass pass, VkExtent2D ex
 	vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m.pipeLayout, 0, 1, &m.sets[frameIndex], 0, nullptr);
 	const VkDeviceSize zero = 0;
 	vkCmdBindVertexBuffers(cmd, 0, 1, &m.vbo, &zero);
+	drawPatches(cmd, m.pipeLayout, f);
+}
+
+bool VulkanLandscape::materialImages(uint32_t frameIndex, const HE::LandscapeRenderFrame& f, const glm::mat4& viewProj, MaterialImages& out)
+{
+	Impl& m = *m_impl;
+	out = MaterialImages{};
+	if (!m.ok || !f.active || !f.world || !m.world || m.world->generation != f.world->generation || frameIndex >= m.env.framesInFlight) return false;
+	vkls::Globals g;
+	vkls::fillGlobals(g, f, viewProj, glm::vec3(0.0f, 1.0f, 0.0f), glm::vec3(1.0f), glm::vec3(0.0f), false, false, false, false);   // the material lights, not these
+	std::memcpy(m.uboMapped[frameIndex], &g, sizeof(g));
+	out.globals = { m.ubo[frameIndex], 0, sizeof(vkls::Globals) };
+	out.heights = m.img[kHeights].view;
+	out.table = m.img[kTable].view;
+	out.coarseHeights = m.img[kCoarseH].view;
+	for (unsigned p = 0; p < 3; ++p) { out.weights[p] = m.img[kWeights + p].view; out.coarseWeights[p] = m.img[kCoarseW + p].view; }
+	out.nearest = m.nearest;
+	return out.heights && out.table && out.coarseHeights && out.weights[0] && out.coarseWeights[0];
+}
+
+void VulkanLandscape::drawPatches(VkCommandBuffer cmd, VkPipelineLayout layout, const HE::LandscapeRenderFrame& f)
+{
+	Impl& m = *m_impl;
+	if (!m.ok || !m.world || f.patches.empty()) return;
+	const LandscapeRenderStatic& w = *m.world;
 	vkCmdBindIndexBuffer(cmd, m.ibo, 0, VK_INDEX_TYPE_UINT16);
 
 	const uint32_t total = w.quadrantFirst[3] + w.quadrantCount[3];
@@ -591,7 +616,7 @@ void VulkanLandscape::draw(VkCommandBuffer cmd, VkRenderPass pass, VkExtent2D ex
 	{
 		vkls::PatchPush pd;
 		vkls::fillPatch(pd, p);
-		vkCmdPushConstants(cmd, m.pipeLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(pd), &pd);
+		vkCmdPushConstants(cmd, layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(pd), &pd);
 		if ((p.quadrants & 15) == 15)
 		{
 			vkCmdDrawIndexed(cmd, total, 1, 0, 0, 0);

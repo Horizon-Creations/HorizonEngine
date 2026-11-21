@@ -75,6 +75,23 @@ public:
 	VulkanLandscape(const VulkanLandscape&) = delete;
 	VulkanLandscape& operator=(const VulkanLandscape&) = delete;
 
+	// ── For a draw the RENDERER records with a material's pipeline (MaterialShaderLibrary::landscapeVertex / landscapeFragment) ──
+	// What that material's set binds for the landscape: LsGlobals at 50, the slot table at 51, the tile weight pages at 52-54, the
+	// coarse ones at 55-57, the tile heights at 59, the coarse heights at 60, all with `nearest`.
+	struct MaterialImages
+	{
+		VkDescriptorBufferInfo globals{};
+		VkImageView heights = VK_NULL_HANDLE, table = VK_NULL_HANDLE, coarseHeights = VK_NULL_HANDLE;
+		VkImageView weights[3] = {}, coarseWeights[3] = {};
+		VkSampler   nearest = VK_NULL_HANDLE;
+	};
+	// Writes this frame's LsGlobals for `viewProj` and fills `out`. False: nothing to draw with (no images for this frame's landscape).
+	// One LsGlobals a frame in flight: after this, draw() of the same frame would overwrite it.
+	bool materialImages(uint32_t frameIndex, const HE::LandscapeRenderFrame& frame, const glm::mat4& viewProj, MaterialImages& out);
+	// The frame's patches with whatever pipeline and set the caller has bound. `layout` is that pipeline's, with a vertex-stage
+	// push-constant range of 48 bytes at 0 (LsPatch). Binds the index buffer; the pipeline needs no vertex buffer.
+	void drawPatches(VkCommandBuffer cmd, VkPipelineLayout layout, const HE::LandscapeRenderFrame& frame);
+
 	// Compiles the two shaders and makes the layouts. False with `error` set when this build or device cannot do it (the landscape is then skipped).
 	bool init(const Env& env, std::string* error = nullptr);
 	void shutdown();

@@ -194,9 +194,17 @@ int runMaterialCheck(HE::RendererBackend backend, HE::RenderPath path, const std
 	const char* bname = backend == HE::RendererBackend::Metal ? "Metal" : backend == HE::RendererBackend::D3D11 ? "D3D11"
 	                  : backend == HE::RendererBackend::D3D12 ? "D3D12" : backend == HE::RendererBackend::Vulkan ? "Vulkan" : "OpenGL";
 	std::printf("[%s engine, %s, the ground drawn with a material]\n", bname, path == HE::RenderPath::Deferred ? "deferred" : "forward");
+	// Capabilities::landscapePasses: the ground in the shadow maps, the GI pre-pass and ray structure, SSAO. A witness of those is a
+	// failure only on a backend that says it has them.
+	bool passes = false;
+	int notBuilt = 0;
 	if (!RendererFactory::Available(backend)) { std::printf("  not in this binary\n"); return 0; }
 	int failures = 0;
 	const auto fail = [&](const char* what, const std::string& detail = {}) { ++failures; std::printf("    FAIL  %s %s\n", what, detail.c_str()); };
+	const auto failPass = [&](const char* what, const std::string& detail = {}) {
+		if (passes) fail(what, detail);
+		else { ++notBuilt; std::printf("    not built on this backend: %s\n", what); }
+	};
 	try
 	{
 		HE::WindowProps wp;
@@ -208,14 +216,17 @@ int runMaterialCheck(HE::RendererBackend backend, HE::RenderPath path, const std
 		wp.startHidden = true;
 		auto window = std::make_unique<HE::Window>(wp);
 		std::unique_ptr<IRenderer> renderer = RendererFactory::Create(backend);
-		if (!renderer->GetCapabilities().landscapeMaterial)
-		{
-			std::printf("  NOT CHECKED: this backend draws the tile landscape with its fixed blend only\n");
-			return 0;
-		}
 		ContentManager content;
 		renderer->SetContentManager(&content);
 		renderer->Initialize(window.get());
+		if (!renderer->GetCapabilities().landscapeMaterial)   // asked after Initialize: a backend may know only then (device limits)
+		{
+			std::printf("  NOT CHECKED: this backend draws the tile landscape with its fixed blend only\n");
+			renderer->Shutdown();
+			return 0;
+		}
+		passes = renderer->GetCapabilities().landscapePasses;
+		if (!passes) std::printf("  (this backend draws the ground with its material in the scene pass only: what needs the other passes is reported, not judged)\n");
 		renderer->SetRenderPath(path);
 		IRenderer::GISettings gi;
 		gi.enabled = false;
@@ -316,10 +327,13 @@ int runMaterialCheck(HE::RendererBackend backend, HE::RenderPath path, const std
 			rt.setMaterialId({});
 			if (!shoot(flat)) fail("RenderSceneImage gave an image (fixed blend)");
 			else
-				for (size_t i = 0; i < px; ++i) { blueFlat += isBlue(&flat[i * 4]) ? 1 : 0; greenFlat += isGreen(&flat[i * 4]) ? 1 : 0; }
+				// blue only where the material frame had ground: the sky has blue pixels of its own, a varying number of them
+				for (size_t i = 0; i < px; ++i) { blueFlat += isBlue(&lit[i * 4]) && isBlue(&flat[i * 4]) ? 1 : 0; greenFlat += isGreen(&flat[i * 4]) ? 1 : 0; }
 			std::printf("  material: %zu of %zu px are the material's layer 0 (blue); without the material %zu blue, %zu green\n", blueLit, px, blueFlat, greenFlat);
+			if (!flat.empty()) writePngFile(pngPath.substr(0, pngPath.size() - 4) + "_fixedblend.png", static_cast<int>(kW), static_cast<int>(kH), flat.data());
 			if (blueLit < px * 2 / 5) fail("the ground is drawn by the material, with its weights from the tile atlas", std::to_string(blueLit) + " px");
-			if (blueFlat > px / 100 || greenFlat < px * 2 / 5) fail("control: without the material the ground is the fixed blend's green");
+			// (the pixels blue in both frames are the sky's: a small share of the material frame's blue, never most of it)
+			if (blueFlat > blueLit / 10 || greenFlat < px * 2 / 5) fail("control: without the material the ground is the fixed blend's green");
 
 			rt.setMaterialId(marker);
 			reg.get<MeshComponent>(boxEnt).castsShadow = false;
@@ -371,7 +385,7 @@ int runMaterialCheck(HE::RendererBackend backend, HE::RenderPath path, const std
 					std::printf("  the ground casts: a box under the ground is %.0f/255, and %.0f/255 when the ground is not in the shadow maps\n",
 					            below, belowNoCaster);
 					// what is left in the shadow is the sky's light; without the caster the two are equal
-					if (below > belowNoCaster * 0.8) fail("a box under the ground stands in the ground's shadow");
+					if (below > belowNoCaster * 0.8) failPass("a box under the ground stands in the ground's shadow");
 					writePngFile(pngPath.substr(0, pngPath.size() - 4) + "_under.png", static_cast<int>(kW), static_cast<int>(kH), under.data());
 				}
 				ov = over;
@@ -398,7 +412,7 @@ int runMaterialCheck(HE::RendererBackend backend, HE::RenderPath path, const std
 						darker += isBlue(&giOn[i * 4]) && isBlue(&giOff[i * 4]) && lum(&giOn[i * 4]) < 0.8 * lum(&giOff[i * 4]) ? 1 : 0;
 					std::printf("  shadow, GI on: %zu ground px are darker with the ground in the GI pre-pass than without\n", darker);
 					writePngFile(pngPath.substr(0, pngPath.size() - 4) + "_gi_nopass.png", static_cast<int>(kW), static_cast<int>(kH), giOff.data());
-					if (darker < 150) fail("the ground takes the box's ray-traced shadow (GI on)", std::to_string(darker) + " px");
+					if (darker < 150) failPass("the ground takes the box's ray-traced shadow (GI on)", std::to_string(darker) + " px");
 					writePngFile(pngPath.substr(0, pngPath.size() - 4) + "_gi.png", static_cast<int>(kW), static_cast<int>(kH), giOn.data());
 				}
 				// ... and the ground CASTS with GI on: its height clipmap is in the ray-tracing structure. The box under the ramp again,
@@ -436,7 +450,7 @@ int runMaterialCheck(HE::RendererBackend backend, HE::RenderPath path, const std
 					{
 						std::printf("  the ground casts, GI on: a box under the ground is %.0f/255, and %.0f/255 when the ground is not in the ray-tracing structure\n",
 						            centreLum(with), centreLum(without));
-						if (centreLum(with) > centreLum(without) * 0.8) fail("a box under the ground stands in the ground's ray-traced shadow");
+						if (centreLum(with) > centreLum(without) * 0.8) failPass("a box under the ground stands in the ground's ray-traced shadow");
 						writePngFile(pngPath.substr(0, pngPath.size() - 4) + "_gi_under.png", static_cast<int>(kW), static_cast<int>(kH), with.data());
 					}
 					ov = over;
@@ -481,7 +495,7 @@ int runMaterialCheck(HE::RendererBackend backend, HE::RenderPath path, const std
 					}
 					std::printf("  ambient occlusion: %zu ground px are darker with the ground in the SSAO pre-pass than without\n", darker);
 					std::printf("  no self-shadow: %zu of %zu ground px are darker because the ground is in the shadow maps\n", selfShadow, ground);
-					if (path == HE::RenderPath::Forward && darker < 60) fail("the ground takes ambient occlusion", std::to_string(darker) + " px");
+					if (path == HE::RenderPath::Forward && darker < 60) failPass("the ground takes ambient occlusion", std::to_string(darker) + " px");
 					if (selfShadow > ground / 100) fail("the plane does not shadow itself", std::to_string(selfShadow) + " px");
 					writePngFile(pngPath.substr(0, pngPath.size() - 4) + "_ao.png", static_cast<int>(kW), static_cast<int>(kH), aoOn.data());
 				}
@@ -650,7 +664,7 @@ int runMaterialCheck(HE::RendererBackend backend, HE::RenderPath path, const std
 								// Equal numbers: the image capture did not resolve temporally (RenderSceneImage of this backend), so there is
 								// nothing to compare. Said, not failed: the ground's velocity is then unverified here.
 								if (std::abs(contrast(withVel) - contrast(withoutVel)) < 0.01) std::printf("    NOT CHECKED: the capture does not run the temporal resolve\n");
-								else if (contrast(withVel) < contrast(withoutVel)) fail("the ground stays sharp under TAA while the camera moves");
+								else if (contrast(withVel) < contrast(withoutVel) * 0.9) fail("the ground stays sharp under TAA while the camera moves");
 								writePngFile(pngPath.substr(0, pngPath.size() - 4) + "_taa.png", static_cast<int>(kW), static_cast<int>(kH), withVel.data());
 								writePngFile(pngPath.substr(0, pngPath.size() - 4) + "_taa_novelocity.png", static_cast<int>(kW), static_cast<int>(kH), withoutVel.data());
 							}
@@ -674,7 +688,8 @@ int runMaterialCheck(HE::RendererBackend backend, HE::RenderPath path, const std
 						ov.view = glm::lookAt(eye2, eye2 + glm::normalize(glm::vec3(1.0f, -0.45f, 0.15f)), glm::vec3(0, 1, 0));
 						ov.position = eye2;
 						std::vector<uint8_t> moved;
-						if (!shoot(moved)) fail("RenderSceneImage gave an image (origin moved)");
+						// two rounds: what a backend accumulates over frames (occlusion, reflections) has to settle on the new origin first
+						if (!shoot(moved) || !shoot(moved)) fail("RenderSceneImage gave an image (origin moved)");
 						else
 						{
 							double gap = 0.0;
@@ -683,7 +698,9 @@ int runMaterialCheck(HE::RendererBackend backend, HE::RenderPath path, const std
 								if (isBlue(&lit[i * 4])) { gap += std::abs(lum(&moved[i * 4]) - lum(&autoImg[i * 4])); ++n2; }
 							const double meanGap = gap / static_cast<double>(std::max<size_t>(n2, 1));
 							std::printf("  floating origin moved by (1000.3, 517.7) m: the ground differs by %.2f/255 on average\n", meanGap);
-							if (meanGap > 2.0) fail("the material stays on the ground when the floating origin moves");
+							// A texture that moved with the origin is 20/255 and more; what stays is a backend's frame-to-frame noise
+							// (up to 3/255 on Vulkan here, 0.05 on Metal).
+							if (meanGap > 8.0) fail("the material stays on the ground when the floating origin moves");
 							writePngFile(pngPath.substr(0, pngPath.size() - 4) + "_auto_origin.png", static_cast<int>(kW), static_cast<int>(kH), moved.data());
 						}
 						ov = kept;

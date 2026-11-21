@@ -1606,12 +1606,22 @@ constexpr const char* kLandscapeGlobalsBlock = R"(layout(std140, set = 0, bindin
 };
 )";
 
-constexpr const char* kLandscapeMaterialVertexHead = R"(layout(std140, set = 0, binding = 58) uniform LsPatch {
+// The per-patch numbers: a uniform block (Metal's vertex buffer 21, a GL block), or on Vulkan the push constant VulkanLandscape
+// pushes per patch for its own pipeline as well (one layout of the data, no ring of per-patch buffers).
+constexpr const char* kLandscapePatchBlock = R"(layout(std140, set = 0, binding = 58) uniform LsPatch {
     ivec4 uPatch;
     vec4  uPatchPos;
     vec4  uMorph;
 };
-layout(set = 0, binding = 59) uniform usampler2DArray uTileHeights;
+)";
+constexpr const char* kLandscapePatchPush = R"(layout(push_constant) uniform LsPatch {
+    ivec4 uPatch;
+    vec4  uPatchPos;
+    vec4  uMorph;
+};
+)";
+
+constexpr const char* kLandscapeMaterialVertexHead = R"(layout(set = 0, binding = 59) uniform usampler2DArray uTileHeights;
 layout(set = 0, binding = 51) uniform usampler2D      uSlotTable;
 layout(set = 0, binding = 60) uniform usampler2D      uCoarseHeights;
 layout(location = 0) out vec3 vNormal;
@@ -1713,23 +1723,42 @@ void replaceAll(std::string& s, std::string_view from, std::string_view to)
 }
 } // namespace
 
-std::string MaterialShaderLibrary::landscapeVertexSource()
+namespace
+{
+// The landscape's images as textures WITHOUT a sampler (Vulkan GLSL: texelFetch and textureSize take a texture type directly).
+// They are only ever fetched, and a combined sampler each would count against the device's samplers per stage: a material's
+// fragment is at that limit already where the limit is Metal's sixteen (MoltenVK).
+std::string landscapeSeparateImages(std::string head)
+{
+    replaceAll(head, "uniform usampler2DArray ", "uniform utexture2DArray ");
+    replaceAll(head, "uniform usampler2D ", "uniform utexture2D ");
+    replaceAll(head, "uniform sampler2DArray ", "uniform texture2DArray ");
+    replaceAll(head, "uniform sampler2D ", "uniform texture2D ");
+    return head;
+}
+} // namespace
+
+std::string MaterialShaderLibrary::landscapeVertexSource(bool patchAsPushConstant)
 {
     const std::string_view vs = HE::glsl::kLandscapeVS, marker = "//#LANDSCAPE_BODY#";
     const size_t at = vs.find(marker), mainAt = vs.find("void main()");
     if (at == std::string_view::npos || mainAt == std::string_view::npos || mainAt < at) return {};
     // the height functions of the landscape's own vertex stage, as they are
-    return std::string("#version 450\n") + kLandscapeGlobalsBlock + kLandscapeMaterialVertexHead
+    // The push-constant form is Vulkan's, and so are the sampler-less images.
+    return std::string("#version 450\n") + (patchAsPushConstant ? "#extension GL_EXT_samplerless_texture_functions : require\n" : "")
+         + kLandscapeGlobalsBlock + (patchAsPushConstant ? kLandscapePatchPush : kLandscapePatchBlock)
+         + (patchAsPushConstant ? landscapeSeparateImages(kLandscapeMaterialVertexHead) : std::string(kLandscapeMaterialVertexHead))
          + std::string(vs.substr(at + marker.size(), mainAt - at - marker.size())) + kLandscapeMaterialVertexMain;
 }
 
-std::string MaterialShaderLibrary::landscapeFragmentSource(const std::string& glsl)
+std::string MaterialShaderLibrary::landscapeFragmentSource(const std::string& glsl, bool separateImages)
 {
     std::string s = glsl;
     // The block goes behind the varyings (the first use of the weights is in main); a material that reads no weights gets the block
     // alone, for the edge test below.
     const std::string_view decl = "layout(set = 0, binding = 14) uniform sampler2D heLandscapeWeights;\n";
-    const std::string head = std::string(kLandscapeGlobalsBlock) + kLandscapeMaterialFragmentHead;
+    const std::string head = std::string(kLandscapeGlobalsBlock)
+                           + (separateImages ? landscapeSeparateImages(kLandscapeMaterialFragmentHead) : std::string(kLandscapeMaterialFragmentHead));
     if (const size_t at = s.find(decl); at != std::string::npos) s.replace(at, decl.size(), head);
     else if (const size_t mainAt = s.find("void main() {"); mainAt != std::string::npos) s.insert(mainAt, head);
     else return {};
@@ -1742,6 +1771,13 @@ std::string MaterialShaderLibrary::landscapeFragmentSource(const std::string& gl
     const size_t mainAt = s.find(mainOpen);
     if (mainAt == std::string::npos) return {};
     s.insert(mainAt + mainOpen.size(), "    if (vUV.x < 0.0 || vUV.y < 0.0 || vUV.x > 1.0 || vUV.y > 1.0) discard;\n");
+    if (separateImages)   // texelFetch on a texture without a sampler
+    {
+        const size_t vpos = s.find("#version");
+        const size_t eol  = vpos == std::string::npos ? std::string::npos : s.find('\n', vpos);
+        if (eol == std::string::npos) return {};
+        s.insert(eol + 1, "#extension GL_EXT_samplerless_texture_functions : require\n");
+    }
     return s;
 }
 
@@ -1752,7 +1788,7 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::landscapeVertex(Ba
 
     using namespace he::shaderc;
     Compiled out;
-    const std::string src = landscapeVertexSource();
+    const std::string src = landscapeVertexSource(/*patchAsPushConstant=*/backend == Backend::SpirV);
     if (src.empty()) out.log = "landscapeVertex: kLandscapeVS has no body marker";
     else if (backend == Backend::Metal)
     {
@@ -3268,7 +3304,7 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fragmentVariant(
     using namespace he::shaderc;
     Compiled out;
     // The landscape variant: the same text with its weights read from the tile atlas (landscapeFragmentSource).
-    const std::string landscapeText = landscape ? landscapeFragmentSource(glslIn) : std::string();
+    const std::string landscapeText = landscape ? landscapeFragmentSource(glslIn, /*separateImages=*/backend == Backend::SpirV) : std::string();
     const std::string& glsl = landscape ? landscapeText : glslIn;
     if (landscape && landscapeText.empty())
     {

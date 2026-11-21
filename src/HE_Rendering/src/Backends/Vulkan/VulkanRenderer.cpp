@@ -1393,6 +1393,7 @@ IRenderer::Capabilities VulkanRenderer::GetCapabilities() const
     // split. Never a blanket "Vulkan + shaderc": a failed step leaves the analytic fog.
     c.supportsVolumetricFog = m_fogReady && m_postFxReady;
     c.landscapeCoarseRevision   = true;   // VulkanLandscape.cpp: new coarse images, the atlas stays
+    c.landscapeMaterial         = m_lsMatPipelineLayout != VK_NULL_HANDLE;   // DrawScene: the ground's material draws the patches (after Initialize)
     c.supportsRawCapture        = m_postFxReady;   // RenderSceneImage's rawOutput rides the tonemap pass
     c.supportsRvt               = m_postFxReady && m_matReady && m_matRvt;   // a page is that raw capture copied into the pool
     return c;
@@ -3107,6 +3108,59 @@ void VulkanRenderer::createMaterialResources()
         return;
     }
 
+    // ── The tile landscape drawn with a material (Thema 326) ─────────────────────
+    // Its own set layout: the material's rows as they are, plus what the landscape variant of the two shaders reads
+    // (MaterialShaderLibrary::landscapeVertex / landscapeFragment): 50 LsGlobals (both stages), 51 the slot table (both), 52-57
+    // the tile and coarse weight pages (fragment), 59 and 60 the tile and coarse heights (vertex). A SECOND layout on purpose: in
+    // the material's own every mesh pipeline would count seven more fragment samplers against the device's limit. The pipeline
+    // layout carries the 48-byte push constant VulkanLandscape pushes per patch (LsPatch). Left null where the fragment stage
+    // cannot hold the seven more: the landscape then keeps its fixed blend (GetCapabilities().landscapeMaterial says so).
+    {
+        VkPhysicalDeviceProperties props{};
+        vkGetPhysicalDeviceProperties(m_physDevice, &props);
+        // The landscape's nine images are SAMPLED_IMAGE rows (read with texelFetch, no sampler: the SPIR-V form of the two
+        // shaders declares them as textures), so they count against the device's sampled IMAGES per stage, of which there are
+        // plenty, and not against its samplers, where a material is at the limit on a device with Metal's sixteen.
+        const uint32_t maxSamplers = props.limits.maxPerStageDescriptorSampledImages;
+        uint32_t fragSamplers = 7;
+        for (uint32_t i = 0; i < nb; ++i)
+            if (b[i].descriptorType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER && (b[i].stageFlags & VK_SHADER_STAGE_FRAGMENT_BIT)) ++fragSamplers;
+        if (fragSamplers <= maxSamplers)
+        {
+            std::vector<VkDescriptorSetLayoutBinding> lb(b, b + nb);
+            const auto add = [&](uint32_t binding, VkDescriptorType type, VkShaderStageFlags stages) {
+                VkDescriptorSetLayoutBinding r{};
+                r.binding = binding; r.descriptorType = type; r.descriptorCount = 1; r.stageFlags = stages;
+                lb.push_back(r);
+            };
+            const VkShaderStageFlags V = VK_SHADER_STAGE_VERTEX_BIT, F = VK_SHADER_STAGE_FRAGMENT_BIT;
+            add(50, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, V | F);
+            add(51, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, V | F);
+            for (uint32_t k = 52; k <= 57; ++k) add(k, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, F);
+            add(59, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, V);
+            add(60, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, V);
+            VkDescriptorSetLayoutCreateInfo lci{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
+            lci.bindingCount = static_cast<uint32_t>(lb.size());
+            lci.pBindings    = lb.data();
+            const VkPushConstantRange pcr{ VK_SHADER_STAGE_VERTEX_BIT, 0, 48 };
+            VkPipelineLayoutCreateInfo lpl{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+            lpl.setLayoutCount = 1;
+            lpl.pSetLayouts = &m_lsMatSetLayout;
+            lpl.pushConstantRangeCount = 1;
+            lpl.pPushConstantRanges = &pcr;
+            if (vkCreateDescriptorSetLayout(m_device, &lci, nullptr, &m_lsMatSetLayout) != VK_SUCCESS
+                || vkCreatePipelineLayout(m_device, &lpl, nullptr, &m_lsMatPipelineLayout) != VK_SUCCESS)
+            {
+                HE_LOG_WARN(RHI, "%s", "VulkanRenderer: the landscape's material layout failed; the landscape keeps its fixed blend");
+                if (m_lsMatSetLayout) { vkDestroyDescriptorSetLayout(m_device, m_lsMatSetLayout, nullptr); m_lsMatSetLayout = VK_NULL_HANDLE; }
+                m_lsMatPipelineLayout = VK_NULL_HANDLE;
+            }
+        }
+        else
+            HE_LOG_WARN(RHI, "VulkanRenderer: the landscape keeps its fixed blend, a fragment stage here holds %u samplers and its material needs %u",
+                        maxSamplers, fragSamplers);
+    }
+
     // Per-frame descriptor pool (reset whole each frame — no FREE bit) + UBO buffers.
     // Each allocated set consumes one descriptor per layout row of its kind, so the
     // pool covers k_matMaxDraws sets worth of each — counted from the same table as
@@ -3133,15 +3187,16 @@ void VulkanRenderer::createMaterialResources()
         using HE::vkmat::DescKind;
         using HE::vkmat::countOf;
         static_assert(HE::vkmat::dynamicCount() == HE::vkmat::kDynamicOffsetCount, "bindings 1, 3, 9");
-        VkDescriptorPoolSize ps[4] = {
+        VkDescriptorPoolSize ps[5] = {
             { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         (countOf(DescKind::UniformBuffer) - HE::vkmat::dynamicCount()) * k_matMaxDraws }, // b0,b8
             { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, HE::vkmat::dynamicCount()                       * k_matMaxDraws }, // b1,b3,b9
             { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, countOf(DescKind::CombinedImageSampler) * k_matMaxDraws }, // b2,b4-b7,b10-b18,b31-b33
             { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,         countOf(DescKind::StorageBuffer)        * k_matMaxDraws }, // b24-b26 (cluster lists)
+            { VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,          9 * 8 },   // the tile landscape's nine images (m_lsMatSetLayout), a few sets a frame
         };
         VkDescriptorPoolCreateInfo dpci{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
         dpci.maxSets       = k_matMaxDraws;
-        dpci.poolSizeCount = 4;
+        dpci.poolSizeCount = 5;
         dpci.pPoolSizes    = ps;
         if (vkCreateDescriptorPool(m_device, &dpci, nullptr, &m_matPool[f]) != VK_SUCCESS)
         {
@@ -3230,6 +3285,8 @@ void VulkanRenderer::destroyMaterialResources()
         m_matDrawCursor[f] = 0;
         m_matSetCache[f].clear();
     }
+    if (m_lsMatPipelineLayout) { vkDestroyPipelineLayout(m_device, m_lsMatPipelineLayout, nullptr); m_lsMatPipelineLayout = VK_NULL_HANDLE; }
+    if (m_lsMatSetLayout)      { vkDestroyDescriptorSetLayout(m_device, m_lsMatSetLayout, nullptr); m_lsMatSetLayout = VK_NULL_HANDLE; }
     if (m_matPipelineLayout) { vkDestroyPipelineLayout(m_device, m_matPipelineLayout, nullptr); m_matPipelineLayout = VK_NULL_HANDLE; }
     if (m_matSetLayout)      { vkDestroyDescriptorSetLayout(m_device, m_matSetLayout, nullptr); m_matSetLayout = VK_NULL_HANDLE; }
     if (m_whiteArrayView)    { vkDestroyImageView(m_device, m_whiteArrayView, nullptr);         m_whiteArrayView = VK_NULL_HANDLE; }
@@ -3718,6 +3775,74 @@ VkPipeline VulkanRenderer::GetOrBuildMaterialPipeline(uint64_t hash, const std::
     if (tcs) vkDestroyShaderModule(m_device, tcs, nullptr);
     if (tes) vkDestroyShaderModule(m_device, tes, nullptr);
     m_materialPipelines.emplace(key, pipe); // cache success OR failure (null → no per-draw retry)
+    return pipe;
+}
+
+// The pipeline that draws the tile landscape's patches with a material: the landscape's vertex stage (no vertex buffer, the grid
+// position is gl_VertexIndex; the per-patch numbers are a push constant) and the material's lit fragment with its layer weights from
+// the tile atlas. Forward only, into the scene pass (`hdr` as GetOrBuildMaterialPipeline). Null (cached): the variant does not build,
+// the landscape keeps its fixed blend.
+VkPipeline VulkanRenderer::GetOrBuildLandscapeMaterialPipeline(uint64_t hash, const std::string& frag, bool hdr)
+{
+    if (m_lsMatPipelineLayout == VK_NULL_HANDLE) return VK_NULL_HANDLE;
+    const bool clustered = m_forwardClustered && m_clusterReady;
+    const uint64_t key = hash ^ 0x7A11E51A2D5CA9E0ULL ^ (hdr ? 0x9E3779B97F4A7C15ULL : 0ULL) ^ (clustered ? 0xC1057E2ED0000001ULL : 0ULL);
+    if (auto it = m_materialPipelines.find(key); it != m_materialPipelines.end()) return it->second;
+    const VkRenderPass rp = hdr ? m_postFxSceneRP : m_renderPass;
+    if (rp == VK_NULL_HANDLE) return VK_NULL_HANDLE;   // not cached: retried when the pass is there
+
+    using Backend = HE::MaterialShaderLibrary::Backend;
+    const auto& v = m_matShaderLib.landscapeVertex(Backend::SpirV);
+    const auto& f = m_matShaderLib.landscapeFragment(hash, frag, Backend::SpirV, clustered);
+    VkPipeline pipe = VK_NULL_HANDLE;
+    VkShaderModule vs = VK_NULL_HANDLE, fs = VK_NULL_HANDLE;
+    const auto makeModule = [&](const std::vector<uint32_t>& spv) {
+        VkShaderModuleCreateInfo ci{ VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO };
+        ci.codeSize = spv.size() * sizeof(uint32_t);
+        ci.pCode    = spv.data();
+        VkShaderModule mod = VK_NULL_HANDLE;
+        return vkCreateShaderModule(m_device, &ci, nullptr, &mod) == VK_SUCCESS ? mod : VkShaderModule(VK_NULL_HANDLE);
+    };
+    if (v.ok && f.ok && !v.spirv.empty() && !f.spirv.empty()) { vs = makeModule(v.spirv); fs = makeModule(f.spirv); }
+    if (vs && fs)
+    {
+        VkPipelineShaderStageCreateInfo stages[2]{};
+        stages[0].sType = stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;   stages[0].module = vs; stages[0].pName = "main";
+        stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT; stages[1].module = fs; stages[1].pName = "main";
+        VkPipelineVertexInputStateCreateInfo vi{ VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };   // none: gl_VertexIndex
+        VkPipelineInputAssemblyStateCreateInfo ia{ VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO };
+        ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+        VkPipelineViewportStateCreateInfo vp{ VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO };
+        vp.viewportCount = 1; vp.scissorCount = 1;
+        VkPipelineRasterizationStateCreateInfo rs{ VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO };
+        rs.polygonMode = VK_POLYGON_MODE_FILL;
+        rs.cullMode    = VK_CULL_MODE_NONE;
+        rs.frontFace   = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+        rs.lineWidth   = 1.0f;
+        VkPipelineMultisampleStateCreateInfo ms{ VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO };
+        ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+        VkPipelineDepthStencilStateCreateInfo ds{ VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO };
+        ds.depthTestEnable = VK_TRUE; ds.depthWriteEnable = VK_TRUE; ds.depthCompareOp = VK_COMPARE_OP_LESS;
+        VkPipelineColorBlendAttachmentState cba{};
+        cba.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+        VkPipelineColorBlendStateCreateInfo cb{ VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO };
+        cb.attachmentCount = 1; cb.pAttachments = &cba;
+        VkDynamicState dynStates[2] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+        VkPipelineDynamicStateCreateInfo dyn{ VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO };
+        dyn.dynamicStateCount = 2; dyn.pDynamicStates = dynStates;
+        VkGraphicsPipelineCreateInfo pci{ VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO };
+        pci.stageCount = 2; pci.pStages = stages;
+        pci.pVertexInputState = &vi; pci.pInputAssemblyState = &ia; pci.pViewportState = &vp; pci.pRasterizationState = &rs;
+        pci.pMultisampleState = &ms; pci.pDepthStencilState = &ds; pci.pColorBlendState = &cb; pci.pDynamicState = &dyn;
+        pci.layout = m_lsMatPipelineLayout; pci.renderPass = rp; pci.subpass = 0;
+        if (createGraphicsPipelines(1, &pci, nullptr, &pipe) != VK_SUCCESS) pipe = VK_NULL_HANDLE;
+    }
+    if (pipe == VK_NULL_HANDLE)
+        HE_LOG_WARN(RHI, "VulkanRenderer: the landscape keeps its fixed blend, its material's variant did not build: %s%s", v.log.c_str(), f.log.c_str());
+    if (vs) vkDestroyShaderModule(m_device, vs, nullptr);
+    if (fs) vkDestroyShaderModule(m_device, fs, nullptr);
+    m_materialPipelines.emplace(key, pipe);
     return pipe;
 }
 
@@ -10167,7 +10292,9 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
 
     // Trails live in their own per-frame band list, not in `objects`, so a scene
     // that has nothing BUT a trail still has something to draw past here.
-    if (m_renderWorld.objects.empty() && m_renderWorld.ribbonBatches.empty()) { landscapeDraw(cmd, width, height, hdr); return; }
+    // (With a tile landscape the frame goes on without objects: its ground is drawn by the material path further down, which needs
+    // this frame's lighting block and descriptor pool, both made below.)
+    if (m_renderWorld.objects.empty() && m_renderWorld.ribbonBatches.empty() && !m_landscapeFrameLive) return;
 
     refineObjectBounds();
     // PBR scalars per object, per material slot and per skinned object, each from
@@ -10178,7 +10305,7 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
     cullCameraObjects();
     m_statTotal   = static_cast<uint32_t>(m_renderWorld.objects.size());
     m_statVisible = static_cast<uint32_t>(m_sortedIndices.size());
-    if (m_sortedIndices.empty() && m_renderWorld.ribbonBatches.empty()) { landscapeDraw(cmd, width, height, hdr); return; }
+    if (m_sortedIndices.empty() && m_renderWorld.ribbonBatches.empty() && !m_landscapeFrameLive) return;
 
     if (m_renderGraph.empty())
     {
@@ -10607,6 +10734,12 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
         // of a material resolves it and every later draw of the frame reuses the result.
         struct MatResolved { bool ok = false; uint64_t hash = 0; std::string frag, vertBody; };
         std::unordered_map<HE::UUID, MatResolved> matFwdMemo, matGbMemo;
+        // The tile landscape drawn with its material goes through this same lambda (one place writes a material's set): while
+        // `lsDraw` is set, the draw call names the landscape's material, the pipeline is its landscape variant, the set gets the
+        // landscape's rows as well, and the patches are drawn instead of a mesh. `lsDrawn` says it happened.
+        const HE::LandscapeRenderFrame* lsDraw = nullptr;
+        HE::VulkanLandscape::MaterialImages lsImages;
+        bool lsDrawn = false;
         auto drawDCVk = [&](const DrawCall& dc) {
             // A trail carries no mesh asset — its geometry sits in this frame's
             // ribbon pool, looked up by the DrawCall that was synthesised for it.
@@ -10701,6 +10834,8 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                                                                      true, false, /*gbuffer=*/true,
                                                                      /*instanced=*/true);
                     }
+                    else if (lsDraw)
+                        matPipe = GetOrBuildLandscapeMaterialPipeline(matHash, matFrag, hdr);
                     else
                     {
                         matPipe = GetOrBuildMaterialPipeline(matHash, matFrag, matVertBody,
@@ -10842,7 +10977,7 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                             VkDescriptorImageInfo texPII[HE::kMatMaxGraphTextures];
                             for (int k = 0; k < HE::kMatMaxGraphTextures; ++k)
                                 texPII[k] = { m_albedoSampler, heTexP[k], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
-                            VkWriteDescriptorSet w[HE::vkmat::kBindingCount]{};
+                            VkWriteDescriptorSet w[HE::vkmat::kBindingCount + 10]{};   // + the landscape's rows (lsDraw)
                             auto wr = [&](int idx, uint32_t binding, VkDescriptorType type,
                                           const VkDescriptorBufferInfo* bi, const VkDescriptorImageInfo* ii) {
                                 w[idx].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -11027,6 +11162,23 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                                        VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &clusterBI[c], nullptr);
                                 }
                             }
+                            // The landscape's rows (m_lsMatSetLayout): its numbers, the slot table, the tile and coarse
+                            // weight pages for the fragment, the tile and coarse heights for the vertex stage. Nearest,
+                            // every one: they are read with texelFetch.
+                            VkDescriptorImageInfo lsII[9]{};
+                            if (lsDraw)
+                            {
+                                const VkImageView lsViews[9] = { lsImages.table, lsImages.weights[0], lsImages.weights[1], lsImages.weights[2],
+                                                                 lsImages.coarseWeights[0], lsImages.coarseWeights[1], lsImages.coarseWeights[2],
+                                                                 lsImages.heights, lsImages.coarseHeights };
+                                static const uint32_t lsBind[9] = { 51, 52, 53, 54, 55, 56, 57, 59, 60 };
+                                wr(static_cast<int>(nWrites++), 50, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &lsImages.globals, nullptr);
+                                for (int k = 0; k < 9; ++k)
+                                {
+                                    lsII[k] = { VK_NULL_HANDLE, lsViews[k], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+                                    wr(static_cast<int>(nWrites++), lsBind[k], VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, nullptr, &lsII[k]);
+                                }
+                            }
                             // Key = everything the writes name (FNV-1a over binding, type and the
                             // handles/ranges), so a changed texture, AO/GI view or cluster buffer gets
                             // its own set and nothing can be bound stale.
@@ -11057,7 +11209,7 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                                 VkDescriptorSetAllocateInfo dsai{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
                                 dsai.descriptorPool     = m_matPool[m_currentFrame];
                                 dsai.descriptorSetCount = 1;
-                                dsai.pSetLayouts        = &m_matSetLayout;
+                                dsai.pSetLayouts        = lsDraw ? &m_lsMatSetLayout : &m_matSetLayout;
                                 if (vkAllocateDescriptorSets(m_device, &dsai, &set) != VK_SUCCESS) return false;
                                 for (uint32_t k = 0; k < nWrites; ++k) w[k].dstSet = set;
                                 vkUpdateDescriptorSets(m_device, nWrites, w, 0, nullptr);
@@ -11069,10 +11221,24 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                             const uint32_t dynOffsets[HE::vkmat::kDynamicOffsetCount] = {
                                 static_cast<uint32_t>(slot), static_cast<uint32_t>(slot), static_cast<uint32_t>(slot) };
                             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                                    m_matPipelineLayout, 0, 1, &set,
+                                                    lsDraw ? m_lsMatPipelineLayout : m_matPipelineLayout, 0, 1, &set,
                                                     HE::vkmat::kDynamicOffsetCount, dynOffsets);
                             return true;
                         };
+                        if (lsDraw)
+                        {
+                            // The landscape's patches with the material's set and its landscape pipeline, then the scene state
+                            // back as after every material draw (see below).
+                            if (bindMatSlot(matPipe, viewProj, glm::mat4(1.0f)))
+                            {
+                                m_landscape->drawPatches(cmd, m_lsMatPipelineLayout, *lsDraw);
+                                lsDrawn = true;
+                            }
+                            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, activeMatScenePipe);
+                            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_scenePipelineLayout, 0, 1,
+                                                    &m_frameUBO[m_currentFrame].set, 1, &m_sceneMatOffset);
+                            return;
+                        }
                         auto drawMatInstance = [&](const glm::mat4& model) {
                             if (!bindMatSlot(matPipe, viewProj * model, model)) return;
                             vkCmdDrawIndexed(cmd, range.count, 1, range.start, 0, 0);
@@ -11118,6 +11284,7 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                     }
                 }
             }
+            if (lsDraw) return;   // no material pipeline for the landscape: the caller draws its fixed blend, never a mesh
             // Base color: an explicit MaterialComponent override (dc.materialAssetId), once its
             // material is loaded, fully replaces the mesh's baked texture — even to flat.
             VkDescriptorSet albedoSet = m.albedoSet;             // baked (A1); null → flat
@@ -11484,7 +11651,32 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
         // was made for). Binds its own pipeline and set 0, so the scene state is restored right after.
         if (m_landscapeFrameLive)
         {
-            landscapeDraw(cmd, width, height, hdr);
+            // With its material when the frame names one and the variant builds (lit, shadowed and fogged by the material's own
+            // fragment, through drawDCVk above); else the landscape's fixed blend.
+            if (m_landscapeFrame.materialId != HE::UUID{} && m_lsMatPipelineLayout != VK_NULL_HANDLE && m_matReady && m_contentManager)
+            {
+                // The texture group's material is named by no entity: loaded from its path once if nothing has.
+                if (!m_landscapeFrame.materialPath.empty() && m_landscapeFrame.materialId != m_landscapeMaterialLoadTried
+                    && !m_contentManager->getMaterial(m_landscapeFrame.materialId))
+                {
+                    m_landscapeMaterialLoadTried = m_landscapeFrame.materialId;
+                    if (!m_contentManager->resolveMaterialRef(m_landscapeFrame.materialId, m_landscapeFrame.materialPath))
+                        m_contentManager->loadAsset(m_landscapeFrame.materialPath);
+                }
+                if (m_landscape->materialImages(m_currentFrame, m_landscapeFrame, m_landscapeViewProj, lsImages))
+                {
+                    DrawCall lsDC{};
+                    lsDC.materialAssetId = m_landscapeFrame.materialId;
+                    const bool gb = gbufferPass;
+                    gbufferPass = false;
+                    lsDraw = &m_landscapeFrame;
+                    lsDrawn = false;
+                    drawDCVk(lsDC);
+                    lsDraw = nullptr;
+                    gbufferPass = gb;
+                }
+            }
+            if (!lsDrawn) landscapeDraw(cmd, width, height, hdr);
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, activeMatScenePipe);
             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_scenePipelineLayout,
                                     0, 1, &m_frameUBO[m_currentFrame].set, 1, &m_sceneMatOffset);

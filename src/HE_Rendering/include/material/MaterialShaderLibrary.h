@@ -600,8 +600,11 @@ public:
     // weight pages, 55-57 coarse weight pages; on Metal fragment buffer 20 and textures 13 (the weightmap's, which this variant does
     // not have) and 25-30, none of them with a sampler slot.
     const Compiled& landscapeFragment(uint64_t sourceHash, const std::string& glsl, Backend backend, bool clustered);
-    static std::string landscapeVertexSource();
-    static std::string landscapeFragmentSource(const std::string& glsl);
+    // `patchAsPushConstant`: LsPatch as a push-constant block instead of the uniform block at 58 (the SPIR-V form: Vulkan pushes it).
+    static std::string landscapeVertexSource(bool patchAsPushConstant = false);
+    // `separateImages`: the landscape's images as textures without a sampler (the SPIR-V form; the vertex source's push-constant
+    // form has them too). A Vulkan set then holds them as SAMPLED_IMAGE descriptors, which do not count as samplers.
+    static std::string landscapeFragmentSource(const std::string& glsl, bool separateImages = false);
 
     // ── Volumetric fog kernels (Thema 225, docs/volumetric-fog-plan.md §10) ──────────────
     // GLSL-450 sources in src/material/FogVolumeShaderSource.h, cross-compiled like every

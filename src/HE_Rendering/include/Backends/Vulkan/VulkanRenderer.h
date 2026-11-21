@@ -506,6 +506,12 @@ private:
 	std::unordered_map<uint64_t, VkPipeline> m_materialPipelines; // key = hash ^ hdr-bit
 	VkDescriptorSetLayout m_matSetLayout      = VK_NULL_HANDLE;
 	VkPipelineLayout      m_matPipelineLayout = VK_NULL_HANDLE;
+	// The tile landscape drawn with a material: the material's set plus the landscape's rows 50-60, and a pipeline layout with
+	// the per-patch push constant (createMaterialResources). Null: the device's fragment stage cannot hold them.
+	VkDescriptorSetLayout m_lsMatSetLayout      = VK_NULL_HANDLE;
+	VkPipelineLayout      m_lsMatPipelineLayout = VK_NULL_HANDLE;
+	VkPipeline GetOrBuildLandscapeMaterialPipeline(uint64_t hash, const std::string& frag, bool hdr);
+	HE::UUID   m_landscapeMaterialLoadTried{};   // the texture group's material this renderer tried to load from its path
 	VkDescriptorPool      m_matPool[2]        = {};  // per frame; reset whole each frame
 	struct MatFrameBuf { VkBuffer buf = VK_NULL_HANDLE; VkDeviceMemory mem = VK_NULL_HANDLE; void* mapped = nullptr; };
 	MatFrameBuf m_matLightBuf[2];   // HeLighting (64 B, filled once per frame)

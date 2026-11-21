@@ -284,6 +284,10 @@ public:
         // The tile landscape is drawn with LandscapeRenderFrame::materialId (the material's fragment, weights from the tile atlas),
         // so the ground is lit, shadowed and fogged like every other surface. false: the fixed layer blend, whatever the frame names.
         bool landscapeMaterial = false;
+        // ... and the ground is in the backend's other geometry passes as well: it casts into the shadow maps, is in the GI
+        // pre-pass and the ray structure, in the SSAO and velocity passes, and in the G-buffer on a deferred frame. Without it
+        // the ground receives (shadows of meshes, fog, the lighting) but does not cast, occlude or report motion.
+        bool landscapePasses = false;
         // CreateRvtPool / EditorCameraOverride::rvtSlot work: the backend can hold the page pool of the Runtime
         // Virtual Textures and fill a slice of it from RenderSceneImage (Thema 333). False = the landscape keeps
         // running its material directly.
