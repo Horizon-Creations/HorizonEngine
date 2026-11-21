@@ -110,7 +110,7 @@ public:
     // and the flat one reads far better against the sky. Mirrors GL/Metal.
     bool  UnlitViewActive() const
     {
-        return m_viewMode == HE::ViewMode::Unlit || m_viewMode == HE::ViewMode::Wireframe || m_viewMode == HE::ViewMode::RvtMips;
+        return m_viewMode == HE::ViewMode::Unlit || m_viewMode == HE::ViewMode::Wireframe || m_viewMode == HE::ViewMode::RvtDebug;
     }
     bool  WireframeViewActive() const { return m_viewMode == HE::ViewMode::Wireframe; }
 

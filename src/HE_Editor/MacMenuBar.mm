@@ -362,7 +362,8 @@ void install()
 			for (int m = 0; m < HE::kViewModeCount; ++m)
 			{
 				const auto mode = static_cast<HE::ViewMode>(m);
-				if (mode == HE::ViewMode::GBufferBaseColor) [modes addItem:[NSMenuItem separatorItem]];
+				if (mode == HE::ViewMode::GBufferBaseColor || mode == HE::ViewMode::RvtDebug)
+					[modes addItem:[NSMenuItem separatorItem]];
 				heAddToggle(modes, [NSString stringWithUTF8String:HE::viewModeName(mode)],
 				            C::SetViewMode, true, m + 1);
 			}

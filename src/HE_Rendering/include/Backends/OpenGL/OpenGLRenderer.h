@@ -119,8 +119,11 @@ public:
 	// and the flat one reads far better against the sky. Mirrors Metal.
 	bool  UnlitViewActive() const
 	{
-		return m_viewMode == HE::ViewMode::Unlit || m_viewMode == HE::ViewMode::Wireframe || m_viewMode == HE::ViewMode::RvtMips;
+		// The RVT debug view is drawn unlit too: its page colours must reach the screen as they are.
+		return m_viewMode == HE::ViewMode::Unlit || m_viewMode == HE::ViewMode::Wireframe
+		    || m_viewMode == HE::ViewMode::RvtDebug;
 	}
+	bool  RvtDebugViewActive() const { return m_viewMode == HE::ViewMode::RvtDebug; }
 	bool  WireframeViewActive() const { return m_viewMode == HE::ViewMode::Wireframe; }
 
 	// Multi-window support

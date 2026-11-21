@@ -688,6 +688,8 @@ const char* nodeTypeName(HE::MatNodeType t)
 	case T::LandscapeFoliage:    return "LandscapeFoliage";
 	case T::LandscapeGroupPick:  return "LandscapeGroupPick";
 	case T::RvtSample:           return "RvtSample";
+	case T::RvtWrite:            return "RvtWrite";
+	case T::RvtRead:             return "RvtRead";
 	case T::ElementSize:         return "ElementSize";
 	case T::ElementUV:           return "ElementUV";
 	case T::RoundedRectSDF:      return "RoundedRectSDF";

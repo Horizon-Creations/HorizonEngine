@@ -8,6 +8,7 @@
 //   * the GI finds the albedo array of any group;
 //   * the committed Forest / Grassland / Desert assets are what the builder makes, and bake on every backend.
 #include "doctest.h"
+#include "RvtOffScope.h"
 
 #include <ContentManager/Assets.h>
 #include <ContentManager/ContentManager.h>
@@ -122,6 +123,7 @@ TEST_CASE("Texture groups: the table is consistent and Mountains is the legacy m
 
 TEST_CASE("Texture groups: Mountains is the default, Forest, Grassland and Desert keep the skeleton")
 {
+	HE_TEST::RvtOffScope rvtOff;   // the whole material in one shader
 	const HE::AutoLandscapeGraph legacy = HE::buildAutoLandscapeGraph();
 	const std::string legacyJson = HE::materialGraphToJson(legacy.graph);
 	CHECK(HE::materialGraphToJson(HE::buildAutoLandscapeGraph(HE::AutoLandscapeView::Lit, AutoLandscapeGroupId::Mountains).graph)
@@ -211,6 +213,7 @@ TEST_CASE("Texture groups: Mountains is the default, Forest, Grassland and Deser
 
 TEST_CASE("Procedural snow and sand: the look is an exposed parameter, packed into the slot budget")
 {
+	HE_TEST::RvtOffScope rvtOff;   // the whole material in one shader
 	for (int i = 0; i < HE::kAutoLandscapeGroupCount; ++i)
 	{
 		const HE::AutoLandscapeGroup& g = HE::kAutoLandscapeGroups[i];
@@ -280,6 +283,7 @@ TEST_CASE("Texture groups: the GI finds the albedo array of any group")
 
 TEST_CASE("The mix material: two groups' slices of fat arrays, the shares read from the weightmap's third page")
 {
+	HE_TEST::RvtOffScope rvtOff;   // the whole material in one shader
 	const HE::AutoLandscapeGraph a = HE::buildAutoLandscapeGraph(HE::AutoLandscapeView::Lit, AutoLandscapeGroupId::Mountains, /*mixed=*/true);
 	const HE::MatShaderGen gen = HE::generateFragment(a.graph, HE::weatherFunctionLoader());
 	REQUIRE(!gen.glsl.empty());
@@ -368,7 +372,8 @@ TEST_CASE("The shipped Forest, Grassland and Desert materials are exactly what t
 		CHECK(m->graphLayerNames == HE::matLandscapeLayerNames(g.paintLayerNames));
 		std::string have;
 		for (const std::string& pn : m->graphParamNames) have += pn + "; ";
-		CHECK_MESSAGE(m->graphParamNames.size() == static_cast<size_t>(HE::autoLandscapeParamCount(g)), have);
+		// + the Read node's two volume vectors (RVT on: the shipped asset keeps every page-side parameter too)
+		CHECK_MESSAGE(m->graphParamNames.size() == static_cast<size_t>(HE::autoLandscapeParamCount(g)) + 2, have);
 		REQUIRE(!m->customShaderFragGlsl.empty());
 
 		// The packer ships the fragment text stored in the file: it must be what the codegen makes today.

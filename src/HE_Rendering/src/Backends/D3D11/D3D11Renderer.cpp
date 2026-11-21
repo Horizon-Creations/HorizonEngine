@@ -8145,7 +8145,7 @@ void D3D11Renderer::DrawScene(int width, int height)
         // back untouched — graph materials, the deferred resolve (rl copies
         // frameMatLight) and the forward replay all read this. Mirrors GL/Metal.
         lit.viewMode[0] = UnlitViewActive() ? 1.0f : 0.0f;
-        lit.viewMode[1] = m_viewMode == HE::ViewMode::RvtMips ? 1.0f : 0.0f;   // heRvtMipView (RvtLookup.h)
+        lit.viewMode[1] = m_viewMode == HE::ViewMode::RvtDebug ? 1.0f : 0.0f;   // RVT debug view (RvtLookup.h)
         // Volumetric fog (v3.6, Thema 225 step 8): fogVol.x gates the opaque heApplyFog
         // (Apply owns it instead) and heApplyFogT (translucent graph materials read the
         // volume themselves — they sit behind the Apply pass). Valid exactly for the

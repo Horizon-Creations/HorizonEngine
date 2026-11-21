@@ -178,9 +178,12 @@ enum class AAMethod : int
 //   GBuffer*   — one G-buffer attachment straight to the screen. Deferred path
 //                only: the forward path has no G-buffer, so a backend that is
 //                forward this frame draws Lit instead (see resolveViewMode).
-//   RvtMips    — Unlit, and every surface drawn from the Runtime Virtual Texture
-//                coloured by the mip of the page it reads (RvtLookup.h,
-//                heRvtMipView); everything else stays plain Unlit.
+//   RvtDebug   — the Runtime Virtual Texture page map (RVT 2.0 step 5): the scene is
+//                drawn unlit and a landscape read from pages shows each page by its
+//                mip, with page borders and marks for stale / fallback / missing
+//                pages. Not a pass: the lookup in RvtLookup.h reads the same table
+//                and branches on heLight.viewMode.y. A landscape without RVT is just
+//                shown unlit.
 // Append-only: the values travel through the headless dump knobs.
 enum class ViewMode : int
 {
@@ -191,7 +194,7 @@ enum class ViewMode : int
     GBufferNormal         = 4,
     GBufferRoughSpecMetal = 5, // r = roughness, g = specular, b = metallic
     GBufferEmissive       = 6,
-    RvtMips               = 7,
+    RvtDebug              = 7,
 };
 constexpr int kViewModeCount = 8;
 
@@ -231,7 +234,7 @@ inline const char* viewModeName(ViewMode m)
     case ViewMode::GBufferNormal:         return "Normals";
     case ViewMode::GBufferRoughSpecMetal: return "Rough / Spec / Metal";
     case ViewMode::GBufferEmissive:       return "Emissive";
-    case ViewMode::RvtMips:               return "RVT Mip Levels";
+    case ViewMode::RvtDebug:              return "Virtual Texture";
     }
     return "Lit";
 }

@@ -680,6 +680,8 @@ static json profileToJson(const ExportProfile& p)
 	j["bakeFarLandscape"]      = p.bakeFarLandscape;
 	j["farLandscapeBudgetMB"]  = p.farLandscapeBudgetMB;
 	j["bakeCellHlod"]          = p.bakeCellHlod;
+	j["bakeRvtBase"]           = p.bakeRvtBase;
+	j["rvtBaseBudgetMB"]       = p.rvtBaseBudgetMB;
 	j["onlyReferenced"]        = p.onlyReferenced;
 	j["alwaysIncludePatterns"] = p.alwaysIncludePatterns;
 	return j;
@@ -721,6 +723,9 @@ static ExportProfile profileFromJson(const json& j)
 	p.bakeCellHlod          = jsonBool(j, "bakeCellHlod", true);
 	p.farLandscapeBudgetMB  = (j.contains("farLandscapeBudgetMB") && j["farLandscapeBudgetMB"].is_number_integer())
 	                              ? std::clamp(j["farLandscapeBudgetMB"].get<int>(), 16, 16384) : 512;
+	p.bakeRvtBase           = jsonBool(j, "bakeRvtBase", true);
+	p.rvtBaseBudgetMB       = (j.contains("rvtBaseBudgetMB") && j["rvtBaseBudgetMB"].is_number_integer())
+	                              ? std::clamp(j["rvtBaseBudgetMB"].get<int>(), 16, 16384) : 256;
 	p.onlyReferenced        = jsonBool(j, "onlyReferenced", true);
 	if (auto it = j.find("alwaysIncludePatterns"); it != j.end() && it->is_array())
 		for (const auto& e : *it)

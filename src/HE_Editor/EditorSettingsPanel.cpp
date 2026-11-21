@@ -346,6 +346,17 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const DrawOptions& o
 		EditorWidgets::checkbox("Occlusion Culling", &cfg.OcclusionCulling);
 		hint("Skip drawing objects hidden behind nearer opaque geometry (OpenGL, Metal).");
 	});
+	row("rvt", "Display", [&]{
+		const bool supported = ctx.renderer && ctx.renderer->GetCapabilities().supportsRvt;
+		ImGui::BeginDisabled(!supported);
+		EditorWidgets::checkbox("Runtime Virtual Texture", &cfg.RuntimeVirtualTextures);
+		ImGui::EndDisabled();
+		if (!supported && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+			ImGui::SetTooltip("This backend cannot hold a virtual texture (needs Capabilities::supportsRvt): "
+			                  "RVT Write nodes are skipped and RVT Read nodes compute directly.");
+		else if (supported)
+			hint("On: RVT Write paints pages, RVT Read reads them. Off: the graph computes directly.");
+	});
 	row("vsync", "Display", [&]{ if (EditorWidgets::checkbox("VSync", &ctx.vsync)) ApplyVSync(ctx); });
 	row("maxfps", "Display", [&]{
 		// VSync-off frame cap. 0 = unlimited (default — full FPS). A cap paces the loop so
@@ -2298,7 +2309,7 @@ constexpr const char* kInputRows[]          = { "pointerinput" };
 constexpr const char* kProjectDataRows[]    = { "cpucache", "cbrefresh", "autosave" };
 constexpr const char* kEditorRendererRows[] = { "backend", "vsync", "maxfps" };
 constexpr const char* kViewportQualityRows[] = {
-	"renderpath", "occlusion", "aa", "gpuparticles",
+	"renderpath", "occlusion", "rvt", "aa", "gpuparticles",
 	"bloom", "ssao", "dof", "motionblur",
 	"ssr", "gi", "girefl",
 };

@@ -312,6 +312,9 @@ public:
 	// Regenerate a BASE material's baked GLSL from its node graph (load-time codegen
 	// refresh — old assets pick up shader-library upgrades; param values kept by name).
 	void regenerateMaterialFromGraph(HE::UUID materialId);
+	// The RVT switch flipped (matSetRvtEnabled): regenerate every LOADED base material whose graph has an RVT Write / RVT Read node,
+	// and sync the instances of those, so the shader in memory is the one the new switch makes. Returns how many were regenerated.
+	size_t regenerateRvtMaterials();
 	// Sync every LOADED instance whose parentMaterialPath == parentRelPath (live
 	// master→variants propagation while editing).
 	void syncMaterialInstancesOf(const std::string& parentRelPath);

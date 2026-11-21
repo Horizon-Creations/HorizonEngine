@@ -610,14 +610,15 @@ void viewModePopup(AppContext& ctx, HE::ViewMode& viewMode)
 		{ VM::Lit,                   "Alt+4" },
 		{ VM::Unlit,                 "Alt+3" },
 		{ VM::Wireframe,             "Alt+2" },
-		{ VM::RvtMips,               nullptr },
 		{ VM::GBufferBaseColor,      nullptr },
 		{ VM::GBufferNormal,         nullptr },
 		{ VM::GBufferRoughSpecMetal, nullptr },
 		{ VM::GBufferEmissive,       nullptr },
+		{ VM::RvtDebug,              nullptr },
 	};
 	for (const Row& r : rows)
 	{
+		if (r.mode == VM::RvtDebug) ImGui::Separator();
 		if (r.mode == VM::GBufferBaseColor)
 		{
 			ImGui::Separator();

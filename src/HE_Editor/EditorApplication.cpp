@@ -115,6 +115,8 @@ static void onProjectWriteRefused(const char* what);   // ProjectWriteGate handl
 #include <HorizonScene/LandscapeHlodBaker.h>
 #include <HorizonScene/RvtProducer.h>
 #include <HorizonScene/RvtLandscape.h>
+#include <HorizonScene/RvtBaseBake.h>           // HE_DUMP_RVTBASE witness
+#include <MaterialGraph/RvtSplit.h>   // matSetRvtEnabled
 #include <HorizonScene/AnimationSystem.h>
 #include <HorizonScene/AnimationBlendSystem.h>
 #include <HorizonScene/AnimationStateMachineSystem.h>
@@ -1764,6 +1766,9 @@ void EditorApplication::OnInit()
 	m_editorConfig.GIReflBounces               = globalstate.getCustomConfigInt("GIReflBounces",              m_editorConfig.GIReflBounces);
 	m_editorConfig.RenderPath                  = globalstate.getCustomConfigInt("RenderPath",           m_editorConfig.RenderPath);
 	m_editorConfig.OcclusionCulling            = globalstate.getCustomConfigBool("OcclusionCulling",    m_editorConfig.OcclusionCulling);
+	m_editorConfig.RuntimeVirtualTextures      = globalstate.getCustomConfigBool("RuntimeVirtualTextures", m_editorConfig.RuntimeVirtualTextures);
+	// Before any material is generated: the capability of the backend corrects it on the first tick (the renderer is not up yet).
+	HE::matSetRvtEnabled(HE::landscape::RvtLandscape::wanted(m_editorConfig.RuntimeVirtualTextures, true));
 	m_editorConfig.SSREnabled                  = globalstate.getCustomConfigBool("SSREnabled",          m_editorConfig.SSREnabled);
 	m_editorConfig.SSRIntensity                = globalstate.getCustomConfigFloat("SSRIntensity",       m_editorConfig.SSRIntensity);
 	m_editorConfig.SSRQuality                  = globalstate.getCustomConfigInt("SSRQuality",           m_editorConfig.SSRQuality);
@@ -4130,14 +4135,22 @@ void EditorApplication::OnRender(float dt)
 			                        m_editorCamera.position(), gameDt,
 			                        (m_isPlaying && m_physicsWorld) ? m_physicsWorld.get() : nullptr,
 			                        gpuParticles);
-			// The virtual texture of the landscape, after the terrain update of the tick: the project's setting (Project
-			// Settings ▸ Virtual Texture), or HE_RVT=1 / 0 over it. Switched off, the landscapes go back to their own material.
+			// The virtual texture of the landscape, after the terrain update of the tick: the global switch (Preferences ▸
+			// Rendering ▸ Runtime Virtual Texture) on a backend that can hold one, or HE_RVT=1 / 0 over it. Switched off, the
+			// landscapes go back to their own material and the RVT nodes of every material are inlined (matSetRvtEnabled).
 			{
-				const HE::ProjectRvtSettings& rs = m_projectManager.currentProject().settings.rvt;
-				if (renderer() && HE::landscape::RvtLandscape::wanted(rs))
+				const bool rvtOn = HE::landscape::RvtLandscape::wanted(
+					m_editorConfig.RuntimeVirtualTextures, renderer() && renderer()->GetCapabilities().supportsRvt);
+				if (rvtOn != HE::matRvtEnabled())
+				{
+					HE::matSetRvtEnabled(rvtOn);
+					const size_t n = contentManager().regenerateRvtMaterials();
+					HE_LOG_INFO(Editor, "EditorApplication: Runtime Virtual Texture %s, %zu RVT material(s) regenerated", rvtOn ? "on" : "off", n);
+				}
+				if (renderer() && rvtOn)
 				{
 					if (!m_rvtLandscape) m_rvtLandscape = std::make_shared<HE::landscape::RvtLandscape>(contentManager(), *renderer());
-					m_rvtLandscape->setSettings(HE::landscape::RvtLandscape::settingsFromProject(rs));
+					m_rvtLandscape->setSettings(HE::landscape::RvtLandscape::settingsFromProject(m_projectManager.currentProject().settings.rvt));
 					// The near radius against the camera's field of view and the scene viewport's pixel height (the window's
 					// until the viewport has a size: taller, so a larger radius, the safe side).
 #ifdef HE_IMGUI_ENABLED
@@ -4149,6 +4162,8 @@ void EditorApplication::OnRender(float dt)
 					}
 #endif
 					HE_PROFILE_SCOPE_N("RvtLandscape");
+					// The viewport's "Virtual Texture" view mode: the tables carry the stale marks while it is on.
+					m_rvtLandscape->setDebugView(renderer()->GetViewMode() == HE::ViewMode::RvtDebug);
 					m_rvtLandscape->tick(*m_editorWorld, m_editorCamera.position());
 				}
 				else if (m_rvtLandscape)
@@ -11734,6 +11749,140 @@ void EditorApplication::dumpFrameHeadless()
 		}
 		r->DestroyRvtPool();
 	}
+	// HE_DUMP_RVTBASE=1 (RVT 2.0 step 6, HorizonScene/RvtBaseBake.h): the export's baked base, end to end on the live AUTOLAND
+	// landscape. Drives the landscape from its page graphs (the reference), bakes the base the way the export does
+	// (bakeRvtBaseWorld), loads the three textures as the pak mount would, and drives a second driver that must find them: it paints
+	// its pages from the pictures (counted: the page graphs are not built) and is compared with the reference and with the whole
+	// material. Then a ground edit and a change before the Write node must each end the baked base for good (the same landscape
+	// is drawn from the page graphs again and still matches the material).
+	if (const char* bv = std::getenv("HE_DUMP_RVTBASE"); bv && *bv && *bv != '0' && m_editorWorld && r && r->GetCapabilities().supportsRvt)
+	{
+		auto& wreg = m_editorWorld->registry();
+		entt::entity land = entt::null;
+		for (auto [e, tc] : wreg.view<TerrainComponent>().each())
+			if (!wreg.all_of<TerrainChunkComponent>(e)) { land = e; break; }
+		if (land == entt::null || !wreg.all_of<MaterialComponent>(land))
+			HE_LOG_WARN(Editor, "EditorApplication: HE_DUMP_RVTBASE: no landscape with a material");
+		else
+		{
+			if (m_editorWorld->entityId(land) == HE::UUID{})
+				m_editorWorld->setEntityId(land, HE::UUID{ 0x5256544241534500ull, 0x1ull });
+			const glm::vec3 centre = HE::worldPositionOf(*m_editorWorld, land);
+			const glm::vec3 camPos = centre + glm::vec3(0.0f, 110.0f, 0.0f);
+			constexpr uint32_t W = 1280, H = 720;
+			HE::landscape::RvtLandscape::Settings cfg;
+			cfg.nearRadiusM = wreg.get<TerrainComponent>(land).sizeX > 200.0f ? 48.0f : 160.0f;
+			const auto lookDown = [&]() {
+				EditorCameraOverride cam;
+				cam.active = true; cam.editorIcons = false; cam.fovDegrees = 60.0f; cam.nearPlane = 0.1f; cam.farPlane = 2000.0f;
+				cam.position = camPos;
+				cam.view = glm::lookAt(cam.position, cam.position + glm::vec3(0.0f, -1.0f, 0.0f), glm::vec3(0.0f, 0.0f, -1.0f));
+				return cam;
+			};
+			const auto diff = [&](const std::vector<uint8_t>& a, const std::vector<uint8_t>& b, double& mean, unsigned& mx) {
+				double sum = 0; mx = 0; size_t n = 0;
+				for (size_t i = 0; i < a.size() && i < b.size(); i += 4)
+				{
+					unsigned d = 0;
+					for (size_t c = 0; c < 3; ++c) d = std::max(d, static_cast<unsigned>(std::abs(int(a[i + c]) - int(b[i + c]))));
+					sum += d; mx = std::max(mx, d); ++n;
+				}
+				mean = n ? sum / double(n) : 0.0;
+			};
+			// One driver run: ticks until the landscape is drawn from pages, then captures the pages and the whole material.
+			struct Run { bool filled = false; uint32_t painted = 0, bakedAttaches = 0; bool baked = false; uint32_t materials = 0; std::vector<uint8_t> pages, direct; };
+			const auto drive = [&](HE::landscape::RvtLandscape& d, Run& out, int maxFrames) {
+				for (int i = 0; i < maxFrames && !d.active(); ++i)
+				{
+					TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
+					const auto st = d.tick(*m_editorWorld, camPos);
+					out.painted += st.pagesPainted; out.bakedAttaches += st.bakedAttaches;
+				}
+				out.filled = d.active();
+				out.baked = d.bakedBase(land);
+				out.materials = d.materialsRegistered();
+				const auto cap = [&](std::vector<uint8_t>& img) { return r->RenderSceneImage(lookDown(), W, H, img) && img.size() == size_t(W) * H * 4; };
+				cap(out.pages);
+				d.pauseSwap(true); cap(out.direct); d.pauseSwap(false);
+			};
+			Run live;
+			{
+				HE::landscape::RvtLandscape drv(contentManager(), *r);
+				drv.setSettings(cfg);
+				drive(drv, live, 300);
+				double m = 0; unsigned x = 0; diff(live.direct, live.pages, m, x);
+				HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTBASE reference (page graphs): filled %d, baked %d, %u pages painted, %u view materials; pages vs whole material mean %.2f /255, max %u",
+				            live.filled, live.baked, live.painted, live.materials, m, x);
+				writeBMP(m_dumpPath + ".rvt_base_live.bmp", live.pages, W, H);
+			}   // ~RvtLandscape gives the landscape back
+			std::vector<HE::landscape::HlodAssetBlob> blobs;
+			std::vector<HE::UUID> seen;
+			HE::landscape::RvtBaseOptions bo;
+			bo.budgetBytes = 0;
+			if (const char* mt = std::getenv("HE_DUMP_RVTBASE_MAXTEXELS"); mt && *mt) bo.maxTexels = std::clamp(std::atoi(mt), 128, 8192);
+			const HE::landscape::RvtBaseStats bs = HE::landscape::bakeRvtBaseWorld(
+				*m_editorWorld, m_editorWorld.get(), contentManager(), *r, bo, blobs, seen,
+				[&](const std::string& s) { HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTBASE export: %s", s.c_str()); });
+			size_t blobBytes = 0; for (const auto& b : blobs) blobBytes += b.bytes.size();
+			HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTBASE bake: %u landscape(s), %zu blob(s), %.1f MB raw, %.0f ms", bs.landscapes, blobs.size(), double(blobBytes) / (1024.0 * 1024.0), bs.ms);
+			const size_t loaded = HE::landscape::loadHlodAssets(contentManager(), blobs);
+			HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTBASE pak mount: %zu texture(s) resident", loaded);
+			if (loaded == 3)
+			{
+				Run baked;
+				HE::landscape::RvtLandscape drv(contentManager(), *r);
+				drv.setSettings(cfg);
+				drive(drv, baked, 300);
+				double mLive = 0, mDirect = 0; unsigned xLive = 0, xDirect = 0;
+				diff(live.pages, baked.pages, mLive, xLive); diff(baked.direct, baked.pages, mDirect, xDirect);
+				// (the material counters are equal on purpose: three baked texture-sampling views stand where the three page graphs were; the
+				// proof that the page graphs are not built is the driver's "baked base" attach line and bakedBase())
+				HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTBASE baked: filled %d, from the baked base %d (%u attach(es)), %u pages painted, %u view materials (reference %u); vs reference pages mean %.2f /255 max %u; vs whole material mean %.2f max %u",
+				            baked.filled, baked.baked, baked.bakedAttaches, baked.painted, baked.materials, live.materials,
+				            mLive, xLive, mDirect, xDirect);
+				writeBMP(m_dumpPath + ".rvt_base_baked.bmp", baked.pages, W, H);
+
+				// A ground edit ends it for good: the journal says the pages' ground changed, the landscape starts over from the graphs.
+				TerrainComponent& tc = wreg.get<TerrainComponent>(land);
+				tc.rvtJournal.noteRect(0.0f, 0.0f, 10.0f, 10.0f, TerrainComponent::RvtJournal::kHeight);
+				HE::landscape::RvtLandscape::FrameStats st;
+				bool dropped = false;
+				for (int i = 0; i < 300 && !dropped; ++i)
+				{
+					TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
+					st = drv.tick(*m_editorWorld, camPos);
+					dropped = st.bakedDropped > 0;
+				}
+				Run after;
+				drive(drv, after, 300);
+				double mA = 0; unsigned xA = 0; diff(after.direct, after.pages, mA, xA);
+				HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTBASE ground edit: baked base dropped %d, baked now %d, filled again %d; pages vs whole material mean %.2f max %u (the page graphs are drawn again)",
+				            dropped, drv.bakedBase(land), after.filled, mA, xA);
+				// A driver that was not running when the ground changed has no memory of an edit; the key is what keeps it honest: with
+				// the ground really different (one vertex raised) the pictures are not found, with the ground as exported they are.
+				drv.detach();
+				{
+					Run same;
+					HE::landscape::RvtLandscape drv2(contentManager(), *r);
+					drv2.setSettings(cfg);
+					drive(drv2, same, 300);
+					HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTBASE fresh driver, ground as exported: baked %d (expected 1)", same.baked);
+				}
+				TerrainSculpt::ensureHeights(tc);
+				tc.sculptHeights[size_t(tc.resolution) * (tc.resolution / 2) + tc.resolution / 2] += 3.0f;
+				TerrainSculpt::markRegionDirty(tc, -2.0f, -2.0f, 2.0f, 2.0f);
+				TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
+				{
+					Run edited;
+					HE::landscape::RvtLandscape drv3(contentManager(), *r);
+					drv3.setSettings(cfg);
+					drive(drv3, edited, 300);
+					double mE = 0; unsigned xE = 0; diff(edited.direct, edited.pages, mE, xE);
+					HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTBASE fresh driver, one vertex raised: baked %d (expected 0); pages vs whole material mean %.2f max %u", edited.baked, mE, xE);
+				}
+			}
+		}
+	}
 	// HE_DUMP_RVTDRIVER=1 (Thema 333 step 4): the per-frame driver on the live AUTOLAND landscape, the way the application
 	// runs it (terrain update, then RvtLandscape::tick). Checks, in order: the first fill; an idle frame paints nothing and
 	// uploads nothing; a sculpt stroke marks exactly the resident pages its bordered rect touches and repaints exactly those;
@@ -11837,7 +11986,13 @@ void EditorApplication::dumpFrameHeadless()
 				const char* nf = std::getenv("HE_DUMP_RVTDRIVER_FRAMES");
 				if (!nf || !*nf) return;
 				const int n = std::clamp(std::atoi(nf), 1, 5000);
-				double worst = 0.0, sum = 0.0;
+					// HE_DUMP_RVTDRIVER_DIRECT=1: the frames draw the landscape from its whole material (the RVT-off shader) instead of the
+					// pages, so one run per setting gives the cost of the live part against the whole material (RVT 2.0 step 4).
+					const char* dd = std::getenv("HE_DUMP_RVTDRIVER_DIRECT");
+					const bool direct = dd && *dd && *dd != '0';
+					if (direct) drv.pauseSwap(true);
+					struct Resume { HE::landscape::RvtLandscape& d; bool on; ~Resume() { if (on) d.pauseSwap(false); } } resume{ drv, direct };
+				double worst = 0.0, sum = 0.0, gpuSum = 0.0; int gpuN = 0;
 				for (int i = 0; i < n; ++i)
 				{
 					const auto f0 = std::chrono::steady_clock::now();
@@ -11845,9 +12000,11 @@ void EditorApplication::dumpFrameHeadless()
 					r->Render();
 					const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - f0).count();
 					worst = std::max(worst, ms); sum += ms;
+						// the GPU time of the previous frame (published when its command buffer completed, long before this one: 50 ms sleep)
+						if (const double g = r->GetFrameGpuStats().gpuFrameMs; g > 0.0) { gpuSum += g; ++gpuN; }
 					std::this_thread::sleep_for(std::chrono::milliseconds(50));
 				}
-				HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTDRIVER normal frames (%s): %d frames, mean %.2f ms, worst %.2f ms (driver tick + Render)", when, n, sum / n, worst);
+				HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTDRIVER normal frames (%s): %d frames, mean %.2f ms, worst %.2f ms (driver tick + Render), GPU frame mean %.3f ms over %d frames", when, n, sum / n, worst, gpuN ? gpuSum / gpuN : -1.0, gpuN);
 			};
 			// A) the first fill
 			HE::landscape::RvtLandscape::FrameStats st;
@@ -11919,6 +12076,49 @@ void EditorApplication::dumpFrameHeadless()
 				writeBMP(m_dumpPath + ".rvt_drv_sculpt_after.bmp", after, W, H);
 			}
 
+			// C2) the viewport's Virtual Texture view mode (RVT 2.0 step 5): the page map of the landscape, then the same after a
+			// sculpt stroke with a one-page budget, so the stale pages stay stale for a few frames and show their mark.
+			{
+				for (int i = 0; i < 40 && drv.manager()->stats().dirty > 0; ++i) sceneTick();
+				drv.setDebugView(true);
+				r->SetViewMode(HE::ViewMode::RvtDebug);
+				sceneTick();                                                                 // the table again, with the marks column
+				std::vector<uint8_t> dbgClean, dbgStale, lit;
+				bool ok2 = capture(dbgClean);
+				auto di = drv.debugInfo();
+				HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTDRIVER debug view: clean state: %u resident, %u stale (grid %d x %d)", di.resident, di.stale, di.gridSide, di.gridSide);
+				HE::landscape::RvtLandscape::Settings slow = cfg; slow.maxPagesPerFrame = 1; drv.setSettings(slow);
+				TerrainComponent& tc = wreg.get<TerrainComponent>(land);
+				TerrainSculpt::ensureHeights(tc);
+				const float cx = -30.0f, cz = 25.0f, rad = 14.0f;
+				const float step = tc.sizeX / float(tc.resolution - 1);
+				for (uint32_t zi = 0; zi < tc.resolution; ++zi)
+					for (uint32_t xi = 0; xi < tc.resolution; ++xi)
+					{
+						const float x = -tc.sizeX * 0.5f + float(xi) * step, z = -tc.sizeZ * 0.5f + float(zi) * step;
+						const float d = std::sqrt((x - cx) * (x - cx) + (z - cz) * (z - cz)) / rad;
+						if (d < 1.0f) tc.sculptHeights[size_t(zi) * tc.resolution + xi] += 4.0f * 0.5f * (1.0f + std::cos(d * 3.14159265f));
+					}
+				TerrainSculpt::markRegionDirty(tc, cx - rad - step, cz - rad - step, cx + rad + step, cz + rad + step);
+				TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
+				drv.tick(*m_editorWorld, camPos);                                            // marks the pages, paints one
+				ok2 = ok2 && capture(dbgStale);
+				di = drv.debugInfo();
+				unsigned grid2 = 0; for (uint8_t c : di.grid) grid2 += c == 2 ? 1u : 0u;
+				HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTDRIVER debug view: after a stroke (1 page per frame): %u stale pages in the manager, %u stale cells in the mip-0 grid", di.stale, grid2);
+				double mDbg = 0; unsigned xDbg = 0;
+				if (ok2) diffStats(dbgClean, dbgStale, mDbg, xDbg);
+				HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTDRIVER debug view: clean vs stale picture mean %.2f /255 (max %u), inside the stroke %.2f  [stale marks change the picture]",
+				            mDbg, xDbg, ok2 ? regionMean(dbgClean, dbgStale, cx, cz, rad) : 0.0);
+				if (ok2) { writeBMP(m_dumpPath + ".rvt_drv_debug_clean.bmp", dbgClean, W, H); writeBMP(m_dumpPath + ".rvt_drv_debug_stale.bmp", dbgStale, W, H); }
+				// the debug view off again: the same pages, no marks, the picture is the normal one
+				for (int i = 0; i < 60 && drv.manager()->stats().dirty > 0; ++i) sceneTick();
+				drv.setSettings(cfg);
+				drv.setDebugView(false);
+				r->SetViewMode(HE::ViewMode::Lit);
+				sceneTick();
+			}
+
 			// D) a paint stroke on layer 2, 10 m radius
 			{
 				TerrainComponent& tc = wreg.get<TerrainComponent>(land);
@@ -11974,18 +12174,122 @@ void EditorApplication::dumpFrameHeadless()
 					contentManager().syncMaterialInstance(directMat);
 					HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTDRIVER material: snow line %.1f -> %.1f, after sync %.1f (slot %zu of %zu floats, parent '%s')", before, before + 15.0f, ma->shaderParamData[snowSlot], snowSlot, ma->shaderParamData.size(), ma->parentMaterialPath.c_str());
 					r->InvalidateMaterial(directMat);
-					bool rescanned = false; uint32_t painted = 0; int refill = 0;
+					bool rescanned = false; uint32_t painted = 0, liveOnly = 0, rebuilds = 0, staleF = 0, staleL[3] = { 0, 0, 0 }; int refill = 0;
 					for (; refill < 300; ++refill)
 					{
 						st = sceneTick(); rescanned = rescanned || st.rescanned; painted += st.pagesPainted;
+							liveOnly += st.liveOnlyChanges; rebuilds += st.pageRebuilds; staleF += st.pagesStale;
+							for (int k = 0; k < 3; ++k) staleL[k] += st.layersStale[k];
 						if (refill > 2 && drv.active() && drv.manager() && drv.manager()->stats().wantedMissing == 0 && drv.manager()->stats().dirty == 0) break;
 					}
 					std::vector<uint8_t> a, b;
 					bool okF = captureDirect(a) && capture(b);
 					double mF = 0; unsigned xF = 0;
 					if (okF) diffStats(a, b, mF, xF);
-					HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTDRIVER material parameter change: re-attached %s, %u pages painted over %d frames, pages vs own material mean %.2f (max %u)",
-					            rescanned ? "yes" : "NO", painted, refill, mF, xF);
+					HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTDRIVER material parameter change (snow line, after the Read; expected: no re-attach, 0 rebuilds, 0 stale, 0 painted, 1+ live-only): re-attached %s, %u page rebuild(s), %u stale (layers colour/normal/AO+rough: %u/%u/%u), %u painted over %d frames, %u live-only change(s), pages vs own material mean %.2f (max %u)",
+					            rescanned ? "yes" : "NO", rebuilds, staleF, staleL[0], staleL[1], staleL[2], painted, refill, liveOnly, mF, xF);
+				}
+				// ... and the rock slope is BEFORE the Write node: the page materials are rebuilt in place (no re-attach) and the
+				// resident pages repainted.
+				{
+					MaterialAsset* ma2 = contentManager().getMaterialMutable(directMat);
+					size_t rockSlot = ~size_t(0);
+					if (ma2)
+						for (size_t i = 0; i < ma2->graphParamNames.size(); ++i)
+							if (ma2->graphParamNames[i] == HE::kAutoLandscapeParamRockSlope) rockSlot = i * 4;
+					if (ma2 && rockSlot < ma2->shaderParamData.size())
+					{
+						if (std::find(ma2->instanceOverriddenParams.begin(), ma2->instanceOverriddenParams.end(), HE::kAutoLandscapeParamRockSlope) == ma2->instanceOverriddenParams.end())
+							ma2->instanceOverriddenParams.push_back(HE::kAutoLandscapeParamRockSlope);
+						ma2->shaderParamData[rockSlot] += 0.08f;
+						contentManager().syncMaterialInstance(directMat);
+						r->InvalidateMaterial(directMat);
+						bool rescanned = false; uint32_t painted = 0, liveOnly = 0, rebuilds = 0, staleF = 0, staleL[3] = { 0, 0, 0 }; int refill = 0;
+						for (; refill < 300; ++refill)
+						{
+							st = sceneTick(); rescanned = rescanned || st.rescanned; painted += st.pagesPainted;
+							liveOnly += st.liveOnlyChanges; rebuilds += st.pageRebuilds; staleF += st.pagesStale;
+							for (int k = 0; k < 3; ++k) staleL[k] += st.layersStale[k];
+							if (refill > 2 && drv.active() && drv.manager() && drv.manager()->stats().wantedMissing == 0 && drv.manager()->stats().dirty == 0) break;
+						}
+						std::vector<uint8_t> a, b;
+						const bool okF = captureDirect(a) && capture(b);
+						double mF = 0; unsigned xF = 0;
+						if (okF) diffStats(a, b, mF, xF);
+						HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTDRIVER material parameter change (rock slope, before the Write; expected: no re-attach, 1 rebuild, only the layers whose Write pins read it stale and painted): re-attached %s, %u page rebuild(s), %u stale (layers colour/normal/AO+rough: %u/%u/%u), %u painted over %d frames, %u live-only change(s), pages vs own material mean %.2f (max %u)",
+						            rescanned ? "yes" : "NO", rebuilds, staleF, staleL[0], staleL[1], staleL[2], painted, refill, liveOnly, mF, xF);
+					}
+				}
+				// G) per-layer stale flags (RVT 2.0 step 8): every shipped Auto Landscape parameter feeds the layer blend, which all three
+				// layers read, so none of them can show a single layer. A witness parameter can: a "Witness Rough" float is multiplied into
+				// the graph in front of the Write node's Roughness pin only. Editing the graph starts the segment over (a graph edit);
+				// moving the parameter afterwards must mark the AO/roughness layer of the resident pages and no other layer.
+				{
+					const MaterialAsset* inst = contentManager().getMaterial(directMat);
+					const HE::UUID parentId = inst ? contentManager().loadAsset(inst->parentMaterialPath) : HE::UUID{};
+					MaterialAsset* parent = parentId != HE::UUID{} ? contentManager().getMaterialMutable(parentId) : nullptr;
+					HE::MaterialGraph g;
+					bool edited = false;
+					if (parent && materialGraphFromJson(parent->nodeGraphJson, g))
+					{
+						int writeId = 0, srcNode = 0, srcPin = 0;
+						for (const HE::MatGraphNode& n : g.nodes) if (n.type == HE::MatNodeType::RvtWrite) writeId = n.id;
+						for (const HE::MatGraphLink& l : g.links)
+							if (l.dstNode == writeId && l.dstPin == HE::kRvtWriteRoughnessPin) { srcNode = l.srcNode; srcPin = l.srcPin; }
+						if (writeId != 0 && srcNode != 0)
+						{
+							const int pf = g.addNode(HE::MatNodeType::ParamFloat);
+							g.findNode(pf)->s = "Witness Rough";
+							g.findNode(pf)->p[0] = 1.0f;
+							const int mul = g.addNode(HE::MatNodeType::Multiply);
+							g.connect(srcNode, srcPin, mul, 0);
+							g.connect(pf, 0, mul, 1);
+							g.connect(mul, 0, writeId, HE::kRvtWriteRoughnessPin);
+							parent->nodeGraphJson = materialGraphToJson(g);
+							contentManager().regenerateMaterialFromGraph(parentId);
+							contentManager().syncMaterialInstance(directMat);
+							r->InvalidateMaterial(parentId);
+							r->InvalidateMaterial(directMat);
+							edited = true;
+						}
+					}
+					if (!edited) HE_LOG_WARN(Editor, "EditorApplication: HE_DUMP_RVTDRIVER layers: could not add the witness parameter");
+					else
+					{
+						bool rescanned = false; int refill = 0;
+						for (; refill < 300; ++refill)
+						{
+							st = sceneTick(); rescanned = rescanned || st.rescanned;
+							if (refill > 2 && drv.active() && drv.manager() && drv.manager()->stats().wantedMissing == 0 && drv.manager()->stats().dirty == 0) break;
+						}
+						MaterialAsset* ma3 = contentManager().getMaterialMutable(directMat);
+						size_t slot = ~size_t(0);
+						if (ma3)
+							for (size_t i = 0; i < ma3->graphParamNames.size(); ++i)
+								if (ma3->graphParamNames[i] == "Witness Rough") slot = i * 4;
+						if (ma3 && slot < ma3->shaderParamData.size())
+						{
+							if (std::find(ma3->instanceOverriddenParams.begin(), ma3->instanceOverriddenParams.end(), "Witness Rough") == ma3->instanceOverriddenParams.end())
+								ma3->instanceOverriddenParams.push_back("Witness Rough");
+							ma3->shaderParamData[slot] = 0.35f;
+							contentManager().syncMaterialInstance(directMat);
+							r->InvalidateMaterial(directMat);
+							const HE::rvt::Stats before = drv.manager()->stats();
+							bool reattached = false; uint32_t painted = 0, rebuilds = 0, staleF = 0, staleL[3] = { 0, 0, 0 }, maxDirty[3] = { 0, 0, 0 };
+							int frames = 0;
+							for (; frames < 300; ++frames)
+							{
+								st = sceneTick(); reattached = reattached || st.rescanned; painted += st.pagesPainted;
+								rebuilds += st.pageRebuilds; staleF += st.pagesStale;
+								for (int k = 0; k < 3; ++k) { staleL[k] += st.layersStale[k]; maxDirty[k] = std::max(maxDirty[k], drv.manager()->stats().dirtyLayer[k]); }
+								if (frames > 2 && drv.active() && drv.manager() && drv.manager()->stats().wantedMissing == 0 && drv.manager()->stats().dirty == 0) break;
+							}
+							HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTDRIVER layers (Witness Rough, only in front of the Roughness pin; expected: no re-attach, 1 rebuild, stale in the AO+rough layer only, colour/normal 0): re-attached %s, %u page rebuild(s), %u page(s) marked stale, per layer colour/normal/AO+rough marked %u/%u/%u, stale at the start %u/%u/%u and at most at once %u/%u/%u (of %u resident), %u painted over %d frames, 0 still dirty %s",
+							            reattached ? "yes" : "NO", rebuilds, staleF, staleL[0], staleL[1], staleL[2], before.dirtyLayer[0], before.dirtyLayer[1], before.dirtyLayer[2], maxDirty[0], maxDirty[1], maxDirty[2],
+							            before.resident, painted, frames, drv.manager()->stats().dirty == 0 ? "yes" : "NO");
+						}
+						else HE_LOG_WARN(Editor, "EditorApplication: HE_DUMP_RVTDRIVER layers: the witness parameter has no slot (re-attached %s)", rescanned ? "yes" : "no");
+					}
 				}
 			}
 			// HE_DUMP_RVTDRIVER_MIRRORSHOT=<prefix> (with HE_DUMP_AUTOLANDMIRROR=1 and GI reflections on): the mirrors of the
@@ -12009,6 +12313,7 @@ void EditorApplication::dumpFrameHeadless()
 				const bool okPages = r->RenderSceneImage(mc, W, H, pages);
 				if (okOwn)   writeBMP(std::string(ms) + ".own.bmp", own, W, H);
 				if (okPages) writeBMP(std::string(ms) + ".rvt.bmp", pages, W, H);
+				// (With HE_GI_RVT_MAP=1 the mirrors of .rvt.bmp show the page map instead: the mip each reflection reads.)
 				HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTDRIVER mirror shot: own %s, pages %s (%s.*.bmp)", okOwn ? "ok" : "FAILED",
 				            okPages ? "ok" : "FAILED", ms);
 			}
@@ -17338,6 +17643,7 @@ void EditorApplication::writeEditorConfig()
 	globalstate.setCustomConfigEntry("GIReflBounces",             m_editorConfig.GIReflBounces);
 	globalstate.setCustomConfigEntry("RenderPath",                m_editorConfig.RenderPath);
 	globalstate.setCustomConfigEntry("OcclusionCulling",          m_editorConfig.OcclusionCulling);
+	globalstate.setCustomConfigEntry("RuntimeVirtualTextures",    m_editorConfig.RuntimeVirtualTextures);
 	globalstate.setCustomConfigEntry("SSREnabled",                m_editorConfig.SSREnabled);
 	globalstate.setCustomConfigEntry("SSRIntensity",              m_editorConfig.SSRIntensity);
 	globalstate.setCustomConfigEntry("SSRQuality",                m_editorConfig.SSRQuality);

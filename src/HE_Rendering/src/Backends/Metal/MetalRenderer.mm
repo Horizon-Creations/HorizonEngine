@@ -2879,6 +2879,7 @@ struct GIReflParams {
 	float4 gridCounts;      // xyz = probes per axis, w = probesPerRow
 	float4 extra;           // x = glossy cone jitter on (quality 2), y = mesh data valid (true hit normals), z = SW instance count, w = max bounces (1-4)
 	float4 land;            // x = landscape count (painted-terrain table), y = rays per pixel (quality tier), z = skyEnv is the baked sky cube (primary misses read it)
+	float4 rvt;             // x = radians per screen pixel, y = feedback phase (frame & 63), z = HE_GI_RVT_MAP (page-map colours), w = feedback on
 };
 
 // P4 (HW only): tier-2 argument buffer of per-unique-BLAS mesh pointers —
@@ -2935,8 +2936,22 @@ static float3 giAutoLandAlbedo(const device GILand& L, float3 pos, float3 n)
 // A landscape drawn from the Runtime Virtual Texture: the hit's colour from the pages (the real ground, textures and all)
 // instead of the means. RvtLookup.h's page math, nearest page at the mip whose texel matches `footprint` (metres the
 // reflected pixel covers there); the table already points a missing page at its nearest coarser one.
+// rvtP = GIReflParams::rvt (y = feedback phase, z = HE_GI_RVT_MAP, w = feedback on). A feedback lane reports the page it
+// wants into the frame's feedback table, like a rasterized pixel (RvtLookup.h), so ground seen only in a mirror gets its
+// fine pages too.
+// How far one pixel's footprint stretches in world XZ where the ray meets the surface, the rasterizer's largest XZ
+// derivative: 1/cos of the incidence along the in-surface ray direction, times that direction's XZ share (a cliff hit
+// from above stretches upwards, not across the ground), never below the unstretched side.
+static float giRvtStretch(float3 rd, float3 n)
+{
+	const float  c  = max(abs(dot(rd, n)), 0.1);
+	const float3 t  = rd - n * dot(rd, n);
+	const float  lt = length(t);
+	return max((lt > 1e-4 ? length(t.xz) / lt : 1.0) / c, 1.0);
+}
 static bool giRvtAlbedo(const device GILand& L, texture2d<uint> table, texture2d_array<float> hot,
-                        texture2d_array<float> cold, float3 hitPos, float footprint, thread float3& albedoOut)
+                        texture2d_array<float> cold, float3 hitPos, float footprint, thread float3& albedoOut,
+                        float4 rvtP, device uint* rvtFb, bool fbLane)
 {
 	if (L.rvtB.w < 0.5) return false;
 	const float2 uv = (hitPos.xz - L.rvtA.xy) / max(L.rvtA.z, 1e-3);
@@ -2946,10 +2961,26 @@ static bool giRvtAlbedo(const device GILand& L, texture2d<uint> table, texture2d
 	const int mip = clamp(int(floor(log2(max(footprint / max(L.rvtA.w, 1e-4), 1.0)))), 0, mipCount - 1);
 	const int pps = max(pps0 >> mip, 1);
 	const uint2 pg = uint2(clamp(int2(uv * float(pps)), int2(0), int2(pps - 1)));
+	if (fbLane && rvtP.w > 0.5)
+	{
+		const uint key = (uint(L.rvtB.y / 256.0) << 27) | (uint(mip) << 22) | (pg.x << 11) | pg.y;
+		rvtFb[((key ^ (uint(rvtP.y) * 40503u)) * 2654435761u) >> 20] = key;
+	}
 	const uint e = table.read(pg, uint(mip)).r;
-	if (e == 0xFFFFFFFFu) return false;
+	if (e == 0xFFFFFFFFu) { if (rvtP.z > 0.5) { albedoOut = float3(0.0); return true; } return false; }
 	const uint slot = e & 0x7FFFFFu;
-	const int  ppsE = max(pps0 >> int(e >> 24), 1);
+	const int  eff  = int((e >> 24) & 0x3Fu);   // bit 30: the debug view's stale mark
+	const int  ppsE = max(pps0 >> eff, 1);
+	if (rvtP.z > 0.5)
+	{
+		// The page map in the mirror (RvtLookup.h's colours): hue = the mip shown, dark stripes = a coarser page stands in.
+		const float hue = fract(0.33 + float(eff) * 0.13);
+		float3 dc = saturate(abs(fract(hue + float3(0.0, 2.0 / 3.0, 1.0 / 3.0)) * 6.0 - 3.0) - 1.0);
+		const float pageM = max(L.rvtA.z, 1e-3) / float(ppsE);
+		if (eff > mip && fmod(floor((hitPos.x + hitPos.z) / max(pageM * 0.0625, 1e-3)), 2.0) < 1.0) dc *= 0.35;
+		albedoOut = dc;
+		return true;
+	}
 	const float2 g  = uv * float(ppsE);
 	const float ps = L.rvtB.x, bd = fmod(L.rvtB.y, 256.0);
 	const float2 tuv = (bd + (g - floor(g)) * ps) / (ps + 2.0 * bd);
@@ -2963,11 +2994,12 @@ static bool giLandscapeAlbedo(const device GILand* lands, int li, int landCount,
                               array<texture2d<float>, 4> weightTex,
                               float3 hitPos, float3 hitN, thread float3& albedoOut,
                               array<texture2d<uint>, 4> rvtTables, texture2d_array<float> rvtHot,
-                              texture2d_array<float> rvtCold, float footprint)
+                              texture2d_array<float> rvtCold, float footprint,
+                              float4 rvtP, device uint* rvtFb, bool fbLane)
 {
 	if (li < 0 || li >= landCount || li >= 4) return false;
 	const device GILand& L = lands[li];
-	if (giRvtAlbedo(L, rvtTables[li], rvtHot, rvtCold, hitPos, footprint, albedoOut)) return true;
+	if (giRvtAlbedo(L, rvtTables[li], rvtHot, rvtCold, hitPos, footprint, albedoOut, rvtP, rvtFb, fbLane)) return true;
 	if (L.cfg.w < -0.5) { albedoOut = giAutoLandAlbedo(L, hitPos, hitN); return true; }
 	const int layers = int(L.cfg.w);
 	if (layers <= 0) return false;
@@ -3101,7 +3133,8 @@ kernel void giReflRay(uint2 gid [[thread_position_in_grid]],
                       array<texture2d<float>, 4> landWeights      [[texture(9)]],
                       array<texture2d<uint>, 4>  rvtTables        [[texture(13)]],
                       texture2d_array<float>     rvtHot           [[texture(17)]],
-                      texture2d_array<float>     rvtCold          [[texture(18)]])
+                      texture2d_array<float>     rvtCold          [[texture(18)]],
+                      device uint*               rvtFb            [[buffer(7)]])
 {
 	if (float(gid.x) >= P.texSize.x || float(gid.y) >= P.texSize.y) return;
 	// Nearest sampling: interpolated oct-encoded normals / depths at geometry
@@ -3233,6 +3266,7 @@ kernel void giReflRay(uint2 gid [[thread_position_in_grid]],
 					if (dot(hitN, rd) > 0.0) hitN = -hitN; // face the incoming ray (two-sided)
 				}
 			}
+			bool rvtMapHit = false;
 			// Landscape hit: replace the flat per-instance tint with the paint at
 			// THIS point, or a red ridge on a green hillside mirrors as one
 			// averaged colour (auto material: its slope/height masks — the reason
@@ -3240,12 +3274,21 @@ kernel void giReflRay(uint2 gid [[thread_position_in_grid]],
 			// there is a guess). Non-landscape hits leave `albedo` untouched.
 			{
 				float3 painted;
-				// Metres one reflected pixel covers at the hit (camera -> mirror -> hit, ~60 degree view; widened by the
-				// lobe, GGX alpha = rough^2: a mirror adds nothing): the RVT mip a hit reads, like the rasterizer's choice.
-				const float footprint = (length(Pw - P.camPos.xyz) + dist) * 1.155 / max(P.texSize.y, 1.0) + dist * rough * rough;
+				// Metres one SCREEN pixel covers at the hit, seen through the mirror (camera -> mirror -> hit at the
+				// camera's own pixel angle, stretched by the grazing angle like the rasterizer's largest derivative;
+				// widened by the lobe, GGX alpha = rough^2: a mirror adds nothing): the RVT mip the rasterizer would
+				// pick for that ground seen directly, whatever resolution the reflection traces at.
+				const float footprint = (length(Pw - P.camPos.xyz) + dist) * P.rvt.x * giRvtStretch(rd, hitN)
+				                      + dist * rough * rough;
+				const uint ph = uint(P.rvt.y);
+				const bool fbLane = ((gid.x + ph) & 3u) == 0u && ((gid.y + (ph >> 2)) & 3u) == 0u;
 				if (giLandscapeAlbedo(lands, instanceLand[instId], int(P.land.x),
-				                      landWeights, hitPos, hitN, painted, rvtTables, rvtHot, rvtCold, footprint))
+				                      landWeights, hitPos, hitN, painted, rvtTables, rvtHot, rvtCold, footprint,
+				                      P.rvt, rvtFb, fbLane))
+				{
 					albedo = painted;
+					rvtMapHit = P.rvt.z > 0.5;
+				}
 			}
 
 			// Direct sun at the hit: one hard occlusion ray. Skipped when the
@@ -3279,6 +3322,7 @@ kernel void giReflRay(uint2 gid [[thread_position_in_grid]],
 				field = giReflField(giIrr, P, hitPos, hitN, fieldW);
 			if (fieldW > 1e-4) Lsurf += albedo * field * P.sunDirRadius.w;
 			else               Lsurf += albedo * P.skyAmbient.rgb;
+			if (rvtMapHit) Lsurf = albedo;   // HE_GI_RVT_MAP: the page map is a colour key, shown unlit
 
 			// Confidence (first hit — deeper bounces ride on the primary hit's):
 			// the roughness cutoff, plus a fade only in the LAST QUARTER of the
@@ -3425,8 +3469,22 @@ static float3 giAutoLandAlbedo(const device GILand& L, float3 pos, float3 n)
 // A landscape drawn from the Runtime Virtual Texture: the hit's colour from the pages (the real ground, textures and all)
 // instead of the means. RvtLookup.h's page math, nearest page at the mip whose texel matches `footprint` (metres the
 // reflected pixel covers there); the table already points a missing page at its nearest coarser one.
+// rvtP = GIReflParams::rvt (y = feedback phase, z = HE_GI_RVT_MAP, w = feedback on). A feedback lane reports the page it
+// wants into the frame's feedback table, like a rasterized pixel (RvtLookup.h), so ground seen only in a mirror gets its
+// fine pages too.
+// How far one pixel's footprint stretches in world XZ where the ray meets the surface, the rasterizer's largest XZ
+// derivative: 1/cos of the incidence along the in-surface ray direction, times that direction's XZ share (a cliff hit
+// from above stretches upwards, not across the ground), never below the unstretched side.
+static float giRvtStretch(float3 rd, float3 n)
+{
+	const float  c  = max(abs(dot(rd, n)), 0.1);
+	const float3 t  = rd - n * dot(rd, n);
+	const float  lt = length(t);
+	return max((lt > 1e-4 ? length(t.xz) / lt : 1.0) / c, 1.0);
+}
 static bool giRvtAlbedo(const device GILand& L, texture2d<uint> table, texture2d_array<float> hot,
-                        texture2d_array<float> cold, float3 hitPos, float footprint, thread float3& albedoOut)
+                        texture2d_array<float> cold, float3 hitPos, float footprint, thread float3& albedoOut,
+                        float4 rvtP, device uint* rvtFb, bool fbLane)
 {
 	if (L.rvtB.w < 0.5) return false;
 	const float2 uv = (hitPos.xz - L.rvtA.xy) / max(L.rvtA.z, 1e-3);
@@ -3436,10 +3494,26 @@ static bool giRvtAlbedo(const device GILand& L, texture2d<uint> table, texture2d
 	const int mip = clamp(int(floor(log2(max(footprint / max(L.rvtA.w, 1e-4), 1.0)))), 0, mipCount - 1);
 	const int pps = max(pps0 >> mip, 1);
 	const uint2 pg = uint2(clamp(int2(uv * float(pps)), int2(0), int2(pps - 1)));
+	if (fbLane && rvtP.w > 0.5)
+	{
+		const uint key = (uint(L.rvtB.y / 256.0) << 27) | (uint(mip) << 22) | (pg.x << 11) | pg.y;
+		rvtFb[((key ^ (uint(rvtP.y) * 40503u)) * 2654435761u) >> 20] = key;
+	}
 	const uint e = table.read(pg, uint(mip)).r;
-	if (e == 0xFFFFFFFFu) return false;
+	if (e == 0xFFFFFFFFu) { if (rvtP.z > 0.5) { albedoOut = float3(0.0); return true; } return false; }
 	const uint slot = e & 0x7FFFFFu;
-	const int  ppsE = max(pps0 >> int(e >> 24), 1);
+	const int  eff  = int((e >> 24) & 0x3Fu);   // bit 30: the debug view's stale mark
+	const int  ppsE = max(pps0 >> eff, 1);
+	if (rvtP.z > 0.5)
+	{
+		// The page map in the mirror (RvtLookup.h's colours): hue = the mip shown, dark stripes = a coarser page stands in.
+		const float hue = fract(0.33 + float(eff) * 0.13);
+		float3 dc = saturate(abs(fract(hue + float3(0.0, 2.0 / 3.0, 1.0 / 3.0)) * 6.0 - 3.0) - 1.0);
+		const float pageM = max(L.rvtA.z, 1e-3) / float(ppsE);
+		if (eff > mip && fmod(floor((hitPos.x + hitPos.z) / max(pageM * 0.0625, 1e-3)), 2.0) < 1.0) dc *= 0.35;
+		albedoOut = dc;
+		return true;
+	}
 	const float2 g  = uv * float(ppsE);
 	const float ps = L.rvtB.x, bd = fmod(L.rvtB.y, 256.0);
 	const float2 tuv = (bd + (g - floor(g)) * ps) / (ps + 2.0 * bd);
@@ -3453,11 +3527,12 @@ static bool giLandscapeAlbedo(const device GILand* lands, int li, int landCount,
                               array<texture2d<float>, 4> weightTex,
                               float3 hitPos, float3 hitN, thread float3& albedoOut,
                               array<texture2d<uint>, 4> rvtTables, texture2d_array<float> rvtHot,
-                              texture2d_array<float> rvtCold, float footprint)
+                              texture2d_array<float> rvtCold, float footprint,
+                              float4 rvtP, device uint* rvtFb, bool fbLane)
 {
 	if (li < 0 || li >= landCount || li >= 4) return false;
 	const device GILand& L = lands[li];
-	if (giRvtAlbedo(L, rvtTables[li], rvtHot, rvtCold, hitPos, footprint, albedoOut)) return true;
+	if (giRvtAlbedo(L, rvtTables[li], rvtHot, rvtCold, hitPos, footprint, albedoOut, rvtP, rvtFb, fbLane)) return true;
 	if (L.cfg.w < -0.5) { albedoOut = giAutoLandAlbedo(L, hitPos, hitN); return true; }
 	const int layers = int(L.cfg.w);
 	if (layers <= 0) return false;
@@ -3856,6 +3931,7 @@ struct GIReflParams {
 	float4 gridCounts;
 	float4 extra;           // x = glossy jitter on, y = (HW-only, unused), z = instance count, w = max bounces
 	float4 land;            // x = landscape count (painted-terrain table), y = rays per pixel (quality tier), z = skyEnv is the baked sky cube
+	float4 rvt;             // x = radians per screen pixel, y = feedback phase, z = HE_GI_RVT_MAP, w = feedback on
 };
 
 // Closest hit that also reports WHICH triangle was hit (global index into the
@@ -3985,7 +4061,8 @@ kernel void giReflRaySw(uint2 gid [[thread_position_in_grid]],
                         array<texture2d<float>, 4> landWeights [[texture(9)]],
                         array<texture2d<uint>, 4>  rvtTables   [[texture(13)]],
                         texture2d_array<float>     rvtHot      [[texture(17)]],
-                        texture2d_array<float>     rvtCold     [[texture(18)]])
+                        texture2d_array<float>     rvtCold     [[texture(18)]],
+                        device uint*               rvtFb       [[buffer(7)]])
 {
 	if (float(gid.x) >= P.texSize.x || float(gid.y) >= P.texSize.y) return;
 	constexpr sampler smp(coord::normalized, address::clamp_to_edge, filter::nearest);
@@ -4068,14 +4145,23 @@ kernel void giReflRaySw(uint2 gid [[thread_position_in_grid]],
 					if (dot(hitN, rd) > 0.0) hitN = -hitN;
 				}
 			}
+			bool rvtMapHit = false;
 			// Landscape hit → the paint at THIS point, not the terrain-wide mean
 			// (auto material: its slope/height masks, hence after hitN).
 			{
 				float3 painted;
-				const float footprint = (length(Pw - P.camPos.xyz) + dist) * 1.155 / max(P.texSize.y, 1.0) + dist * rough * rough;
+				// The screen pixel's footprint through the mirror (see giReflRay).
+				const float footprint = (length(Pw - P.camPos.xyz) + dist) * P.rvt.x * giRvtStretch(rd, hitN)
+				                      + dist * rough * rough;
+				const uint ph = uint(P.rvt.y);
+				const bool fbLane = ((gid.x + ph) & 3u) == 0u && ((gid.y + (ph >> 2)) & 3u) == 0u;
 				if (giLandscapeAlbedo(lands, insts[hitInst].offsets.z, int(P.land.x),
-				                      landWeights, hitPos, hitN, painted, rvtTables, rvtHot, rvtCold, footprint))
+				                      landWeights, hitPos, hitN, painted, rvtTables, rvtHot, rvtCold, footprint,
+				                      P.rvt, rvtFb, fbLane))
+				{
 					albedo = painted;
+					rvtMapHit = P.rvt.z > 0.5;
+				}
 			}
 			// Occlusion ray skipped when the sun term is black anyway (night) —
 			// same shortcut as the HW kernel.
@@ -4091,6 +4177,7 @@ kernel void giReflRaySw(uint2 gid [[thread_position_in_grid]],
 				field = giReflFieldSw(giIrr, P, hitPos, hitN, fieldW);
 			if (fieldW > 1e-4) Lsurf += albedo * field * P.sunDirRadius.w;
 			else               Lsurf += albedo * P.skyAmbient.rgb;
+			if (rvtMapHit) Lsurf = albedo;   // HE_GI_RVT_MAP: the page map is a colour key, shown unlit
 			if (b == 0) // range-edge fade only — see the HW kernel
 				conf = roughFade * (1.0 - smoothstep(max(P.camPos.w, 1.0) * 0.75,
 				                                     max(P.camPos.w, 1.0), dist));
@@ -6915,8 +7002,9 @@ struct GIReflParamsCPU
 	glm::vec4 gridCounts;   // xyz = probes per axis, w = probesPerRow
 	glm::vec4 extra;        // x = glossy jitter on, y = mesh data valid, z = SW instance count, w = max bounces
 	glm::vec4 land;         // x = landscape count (capped at kGiMaxLandscapes), y = rays per pixel, z = sky cube baked (EncodeSkyReflCube
+	glm::vec4 rvt;          // x = radians per screen pixel, y = feedback phase, z = HE_GI_RVT_MAP, w = feedback on
 };
-static_assert(sizeof(GIReflParamsCPU) == 2 * 64 + 9 * 16, "must match the MSL GIReflParams layout");
+static_assert(sizeof(GIReflParamsCPU) == 2 * 64 + 10 * 16, "must match the MSL GIReflParams layout");
 struct GITemporalParamsCPU
 {
 	glm::mat4 prevViewProj;
@@ -8977,12 +9065,20 @@ int MetalRenderer::BuildGILandscapeTable(std::vector<void*>& outWeightTex, std::
 				if (const auto t = m_rvtTables.find(sw->second.consumerMat); t != m_rvtTables.end() && t->second.tex)
 					if (const MaterialAsset* cm = m_contentManager->getMaterial(sw->second.consumerMat))
 					{
-						const auto slotOf = [&](const char* name) -> int {
+						// The volume vectors: "RvtVolumeA/B" in the driver's own consumer, "RVT <name> Volume A/B" in a
+						// material's live part behind its RVT Read node (RVT 2.0, matRvtVolumeParamName).
+						const auto slotOf = [&](char which) -> int {
+							const std::string own = std::string("RvtVolume") + which, tail = std::string(" Volume ") + which;
 							for (size_t k = 0; k < cm->graphParamNames.size(); ++k)
-								if (cm->graphParamNames[k] == name) return static_cast<int>(k);
+							{
+								const std::string& n = cm->graphParamNames[k];
+								if (n == own || (n.rfind("RVT ", 0) == 0 && n.size() > tail.size()
+								                 && n.compare(n.size() - tail.size(), tail.size(), tail) == 0))
+									return static_cast<int>(k);
+							}
 							return -1;
 						};
-						const int a = slotOf("RvtVolumeA"), b = slotOf("RvtVolumeB");
+						const int a = slotOf('A'), b = slotOf('B');
 						if (a >= 0 && b >= 0 && cm->shaderParamData.size() >= size_t(std::max(a, b) + 1) * 4)
 						{
 							const float* d = cm->shaderParamData.data();
@@ -17271,7 +17367,8 @@ void MetalRenderer::FillMaterialLighting(HE::MaterialShaderLibrary::Lighting& ma
 	// untouched — graph materials, the deferred resolve and the SSR composite
 	// all read this. Scene-pass fill only; previews keep the zero.
 	matLight.viewMode[0] = UnlitViewActive() ? 1.0f : 0.0f;
-	matLight.viewMode[1] = m_viewMode == HE::ViewMode::RvtMips ? 1.0f : 0.0f;   // heRvtMipView (RvtLookup.h)
+	// y = 1 → the Runtime Virtual Texture lookup (RvtLookup.h) shows its page map instead of the ground (RVT debug view).
+	matLight.viewMode[1] = RvtDebugViewActive() ? 1.0f : 0.0f;
 	matLight.viewMode[2] = float(m_rvtFbPhase);                                 // which pixel of 8x8 reports (HE_RVT_FEEDBACK)
 	FillFogLighting(matLight);
 }
@@ -18247,6 +18344,17 @@ void MetalRenderer::EncodeGIReflections(void* cmdBufPtr, int width, int height)
 		rp.land         = glm::vec4(static_cast<float>(landCount),
 		                            static_cast<float>(rays),
 		                            m_skyReflValid ? 1.0f : 0.0f, 0.0f);
+		// The RVT mip of a landscape hit follows the SCREEN pixel (`height`, not the trace size th), at the camera's own
+		// field of view; hits report the pages they want into this frame's feedback like rasterized pixels.
+		// HE_GI_RVT_MAP=1 (witness): a landscape hit shows the page-map colour of the mip it reads, unlit, in the normal view
+		// (the Virtual Texture view itself draws the scene unlit, so a mirror there shows only its own base colour).
+		// HE_GI_RVT_FEEDBACK=0: the reflections stop asking for pages (A/B against the rasterized pixels alone).
+		static const bool rvtFbOn = [] { const char* e = std::getenv("HE_RVT_FEEDBACK"); const char* g = std::getenv("HE_GI_RVT_FEEDBACK"); return !(e && *e == '0') && !(g && *g == '0'); }();
+		static const bool rvtMapOn = [] { const char* e = std::getenv("HE_GI_RVT_MAP"); return e && *e && *e != '0'; }();
+		void* rvtFb = RvtFeedbackBindTarget();
+		rp.rvt          = glm::vec4(2.0f / (std::max(std::abs(m_renderWorld.camera.projection[1][1]), 1e-4f) * float(std::max(height, 1))),
+		                            float(m_rvtFbPhase), rvtMapOn ? 1.0f : 0.0f,
+		                            (rvtFbOn && rvtFb) ? 1.0f : 0.0f);
 
 		const int curIdx  = m_giReflHistIdx;
 		const int prevIdx = 1 - curIdx;
@@ -18295,6 +18403,8 @@ void MetalRenderer::EncodeGIReflections(void* cmdBufPtr, int width, int height)
 			[enc setBuffer:(__bridge id<MTLBuffer>)(m_giInstanceLandBuf ? m_giInstanceLandBuf
 			                                                           : m_giInstanceColorBuffer)
 			        offset:0 atIndex:6];
+			// RVT feedback (rp.rvt.w = 0 keeps the placeholder unwritten).
+			[enc setBuffer:(__bridge id<MTLBuffer>)(rvtFb ? rvtFb : m_giInstanceColorBuffer) offset:0 atIndex:7];
 			// Every BLAS the TLAS references must be explicitly declared used — Metal
 			// does not auto-track residency through an acceleration structure. The
 			// mesh vertex/index buffers reached through the argument buffer need
@@ -18317,6 +18427,7 @@ void MetalRenderer::EncodeGIReflections(void* cmdBufPtr, int width, int height)
 			[enc setBuffer:(__bridge id<MTLBuffer>)(m_giLandBuf ? m_giLandBuf
 			                                                    : m_giSwInstanceBuf)
 			        offset:0 atIndex:4];
+			[enc setBuffer:(__bridge id<MTLBuffer>)(rvtFb ? rvtFb : m_giSwInstanceBuf) offset:0 atIndex:7];   // RVT feedback
 		}
 		// Weightmap per landscape, slots 9..9+kGiMaxLandscapes-1. Unused slots
 		// take the 1x1 dummy: the pipeline declares the whole array, and an
@@ -18534,14 +18645,15 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 		// is already an encoded texel.
 		matLight.specAA[0] = m_specularAA ? m_specularAAStrength : 0.0f;
 		matLight.specAA[1] = 1.0f;
-		// The RVT mip view tints the base colour the G-buffer stores (heRvtMipView, RvtLookup.h).
-		matLight.viewMode[1] = m_viewMode == HE::ViewMode::RvtMips ? 1.0f : 0.0f;
 		matLight.viewMode[2] = float(m_rvtFbPhase);   // the feedback's pixel of each 8x8 cell (HE_RVT_FEEDBACK)
 		// The G-buffer's WPO vertex stage reads this block too: without the wind
 		// the deferred path would draw every Wind Sway material standing still.
 		HE::FillMaterialWind(GetEnvironment(), matLight);
 		HE::FillMaterialWeather(GetEnvironment(), matLight); // Weather node + the generic wet/snow response
 		HE::FillMaterialWater(GetWaterRipples(), matLight);  // Water Ripple node, same rings as the forward pass
+		// The RVT debug view (viewMode.y) is read by the lookup in THIS pass: the G-buffer's base colour is the page map, the
+		// resolve (unlit, viewMode.x) hands it to the screen.
+		matLight.viewMode[1] = RvtDebugViewActive() ? 1.0f : 0.0f;
 	}
 	[encoder setFragmentBytes:&matLight length:sizeof(matLight)
 	                  atIndex:HE::MaterialShaderLibrary::kMetalLightingBufferIndex];
