@@ -170,9 +170,10 @@ already share it for shadows. **Metal and D3D12 need their closest-hit path buil
 * `src/HE_Rendering/include/HorizonRendering/RenderWorld.h` — `kLandscapeGiHeightfieldKey` lifted
   out of `RenderExtractor.cpp` into a shared, named constant next to `struct GiHeightfield`.
 * `src/HE_Rendering/src/RenderExtractor.cpp` — uses the shared constant instead of its own copy.
-* `src/HE_Rendering/include/HorizonRendering/GiHeightfield.h` — `GiHeightPyramidClosestHitRef`, the
-  CPU reference the GLSL `hfClosestHit` mirrors (same relationship as `giAutoLandscapeAlbedo` to its
-  three kernel copies), covered by a new doctest in `tests/test_gi_bvh.cpp`.
+* ~~`GiHeightfield.h` — `GiHeightPyramidClosestHitRef` (CPU copy of `hfClosestHit`) + 3 doctests~~ —
+  removed in step 24: test-only, already diverged from the GLSL (clamped negative cells), so it
+  tested itself, not the shader. The shader is covered by the reflection check in
+  `landscape_gpu_check` (step 23).
 * `src/HE_Rendering/src/Backends/OpenGL/OpenGLRenderer.cpp`:
   - `kGiHeightfieldGLSL`: `hfAnyHit`'s loop factored into `hfMarch`; new `hfClosestHit` built on it.
   - The reflection compute program now links `kGiHeightfieldGLSL` too (was shadow-only).
@@ -186,10 +187,8 @@ already share it for shadows. **Metal and D3D12 need their closest-hit path buil
 
 ## 7. Verified / not verified
 
-* **Verified**: `he_tests` (existing suite, unchanged) stays green; the new doctest exercises
-  `GiHeightPyramidClosestHitRef` against a brute-force dense reference march on a synthetic field
-  (flat, ramp, single bump), checking the hit/miss agreement and that the returned normal matches
-  the analytic slope within tolerance. `HorizonEditor` and `he_tests` build with the new GLSL
+* **Verified**: `he_tests` (existing suite, unchanged) stays green (the CPU-reference doctests
+  originally added here were removed in step 24, see section 6). `HorizonEditor` and `he_tests` build with the new GLSL
   source compiled into both programs's link step (a GLSL syntax error surfaces at
   `linkCompute`'s link-status check, at program start-up, not at `cmake --build` time — see
   `docs/verify-runtime-compiled-shaders.md`'s standing lesson that these strings are never checked
