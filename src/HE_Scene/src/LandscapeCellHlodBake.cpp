@@ -4,10 +4,15 @@
 #include "HorizonScene/SceneSerializer.h"
 #include "HorizonScene/TransformHierarchy.h"
 #include "HorizonScene/Components/AnimatorComponent.h"
+#include "HorizonScene/Components/MaterialComponent.h"
 #include "HorizonScene/Components/MeshComponent.h"
 #include "HorizonScene/Components/RigidBodyComponent.h"
 #include "HorizonScene/Components/SkeletalMeshComponent.h"
 #include <ContentManager/ContentManager.h>
+#include <ContentManager/TextureBlockDecode.h>
+
+#include <climits>
+#include <cmath>
 
 #include <glm/gtc/matrix_inverse.hpp>
 
@@ -49,6 +54,55 @@ namespace
 			uv.push_back(a.uvs.size() >= (i + 1) * 2 ? glm::vec2(a.uvs[i * 2], a.uvs[i * 2 + 1]) : glm::vec2(0.0f));
 		}
 		return true;
+	}
+
+	// The colour a far eye sees an instance in: its material's base colour times the mean of its albedo texture. The entity's material
+	// override first, else the mesh's first section. Linear; mid grey when nothing can be read (a graph material has no base colour
+	// to speak of, a texture in a format the CPU cannot read keeps the base colour alone).
+	glm::vec3 instanceColour(entt::registry& reg, entt::entity e, const StaticMeshAsset& mesh, ContentManager& content)
+	{
+		const MaterialAsset* mat = nullptr;
+		if (const auto* mc = reg.try_get<MaterialComponent>(e); mc && mc->materialAssetId != HE::UUID{})
+		{
+			content.ensureResident(mc->materialAssetId);
+			mat = content.getMaterial(mc->materialAssetId);
+		}
+		if (!mat && !mesh.sections.empty()) mat = content.resolveMaterialRef(mesh.sections[0].materialId, mesh.sections[0].materialPath);
+		if (!mat) return glm::vec3(0.5f);
+		glm::vec3 c(mat->baseColor[0], mat->baseColor[1], mat->baseColor[2]);
+		const HE::UUID texId = mat->textureIds.empty() ? HE::UUID{} : mat->textureIds[0];
+		const std::string texPath = mat->texturePaths.empty() ? std::string() : mat->texturePaths[0];
+		if (const TextureAsset* t = content.resolveTextureRef(texId, texPath))
+		{
+			float rgb[3];
+			if (t->layers <= 1 && textureArraySliceMean(*t, 0, rgb)) c *= glm::vec3(rgb[0], rgb[1], rgb[2]);
+		}
+		return glm::clamp(c, glm::vec3(0.0f), glm::vec3(1.0f));
+	}
+
+	uint8_t toSrgb8(float linear)
+	{
+		const float s = linear <= 0.0031308f ? linear * 12.92f : 1.055f * std::pow(linear, 1.0f / 2.4f) - 0.055f;
+		return static_cast<uint8_t>(std::lround(std::clamp(s, 0.0f, 1.0f) * 255.0f));
+	}
+
+	// The palette entry of a colour, added if the palette does not have it. Colours are held to 5 bits a channel, so near twins
+	// share an entry; a full palette gives the nearest entry it has.
+	uint32_t paletteEntry(std::vector<uint8_t>& palette, const glm::vec3& linear)
+	{
+		const uint8_t rgb[3] = { static_cast<uint8_t>(toSrgb8(linear.r) & 0xF8u), static_cast<uint8_t>(toSrgb8(linear.g) & 0xF8u), static_cast<uint8_t>(toSrgb8(linear.b) & 0xF8u) };
+		uint32_t best = 0;
+		int bestDist = INT_MAX;
+		for (uint32_t i = 0; i * 3 + 2 < palette.size(); ++i)
+		{
+			const int dr = palette[i * 3] - rgb[0], dg = palette[i * 3 + 1] - rgb[1], db = palette[i * 3 + 2] - rgb[2];
+			const int d = dr * dr + dg * dg + db * db;
+			if (d == 0) return i;
+			if (d < bestDist) { bestDist = d; best = i; }
+		}
+		if (palette.size() / 3 >= kLandscapeHlodPaletteEntries) return best;
+		palette.insert(palette.end(), rgb, rgb + 3);
+		return static_cast<uint32_t>(palette.size() / 3 - 1);
 	}
 
 	bool isStaticMeshEntity(entt::registry& reg, entt::entity e)
@@ -103,7 +157,9 @@ LandscapeHlodTable bakeCellProxies(const CellManifest& manifest, const CellStrea
 				const glm::vec3 n = normalM * nor[i];
 				inst.mesh.normals.push_back(glm::dot(n, n) > 1e-12f ? glm::normalize(n) : glm::vec3(0, 1, 0));
 			}
-			inst.mesh.uvs = std::move(uv);
+			// Every vertex of the instance gets ONE uv: the palette texel of the instance's colour (the mesh's own uvs mean nothing
+			// to a proxy, which does not have the instance's textures).
+			inst.mesh.uvs.assign(pos.size(), landscapeHlodPaletteUv(paletteEntry(table.palette, instanceColour(reg, e, *asset, content))));
 			inst.mesh.indices = asset->indices;
 			inst.size = glm::length(hi - lo);
 			instances.push_back(std::move(inst));

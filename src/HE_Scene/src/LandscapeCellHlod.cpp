@@ -3,6 +3,7 @@
 
 #include <glm/geometric.hpp>
 
+#include <algorithm>
 #include <cstring>
 
 namespace HE
@@ -82,7 +83,7 @@ size_t LandscapeHlodTable::bytes() const
 namespace
 {
 constexpr uint32_t kHlodTableMagic   = 0x54444c48u;   // 'HLDT' little-endian
-constexpr uint32_t kHlodTableVersion = 1;
+constexpr uint32_t kHlodTableVersion = 2;   // 2: the palette behind the cells; 1 is still read
 
 template <class T>
 void put(std::vector<uint8_t>& out, const T& v)
@@ -130,16 +131,20 @@ std::vector<uint8_t> LandscapeHlodTable::encode() const
 			out.insert(out.end(), p, p + mesh.indices.size() * sizeof(uint32_t));
 		}
 	}
+	const uint32_t entries = static_cast<uint32_t>(std::min<size_t>(palette.size() / 3, kLandscapeHlodPaletteEntries));
+	put(out, entries);
+	out.insert(out.end(), palette.begin(), palette.begin() + static_cast<std::ptrdiff_t>(entries) * 3);
 	return out;
 }
 
 bool LandscapeHlodTable::decode(const std::vector<uint8_t>& bytes, LandscapeHlodTable& out)
 {
 	out.clear();
+	out.palette.clear();
 	size_t pos = 0;
 	uint32_t magic = 0, version = 0, cellCount = 0;
 	if (!getVal(bytes, pos, magic) || magic != kHlodTableMagic) return false;
-	if (!getVal(bytes, pos, version) || version != kHlodTableVersion) return false;
+	if (!getVal(bytes, pos, version) || (version != 1 && version != kHlodTableVersion)) return false;
 	if (!getVal(bytes, pos, cellCount)) return false;
 	for (uint32_t i = 0; i < cellCount; ++i)
 	{
@@ -155,6 +160,13 @@ bool LandscapeHlodTable::decode(const std::vector<uint8_t>& bytes, LandscapeHlod
 		if (indexCount > 0 && !get(bytes, pos, mesh.indices.data(), indexCount * sizeof(uint32_t)))
 			return false;
 		out.m_cells[{ x, z }] = std::move(mesh);
+	}
+	if (version >= 2)
+	{
+		uint32_t entries = 0;
+		if (!getVal(bytes, pos, entries) || entries > kLandscapeHlodPaletteEntries) return false;
+		out.palette.resize(static_cast<size_t>(entries) * 3);
+		if (entries > 0 && !get(bytes, pos, out.palette.data(), out.palette.size())) return false;
 	}
 	return true;
 }

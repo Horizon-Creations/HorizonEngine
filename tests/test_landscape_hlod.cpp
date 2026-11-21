@@ -13,6 +13,7 @@
 #include <HorizonScene/LandscapeSource.h>
 #include <HorizonScene/SceneJsonParse.h>
 #include <HorizonScene/SceneSerializer.h>
+#include <HorizonScene/Components/MaterialComponent.h>
 #include <HorizonScene/Components/MeshComponent.h>
 #include <HorizonScene/Components/TransformComponent.h>
 #include <nlohmann/json.hpp>
@@ -312,6 +313,7 @@ TEST_CASE("LandscapeHlodProxies: a cell without content gets an entity inside th
 	HE::LandscapeHlodTable table;
 	table.set(0, 0, oneTriangle());
 	table.set(1, 0, oneTriangle());
+	table.palette = { 200, 100, 50 };
 	streamAt(streamer, world, { 50.0, 0.0, 50.0 }, [&] { return streamer.isLoaded(0, 0); });
 	REQUIRE(streamer.isLoaded(0, 0));
 	REQUIRE_FALSE(streamer.isLoaded(1, 0));
@@ -340,6 +342,18 @@ TEST_CASE("LandscapeHlodProxies: a cell without content gets an entity inside th
 		const auto& p = world.registry().get<LandscapeProxyComponent>(e);
 		CHECK(p.meshId != HE::UUID{});
 		CHECK(world.registry().all_of<MeshComponent>(e));
+		// and draws with the table's palette: one material, its albedo the 64² palette with entry 0 in the first texel
+		const auto* matc = world.registry().try_get<MaterialComponent>(e);
+		REQUIRE(matc);
+		CHECK(matc->materialAssetId == proxies.paletteMaterial());
+		const MaterialAsset* mat = cm.getMaterial(matc->materialAssetId);
+		REQUIRE(mat);
+		REQUIRE(mat->textureIds.size() == 1);
+		const TextureAsset* tex = cm.getTexture(mat->textureIds[0]);
+		REQUIRE(tex);
+		CHECK(tex->width == HE::kLandscapeHlodPaletteSide);
+		CHECK(tex->srgb);
+		CHECK((tex->data[0] == 200 && tex->data[1] == 100 && tex->data[2] == 50 && tex->data[3] == 255));
 	}
 	// the same sync again changes nothing
 	proxies.sync(world, table, streamer, { 50.0, 0.0, 50.0 }, cm, nullptr);

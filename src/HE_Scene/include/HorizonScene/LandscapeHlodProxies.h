@@ -1,10 +1,12 @@
 #pragma once
 #include "HorizonScene/LandscapeCellHlod.h"
 
+#include <Types/UUID.h>
 #include <entt/entt.hpp>
 
 #include <cstdint>
 #include <unordered_map>
+#include <vector>
 
 class HorizonWorld;
 class ContentManager;
@@ -65,6 +67,12 @@ private:
 	std::unordered_map<LandscapeHlodCellKey, entt::entity, LandscapeHlodCellKeyHash> m_cells;
 	unsigned m_frame = 0;
 	LandscapeHlodProxyStats m_stats;
+	// The table's palette as a texture and the one material every proxy draws with (LandscapeCellHlod.h). Null ids: no palette.
+	std::vector<uint8_t> m_palette;
+	HE::UUID m_paletteTexture{}, m_paletteMaterial{};
+
+public:
+	HE::UUID paletteMaterial() const { return m_paletteMaterial; }
 };
 
 } // namespace HE

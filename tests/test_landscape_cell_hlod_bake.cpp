@@ -2,6 +2,7 @@
 // content is left out, the budgets cut the small instances first, and the table is appended to (and replaced in) an existing pack.
 #include "doctest.h"
 #include <ContentManager/ContentManager.h>
+#include <HorizonScene/Components/MaterialComponent.h>
 #include <HorizonScene/Components/MeshComponent.h>
 #include <HorizonScene/Components/RigidBodyComponent.h>
 #include <HorizonScene/Components/TransformComponent.h>
@@ -108,6 +109,65 @@ TEST_CASE("bakeCellProxies: static meshes are merged in absolute metres, a movin
 	CHECK(minX == doctest::Approx(20.0f));
 	CHECK(maxX == doctest::Approx(70.0f));
 	CHECK(table.find(1, 0) == nullptr);
+}
+
+TEST_CASE("bakeCellProxies: every instance's uv is the palette texel of its material's colour, and the palette survives the table's bytes")
+{
+	ContentManager cm{ "." };
+	const HE::UUID quad = registerQuad(cm, 10.0f);
+	const auto material = [&](float r, float g, float b) {
+		MaterialAsset a;
+		a.type = HE::AssetType::Material;
+		a.baseColor[0] = r; a.baseColor[1] = g; a.baseColor[2] = b;
+		return cm.registerMaterial(std::move(a));
+	};
+	const HE::UUID red = material(1.0f, 0.0f, 0.0f), green = material(0.0f, 1.0f, 0.0f);
+
+	HorizonWorld w;
+	const HE::UUID mats[3] = { red, green, red };
+	for (int i = 0; i < 3; ++i)
+	{
+		const Entity e = w.createEntity("M" + std::to_string(i));
+		TransformComponent t;
+		t.position = { 20.0f * static_cast<float>(i), 0.0f, 0.0f };
+		w.addComponent(e, t);
+		MeshComponent mc;
+		mc.meshAssetId = quad;
+		w.registry().emplace<MeshComponent>(e, mc);
+		MaterialComponent matc;
+		matc.materialAssetId = mats[i];
+		w.registry().emplace<MaterialComponent>(e, matc);
+	}
+	Files files;
+	REQUIRE(SceneSerializer().saveToMemory(w, files["H.cells/cell_0_0.hescene"]));
+
+	const HE::LandscapeHlodTable table = HE::bakeCellProxies(manifestOf({ { 0, 0 } }), readerOver(files), cm, {}, nullptr);
+	REQUIRE(table.find(0, 0));
+	REQUIRE(table.palette.size() == 6);   // two colours, the second red shares the first's entry
+	const auto entryIs = [&](size_t i, uint8_t r, uint8_t g, uint8_t b) {
+		return table.palette[i * 3] == r && table.palette[i * 3 + 1] == g && table.palette[i * 3 + 2] == b;
+	};
+	const bool redFirst = entryIs(0, 0xF8, 0, 0);
+	CHECK((redFirst ? entryIs(1, 0, 0xF8, 0) : (entryIs(0, 0, 0xF8, 0) && entryIs(1, 0xF8, 0, 0))));
+	// each vertex's uv is its instance's texel: the quad at x 20..30 is the green one
+	const glm::vec2 redUv = HE::landscapeHlodPaletteUv(redFirst ? 0 : 1), greenUv = HE::landscapeHlodPaletteUv(redFirst ? 1 : 0);
+	for (const auto& v : table.find(0, 0)->vertices)
+	{
+		const bool isGreen = v.position.x >= 19.0f && v.position.x <= 31.0f;
+		CHECK(v.uv.x == doctest::Approx((isGreen ? greenUv : redUv).x));
+		CHECK(v.uv.y == doctest::Approx((isGreen ? greenUv : redUv).y));
+	}
+
+	HE::LandscapeHlodTable back;
+	REQUIRE(HE::LandscapeHlodTable::decode(table.encode(), back));
+	CHECK(back.palette == table.palette);
+	// a table from before the palette (version 1: the same bytes without the palette's tail) still reads, without one
+	std::vector<uint8_t> old = table.encode();
+	old.resize(old.size() - 4 - table.palette.size());
+	old[4] = 1;
+	REQUIRE(HE::LandscapeHlodTable::decode(old, back));
+	CHECK(back.palette.empty());
+	CHECK(back.cellCount() == 1);
 }
 
 TEST_CASE("bakeCellProxies: the budgets drop the small instances, not the big ones")

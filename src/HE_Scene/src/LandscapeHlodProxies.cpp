@@ -2,6 +2,7 @@
 #include "HorizonScene/CellStreamer.h"
 #include "HorizonScene/HorizonWorld.h"
 #include "HorizonScene/Components/LandscapeProxyComponent.h"
+#include "HorizonScene/Components/MaterialComponent.h"
 #include "HorizonScene/Components/MeshComponent.h"
 #include "HorizonScene/Components/TransformComponent.h"
 #include <ContentManager/ContentManager.h>
@@ -73,11 +74,40 @@ void LandscapeHlodProxies::clear(HorizonWorld& world, ContentManager& content, I
 	m_stats.entities = 0;
 	m_world = nullptr;
 	m_frame = 0;
+	if (m_paletteMaterial != HE::UUID{}) content.unloadAsset(m_paletteMaterial);
+	if (m_paletteTexture != HE::UUID{}) content.unloadAsset(m_paletteTexture);
+	m_paletteMaterial = m_paletteTexture = HE::UUID{};
+	m_palette.clear();
 }
 
 void LandscapeHlodProxies::sync(HorizonWorld& world, const LandscapeHlodTable& table, const CellStreamer& streamer,
                                 const glm::dvec3& cameraAbsolute, ContentManager& content, IRenderer* renderer)
 {
+	// Another palette than the one the proxies were made with (another table, a re-bake): all of them go and are made again.
+	if (table.palette != m_palette)
+	{
+		clear(world, content, renderer);
+		m_palette = table.palette;
+		if (!m_palette.empty())
+		{
+			TextureAsset tex;
+			tex.type = HE::AssetType::Texture;
+			tex.name = "LandscapeHlodPalette";
+			tex.width = tex.height = kLandscapeHlodPaletteSide;
+			tex.channels = 4;
+			tex.srgb = true;
+			tex.data.assign(static_cast<size_t>(kLandscapeHlodPaletteEntries) * 4, 255);
+			for (size_t i = 0; i * 3 + 2 < m_palette.size() && i < kLandscapeHlodPaletteEntries; ++i)
+				std::copy_n(&m_palette[i * 3], 3, &tex.data[i * 4]);
+			m_paletteTexture = content.registerTexture(std::move(tex));
+			MaterialAsset mat;
+			mat.type = HE::AssetType::Material;
+			mat.name = "LandscapeHlodPalette";
+			mat.textureIds = { m_paletteTexture };
+			mat.roughness = 0.9f;
+			m_paletteMaterial = content.registerMaterial(std::move(mat));
+		}
+	}
 	auto& reg = world.registry();
 	if (m_world != &world)
 	{
@@ -130,6 +160,12 @@ void LandscapeHlodProxies::sync(HorizonWorld& world, const LandscapeHlodTable& t
 			mc.castsShadow = false;     // far content: its shadow would pop in with the cell's own
 			mc.dirty = true;
 			reg.emplace_or_replace<MeshComponent>(e, mc);
+			if (m_paletteMaterial != HE::UUID{})
+			{
+				MaterialComponent matc;
+				matc.materialAssetId = m_paletteMaterial;
+				reg.emplace_or_replace<MaterialComponent>(e, matc);
+			}
 			m_cells[k] = e;
 			++m_stats.created;
 		}

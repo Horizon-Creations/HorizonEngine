@@ -98,6 +98,16 @@ struct LandscapeHlodCellKeyHash
 // Every cell's baked proxy, by (x, z). What the export pipeline fills in and the
 // pak stores (not built here — see the file comment); what a runtime loads and
 // hands to hlodCellsToDraw/a future LandscapeHlodProxies.
+// The palette is a kLandscapeHlodPaletteSide squared texture, one texel a colour. A whole instance has ONE uv, the centre of its
+// texel, so no filter ever mixes two entries.
+constexpr uint32_t kLandscapeHlodPaletteSide = 64;
+constexpr uint32_t kLandscapeHlodPaletteEntries = kLandscapeHlodPaletteSide * kLandscapeHlodPaletteSide;
+inline glm::vec2 landscapeHlodPaletteUv(uint32_t entry)
+{
+	const float side = static_cast<float>(kLandscapeHlodPaletteSide);
+	return { (static_cast<float>(entry % kLandscapeHlodPaletteSide) + 0.5f) / side, (static_cast<float>(entry / kLandscapeHlodPaletteSide) + 0.5f) / side };
+}
+
 class LandscapeHlodTable
 {
 public:
@@ -107,12 +117,18 @@ public:
 	size_t                   cellCount() const { return m_cells.size(); }
 	std::vector<LandscapeHlodCellKey> cells() const;
 	size_t                   bytes() const;
-	void                     clear() { m_cells.clear(); }
+	void                     clear() { m_cells.clear(); palette.clear(); }
 
-	// Little-endian binary: u32 magic 'HLDT', u32 version (1), u32 cellCount, then
+	// The colours of the proxies: RGB8 (sRGB) triplets, entry i. A mesh has no vertex colours, so a proxy is coloured through a
+	// texture: every merged instance's uv points at the texel of its colour (landscapeHlodPaletteUv), and the proxies draw with
+	// one material for the whole table that reads this palette as its albedo (LandscapeHlodProxies). Empty: the proxies draw
+	// in the default material, as a table from before the palette does.
+	std::vector<uint8_t> palette;
+
+	// Little-endian binary: u32 magic 'HLDT', u32 version (2), u32 cellCount, then
 	// per cell i32 x, i32 z, u32 vertexCount, u32 indexCount, the vertices, the
-	// indices, back to back. For a pak chunk or a loose file; version is for a
-	// later format change, not read today beyond "must be 1".
+	// indices, back to back; then (version 2) u32 paletteEntries and three bytes an entry.
+	// Version 1 (no palette) is still read.
 	std::vector<uint8_t> encode() const;
 	static bool          decode(const std::vector<uint8_t>& bytes, LandscapeHlodTable& out);
 
