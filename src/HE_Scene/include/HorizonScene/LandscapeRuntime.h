@@ -195,7 +195,7 @@ public:
 	// The material the ground is drawn with (LandscapeRenderFrame::materialId). update() sets it every frame from the scene (the
 	// landscape entity's MaterialComponent, else the texture group's material); a caller that drives the runtime without a scene
 	// (updateAt: tools, tests) sets it here.
-	void setMaterialId(const HE::UUID& id) { m_materialId = id; }
+	void setMaterialId(const HE::UUID& id) { m_materialId = id; m_materialPath.clear(); }
 	const HE::UUID& materialId() const { return m_materialId; }
 	LandscapeEditSource* edits() const { return m_edits.get(); }
 	const std::filesystem::path& packFile() const { return m_packFile; }
@@ -257,6 +257,7 @@ private:
 	uint64_t                                 m_foliageKey = 0;   // of the layer settings last given to m_foliage; 0 = none
 	std::vector<glm::dvec3>                  m_physicsAnchors;
 	HE::UUID                                 m_materialId{};                    // the ground's material this frame (update())
+	std::string                              m_materialPath;                    // its asset path when it is the texture group's
 	uint32_t                                 m_landscapeEntity = 0xFFFFFFFEu;   // PhysicsWorld::kGroundOwner until a component names the entity
 	std::vector<LandscapeAtlas::Upload>      m_pendingUploads;
 	std::vector<LandscapeAtlas::Release>     m_pendingReleases;

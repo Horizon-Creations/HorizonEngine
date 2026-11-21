@@ -16379,10 +16379,14 @@ bool MetalRenderer::EnsureLandscape()
 // frame carries the uploads that were pending when it was asked, so whichever pass comes first in a frame brings the tiles in.
 void MetalRenderer::EncodeLandscapePass(void* renderEncoder, const glm::mat4& clip, bool giGBuffer)
 {
-	if (!m_landscapeProvider || !EnsureLandscape()) return;
+	if (!m_landscapeProvider || m_landscapeFailed) return;
 	// HE_LANDSCAPE_PASSES=0: the ground in the scene pass alone, as before (the A/B of landscape_gpu_check; read per call so a
 	// running process can switch).
 	if (const char* e = std::getenv("HE_LANDSCAPE_PASSES"); e && *e == '0') return;
+	// The provider first: a scene without a tile landscape compiles nothing here.
+	HE::LandscapeRenderFrame frame;
+	m_landscapeProvider(glm::dmat4(clip), /*zeroToOne=*/true, frame);
+	if (!frame.active || !EnsureLandscape()) return;
 	void*& pso = giGBuffer ? m_landscapeGiPipeline : m_landscapeShadowPipeline;
 	bool& tried = giGBuffer ? m_landscapeGiTried : m_landscapeShadowTried;
 	if (!pso && !tried)
@@ -16393,10 +16397,7 @@ void MetalRenderer::EncodeLandscapePass(void* renderEncoder, const glm::mat4& cl
 		pso = m_landscape.makePassPipeline(giGBuffer ? "fragmentGiGBuf" : nullptr, gi, giGBuffer ? 2 : 0, static_cast<unsigned long>(kDepthFormat), &err);
 		if (!pso) HE_LOG_WARN(RHI, "MetalRenderer: the landscape is not in the %s: %s", giGBuffer ? "GI pre-pass" : "shadow maps", err.c_str());
 	}
-	if (!pso) return;
-	HE::LandscapeRenderFrame frame;
-	m_landscapeProvider(glm::dmat4(clip), /*zeroToOne=*/true, frame);
-	if (!frame.active) return;
+	if (!pso) frame.patches.clear();   // nothing to draw with, but the frame's uploads are still this frame's: encode() applies them
 	MetalLandscape::Shading sh;
 	sh.passPipeline = pso;
 	m_landscape.encode(renderEncoder, frame, clip, sh);
@@ -16411,6 +16412,15 @@ void MetalRenderer::EncodeLandscape(void* renderEncoder, const glm::mat4& viewPr
 	// (parameters, the graph's textures, the virtual texture), the landscape adds its own images. Lighting, shadow masks, fog and the
 	// rest of the preamble are on the encoder already. Not on a page camera (rvtSlot): that draws the page material on meshes.
 #if defined(HE_HAVE_SHADERC)
+	// The texture group's material is named by no entity, so nothing may have loaded it: once per id, from its path.
+	if (frame.materialId != HE::UUID{} && !frame.materialPath.empty() && m_contentManager && frame.materialId != m_landscapeMaterialLoadTried
+	    && !m_contentManager->getMaterial(frame.materialId))
+	{
+		m_landscapeMaterialLoadTried = frame.materialId;
+		if (!m_contentManager->resolveMaterialRef(frame.materialId, frame.materialPath)) m_contentManager->loadAsset(frame.materialPath);
+		if (!m_contentManager->getMaterial(frame.materialId))
+			HE_LOG_WARN(RHI, "MetalRenderer: the landscape's material %s is not there; the ground keeps its fixed blend", frame.materialPath.c_str());
+	}
 	if (frame.materialId != HE::UUID{} && m_editorCamera.rvtSlot < 0)
 		if (void* pso = GetOrBuildLandscapeMaterialPipeline(frame.materialId))
 		{

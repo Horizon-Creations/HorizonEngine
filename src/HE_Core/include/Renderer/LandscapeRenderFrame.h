@@ -117,6 +117,10 @@ struct LandscapeRenderFrame
 	// lit, shadowed and fogged like every other surface. Null, or a backend that cannot (yet): the fixed layer blend of
 	// LandscapeShaderSource.h.
 	HE::UUID   materialId{};
+	// Where that material's asset is when it is the texture group's (an "Engine/..." path), empty for the entity's own. A backend
+	// loads it from there once if nothing has made the id resident: the application loads what a scene's entities name, and no
+	// entity names the group's material.
+	std::string materialPath;
 };
 
 // What the application hands a renderer: called by the backend once per main scene frame with the view-projection it is about to

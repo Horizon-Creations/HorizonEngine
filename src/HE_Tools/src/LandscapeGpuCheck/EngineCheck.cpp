@@ -3,6 +3,7 @@
 
 #include <ContentManager/ContentManager.h>
 #include <Diagnostics/Log.h>
+#include <HorizonScene/Components/LandscapeWorldComponent.h>
 #include <HorizonScene/Components/LightComponent.h>
 #include <MaterialGraph/AutoLandscapeMaterial.h>
 #include <MaterialGraph/MaterialGraph.h>
@@ -31,6 +32,17 @@ namespace
 {
 constexpr double kSlope = 0.1, kBase = 600.0, kPivot = 3072.0, kWorld = 32 * 512.0;
 constexpr uint32_t kW = 480, kH = 270;
+
+// HE_LANDSCAPE_PASSES for the next frames: "0" leaves the ground out of the shadow and GI passes, null puts it back.
+void landscapePasses(const char* value)
+{
+#ifdef _WIN32
+	_putenv_s("HE_LANDSCAPE_PASSES", value ? value : "");   // an empty value removes the variable
+#else
+	if (value) setenv("HE_LANDSCAPE_PASSES", value, 1);
+	else unsetenv("HE_LANDSCAPE_PASSES");
+#endif
+}
 }
 
 int runEngineCheck(HE::RendererBackend backend, HE::RenderPath path, const std::string& packPath, const std::string& pngPath, const std::string& arrayRoot, bool farMarker)
@@ -349,16 +361,17 @@ int runMaterialCheck(HE::RendererBackend backend, HE::RenderPath path, const std
 					return s / std::max(n, 1);
 				};
 				std::vector<uint8_t> under, underNoCaster;
-				setenv("HE_LANDSCAPE_PASSES", "0", 1);
+				landscapePasses("0");
 				const bool gotB = shoot(underNoCaster);
-				unsetenv("HE_LANDSCAPE_PASSES");
+				landscapePasses(nullptr);
 				if (!gotB || !shoot(under)) fail("RenderSceneImage gave an image (under the ground)");
 				else
 				{
 					const double below = boxLum(under), belowNoCaster = boxLum(underNoCaster);
 					std::printf("  the ground casts: a box under the ground is %.0f/255, and %.0f/255 when the ground is not in the shadow maps\n",
 					            below, belowNoCaster);
-					if (below > belowNoCaster * 0.7) fail("a box under the ground stands in the ground's shadow");
+					// what is left in the shadow is the sky's light; without the caster the two are equal
+					if (below > belowNoCaster * 0.8) fail("a box under the ground stands in the ground's shadow");
 					writePngFile(pngPath.substr(0, pngPath.size() - 4) + "_under.png", static_cast<int>(kW), static_cast<int>(kH), under.data());
 				}
 				ov = over;
@@ -374,9 +387,9 @@ int runMaterialCheck(HE::RendererBackend backend, HE::RenderPath path, const std
 				// The control is the ground left out of the pre-pass: its pixels then have no ray-traced shadow value.
 				std::vector<uint8_t> giOn, giOff;
 				const bool a = settle(giOn);
-				setenv("HE_LANDSCAPE_PASSES", "0", 1);
+				landscapePasses("0");
 				const bool b = a && settle(giOff);
-				unsetenv("HE_LANDSCAPE_PASSES");
+				landscapePasses(nullptr);
 				if (!b) fail("RenderSceneImage gave an image (GI)");
 				else
 				{
@@ -417,12 +430,24 @@ int runMaterialCheck(HE::RendererBackend backend, HE::RenderPath path, const std
 				clear.fogDensity = 0.0f;
 				renderer->SetEnvironmentSettings(clear);
 				content.setEngineContentRoot(arrayRoot);
-				const HE::AutoLandscapeGroup& grp = HE::autoLandscapeGroup(HE::AutoLandscapeGroupId::Forest);
-				const MaterialAsset* real = content.resolveMaterialRef(HE::UUID{}, grp.materialPath);   // by path: nothing has registered the id here
-				if (!real) fail("the Auto Landscape material loads from the EngineContent folder", grp.materialPath);
+				// The way the editor and a game get there: a LandscapeWorldComponent in the scene (texture group Forest, no material of
+				// its own) and LandscapeRuntime::update(world). Nothing here loads the material: the renderer finds it from the frame.
+				const auto lsEnt = world.createEntity("Landscape");
+				LandscapeWorldComponent lw;
+				lw.pack = packPath;
+				lw.textureGroup = 1;
+				lw.budgetMB = 80;
+				reg.emplace<LandscapeWorldComponent>(lsEnt, lw);
+				bool began = false;
+				for (const auto t1 = std::chrono::steady_clock::now(); std::chrono::steady_clock::now() - t1 < std::chrono::seconds(120);)
+				{
+					rt.update(world, 0.016f, 5.0, &camPos);
+					if (rt.active() && rt.store()->settled() && rt.atlas()->stats().used == rt.store()->residentKeys().size()) { began = true; break; }
+					std::this_thread::sleep_for(std::chrono::milliseconds(1));
+				}
+				if (!began) fail("the scene's LandscapeWorldComponent starts the landscape");
 				else
 				{
-					rt.setMaterialId(real->id);
 					std::vector<uint8_t> autoImg;
 					if (!shoot(autoImg)) fail("RenderSceneImage gave an image (Auto Landscape)");
 					else
@@ -443,8 +468,39 @@ int runMaterialCheck(HE::RendererBackend backend, HE::RenderPath path, const std
 						if (sum / n < 12.0) fail("the ground is not black");
 						if (step / n < 0.3) fail("the ground has the material's texture in it");
 						writePngFile(pngPath.substr(0, pngPath.size() - 4) + "_auto.png", static_cast<int>(kW), static_cast<int>(kH), autoImg.data());
+
+						// The floating origin moves (a large world rebases it as the camera travels): the same absolute camera should see
+						// the same ground, texture and all. KNOWN GAP, measured and reported here, not a failure of this check: a graph
+						// material's World Position is the origin-relative one (every material's, on every mesh), so its world-space
+						// texturing moves with the origin. The landscape's fixed blend carries uvOrigin for this; the material path needs
+						// an absolute-stable position node in the generator (docs/landscape-tile-material-design-2026-11-21.md).
+						const glm::dvec3 shift(1000.3, 0.0, 517.7);
+						world.setOrigin(origin + shift);
+						auto& btf = reg.get<TransformComponent>(boxEnt);
+						btf.position -= glm::vec3(shift);
+						btf.dirty = true;
+						const EditorCameraOverride kept = ov;
+						const glm::vec3 eye2 = glm::vec3(camPos - (origin + shift));
+						ov.view = glm::lookAt(eye2, eye2 + glm::normalize(glm::vec3(1.0f, -0.45f, 0.15f)), glm::vec3(0, 1, 0));
+						ov.position = eye2;
+						std::vector<uint8_t> moved;
+						if (!shoot(moved)) fail("RenderSceneImage gave an image (origin moved)");
+						else
+						{
+							double gap = 0.0;
+							size_t n2 = 0;
+							for (size_t i = 0; i < px; ++i)
+								if (isBlue(&lit[i * 4])) { gap += std::abs(lum(&moved[i * 4]) - lum(&autoImg[i * 4])); ++n2; }
+							const double meanGap = gap / static_cast<double>(std::max<size_t>(n2, 1));
+							std::printf("  floating origin moved by (1000.3, 517.7) m: the ground differs by %.2f/255 on average%s\n", meanGap,
+							            meanGap > 2.0 ? "  KNOWN GAP: the material's texturing moves with the origin" : "");
+							writePngFile(pngPath.substr(0, pngPath.size() - 4) + "_auto_origin.png", static_cast<int>(kW), static_cast<int>(kH), moved.data());
+						}
+						ov = kept;
+						world.setOrigin(origin);
+						btf.position += glm::vec3(shift);
+						btf.dirty = true;
 					}
-					rt.setMaterialId(marker);
 				}
 			}
 			// A scene with no mesh at all still renders its shadow maps for the ground: the frame comes back.

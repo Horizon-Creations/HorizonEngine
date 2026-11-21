@@ -272,8 +272,13 @@ void LandscapeRuntime::update(HorizonWorld& world, float dt, double budgetMs, co
 	{
 		const auto* mc = world.registry().try_get<MaterialComponent>(static_cast<entt::entity>(m_landscapeEntity));
 		m_materialId = mc ? mc->materialAssetId : HE::UUID{};
+		m_materialPath.clear();
 		if (m_materialId == HE::UUID{} && comp->textureGroup >= 0 && comp->textureGroup < kAutoLandscapeGroupCount)
-			m_materialId = autoLandscapeGroup(static_cast<AutoLandscapeGroupId>(comp->textureGroup)).materialId;
+		{
+			const AutoLandscapeGroup& grp = autoLandscapeGroup(static_cast<AutoLandscapeGroupId>(comp->textureGroup));
+			m_materialId = grp.materialId;
+			m_materialPath = grp.materialPath;
+		}
 	}
 	// It failed before with the same path AND the same project root (beginFromPack resolves a relative path against m_projectRoot): a
 	// changed path, or a project root that now resolves it differently, is a new try.
@@ -569,6 +574,7 @@ void LandscapeRuntime::buildRenderFrame(const glm::dmat4& viewProjRelative, cons
 	out.cameraRel = glm::vec3(f.cameraAbsolute - f.origin);
 	out.slabDistance = f.slabDistance;
 	out.materialId = m_materialId;
+	out.materialPath = m_materialPath;
 	out.patches.reserve(f.patches.size());
 	for (const LandscapeFrame::Patch& p : f.patches)
 	{

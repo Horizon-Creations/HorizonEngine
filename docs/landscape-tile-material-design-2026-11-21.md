@@ -75,7 +75,16 @@ is fogged. Branch `claude/landscape-weltmassstab-100km`, commits `b8b5c66a5`, `d
 * fog moves the ground by 66.7/255. Same numbers forward and deferred.
 * the engine's Auto Landscape (Forest) material draws the ground: picture in `docs/landscape-tile-material-2026-11-21/`.
 
+* through the scene: a `LandscapeWorldComponent` (texture group Forest, no material of its own) and `LandscapeRuntime::update(world)`
+  draw the Auto Landscape material; the renderer loads the group's material from `LandscapeRenderFrame::materialPath` when nothing has.
+
 **Not verified / known gaps**
+* **Floating origin: the material's texturing moves when the origin is rebased** (measured: 22.8/255 mean difference for the same
+  absolute camera after an origin shift). A graph material's World Position is origin-relative (`vWorldPos`, every material, every mesh,
+  the old terrain too); the fixed blend has `uvOrigin` for this. It shows once per rebase, and only with
+  `ProjectSettings::physics.floatingOriginRadius` > 0, which a world over ~32 km needs. The fix is in the generator, not here: a position
+  node that adds the origin (a new `HeLighting` member the backends fill), used by the Auto Landscape graph for its texturing, with the
+  engine content regenerated. `WorldPos` itself must stay relative (Camera Distance, RVT and lighting use it).
 * No timing at all. The vertex stage reads up to 11 heights a vertex, the far ground runs the whole material.
 * GI on (Metal): the ground is NOT in the ray-tracing acceleration structure, and the cascades are off while GI owns the sun, so with
   GI on the ground casts no shadow (mountains do not shadow valleys) and bounces no light. It receives. Needs the GI height clipmap
