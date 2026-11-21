@@ -206,14 +206,31 @@ already share it for shadows. **Metal and D3D12 need their closest-hit path buil
   returns a flat unlit colour *before* the code that samples `uGIRefl`, so a scene with no light
   "passes" silently with the reflection path never exercised; bisected by forcing `kGiReflCS`'s
   `main()` to write solid magenta unconditionally and watching it not appear on screen). With the
-  light in place the real log line fires (`OpenGLRenderer: GI pipelines built`), the heightfield
-  uploads (`GI height field 1025x1025, 9 mips`), and the mirror's centre pixel is rgb(192,196,186)
-  with reflections on vs rgb(151,148,141) with them off (worst channel delta 48/255) — a real,
-  on-hardware change, not a log line alone. The mirror is *not* green: a heightfield hit still
+  light in place the real log line fires (`OpenGLRenderer: GI pipelines built`) and the heightfield
+  uploads (`GI height field 1025x1025, 9 mips`). The mirror is *not* green: a heightfield hit still
   returns the flat placeholder albedo `vec3(0.3, 0.32, 0.26)` this section's §5/§6 already flagged
-  (no painted weights yet), so the check asserts the pixel MOVES when reflections toggle off rather
-  than asserting a specific colour — a plain-colour check can't tell "hit the landscape" from "the
-  kernel never ran" while that gap stands.
+  (no painted weights yet).
+* **Step 26 correction (gate run 2575, NN-WS03, RTX 4070)**: the check this section used to describe
+  — toggle `GIReflectionSettings::enabled` and require the mirror's pixel to move — was not actually
+  evidence of a landscape hit. `env.skyEnabled` defaults true, so `RenderSkyReflCube` bakes a real
+  sky cube every frame regardless of the setting, and `kGiReflCS`'s miss branch samples that cube
+  with full confidence on *any* miss (`OpenGLRenderer.cpp`'s `if (hitInst < 0 && !hfHit)` block). A
+  permanently broken `hfClosestHit` (every ray missing the heightfield) still took that branch and
+  still moved the pixel when reflections toggled off, so the old control could not tell "the march
+  hit the landscape" from "every ray missed and fell back to the baked sky" — it was never a valid
+  geometry-only argument, contrary to what this section previously claimed. The control is now:
+  reflections stay ON in both renders; the second render instead calls
+  `world.setLandscapeRuntime(nullptr)` (`SetLandscapeProvider` stays, so the ramp still renders —
+  only `extractLandscapeGiHeightfield` now has nothing to feed, `RenderExtractor.cpp:804`), which
+  drives `uHfParams.w` to 0 and makes `hfClosestHit` return false unconditionally
+  (`OpenGLRenderer.cpp:2126`) — the same state a permanently broken march would be in. Measured on
+  hardware: with the heightfield march intact, the landscape-on render is rgb(192,196,186) and the
+  no-heightfield (sky-only) render is rgb(151,148,141), worst channel delta 48/255 — **PASS**. Forcing
+  the march off with the existing `HE_GI_HEIGHTFIELD=0` test hook (`OpenGLRenderer.cpp:6480`, written
+  for `scripts/he_gi_hf_check.py`'s own negative control) reproduces exactly the bug this section used
+  to miss: both renders come back rgb(151,148,141), delta 0/255, and the check correctly **FAILS**
+  (`the mirror shows the landscape's heightfield, not just the baked sky`). This is the proof the old
+  control lacked — a broken march can no longer pass by hitting the sky instead.
 * **Still not verified**: the landscape's own paint showing through the reflection (the §5/§6 gap
   itself — unchanged by this step, tracked there) end-to-end on D3D11/D3D12/Vulkan/Metal (this
   step was GL-only, matching the gate it closes); and `he_tests` still has no headless GL context

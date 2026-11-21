@@ -179,7 +179,14 @@ int runEngineCheck(HE::RendererBackend backend, HE::RenderPath path, const std::
 // IRenderer::GIReflectionSettings's default 200 m trace distance. Checks the 'GI pipelines built'
 // log line and, since a heightfield hit still feeds a flat placeholder albedo (not yet the ramp's
 // own paint — design doc §5/§6, a follow-up gap, not this step's), that the mirror's pixel actually
-// MOVES when reflections toggle off (a plain colour can't tell "hit" from "never ran").
+// MOVES when the landscape's GI heightfield is removed (step 26's fix): toggling
+// GIReflectionSettings::enabled instead (what this used to do) is not a valid control, because
+// env.skyEnabled defaults true and RenderSkyReflCube bakes a real sky cube every frame regardless —
+// kGiReflCS's miss branch (OpenGLRenderer.cpp) then samples that cube with full confidence, so a
+// mirror that only ever sees the baked sky (a permanently broken hfClosestHit) still "moves" when
+// reflections toggle off and the check passed for the wrong reason. Pulling world.setLandscapeRuntime
+// back out (reflections stay ON in both renders) makes extractLandscapeGiHeightfield feed nothing
+// (RenderExtractor.cpp), so a broken march gets the SAME sky-only pixel in both renders and fails.
 int runReflectionCheck(const std::string& packPath, const std::string& pngPath)
 {
 	std::printf("[OpenGL engine, GI reflection against the tile landscape]\n");
@@ -310,8 +317,8 @@ int runReflectionCheck(const std::string& packPath, const std::string& pngPath)
 			return true;
 		};
 
-		std::array<uint8_t, 4> onPx{}, offPx{};
-		if (!renderMirrorPixel(onPx)) fail("RenderSceneImage gave an image (reflections on)");
+		std::array<uint8_t, 4> onPx{}, skyOnlyPx{};
+		if (!renderMirrorPixel(onPx)) fail("RenderSceneImage gave an image (landscape heightfield)");
 		else
 		{
 			std::vector<uint8_t> rgba;
@@ -319,23 +326,26 @@ int runReflectionCheck(const std::string& packPath, const std::string& pngPath)
 			renderer->RenderSceneImage(ov, kW, kH, rgba);   // one more frame, same state, just to save the picture
 			writePngFile(pngPath, static_cast<int>(kW), static_cast<int>(kH), rgba.data());
 
-			// Negative control: the SAME scene with reflections off. The heightfield march (step 16)
-			// feeds a flat placeholder albedo on a hit (not yet the landscape's paint — see
-			// docs/landscape-reflections-design-2026-11-19.md §5/§6), so a plain colour check can't
-			// tell "the kernel hit the landscape" from "the kernel never ran" — both look muted. What
-			// the kernel changes is observable: with it off, uGIRefl binds the black dummy instead, so
-			// the mirror's pixel must move.
-			refl.enabled = false;
-			renderer->SetGIReflectionSettings(refl);
-			if (!renderMirrorPixel(offPx)) fail("RenderSceneImage gave an image (reflections off)");
+			// Negative control: the SAME scene, reflections still ON, but with the landscape's GI
+			// heightfield pulled back out (world.setLandscapeRuntime(nullptr) — SetLandscapeProvider
+			// stays, so the ramp still renders, only extractLandscapeGiHeightfield now has nothing to
+			// feed, RenderExtractor.cpp:804). This is deliberately NOT the old "toggle
+			// GIReflectionSettings::enabled" control: env.skyEnabled defaults true, so RenderSkyReflCube
+			// bakes a real sky cube every frame regardless, and kGiReflCS's miss branch samples it with
+			// full confidence — a mirror that only ever sees that baked sky (i.e. hfClosestHit always
+			// misses) still "moved" when reflections toggled off, passing for the wrong reason. With the
+			// heightfield removed instead, a working march has nothing left to hit either, so it falls
+			// onto that exact same sky branch — a broken march gets the identical pixel in both renders.
+			world.setLandscapeRuntime(nullptr);
+			if (!renderMirrorPixel(skyOnlyPx)) fail("RenderSceneImage gave an image (no heightfield)");
 			else
 			{
-				std::printf("  mirror pixel reflections on rgb(%d,%d,%d), off rgb(%d,%d,%d)\n",
-				            onPx[0], onPx[1], onPx[2], offPx[0], offPx[1], offPx[2]);
+				std::printf("  mirror pixel landscape heightfield rgb(%d,%d,%d), no heightfield (sky only) rgb(%d,%d,%d)\n",
+				            onPx[0], onPx[1], onPx[2], skyOnlyPx[0], skyOnlyPx[1], skyOnlyPx[2]);
 				int worst = 0;
-				for (int c = 0; c < 3; ++c) worst = std::max(worst, std::abs(static_cast<int>(onPx[static_cast<size_t>(c)]) - static_cast<int>(offPx[static_cast<size_t>(c)])));
+				for (int c = 0; c < 3; ++c) worst = std::max(worst, std::abs(static_cast<int>(onPx[static_cast<size_t>(c)]) - static_cast<int>(skyOnlyPx[static_cast<size_t>(c)])));
 				if (worst <= 8)
-					fail("the mirror changes when GI reflections against the tile landscape toggle off",
+					fail("the mirror shows the landscape's heightfield, not just the baked sky",
 					     "worst channel delta " + std::to_string(worst) + "/255");
 			}
 		}

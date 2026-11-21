@@ -25,7 +25,9 @@ int runEngineCheck(HE::RendererBackend backend, HE::RenderPath path, const std::
                    bool farMarker = false);
 
 // GL-only: a mirror standing on the tile landscape with GI reflections on, checking that the GI
-// pipelines link (the 'GI pipelines built' log line) and that the mirror's pixel moves when
-// reflections toggle off. See docs/landscape-reflections-design-2026-11-19.md §7.
+// pipelines link (the 'GI pipelines built' log line) and that the mirror's pixel differs from the
+// same render with the landscape's GI heightfield removed (reflections stay on in both — a plain
+// reflections-on/off toggle can pass on the baked sky alone). See
+// docs/landscape-reflections-design-2026-11-19.md §7.
 int runReflectionCheck(const std::string& packPath, const std::string& pngPath);
 } // namespace gpucheck
