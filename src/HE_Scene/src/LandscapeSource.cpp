@@ -474,6 +474,13 @@ std::shared_ptr<LandscapePackSource> LandscapePackSource::open(const std::string
 		if (src->m_size[i] && (src->m_offset[i] < indexEnd || src->m_offset[i] + src->m_size[i] > fileSize))
 			return fail("pack index points outside the file");
 	}
+	{
+		// identity(): the header's first 32 bytes (size, geometry) and the index. Tail sections and the coarse world are derived, not part of it.
+		uint64_t h = 1469598103934665603ull;
+		for (size_t i = 0; i < kLandscapePackHeaderBytesV1; ++i) h = (h ^ head[i]) * 1099511628211ull;
+		for (const uint8_t b : index) h = (h ^ b) * 1099511628211ull;
+		src->m_identity = h ? h : 1;
+	}
 
 	if (version == 2)
 	{

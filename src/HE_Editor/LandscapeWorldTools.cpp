@@ -39,7 +39,7 @@ namespace LandscapeWorldTools
 {
 namespace
 {
-void drawEditBlock();   // the "Sculpt and Paint" block of the section; with the tile brush at the end of this file
+void drawEditBlock(AppContext& ctx);   // the "Sculpt and Paint" block of the section; with the tile brush at the end of this file
 
 enum class Kind { Generate, Migrate, Import };
 
@@ -334,7 +334,7 @@ void drawSection(AppContext& ctx, Entity entity, const std::function<void()>& af
 	}
 	ImGui::TextDisabled("%.1f km x %.1f km, 512 m tiles", s.gen.tilesX * 0.512, s.gen.tilesZ * 0.512);
 
-	drawEditBlock();
+	drawEditBlock(ctx);
 
 	ImGui::SeparatorText("Migrate");
 	const Entity terrain = migrationSource(*ctx.world, entity);
@@ -451,7 +451,7 @@ namespace
 {
 const char* const kToolNames[] = { "Raise", "Lower", "Smooth", "Flatten", "Paint Layer" };
 
-void drawEditBlock()
+void drawEditBlock(AppContext& ctx)
 {
 	EditState& e = es();
 	ImGui::SeparatorText("Sculpt and Paint");
@@ -462,6 +462,8 @@ void drawEditBlock()
 		return;
 	}
 	EditorWidgets::checkbox("Edit Tiles##tlwe", &e.on);
+	if (e.on && ctx.editorConfig.mode != EditorMode::Landscape)
+		ImGui::TextDisabled("The brush works in the Landscape mode: there the left button belongs to it.");
 	Row::combo("Tile Brush##tlwe", &e.tool, kToolNames, 5);
 	Row::dragFloat("Brush Radius##tlwe", &e.radius, 0.5f, 1.0f, 800.0f, "%.1f m");
 	Row::dragFloat("Brush Falloff##tlwe", &e.falloff, 0.5f, 0.0f, 400.0f, "%.1f m");
@@ -499,7 +501,9 @@ void brushInViewport(AppContext& ctx, const RenderWorld& sceneSnapshot, const Im
                      bool navigating, bool viewportHovered, float dt)
 {
 	EditState& e = es();
-	HE::LandscapeEditSession* session = e.on && ctx.world ? sessionNow() : nullptr;
+	// Only in the Landscape mode, like the single landscape's brushes: there the viewport gives the left button to a brush (no picking,
+	// no gizmo, no deselect), in every other mode the same click selects.
+	HE::LandscapeEditSession* session = e.on && ctx.world && ctx.editorConfig.mode == EditorMode::Landscape ? sessionNow() : nullptr;
 	ImGuiIO& io = ImGui::GetIO();
 	const bool down = ImGui::IsMouseDown(ImGuiMouseButton_Left) && !io.KeyAlt;
 	// The button came up, or the brush went away under a stroke: close it, whatever else this frame does.

@@ -588,7 +588,7 @@ void EditorApplication::OnInit()
 		const std::string root = projectRoot();
 		if (root.empty()) return false;
 		const std::filesystem::path full = (std::filesystem::path(root) / projectRelPath).lexically_normal();
-		if (!m_currentScenePath.empty() && m_undo.revision() != m_savedRevision &&
+		if (!m_currentScenePath.empty() && sceneHasUnsavedChanges() &&
 		    std::filesystem::path(m_currentScenePath).lexically_normal() == full)
 			return true;
 		return EditorUI::tabHasUnsavedEdits(full.generic_string());
@@ -3499,7 +3499,7 @@ void EditorApplication::OnRender(float dt)
 	// ── Window title ─────────────────────────────────────────────────────
 	{
 		const std::string& projName = m_projectManager.currentProject().name;
-		const bool dirty = m_undo.revision() != m_savedRevision;
+		const bool dirty = sceneHasUnsavedChanges();
 		// Only rebuild the title (string concats + filesystem path-stem parse + the
 		// SDL_SetWindowTitle syscall) when an input actually changed — this whole block
 		// ran every editor frame otherwise.
@@ -13204,7 +13204,7 @@ void EditorApplication::setupMcpTools()
 	hooks.scenePath   = [this] { return m_currentScenePath; };
 	// The same expression AppContext uses (see makeContext): the scene is dirty
 	// when the undo revision has moved past the one it was saved at.
-	hooks.sceneDirty  = [this] { return m_undo.revision() != m_savedRevision; };
+	hooks.sceneDirty  = [this] { return sceneHasUnsavedChanges(); };
 	hooks.isPlaying   = [this] { return m_isPlaying; };
 	hooks.inSession   = [this] { return m_collab.inSession(); };
 	hooks.entityCount = [this]() -> int {
@@ -13255,7 +13255,7 @@ void EditorApplication::setupMcpTools()
 		if (m_editorWorld)
 			out.push_back({ std::string(HE::Ed::kMcpDocLevelScript),
 			                "Level Script", "level",
-			                m_undo.revision() != m_savedRevision,
+			                sceneHasUnsavedChanges(),
 			                {}, kLevelScriptExcluded });
 		if (!m_projectManager.currentProject().name.empty())
 			out.push_back({ std::string(HE::Ed::kMcpDocGameInstance),
@@ -13531,7 +13531,7 @@ void EditorApplication::setupMcpTools()
 	// save prompt — that guard is replicated inside the tools (see McpSceneHooks).
 	HE::Ed::McpSceneHooks scene;
 	scene.currentScenePath = [this] { return m_currentScenePath; };
-	scene.sceneDirty       = [this] { return m_undo.revision() != m_savedRevision; };
+	scene.sceneDirty       = [this] { return sceneHasUnsavedChanges(); };
 	scene.isPlaying        = [this] { return m_isPlaying; };
 	scene.inSession        = [this] { return m_collab.inSession(); };
 	scene.entityCount      = [this]() -> int {
@@ -14983,7 +14983,7 @@ AppContext EditorApplication::makeContext()
 			m_uiPanelWindow = win;
 		},
 		.currentScenePath    = m_currentScenePath,
-		.sceneDirty          = m_undo.revision() != m_savedRevision,
+		.sceneDirty          = sceneHasUnsavedChanges(),
 		.exitRequested       = m_exitRequested,
 		.saveSceneToPath     = [this](const std::string& p){ return saveSceneToPath(p); },
 		.openScene           = [this](const std::string& p){ openScene(p); },
@@ -16441,6 +16441,14 @@ bool EditorApplication::pushToPrefab(Entity root)
 	return true;
 }
 
+// What "the scene has unsaved changes" means everywhere (title, close prompt, autosave): the undo history moved since the last save, or a
+// tile landscape has sculpted or painted tiles no file holds yet. Those are not undo steps of the scene (they live beside the pack), and
+// without this a quit after a brush stroke dropped them without a question.
+bool EditorApplication::sceneHasUnsavedChanges() const
+{
+	return m_undo.revision() != m_savedRevision || LandscapeWorldTools::editsUnsaved();
+}
+
 bool EditorApplication::saveSceneToPath(const std::string& path)
 {
 	if (!m_editorWorld || path.empty()) return false;
@@ -16547,7 +16555,7 @@ void EditorApplication::updateAutosave(std::uint64_t nowMs)
 	info.scenePath   = m_currentScenePath;
 	info.projectPath = m_projectManager.currentProject().path;
 
-	const bool dirty = m_undo.revision() != m_savedRevision;
+	const bool dirty = sceneHasUnsavedChanges();
 	m_autosave.update(nowMs, dirty, m_undo.revision(), info,
 		[this](const std::string& path)
 		{
@@ -17654,7 +17662,7 @@ bool EditorApplication::OnEvent(const SDL_Event& event)
 		 event.window.windowID == SDL_GetWindowID(window()->GetNativeWindow()));
 	if (osCloseRequest && m_dumpPath.empty() && m_projectLoaded)
 	{
-		const bool sceneDirty = m_undo.revision() != m_savedRevision;
+		const bool sceneDirty = sceneHasUnsavedChanges();
 		// Panel-driven, not m_tabs-driven: a dirty tab the user CLOSED keeps its
 		// panel state but is gone from m_tabs, so walking m_tabs would let those
 		// edits be thrown away silently.

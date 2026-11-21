@@ -451,6 +451,28 @@ TEST_CASE("landscape runtime: a pack with an edits file beside it is shown edite
 		REQUIRE(rt.store()->source().load({ 1, 2 }, -1, t));
 		CHECK(t.heights[0][0] == 22222);
 	}
+	// The world is built again under the same path (Generate, Migrate, Import): the edits file beside it belongs to the OLD world and
+	// must not put its tiles onto the new one.
+	{
+		ProceduralLandscapeParams p;
+		p.tilesX = p.tilesZ = 4;
+		p.seed = 4242;
+		const ProceduralLandscapeSource other(p);
+		LandscapePackWriter w;
+		REQUIRE(w.begin(packFile.string(), other.geometry(), 4, 4, 4, 0.0f, 3000.0f));
+		for (int z = 0; z < 4; ++z)
+			for (int x = 0; x < 4; ++x) REQUIRE(w.add({ x, z }, encodeLandscapeTile(other.generate({ x, z }))));
+		REQUIRE(w.finish());
+		REQUIRE(std::filesystem::exists(landscapeEditsFile(packFile)));
+
+		LandscapeRuntime rt;
+		REQUIRE_MESSAGE(rt.beginFromPack(packFile.string(), LandscapeRuntimeConfig{}, &err), err);
+		REQUIRE(rt.edits());                                   // the file is there, so there is an overlay ...
+		CHECK(rt.edits()->editedKeys().empty());               // ... with nothing of the old world in it
+		LandscapeTile t;
+		REQUIRE(rt.store()->source().load({ 1, 2 }, -1, t));
+		CHECK(t.heights[0] == other.generate({ 1, 2 }).heights[0]);
+	}
 	std::filesystem::remove(landscapeEditsFile(packFile));
 	std::filesystem::remove(packFile);
 }

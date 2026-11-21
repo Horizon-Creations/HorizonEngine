@@ -2,6 +2,9 @@
 
 Status: **design, plus step 1 built** (`LandscapeStore::invalidate`, `LandscapeRuntime::tileChanged`; nothing calls `tileChanged` outside the tests yet, a brush stroke still changes no tile). Steps 2 to 7 are not built. Written 06.11.2026 after reading the code listed under "What I read". Decisions are marked *taken* (by me, reversible) or *open* (the owner decides).
 
+**Status 2026-11-21: delivered.** What was built, how it deviates from this design and what is verified is in
+`docs/landscape-world-scale-writeback-2026-11-21.md`; the Handoff at the end of this file describes the state before that.
+
 ## The problem
 
 A pack (`LandscapeSource.h`, "Pack file") is write-once: a fixed index of `u64 offset, u32 size` per tile, the tile blobs back to back, then the coarse world, the water table and the HLOD tail. Editing a tile changes its blob size, so it cannot be replaced in place. Four more facts make "just save the tile" wrong:

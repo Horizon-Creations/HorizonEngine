@@ -98,7 +98,9 @@ bool LandscapeRuntime::beginFromPack(const std::string& path, const LandscapeRun
 	std::error_code ec;
 	if (m_editable || std::filesystem::is_regular_file(editsFile, ec))
 	{
+		const uint64_t world = pack->identity();
 		auto overlay = std::make_shared<LandscapeEditSource>(std::move(pack));
+		overlay->setWorldId(world);   // an edits file left over from another build of this path is not this world's
 		overlay->loadFile(editsFile);
 		source = std::move(overlay);
 	}

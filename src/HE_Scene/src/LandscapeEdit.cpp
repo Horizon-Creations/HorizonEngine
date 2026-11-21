@@ -45,9 +45,20 @@ bool LandscapeEditSource::load(LandscapeTileKey key, int maxLevels, LandscapeTil
 	return true;
 }
 
-void LandscapeEditSource::set(const std::vector<std::pair<LandscapeTileKey, LandscapeTilePtr>>& tiles)
+void LandscapeEditSource::set(const std::vector<std::pair<LandscapeTileKey, LandscapeTilePtr>>& tiles, bool patchCoarse)
 {
 	if (tiles.empty()) return;
+	m_dirty = true;
+	if (!patchCoarse)
+	{
+		std::lock_guard<std::mutex> lock(m_mutex);
+		for (const auto& [key, tile] : tiles)
+		{
+			if (tile) m_tiles[{ key.x, key.z }] = tile;
+			else m_tiles.erase({ key.x, key.z });
+		}
+		return;
+	}
 	std::vector<std::pair<LandscapeTileKey, LandscapeTilePtr>> patch;
 	{
 		std::lock_guard<std::mutex> lock(m_mutex);
@@ -115,6 +126,8 @@ bool LandscapeEditSource::save(const std::filesystem::path& file, std::string* e
 		put32(head, kEditsMagic);
 		put32(head, kEditsVersion);
 		put32(head, static_cast<uint32_t>(tiles.size()));
+		put32(head, static_cast<uint32_t>(m_worldId));
+		put32(head, static_cast<uint32_t>(m_worldId >> 32));
 		out.write(reinterpret_cast<const char*>(head.data()), static_cast<std::streamsize>(head.size()));
 		for (const auto& [k, t] : tiles)
 		{
@@ -140,14 +153,16 @@ size_t LandscapeEditSource::loadFile(const std::filesystem::path& file)
 	std::ifstream in(file, std::ios::binary | std::ios::ate);
 	if (!in) return 0;
 	const std::streamoff size = in.tellg();
-	if (size < 12) return 0;
+	if (size < 20) return 0;
 	std::vector<uint8_t> bytes(static_cast<size_t>(size));
 	in.seekg(0);
 	in.read(reinterpret_cast<char*>(bytes.data()), size);
 	if (!in || get32(bytes.data()) != kEditsMagic || get32(bytes.data() + 4) != kEditsVersion) return 0;
 	const uint32_t count = get32(bytes.data() + 8);
+	const uint64_t stamp = static_cast<uint64_t>(get32(bytes.data() + 12)) | static_cast<uint64_t>(get32(bytes.data() + 16)) << 32;
+	if (stamp != 0 && m_worldId != 0 && stamp != m_worldId) return 0;   // edits of another world under the same file name
 	std::vector<std::pair<LandscapeTileKey, LandscapeTilePtr>> tiles;
-	size_t at = 12;
+	size_t at = 20;
 	for (uint32_t i = 0; i < count; ++i)
 	{
 		if (bytes.size() - at < 12) break;
@@ -271,10 +286,17 @@ LandscapeEditSession::LandscapeEditSession(LandscapeRuntime& runtime, LandscapeE
 LandscapeTilePtr LandscapeEditSession::read(LandscapeTileKey key) const
 {
 	if (key.x < 0 || key.z < 0 || key.x >= m_edits.tilesX() || key.z >= m_edits.tilesZ()) return nullptr;
-	if (const LandscapeTilePtr t = m_edits.edited(key)) return t;
-	// The store's tile may hold fewer levels than a tile has (LandscapeStoreConfig): an edit needs all of level 0, so read the source.
-	auto tile = std::make_shared<LandscapeTile>();
-	return m_edits.base().load(key, -1, *tile) ? tile : nullptr;
+	if (const auto it = m_tiles.find({ key.x, key.z }); it != m_tiles.end()) return it->second;
+	LandscapeTilePtr t = m_edits.edited(key);
+	if (!t)
+	{
+		// The store's tile may hold fewer levels than a tile has (LandscapeStoreConfig): an edit needs all of level 0, so read the source.
+		auto tile = std::make_shared<LandscapeTile>();
+		if (!m_edits.base().load(key, -1, *tile)) return nullptr;
+		t = std::move(tile);
+	}
+	m_tiles[{ key.x, key.z }] = t;
+	return t;
 }
 
 bool LandscapeEditSession::focus(double absX, double absZ, double radiusM)
@@ -292,6 +314,7 @@ bool LandscapeEditSession::focus(double absX, double absZ, double radiusM)
 	}
 	commit();
 	m_n = 0;
+	m_tiles.clear();
 	if (absX < 0.0 || absZ < 0.0 || absX > m_edits.tilesX() * tileM || absZ > m_edits.tilesZ() * tileM) return false;
 	// The smallest of 1, 2, 4 tiles whose span around the brush fits; the world's own edge needs no spare sample.
 	for (const int n : { 1, 2, 4 })
@@ -339,7 +362,13 @@ void LandscapeEditSession::beginStroke()
 void LandscapeEditSession::apply(const std::vector<std::pair<LandscapeTileKey, LandscapeTilePtr>>& tiles, bool finish)
 {
 	if (tiles.empty()) return;
-	m_edits.set(tiles);
+	// The coarse copy waits for the end of the stroke: patching it rebuilds the whole chain above grid 0.
+	m_edits.set(tiles, finish);
+	for (const auto& [key, tile] : tiles)
+	{
+		if (tile) m_tiles[{ key.x, key.z }] = tile;
+		else m_tiles.erase({ key.x, key.z });
+	}
 	// In place where the tile is resident (the atlas uploads it again into its slot); a removed edit, or `finish`, goes through the
 	// drop-and-reload path, which is also what makes ground bodies, foliage, navigation and water build again.
 	std::vector<std::pair<LandscapeTileKey, LandscapeTilePtr>> inPlace;

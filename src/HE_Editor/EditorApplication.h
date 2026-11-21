@@ -1211,6 +1211,7 @@ private:
 	// is the undo revision at that point; the scene is dirty when it differs.
 	std::string m_currentScenePath;
 	uint64_t    m_savedRevision = 0;
+	bool        sceneHasUnsavedChanges() const;   // the undo history moved, or a tile landscape has unsaved edits
 	// Both answer whether the file was actually written / read. The UI callers
 	// ignore it (the editor log and the title bar already say so); the MCP scene
 	// tools are the caller that HAS to know, because the client on the other end

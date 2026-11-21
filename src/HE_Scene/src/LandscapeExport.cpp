@@ -115,6 +115,7 @@ namespace
 
 		// The world as its author sees it: the pack with its edits (LandscapeEdit.h) on top. An edited tile hashes by its own bytes.
 		LandscapeEditSource edited(source);
+		edited.setWorldId(source->identity());
 		const size_t editedTiles = pack.editsFile.empty() ? 0 : edited.loadFile(pack.editsFile);
 		const LandscapeFarTileHash packHash = landscapePackTileHash(*source);
 		const LandscapeFarTileHash hash = editedTiles ? LandscapeFarTileHash([&](LandscapeTileKey k) { return edited.contentHash(k, packHash); }) : packHash;
@@ -265,7 +266,9 @@ bool finishExportedPack(const LandscapeExportPack& pack, const std::filesystem::
 		std::string err;
 		auto base = LandscapePackSource::open(pack.source.string(), &err);
 		if (!base) { if (error) *error = "landscape edits: " + err; return false; }
+		const uint64_t world = base->identity();
 		LandscapeEditSource edits(std::move(base));
+		edits.setWorldId(world);
 		if (edits.loadFile(pack.editsFile) > 0 && !landscapePackBakeEdits(copied.string(), edits, error)) return false;
 	}
 	const bool hlod = pack.hlod && pack.hlod->cellCount() > 0;

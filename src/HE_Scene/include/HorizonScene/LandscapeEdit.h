@@ -45,17 +45,25 @@ public:
 	const LandscapeTileSource& base() const { return *m_base; }
 
 	// Main thread. A tile with every level (buildMips); null takes the edit away (the base's tile shows again). The coarse copy is
-	// patched for the tiles set (a removed one from the base, which costs a tile load).
-	void set(const std::vector<std::pair<LandscapeTileKey, LandscapeTilePtr>>& tiles);
+	// patched for the tiles set (a removed one from the base, which costs a tile load), unless `patchCoarse` is false: a stroke in
+	// progress sets tiles dab by dab and patches once, at its end (the chain above grid 0 is rebuilt whole each time).
+	void set(const std::vector<std::pair<LandscapeTileKey, LandscapeTilePtr>>& tiles, bool patchCoarse = true);
 	LandscapeTilePtr edited(LandscapeTileKey key) const;
 	std::vector<LandscapeTileKey> editedKeys() const;
 	bool dirty() const { return m_dirty; }   // edits not saved yet
 	// A number that changes when the tile's content does: of the edited tile's encoded bytes, else `baseHash(key)`.
 	uint64_t contentHash(LandscapeTileKey key, const std::function<uint64_t(LandscapeTileKey)>& baseHash) const;
 
-	// The sidecar: little endian, u32 magic 'HLE1'  u32 version (1)  u32 count, then per tile  i32 x  i32 z  u32 size  and `size` bytes of an
-	// encodeLandscapeTile blob. Written beside and renamed over; an empty overlay removes the file. Loading keeps every whole record of
-	// the pack's geometry and stops at the first that is not (a file cut short by a crash loses its tail, not the rest).
+	// Which world the edits belong to (LandscapePackSource::identity()), written into the edits file and checked when one is loaded: a pack
+	// that was generated, migrated or imported again under the same path is another world, and the old file's tiles must not land on it.
+	// 0 (the default, and what a file without a stamp says) is not checked.
+	void     setWorldId(uint64_t id) { m_worldId = id; }
+	uint64_t worldId() const { return m_worldId; }
+
+	// The sidecar: little endian, u32 magic 'HLE1'  u32 version (1)  u32 count  u64 worldId, then per tile  i32 x  i32 z  u32 size  and
+	// `size` bytes of an encodeLandscapeTile blob. Written beside and renamed over; an empty overlay removes the file. Loading keeps every
+	// whole record of the pack's geometry and stops at the first that is not (a file cut short by a crash loses its tail, not the rest);
+	// a file stamped for another world gives nothing.
 	// shortcut: the whole file again on every save (a megabyte a tile), make it an append-only log when a world has thousands of edited tiles.
 	bool save(const std::filesystem::path& file, std::string* error = nullptr);
 	size_t loadFile(const std::filesystem::path& file);   // tiles taken in
@@ -66,6 +74,7 @@ private:
 	std::map<std::pair<int, int>, LandscapeTilePtr> m_tiles;
 	LandscapeCoarseWorld m_coarse;   // a copy of the base's, made at the first edit
 	bool m_dirty = false;
+	uint64_t m_worldId = 0;
 };
 
 // Where a pack's edits live.
@@ -129,6 +138,7 @@ private:
 	LandscapeRuntime&    m_runtime;
 	LandscapeEditSource& m_edits;
 	LandscapeRegionTerrain m_region;
+	mutable std::map<std::pair<int, int>, LandscapeTilePtr> m_tiles;   // the region's tiles as they are now: a dab compares against these, not against a fresh load
 	int   m_n = 0;
 	LandscapeTileTerrainParams m_params;
 	bool  m_inStroke = false;

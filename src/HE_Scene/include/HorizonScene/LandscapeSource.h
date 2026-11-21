@@ -255,6 +255,9 @@ public:
 	bool readStored(LandscapeTileKey key, std::vector<uint8_t>& blob) const;
 	// Bytes of the file without its tail sections (the cell HLOD table, the far image): where a rewrite of them starts.
 	uint64_t coreSize() const { return m_coreSize; }
+	// A number for THIS world's content: of the size, the geometry and the tile index (where every tile lies and how large it is stored,
+	// which follows its content). The same after a copy of the file, another after the world was built again. Never 0.
+	uint64_t identity() const { return m_identity; }
 
 private:
 	LandscapePackSource() = default;
@@ -273,6 +276,7 @@ private:
 	std::vector<uint32_t> m_size;
 	uint64_t              m_fileSize = 0;
 	uint64_t              m_coreSize = 0;
+	uint64_t              m_identity = 1;
 	int                   m_fd = -1;                 // POSIX pread: no lock between workers
 	mutable std::mutex    m_mutex;                   // Windows: one HANDLE, one reader at a time
 	void*                 m_handle = nullptr;         // Windows HANDLE opened with FILE_SHARE_DELETE (see .cpp)
