@@ -103,6 +103,32 @@ get the old behaviour through a switch, so nothing is broken there:
   Landscape graph. When it draws the real material, `landscapeFarWeightPainter` is replaced by a painter that photographs it.
 * One Landscape mode for both kinds of landscape (today the tile brush is its own small tool in `LandscapeWorldTools.cpp:500`).
 
+## 7. Everything that is still missing after 21.11. (owner asked for the full list)
+
+Done on the Mac the same evening and only to be **run** on Windows: streaming switched off (`LandscapeWorldComponent::streaming`,
+"Stream Tiles", worlds up to 1024 tiles), a migrated terrain bringing its water, the textured far-image witness (scene 4 prints
+`textured ground: ... mean gap 0.62/255` on OpenGL and Metal; D3D and Vulkan print it once they take the far image).
+
+Not built anywhere, largest first. None of it is Windows-specific, but each part that draws needs its D3D and Vulkan half on NN-WS03:
+
+| # | Missing | Why it was not done in the session | Where it starts |
+|---|---|---|---|
+| 1 | **The landscape material in the tile world** (Auto Landscape graph, RVT, snow / sand / weather / trails) | The tile landscape does not go through the engine's material and lighting pipeline at all: `kLandscapeFS` is its own shader with its own sun and ambient, no shadows, no fog, no GI on it. Drawing the material means a landscape variant of every material shader (vertex stage from the height atlas, weights from the tile arrays instead of `heLandscapeWeights`) inside each backend's scene pass. That is the renderer step of weeks, per backend, not a hook | `LandscapeShaderSource.h`, `MatShaderGen`, each backend's `*Landscape.*` and scene pass; RVT 2.0 is on the branch since `11b9eea4e` (Thema 335 step 10) |
+| 2 | The far image painted from that material | Waits for 1: a far image of the real material beside near ground that is the layer blend is a visible ring. The painter is the one swappable piece (`LandscapeFarPainter`); `HlodBaker::bakeRect` photographs any world rectangle of the old material already | `LandscapeFarBake.h`, `LandscapeHlodBaker.h` |
+| 3 | **Shadows, fog and GI on the tile landscape** as on any other object; GI sun shadows on Metal and D3D12; reflections on four backends | Part of 1 (lighting pipeline) for the first half; the second needs the height field in Metal's and D3D12's ray-traced paths | `docs/landscape-world-scale-gi-2026-11-02.md`, `docs/landscape-reflections-design-2026-11-19.md` |
+| 4 | **Tools on tiles**: foliage painting, water brush and lakes, Mountain, Ramp, heightmap import onto an existing world | Each writes another raster back (foliage masks are not in the tile format at all; water rasters are, editing them is not built). Sculpt and Paint Layer exist | `LandscapeEdit.h` (the write-back to copy), `TerrainTools.cpp` (the brushes), `LandscapeTile.h` (format) |
+| 5 | **One Landscape mode** for both kinds, strokes in the editor's own undo | 2871 lines built around an entity's terrain; needs a target abstraction. Today: "Edit Tiles" in the Tile Landscape section, its own Undo Stroke | `TerrainTools.cpp`, `LandscapeWorldTools.cpp:500` |
+| 6 | **Migration when a scene is loaded**, with foliage masks and material overrides | The migration is a button ("Migrate Terrain to Tiles"); it brings heights, paint and now water. Masks and overrides have nowhere to go until 1 and 4 | `LandscapePackBuild.cpp` (`migrateTerrainToPack`), `SceneSerializer.cpp` |
+| 7 | **Colour on the cell proxies** (far buildings and props are silhouettes in the default material) | A mesh has no vertex colours (position, normal, uv). Planned: one small palette texture for the whole table, each instance's uv pointing at its mean albedo, one shared material; needs a version of the `'HLDF'` table | `LandscapeCellHlodBake.cpp`, `LandscapeHlodProxies.cpp` |
+| 8 | **Entity cells streaming in the editor** | `CellRuntime` is wired in `GameApplication` only | `GameApplication.cpp` (`updateCellStreaming`), `EditorApplication.cpp` |
+| 9 | Script API, MCP tools, tutorial, outliner, viewport picking, spline tool for the tile world | They address a `TerrainComponent` entity | `EngineApi.cpp`, `McpToolsTerrain.cpp`, `ViewportPick.cpp`, `SplineTool.cpp` |
+| 10 | The end of a brush stroke without dropping the changed tiles once | Ground bodies, foliage, navigation and water are rebuilt by the tile leaving the store for a frame or two; an in-place refresh needs a "tile changed" on each of the four | `LandscapeEditSession::endStroke`, `LandscapePhysics/Foliage/Navigation/Water` |
+| 11 | Huge worlds: the tile index, the cell HLOD table and the pack writer's coarse world are still whole in memory; no pack over 131 km was ever built or flown | Not needed up to 131 km | `LandscapeSource.h` (the two `shortcut:` comments) |
+| 12 | Collaboration on a pack (two people sculpting) | The collaboration layer streams scenes, not packs | `TerrainSync.*` is the model for terrains |
+
+Never measured on any machine: the 100 km flight of the original plan (1 % low under 8 ms, no hitch over 16 ms, memory under budget),
+the cost of a far bake, of a window move, of a brush stroke. The first Windows session with the hardware free should take those.
+
 ## Handoff
 
 - **Done / verified / not verified:** see the three docs named at the top; on Windows nothing is verified.

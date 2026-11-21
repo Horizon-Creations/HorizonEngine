@@ -200,6 +200,7 @@ public:
 	bool load(LandscapeTileKey key, int maxLevels, LandscapeTile& out) const override { return m_base->load(key, maxLevels, out); }
 	bool heightRange(float& minM, float& scaleM) const override { return m_base->heightRange(minM, scaleM); }
 	const LandscapeCoarseWorld* coarse() const override { return m_base->coarse(); }
+	std::shared_ptr<const LandscapeCoarseWorld> coarseWindow(LandscapeTileKey o, int tx, int tz) const override { return m_base->coarseWindow(o, tx, tz); }
 	const LandscapeFarTable* farImage() const override { return m_table.get(); }
 
 private:
@@ -604,6 +605,82 @@ int runBackend(gpucheck::Backend& be, const std::string& packPath, const std::fi
 		writePng((outDir / (std::string("landscape_") + be.name() + "_far.png")).string(), withReal);
 		writePng((outDir / (std::string("landscape_") + be.name() + "_far_marker.png")).string(), withMarker);
 		writePng((outDir / (std::string("landscape_") + be.name() + "_far_without.png")).string(), without);
+
+		// The same with the ground TEXTURED (the texture group's array on layers 0-3, the default of a real world): the far image is
+		// baked with the mean colour of each slice, which is what the array comes to once a pixel covers many repeats of it.
+		if (be.takesFarImage())
+		{
+			gpucheck::TexArray tex;
+			tex.size = 64;
+			tex.layers = 4;
+			tex.rgba.resize(static_cast<size_t>(tex.size) * static_cast<size_t>(tex.size) * 4u * 4u);
+			// Each slice a checker of two colours in 8 x 8 texel squares: its mean is the two colours' mean, at every mip from the squares up.
+			const uint8_t colours[4][2][3] = { { { 40, 120, 30 }, { 90, 170, 60 } }, { { 110, 100, 90 }, { 150, 140, 130 } }, { { 200, 180, 110 }, { 160, 140, 80 } }, { { 250, 250, 250 }, { 210, 215, 225 } } };
+			LandscapeFarPaint texPaint = paint;
+			for (int l = 0; l < 4; ++l)
+			{
+				for (int y = 0; y < tex.size; ++y)
+					for (int x = 0; x < tex.size; ++x)
+					{
+						uint8_t* px = &tex.rgba[((static_cast<size_t>(l) * static_cast<size_t>(tex.size) + static_cast<size_t>(y)) * static_cast<size_t>(tex.size) + static_cast<size_t>(x)) * 4u];
+						const uint8_t* col = colours[l][((x / 8) + (y / 8)) & 1];
+						px[0] = col[0]; px[1] = col[1]; px[2] = col[2]; px[3] = 255;
+					}
+				// The tool's arrays are plain RGBA8 (no sRGB decode when sampled), so the mean is the mean of the bytes.
+				for (int k = 0; k < 3; ++k) texPaint.layerColor[static_cast<size_t>(l)][k] = (static_cast<float>(colours[l][0][k]) + static_cast<float>(colours[l][1][k])) / 510.0f;
+			}
+			// A world that is layer 0 everywhere (the fBm world above is mostly the untextured layers): all of its ground is slice 0.
+			const auto texBase = std::make_shared<FormulaSource>(kFarTiles);
+			const auto bakeTex = [&](const LandscapeFarPainter& painter) {
+				LandscapeFarBakeOptions o;
+				o.painter = painter;
+				auto t = std::make_shared<LandscapeFarTable>();
+				LandscapeFarBakeStats st;
+				bakeLandscapeFar(*texBase, {}, o, nullptr, *t, st);
+				return st.baked == st.regions && st.regions > 0 ? t : nullptr;
+			};
+			const auto texReal = bakeTex(landscapeFarWeightPainter(texPaint));
+			const auto texMarker = bakeTex([](const LandscapeTileSource&, const LandscapeFarLayout& l, int, int, std::vector<uint8_t>& rgba) {
+				rgba.resize(static_cast<size_t>(l.regionSide()) * static_cast<size_t>(l.regionSide()) * 4);
+				for (size_t i = 0; i < rgba.size(); i += 4) { rgba[i] = 255; rgba[i + 1] = 0; rgba[i + 2] = 255; rgba[i + 3] = 255; }
+				return true;
+			});
+			if (!texReal || !texMarker) { std::printf("  the far image did not bake (textured)\n"); return 1; }
+			const auto shotTex = [&](const std::shared_ptr<const LandscapeFarTable>& table, bool array, gpucheck::RenderOut& out) {
+				LandscapeRuntime rt;
+				LandscapeRuntimeConfig cfg;
+				cfg.store.byteBudget = 16ull * 1024 * 1024;
+				cfg.textureGroup = 0;        // the frame names the group's array; what the backend binds is the tool's own
+				cfg.textureMeters = 8.0f;
+				std::string err;
+				if (!rt.begin(std::make_shared<FarSource>(texBase, table), cfg, &err)) { std::printf("  runtime: %s\n", err.c_str()); return false; }
+				if (!settle(rt, c.pos, c.origin)) return false;
+				gpucheck::RenderIn in = makeInput(c, be.depthIsNdc(), rt);
+				in.albedo = array ? &tex : nullptr;
+				return be.render(in, out);
+			};
+			gpucheck::RenderOut texWithout, texWith, texFar, flatWithout;
+			if (!shotTex(nullptr, true, texWithout) || !shotTex(texReal, true, texWith) || !shotTex(texMarker, true, texFar) || !shotTex(nullptr, false, flatWithout))
+			{ std::printf("  render failed (far image, textured)\n"); return 1; }
+			// Over the pixels the marker shows to be far ground: the baked picture against the array itself, and (control) against no array.
+			double a[3] = { 0, 0, 0 }, b[3] = { 0, 0, 0 };
+			size_t n = 0, flatLike = 0;
+			for (size_t i = 0; i < texWithout.depth.size(); ++i)
+			{
+				if (texWithout.depth[i] >= 1.0f || !isMarker(texFar, i)) continue;
+				++n;
+				for (size_t k = 0; k < 3; ++k) { a[k] += texWith.rgba[i * 4 + k]; b[k] += texWithout.rgba[i * 4 + k]; }
+				int worst = 0;
+				for (size_t k = 0; k < 3; ++k) worst = std::max(worst, std::abs(static_cast<int>(texWithout.rgba[i * 4 + k]) - static_cast<int>(flatWithout.rgba[i * 4 + k])));
+				flatLike += worst <= 2 ? 1 : 0;
+			}
+			double gap = 0.0;
+			for (int k = 0; k < 3; ++k) gap = std::max(gap, n ? std::abs(a[k] - b[k]) / static_cast<double>(n) : 255.0);
+			std::printf("  %-26s textured ground: baked image against the texture array over %zu far px: mean gap %.2f/255\n", "", n, gap);
+			tally.check(n > 0 && flatLike * 4 < n, "the array changes the far ground (the textured control is not the flat one)");
+			tally.check(gap < 6.0, "a far image baked from the slices' mean colours is what the textured ground comes to", "mean gap " + std::to_string(gap));
+			writePng((outDir / (std::string("landscape_") + be.name() + "_far_textured.png")).string(), texWith);
+		}
 	}
 	// ── scene 5: sculpt and paint that write back (LandscapeEdit.h): a dab shows in the atlas at once, the far levels after the stroke ──
 	{
