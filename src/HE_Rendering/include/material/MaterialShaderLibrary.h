@@ -209,6 +209,11 @@ public:
         float fogVol[4]       = {};
         float fogVolGrid[4]   = {};
         float fogViewProj[16] = {};
+        // worldOrigin: xyz = the world's floating origin (HorizonWorld::origin), so that position + worldOrigin is the ABSOLUTE
+        // position. A material's World Position (and its world-space noise) is that sum: its texturing then stays on the ground
+        // when the origin is rebased, instead of moving with it. Lighting keeps the origin-relative vWorldPos. Filled for every
+        // backend by FillMaterialLightWindow (RenderWorld::worldOrigin); 0 where the world has no floating origin.
+        float worldOrigin[4]  = {};
     };
     // Metal's setFragmentBytes caps at 4 KiB; the lighting block rides it on every material draw.
     static_assert(sizeof(Lighting) <= 4096, "HeLighting outgrew Metal's setBytes limit");

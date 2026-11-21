@@ -524,6 +524,9 @@ public:
     // first directional light, or driven by the day-night cycle when enabled.
     // Backends use it for the procedural sky + image-based ambient.
     glm::vec3 sunDirection = glm::vec3(0.45f, 0.80f, 0.55f);
+    // The world's floating origin (HorizonWorld::origin): every position in here is relative to it. For the materials' absolute
+    // World Position (MaterialShaderLibrary::Lighting::worldOrigin).
+    glm::dvec3 worldOrigin{ 0.0 };
 
     // Flat ambient fill added to every lit surface, set by the extractor. A weak
     // floor is always present (so the scene is never fully black); under heavy

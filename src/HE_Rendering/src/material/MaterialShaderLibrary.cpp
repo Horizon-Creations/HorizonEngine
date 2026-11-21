@@ -287,6 +287,7 @@ layout(std140, set = 0, binding = 0) uniform HeLighting {
     vec4 fogVol;         // volumetric fog: x = 1 → the froxel volume owns the fog (heApplyFog = no-op), y = D (m), z = c (m), w = 1 → heFogVolume bound
     vec4 fogVolGrid;     // xyz = froxel grid size
     mat4 fogViewProj;    // world → clip, unjittered, y flip pre-baked: uv = clip.xy / clip.w * 0.5 + 0.5, clip.w = planar depth
+    vec4 worldOrigin;    // xyz = the floating origin: vWorldPos + worldOrigin.xyz is the absolute position (World Position node)
 } heLight;
 // Screen-space ray-traced shadow masks (GI): sun visibility (.r) + local-light
 // visibility (one channel per the first 4 point/spot lights). Bindings 10/11 —

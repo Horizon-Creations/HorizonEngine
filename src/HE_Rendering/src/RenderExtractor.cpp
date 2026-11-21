@@ -1865,6 +1865,7 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 	}
 	{ HE_PROFILE_SCOPE_N("Extract::meshes"); extractMeshes(reg, out, m_contentManager, m_sectionMaterialMissing, cooked); }
 	extractLandscapeGiHeightfield(world, out);
+	out.worldOrigin = world.origin();
 	extractParticleBatches(reg, out);
 	extractPrecipitation(reg, out);
 	if (!m_foliageLod) m_foliageLod = std::make_unique<HE::FoliageLodMemory>();

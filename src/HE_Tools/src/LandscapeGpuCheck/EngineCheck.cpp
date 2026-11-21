@@ -534,8 +534,8 @@ int runMaterialCheck(HE::RendererBackend backend, HE::RenderPath path, const std
 							for (size_t i = 0; i < px; ++i)
 								if (isBlue(&lit[i * 4])) { gap += std::abs(lum(&moved[i * 4]) - lum(&autoImg[i * 4])); ++n2; }
 							const double meanGap = gap / static_cast<double>(std::max<size_t>(n2, 1));
-							std::printf("  floating origin moved by (1000.3, 517.7) m: the ground differs by %.2f/255 on average%s\n", meanGap,
-							            meanGap > 2.0 ? "  KNOWN GAP: the material's texturing moves with the origin" : "");
+							std::printf("  floating origin moved by (1000.3, 517.7) m: the ground differs by %.2f/255 on average\n", meanGap);
+							if (meanGap > 2.0) fail("the material stays on the ground when the floating origin moves");
 							writePngFile(pngPath.substr(0, pngPath.size() - 4) + "_auto_origin.png", static_cast<int>(kW), static_cast<int>(kH), moved.data());
 						}
 						ov = kept;

@@ -458,7 +458,8 @@ TEST_CASE("Noise Texture node emits 3D world-space fbm as a vec3 (mesh-independe
 	const std::string glsl = HE::generateFragment(g).glsl;
 	// World-space 3D noise so it varies on ANY mesh (a UV-less cube has vUV=0 everywhere,
 	// which would collapse UV noise to a single value → flat/black).
-	CHECK(glsl.find("heFbm3(vWorldPos") != std::string::npos);
+	// ... of the ABSOLUTE position (plus the floating origin), so the mottling stays on the mesh when the origin is rebased.
+	CHECK(glsl.find("heFbm3((vWorldPos + heLight.worldOrigin.xyz)") != std::string::npos);
 	CHECK(glsl.find("float heValueNoise3(vec3") != std::string::npos); // 3D helper injected
 	CHECK(glsl.find("vec3(") != std::string::npos);           // grayscale RGB for a clean multiply
 	CHECK(glsl.find("6.0") != std::string::npos);             // default Scale baked in
