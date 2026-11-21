@@ -30,6 +30,8 @@ struct alignas(16) Globals
 	float   ambient[4];
 	float   texMaps[4];
 	float   tex[4];
+	float   aux0[16];
+	float   aux1[16];
 };
 struct alignas(16) PatchData
 {
@@ -37,7 +39,7 @@ struct alignas(16) PatchData
 	float   patchPos[4];
 	float   morph[4];
 };
-static_assert(sizeof(Globals) == 64 + 4 * 16 + 16 + 8 * 16 + 16 * 16 + 12 * 16 + 5 * 16, "LsGlobals: the MSL struct and this one have to be the same size");
+static_assert(sizeof(Globals) == 64 + 4 * 16 + 16 + 8 * 16 + 16 * 16 + 12 * 16 + 5 * 16 + 2 * 64, "LsGlobals: the MSL struct and this one have to be the same size");
 static_assert(sizeof(PatchData) == 48, "LsPatch: the MSL struct and this one have to be the same size");
 
 constexpr NSUInteger kBuf = 20, kPatchBuf = 21;      // constant buffers (vertex: 20, 21; fragment: 20)
@@ -126,7 +128,7 @@ bool MetalLandscape::init(void* devicePtr, unsigned long colorFormat, unsigned l
 	return true;
 }
 
-void* MetalLandscape::makePassPipeline(const char* fragment, const unsigned long* colorFormats, int colorCount, unsigned long depthFormat, std::string* error)
+void* MetalLandscape::makePassPipeline(const char* vertex, const char* fragment, const unsigned long* colorFormats, int colorCount, unsigned long depthFormat, std::string* error)
 {
 	Impl& m = *m_impl;
 	if (!m.ok) return nullptr;
@@ -135,7 +137,7 @@ void* MetalLandscape::makePassPipeline(const char* fragment, const unsigned long
 		NSError* err = nil;
 		id<MTLLibrary> lib = [m.device newLibraryWithSource:[NSString stringWithUTF8String:glsl::kLandscapeMSL] options:nil error:&err];
 		MTLRenderPipelineDescriptor* pd = [[MTLRenderPipelineDescriptor alloc] init];
-		pd.vertexFunction = [lib newFunctionWithName:@"vertexMain"];
+		pd.vertexFunction = [lib newFunctionWithName:[NSString stringWithUTF8String:vertex ? vertex : "vertexMain"]];
 		if (fragment) pd.fragmentFunction = [lib newFunctionWithName:[NSString stringWithUTF8String:fragment]];
 		for (int i = 0; i < colorCount; ++i) pd.colorAttachments[static_cast<NSUInteger>(i)].pixelFormat = static_cast<MTLPixelFormat>(colorFormats[i]);
 		pd.depthAttachmentPixelFormat = static_cast<MTLPixelFormat>(depthFormat);
@@ -279,6 +281,8 @@ void MetalLandscape::encode(void* renderEncoder, const LandscapeRenderFrame& f, 
 		// ── encode ──
 		Globals g{};
 		std::memcpy(g.viewProj, &viewProj[0][0], sizeof(g.viewProj));
+		std::memcpy(g.aux0, &shading.aux0[0][0], sizeof(g.aux0));
+		std::memcpy(g.aux1, &shading.aux1[0][0], sizeof(g.aux1));
 		g.cameraRel[0] = f.cameraRel.x; g.cameraRel[1] = f.cameraRel.y; g.cameraRel[2] = f.cameraRel.z; g.cameraRel[3] = f.slabDistance;
 		g.world[0] = w.worldMaxX; g.world[1] = w.worldMaxZ; g.world[2] = w.tileM; g.world[3] = w.heightScaleM;
 		g.heightInfo[0] = w.heightMinM; g.heightInfo[1] = static_cast<float>(w.tilesX); g.heightInfo[2] = static_cast<float>(w.tilesZ); g.heightInfo[3] = static_cast<float>(w.tableWindow);
@@ -303,7 +307,7 @@ void MetalLandscape::encode(void* renderEncoder, const LandscapeRenderFrame& f, 
 		g.tex[2] = static_cast<float>(f.uvOrigin.x * k - std::floor(f.uvOrigin.x * k)); g.tex[3] = static_cast<float>(f.uvOrigin.z * k - std::floor(f.uvOrigin.z * k));
 
 		id<MTLRenderCommandEncoder> enc = (__bridge id<MTLRenderCommandEncoder>)renderEncoder;
-		[enc setDepthStencilState:m.depth];
+		if (!shading.passKeepsDepthState) [enc setDepthStencilState:m.depth];
 		[enc setVertexBytes:&g length:sizeof(g) atIndex:kBuf];
 		[enc setFragmentBytes:&g length:sizeof(g) atIndex:kBuf];
 		[enc setVertexTexture:m.tileHeights atIndex:kTex + 0];

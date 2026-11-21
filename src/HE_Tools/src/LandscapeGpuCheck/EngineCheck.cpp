@@ -448,6 +448,32 @@ int runMaterialCheck(HE::RendererBackend backend, HE::RenderPath path, const std
 				shoot(giOff);   // back on the cascades before the fog frame
 			}
 
+			// Ambient occlusion: the ground is in the SSAO position pre-pass, so the box darkens the ground around its foot. Against
+			// the same frame with the ground left out of the pre-pass (its pixels are then background to the occlusion pass).
+			{
+				IRenderer::SSAOSettings ao;
+				ao.enabled = true;
+				ao.radius = 12.0f;
+				ao.intensity = 1.0f;
+				renderer->SetSSAOSettings(ao);
+				std::vector<uint8_t> aoOn, aoOff;
+				const bool gotA = shoot(aoOn);
+				landscapePasses("0");
+				const bool gotB = gotA && shoot(aoOff);
+				landscapePasses(nullptr);
+				if (!gotB) fail("RenderSceneImage gave an image (SSAO)");
+				else
+				{
+					size_t darker = 0;
+					for (size_t i = 0; i < px; ++i)
+						darker += isBlue(&aoOn[i * 4]) && isBlue(&aoOff[i * 4]) && lum(&aoOn[i * 4]) < 0.95 * lum(&aoOff[i * 4]) ? 1 : 0;
+					std::printf("  ambient occlusion: %zu ground px are darker with the ground in the SSAO pre-pass than without\n", darker);
+					if (darker < 60) fail("the ground takes ambient occlusion", std::to_string(darker) + " px");
+					writePngFile(pngPath.substr(0, pngPath.size() - 4) + "_ao.png", static_cast<int>(kW), static_cast<int>(kH), aoOn.data());
+				}
+				renderer->SetSSAOSettings(IRenderer::SSAOSettings{});
+			}
+
 			IRenderer::EnvironmentSettings env = renderer->GetEnvironment();
 			env.fogDensity = 0.004f;
 			env.fogHeightFalloff = 0.0f;   // the ramp stands 600 m up: with a falloff the fog would lie far below it
@@ -510,6 +536,53 @@ int runMaterialCheck(HE::RendererBackend backend, HE::RenderPath path, const std
 						if (sum / n < 12.0) fail("the ground is not black");
 						if (step / n < 0.3) fail("the ground has the material's texture in it");
 						writePngFile(pngPath.substr(0, pngPath.size() - 4) + "_auto.png", static_cast<int>(kW), static_cast<int>(kH), autoImg.data());
+
+						// Temporal anti-aliasing with the camera moving: the ground reports the camera's motion in the velocity pass, so
+						// the history lines up and the texture stays sharp. Without the ground there it reports "did not move" and the
+						// resolve blends misplaced history into it. Measured as the texture's contrast in the last frame of a pan.
+						{
+							IRenderer::AntiAliasingSettings aa;
+							aa.method = static_cast<int>(HE::AAMethod::TAA);
+							aa.sharpness = 0.0f;
+							renderer->SetAntiAliasingSettings(aa);
+							const EditorCameraOverride still = ov;
+							const auto pan = [&](std::vector<uint8_t>& img) {
+								bool ok = true;
+								for (int k = 0; k < 16 && ok; ++k)
+								{
+									const glm::vec3 e = eye + glm::vec3(0.0f, 0.0f, 0.6f * static_cast<float>(k));
+									ov.view = glm::lookAt(e, e + glm::normalize(glm::vec3(1.0f, -0.45f, 0.15f)), glm::vec3(0, 1, 0));
+									ov.position = e;
+									img.clear();
+									ok = renderer->RenderSceneImage(ov, kW, kH, img) && img.size() == px * 4;
+								}
+								return ok;
+							};
+							const auto contrast = [&](const std::vector<uint8_t>& img) {
+								double s = 0.0;
+								size_t n3 = 0;
+								for (size_t i = 0; i + 1 < px; ++i)
+									if (isBlue(&lit[i * 4]) && i % kW + 1 < kW) { s += std::abs(lum(&img[i * 4 + 4]) - lum(&img[i * 4])); ++n3; }
+								return s / static_cast<double>(std::max<size_t>(n3, 1));
+							};
+							std::vector<uint8_t> withVel, withoutVel;
+							const bool gotA = pan(withVel);
+							landscapePasses("0");
+							const bool gotB = gotA && pan(withoutVel);
+							landscapePasses(nullptr);
+							ov = still;
+							if (!gotB) fail("RenderSceneImage gave an image (TAA pan)");
+							else
+							{
+								std::printf("  TAA, camera panning: the ground's contrast is %.2f/255 with its velocity, %.2f/255 without\n", contrast(withVel), contrast(withoutVel));
+								if (renderer->GetCapabilities().supportsTemporalAA &&contrast(withVel) < contrast(withoutVel) * 1.1) fail("the ground stays sharp under TAA while the camera moves");
+								writePngFile(pngPath.substr(0, pngPath.size() - 4) + "_taa.png", static_cast<int>(kW), static_cast<int>(kH), withVel.data());
+								writePngFile(pngPath.substr(0, pngPath.size() - 4) + "_taa_novelocity.png", static_cast<int>(kW), static_cast<int>(kH), withoutVel.data());
+							}
+							renderer->SetAntiAliasingSettings(IRenderer::AntiAliasingSettings{});
+							std::vector<uint8_t> settleBack;
+							shoot(settleBack);
+						}
 
 						// The floating origin moves (a large world rebases it as the camera travels): the same absolute camera should see
 						// the same ground, texture and all. KNOWN GAP, measured and reported here, not a failure of this check: a graph

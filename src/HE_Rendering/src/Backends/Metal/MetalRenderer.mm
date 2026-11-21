@@ -7311,9 +7311,11 @@ void MetalRenderer::Shutdown()
 	m_uiMaterialPipelines.clear();
 	for (auto& [k, pso] : m_landscapeMaterialPipelines) if (pso) CFBridgingRelease(pso);
 	m_landscapeMaterialPipelines.clear();
-	if (m_landscapeShadowPipeline) { CFBridgingRelease(m_landscapeShadowPipeline); m_landscapeShadowPipeline = nullptr; }
-	if (m_landscapeGiPipeline)     { CFBridgingRelease(m_landscapeGiPipeline);     m_landscapeGiPipeline = nullptr; }
-	m_landscapeShadowTried = m_landscapeGiTried = false;
+	for (int k = 0; k < kLandscapePassKinds; ++k)
+	{
+		if (m_landscapePassPipeline[k]) { CFBridgingRelease(m_landscapePassPipeline[k]); m_landscapePassPipeline[k] = nullptr; }
+		m_landscapePassTried[k] = false;
+	}
 	if (m_giLandMesh.blas)      CFBridgingRelease(m_giLandMesh.blas);
 	if (m_giLandMesh.vertexBuf) CFBridgingRelease(m_giLandMesh.vertexBuf);
 	if (m_giLandMesh.indexBuf)  CFBridgingRelease(m_giLandMesh.indexBuf);
@@ -8803,7 +8805,7 @@ void MetalRenderer::EncodeShadowMap(void* cmdBufPtr, float aspect)
 				}, "ShadowLoop", /*serial=*/true);
 			}
 			// The tile landscape casts into every layer: the ground shadows itself and what stands on it.
-			EncodeLandscapePass((__bridge void*)enc, HE::kMetalClipFix * sv.viewProj, /*giGBuffer=*/false);
+			EncodeLandscapePass((__bridge void*)enc, HE::kMetalClipFix * sv.viewProj, /*shadow*/ 0);
 			[enc endEncoding];
 		};
 
@@ -9703,7 +9705,7 @@ void MetalRenderer::EncodeGIShadowRays(void* cmdBufPtr, int width, int height)
 			}
 		}
 		// The tile landscape's ground is geometry like the meshes: without it here its pixels would have no shadow value at all.
-		EncodeLandscapePass((__bridge void*)genc, viewProjRaster, /*giGBuffer=*/true);
+		EncodeLandscapePass((__bridge void*)genc, viewProjRaster, /*GI pre-pass*/ 1);
 		[genc endEncoding];
 
 		// ── 2. Ray-traced occlusion (compute) — HW intersection_query against
@@ -14515,10 +14517,11 @@ void MetalRenderer::EncodeSSAO(void* cmdBufPtr, int width, int height)
 	m_extractor.setContentManager(m_contentManager);
 	m_extractor.extract(*m_world, m_renderWorld,
 	                    static_cast<float>(width) / static_cast<float>(height), &m_editorCamera);
-	if (m_renderWorld.objects.empty()) return;
+	// (a tile landscape is geometry too: with one, the pass runs for the ground alone)
+	if (m_renderWorld.objects.empty() && !m_landscapeProvider) return;
 	RefineObjectBounds();
 	CullCameraObjects();
-	if (m_sortedIndices.empty()) return;
+	if (m_sortedIndices.empty() && !m_landscapeProvider) return;
 	}
 
 	EnsureSSAOTargets(width, height);
@@ -14673,6 +14676,8 @@ void MetalRenderer::EncodeSSAO(void* cmdBufPtr, int width, int height)
 				                 indexType:MTLIndexTypeUInt32 indexBuffer:ibuf indexBufferOffset:0];
 			}, "PrepassLoop", /*serial=*/true);
 		}
+		// The tile landscape's ground: occludes and is occluded like the meshes (and feeds the forward reflections' targets).
+		EncodeLandscapePass((__bridge void*)enc, viewProj, mrt ? 3 : 2, view);
 		[enc endEncoding];
 		}
 
@@ -15299,7 +15304,7 @@ void MetalRenderer::DestroyLdrTarget()
 // construction: it only ever reads positions.
 void MetalRenderer::EncodeVelocity(void* cmdBufPtr, int width, int height)
 {
-	if (!TemporalActive() || !m_velocityTex || m_sortedIndices.empty()) return;
+	if (!TemporalActive() || !m_velocityTex || (m_sortedIndices.empty() && !m_landscapeProvider)) return;
 	id<MTLCommandBuffer> cmdBuf = (__bridge id<MTLCommandBuffer>)cmdBufPtr;
 
 	MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
@@ -15374,6 +15379,8 @@ void MetalRenderer::EncodeVelocity(void* cmdBufPtr, int width, int height)
 		               indexBuffer:(__bridge id<MTLBuffer>)mesh->indexBuf
 		         indexBufferOffset:0];
 	}
+	// The tile landscape's ground stands still; the camera's own motion is its velocity.
+	EncodeLandscapePass((__bridge void*)enc, viewProjJit, 4, viewProjClean, m_taaPrevViewProj);
 	[enc endEncoding];
 
 	// Advance the history HERE, at the end of the one pass that consumed it —
@@ -16438,29 +16445,46 @@ bool MetalRenderer::EnsureLandscape()
 // `clip` is that pass's matrix with depth 0..1. The provider is asked for THIS view (its patches are the ones this view sees; their
 // levels are the main camera's whatever the view, LandscapeRuntime::buildFrame, so caster and receiver are the same surface), and a
 // frame carries the uploads that were pending when it was asked, so whichever pass comes first in a frame brings the tiles in.
-void MetalRenderer::EncodeLandscapePass(void* renderEncoder, const glm::mat4& clip, bool giGBuffer)
+void MetalRenderer::EncodeLandscapePass(void* renderEncoder, const glm::mat4& clip, int kind, const glm::mat4& aux0, const glm::mat4& aux1)
 {
+	// kind: 0 shadow map layer (depth only), 1 GI pre-pass (position + normal), 2 SSAO position, 3 SSAO position with the forward
+	// reflections' normal and depth beside it, 4 velocity. 0 and 1 hand a matrix with depth 0..1, the others the scene's GL one.
+	if (kind < 0 || kind >= kLandscapePassKinds) return;
+	const bool zeroToOne = kind <= 1;
 	if (!m_landscapeProvider || m_landscapeFailed) return;
 	// HE_LANDSCAPE_PASSES=0: the ground in the scene pass alone, as before (the A/B of landscape_gpu_check; read per call so a
 	// running process can switch).
 	if (const char* e = std::getenv("HE_LANDSCAPE_PASSES"); e && *e == '0') return;
 	// The provider first: a scene without a tile landscape compiles nothing here.
 	HE::LandscapeRenderFrame frame;
-	m_landscapeProvider(glm::dmat4(clip), /*zeroToOne=*/true, frame);
+	m_landscapeProvider(glm::dmat4(clip), zeroToOne, frame);
 	if (!frame.active || !EnsureLandscape()) return;
-	void*& pso = giGBuffer ? m_landscapeGiPipeline : m_landscapeShadowPipeline;
-	bool& tried = giGBuffer ? m_landscapeGiTried : m_landscapeShadowTried;
+	void*& pso = m_landscapePassPipeline[kind];
+	bool& tried = m_landscapePassTried[kind];
 	if (!pso && !tried)
 	{
 		tried = true;
 		std::string err;
-		const unsigned long gi[2] = { static_cast<unsigned long>(kGiGBufPosFormat), static_cast<unsigned long>(MTLPixelFormatRGBA16Float) };
-		pso = m_landscape.makePassPipeline(giGBuffer ? "fragmentGiGBuf" : nullptr, gi, giGBuffer ? 2 : 0, static_cast<unsigned long>(kDepthFormat), &err);
-		if (!pso) HE_LOG_WARN(RHI, "MetalRenderer: the landscape is not in the %s: %s", giGBuffer ? "GI pre-pass" : "shadow maps", err.c_str());
+		static const char* const kVertex[kLandscapePassKinds]   = { nullptr, nullptr, nullptr, nullptr, "vertexVelocity" };
+		static const char* const kFragment[kLandscapePassKinds] = { nullptr, "fragmentGiGBuf", "fragmentViewPos", "fragmentViewPosMrt", "fragmentVelocity" };
+		static const char* const kWhere[kLandscapePassKinds]    = { "shadow maps", "GI pre-pass", "SSAO pre-pass", "reflection pre-pass", "velocity pass" };
+		const unsigned long f16 = static_cast<unsigned long>(MTLPixelFormatRGBA16Float);
+		const unsigned long colors[kLandscapePassKinds][3] = {
+			{ 0, 0, 0 },
+			{ static_cast<unsigned long>(kGiGBufPosFormat), f16, 0 },
+			{ f16, 0, 0 },
+			{ f16, f16, static_cast<unsigned long>(MTLPixelFormatR32Float) },
+			{ static_cast<unsigned long>(MTLPixelFormatRG16Float), 0, 0 } };
+		static const int kColorCount[kLandscapePassKinds] = { 0, 2, 1, 3, 1 };
+		pso = m_landscape.makePassPipeline(kVertex[kind], kFragment[kind], colors[kind], kColorCount[kind], static_cast<unsigned long>(kDepthFormat), &err);
+		if (!pso) HE_LOG_WARN(RHI, "MetalRenderer: the landscape is not in the %s: %s", kWhere[kind], err.c_str());
 	}
 	if (!pso) frame.patches.clear();   // nothing to draw with, but the frame's uploads are still this frame's: encode() applies them
 	MetalLandscape::Shading sh;
 	sh.passPipeline = pso;
+	sh.passKeepsDepthState = kind == 4;   // velocity tests against the scene's depth and does not write
+	sh.aux0 = aux0;
+	sh.aux1 = aux1;
 	m_landscape.encode(renderEncoder, frame, clip, sh);
 }
 

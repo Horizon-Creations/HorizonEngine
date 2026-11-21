@@ -412,4 +412,13 @@ void OpenGLLandscape::draw(const LandscapeRenderFrame& f, const glm::mat4& viewP
 		}
 		++m.stats.patches;
 	}
+	// Give the units back empty. Units 22-25 are also where a material reads its virtual texture (OpenGLRenderer::BindRvtForDraw
+	// binds them only for a material that owns a page table): left as they are, a later draw of a material that has the samplers
+	// and no table would read the slot table as its page table and the weight pages as its pool.
+	for (int i = 0; i < kUnits; ++i)
+	{
+		glActiveTexture(GL_TEXTURE0 + kFirstUnit + i);
+		glBindTexture(targets[i], 0);
+	}
+	glActiveTexture(GL_TEXTURE0);
 }

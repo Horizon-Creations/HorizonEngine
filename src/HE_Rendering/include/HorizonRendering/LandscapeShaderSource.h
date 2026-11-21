@@ -365,6 +365,8 @@ struct LsGlobals
     float4   ambient;
     float4   texMaps;        // x = 1 when the normal array is bound, y = 1 when the mask array is, z = 1 when the far image (texture 30) is
     float4   tex;            // x = 1 / metres of one texture tile, y = 1 when the albedo array is bound, zw = fract(origin.xz * x)
+    float4x4 aux0;           // Metal only, for the passes that are not the scene's: velocity = this frame's unjittered view-projection,
+    float4x4 aux1;           // SSAO = the view matrix (aux0); velocity = the previous frame's view-projection (aux1)
 };
 
 struct LsPatch
@@ -418,12 +420,9 @@ static float lsHeightAt(int2 g, constant LsGlobals& G, constant LsPatch& P, text
     return P.patch.w == 0 ? lsHeightOfTile(g, P.patch.x, G, tiles, slots, coarse) : lsHeightOfCoarseGrid(g, int(P.patchPos.w), G, coarse);
 }
 
-vertex LsVertexOut vertexMain(uint vid [[vertex_id]],
-                              constant LsGlobals& G [[buffer(20)]],
-                              constant LsPatch& P [[buffer(21)]],
-                              texture2d_array<ushort, access::read> tiles [[texture(20)]],
-                              texture2d<ushort, access::read> slots [[texture(21)]],
-                              texture2d<ushort, access::read> coarse [[texture(22)]])
+// The origin-relative position of a grid vertex: what every vertex function of the ground starts from, so every pass draws one surface.
+static float3 lsWorldRel(uint vid, constant LsGlobals& G, constant LsPatch& P, texture2d_array<ushort, access::read> tiles,
+                         texture2d<ushort, access::read> slots, texture2d<ushort, access::read> coarse)
 {
     int2 ij = int2(int(vid % 65u), int(vid / 65u));
     float cell = P.patchPos.z / 64.0;
@@ -445,10 +444,52 @@ vertex LsVertexOut vertexMain(uint vid [[vertex_id]],
         else                { a = g + int2(-1, -1); b = g + int2(1, 1); }   // on the triangulation's diagonal
         h = mix(h, 0.5 * (lsHeightAt(a, G, P, tiles, slots, coarse) + lsHeightAt(b, G, P, tiles, slots, coarse)), m);
     }
+    return float3(xz.x, h - G.origin.y, xz.y);
+}
+
+vertex LsVertexOut vertexMain(uint vid [[vertex_id]],
+                              constant LsGlobals& G [[buffer(20)]],
+                              constant LsPatch& P [[buffer(21)]],
+                              texture2d_array<ushort, access::read> tiles [[texture(20)]],
+                              texture2d<ushort, access::read> slots [[texture(21)]],
+                              texture2d<ushort, access::read> coarse [[texture(22)]])
+{
     LsVertexOut o;
-    o.worldRel = float3(xz.x, h - G.origin.y, xz.y);
+    o.worldRel = lsWorldRel(vid, G, P, tiles, slots, coarse);
     o.position = G.viewProj * float4(o.worldRel, 1.0);
     return o;
+}
+
+// The velocity pass of MetalRenderer (TAA): the ground does not move, the camera does. viewProj rasterises (jittered), aux0 and aux1
+// are the unjittered view-projections of this frame and the one before; the result is the motion in texture-uv units, as
+// velocityFragment gives it for a mesh. Without it the ground would report "did not move" under a moving camera and smear.
+struct LsVelOut
+{
+    float4 position [[position]];
+    float4 clipNow;
+    float4 clipPrev;
+};
+
+vertex LsVelOut vertexVelocity(uint vid [[vertex_id]],
+                               constant LsGlobals& G [[buffer(20)]],
+                               constant LsPatch& P [[buffer(21)]],
+                               texture2d_array<ushort, access::read> tiles [[texture(20)]],
+                               texture2d<ushort, access::read> slots [[texture(21)]],
+                               texture2d<ushort, access::read> coarse [[texture(22)]])
+{
+    float4 p = float4(lsWorldRel(vid, G, P, tiles, slots, coarse), 1.0);
+    LsVelOut o;
+    o.position = G.viewProj * p;
+    o.clipNow = G.aux0 * p;
+    o.clipPrev = G.aux1 * p;
+    return o;
+}
+
+fragment float2 fragmentVelocity(LsVelOut in [[stage_in]])
+{
+    float2 ndcNow = in.clipNow.xy / max(in.clipNow.w, 1e-6);
+    float2 ndcPrev = in.clipPrev.xy / max(in.clipPrev.w, 1e-6);
+    return (float2(ndcNow.x, -ndcNow.y) - float2(ndcPrev.x, -ndcPrev.y)) * 0.5;
 }
 
 fragment float4 fragmentMain(LsVertexOut in [[stage_in]],
@@ -560,6 +601,32 @@ fragment LsGiOut fragmentGiGBuf(LsVertexOut in [[stage_in]], constant LsGlobals&
     LsGiOut o;
     o.posOut = float4(in.worldRel, 1.0);
     o.normOut = float4(n, 0.0);
+    return o;
+}
+
+// The ground for the SSAO position pre-pass (view-space position, a = 1: geometry; aux0 = the view matrix) and for its three-target
+// form the forward reflections read (octahedral world normal and the depth beside it, as MaterialShaderLibrary's kReflPrepassFS writes).
+fragment float4 fragmentViewPos(LsVertexOut in [[stage_in]], constant LsGlobals& G [[buffer(20)]])
+{
+    float2 abs2 = in.worldRel.xz + G.origin.xz;
+    if (abs2.x > G.world.x || abs2.y > G.world.y || abs2.x < 0.0 || abs2.y < 0.0) discard_fragment();
+    return float4((G.aux0 * float4(in.worldRel, 1.0)).xyz, 1.0);
+}
+
+struct LsReflOut { float4 viewPos [[color(0)]]; float4 attr [[color(1)]]; float ndc [[color(2)]]; };
+fragment LsReflOut fragmentViewPosMrt(LsVertexOut in [[stage_in]], constant LsGlobals& G [[buffer(20)]])
+{
+    float2 abs2 = in.worldRel.xz + G.origin.xz;
+    if (abs2.x > G.world.x || abs2.y > G.world.y || abs2.x < 0.0 || abs2.y < 0.0) discard_fragment();
+    float3 n = normalize(cross(dfdx(in.worldRel), dfdy(in.worldRel)));
+    if (n.y < 0.0) n = -n;
+    float2 p = n.xy * (1.0 / (abs(n.x) + abs(n.y) + abs(n.z)));
+    float2 signP = float2(p.x >= 0.0 ? 1.0 : -1.0, p.y >= 0.0 ? 1.0 : -1.0);
+    float2 oct = (n.z <= 0.0) ? ((1.0 - abs(p.yx)) * signP) : p;
+    LsReflOut o;
+    o.viewPos = float4((G.aux0 * float4(in.worldRel, 1.0)).xyz, 1.0);
+    o.attr = float4(oct * 0.5 + 0.5, 0.0, 0.0);
+    o.ndc = in.position.z;
     return o;
 }
 )MSL";

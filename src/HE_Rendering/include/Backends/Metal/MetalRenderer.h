@@ -1668,10 +1668,10 @@ private:
 	uint64_t m_giLandMeshVersion = 0;            // GiHeightfield::version it was made from
 	HE::UUID m_landscapeMaterialLoadTried{};     // the group material this renderer tried to load from its path
 	bool EnsureLandscape();
-	void EncodeLandscapePass(void* renderEncoder, const glm::mat4& clip, bool giGBuffer);
-	void* m_landscapeShadowPipeline = nullptr;   // the ground's vertex stage, depth only (shadow map layers)
-	void* m_landscapeGiPipeline = nullptr;       // ... with fragmentGiGBuf (the GI pre-pass)
-	bool  m_landscapeShadowTried = false, m_landscapeGiTried = false;
+	static constexpr int kLandscapePassKinds = 5;   // shadow, GI pre-pass, SSAO position, SSAO position + normal + depth, velocity
+	void EncodeLandscapePass(void* renderEncoder, const glm::mat4& clip, int kind, const glm::mat4& aux0 = glm::mat4(1.0f), const glm::mat4& aux1 = glm::mat4(1.0f));
+	void* m_landscapePassPipeline[kLandscapePassKinds] = {};   // the ground's vertex stage for each of those targets
+	bool  m_landscapePassTried[kLandscapePassKinds] = {};
 	void* GetOrBuildLandscapeMaterialPipeline(const HE::UUID& materialId);
 	std::unordered_map<uint64_t, void*> m_landscapeMaterialPipelines;   // key = the material's shader key, salted; null = does not build
 	MetalLandscape m_landscape;
