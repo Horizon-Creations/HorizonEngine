@@ -4,6 +4,7 @@
 #include <ContentManager/ContentManager.h>
 #include <Diagnostics/Log.h>
 #include <HorizonScene/Components/LightComponent.h>
+#include <MaterialGraph/AutoLandscapeMaterial.h>
 #include <MaterialGraph/MaterialGraph.h>
 #include <HorizonScene/Components/MaterialComponent.h>
 #include <HorizonScene/Components/MeshComponent.h>
@@ -176,11 +177,11 @@ int runEngineCheck(HE::RendererBackend backend, HE::RenderPath path, const std::
 //   * shadow:    a box stands on the ground. With its shadow switched on, ground pixels are darker than with it switched off (the box itself
 //                is in both frames, so only its shadow differs). GI is off here: the sun's shadow is the cascade map's.
 //   * fog:       with fog in the scene the ground's colour moves.
-int runMaterialCheck(HE::RendererBackend backend, const std::string& packPath, const std::string& pngPath)
+int runMaterialCheck(HE::RendererBackend backend, HE::RenderPath path, const std::string& packPath, const std::string& pngPath, const std::string& arrayRoot)
 {
 	const char* bname = backend == HE::RendererBackend::Metal ? "Metal" : backend == HE::RendererBackend::D3D11 ? "D3D11"
 	                  : backend == HE::RendererBackend::D3D12 ? "D3D12" : backend == HE::RendererBackend::Vulkan ? "Vulkan" : "OpenGL";
-	std::printf("[%s engine, the ground drawn with a material]\n", bname);
+	std::printf("[%s engine, %s, the ground drawn with a material]\n", bname, path == HE::RenderPath::Deferred ? "deferred" : "forward");
 	if (!RendererFactory::Available(backend)) { std::printf("  not in this binary\n"); return 0; }
 	int failures = 0;
 	const auto fail = [&](const char* what, const std::string& detail = {}) { ++failures; std::printf("    FAIL  %s %s\n", what, detail.c_str()); };
@@ -203,7 +204,7 @@ int runMaterialCheck(HE::RendererBackend backend, const std::string& packPath, c
 		ContentManager content;
 		renderer->SetContentManager(&content);
 		renderer->Initialize(window.get());
-		renderer->SetRenderPath(HE::RenderPath::Forward);
+		renderer->SetRenderPath(path);
 		IRenderer::GISettings gi;
 		gi.enabled = false;
 		renderer->SetGISettings(gi);
@@ -406,6 +407,45 @@ int runMaterialCheck(HE::RendererBackend backend, const std::string& packPath, c
 				std::printf("  fog: the ground moves by %.1f/255 on average with fog in the scene\n", gap / static_cast<double>(std::max<size_t>(n, 1)));
 				if (gap / static_cast<double>(std::max<size_t>(n, 1)) < 4.0) fail("the ground is fogged");
 				writePngFile(pngPath.substr(0, pngPath.size() - 4) + "_fog.png", static_cast<int>(kW), static_cast<int>(kH), fogged.data());
+			}
+			// The real thing: the engine's Auto Landscape material (Forest) from an EngineContent folder, when one was named. The ramp is
+			// all layer 0 ("Auto"), so the material decides by slope and height itself. Checked: its variant builds and draws (no pixel
+			// of the fixed blend's green is left), and the ground is neither black nor one flat colour.
+			if (!arrayRoot.empty())
+			{
+				IRenderer::EnvironmentSettings clear = renderer->GetEnvironment();
+				clear.fogDensity = 0.0f;
+				renderer->SetEnvironmentSettings(clear);
+				content.setEngineContentRoot(arrayRoot);
+				const HE::AutoLandscapeGroup& grp = HE::autoLandscapeGroup(HE::AutoLandscapeGroupId::Forest);
+				const MaterialAsset* real = content.resolveMaterialRef(HE::UUID{}, grp.materialPath);   // by path: nothing has registered the id here
+				if (!real) fail("the Auto Landscape material loads from the EngineContent folder", grp.materialPath);
+				else
+				{
+					rt.setMaterialId(real->id);
+					std::vector<uint8_t> autoImg;
+					if (!shoot(autoImg)) fail("RenderSceneImage gave an image (Auto Landscape)");
+					else
+					{
+						size_t green = 0, ground = 0;
+						double sum = 0.0, step = 0.0;
+						for (size_t i = 0; i < px; ++i)
+						{
+							if (!isBlue(&lit[i * 4])) continue;   // where the marker frame had ground
+							++ground;
+							green += isGreen(&autoImg[i * 4]) && std::abs(static_cast<int>(autoImg[i * 4 + 1]) - static_cast<int>(flat[i * 4 + 1])) < 6 ? 1 : 0;
+							sum += lum(&autoImg[i * 4]);
+							if (i % kW + 1 < kW) step += std::abs(lum(&autoImg[i * 4 + 4]) - lum(&autoImg[i * 4]));
+						}
+						const double n = static_cast<double>(std::max<size_t>(ground, 1));
+						std::printf("  Auto Landscape (Forest): mean ground %.0f/255, mean step between neighbours %.2f/255, %zu px still the fixed blend's green\n", sum / n, step / n, green);
+						if (green > ground / 20) fail("the Auto Landscape material draws the ground");
+						if (sum / n < 12.0) fail("the ground is not black");
+						if (step / n < 0.3) fail("the ground has the material's texture in it");
+						writePngFile(pngPath.substr(0, pngPath.size() - 4) + "_auto.png", static_cast<int>(kW), static_cast<int>(kH), autoImg.data());
+					}
+					rt.setMaterialId(marker);
+				}
 			}
 			// A scene with no mesh at all still renders its shadow maps for the ground: the frame comes back.
 			world.destroyEntity(boxEnt);

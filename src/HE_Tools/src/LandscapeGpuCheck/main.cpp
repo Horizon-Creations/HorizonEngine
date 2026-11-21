@@ -1047,8 +1047,12 @@ int main(int argc, char** argv)
 			++ran;
 			rc = std::max(rc, gpucheck::runEngineCheck(backend, HE::RenderPath::Forward, pack, (outDir / (std::string("landscape_") + name + "_engine_worlduv.png")).string(), arrayRoot));
 		}
-		++ran;
-		rc = std::max(rc, gpucheck::runMaterialCheck(backend, pack, (outDir / (std::string("landscape_") + name + "_engine_material.png")).string()));
+		for (auto path : { HE::RenderPath::Forward, HE::RenderPath::Deferred })
+		{
+			++ran;
+			rc = std::max(rc, gpucheck::runMaterialCheck(backend, path, pack,
+			                                             (outDir / (std::string("landscape_") + name + "_engine_material" + (path == HE::RenderPath::Deferred ? "_deferred" : "") + ".png")).string(), arrayRoot));
+		}
 		// The same world with a far image of the marker colour in its pack, through the real renderer.
 		if (!markerPack.empty())
 		{

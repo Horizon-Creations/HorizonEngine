@@ -26,7 +26,8 @@ int runEngineCheck(HE::RendererBackend backend, HE::RenderPath path, const std::
 
 // The ground drawn with a material (LandscapeRenderFrame::materialId) by a backend that says it can (Capabilities::landscapeMaterial):
 // a marker material's layer 0 is on the ground, a box's shadow darkens it, fog moves it. See the comment at the function.
-int runMaterialCheck(HE::RendererBackend backend, const std::string& packPath, const std::string& pngPath);
+// `arrayRoot` (optional): an EngineContent folder; then the engine's own Auto Landscape material (Forest) is drawn on the ground as well.
+int runMaterialCheck(HE::RendererBackend backend, HE::RenderPath path, const std::string& packPath, const std::string& pngPath, const std::string& arrayRoot = {});
 
 // GL-only: a mirror standing on the tile landscape with GI reflections on, checking that the GI
 // pipelines link (the 'GI pipelines built' log line) and that the mirror's pixel differs from the
