@@ -103,4 +103,14 @@ inline void fillPatch(PatchPush& d, const HE::LandscapeRenderPatch& p)
 	d.morph[0] = p.morphStart; d.morph[1] = p.morphEnd; d.morph[2] = 0.0f; d.morph[3] = 0.0f;
 }
 
+// The TAA velocity pass tests LESS_EQUAL against the depth the ground's MATERIAL draw left, which another vertex stage computed:
+// the same clip matrix pulled a hair towards the camera, so the ground passes its own depth. The ground is drawn first in
+// that pass and the meshes after it (no depth writes there), so a mesh standing on the ground still reports its own motion.
+// Every backend's ground uses it (D3D11, D3D12, Vulkan, OpenGL).
+inline glm::mat4 velocityClip(glm::mat4 clip)
+{
+	for (int col = 0; col < 4; ++col) clip[col][2] -= 4e-6f * clip[col][3];
+	return clip;
+}
+
 } // namespace HE::vkls

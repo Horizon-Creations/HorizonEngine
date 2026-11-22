@@ -110,13 +110,4 @@ inline void setViewRows(Globals& g, const glm::mat4& view, int first = 0)
 		for (int col = 0; col < 4; ++col) g.layerColor[first + row][col] = view[col][row];
 }
 
-// The velocity pass tests LESS_EQUAL against the depth the ground's MATERIAL draw left, which another vertex stage computed:
-// the same clip matrix pulled a hair towards the camera, so the ground passes its own depth. The ground is drawn first in
-// that pass and the meshes after it (no depth writes there), so a mesh standing on the ground still reports its own motion.
-inline glm::mat4 velocityClip(glm::mat4 clip)
-{
-	for (int col = 0; col < 4; ++col) clip[col][2] -= 4e-6f * clip[col][3];
-	return clip;
-}
-
 } // namespace HE::d3dls

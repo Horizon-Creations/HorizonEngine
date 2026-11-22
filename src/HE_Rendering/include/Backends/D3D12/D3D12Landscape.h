@@ -86,7 +86,7 @@ public:
 	void drawGiGBuf(ID3D12GraphicsCommandList* cl, const HE::LandscapeRenderFrame& frame, const glm::mat4& viewProj);
 	// The ground into the TAA velocity target that is bound (RG16F, the scene's D32_FLOAT depth tested, not written): uvNow -
 	// uvPrev from the two unjittered view-projections, rasterised with `viewProjJitter` (the scene draw's matrix; pulled towards
-	// the camera by d3dls::velocityClip). Leaves its own root signature, pipeline and heap set.
+	// the camera by vkls::velocityClip). Leaves its own root signature, pipeline and heap set.
 	void drawVelocity(ID3D12GraphicsCommandList* cl, const HE::LandscapeRenderFrame& frame, const glm::mat4& viewProjJitter,
 	                  const glm::mat4& viewProjNow, const glm::mat4& viewProjPrev);
 

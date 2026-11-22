@@ -745,7 +745,7 @@ void D3D12Landscape::drawGiGBuf(ID3D12GraphicsCommandList* cl, const HE::Landsca
 void D3D12Landscape::drawVelocity(ID3D12GraphicsCommandList* cl, const HE::LandscapeRenderFrame& f, const glm::mat4& viewProjJitter,
                                   const glm::mat4& viewProjNow, const glm::mat4& viewProjPrev)
 {
-	m_impl->drawBare(cl, f, d3dls::velocityClip(viewProjJitter), m_impl->velocityPsoGet(), &viewProjNow, &viewProjPrev);
+	m_impl->drawBare(cl, f, vkls::velocityClip(viewProjJitter), m_impl->velocityPsoGet(), &viewProjNow, &viewProjPrev);
 }
 
 // The patches with one of the pipelines that are not the scene's: depth alone (a shadow layer), the view-space position (the

@@ -14245,7 +14245,7 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                 cl->OMSetRenderTargets(1, &vrtv, FALSE, &vdsv);
             }
             // The tile landscape's ground stands still; the camera's own motion is its velocity. Before the meshes: the pass
-            // writes no depth, so what stands on the ground overwrites it (d3dls::velocityClip). It leaves its own root
+            // writes no depth, so what stands on the ground overwrites it (vkls::velocityClip). It leaves its own root
             // signature and heap set; this pass sets its own next and the scene's are rebuilt at its end.
             if (p.landscapeFrameLive && HE::landscapeD3dPassesOn() && HE::landscapePassesOn())
                 p.landscape.drawVelocity(cl, p.landscapeFrame, viewProj, viewProjClean, p.taaPrevViewProj);

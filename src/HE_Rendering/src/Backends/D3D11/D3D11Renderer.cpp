@@ -2065,7 +2065,7 @@ struct D3D11RendererImpl
         ctx->OMSetDepthStencilState(taaVelocityDSS.Get(), 0);
         ctx->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFF);
         // The tile landscape's ground stands still; the camera's own motion is its velocity. Before the meshes: the pass
-        // writes no depth, so what stands on the ground overwrites it (d3dls::velocityClip). Puts back what it sets.
+        // writes no depth, so what stands on the ground overwrites it (vkls::velocityClip). Puts back what it sets.
         if (landscapeFrameLive && HE::landscapeD3dPassesOn() && HE::landscapePassesOn())
             landscape.drawVelocity(ctx, landscapeFrame, vpJit, vpClean, taaPrevViewProj);
         ctx->IASetInputLayout(inputLayout.Get());

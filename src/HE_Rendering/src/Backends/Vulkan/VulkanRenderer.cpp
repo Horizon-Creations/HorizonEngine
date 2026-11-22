@@ -1397,7 +1397,8 @@ IRenderer::Capabilities VulkanRenderer::GetCapabilities() const
     c.landscapeMaterial         = m_lsMatPipelineLayout != VK_NULL_HANDLE;   // DrawScene: the ground's material draws the patches (after Initialize)
     // EncodeShadowMap: every shadow layer (proven on MoltenVK). runSSAO's position pre-pass is written and not proven: said only
     // where it is on (HE::landscapeVkSsaoOn: a real Vulkan driver, or the variable), so the witness judges it there.
-    c.landscapePassMask         = kLandscapePassShadow | kLandscapePassGBuffer | kLandscapePassGi | (HE::landscapeVkSsaoOn() ? kLandscapePassSsao : 0u);
+    c.landscapePassMask         = kLandscapePassShadow | kLandscapePassGBuffer | kLandscapePassGi | kLandscapePassVelocity
+                                | (HE::landscapeVkSsaoOn() ? kLandscapePassSsao : 0u);
     c.supportsRawCapture        = m_postFxReady;   // RenderSceneImage's rawOutput rides the tonemap pass
     c.supportsRvt               = m_postFxReady && m_matReady && m_matRvt;   // a page is that raw capture copied into the pool
     c.landscapeRvt              = c.landscapeMaterial && c.supportsRvt;      // SetRvtTileGround, rvtTileGround pages (drawGroundMaterial)
@@ -6226,6 +6227,15 @@ void VulkanRenderer::encodeTaaVelocity(VkCommandBuffer cmd)
     // before it, and m_sortedIndices would still hold last frame's objects.
     if (m_taaSceneSorted)
     {
+        // The tile landscape's ground stands still; the camera's own motion is its velocity. Before the meshes: the pass
+        // writes no depth, so what stands on the ground overwrites it (vkls::velocityClip). m_landscapeViewProj is the
+        // jittered matrix the ground's own draw used; the pass binds its own pipeline after this.
+        if (m_landscapeFrameLive && m_landscape && HE::landscapePassesOn())
+        {
+            const glm::mat4 prevJitGround = taaJittered(m_taaPrevViewProj);
+            m_landscape->drawDepth(cmd, m_taaVelocityRP, VkExtent2D{ m_viewportW, m_viewportH }, m_currentFrame, m_landscapeFrame,
+                                   m_landscapeViewProj, &m_taaViewProjJit, false, &prevJitGround);
+        }
         VkViewport vp{ 0, 0, (float)m_viewportW, (float)m_viewportH, 0, 1 }; vkCmdSetViewport(cmd, 0, 1, &vp);
         VkRect2D   sc{ { 0, 0 }, { m_viewportW, m_viewportH } };          vkCmdSetScissor(cmd, 0, 1, &sc);
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_taaVelocityPipe);

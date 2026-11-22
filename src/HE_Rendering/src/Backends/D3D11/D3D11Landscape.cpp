@@ -452,7 +452,7 @@ void D3D11Landscape::drawVelocity(ID3D11DeviceContext* ctx, const HE::LandscapeR
 	m_impl->depthOnly = true;       // the caller's rasteriser and depth state (LESS_EQUAL, no writes)
 	m_impl->velNow = &viewProjNow;
 	m_impl->velPrev = &viewProjPrev;
-	draw(ctx, f, d3dls::velocityClip(viewProjJitter), Shading{});
+	draw(ctx, f, vkls::velocityClip(viewProjJitter), Shading{});
 	m_impl->velNow = m_impl->velPrev = nullptr;
 	m_impl->depthOnly = false;
 }

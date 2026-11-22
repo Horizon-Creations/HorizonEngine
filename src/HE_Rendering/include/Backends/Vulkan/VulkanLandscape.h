@@ -115,8 +115,11 @@ public:
 	// position (this matrix times the origin-relative position), alpha 1; no depth bias is used then.
 	// `giGBuf`: the GI pre-pass, a pass with TWO colour attachments: the origin-relative position (a = 1) and the surface normal
 	// (a = roughness 1), what that pass writes for a mesh.
+	// `velocityPrev`: the TAA velocity pass (one colour attachment, the scene's depth tested and not written): `clip` rasterises
+	// (pulled towards the camera, vkls::velocityClip), `viewForPosition` is then this frame's view-projection and `velocityPrev`
+	// last frame's, both with this frame's jitter; uvNow - uvPrev is written.
 	void drawDepth(VkCommandBuffer cmd, VkRenderPass pass, VkExtent2D extent, uint32_t frameIndex, const HE::LandscapeRenderFrame& frame,
-	               const glm::mat4& clip, const glm::mat4* viewForPosition = nullptr, bool giGBuf = false);
+	               const glm::mat4& clip, const glm::mat4* viewForPosition = nullptr, bool giGBuf = false, const glm::mat4* velocityPrev = nullptr);
 	const Stats& stats() const;
 
 private:
