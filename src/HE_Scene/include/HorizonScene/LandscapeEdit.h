@@ -62,7 +62,11 @@ public:
 	// The base's window with the edited tiles inside it laid over. For a base that has a whole coarse world this is a crop of the
 	// patched copy; for one that has none (a pack in coarse regions) the window is patched as it is asked for.
 	std::shared_ptr<const LandscapeCoarseWorld> coarseWindow(LandscapeTileKey origin, int tilesX, int tilesZ) const override;
-	const LandscapeWaterTable* water() const override { return m_base->water(); }
+	// The base's water table, or the overlay's own once a water brush changed it (setWaterTable): saved in the edits file, baked
+	// into the pack with the tiles.
+	const LandscapeWaterTable* water() const override { return m_water ? m_water.get() : m_base->water(); }
+	void setWaterTable(LandscapeWaterTable table);
+	bool waterEdited() const { return m_water != nullptr; }
 	const LandscapeHlodTable* hlod() const override { return m_base->hlod(); }
 	const LandscapeFarTable* farImage() const override { return m_base->farImage(); }
 	const LandscapeTileSource& base() const { return *m_base; }
@@ -108,6 +112,10 @@ private:
 	LandscapeCoarseWorld m_coarse;   // a copy of the base's, made at the first edit
 	bool m_dirty = false;
 	uint64_t m_worldId = 0;
+	std::shared_ptr<const LandscapeWaterTable> m_water;                     // null: the base's
+	// shortcut: every table a stroke replaced stays alive (a water job may still read it through water()'s pointer); a few hundred
+	// bytes a stroke, hand out shared pointers when sessions paint thousands of lakes
+	std::vector<std::shared_ptr<const LandscapeWaterTable>> m_waterRetired;
 	// Never changed once made (a job-pool load holds its own reference): the stamps and, per tile, which of them reach it.
 	struct StampSet
 	{

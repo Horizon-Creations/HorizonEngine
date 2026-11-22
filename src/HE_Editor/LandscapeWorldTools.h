@@ -68,6 +68,9 @@ namespace LandscapeWorldTools
 	                            bool navigating, bool viewportHovered, float dt);
 	// Writes the edits beside the pack ("<pack>.edits"); "" or why it failed. Called by the section's button and when the scene is saved.
 	std::string saveEdits();
+	// One stroke of the Water tool at an absolute place, without a viewport: a lake `radius` wide, 4 m above the ground there, with a
+	// bed dug under it. What the headless dump paints (HE_DUMP_TILEWATER); false when no editing region holds it.
+	bool paintLake(double absX, double absZ, float radius);
 	// True while there are edits no file holds yet.
 	bool        editsUnsaved();
 }

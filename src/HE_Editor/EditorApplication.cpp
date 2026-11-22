@@ -10749,6 +10749,7 @@ void EditorApplication::dumpFrameHeadless()
 				m_editorWorld->registry().emplace<LandscapeStampComponent>(se, sc);
 			}
 		}
+		if (std::getenv("HE_DUMP_TILEWATER")) LandscapeWorldTools::setRuntime(&m_landscape);   // editable before it begins: an overlay to paint into
 		bool settled = false;
 		size_t stampTiles = 0;
 		for (const auto t0 = std::chrono::steady_clock::now(); std::chrono::steady_clock::now() - t0 < std::chrono::seconds(60);)
@@ -10763,6 +10764,26 @@ void EditorApplication::dumpFrameHeadless()
 		HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_TILEWORLD %s: %zu tile(s) resident, renderer draws the ground with %s, %zu tile(s) read again for stamps",
 		            settled ? "streamed in" : "DID NOT SETTLE", m_landscape.active() ? m_landscape.store()->residentKeys().size() : size_t(0),
 		            r->GetCapabilities().landscapeMaterial ? "its material" : "the fixed blend", stampTiles);
+		// HE_DUMP_TILEWATER=x,z,radius: one stroke of the tile brush's Water tool there, then the frame loop's calls until the water
+		// sheet of the new lake is an entity (LandscapeWorldProxies).
+		if (const char* twa = std::getenv("HE_DUMP_TILEWATER"); twa && *twa && settled)
+		{
+			float wx = 0.0f, wz = 0.0f, wr = 60.0f;
+			std::sscanf(twa, "%f,%f,%f", &wx, &wz, &wr);
+			LandscapeWorldTools::setRuntime(&m_landscape);
+			const bool painted = LandscapeWorldTools::paintLake(wx, wz, wr);
+			for (int i = 0; i < 3000; ++i)
+			{
+				m_landscape.update(*m_editorWorld, 0.016f, 5.0, &eye);
+				m_landscapeProxies.sync(*m_editorWorld, m_landscape, contentManager(), r);
+				if (i > 200 && m_landscape.store()->settled() && m_landscape.atlas()->stats().used == m_landscape.store()->residentKeys().size()) break;
+				std::this_thread::sleep_for(std::chrono::milliseconds(1));
+			}
+			const HE::LandscapeWaterTable* table = m_landscape.edits() ? m_landscape.edits()->water() : nullptr;
+			HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_TILEWATER %s: %zu edited tile(s), %zu water bod(ies) in the overlay's table",
+			            painted ? "painted" : "NOT PAINTED", m_landscape.edits() ? m_landscape.edits()->editedKeys().size() : size_t(0),
+			            table ? table->bodies.size() : size_t(0));
+		}
 		// What the stamps cost a frame in which nothing moves: the sync alone, a thousand times.
 		if (std::getenv("HE_DUMP_STAMP"))
 		{

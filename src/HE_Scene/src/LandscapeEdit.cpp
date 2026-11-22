@@ -14,6 +14,7 @@ void put32(std::vector<uint8_t>& b, uint32_t v) { for (int i = 0; i < 4; ++i) b.
 uint32_t get32(const uint8_t* p) { return static_cast<uint32_t>(p[0]) | static_cast<uint32_t>(p[1]) << 8 | static_cast<uint32_t>(p[2]) << 16 | static_cast<uint32_t>(p[3]) << 24; }
 constexpr uint32_t kEditsMagic = 0x31454c48u;   // 'HLE1'
 constexpr uint32_t kEditsVersion = 1;
+constexpr uint32_t kEditsWaterTag = 0x54574c48u;   // 'HLWT': the optional water table after the tile records
 
 uint64_t fnv(const std::vector<uint8_t>& bytes)
 {
@@ -121,6 +122,13 @@ std::vector<LandscapeTileKey> LandscapeEditSource::editedKeys() const
 	keys.reserve(m_tiles.size());
 	for (const auto& [k, t] : m_tiles) keys.push_back({ k.first, k.second });
 	return keys;
+}
+
+void LandscapeEditSource::setWaterTable(LandscapeWaterTable table)
+{
+	if (m_water) m_waterRetired.push_back(m_water);
+	m_water = std::make_shared<const LandscapeWaterTable>(std::move(table));
+	m_dirty = true;
 }
 
 // ── stamps ──────────────────────────────────────────────────────────────────
@@ -306,6 +314,16 @@ bool LandscapeEditSource::save(const std::filesystem::path& file, std::string* e
 			out.write(reinterpret_cast<const char*>(rec.data()), static_cast<std::streamsize>(rec.size()));
 			out.write(reinterpret_cast<const char*>(blob.data()), static_cast<std::streamsize>(blob.size()));
 		}
+		// The water table, when a brush changed it: a tail after the tile records (a reader from before it stops at the last record).
+		if (m_water)
+		{
+			const std::vector<uint8_t> blob = encodeLandscapeWaterTable(*m_water);
+			std::vector<uint8_t> rec;
+			put32(rec, kEditsWaterTag);
+			put32(rec, static_cast<uint32_t>(blob.size()));
+			out.write(reinterpret_cast<const char*>(rec.data()), static_cast<std::streamsize>(rec.size()));
+			out.write(reinterpret_cast<const char*>(blob.data()), static_cast<std::streamsize>(blob.size()));
+		}
 		out.flush();
 		if (!out) { out.close(); std::filesystem::remove(tmp, ec); return fail("the edits could not be written"); }
 	}
@@ -330,7 +348,8 @@ size_t LandscapeEditSource::loadFile(const std::filesystem::path& file)
 	if (stamp != 0 && m_worldId != 0 && stamp != m_worldId) return 0;   // edits of another world under the same file name
 	std::vector<std::pair<LandscapeTileKey, LandscapeTilePtr>> tiles;
 	size_t at = 20;
-	for (uint32_t i = 0; i < count; ++i)
+	uint32_t i = 0;
+	for (; i < count; ++i)
 	{
 		if (bytes.size() - at < 12) break;
 		const LandscapeTileKey key{ static_cast<int>(get32(&bytes[at])), static_cast<int>(get32(&bytes[at + 4])) };
@@ -342,6 +361,13 @@ size_t LandscapeEditSource::loadFile(const std::filesystem::path& file)
 		at += blob;
 		if (key.x < 0 || key.z < 0 || key.x >= tilesX() || key.z >= tilesZ()) continue;
 		tiles.emplace_back(key, std::move(tile));
+	}
+	// The water table a brush left, after the last record (only behind a file that is whole).
+	if (i == count && bytes.size() - at >= 8 && get32(&bytes[at]) == kEditsWaterTag)
+	{
+		const uint32_t n = get32(&bytes[at + 4]);
+		LandscapeWaterTable table;
+		if (n <= bytes.size() - at - 8 && decodeLandscapeWaterTable(&bytes[at + 8], n, table)) setWaterTable(std::move(table));
 	}
 	set(tiles);
 	m_dirty = false;
@@ -392,6 +418,25 @@ bool landscapeWriteRegionTerrain(const TerrainComponent& tc, const LandscapeGeom
 						}
 					}
 			}
+			// Water: the region's field (LandscapeRegionTerrain has one at the tiles' raster once the world has a water table or a
+			// brush made one) back into the tile's rasters; a tile without a wet cell holds none. A terrain without that field
+			// leaves the tile's water as it is.
+			if (tc.water.res == wr && tc.water.coverage.size() == static_cast<size_t>(wr) * wr && tc.water.owner.size() == tc.water.coverage.size())
+			{
+				std::vector<uint8_t> cov(static_cast<size_t>(wt) * wt);
+				std::vector<uint16_t> own(static_cast<size_t>(wt) * wt);
+				bool wet = false;
+				for (uint32_t z = 0; z < wt; ++z)
+					for (uint32_t x = 0; x < wt; ++x)
+					{
+						const size_t src = (static_cast<size_t>(tj) * wt + z) * wr + static_cast<size_t>(ti) * wt + x;
+						cov[static_cast<size_t>(z) * wt + x] = tc.water.coverage[src];
+						own[static_cast<size_t>(z) * wt + x] = tc.water.coverage[src] ? tc.water.owner[src] : uint16_t(0);
+						wet = wet || tc.water.coverage[src] != 0;
+					}
+				if (wet) { tile->waterCoverage = std::move(cov); tile->waterOwner = std::move(own); }
+				else     { tile->waterCoverage.clear(); tile->waterOwner.clear(); }
+			}
 			// The painted foliage density: a tile that is 255 everywhere holds none (what an unpainted tile is).
 			if (foliageDensity && foliageDensity->size() == static_cast<size_t>(wr) * wr)
 			{
@@ -407,7 +452,9 @@ bool landscapeWriteRegionTerrain(const TerrainComponent& tc, const LandscapeGeom
 				if (painted) tile->foliageDensity = std::move(f);
 				else tile->foliageDensity.clear();
 			}
-			if (tile->heights[0] == was->heights[0] && tile->weights[0] == was->weights[0] && tile->foliageDensity == was->foliageDensity) continue;
+			if (tile->heights[0] == was->heights[0] && tile->weights[0] == was->weights[0] && tile->foliageDensity == was->foliageDensity
+			    && tile->waterCoverage == was->waterCoverage && tile->waterOwner == was->waterOwner)
+				continue;
 			tile->buildMips();
 			out.emplace_back(key, std::move(tile));
 		}
@@ -434,7 +481,7 @@ bool landscapePackBakeEdits(const std::string& packPath, const LandscapeEditSour
 		if (!w.begin(tmp, pack->geometry(), pack->tilesX(), pack->tilesZ(), pack->coarseHeightLevel(), minM, scaleM))
 			return fail("cannot write beside the pack");
 		w.setCoarseRegions(pack->coarseRegionTiles());   // laid out as the pack is: whole, or in regions of the same size
-		if (pack->water()) w.setWaterTable(*pack->water());
+		if (edits.water()) w.setWaterTable(*edits.water());   // the pack's, or the one a water brush changed
 		if (pack->hlod()) w.setHlodTable(*pack->hlod());
 		if (pack->farImage()) w.setFarTable(*pack->farImage());
 		std::vector<uint8_t> blob;
@@ -518,7 +565,10 @@ bool LandscapeEditSession::focus(double absX, double absZ, double radiusM)
 		};
 		if (!fits(absX, origin.x, m_edits.tilesX()) || !fits(absZ, origin.z, m_edits.tilesZ())) continue;
 		LandscapeRegionTerrain region;
-		if (!landscapeRegionTerrain([this](LandscapeTileKey k) { return read(k); }, origin, n, m_params, nullptr, region)) return false;
+		// With the world's water (an empty table where it has none), so the water brush finds the region's lakes and a free id.
+		static const LandscapeWaterTable kNoWater;
+		const LandscapeWaterTable* waterTable = m_edits.water() ? m_edits.water() : &kNoWater;
+		if (!landscapeRegionTerrain([this](LandscapeTileKey k) { return read(k); }, origin, n, m_params, waterTable, region)) return false;
 		m_region = std::move(region);
 		m_n = n;
 		return true;
@@ -578,6 +628,26 @@ size_t LandscapeEditSession::commit()
 	if (!landscapeWriteRegionTerrain(m_region.terrain, m_edits.geometry(), m_region.origin, m_n, m_params,
 	                                 [this](LandscapeTileKey k) { return read(k); }, changed, &m_region.foliageDensity) || changed.empty())
 		return 0;
+	// A body the water brush made or moved goes into the overlay's water table (bodies are never taken out: one without a wet
+	// cell left is a table row nobody reads).
+	{
+		const LandscapeWaterTable* now = m_edits.water();
+		LandscapeWaterTable table = now ? *now : LandscapeWaterTable{};
+		bool differs = false;
+		for (const water::Body& b : m_region.terrain.water.bodies)
+		{
+			auto it = std::find_if(table.bodies.begin(), table.bodies.end(), [&](const LandscapeWaterBody& w) { return w.id == b.id; });
+			if (it == table.bodies.end()) { table.bodies.push_back({}); it = table.bodies.end() - 1; it->id = b.id; it->level = b.level - 1.0f; }
+			if (it->level == b.level) continue;
+			it->level = b.level;
+			it->physics = b.physics;
+			it->underwaterFog = b.underwaterFog;
+			it->underwaterCaustics = b.underwaterCaustics;
+			it->tessellation = b.tessellation;
+			differs = true;
+		}
+		if (differs) m_edits.setWaterTable(std::move(table));
+	}
 	// The undo step keeps what each tile was BEFORE its first change in this stroke.
 	const bool own = !m_inStroke;
 	if (own) m_stroke.clear();

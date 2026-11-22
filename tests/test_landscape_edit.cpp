@@ -15,6 +15,9 @@
 #include <HorizonScene/LandscapeTileTerrain.h>
 #include <HorizonScene/TerrainPaint.h>
 #include <HorizonScene/TerrainSculpt.h>
+#include <HorizonScene/WaterBrush.h>
+#include <HorizonScene/LandscapeFoliage.h>
+#include <HorizonScene/Components/FoliageComponent.h>
 
 #include <glm/gtc/matrix_transform.hpp>
 
@@ -555,6 +558,103 @@ TEST_CASE("LandscapeEditSession: the single landscape's own brushes work on the 
 	CHECK(painted->weights[0] != sculpted->weights[0]);
 	const int wt = edits->geometry().wTexels, C = edits->geometry().channels;
 	CHECK(painted->weights[0][(static_cast<size_t>(wt / 2) * wt + wt / 2) * C + 2] > 200);   // the middle of the tile is layer 2 now
+}
+
+TEST_CASE("LandscapeEditSession: the water brush makes a lake on a dry tile world: cells in the tile, a body in the overlay's table, "
+          "both in the edits file and in a baked pack")
+{
+	const auto base = world(4);   // no sea: the source has no water table at all
+	REQUIRE(base->water() == nullptr);
+	const std::filesystem::path packFile = tempFile("water_pack.bin");
+	{
+		LandscapePackWriter w;
+		REQUIRE(w.begin(packFile.string(), base->geometry(), 4, 4, 4, 0.0f, 3000.0f));
+		for (int z = 0; z < 4; ++z)
+			for (int x = 0; x < 4; ++x) REQUIRE(w.add({ x, z }, encodeLandscapeTile(base->generate({ x, z }))));
+		REQUIRE(w.finish());
+	}
+	std::string err;
+	const std::filesystem::path sidecar = tempFile("water_sidecar");
+	uint16_t bodyId = 0;
+	float level = 0.0f;
+	LandscapeTile wetTile;
+	{
+		auto pack = LandscapePackSource::open(packFile.string(), &err);
+		REQUIRE_MESSAGE(pack, err);
+		const auto edits = std::make_shared<LandscapeEditSource>(pack);
+		LandscapeRuntime rt;
+		REQUIRE(rt.begin(edits, LandscapeRuntimeConfig{}));
+		LandscapeEditSession session(rt, *edits);
+		const double bx = 1.5 * 512.0, bz = 1.5 * 512.0;
+		REQUIRE(session.focus(bx, bz, 60.0));
+		const float lx = static_cast<float>(bx - session.centre().x), lz = static_cast<float>(bz - session.centre().z);
+		CHECK(session.terrain().water.res == session.foliageRes());   // the field is at the tiles' raster before the first cell
+
+		namespace WB = HE::water::brush;
+		WB::Params wp;
+		wp.radius = 40.0f;
+		wp.falloff = 10.0f;
+		wp.amount = 1.0f;
+		wp.levelOffset = 5.0f;   // the ground here is not flat: a lake 5 m above the point under the brush covers its surroundings
+		WB::Stroke stroke;
+		session.beginStroke();
+		WB::begin(stroke, session.terrain(), lx, lz, wp);
+		REQUIRE(stroke.active);
+		for (int i = 0; i < 4; ++i) CHECK(WB::dab(stroke, session.terrain(), lx, lz, wp).ok);
+		WB::end(stroke, session.terrain());
+		session.endStroke();
+
+		const LandscapeTilePtr wet = edits->edited({ 1, 1 });
+		REQUIRE(wet);
+		REQUIRE(wet->hasWater());
+		const size_t wt = static_cast<size_t>(edits->geometry().weightDim(0));
+		CHECK(wet->waterCoverage[(wt / 2) * wt + wt / 2] > 0);
+		bodyId = wet->waterOwner[(wt / 2) * wt + wt / 2];
+		CHECK(bodyId != 0);
+		REQUIRE(edits->waterEdited());
+		const LandscapeWaterBody* body = edits->water()->find(bodyId);
+		REQUIRE(body);
+		level = body->level;
+		float ground = 0.0f;
+		REQUIRE(session.heightAt(bx, bz, ground));
+		CHECK(level == doctest::Approx(ground + 5.0f).epsilon(0.01));
+		wetTile = *wet;
+		CHECK(fullTile(*pack, { 2, 2 })->hasWater() == false);
+		CHECK(edits->edited({ 3, 3 }) == nullptr);   // nothing else was touched
+
+		REQUIRE_MESSAGE(edits->save(sidecar, &err), err);
+		// Baked: the pack has the table and the wet tile.
+		const std::filesystem::path copy = tempFile("water_copy.bin");
+		std::filesystem::copy_file(packFile, copy);
+		REQUIRE_MESSAGE(landscapePackBakeEdits(copy.string(), *edits, &err), err);
+		{
+			auto baked = LandscapePackSource::open(copy.string(), &err);
+			REQUIRE_MESSAGE(baked, err);
+			REQUIRE(baked->water());
+			REQUIRE(baked->water()->find(bodyId));
+			CHECK(baked->water()->find(bodyId)->level == level);
+			LandscapeTile t;
+			REQUIRE(baked->load({ 1, 1 }, -1, t));
+			CHECK(t.waterCoverage == wetTile.waterCoverage);
+			CHECK(t.waterOwner == wetTile.waterOwner);
+		}
+		std::filesystem::remove(copy);
+	}
+	// The edits file brings the lake back: tile and table.
+	{
+		auto pack = LandscapePackSource::open(packFile.string(), &err);
+		REQUIRE_MESSAGE(pack, err);
+		LandscapeEditSource again(pack);
+		CHECK(again.loadFile(sidecar) == 1);
+		REQUIRE(again.water());
+		REQUIRE(again.water()->find(bodyId));
+		CHECK(again.water()->find(bodyId)->level == level);
+		REQUIRE(again.edited({ 1, 1 }));
+		CHECK(again.edited({ 1, 1 })->waterCoverage == wetTile.waterCoverage);
+		CHECK_FALSE(again.dirty());
+	}
+	std::filesystem::remove(sidecar);
+	std::filesystem::remove(packFile);
 }
 
 TEST_CASE("LandscapeStamp: a stamp raises the tiles under it when they are loaded, lies over a brush edit without changing it, moves by "

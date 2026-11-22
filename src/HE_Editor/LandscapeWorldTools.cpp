@@ -6,6 +6,7 @@
 #include <HorizonScene/Components/LandscapeStampComponent.h>
 #include <HorizonScene/Components/FoliageComponent.h>
 #include <HorizonScene/FoliagePaint.h>
+#include <HorizonScene/WaterBrush.h>
 #include <HorizonScene/Components/TransformComponent.h>
 #include <HorizonScene/Components/NameComponent.h>
 #include <HorizonScene/Components/TerrainComponent.h>
@@ -410,7 +411,10 @@ struct EditState
 	glm::dvec3 rampFrom{ 0.0 };
 	float mountainHeight = 120.0f;
 	int   mountainSeed = 1;
-	HE::UUID stampTexture;                                     // Stamp: the heightmap the next placed stamp gets
+	HE::water::brush::Stroke waterStroke;                      // Water: the stroke in progress (one body)
+	bool  waterDig = false;
+	float waterDepth = 2.0f;
+	HE::UUID stampTexture;                                   // Stamp: the heightmap the next placed stamp gets
 	float stampHeight = 100.0f;
 	std::string status;
 	bool  statusError = false;
@@ -443,6 +447,28 @@ void setRuntime(HE::LandscapeRuntime* runtime)
 	if (runtime) runtime->setEditable(true);
 }
 
+bool paintLake(double absX, double absZ, float radius)
+{
+	HE::LandscapeEditSession* session = sessionNow();
+	if (!session || !session->focus(absX, absZ, radius * 1.5f)) return false;
+	namespace WB = HE::water::brush;
+	WB::Params wp;
+	wp.radius = radius;
+	wp.falloff = radius * 0.25f;
+	wp.levelOffset = 4.0f;
+	wp.dig = true;
+	wp.digDepth = 6.0f;
+	const float lx = static_cast<float>(absX - session->centre().x), lz = static_cast<float>(absZ - session->centre().z);
+	WB::Stroke stroke;
+	session->beginStroke();
+	WB::begin(stroke, session->terrain(), lx, lz, wp);
+	uint32_t cells = 0;
+	for (int i = 0; i < 6 && stroke.active; ++i) cells += WB::dab(stroke, session->terrain(), lx, lz, wp).cells;
+	WB::end(stroke, session->terrain());
+	session->endStroke();
+	return cells > 0;
+}
+
 bool editsUnsaved()
 {
 	const EditState& e = es();
@@ -462,7 +488,7 @@ std::string saveEdits()
 #ifdef HE_IMGUI_ENABLED
 namespace
 {
-const char* const kToolNames[] = { "Raise", "Lower", "Smooth", "Flatten", "Paint Layer", "Roughen", "Ramp", "Mountain", "Stamp", "Foliage Mask" };
+const char* const kToolNames[] = { "Raise", "Lower", "Smooth", "Flatten", "Paint Layer", "Roughen", "Ramp", "Mountain", "Stamp", "Foliage Mask", "Water" };
 
 void drawEditBlock(AppContext& ctx)
 {
@@ -477,7 +503,12 @@ void drawEditBlock(AppContext& ctx)
 	EditorWidgets::checkbox("Edit Tiles##tlwe", &e.on);
 	if (e.on && ctx.editorConfig.mode != EditorMode::Landscape)
 		ImGui::TextDisabled("The brush works in the Landscape mode: there the left button belongs to it.");
-	Row::combo("Tile Brush##tlwe", &e.tool, kToolNames, 10);
+	Row::combo("Tile Brush##tlwe", &e.tool, kToolNames, 11);
+	if (e.tool == 10)
+	{
+		EditorWidgets::checkbox("Dig Water Bed##tlwe", &e.waterDig);
+		if (e.waterDig) Row::dragFloat("Water Depth##tlwe", &e.waterDepth, 0.1f, 0.1f, 200.0f, "%.1f m");
+	}
 	Row::dragFloat("Brush Radius##tlwe", &e.radius, 0.5f, 1.0f, 800.0f, "%.1f m");
 	Row::dragFloat("Brush Falloff##tlwe", &e.falloff, 0.5f, 0.0f, 400.0f, "%.1f m");
 	Row::dragFloat("Brush Strength##tlwe", &e.strength, 0.01f, 0.01f, 5.0f, "%.2f");
@@ -530,6 +561,8 @@ void brushInViewport(AppContext& ctx, const RenderWorld& sceneSnapshot, const Im
 	// The button came up, or the brush went away under a stroke: close it, whatever else this frame does.
 	if (e.stroke && (!session || !down))
 	{
+		if (e.session && e.waterStroke.active && e.session->hasRegion()) HE::water::brush::end(e.waterStroke, e.session->terrain());
+		e.waterStroke = HE::water::brush::Stroke{};
 		if (e.session) e.session->endStroke();
 		e.stroke = false;
 	}
@@ -679,6 +712,22 @@ void brushInViewport(AppContext& ctx, const RenderWorld& sceneSnapshot, const Im
 		                    lx, lz, static_cast<float>(groundH(p.x, p.z)), e.radius, e.falloff, std::clamp(e.strength * dt * 6.0f, 0.0f, 1.0f));
 		break;
 	case 5: TerrainSculpt::apply(tc, lx, lz, TerrainSculpt::Op::Roughen, e.radius, e.falloff, e.strength * dt * 20.0f); break;   // the op's stable per-vertex hash, as far as Raise would lift
+	case 10:
+	{
+		// Water: the single landscape's water brush on the region. One stroke writes one body: the water under its first point, else
+		// a new lake at the ground's height there plus a little. Ctrl erases. The session writes cells and bodies back (commit).
+		namespace WB = HE::water::brush;
+		WB::Params wp;
+		wp.radius = e.radius;
+		wp.falloff = e.falloff;
+		wp.amount = std::clamp(e.strength * dt * 6.0f, 0.0f, 1.0f);
+		wp.erase = invert;
+		wp.dig = e.waterDig;
+		wp.digDepth = e.waterDepth;
+		if (!e.waterStroke.active) WB::begin(e.waterStroke, tc, lx, lz, wp);
+		if (e.waterStroke.active) WB::dab(e.waterStroke, tc, lx, lz, wp);
+		break;
+	}
 	case 9:
 	{
 		// Foliage Mask: the single landscape's density brush on the region's mask (one for every foliage layer). Erases; Ctrl grows back.

@@ -131,6 +131,15 @@ bool landscapeRegionTerrain(const std::function<std::shared_ptr<const LandscapeT
 		const auto tileWater = [wt](const LandscapeTile& t) { return t.hasWater() && t.waterCoverage.size() == static_cast<size_t>(wt) * wt; };
 		bool anyWater = false;
 		for (const auto& t : tiles) anyWater = anyWater || tileWater(*t);
+		// Ready for a brush even where the region is dry: the field at the tiles' raster (it allocates at the first cell), and the
+		// next body's id above every id of the WORLD, not of this region (the ids are the pack's water table's).
+		tc.water.res = wr;
+		uint16_t worldMaxId = 0;
+		for (const LandscapeWaterBody& b : waterTable->bodies) worldMaxId = std::max(worldMaxId, b.id);
+		tc.water.nextBodyId = static_cast<uint16_t>(worldMaxId + 1);
+		tc.water.clipToGround = waterTable->clipToGround;
+		tc.water.shoreOvershoot = waterTable->shoreOvershoot;
+		tc.water.tessellation = waterTable->tessellation;
 		if (anyWater)
 		{
 			water::Field& f = tc.water;
@@ -167,7 +176,7 @@ bool landscapeRegionTerrain(const std::function<std::shared_ptr<const LandscapeT
 				f.bodies.push_back(b);
 				maxId = std::max(maxId, id);
 			}
-			f.nextBodyId = static_cast<uint16_t>(maxId + 1);
+			(void)maxId;   // nextBodyId is the world's (above)
 			f.clipToGround = waterTable->clipToGround;
 			f.shoreOvershoot = waterTable->shoreOvershoot;
 			f.tessellation = waterTable->tessellation;
