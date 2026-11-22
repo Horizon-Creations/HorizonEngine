@@ -114,6 +114,45 @@ private:
 	LandscapeTile m_base;
 };
 
+// The ramp again as a world that is NOT square (16 x 8 tiles) with paint that is not all layer 0: layer 1 in one 64 m square of
+// ground and layer 5 (the second weight page) in another, layer 0 everywhere else. For the material check: a weight read from the
+// wrong place, the wrong page or the wrong channel shows the wrong colour at a known pixel (gpucheck::kPaint*).
+class PaintedSource final : public LandscapeTileSource
+{
+public:
+	const LandscapeGeometry& geometry() const override { return m_ramp.geometry(); }
+	int  tilesX() const override { return gpucheck::kPaintTilesX; }
+	int  tilesZ() const override { return gpucheck::kPaintTilesZ; }
+	bool heightRange(float& minM, float& scaleM) const override { return m_ramp.heightRange(minM, scaleM); }
+	bool load(LandscapeTileKey key, int maxLevels, LandscapeTile& out) const override
+	{
+		if (key.x < 0 || key.z < 0 || key.x >= tilesX() || key.z >= tilesZ() || !m_ramp.load(key, -1, out)) return false;
+		const int ch = out.geometry.channels;
+		for (size_t level = 0; level < out.weights.size(); ++level)
+		{
+			const int dim = std::max(1, out.geometry.wTexels >> level);
+			const double texel = out.geometry.tileM / dim;
+			for (int j = 0; j < dim; ++j)
+				for (int i = 0; i < dim; ++i)
+				{
+					const double x = key.x * static_cast<double>(out.geometry.tileM) + (i + 0.5) * texel, z = key.z * static_cast<double>(out.geometry.tileM) + (j + 0.5) * texel;
+					const int layer = gpucheck::paintLayerAt(x, z);
+					uint8_t* w = &out.weights[level][(static_cast<size_t>(j) * static_cast<size_t>(dim) + static_cast<size_t>(i)) * static_cast<size_t>(ch)];
+					for (int c = 0; c < ch; ++c) w[c] = c == layer ? 255 : 0;
+				}
+		}
+		if (maxLevels >= 0)
+		{
+			out.heights.resize(std::min<size_t>(out.heights.size(), static_cast<size_t>(maxLevels)));
+			out.weights.resize(std::min<size_t>(out.weights.size(), static_cast<size_t>(maxLevels)));
+		}
+		return true;
+	}
+
+private:
+	RampSource m_ramp;
+};
+
 // A world of any size for nothing (scene 6): heights are a formula of the absolute position, all paint on layer 0, and there is no
 // coarse() at all, only coarseWindow() computed for the window asked for. What a pack too large for memory looks like to the runtime.
 class FormulaSource final : public LandscapeTileSource
@@ -1026,6 +1065,20 @@ int main(int argc, char** argv)
 		std::filesystem::remove(pack);
 		return mrc;
 	}
+	// The painted, non-square world of the material check.
+	std::string paintedPack = pack + ".painted";
+	{
+		PaintedSource src;
+		LandscapePackWriter w;
+		bool ok = w.begin(paintedPack, src.geometry(), src.tilesX(), src.tilesZ(), 4, kMin, kScale);
+		for (int z = 0; ok && z < src.tilesZ(); ++z)
+			for (int x = 0; ok && x < src.tilesX(); ++x)
+			{
+				LandscapeTile t;
+				ok = src.load({ x, z }, -1, t) && w.add({ x, z }, encodeLandscapeTile(t));
+			}
+		if (!ok || !w.finish()) { std::printf("painted pack: not written, the painted squares are not checked\n"); paintedPack.clear(); }
+	}
 	// A copy of the pack that carries a far image in a colour no layer has: what the engine pass "far image" draws.
 	std::string markerPack = pack + ".far";
 	{
@@ -1069,7 +1122,7 @@ int main(int argc, char** argv)
 		{
 			++ran;
 			rc = std::max(rc, gpucheck::runMaterialCheck(backend, path, pack,
-			                                             (outDir / (std::string("landscape_") + name + "_engine_material" + (path == HE::RenderPath::Deferred ? "_deferred" : "") + ".png")).string(), arrayRoot));
+			                                             (outDir / (std::string("landscape_") + name + "_engine_material" + (path == HE::RenderPath::Deferred ? "_deferred" : "") + ".png")).string(), arrayRoot, paintedPack));
 		}
 		// The same world with a far image of the marker colour in its pack, through the real renderer.
 		if (!markerPack.empty())
@@ -1141,6 +1194,7 @@ int main(int argc, char** argv)
 		}
 	std::filesystem::remove(pack);
 	if (!markerPack.empty()) std::filesystem::remove(markerPack);
+	if (!paintedPack.empty()) std::filesystem::remove(paintedPack);
 	if (ran == 0) { std::printf("no backend ran\n"); return 3; }
 	return rc;
 }

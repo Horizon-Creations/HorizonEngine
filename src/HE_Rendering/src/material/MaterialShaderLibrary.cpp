@@ -1673,7 +1673,8 @@ void main()
     vec3 rel = vec3(xz.x, h - uOrigin.y, xz.y);
     vNormal   = n;
     vColor    = vec3(1.0);
-    vUV       = (xz + uOrigin.xz) / uWorld.xy;
+    // over the SQUARE of the world's longer side (uWorld.z is a tile's size): see heLsSide in the fragment's weight functions
+    vUV       = (xz + uOrigin.xz) / (uWorld.z * max(uHeightInfo.y, uHeightInfo.z));
     vWorldPos = rel;
     gl_Position = uViewProj * vec4(rel, 1.0);
 }
@@ -1690,7 +1691,12 @@ layout(set = 0, binding = 54) uniform sampler2DArray heLsTileWeights2;
 layout(set = 0, binding = 55) uniform sampler2D      heLsCoarseWeights0;
 layout(set = 0, binding = 56) uniform sampler2D      heLsCoarseWeights1;
 layout(set = 0, binding = 57) uniform sampler2D      heLsCoarseWeights2;
-ivec2 heLsPageSize() { return ivec2(int(uHeightInfo.y), int(uHeightInfo.z)) * uTile.y; }
+// The virtual image is SQUARE whatever the world's shape: a material takes its page count from the image's aspect (width / height),
+// so three pages have to be exactly three times as wide as high. Its side is the longer side of the world (the window), in tiles;
+// vUV (the vertex stage) is the position over that square, and the texels beyond the shorter side are never asked for.
+int   heLsSide() { return int(max(uHeightInfo.y, uHeightInfo.z)); }
+ivec2 heLsRealSize() { return ivec2(int(uHeightInfo.y), int(uHeightInfo.z)) * uTile.y; }
+ivec2 heLsPageSize() { return ivec2(heLsSide() * uTile.y); }
 ivec2 heLsWeightSize() { ivec2 s = heLsPageSize(); return ivec2(s.x * 3, s.y); }
 // The fragment's own tile and its atlas slot, looked up ONCE a fragment: every weight read of a fragment lies in that tile, but for
 // the texels right on its border. (A material reads its weights six to ten times; a slot-table fetch for each texel of each read
@@ -1702,14 +1708,14 @@ void heLsFind()
 {
     if (heLsFound) return;
     ivec2 tiles = ivec2(int(uHeightInfo.y), int(uHeightInfo.z));
-    heLsTile = clamp(ivec2(vUV * vec2(tiles)), ivec2(0), tiles - ivec2(1));
+    heLsTile = clamp(ivec2(vUV * float(heLsSide())), ivec2(0), tiles - ivec2(1));
     int mask = int(uHeightInfo.w) - 1;
     heLsSlot = texelFetch(heLsSlotTable, ivec2(heLsTile.x & mask, heLsTile.y & mask), 0).r;
     heLsFound = true;
 }
 vec4 heLsTexel(int page, ivec2 p)
 {
-    ivec2 size = heLsPageSize();
+    ivec2 size = heLsRealSize();   // the world's own texels: a tile beyond them does not exist (its slot would be another tile's)
     p = clamp(p, ivec2(0), size - ivec2(1));
     ivec2 tile = p / uTile.y;
     uint slot = heLsSlot;
@@ -1746,9 +1752,11 @@ vec4 heLsWeight(vec2 uv)
     // coarse world's where the tile is not in the atlas. Level 0 of a tile sits in the corner of its layer.
     if (heLsSlot == 65535u)
     {
-        if (page == 0) return textureLod(heLsCoarseWeights0, puv, 0.0);
-        if (page == 1) return textureLod(heLsCoarseWeights1, puv, 0.0);
-        return textureLod(heLsCoarseWeights2, puv, 0.0);
+        // the coarse image covers the world, not the square
+        vec2 cuv = clamp(puv * vec2(heLsPageSize()) / vec2(heLsRealSize()), vec2(0.0), vec2(1.0));
+        if (page == 0) return textureLod(heLsCoarseWeights0, cuv, 0.0);
+        if (page == 1) return textureLod(heLsCoarseWeights1, cuv, 0.0);
+        return textureLod(heLsCoarseWeights2, cuv, 0.0);
     }
     ivec2 t0 = heLsTile * uTile.y;
     if (i.x >= t0.x && i.y >= t0.y && i.x + 1 < t0.x + uTile.y && i.y + 1 < t0.y + uTile.y)

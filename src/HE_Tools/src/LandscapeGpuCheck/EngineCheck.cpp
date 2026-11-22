@@ -196,7 +196,8 @@ int runEngineCheck(HE::RendererBackend backend, HE::RenderPath path, const std::
 //   * shadow:    a box stands on the ground. With its shadow switched on, ground pixels are darker than with it switched off (the box itself
 //                is in both frames, so only its shadow differs). GI is off here: the sun's shadow is the cascade map's.
 //   * fog:       with fog in the scene the ground's colour moves.
-int runMaterialCheck(HE::RendererBackend backend, HE::RenderPath path, const std::string& packPath, const std::string& pngPath, const std::string& arrayRoot)
+int runMaterialCheck(HE::RendererBackend backend, HE::RenderPath path, const std::string& packPath, const std::string& pngPath, const std::string& arrayRoot,
+                     const std::string& paintedPack)
 {
 	const char* bname = backend == HE::RendererBackend::Metal ? "Metal" : backend == HE::RendererBackend::D3D11 ? "D3D11"
 	                  : backend == HE::RendererBackend::D3D12 ? "D3D12" : backend == HE::RendererBackend::Vulkan ? "Vulkan" : "OpenGL";
@@ -739,6 +740,66 @@ int runMaterialCheck(HE::RendererBackend backend, HE::RenderPath path, const std
 						btf.position += glm::vec3(shift);
 						btf.dirty = true;
 					}
+				}
+			}
+			// The painted, NON-SQUARE world (16 x 8 tiles): layer 1 in one square of ground, layer 5 (the second weight page) in
+			// another, with a six-layer marker material: blue, red, -, -, -, yellow. The colour at the pixel each square's centre
+			// projects to says the weights were read from the right place, page and channel; a point beside them stays layer 0.
+			if (!paintedPack.empty())
+			{
+				for (auto e : reg.view<LandscapeWorldComponent>()) world.destroyEntity(e);   // the runtime is driven by hand again
+				renderer->SetAntiAliasingSettings(IRenderer::AntiAliasingSettings{});
+				using HE::MaterialGraph;
+				using HE::MatNodeType;
+				MaterialGraph g6;
+				const int out6 = g6.addNode(MatNodeType::Output);
+				const int blend6 = g6.addNode(MatNodeType::LandscapeLayerBlend);
+				g6.findNode(blend6)->s = "L1\nL2\nL3\nL4\nL5\nL6";
+				const float cols[6][3] = { { 0, 0, 1 }, { 1, 0, 0 }, { 0, 0, 0 }, { 0, 0, 0 }, { 0, 0, 0 }, { 1, 1, 0 } };
+				for (int l = 0; l < 6; ++l)
+				{
+					const int c = g6.addNode(MatNodeType::ConstColor);
+					for (int k = 0; k < 3; ++k) g6.findNode(c)->p[k] = cols[l][k];
+					g6.connect(c, 0, blend6, l);
+				}
+				g6.connect(blend6, 0, out6, HE::kMatOutputBaseColorPin);
+				MaterialAsset m6;
+				m6.type = HE::AssetType::Material;
+				m6.name = "LandscapeMarker6";
+				m6.nodeGraphJson = HE::materialGraphToJson(g6);
+				const HE::UUID marker6 = content.registerMaterial(std::move(m6));
+				content.regenerateMaterialFromGraph(marker6);
+				HE::LandscapeRuntimeConfig pcfg;
+				pcfg.store.byteBudget = 80ull * 1024 * 1024;
+				std::string perr;
+				bool began = rt.beginFromPack(paintedPack, pcfg, &perr);
+				for (const auto t1 = std::chrono::steady_clock::now(); began && std::chrono::steady_clock::now() - t1 < std::chrono::seconds(120);)
+				{
+					rt.updateAt(camPos, glm::vec3(0.0f), 5.0, origin);
+					if (rt.store()->settled() && rt.atlas()->stats().used == rt.store()->residentKeys().size()) break;
+					std::this_thread::sleep_for(std::chrono::milliseconds(1));
+				}
+				rt.setMaterialId(marker6);
+				std::vector<uint8_t> painted;
+				if (!began || !shoot(painted)) fail("the painted world starts and draws", perr);
+				else
+				{
+					const glm::mat4 proj = glm::perspective(glm::radians(70.0f), static_cast<float>(kW) / static_cast<float>(kH), 2.0f, 20000.0f);
+					const auto at = [&](double x, double z) {
+						const glm::vec4 clip = proj * ov.view * glm::vec4(glm::vec3(glm::dvec3(x, kBase + kSlope * (x - kPivot), z) - origin), 1.0f);
+						const int px2 = std::clamp(static_cast<int>((clip.x / clip.w * 0.5f + 0.5f) * kW), 0, static_cast<int>(kW) - 1);
+						const int py2 = std::clamp(static_cast<int>((0.5f - clip.y / clip.w * 0.5f) * kH), 0, static_cast<int>(kH) - 1);
+						return &painted[(static_cast<size_t>(py2) * kW + static_cast<size_t>(px2)) * 4];
+					};
+					const uint8_t* a = at((kPaintA[0] + kPaintA[2]) * 0.5, (kPaintA[1] + kPaintA[3]) * 0.5);
+					const uint8_t* b = at((kPaintB[0] + kPaintB[2]) * 0.5, (kPaintB[1] + kPaintB[3]) * 0.5);
+					const uint8_t* c = at(3200.0, 3072.0);
+					std::printf("  painted, 16 x 8 tiles: layer 1's square is rgb(%d, %d, %d), layer 5's rgb(%d, %d, %d), beside them rgb(%d, %d, %d)\n",
+					            a[0], a[1], a[2], b[0], b[1], b[2], c[0], c[1], c[2]);
+					if (!(a[0] > a[2] + 40 && a[0] > a[1] + 40)) fail("layer 1's square is the material's red");
+					if (!(b[0] > b[2] + 40 && b[1] > b[2] + 40)) fail("layer 5's square (second weight page) is the material's yellow");
+					if (!isBlue(c)) fail("the ground beside the squares is layer 0's blue");
+					writePngFile(pngPath.substr(0, pngPath.size() - 4) + "_painted.png", static_cast<int>(kW), static_cast<int>(kH), painted.data());
 				}
 			}
 			if (!arrayRoot.empty()) HE::matSetRvtEnabled(false);   // as this tool runs otherwise

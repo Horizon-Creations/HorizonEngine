@@ -444,6 +444,9 @@ static float3 lsWorldRel(uint vid, constant LsGlobals& G, constant LsPatch& P, t
         else                { a = g + int2(-1, -1); b = g + int2(1, 1); }   // on the triangulation's diagonal
         h = mix(h, 0.5 * (lsHeightAt(a, G, P, tiles, slots, coarse) + lsHeightAt(b, G, P, tiles, slots, coarse)), m);
     }
+    // Vertices beyond the world's edge (the top node is bigger than the world) are pulled ONTO it: those triangles collapse. The scene
+    // fragment discards beyond the edge anyway; a pass without a fragment function (a shadow map) would cast phantom ground there.
+    xz = clamp(xz + G.origin.xz, float2(0.0), G.world.xy) - G.origin.xz;
     return float3(xz.x, h - G.origin.y, xz.y);
 }
 
