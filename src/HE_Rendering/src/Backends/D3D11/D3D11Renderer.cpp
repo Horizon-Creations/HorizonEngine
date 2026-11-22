@@ -9922,6 +9922,7 @@ IRenderer::Capabilities D3D11Renderer::GetCapabilities() const
     c.supportsRvt               = m_impl->postFxReady;   // the page is a raw capture copied into the pool
     // The tile landscape's ground in the shadow layers: written, not run (see renderDepthLayer). Said only with the switch on.
     c.landscapePassMask         = HE::landscapeD3dPassesOn() ? kLandscapePassShadow : 0u;
+    c.landscapeCoarseRevision   = true;   // D3D11Landscape.cpp: new coarse and far images, the atlas stays
     // Froxel volumetric fog (Thema 225 step 8): Inject/Integrate/Apply compiled and
     // the HeFogVol/dummy resources built at Initialize. False leaves the analytic
     // height-fog (applyFog/uFog) running everywhere, byte-identical to before.

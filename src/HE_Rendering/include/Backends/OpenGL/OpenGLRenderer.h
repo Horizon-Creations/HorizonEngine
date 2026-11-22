@@ -1568,7 +1568,7 @@ private:
 	// ── World-scale landscape (Thema 326, step 2 part B) ────────────────────
 	// DrawLandscape asks the application's provider (IRenderer::SetLandscapeProvider) for the frame of the camera it is about to render
 	// with and draws it into the bound HDR target, in the opaque pass before the sky. Not in the G-buffer: no shadows, SSAO or GI.
-	void DrawLandscape(const glm::mat4& viewProj);
+	void DrawLandscape(const glm::mat4& viewProj, unsigned int csmLightUbo = 0);   // csmLightUbo: a lighting block with the sun's cascades, or 0
 	void DrawLandscapeDepth(const glm::mat4& viewProj);   // into the bound depth-only target (a shadow layer)
 	OpenGLLandscape m_landscape;
 	bool            m_landscapeFailed = false;   // init failed once: not tried again

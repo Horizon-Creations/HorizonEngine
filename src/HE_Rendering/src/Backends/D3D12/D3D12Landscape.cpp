@@ -395,17 +395,29 @@ void D3D12Landscape::upload(ID3D12GraphicsCommandList* cl, HE::LandscapeRenderFr
 	std::vector<std::vector<uint8_t>> scratch;   // zero images for pages a world does not have, alive until the copies are recorded
 
 	// ── the images of a landscape that began (or the first frame) ─────────────
-	if (m.world != f.world && (!m.world || m.world->generation != w.generation))
+	// Or of a render window that moved, or far ground that was edited (same generation, another coarseRevision): the coarse
+	// images and the far image again, at their new sizes; the tile arrays, the slot table and the index buffer stay as they
+	// are, so the near ground is never thrown away (Windows handoff, item 2a).
+	const bool fresh = !m.world || m.world->generation != w.generation;
+	if (m.world != f.world && (fresh || m.world->coarseRevision != w.coarseRevision))
 	{
 		m.idle();   // the old images may still be read by frames in flight
-		m.destroyImages();
 		bool good = true;
-		good &= m.makeImage(0, DXGI_FORMAT_R16_UINT, w.heightW, w.heightH, w.slotCapacity);
-		for (unsigned p = 0; p < 3; ++p)   // pages the tiles do not have stay zero (a landscape of fewer than 9 channels); the shader reads all three
-			good &= m.makeImage(3 + p, DXGI_FORMAT_R8G8B8A8_UNORM, w.weightW, w.weightH, w.slotCapacity);
+		if (fresh)
+		{
+			m.destroyImages();
+			good &= m.makeImage(0, DXGI_FORMAT_R16_UINT, w.heightW, w.heightH, w.slotCapacity);
+			for (unsigned p = 0; p < 3; ++p)   // pages the tiles do not have stay zero (a landscape of fewer than 9 channels); the shader reads all three
+				good &= m.makeImage(3 + p, DXGI_FORMAT_R8G8B8A8_UNORM, w.weightW, w.weightH, w.slotCapacity);
 
-		m.table.assign(static_cast<size_t>(w.tableWindow) * static_cast<size_t>(w.tableWindow), 0xFFFF);
-		good &= m.makeImage(1, DXGI_FORMAT_R16_UINT, w.tableWindow, w.tableWindow, 0);
+			m.table.assign(static_cast<size_t>(w.tableWindow) * static_cast<size_t>(w.tableWindow), 0xFFFF);
+			good &= m.makeImage(1, DXGI_FORMAT_R16_UINT, w.tableWindow, w.tableWindow, 0);
+		}
+		else
+		{
+			m.farTex.Reset();
+			m.farFp.clear(); m.farRows.clear(); m.farRowBytes.clear(); m.farTotal = 0; m.farPending = false; m.farPresent = false;
+		}
 
 		const bool haveCoarse = w.coarseHeights.size() == static_cast<size_t>(w.coarseW) * static_cast<size_t>(w.coarseH) && w.coarseW > 0 && w.coarseH > 0;
 		if (!haveCoarse) ++m.stats.rejected;
@@ -417,20 +429,26 @@ void D3D12Landscape::upload(ID3D12GraphicsCommandList* cl, HE::LandscapeRenderFr
 
 		// the index buffer: the grid's triangles, read by the input assembler straight from an upload-heap buffer (written once)
 		uint8_t* iptr = nullptr;
-		m.indices = makeUploadBuffer(m.device, w.patchIndices.size() * sizeof(uint16_t), &iptr);
-		good &= m.indices != nullptr;
+		if (fresh)
+		{
+			m.indices = makeUploadBuffer(m.device, w.patchIndices.size() * sizeof(uint16_t), &iptr);
+			good &= m.indices != nullptr;
+		}
 		if (!good)
 		{
 			m.destroyImages();
 			++m.stats.rejected;
 			return;
 		}
-		std::memcpy(iptr, w.patchIndices.data(), w.patchIndices.size() * sizeof(uint16_t));
-		m.ibv.BufferLocation = m.indices->GetGPUVirtualAddress();
-		m.ibv.SizeInBytes = static_cast<UINT>(w.patchIndices.size() * sizeof(uint16_t));
-		m.ibv.Format = DXGI_FORMAT_R16_UINT;
+		if (fresh)
+		{
+			std::memcpy(iptr, w.patchIndices.data(), w.patchIndices.size() * sizeof(uint16_t));
+			m.ibv.BufferLocation = m.indices->GetGPUVirtualAddress();
+			m.ibv.SizeInBytes = static_cast<UINT>(w.patchIndices.size() * sizeof(uint16_t));
+			m.ibv.Format = DXGI_FORMAT_R16_UINT;
 
-		jobs.push_back({ 1, 0, m.table.data() });
+			jobs.push_back({ 1, 0, m.table.data() });
+		}
 		if (haveCoarse) jobs.push_back({ 2, 0, w.coarseHeights.data() });
 		else { scratch.emplace_back(2, 0); jobs.push_back({ 2, 0, scratch.back().data() }); }
 		for (unsigned p = 0; p < 3; ++p)
@@ -470,7 +488,7 @@ void D3D12Landscape::upload(ID3D12GraphicsCommandList* cl, HE::LandscapeRenderFr
 		for (unsigned s = 0; s < kSets; ++s) m.writeFar(s, m.farTex.Get());
 
 		m.world = f.world;
-		++m.stats.generations;
+		if (fresh) ++m.stats.generations;
 	}
 	if (!m.world) return;
 
@@ -614,7 +632,7 @@ void D3D12Landscape::drawDepth(ID3D12GraphicsCommandList* cl, const HE::Landscap
 	const LandscapeRenderStatic& w = *m.world;
 
 	d3dls::Globals g;
-	d3dls::fillGlobals(g, f, clip, glm::vec3(0.0f, 1.0f, 0.0f), glm::vec3(1.0f), glm::vec3(0.0f), false, false, false);
+	d3dls::fillGlobals(g, f, clip, glm::vec3(0.0f, 1.0f, 0.0f), glm::vec3(1.0f), glm::vec3(0.0f), false, false, false, false);
 	const unsigned slot = m.globalsNext++ % kGlobalsSlots;
 	std::memcpy(m.globalsMapped + static_cast<size_t>(slot) * m.globalsStride, &g, sizeof(g));
 	// The table the last colour draw used, as it is: the vertex stage reads the landscape's own images, which sit at the same

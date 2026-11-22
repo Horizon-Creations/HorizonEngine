@@ -36,6 +36,7 @@ public:
 	const char* name() const override { return "D3D12"; }
 	bool depthIsNdc() const override { return true; }
 	bool takesFarImage() const override { return true; }
+	bool refreshesCoarse() const override { return true; }
 
 	bool init(std::string& error) override
 	{

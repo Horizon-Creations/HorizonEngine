@@ -9446,7 +9446,7 @@ bool OpenGLRenderer::EnsureDeferredPipelines()
 		glBufferData(GL_UNIFORM_BUFFER,
 			static_cast<GLsizeiptr>(sizeof(HE::MaterialShaderLibrary::ResolveUniforms)),
 			nullptr, GL_DYNAMIC_DRAW);
-		glGenBuffers(1, &m_resolveLightUBO);
+		if (!m_resolveLightUBO) glGenBuffers(1, &m_resolveLightUBO);   // the landscape's forward draw may have made it already
 		glBindBuffer(GL_UNIFORM_BUFFER, m_resolveLightUBO);
 		glBufferData(GL_UNIFORM_BUFFER,
 			static_cast<GLsizeiptr>(sizeof(HE::MaterialShaderLibrary::Lighting)),
@@ -12402,8 +12402,9 @@ void OpenGLRenderer::DrawLandscapeDepth(const glm::mat4& viewProj)
 	m_landscape.draw(frame, viewProj, OpenGLLandscape::Shading{});
 }
 
-void OpenGLRenderer::DrawLandscape(const glm::mat4& viewProj)
+void OpenGLRenderer::DrawLandscape(const glm::mat4& viewProj, unsigned int csmLightUbo)
 {
+	bool csmBound = false;
 	if (!m_landscapeProvider || m_landscapeFailed) return;
 	HE::LandscapeRenderFrame frame;
 	m_landscapeProvider(glm::dmat4(viewProj), /*zeroToOne=*/false, frame);   // viewProj is origin-relative, in GL clip space (-1..1)
@@ -12472,7 +12473,13 @@ void OpenGLRenderer::DrawLandscape(const glm::mat4& viewProj)
 			glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(padded), padded);
 			glBindBuffer(GL_UNIFORM_BUFFER, 0);
 			m_haveMatParams = false;
-			glBindBufferBase(GL_UNIFORM_BUFFER, 0, m_matLightUBO);
+			glBindBufferBase(GL_UNIFORM_BUFFER, 0, csmLightUbo ? csmLightUbo : m_matLightUBO);
+			if (csmLightUbo)
+			{
+				glActiveTexture(GL_TEXTURE11);   // heCsm: the real cascades instead of the stand-in, for this draw
+				glBindTexture(GL_TEXTURE_2D_ARRAY, m_shadowDepthTex);
+				csmBound = true;
+			}
 			glBindBufferBase(GL_UNIFORM_BUFFER, 2, m_matParamUBO);
 			for (size_t i = 0; i < nTex; ++i)
 			{
@@ -12486,6 +12493,13 @@ void OpenGLRenderer::DrawLandscape(const glm::mat4& viewProj)
 	}
 #endif
 	m_landscape.draw(frame, viewProj, sh);
+	if (csmBound)   // what the material programs drawn after this expect (as after the deferred resolve)
+	{
+		glBindBufferBase(GL_UNIFORM_BUFFER, 0, m_matLightUBO);
+		glActiveTexture(GL_TEXTURE11);
+		glBindTexture(GL_TEXTURE_2D_ARRAY, m_localShadowDepthTex ? m_localShadowDepthTex : m_shadowDepthTex);
+		glActiveTexture(GL_TEXTURE0);
+	}
 }
 
 void OpenGLRenderer::DrawSkyFullscreen(const glm::mat4& invViewProj, const glm::vec3& sunDir,
@@ -14576,7 +14590,52 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			glUseProgram(m_unlitProgram); // restore for the sky + transparent passes
 		}
 		// ── World-scale landscape (Thema 326): after the opaque geometry, before the sky, depth-tested into the same target ──
-		DrawLandscape(viewProj);
+		unsigned int landscapeLightUbo = 0;
+#if defined(HE_HAVE_SHADERC)
+		{
+			// The ground's material program reads the frame's lighting block, which only a graph-material mesh uploads: a
+			// frame without one left the ground black (first run on a 24-sampler driver, NN-WS03). And the ground takes the
+			// sun's cascades, which the mesh materials' fill leaves out (csmSplits.w = 0): the resolve's buffer, filled as
+			// the resolve fills it, with the cascade array on unit 11 for the draw (DrawLandscape).
+			HE::MaterialShaderLibrary::Lighting lit{};
+			fillMatLight(lit);
+			if (m_matLightUBO && !m_matLightUploadedThisFrame)
+			{
+				glBindBuffer(GL_UNIFORM_BUFFER, m_matLightUBO);
+				glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(lit), &lit);
+				m_matLightUploadedThisFrame = true;
+			}
+			if (!giShadingActive && shadowFrame.shadows && m_shadowDepthTex)
+			{
+				if (!m_resolveLightUBO)   // a forward renderer has no resolve, so nobody made its buffer
+				{
+					glGenBuffers(1, &m_resolveLightUBO);
+					glBindBuffer(GL_UNIFORM_BUFFER, m_resolveLightUBO);
+					glBufferData(GL_UNIFORM_BUFFER, static_cast<GLsizeiptr>(sizeof(lit)), nullptr, GL_DYNAMIC_DRAW);
+				}
+				glm::mat4 zRemap(1.0f);
+				zRemap[2][2] = 0.5f; zRemap[3][2] = 0.5f;
+				const int nc = std::min(nCascades, 3);
+				for (int c = 0; c < nc; ++c)
+				{
+					const glm::mat4 m = zRemap * m_renderWorld.shadow.cascadeViewProj[c];
+					std::memcpy(lit.csmVP[c], &m[0][0], 16 * sizeof(float));
+				}
+				lit.csmSplits[0] = cascadeSplits.x;
+				lit.csmSplits[1] = cascadeSplits.y;
+				lit.csmSplits[2] = cascadeSplits.z;
+				lit.csmSplits[3] = static_cast<float>(nc);
+				lit.camFwd[0] = camFwd.x; lit.camFwd[1] = camFwd.y; lit.camFwd[2] = camFwd.z;
+				lit.shadowBias[0] = m_shadowSettings.slopeBias;
+				lit.shadowBias[1] = m_shadowSettings.minBias;
+				glBindBuffer(GL_UNIFORM_BUFFER, m_resolveLightUBO);
+				glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(lit), &lit);
+				landscapeLightUbo = m_resolveLightUBO;
+			}
+			glBindBuffer(GL_UNIFORM_BUFFER, 0);
+		}
+#endif
+		DrawLandscape(viewProj, landscapeLightUbo);
 		GpuTimerEndPass();                 // end "Opaque"
 
 		// ── TAA velocity (A2): screen-space motion of the opaque geometry, right

@@ -308,16 +308,25 @@ void D3D11Landscape::upload(ID3D11DeviceContext* ctx, HE::LandscapeRenderFrame& 
 	if (!d3dls::worldUsable(w)) { ++m.stats.rejected; f.uploads.clear(); f.tableUpdates.clear(); return; }
 
 	// ── the images of a landscape that began (or the first frame) ─────────────
-	if (m.world != f.world && (!m.world || m.world->generation != w.generation))
+	// Or of a render window that moved, or far ground that was edited (same generation, another coarseRevision): the coarse
+	// images and the far image again, at their new sizes; the tile arrays, the slot table and the index buffer stay as they
+	// are, so the near ground is never thrown away (Windows handoff, item 2a). The context is immediate: replacing is enough.
+	const bool fresh = !m.world || m.world->generation != w.generation;
+	if (m.world != f.world && (fresh || m.world->coarseRevision != w.coarseRevision))
 	{
-		m.destroyImages();
 		bool good = true;
-		good &= m.makeImage(0, DXGI_FORMAT_R16_UINT, w.heightW, w.heightH, w.slotCapacity, nullptr, 0);
-		for (unsigned p = 0; p < 3; ++p)   // pages the tiles do not have stay zero (a landscape of fewer than 9 channels); the shader reads all three
-			good &= m.makeImage(3 + p, DXGI_FORMAT_R8G8B8A8_UNORM, w.weightW, w.weightH, w.slotCapacity, nullptr, 0);
+		if (fresh)
+		{
+			m.destroyImages();
+			good &= m.makeImage(0, DXGI_FORMAT_R16_UINT, w.heightW, w.heightH, w.slotCapacity, nullptr, 0);
+			for (unsigned p = 0; p < 3; ++p)   // pages the tiles do not have stay zero (a landscape of fewer than 9 channels); the shader reads all three
+				good &= m.makeImage(3 + p, DXGI_FORMAT_R8G8B8A8_UNORM, w.weightW, w.weightH, w.slotCapacity, nullptr, 0);
 
-		m.table.assign(static_cast<size_t>(w.tableWindow) * static_cast<size_t>(w.tableWindow), 0xFFFF);
-		good &= m.makeImage(1, DXGI_FORMAT_R16_UINT, w.tableWindow, w.tableWindow, 0, m.table.data(), static_cast<UINT>(w.tableWindow) * 2);
+			m.table.assign(static_cast<size_t>(w.tableWindow) * static_cast<size_t>(w.tableWindow), 0xFFFF);
+			good &= m.makeImage(1, DXGI_FORMAT_R16_UINT, w.tableWindow, w.tableWindow, 0, m.table.data(), static_cast<UINT>(w.tableWindow) * 2);
+		}
+		else
+			for (unsigned i : { 2u, 6u, 7u, 8u }) { m.srv[i].Reset(); m.tex[i].Reset(); }   // makeImage fills empty pointers
 
 		const bool haveCoarse = w.coarseHeights.size() == static_cast<size_t>(w.coarseW) * static_cast<size_t>(w.coarseH) && w.coarseW > 0 && w.coarseH > 0;
 		if (!haveCoarse) ++m.stats.rejected;
@@ -333,13 +342,16 @@ void D3D11Landscape::upload(ID3D11DeviceContext* ctx, HE::LandscapeRenderFrame& 
 			good &= m.makeImage(6 + p, DXGI_FORMAT_R8G8B8A8_UNORM, cw, ch, 0, have ? w.coarseWeights[p].data() : none.data(), static_cast<UINT>(cw) * 4);
 		}
 
-		D3D11_BUFFER_DESC ib{};
-		ib.ByteWidth = static_cast<UINT>(w.patchIndices.size() * sizeof(uint16_t));
-		ib.Usage = D3D11_USAGE_IMMUTABLE;
-		ib.BindFlags = D3D11_BIND_INDEX_BUFFER;
-		D3D11_SUBRESOURCE_DATA id{};
-		id.pSysMem = w.patchIndices.data();
-		good &= SUCCEEDED(m.device->CreateBuffer(&ib, &id, m.indices.GetAddressOf()));
+		if (fresh)
+		{
+			D3D11_BUFFER_DESC ib{};
+			ib.ByteWidth = static_cast<UINT>(w.patchIndices.size() * sizeof(uint16_t));
+			ib.Usage = D3D11_USAGE_IMMUTABLE;
+			ib.BindFlags = D3D11_BIND_INDEX_BUFFER;
+			D3D11_SUBRESOURCE_DATA id{};
+			id.pSysMem = w.patchIndices.data();
+			good &= SUCCEEDED(m.device->CreateBuffer(&ib, &id, m.indices.GetAddressOf()));
+		}
 		if (!good)
 		{
 			m.destroyImages();
@@ -350,7 +362,7 @@ void D3D11Landscape::upload(ID3D11DeviceContext* ctx, HE::LandscapeRenderFrame& 
 		}
 		if (!m.makeFar(w)) ++m.stats.rejected;   // not fatal to the landscape: the world just draws without one (see makeFar)
 		m.world = f.world;
-		++m.stats.generations;
+		if (fresh) ++m.stats.generations;
 	}
 	if (!m.world) { f.uploads.clear(); f.tableUpdates.clear(); return; }
 
