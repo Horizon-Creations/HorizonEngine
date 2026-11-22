@@ -10199,13 +10199,6 @@ void VulkanRenderer::landscapeBegin(uint32_t /*width*/, uint32_t /*height*/)
     m_landscapeFrameLive = true;
 }
 
-// HE_LANDSCAPE_PASSES=0: the ground in the scene pass alone (the A/B switch of the witnesses; read per call, as on Metal).
-static bool landscapePassesOn()
-{
-    const char* v = std::getenv("HE_LANDSCAPE_PASSES");
-    return !(v && *v == '0');
-}
-
 bool VulkanRenderer::landscapePassFrame(const glm::mat4& clip, HE::LandscapeRenderFrame& frame)
 {
     frame = HE::LandscapeRenderFrame{};
@@ -10214,7 +10207,7 @@ bool VulkanRenderer::landscapePassFrame(const glm::mat4& clip, HE::LandscapeRend
     m_landscapeProvider(glm::dmat4(clip), /*zeroToOne=*/true, frame);
     if (!frame.active || !landscapeEnsure()) return false;
     m_landscape->upload(frame);
-    if (!landscapePassesOn()) frame.patches.clear();
+    if (!HE::landscapePassesOn()) frame.patches.clear();
     return !frame.patches.empty();
 }
 

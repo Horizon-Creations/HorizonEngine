@@ -3,6 +3,7 @@
 #include <Types/UUID.h>
 
 #include <cstdint>
+#include <cstdlib>
 #include <functional>
 #include <memory>
 #include <string>
@@ -127,5 +128,21 @@ struct LandscapeRenderFrame
 // use (origin-relative world to that backend's clip space) and whether its clip depth is 0..1. The application knows the world's
 // floating origin, the backend does not (the render world carries origin-relative positions only), so the origin is the provider's.
 using LandscapeProvider = std::function<void(const glm::dmat4& viewProjRelative, bool zeroToOne, LandscapeRenderFrame& out)>;
+
+// HE_LANDSCAPE_PASSES=0: the ground in the scene pass alone, on every backend (the A/B switch of landscape_gpu_check's witnesses;
+// read per call, so a tool can flip it between two frames).
+inline bool landscapePassesOn()
+{
+	const char* v = std::getenv("HE_LANDSCAPE_PASSES");
+	return !(v && *v == '0');
+}
+// HE_LANDSCAPE_D3D_PASSES=1: the D3D11 / D3D12 code for the ground in the other passes, which was written without a machine that
+// runs D3D. Off until a Windows run has shown each pass (docs/landscape-world-scale-windows-handoff-2026-11-21.md, section 8);
+// then the switch goes and the passes are on. Read once.
+inline bool landscapeD3dPassesOn()
+{
+	static const bool on = [] { const char* v = std::getenv("HE_LANDSCAPE_D3D_PASSES"); return v && *v == '1'; }();
+	return on;
+}
 
 } // namespace HE
