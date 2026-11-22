@@ -9,6 +9,7 @@
 #include <HorizonRendering/ParticleShaderTemplates.h>
 #include <HorizonRendering/GiCasterRange.h>
 #include <HorizonRendering/GiHeightfield.h>
+#include <HorizonRendering/RvtTilePatches.h>
 #include <HorizonRendering/SsaoKernel.h>     // shared SSAO kernel + rotation noise
 #include <HorizonRendering/GIJitter.h>       // GI: wrapped cone-jitter frame index (all backends)
 #include <HorizonRendering/GIReflectionTier.h> // GI reflections: rays / resolution / blur per tier (all backends)
@@ -12578,6 +12579,15 @@ bool OpenGLRenderer::DrawLandscape(const glm::mat4& viewProj, unsigned int csmLi
 	// The ground's material, when it has a shader and its landscape program links: bound like a forward draw of that material (its
 	// parameters, the graph's textures, the virtual texture; the frame's lighting block and shadow, sky and occlusion units are
 	// the pass's already), the landscape adds its own blocks and images. Else the fixed blend.
+	// A virtual texture page of meshes: the ground stays out of it (the frame's uploads are still executed).
+	const bool page = m_editorCamera.rvtSlot >= 0;
+	if (page && !m_editorCamera.rvtTileGround)
+	{
+		frame.patches.clear();
+		m_landscape.draw(frame, viewProj, sh);
+		return true;
+	}
+	bool any = false;
 #if defined(HE_HAVE_SHADERC)
 	if (frame.materialId != HE::UUID{} && m_contentManager && m_maxFragmentSamplers >= 24)   // see GetCapabilities: fewer samplers, no link
 	{
@@ -12586,9 +12596,10 @@ bool OpenGLRenderer::DrawLandscape(const glm::mat4& viewProj, unsigned int csmLi
 			m_landscapeMaterialLoadTried = frame.materialId;   // the texture group's material is named by no entity: from its path, once
 			if (!m_contentManager->resolveMaterialRef(frame.materialId, frame.materialPath)) m_contentManager->loadAsset(frame.materialPath);
 		}
-		// the extractor's derived material where the landscape's own cannot be drawn (RenderWorld::tileLandscapeMaterial)
-		const HE::UUID matId = m_renderWorld.tileLandscapeMaterial != HE::UUID{} ? m_renderWorld.tileLandscapeMaterial : frame.materialId;
-		if (const unsigned int prog = GetOrBuildLandscapeMaterialProgram(matId, gbuffer))
+		// Binds `matId`'s landscape program and its material state; false when no variant builds.
+		const auto bindMaterial = [&](const HE::UUID& matId) -> bool {
+		const unsigned int prog = GetOrBuildLandscapeMaterialProgram(matId, gbuffer);
+		if (prog)
 		{
 			float padded[HE::kMatParamFloats] = { 0 };
 			unsigned int gtex[4] = { 0, 0, 0, 0 };
@@ -12624,13 +12635,38 @@ bool OpenGLRenderer::DrawLandscape(const glm::mat4& viewProj, unsigned int csmLi
 			}
 			BindRvtForDraw(matId);
 			glActiveTexture(GL_TEXTURE0);
-			sh.materialProgram = prog;
 		}
+		sh.materialProgram = prog;
+		return prog != 0;
+		};
+		// Under a virtual texture (SetRvtTileGround) the patches inside its rectangle are drawn with the consumer, which reads
+		// the pages; when the consumer's variant does not build they go back to the ground's own material.
+		if (!page && m_tileRvtConsumer != HE::UUID{} && m_rvtPool[0] && m_rvtTables.count(m_tileRvtConsumer))
+		{
+			std::vector<HE::LandscapeRenderPatch> inside;
+			HE::splitRvtTilePatches(frame, m_tileRvtMin, m_tileRvtMax, m_tileRvtNearM, inside);
+			if (!inside.empty() && bindMaterial(m_tileRvtConsumer))
+			{
+				frame.patches.swap(inside);
+				m_landscape.draw(frame, viewProj, sh);
+				frame.patches.swap(inside);
+				frame.uploads.clear();        // executed by that draw
+				frame.tableUpdates.clear();
+				any = true;
+			}
+			else
+				frame.patches.insert(frame.patches.end(), inside.begin(), inside.end());
+		}
+		// What the rest is drawn with: on a page of the ground (rvtTileGround) the layer's view; else the extractor's derived
+		// material where the landscape's own cannot be drawn (RenderWorld::tileLandscapeMaterial), else the landscape's own.
+		bindMaterial(page ? m_editorCamera.rvtMaterial
+		             : m_renderWorld.tileLandscapeMaterial != HE::UUID{} ? m_renderWorld.tileLandscapeMaterial : frame.materialId);
 	}
 #endif
 	// The frame's uploads are executed either way (the runtime counts them as done); a G-buffer without a variant gets no ground.
 	if (gbuffer && !sh.materialProgram) frame.patches.clear();
 	m_landscape.draw(frame, viewProj, sh);
+	any = any || sh.materialProgram != 0;
 	if (csmBound)   // what the material programs drawn after this expect (as after the deferred resolve)
 	{
 		glBindBufferBase(GL_UNIFORM_BUFFER, 0, m_matLightUBO);
@@ -12638,7 +12674,7 @@ bool OpenGLRenderer::DrawLandscape(const glm::mat4& viewProj, unsigned int csmLi
 		glBindTexture(GL_TEXTURE_2D_ARRAY, m_localShadowDepthTex ? m_localShadowDepthTex : m_shadowDepthTex);
 		glActiveTexture(GL_TEXTURE0);
 	}
-	return sh.materialProgram != 0;
+	return any;
 }
 
 void OpenGLRenderer::DrawSkyFullscreen(const glm::mat4& invViewProj, const glm::vec3& sunDir,
@@ -15518,6 +15554,7 @@ IRenderer::Capabilities OpenGLRenderer::GetCapabilities() const
 	c.landscapePassMask          = kLandscapePassShadow | (c.landscapeMaterial ? (kLandscapePassGBuffer | kLandscapePassSsao | kLandscapePassGi) : 0u);
 #endif
 	c.supportsRvt                = m_rvtSupported;   // a page is that raw capture blitted into the pool (the programs come from the cross-compiler)
+	c.landscapeRvt               = c.landscapeMaterial && c.supportsRvt;   // SetRvtTileGround, rvtTileGround pages (DrawLandscape)
 	// SSR: the FORWARD variant only (docs/ssr-cross-backend-plan.md checkpoint
 	// A) — the reflection MRT pre-pass plus last frame's HDR copy, exactly
 	// Metal's Option-A path. The deferred composite (A6) is not built, so in
