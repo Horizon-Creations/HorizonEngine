@@ -1025,6 +1025,8 @@ private:
 	uint32_t     m_taaFrameIndex      = 0;      // drives the Halton sequence
 	glm::vec2    m_taaJitter{0.0f};             // this frame's offset, pixel units (-0.5 … 0.5)
 	glm::mat4    m_taaPrevViewProj{1.0f};       // LAST frame's UNJITTERED view-proj (velocity)
+	glm::dvec3   m_taaPrevOrigin{0.0};          // the floating origin it was built for (HE::taaPrevViewProjAt)
+	bool         m_taaPrevOriginKnown = false;
 	// Per-entity model matrices of the previous frame, so a moving OBJECT under
 	// a still camera reports motion too. Keyed by entity id; swapped per frame.
 	std::unordered_map<uint32_t, glm::mat4> m_taaPrevTransforms;
@@ -1590,8 +1592,6 @@ private:
 	void            DrawLandscapeVelocity(const glm::mat4& viewProjJit, const glm::mat4& viewProjNow, const glm::mat4& viewProjPrev);   // into the TAA velocity target that is bound
 	unsigned int    m_landscapeVelProgram = 0;    // DrawLandscapeVelocity: the same vertex stage with the velocity fragment
 	bool            m_landscapeVelTried = false;
-	glm::dvec3      m_landscapeVelOrigin{ 0.0 };  // the floating origin of the last velocity draw (vkls::velocityPrev)
-	bool            m_landscapeVelOriginSet = false;
 	unsigned int    GetOrBuildLandscapeMaterialProgram(const HE::UUID& materialId, bool gbuffer = false);
 	int             m_maxFragmentSamplers = 0;   // GL_MAX_TEXTURE_IMAGE_UNITS, read at Initialize
 	HE::UUID        m_landscapeMaterialLoadTried{};   // the texture group's material this renderer tried to load from its path

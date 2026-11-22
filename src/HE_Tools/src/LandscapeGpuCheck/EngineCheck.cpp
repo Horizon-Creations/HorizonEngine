@@ -924,13 +924,16 @@ int runMaterialCheck(HE::RendererBackend backend, HE::RenderPath path, const std
 									};
 									// Misplaced history shows as ghosts of everything larger than a texel (the shadow's edge, the patches
 									// of the texture): the mean difference of 4x4 block averages on the ground, moving against standing.
-									const auto ghost = [&](const std::vector<uint8_t>& a, const std::vector<uint8_t>& b) {
+									// `box`: on everything that is not ground instead (the box, which has a remembered model, and the
+									// sky, which does not change under a standing camera), and as the number of blocks that differ by
+									// more than 6/255: the box is one flat colour, a misplaced history shows at its edges only.
+									const auto ghost = [&](const std::vector<uint8_t>& a, const std::vector<uint8_t>& b, bool box = false) {
 										double s = 0.0;
-										size_t n3 = 0;
+										size_t n3 = 0, edges = 0;
 										for (uint32_t y = 0; y + 4 <= kH; y += 4)
 											for (uint32_t x = 0; x + 4 <= kW; x += 4)
 											{
-												if (!isBlue(&lit[(static_cast<size_t>(y) * kW + x) * 4])) continue;
+												if (isBlue(&lit[(static_cast<size_t>(y) * kW + x) * 4]) == box) continue;
 												double la = 0.0, lb = 0.0;
 												for (uint32_t j = 0; j < 4; ++j)
 													for (uint32_t i = 0; i < 4; ++i)
@@ -940,17 +943,18 @@ int runMaterialCheck(HE::RendererBackend backend, HE::RenderPath path, const std
 														lb += lum(&b[o]);
 													}
 												s += std::abs(la - lb) / 16.0;
+												edges += std::abs(la - lb) / 16.0 > 6.0 ? 1 : 0;
 												++n3;
 											}
-										return s / static_cast<double>(std::max<size_t>(n3, 1));
+										return box ? static_cast<double>(edges) : s / static_cast<double>(std::max<size_t>(n3, 1));
 									};
 									std::vector<uint8_t> standing, moved, standingOff, movedOff;
 									const bool gotLive = live(standing, false) && live(moved, true);
 									// The floating origin hops between two frames while the camera stands: last frame's matrix is in the
 									// old origin's frame, and the ground's velocity has to say "did not move" all the same
-									// (vkls::velocityPrev). A small hop on purpose: a wrong velocity of a few pixels ghosts, one of a
+									// (HE::taaPrevViewProjAt). A small hop on purpose: a wrong velocity of a few pixels ghosts, one of a
 									// kilometre only drops the history.
-									double hopGap = -1.0;
+									double hopGap = -1.0, hopBox = -1.0;
 									if (std::vector<uint8_t> settled, hopped; gotLive && live(settled, false))
 									{
 										const glm::dvec3 hop(1.5, 0.0, 0.8);
@@ -964,7 +968,11 @@ int runMaterialCheck(HE::RendererBackend backend, HE::RenderPath path, const std
 										renderer->SetEditorCamera(ov);
 										renderer->Render();
 										uint32_t w = 0, h = 0;
-										if (renderer->CaptureViewport(hopped, w, h) && w == kW && h == kH && hopped.size() == px * 4) hopGap = ghost(hopped, settled);
+										if (renderer->CaptureViewport(hopped, w, h) && w == kW && h == kH && hopped.size() == px * 4)
+										{
+											hopGap = ghost(hopped, settled);
+											hopBox = ghost(hopped, settled, true);
+										}
 										world.setOrigin(origin);
 										htf.position += glm::vec3(hop);
 										htf.dirty = true;
@@ -985,9 +993,14 @@ int runMaterialCheck(HE::RendererBackend backend, HE::RenderPath path, const std
 											failPass(kLandscapePassVelocity, "the ground's history lines up under TAA while the camera moves (live viewport)");
 										if (hopGap >= 0.0)
 										{
-											std::printf("  TAA, live viewport, the floating origin hops by (1.5, 0.8) m under a standing camera: the ground differs by %.2f/255 in that frame\n", hopGap);
+											std::printf("  TAA, live viewport, the floating origin hops by (1.5, 0.8) m under a standing camera: the ground differs by %.2f/255; %.0f blocks of the box and sky differ by more than 6/255\n",
+											            hopGap, hopBox);
 											// 0.4 to 0.5 with the origin's part in the matrix, 4.5 and more without it (D3D11, measured both ways)
 											if (hopGap > 1.5) failPass(kLandscapePassVelocity, "the ground's velocity is zero across a floating origin hop");
+											// The box keeps its remembered model and last frame's matrix as it was: the origin's step must not
+											// reach it a second time (HE::taaPrevViewProjAt is for what this frame places, not for it).
+											// 0 blocks right, 27 with the step applied twice (D3D11 deferred; forward shows 0 either way).
+											if (hopBox > 5.0) fail("a remembered object's velocity is zero across a floating origin hop");
 										}
 										writePngFile(pngPath.substr(0, pngPath.size() - 4) + "_taa_live.png", static_cast<int>(kW), static_cast<int>(kH), moved.data());
 										writePngFile(pngPath.substr(0, pngPath.size() - 4) + "_taa_live_standing.png", static_cast<int>(kW), static_cast<int>(kH), standing.data());

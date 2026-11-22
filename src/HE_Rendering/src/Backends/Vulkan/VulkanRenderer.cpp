@@ -6230,19 +6230,20 @@ void VulkanRenderer::encodeTaaVelocity(VkCommandBuffer cmd)
         // The tile landscape's ground stands still; the camera's own motion is its velocity. Before the meshes: the pass
         // writes no depth, so what stands on the ground overwrites it (vkls::velocityClip). m_landscapeViewProj is the
         // jittered matrix the ground's own draw used; the pass binds its own pipeline after this.
+        // Last frame's clean matrix with THIS frame's jitter — see taa_velocity.vert: the jitter then cancels out of the
+        // difference. `prevJitHere` is the one for what this frame places (the ground, a cluster's plants, a first-seen
+        // object): across a floating-origin hop it takes the origin's step (HE::taaPrevViewProjAt). A remembered model
+        // keeps prevJit.
+        const glm::dvec3 originNow = m_renderWorld.worldOrigin;
+        const glm::mat4 prevJit = taaJittered(m_taaPrevViewProj);
+        const glm::mat4 prevJitHere = m_taaPrevOriginKnown ? taaJittered(HE::taaPrevViewProjAt(m_taaPrevViewProj, originNow, m_taaPrevOrigin))
+                                                           : prevJit;
         if (m_landscapeFrameLive && m_landscape && HE::landscapePassesOn())
-        {
-            const glm::mat4 prevJitGround = taaJittered(m_taaPrevViewProj);
             m_landscape->drawDepth(cmd, m_taaVelocityRP, VkExtent2D{ m_viewportW, m_viewportH }, m_currentFrame, m_landscapeFrame,
-                                   m_landscapeViewProj, &m_taaViewProjJit, false, &prevJitGround);
-        }
+                                   m_landscapeViewProj, &m_taaViewProjJit, false, &prevJitHere);
         VkViewport vp{ 0, 0, (float)m_viewportW, (float)m_viewportH, 0, 1 }; vkCmdSetViewport(cmd, 0, 1, &vp);
         VkRect2D   sc{ { 0, 0 }, { m_viewportW, m_viewportH } };          vkCmdSetScissor(cmd, 0, 1, &sc);
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_taaVelocityPipe);
-
-        // Last frame's clean matrix with THIS frame's jitter — see
-        // taa_velocity.vert: the jitter then cancels out of the difference.
-        const glm::mat4 prevJit = taaJittered(m_taaPrevViewProj);
         m_taaCurTransforms.clear();
         for (const uint32_t idx : m_sortedIndices)
         {
@@ -6261,7 +6262,7 @@ void VulkanRenderer::encodeTaaVelocity(VkCommandBuffer cmd)
                 vkCmdBindVertexBuffers(cmd, 0, 1, &mesh->vbuf, &offset);
                 vkCmdBindIndexBuffer(cmd, mesh->ibuf, 0, VK_INDEX_TYPE_UINT32);
                 m_renderWorld.forEachInstance(obj, [&](const glm::mat4& model) {
-                    const PushConstants pc{ m_taaViewProjJit * model, prevJit * model };
+                    const PushConstants pc{ m_taaViewProjJit * model, prevJitHere * model };
                     vkCmdPushConstants(cmd, m_scenePipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(pc), &pc);
                     vkCmdDrawIndexed(cmd, mesh->indexCount, 1, 0, 0, 0);
                 });
@@ -6271,10 +6272,10 @@ void VulkanRenderer::encodeTaaVelocity(VkCommandBuffer cmd)
             // An object seen for the first time reports no motion — its
             // "previous" position is where it is now.
             const auto it = m_taaPrevTransforms.find(obj.entityId);
-            const glm::mat4 prevModel = (it != m_taaPrevTransforms.end()) ? it->second : obj.transform;
+            const bool known = it != m_taaPrevTransforms.end();
             m_taaCurTransforms[obj.entityId] = obj.transform;
 
-            const PushConstants pc{ m_taaViewProjJit * obj.transform, prevJit * prevModel };
+            const PushConstants pc{ m_taaViewProjJit * obj.transform, known ? prevJit * it->second : prevJitHere * obj.transform };
             vkCmdPushConstants(cmd, m_scenePipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(pc), &pc);
             VkDeviceSize offset = 0;
             vkCmdBindVertexBuffers(cmd, 0, 1, &mesh->vbuf, &offset);
@@ -6284,6 +6285,8 @@ void VulkanRenderer::encodeTaaVelocity(VkCommandBuffer cmd)
         // Advance the history HERE, at the end of the one pass that consumed
         // it, so a frame is never compared against itself.
         m_taaPrevViewProj = m_taaViewProjClean;
+        m_taaPrevOrigin = originNow;
+        m_taaPrevOriginKnown = true;
         m_taaPrevTransforms.swap(m_taaCurTransforms);
     }
     vkCmdEndRenderPass(cmd);

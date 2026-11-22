@@ -11,6 +11,7 @@
 #include <HorizonRendering/GiHeightfield.h>
 #include <HorizonRendering/RvtTilePatches.h>
 #include "Backends/Vulkan/VulkanLandscapeLayout.h"   // HE::vkls::velocityClip, shared by every backend's ground
+#include <HorizonRendering/TemporalAA.h>              // HE::taaPrevViewProjAt
 #include <HorizonRendering/SsaoKernel.h>     // shared SSAO kernel + rotation noise
 #include <HorizonRendering/GIJitter.h>       // GI: wrapped cone-jitter frame index (all backends)
 #include <HorizonRendering/GIReflectionTier.h> // GI reflections: rays / resolution / blur per tier (all backends)
@@ -5204,8 +5205,12 @@ void OpenGLRenderer::RenderVelocity(int pw, int ph, const glm::mat4& viewProjCle
 	glDepthFunc(GL_LEQUAL);
 	glDepthMask(GL_FALSE);
 	glDisable(GL_BLEND);
+	// Last frame's matrix for what this frame places (the ground, a cluster's plants, a first-seen object): across a
+	// floating-origin hop it takes the origin's step (HE::taaPrevViewProjAt). A remembered model keeps m_taaPrevViewProj.
+	const glm::dvec3 originNow = m_renderWorld.worldOrigin;
+	const glm::mat4 prevHere = m_taaPrevOriginKnown ? HE::taaPrevViewProjAt(m_taaPrevViewProj, originNow, m_taaPrevOrigin) : m_taaPrevViewProj;
 	// The tile landscape's ground first: the pass writes no depth, so what stands on the ground overwrites it.
-	DrawLandscapeVelocity(viewProjJit, viewProjClean, m_taaPrevViewProj);
+	DrawLandscapeVelocity(viewProjJit, viewProjClean, prevHere);
 	glUseProgram(m_taaVelocityProgram);
 
 	m_taaCurTransforms.clear();
@@ -5226,7 +5231,7 @@ void OpenGLRenderer::RenderVelocity(int pw, int ph, const glm::mat4& viewProjCle
 			{
 				glUniformMatrix4fv(m_uTaaVelMvpJitter, 1, GL_FALSE, glm::value_ptr(viewProjJit * model));
 				glUniformMatrix4fv(m_uTaaVelMvpNow,    1, GL_FALSE, glm::value_ptr(viewProjClean * model));
-				glUniformMatrix4fv(m_uTaaVelMvpPrev,   1, GL_FALSE, glm::value_ptr(m_taaPrevViewProj * model));
+				glUniformMatrix4fv(m_uTaaVelMvpPrev,   1, GL_FALSE, glm::value_ptr(prevHere * model));
 				glDrawElements(GL_TRIANGLES, mesh->indexCount, GL_UNSIGNED_INT, nullptr);
 			});
 			continue;
@@ -5236,12 +5241,13 @@ void OpenGLRenderer::RenderVelocity(int pw, int ph, const glm::mat4& viewProjCle
 		// position is where it is now. Anything else invents a streak out of
 		// nowhere on the frame something spawns.
 		const auto it = m_taaPrevTransforms.find(obj.entityId);
-		const glm::mat4 prevModel = (it != m_taaPrevTransforms.end()) ? it->second : obj.transform;
+		const bool known = it != m_taaPrevTransforms.end();
 		m_taaCurTransforms[obj.entityId] = obj.transform;
 
 		glUniformMatrix4fv(m_uTaaVelMvpJitter, 1, GL_FALSE, glm::value_ptr(viewProjJit * obj.transform));
 		glUniformMatrix4fv(m_uTaaVelMvpNow,    1, GL_FALSE, glm::value_ptr(viewProjClean * obj.transform));
-		glUniformMatrix4fv(m_uTaaVelMvpPrev,   1, GL_FALSE, glm::value_ptr(m_taaPrevViewProj * prevModel));
+		glUniformMatrix4fv(m_uTaaVelMvpPrev,   1, GL_FALSE,
+		                   glm::value_ptr(known ? m_taaPrevViewProj * it->second : prevHere * obj.transform));
 		glBindVertexArray(mesh->vao);
 		glDrawElements(GL_TRIANGLES, mesh->indexCount, GL_UNSIGNED_INT, nullptr);
 	}
@@ -5250,6 +5256,8 @@ void OpenGLRenderer::RenderVelocity(int pw, int ph, const glm::mat4& viewProjCle
 	// not at some "frame end" further out, so a frame is never compared
 	// against itself.
 	m_taaPrevViewProj = viewProjClean;
+	m_taaPrevOrigin = originNow;
+	m_taaPrevOriginKnown = true;
 	m_taaPrevTransforms.swap(m_taaCurTransforms);
 
 	// Back to what the opaque pass had set, for the sky + transparent tail.
@@ -12598,8 +12606,7 @@ void OpenGLRenderer::DrawLandscapeVelocity(const glm::mat4& viewProjJit, const g
 	const GLboolean cull = glIsEnabled(GL_CULL_FACE);
 	glUseProgram(m_landscapeVelProgram);
 	glUniformMatrix4fv(glGetUniformLocation(m_landscapeVelProgram, "uNow"), 1, GL_FALSE, glm::value_ptr(viewProjNow));
-	const glm::mat4 prev = HE::vkls::velocityPrev(viewProjPrev, frame.uvOrigin, m_landscapeVelOrigin, m_landscapeVelOriginSet);
-	glUniformMatrix4fv(glGetUniformLocation(m_landscapeVelProgram, "uPrev"), 1, GL_FALSE, glm::value_ptr(prev));
+	glUniformMatrix4fv(glGetUniformLocation(m_landscapeVelProgram, "uPrev"), 1, GL_FALSE, glm::value_ptr(viewProjPrev));
 	OpenGLLandscape::Shading sh;
 	sh.materialProgram = m_landscapeVelProgram;
 	sh.depthReadOnly = true;

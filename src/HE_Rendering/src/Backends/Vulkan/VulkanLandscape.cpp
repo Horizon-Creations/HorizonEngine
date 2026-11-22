@@ -64,8 +64,6 @@ struct VulkanLandscape::Impl
 	VkShaderModule        fsViewPosMrt = VK_NULL_HANDLE;   // null when it did not compile: no occlusion on the ground then
 	std::vector<Pipe>     velocityPipes;  // the TAA velocity pass (fsVelocity)
 	VkShaderModule        fsVelocity = VK_NULL_HANDLE; // null when it did not compile: the ground then reports "did not move"
-	glm::dvec3            velOrigin{ 0.0 };            // the floating origin of the last velocity draw (vkls::velocityPrev)
-	bool                  velOriginSet = false;
 
 	Img                   img[kImages];
 	Img                   farAlbedo;   // the baked far image (sRGB, mipped); view is null when the world has none
@@ -714,11 +712,7 @@ void VulkanLandscape::drawDepth(VkCommandBuffer cmd, VkRenderPass pass, VkExtent
 	vkls::Globals g;
 	vkls::fillGlobals(g, f, velocityPrev ? vkls::velocityClip(clip) : clip, glm::vec3(0.0f, 1.0f, 0.0f), glm::vec3(1.0f), glm::vec3(0.0f), false, false, false, false);
 	if (viewForPosition) std::memcpy(g.aux0, &(*viewForPosition)[0][0], sizeof(g.aux0));
-	if (velocityPrev)
-	{
-		const glm::mat4 prev = vkls::velocityPrev(*velocityPrev, f.uvOrigin, m.velOrigin, m.velOriginSet);
-		std::memcpy(g.aux1, &prev[0][0], sizeof(g.aux1));
-	}
+	if (velocityPrev) std::memcpy(g.aux1, &(*velocityPrev)[0][0], sizeof(g.aux1));
 	std::memcpy(static_cast<uint8_t*>(m.uboMapped[frameIndex]) + offset, &g, sizeof(g));
 
 	// The whole set, as the scene's: the vertex stage reads the block, the heights and the slot table; the rest is what the layout

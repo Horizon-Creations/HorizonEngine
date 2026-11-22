@@ -344,8 +344,6 @@ struct D3D12Landscape::Impl
 	// against the scene's D32_FLOAT depth without writing it (the renderer's own velocity pipeline). Tried once.
 	ComPtr<ID3D12PipelineState> velocityPso;
 	bool velocityPsoTried = false;
-	glm::dvec3 velOrigin{ 0.0 };   // the floating origin of the last velocity draw (vkls::velocityPrev)
-	bool velOriginSet = false;
 	ID3D12PipelineState* velocityPsoGet()
 	{
 		if (velocityPsoTried) return velocityPso.Get();
@@ -752,8 +750,7 @@ void D3D12Landscape::drawGiGBuf(ID3D12GraphicsCommandList* cl, const HE::Landsca
 void D3D12Landscape::drawVelocity(ID3D12GraphicsCommandList* cl, const HE::LandscapeRenderFrame& f, const glm::mat4& viewProjJitter,
                                   const glm::mat4& viewProjNow, const glm::mat4& viewProjPrev)
 {
-	const glm::mat4 prev = vkls::velocityPrev(viewProjPrev, f.uvOrigin, m_impl->velOrigin, m_impl->velOriginSet);
-	m_impl->drawBare(cl, f, vkls::velocityClip(viewProjJitter), m_impl->velocityPsoGet(), &viewProjNow, &prev);
+	m_impl->drawBare(cl, f, vkls::velocityClip(viewProjJitter), m_impl->velocityPsoGet(), &viewProjNow, &viewProjPrev);
 }
 
 // The patches with one of the pipelines that are not the scene's: depth alone (a shadow layer), the view-space position (the

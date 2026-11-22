@@ -1943,6 +1943,8 @@ struct D3D12RendererImpl
     // image by a subpixel every frame with nothing to average it out.
     bool      taaFrame = false;
     glm::mat4 taaPrevViewProj{ 1.0f };
+    glm::dvec3 taaPrevOrigin{ 0.0 };     // the floating origin taaPrevViewProj was built for (HE::taaPrevViewProjAt)
+    bool       taaPrevOriginKnown = false;
     std::unordered_map<uint32_t, glm::mat4> taaPrevTransforms, taaCurTransforms;
 
     bool taaReady() const { return postFxReady && taaVelocityPSO && taaResolvePSO && taaSharpenPSO; }
@@ -14246,8 +14248,13 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
             // The tile landscape's ground stands still; the camera's own motion is its velocity. Before the meshes: the pass
             // writes no depth, so what stands on the ground overwrites it (vkls::velocityClip). It leaves its own root
             // signature and heap set; this pass sets its own next and the scene's are rebuilt at its end.
+            // Last frame's matrix for what this frame places (the ground, a cluster's plants, a first-seen object): across a
+            // floating-origin hop it takes the origin's step (HE::taaPrevViewProjAt). A remembered model keeps taaPrevViewProj.
+            const glm::dvec3 originNow = p.m_renderWorld.worldOrigin;
+            const glm::mat4 prevHere = p.taaPrevOriginKnown ? HE::taaPrevViewProjAt(p.taaPrevViewProj, originNow, p.taaPrevOrigin)
+                                                            : p.taaPrevViewProj;
             if (p.landscapeFrameLive && HE::landscapeD3dPassesOn() && HE::landscapePassesOn())
-                p.landscape.drawVelocity(cl, p.landscapeFrame, viewProj, viewProjClean, p.taaPrevViewProj);
+                p.landscape.drawVelocity(cl, p.landscapeFrame, viewProj, viewProjClean, prevHere);
             cl->SetGraphicsRootSignature(p.taaVelocityRootSig.Get());
             cl->SetPipelineState(p.taaVelocityPSO.Get());
             cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -14293,7 +14300,7 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                         HE::TaaVelocityConstants c;
                         c.mvpJitter = viewProj * model;
                         c.mvpNow    = viewProjClean * model;
-                        c.mvpPrev   = p.taaPrevViewProj * model;
+                        c.mvpPrev   = prevHere * model;
                         std::memcpy(ringPtr + static_cast<size_t>(drawIdx) * k_cbSlot, &c, sizeof(c));
                         cl->SetGraphicsRootConstantBufferView(
                             0, ringBase + static_cast<UINT64>(drawIdx) * k_cbSlot);
@@ -14306,13 +14313,13 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                 // An object seen for the first time reports no motion — its
                 // "previous" position is where it is now.
                 const auto it = p.taaPrevTransforms.find(obj.entityId);
-                const glm::mat4 prevModel = (it != p.taaPrevTransforms.end()) ? it->second : obj.transform;
+                const bool known = it != p.taaPrevTransforms.end();
                 p.taaCurTransforms[obj.entityId] = obj.transform;
 
                 HE::TaaVelocityConstants c;
                 c.mvpJitter = viewProj * obj.transform;
                 c.mvpNow    = viewProjClean * obj.transform;
-                c.mvpPrev   = p.taaPrevViewProj * prevModel;
+                c.mvpPrev   = known ? p.taaPrevViewProj * it->second : prevHere * obj.transform;
                 std::memcpy(ringPtr + static_cast<size_t>(drawIdx) * k_cbSlot, &c, sizeof(c));
                 cl->SetGraphicsRootConstantBufferView(
                     0, ringBase + static_cast<UINT64>(drawIdx) * k_cbSlot);
@@ -14324,6 +14331,8 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
             // Advance the history HERE, at the end of the one pass that consumed
             // it, so a frame is never compared against itself.
             p.taaPrevViewProj = viewProjClean;
+            p.taaPrevOrigin = originNow;
+            p.taaPrevOriginKnown = true;
             p.taaPrevTransforms.swap(p.taaCurTransforms);
 
             // A root-signature switch wipes every root argument: the scene state

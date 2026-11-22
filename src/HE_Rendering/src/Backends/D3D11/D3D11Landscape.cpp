@@ -27,8 +27,6 @@ struct D3D11Landscape::Impl
 	ComPtr<ID3D11PixelShader> psViewPosMrt;
 	const glm::mat4* velNow = nullptr;      // set by drawVelocity with velPrev: the unjittered view-projections, and PSVelocity
 	const glm::mat4* velPrev = nullptr;
-	glm::dvec3 velOrigin{ 0.0 };             // the floating origin of the last velocity draw (vkls::velocityPrev)
-	bool velOriginSet = false;
 	ComPtr<ID3D11PixelShader> psVelocity;    // kLandscapeHLSL's PSVelocity (the TAA velocity pass); null when it did not compile
 	ComPtr<ID3D11PixelShader> psGiGBuf;      // kLandscapeHLSL's PSGiGBuf (the GI pre-pass); null when it did not compile
 	ComPtr<ID3D11VertexShader>      vs;
@@ -460,9 +458,8 @@ void D3D11Landscape::drawVelocity(ID3D11DeviceContext* ctx, const HE::LandscapeR
 {
 	if (!m_impl->psVelocity) return;
 	m_impl->depthOnly = true;       // the caller's rasteriser and depth state (LESS_EQUAL, no writes)
-	const glm::mat4 prev = vkls::velocityPrev(viewProjPrev, f.uvOrigin, m_impl->velOrigin, m_impl->velOriginSet);
 	m_impl->velNow = &viewProjNow;
-	m_impl->velPrev = &prev;
+	m_impl->velPrev = &viewProjPrev;
 	draw(ctx, f, vkls::velocityClip(viewProjJitter), Shading{});
 	m_impl->velNow = m_impl->velPrev = nullptr;
 	m_impl->depthOnly = false;

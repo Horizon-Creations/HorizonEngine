@@ -1983,6 +1983,8 @@ struct D3D11RendererImpl
     // the image by a subpixel every frame with nothing to average it out.
     bool      taaFrame = false;
     glm::mat4 taaPrevViewProj{ 1.0f };
+    glm::dvec3 taaPrevOrigin{ 0.0 };     // the floating origin taaPrevViewProj was built for (HE::taaPrevViewProjAt)
+    bool       taaPrevOriginKnown = false;
     std::unordered_map<uint32_t, glm::mat4> taaPrevTransforms, taaCurTransforms;
 
     bool taaReady() const
@@ -2064,10 +2066,14 @@ struct D3D11RendererImpl
         ctx->OMSetRenderTargets(1, &velRTV, savedDSV.Get());
         ctx->OMSetDepthStencilState(taaVelocityDSS.Get(), 0);
         ctx->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFF);
+        // Last frame's matrix for what this frame places (the ground, a cluster's plants, a first-seen object): across a
+        // floating-origin hop it takes the origin's step (HE::taaPrevViewProjAt). A remembered model keeps taaPrevViewProj.
+        const glm::dvec3 originNow = m_renderWorld.worldOrigin;
+        const glm::mat4 prevHere = taaPrevOriginKnown ? HE::taaPrevViewProjAt(taaPrevViewProj, originNow, taaPrevOrigin) : taaPrevViewProj;
         // The tile landscape's ground stands still; the camera's own motion is its velocity. Before the meshes: the pass
         // writes no depth, so what stands on the ground overwrites it (vkls::velocityClip). Puts back what it sets.
         if (landscapeFrameLive && HE::landscapeD3dPassesOn() && HE::landscapePassesOn())
-            landscape.drawVelocity(ctx, landscapeFrame, vpJit, vpClean, taaPrevViewProj);
+            landscape.drawVelocity(ctx, landscapeFrame, vpJit, vpClean, prevHere);
         ctx->IASetInputLayout(inputLayout.Get());
         ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         ctx->VSSetShader(taaVelocityVS.Get(), nullptr, 0);
@@ -2096,7 +2102,7 @@ struct D3D11RendererImpl
                     HE::TaaVelocityConstants c;
                     c.mvpJitter = vpJit * model;
                     c.mvpNow    = vpClean * model;
-                    c.mvpPrev   = taaPrevViewProj * model;
+                    c.mvpPrev   = prevHere * model;
                     D3D11_MAPPED_SUBRESOURCE m{};
                     if (FAILED(ctx->Map(taaVelocityCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &m))) return;
                     std::memcpy(m.pData, &c, sizeof(c));
@@ -2109,13 +2115,13 @@ struct D3D11RendererImpl
             // An object seen for the first time reports no motion — its
             // "previous" position is where it is now.
             const auto it = taaPrevTransforms.find(obj.entityId);
-            const glm::mat4 prevModel = (it != taaPrevTransforms.end()) ? it->second : obj.transform;
+            const bool known = it != taaPrevTransforms.end();
             taaCurTransforms[obj.entityId] = obj.transform;
 
             HE::TaaVelocityConstants c;
             c.mvpJitter = vpJit * obj.transform;
             c.mvpNow    = vpClean * obj.transform;
-            c.mvpPrev   = taaPrevViewProj * prevModel;
+            c.mvpPrev   = known ? taaPrevViewProj * it->second : prevHere * obj.transform;
             D3D11_MAPPED_SUBRESOURCE m{};
             if (FAILED(ctx->Map(taaVelocityCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &m))) continue;
             std::memcpy(m.pData, &c, sizeof(c));
@@ -2128,6 +2134,8 @@ struct D3D11RendererImpl
         // Advance the history HERE, at the end of the one pass that consumed
         // it, so a frame is never compared against itself.
         taaPrevViewProj = vpClean;
+        taaPrevOrigin = originNow;
+        taaPrevOriginKnown = true;
         taaPrevTransforms.swap(taaCurTransforms);
 
         ID3D11RenderTargetView* rtv = savedRTV.Get();

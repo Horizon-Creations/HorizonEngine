@@ -1248,6 +1248,8 @@ private:
 	glm::mat4 m_taaViewProjClean{ 1.0f };  // this frame's, set by DrawScene
 	glm::mat4 m_taaViewProjJit{ 1.0f };
 	glm::mat4 m_taaPrevViewProj{ 1.0f };   // last TAA frame's clean one
+	glm::dvec3 m_taaPrevOrigin{ 0.0 };     // the floating origin it was built for (HE::taaPrevViewProjAt)
+	bool       m_taaPrevOriginKnown = false;
 	std::unordered_map<uint32_t, glm::mat4> m_taaPrevTransforms, m_taaCurTransforms;
 
 	bool   m_postFxReady     = false;
