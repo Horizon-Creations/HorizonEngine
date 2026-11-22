@@ -1396,7 +1396,7 @@ IRenderer::Capabilities VulkanRenderer::GetCapabilities() const
     c.landscapeMaterial         = m_lsMatPipelineLayout != VK_NULL_HANDLE;   // DrawScene: the ground's material draws the patches (after Initialize)
     // EncodeShadowMap: every shadow layer (proven on MoltenVK). runSSAO's position pre-pass is written and not proven: said only
     // where it is on (HE::landscapeVkSsaoOn: a real Vulkan driver, or the variable), so the witness judges it there.
-    c.landscapePassMask         = kLandscapePassShadow | (HE::landscapeVkSsaoOn() ? kLandscapePassSsao : 0u);
+    c.landscapePassMask         = kLandscapePassShadow | kLandscapePassGBuffer | (HE::landscapeVkSsaoOn() ? kLandscapePassSsao : 0u);
     c.supportsRawCapture        = m_postFxReady;   // RenderSceneImage's rawOutput rides the tonemap pass
     c.supportsRvt               = m_postFxReady && m_matReady && m_matRvt;   // a page is that raw capture copied into the pool
     return c;
@@ -3785,13 +3785,15 @@ VkPipeline VulkanRenderer::GetOrBuildMaterialPipeline(uint64_t hash, const std::
 // position is gl_VertexIndex; the per-patch numbers are a push constant) and the material's lit fragment with its layer weights from
 // the tile atlas. Forward only, into the scene pass (`hdr` as GetOrBuildMaterialPipeline). Null (cached): the variant does not build,
 // the landscape keeps its fixed blend.
-VkPipeline VulkanRenderer::GetOrBuildLandscapeMaterialPipeline(uint64_t hash, const std::string& frag, bool hdr)
+// `gbuffer`: `frag` is the material's G-buffer tail (resolveGBufferShaders), into m_gbufferRP's targets; its own key, never clustered.
+VkPipeline VulkanRenderer::GetOrBuildLandscapeMaterialPipeline(uint64_t hash, const std::string& frag, bool hdr, bool gbuffer)
 {
     if (m_lsMatPipelineLayout == VK_NULL_HANDLE) return VK_NULL_HANDLE;
-    const bool clustered = m_forwardClustered && m_clusterReady;
+    if (gbuffer) { hash ^= 0x7A11E56B0FFE2000ULL; hdr = false; }
+    const bool clustered = m_forwardClustered && m_clusterReady && !gbuffer;
     const uint64_t key = hash ^ 0x7A11E51A2D5CA9E0ULL ^ (hdr ? 0x9E3779B97F4A7C15ULL : 0ULL) ^ (clustered ? 0xC1057E2ED0000001ULL : 0ULL);
     if (auto it = m_materialPipelines.find(key); it != m_materialPipelines.end()) return it->second;
-    const VkRenderPass rp = hdr ? m_postFxSceneRP : m_renderPass;
+    const VkRenderPass rp = gbuffer ? m_gbufferRP : hdr ? m_postFxSceneRP : m_renderPass;
     if (rp == VK_NULL_HANDLE) return VK_NULL_HANDLE;   // not cached: retried when the pass is there
 
     using Backend = HE::MaterialShaderLibrary::Backend;
@@ -3831,6 +3833,13 @@ VkPipeline VulkanRenderer::GetOrBuildLandscapeMaterialPipeline(uint64_t hash, co
         cba.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
         VkPipelineColorBlendStateCreateInfo cb{ VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO };
         cb.attachmentCount = 1; cb.pAttachments = &cba;
+        VkPipelineColorBlendAttachmentState gbBlend[k_gbTargets];   // the G-buffer tail writes oGB0..oGB3, one state each (GetOrBuildMaterialPipeline)
+        if (gbuffer)
+        {
+            for (VkPipelineColorBlendAttachmentState& g : gbBlend) g = cba;
+            cb.attachmentCount = k_gbTargets;
+            cb.pAttachments    = gbBlend;
+        }
         VkDynamicState dynStates[2] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
         VkPipelineDynamicStateCreateInfo dyn{ VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO };
         dyn.dynamicStateCount = 2; dyn.pDynamicStates = dynStates;
@@ -10866,11 +10875,14 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                         const std::string& gbVertBody = gbIt->second.vertBody;
                         if (gbOk)
                         {
-                            matPipe = GetOrBuildMaterialPipeline(gbHash, gbFrag, gbVertBody, nullptr,
-                                                                 true, false, /*gbuffer=*/true);
+                            // The ground (lsDraw): the same tail behind the landscape's vertex stage.
+                            matPipe = lsDraw ? GetOrBuildLandscapeMaterialPipeline(gbHash, gbFrag, true, /*gbuffer=*/true)
+                                             : GetOrBuildMaterialPipeline(gbHash, gbFrag, gbVertBody, nullptr,
+                                                                          true, false, /*gbuffer=*/true);
                         }
                         if (matPipe == VK_NULL_HANDLE)
                         {
+                            if (lsDraw) return;   // the ground is drawn forward after the resolve then, never a mesh
                             deferredForwardDCs.push_back(&dc);
                             return;
                         }
@@ -11427,6 +11439,36 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                 drawOne(dc.transform);
         };
 
+        // The tile landscape's ground through its material (drawDCVk with lsDraw): `gbuffer` = into the G-buffer pass that is
+        // open, with the material's G-buffer tail; else lit, forward. False when it has no material or no variant builds.
+        bool groundInGBuffer = false;
+        auto drawGroundMaterial = [&](bool gbuffer) -> bool
+        {
+            if (!(m_landscapeFrameLive && m_landscapeFrame.materialId != HE::UUID{} && m_lsMatPipelineLayout != VK_NULL_HANDLE && m_matReady
+                  && m_contentManager))
+                return false;
+            // The texture group's material is named by no entity: loaded from its path once if nothing has.
+            if (!m_landscapeFrame.materialPath.empty() && m_landscapeFrame.materialId != m_landscapeMaterialLoadTried
+                && !m_contentManager->getMaterial(m_landscapeFrame.materialId))
+            {
+                m_landscapeMaterialLoadTried = m_landscapeFrame.materialId;
+                if (!m_contentManager->resolveMaterialRef(m_landscapeFrame.materialId, m_landscapeFrame.materialPath))
+                    m_contentManager->loadAsset(m_landscapeFrame.materialPath);
+            }
+            if (!m_landscape->materialImages(m_currentFrame, m_landscapeFrame, m_landscapeViewProj, lsImages)) return false;
+            DrawCall lsDC{};
+            // the extractor's derived material where the landscape's own cannot be drawn (RenderWorld::tileLandscapeMaterial)
+            lsDC.materialAssetId = m_renderWorld.tileLandscapeMaterial != HE::UUID{} ? m_renderWorld.tileLandscapeMaterial : m_landscapeFrame.materialId;
+            const bool gb = gbufferPass;
+            gbufferPass = gbuffer;
+            lsDraw = &m_landscapeFrame;
+            lsDrawn = false;
+            drawDCVk(lsDC);
+            lsDraw = nullptr;
+            gbufferPass = gb;
+            return lsDrawn;
+        };
+
         // Decals into GB0 when this frame is deferred and the variant built;
         // otherwise the forward decal over the lit colour, as before.
         const bool gbDecals = deferred && !m_renderWorld.decals.empty() && EnsureDecalPipelines()
@@ -11470,6 +11512,9 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_scenePipelineLayout,
                                     0, 1, &m_frameUBO[m_currentFrame].set, 1, &m_sceneMatOffset);
             for (const DrawCall* dc : opaqueDCs) drawDCVk(*dc);
+            // The tile landscape's ground into the G-buffer with its material's G-buffer tail (Thema 326), so the resolve lights
+            // it with everything else; without a variant it is drawn forward after the resolve, as before.
+            if (HE::landscapePassesOn()) groundInGBuffer = drawGroundMaterial(true);
             gbufferPass        = false;
             activeMatScenePipe = hdr && m_scenePipelineHDR ? m_scenePipelineHDR : m_scenePipeline;
             vkCmdEndRenderPass(cmd); // GB0..3 → SHADER_READ_ONLY (finalLayout)
@@ -11697,32 +11742,9 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
         if (m_landscapeFrameLive)
         {
             // With its material when the frame names one and the variant builds (lit, shadowed and fogged by the material's own
-            // fragment, through drawDCVk above); else the landscape's fixed blend.
-            if (m_landscapeFrame.materialId != HE::UUID{} && m_lsMatPipelineLayout != VK_NULL_HANDLE && m_matReady && m_contentManager)
-            {
-                // The texture group's material is named by no entity: loaded from its path once if nothing has.
-                if (!m_landscapeFrame.materialPath.empty() && m_landscapeFrame.materialId != m_landscapeMaterialLoadTried
-                    && !m_contentManager->getMaterial(m_landscapeFrame.materialId))
-                {
-                    m_landscapeMaterialLoadTried = m_landscapeFrame.materialId;
-                    if (!m_contentManager->resolveMaterialRef(m_landscapeFrame.materialId, m_landscapeFrame.materialPath))
-                        m_contentManager->loadAsset(m_landscapeFrame.materialPath);
-                }
-                if (m_landscape->materialImages(m_currentFrame, m_landscapeFrame, m_landscapeViewProj, lsImages))
-                {
-                    DrawCall lsDC{};
-                    // the extractor's derived material where the landscape's own cannot be drawn (RenderWorld::tileLandscapeMaterial)
-                    lsDC.materialAssetId = m_renderWorld.tileLandscapeMaterial != HE::UUID{} ? m_renderWorld.tileLandscapeMaterial : m_landscapeFrame.materialId;
-                    const bool gb = gbufferPass;
-                    gbufferPass = false;
-                    lsDraw = &m_landscapeFrame;
-                    lsDrawn = false;
-                    drawDCVk(lsDC);
-                    lsDraw = nullptr;
-                    gbufferPass = gb;
-                }
-            }
-            if (!lsDrawn) landscapeDraw(cmd, width, height, hdr);
+            // fragment, through drawDCVk above); else the landscape's fixed blend. On a deferred frame the G-buffer pass has drawn
+            // it already and the resolve has lit it (groundInGBuffer).
+            if (!groundInGBuffer && !drawGroundMaterial(false)) landscapeDraw(cmd, width, height, hdr);
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, activeMatScenePipe);
             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_scenePipelineLayout,
                                     0, 1, &m_frameUBO[m_currentFrame].set, 1, &m_sceneMatOffset);

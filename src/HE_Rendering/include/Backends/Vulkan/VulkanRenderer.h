@@ -510,7 +510,7 @@ private:
 	// the per-patch push constant (createMaterialResources). Null: the device's fragment stage cannot hold them.
 	VkDescriptorSetLayout m_lsMatSetLayout      = VK_NULL_HANDLE;
 	VkPipelineLayout      m_lsMatPipelineLayout = VK_NULL_HANDLE;
-	VkPipeline GetOrBuildLandscapeMaterialPipeline(uint64_t hash, const std::string& frag, bool hdr);
+	VkPipeline GetOrBuildLandscapeMaterialPipeline(uint64_t hash, const std::string& frag, bool hdr, bool gbuffer = false);
 	HE::UUID   m_landscapeMaterialLoadTried{};   // the texture group's material this renderer tried to load from its path
 	VkDescriptorPool      m_matPool[2]        = {};  // per frame; reset whole each frame
 	struct MatFrameBuf { VkBuffer buf = VK_NULL_HANDLE; VkDeviceMemory mem = VK_NULL_HANDLE; void* mapped = nullptr; };
