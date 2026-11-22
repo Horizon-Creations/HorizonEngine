@@ -160,6 +160,24 @@ Read `docs/landscape-tile-material-design-2026-11-21.md` (its Handoff) first. In
 Never measured on any machine: the 100 km flight of the original plan (1 % low under 8 ms, no hitch over 16 ms, memory under budget),
 the cost of a far bake, of a window move, of a brush stroke. The first Windows session with the hardware free should take those.
 
+### 7b. 22.11.: virtual texture, stamps, foliage mask and water brush on tiles, and what Windows has to do for them
+
+Built and checked on the Mac (Metal); details in `docs/landscape-tile-material-state-2026-11-22.md`.
+
+* **Formats changed, old files still load** (tested): a tile blob may carry one more optional stream (flag bit 2 of byte 6, the
+  painted foliage density); an edits file may carry a tail after its tile records (tag `HLWT`, the water table a brush changed).
+  A build from before reads both and ignores the new part. **Windows: run `he_tests --source-file=*test_landscape_edit*`**; it
+  writes and reads both forms.
+* **Virtual texture on the tile ground** (`RvtLandscapeTiles.cpp`): only a backend that says `Capabilities::landscapeRvt` gets
+  it, today Metal. For D3D11 / D3D12 / Vulkan it needs three things, all with a Metal reference in `MetalRenderer.mm`:
+  `SetRvtTileGround` + the patch split (`TakeRvtTilePatches`, patches wholly inside the rectangle drawn with the consumer),
+  a page camera with `EditorCameraOverride::rvtTileGround` that draws the ground with `rvtMaterial` and no meshes of the live
+  world (the driver hands an empty world), and the consumer bound for the landscape draw (`BindRvtForDraw`). Until then those
+  backends compute the ground in place: correct, slower. Witness: `landscape_gpu_check`, the four `virtual texture ...` lines.
+* **Landscape Stamp** (`LandscapeStampComponent`, `LandscapeStamps.h`): CPU only, nothing per backend. By hand on Windows: place
+  one with the tile brush's Stamp tool, move it in the Scene mode, export, and look at the exported game (never done anywhere).
+* **Foliage Mask and Water tools** of the tile brush: CPU only. By hand: paint both, save, reopen, export.
+
 ## Handoff
 
 - **Done / verified / not verified:** see the three docs named at the top; on Windows nothing is verified.

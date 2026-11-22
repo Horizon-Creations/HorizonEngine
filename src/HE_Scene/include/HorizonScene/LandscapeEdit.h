@@ -82,7 +82,9 @@ public:
 	// Stamps (LandscapeStamp). Main thread. Replaces them all and returns the tiles whose content that changes: the footprints of every
 	// stamp that came, went or changed (hand them to LandscapeRuntime::tileChanged). The coarse copy is patched for those tiles.
 	// `heightScaleM`: metres of a stored 65535 above a stored 0, used when the base does not say (heightRange).
-	std::vector<LandscapeTileKey> setStamps(std::vector<LandscapeStamp> stamps, float heightScaleM);
+	// `patchCoarse` false leaves the coarse copy (the far levels) as it was: the caller hands the keys to patchCoarseFor later.
+	std::vector<LandscapeTileKey> setStamps(std::vector<LandscapeStamp> stamps, float heightScaleM, bool patchCoarse = true);
+	void patchCoarseFor(const std::vector<LandscapeTileKey>& keys);
 	size_t stampCount() const;
 	bool   stamped(LandscapeTileKey key) const;
 	std::vector<LandscapeTileKey> stampedKeys() const;

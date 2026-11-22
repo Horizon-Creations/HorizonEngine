@@ -26,7 +26,8 @@ std::vector<LandscapeStamp> landscapeStampsOfWorld(HorizonWorld& world, ContentM
 //
 // What an idle stamp costs: one pass over the stamp entities that folds their transform and settings into a number, and a compare.
 // Only when that number changed are the stamps handed over (LandscapeEditSource::setStamps), and then only the tiles under a stamp
-// that came, went or changed are read again; a stamp that is being dragged does that at most ten times a second. Nothing is
+// that came, went or changed are read again (on the job pool); a stamp that is being dragged does that at most ten times a second,
+// and the far levels (the coarse world, a millisecond a tile on the main thread) follow once it has rested for 0.3 s. Nothing is
 // evaluated per frame, per tile or per pixel while nothing moves.
 class LandscapeStampSync
 {
@@ -39,6 +40,7 @@ private:
 	uint64_t m_key = 0;                    // of the stamps last handed over
 	const void* m_overlay = nullptr;       // ... and the overlay they went to, with how many it took
 	size_t      m_applied = 0;
+	std::vector<LandscapeTileKey> m_pendingCoarse;   // tiles the far levels have not taken yet (they do once the stamps rest)
 	LandscapeStampImages m_images;
 	std::chrono::steady_clock::time_point m_last{};
 };

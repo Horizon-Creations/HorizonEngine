@@ -81,6 +81,50 @@ Branch `claude/landscape-weltmassstab-100km`, up to `1e118e0a6`.
 * Frame times with THIS build's material: the `TerrainComponent` row is 7.0 ms, but its material reads a virtual texture nobody
   paints in the tool, so it is grey and cheap; with its RVT driver running it was not measured. The tile ground is 14.2 ms.
 
+**Third session, 22.11. (up to the commit that adds this text)**
+
+*Runtime Virtual Texture on the tile ground (Metal)*
+* `src/HE_Scene/src/RvtLandscapeTiles.cpp`: the tile ground is one more user of `RvtLandscape`'s pool (same tick, same detach
+  sites, same feedback). Volume = the whole world where 2048 pages a side hold it, else a square around the camera on a grid of a
+  quarter of its edge; a successor is filled before it takes over (`tileGroundTables`). Pages: the live ground in an empty world
+  at the live floating origin (`paintTileGround`). The consumer's volume vector is origin-relative and follows a move.
+  Stale pages: `LandscapeRuntime::takeChangedTiles` (every tile the atlas takes up).
+* Renderer: `IRenderer::SetRvtTileGround`, `EditorCameraOverride::rvtTileGround`, `Capabilities::landscapeRvt`; Metal:
+  `TakeRvtTilePatches`, `BindLandscapeMaterial(..., use)`. A page of meshes no longer gets the tile ground drawn into it.
+* Verified (`landscape_gpu_check`, forward and deferred): 181 pages, ground from pages 3.5/255 from the ground in place (0.00
+  with the swap paused); origin move 0.05/255; a tile read again repaints 93 pages; with 3.1 cm texels (camera-centred 8.2 km
+  volume) 2.5 km of travel make exactly one swap, the ground never falls back, the frame across the swap differs by 0.13/255.
+  Frame time 1600 x 900: 14.2 ms in place -> 10.0 ms from pages; a `TerrainComponent` with its driver settled 8.8; a page 0.48 ms.
+* Not built: the native near view (patches next to the camera keep the material in place: at 0.25 m texels the near ground is
+  softer than in place), the baked base of an export (`RvtBaseBake`), the debug grid for the tile volume, any other backend.
+* Not verified: the seam between consumer and in-place patches as a pixel row (only as part of whole-frame means), the editor
+  by hand with RVT on.
+
+*Landscape Stamp (replaces "heightmap import onto a world")*
+* `LandscapeStamp` + `LandscapeEditSource::setStamps / shown / stamped / patchCoarseFor` (`LandscapeEdit.h/.cpp`): stamps lie
+  over the tiles AND their brush edits and are applied when a tile is loaded; the brushes edit the ground underneath (the brush
+  cursor and Flatten read the unstamped height). `LandscapeStampComponent` (entity: position, turn around Y, scale),
+  `LandscapeStampSync` (`LandscapeStamps.h/.cpp`, called by editor and game after `LandscapeRuntime::update`), tile brush tool
+  "Stamp" (`LandscapeWorldTools.cpp`), Inspector section, export (`prepareLandscapePacksForExport` collects the stamps and takes
+  the components out of the shipped scene; `finishExportedPack` bakes them with the edits).
+* Cost, measured in the editor (`HE_DUMP_STAMP`, `HE_DUMP_STAMPMOVE`): idle 0.08-0.2 us a frame, no tile read; one drag step
+  0.1 ms on the main thread for a 300 m, 2 km or 6 km stamp (tiles reload on the job pool, at most 10 times a second); the far
+  levels follow 0.3 s after the stamp rests (they cost about 1 ms a tile: 80 ms for a 6 km stamp, once).
+* Limits: the heightmap is the texture's red channel at 8 bits (256 steps, smoothed by the bilinear read); only Add (negative
+  height digs); the export's far image is painted before the stamps (heights are right, far colours are the unstamped ground's).
+* Pictures: `docs/landscape-tile-material-2026-11-21/editor_headless_stamp_none_placed_moved.png`.
+
+*Foliage mask and water brush on tiles*
+* `LandscapeTile::foliageDensity` (optional stream, flag bit 2), carried by the region terrain, tile brush tool "Foliage Mask"
+  (Ctrl grows back), `LandscapeFoliage` scatters with it. ONE mask for all layers (the single landscape has one per layer).
+  Tested (`test_landscape_edit.cpp`); **no picture, and the re-scatter after a stroke in the running editor was not looked at**.
+* Water: the session's region carries the world's water (`LandscapeEditSession::focus`), `landscapeWriteRegionTerrain` writes the
+  field back, new bodies go into the overlay's table (`LandscapeEditSource::setWaterTable`, saved as a tail of the edits file,
+  baked with the pack). Tile brush tool "Water" with "Dig Water Bed". Picture
+  `editor_headless_water_brush_two_lakes.png`: the sheets are there and level, cut where the slope rises above them; **they are
+  black in the headless dump (no water material there) and a pack that already has water was not shot beside them to tell the
+  dump from the new body**. A stroke that leaves the region its body lies in stops painting (the body is not in the new region).
+
 **Parity: what the single landscape has, and the tile landscape**
 
 | Feature of a `TerrainComponent` landscape | Tile landscape |
@@ -89,21 +133,24 @@ Branch `claude/landscape-weltmassstab-100km`, up to `1e118e0a6`.
 | Receives shadows | yes where drawn with the material |
 | Casts shadows, SSAO, velocity, G-buffer, GI ray hits | Metal only (`landscapePasses`) |
 | Parameter overrides of the landscape entity | yes (derived material) |
-| Runtime Virtual Texture | no: computed in place (slower by about what RVT saves) |
+| Runtime Virtual Texture | Metal yes (no native near view, no baked base); other backends compute in place |
 | Baked far image / HLOD of the ground | the fixed blend reads it; with a material it is not read |
 | Sculpt: Raise, Lower, Smooth, Flatten, Roughen, Ramp, Mountain | yes (tile brush; Mountain is one click, not a dragged area) |
 | Paint layers | yes |
-| Foliage: scatter by rules, by ground layer | yes; the painted density mask no |
-| Water: bodies from the pack, migrated lakes | yes; the water brush and new lakes no |
-| Heightmap import | as a new pack only, not onto an existing world |
+| Foliage: scatter by rules, by ground layer | yes |
+| Foliage: painted density mask | one mask for all layers (the single landscape: one per layer) |
+| Water: bodies from the pack, migrated lakes | yes |
+| Water brush, new lakes | yes (brush); lakes from a closed spline no |
+| Heightmap import | as a new pack, or as Landscape Stamp entities onto an existing world (8-bit textures) |
 | One Landscape mode, editor undo | no: "Edit Tiles" block with its own undo |
 | Script API, MCP tools, picking, spline tool, outliner | no (they address a `TerrainComponent`) |
 | Collaboration | no |
 
 **Next steps**
-1. Export a game with a tile landscape and RVT on and look at the ground (see the derived material above).
-2. RVT for the tile ground, or the far image photographed from the material (survey in the session's notes: `HlodBaker::renderView`
-   is the capture to copy, `bakeLandscapeFar`'s painter slot at `LandscapeExport.cpp:103` takes it; a page camera needs the landscape
-   drawn with the camera's `rvtMaterial`, and the consumer's id for `BindRvtForDraw`).
-3. `landscapePasses` on Vulkan (shadow layers `drawDepthLayer`, GI raster in `runGi`, G-buffer), then D3D.
-4. Foliage mask, water brush, import on tiles; the rows of the table that say no.
+1. By hand in the editor: RVT on over a tile world, the Stamp / Foliage Mask / Water tools, then an export with stamps and a look
+   at the exported game (none of this was done by hand; the export also answers the derived-material question above).
+2. Stamps from 16-bit heightmaps (texture assets hold 8 bits; the pack importer's reader is the place to look for a 16-bit path).
+3. The far image photographed from the material and after the stamps (`bakeLandscapeFar`'s painter slot, `LandscapeExport.cpp`);
+   the native near view for the tile virtual texture.
+4. `landscapeRvt` and `landscapePasses` on Vulkan, then D3D (Windows handoff, section 7b).
+5. The rows of the table that still say no.

@@ -99,8 +99,14 @@ std::shared_ptr<const LandscapeCoarseWorld> LandscapeEditSource::coarseWindow(La
 	for (const LandscapeTileKey& k : keys)
 		if (k.x >= origin.x && k.z >= origin.z && k.x < origin.x + window->tilesX && k.z < origin.z + window->tilesZ)
 		{
-			auto tile = std::make_shared<LandscapeTile>();
-			if (load(k, -1, *tile)) inside.emplace_back(LandscapeTileKey{ k.x - origin.x, k.z - origin.z }, std::move(tile));
+			// An edited tile is in memory (copied only where a stamp reaches it); a stamped-only one is read from the base.
+			LandscapeTilePtr tile = shown(k, edited(k));
+			if (!tile)
+			{
+				auto read = std::make_shared<LandscapeTile>();
+				if (load(k, -1, *read)) tile = std::move(read);
+			}
+			if (tile) inside.emplace_back(LandscapeTileKey{ k.x - origin.x, k.z - origin.z }, std::move(tile));
 		}
 	if (inside.empty()) return window;
 	auto patched = std::make_shared<LandscapeCoarseWorld>(*window);
@@ -222,7 +228,7 @@ LandscapeTilePtr LandscapeEditSource::shown(LandscapeTileKey key, LandscapeTileP
 	return copy;
 }
 
-std::vector<LandscapeTileKey> LandscapeEditSource::setStamps(std::vector<LandscapeStamp> stamps, float heightScaleM)
+std::vector<LandscapeTileKey> LandscapeEditSource::setStamps(std::vector<LandscapeStamp> stamps, float heightScaleM, bool patchCoarse)
 {
 	const auto old = stampSet();
 	auto next = std::make_shared<StampSet>();
@@ -249,22 +255,30 @@ std::vector<LandscapeTileKey> LandscapeEditSource::setStamps(std::vector<Landsca
 		m_stampSet = next->stamps.empty() ? nullptr : std::move(next);
 	}
 	std::vector<LandscapeTileKey> keys;
-	std::vector<std::pair<LandscapeTileKey, LandscapeTilePtr>> patch;
-	for (const auto& [k, yes] : changed)
-	{
-		const LandscapeTileKey key{ k.first, k.second };
-		keys.push_back(key);
-		auto tile = std::make_shared<LandscapeTile>();
-		if (load(key, -1, *tile)) patch.emplace_back(key, std::move(tile));
-	}
-	// The far levels: the coarse copy takes the tiles as they are shown now (made at the first change, like an edit's).
-	if (!patch.empty())
-	{
-		if (!m_coarse.valid())
-			if (const LandscapeCoarseWorld* c = m_base->coarse()) m_coarse = *c;
-		if (m_coarse.valid()) landscapeCoarsePatch(m_coarse, patch);
-	}
+	for (const auto& [k, yes] : changed) keys.push_back({ k.first, k.second });
+	if (patchCoarse) patchCoarseFor(keys);
 	return keys;
+}
+
+void LandscapeEditSource::patchCoarseFor(const std::vector<LandscapeTileKey>& keys)
+{
+	// The far levels: the coarse copy takes the tiles as they are shown now (made at the first change, like an edit's). About a
+	// millisecond a tile (a decode, the stamps, the chain above grid 0), which is why a stamp that is being dragged waits with it.
+	std::vector<std::pair<LandscapeTileKey, LandscapeTilePtr>> patch;
+	for (const LandscapeTileKey& key : keys)
+	{
+		LandscapeTilePtr tile = shown(key, edited(key));
+		if (!tile)
+		{
+			auto read = std::make_shared<LandscapeTile>();
+			if (load(key, -1, *read)) tile = std::move(read);
+		}
+		if (tile) patch.emplace_back(key, std::move(tile));
+	}
+	if (patch.empty()) return;
+	if (!m_coarse.valid())
+		if (const LandscapeCoarseWorld* c = m_base->coarse()) m_coarse = *c;
+	if (m_coarse.valid()) landscapeCoarsePatch(m_coarse, patch);
 }
 
 uint64_t LandscapeEditSource::contentHash(LandscapeTileKey key, const std::function<uint64_t(LandscapeTileKey)>& baseHash) const
@@ -431,11 +445,13 @@ bool landscapeWriteRegionTerrain(const TerrainComponent& tc, const LandscapeGeom
 					{
 						const size_t src = (static_cast<size_t>(tj) * wt + z) * wr + static_cast<size_t>(ti) * wt + x;
 						cov[static_cast<size_t>(z) * wt + x] = tc.water.coverage[src];
-						own[static_cast<size_t>(z) * wt + x] = tc.water.coverage[src] ? tc.water.owner[src] : uint16_t(0);
+						own[static_cast<size_t>(z) * wt + x] = tc.water.owner[src];
 						wet = wet || tc.water.coverage[src] != 0;
 					}
-				if (wet) { tile->waterCoverage = std::move(cov); tile->waterOwner = std::move(own); }
-				else     { tile->waterCoverage.clear(); tile->waterOwner.clear(); }
+				// A tile that carried rasters keeps them even when they are all dry now (a world with a sea has them on every tile):
+				// an untouched region must come back byte for byte.
+				if (wet || was->hasWater()) { tile->waterCoverage = std::move(cov); tile->waterOwner = std::move(own); }
+				else                        { tile->waterCoverage.clear(); tile->waterOwner.clear(); }
 			}
 			// The painted foliage density: a tile that is 255 everywhere holds none (what an unpainted tile is).
 			if (foliageDensity && foliageDensity->size() == static_cast<size_t>(wr) * wr)

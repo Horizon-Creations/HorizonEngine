@@ -8,6 +8,7 @@
 #include <ContentManager/ContentManager.h>
 #include <Diagnostics/Log.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 
@@ -101,7 +102,20 @@ size_t LandscapeStampSync::sync(HorizonWorld& world, LandscapeRuntime& runtime, 
 	LandscapeEditSource* edits = runtime.edits();
 	// A runtime that began again (another scene, a rebuilt pack) has a new overlay without the stamps.
 	const bool sameOverlay = edits == m_overlay && (!edits || edits->stampCount() == m_applied);
-	if (key == m_key && sameOverlay) return 0;
+	if (key == m_key && sameOverlay)
+	{
+		// The stamps have come to rest: the far levels take the tiles they changed (too slow for every step of a drag).
+		if (!m_pendingCoarse.empty() && edits && std::chrono::steady_clock::now() - m_last >= std::chrono::milliseconds(300))
+		{
+			std::sort(m_pendingCoarse.begin(), m_pendingCoarse.end(), [](const LandscapeTileKey& a, const LandscapeTileKey& b) { return a.x != b.x ? a.x < b.x : a.z < b.z; });
+			m_pendingCoarse.erase(std::unique(m_pendingCoarse.begin(), m_pendingCoarse.end()), m_pendingCoarse.end());
+			edits->patchCoarseFor(m_pendingCoarse);
+			m_pendingCoarse.clear();
+			runtime.coarseChanged();
+		}
+		return 0;
+	}
+	if (!sameOverlay) m_pendingCoarse.clear();
 
 	if (!edits)
 	{
@@ -115,11 +129,11 @@ size_t LandscapeStampSync::sync(HorizonWorld& world, LandscapeRuntime& runtime, 
 	const auto now = std::chrono::steady_clock::now();
 	if (sameOverlay && m_key != 0 && now - m_last < std::chrono::milliseconds(100)) return 0;
 
-	const std::vector<LandscapeTileKey> changed = edits->setStamps(landscapeStampsOfWorld(world, content, m_images), runtime.config().heightScaleM);
+	const std::vector<LandscapeTileKey> changed = edits->setStamps(landscapeStampsOfWorld(world, content, m_images), runtime.config().heightScaleM, /*patchCoarse=*/false);
 	if (!changed.empty())
 	{
-		runtime.tileChanged(changed);
-		runtime.coarseChanged();
+		runtime.tileChanged(changed);   // read again on the job pool, with the stamps over them
+		m_pendingCoarse.insert(m_pendingCoarse.end(), changed.begin(), changed.end());
 	}
 	m_key = key;
 	m_last = now;

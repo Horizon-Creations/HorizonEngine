@@ -825,6 +825,74 @@ int runMaterialCheck(HE::RendererBackend backend, HE::RenderPath path, const std
 							if (gapRvt <= gapPaused + 0.01) fail("the pages are what is drawn (the picture changes when the swap is paused)");
 							if (got) writePngFile(pngPath.substr(0, pngPath.size() - 4) + "_auto_rvt.png", static_cast<int>(kW), static_cast<int>(kH), rvtImg.data());
 							drv.detach();
+
+							// The same with texels so small that the table cannot hold the world (3.1 cm: a volume of 8.2 km in a world of
+							// 16.4): the volume lies around the camera, the ground beyond it is computed in place, and a camera that leaves
+							// the volume's inner half gets a successor. The ground must stay drawn from pages through the whole move, the
+							// swap must happen once, and the frame after it must be the frame before it.
+							{
+								HE::landscape::RvtLandscape drv2(content, *renderer);
+								HE::landscape::RvtLandscape::Settings s2;
+								s2.metersPerTexel = 0.03125f;
+								drv2.setSettings(s2);
+								std::vector<uint8_t> frame, prev, near1;
+								const auto run = [&](const glm::dvec3& cam, const EditorCameraOverride& view, int maxTicks, bool untilSwap, uint32_t& swaps, bool& dropped, double& pop) {
+									const glm::vec3 e = glm::vec3(cam - origin);
+									bool was = drv2.active();
+									for (int i = 0, quiet = 0; i < maxTicks && quiet < 12; ++i)
+									{
+										rt.update(world, 0.016f, 5.0, &cam);
+										const auto st = drv2.tick(world, e);
+										prev.swap(frame);
+										frame.clear();
+										renderer->RenderSceneImage(view, kW, kH, frame);
+										if (was && !drv2.active()) dropped = true;
+										was = was || drv2.active();
+										if (st.detaches) { ++swaps; pop = std::max(pop, gapTo(frame, prev)); }
+										const bool done = drv2.active() && st.pagesPainted == 0 && rt.store()->settled() && (!untilSwap || swaps > 0);
+										quiet = done ? quiet + 1 : 0;
+									}
+								};
+								uint32_t swaps = 0; bool dropped = false; double pop = 0.0;
+								run(camPos, ov, 900, false, swaps, dropped, pop);
+								const bool on1 = drv2.active();
+								const bool got1 = shoot(near1);
+								const double gap1 = got1 ? gapTo(near1, autoImg) : 1e9;
+								// 2.5 km along +X: out of the first volume's inner half (its grid is 2 km).
+								const glm::dvec3 cam2 = camPos + glm::dvec3(2500.0, 0.0, 0.0);
+								EditorCameraOverride ov2 = ov;
+								const glm::vec3 e2 = glm::vec3(cam2 - origin);
+								ov2.view = glm::lookAt(e2, e2 + glm::normalize(glm::vec3(1.0f, -0.45f, 0.15f)), glm::vec3(0, 1, 0));
+								ov2.position = e2;
+								uint32_t swaps2 = 0;
+								run(cam2, ov2, 1500, true, swaps2, dropped, pop);
+								const bool on2 = drv2.active();
+								std::vector<uint8_t> far2, far2Paused;
+								const EditorCameraOverride kept3 = ov;
+								ov = ov2;
+								const bool got2 = shoot(far2);
+								drv2.pauseSwap(true);
+								drv2.tick(world, e2);
+								const bool got3 = shoot(far2Paused);
+								ov = kept3;
+								// against the ground computed in place at the same camera, where the first frame had ground at all
+								double gap2 = 0.0; size_t n4 = 0;
+								if (got2 && got3)
+									for (size_t i = 0; i < px; ++i) { gap2 += std::abs(lum(&far2[i * 4]) - lum(&far2Paused[i * 4])); ++n4; }
+								gap2 = n4 ? gap2 / static_cast<double>(n4) : 1e9;
+								std::printf("  virtual texture around the camera (3.1 cm texels, 8.2 km volume): %s; %.2f/255 from the ground in place; after 2.5 km: %s, "
+								            "%u swap(s) of the volume, never back to in-place: %s, the frame across the swap differs by %.2f/255, %.2f/255 from in place there\n",
+								            on1 ? "drawn from pages" : "NOT drawn from pages", gap1, on2 ? "drawn from pages" : "NOT drawn from pages", swaps + swaps2,
+								            dropped ? "NO" : "yes", pop, gap2);
+								if (!on1 || !on2) fail("the camera-centred volume draws the ground from pages");
+								if (swaps + swaps2 != 1) fail("the volume is replaced once when the camera leaves its inner half");
+								if (dropped) fail("the ground stays drawn from pages while the successor volume fills");
+								if (pop > 1.5) fail("the swap to the successor volume does not show");
+								if (gap1 > 6.0 || gap2 > 6.0) fail("the ground from the camera-centred pages looks like the ground computed in place");
+								if (got2) writePngFile(pngPath.substr(0, pngPath.size() - 4) + "_auto_rvt_moved.png", static_cast<int>(kW), static_cast<int>(kH), far2.data());
+								drv2.detach();
+								for (int i = 0; i < 400; ++i) { rt.update(world, 0.016f, 5.0, &camPos); if (rt.store()->settled()) break; std::this_thread::sleep_for(std::chrono::milliseconds(1)); }
+							}
 							world.setLandscapeRuntime(nullptr);
 						}
 					}

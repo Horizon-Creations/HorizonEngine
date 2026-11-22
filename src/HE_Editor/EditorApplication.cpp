@@ -10787,11 +10787,29 @@ void EditorApplication::dumpFrameHeadless()
 		// What the stamps cost a frame in which nothing moves: the sync alone, a thousand times.
 		if (std::getenv("HE_DUMP_STAMP"))
 		{
+			// The far levels take a stamp once it has rested (LandscapeStampSync): let it, so the picture has them.
+			std::this_thread::sleep_for(std::chrono::milliseconds(320));
+			m_landscapeStamps.sync(*m_editorWorld, m_landscape, contentManager());
 			const auto i0 = std::chrono::steady_clock::now();
 			size_t again = 0;
 			for (int i = 0; i < 1000; ++i) again += m_landscapeStamps.sync(*m_editorWorld, m_landscape, contentManager());
 			const double us = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - i0).count() / 1000.0;
 			HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_STAMP idle: %.3f us a frame for the sync, %zu tile(s) read again in 1000 idle frames", us, again);
+			// And what one step of a drag costs on the main thread (HE_DUMP_STAMPMOVE=1): the stamp 40 m further, the sync that takes it.
+			if (std::getenv("HE_DUMP_STAMPMOVE"))
+				for (auto [se, stf, sc] : m_editorWorld->registry().view<TransformComponent, LandscapeStampComponent>().each())
+				{
+					stf.position.x += 40.0f;
+					stf.dirty = true;
+					std::this_thread::sleep_for(std::chrono::milliseconds(120));
+					const auto m0 = std::chrono::steady_clock::now();
+					const size_t moved = m_landscapeStamps.sync(*m_editorWorld, m_landscape, contentManager());
+					const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - m0).count();
+					HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_STAMPMOVE: a %.0f m stamp moved by 40 m: %.1f ms on the main thread, %zu tile(s) read again", sc.sizeM, ms, moved);
+					stf.position.x -= 40.0f;
+					stf.dirty = true;
+					break;
+				}
 		}
 	}
 	// The dump renders without scene ticks, so the trail clipmap (HE_DUMP_TRAILTEST's footprints) is brought in

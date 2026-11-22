@@ -657,6 +657,41 @@ TEST_CASE("LandscapeEditSession: the water brush makes a lake on a dry tile worl
 	std::filesystem::remove(packFile);
 }
 
+TEST_CASE("LandscapeEditSession on a world with a sea: a commit without a change writes no tile, a sculpt dab changes its own tile and "
+          "leaves the water rasters and the water table as they were")
+{
+	ProceduralLandscapeParams p;
+	p.tilesX = p.tilesZ = 6;
+	p.seaLevelM = 1500.0f;   // half of the height range: most tiles are partly under water
+	const auto base = std::make_shared<ProceduralLandscapeSource>(p);
+	REQUIRE(base->water());
+	const auto edits = std::make_shared<LandscapeEditSource>(base);
+	LandscapeRuntime rt;
+	REQUIRE(rt.begin(edits, LandscapeRuntimeConfig{}));
+	LandscapeEditSession session(rt, *edits);
+	const double bx = 2.5 * 512.0, bz = 2.5 * 512.0;
+	REQUIRE(session.focus(bx, bz, 300.0));   // 2 x 2 tiles
+	size_t wetTiles = 0;
+	for (int z = 0; z < 6; ++z)
+		for (int x = 0; x < 6; ++x) wetTiles += fullTile(*base, { x, z })->hasWater() ? 1 : 0;
+	REQUIRE(wetTiles > 0);
+
+	CHECK(session.commit() == 0);
+	CHECK(edits->editedKeys().empty());
+	CHECK_FALSE(edits->waterEdited());
+
+	const float lx = static_cast<float>(bx - session.centre().x), lz = static_cast<float>(bz - session.centre().z);
+	REQUIRE(TerrainSculpt::apply(session.terrain(), lx, lz, TerrainSculpt::Op::Raise, 20.0f, 10.0f, 12.0f).ok);
+	CHECK(session.commit() == 1);
+	REQUIRE(edits->editedKeys().size() == 1);
+	const LandscapeTileKey key = edits->editedKeys()[0];
+	const LandscapeTilePtr was = fullTile(*base, key), now = edits->edited(key);
+	CHECK(now->heights[0] != was->heights[0]);
+	CHECK(now->waterCoverage == was->waterCoverage);
+	CHECK(now->waterOwner == was->waterOwner);
+	CHECK_FALSE(edits->waterEdited());   // the sea is the base's: no body moved, no table of the overlay's own
+}
+
 TEST_CASE("LandscapeStamp: a stamp raises the tiles under it when they are loaded, lies over a brush edit without changing it, moves by "
           "naming old and new footprint, and is baked into a pack")
 {
