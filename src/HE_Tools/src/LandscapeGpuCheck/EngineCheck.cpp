@@ -17,6 +17,8 @@
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/LandscapeRuntime.h>
 #include <HorizonScene/RvtLandscape.h>
+#include <HorizonScene/LandscapeStamps.h>
+#include <HorizonScene/Components/LandscapeStampComponent.h>
 #include <HorizonScene/Components/TerrainComponent.h>
 #include <HorizonScene/TerrainSystem.h>
 #include <HorizonScene/TransformHierarchy.h>
@@ -824,6 +826,78 @@ int runMaterialCheck(HE::RendererBackend backend, HE::RenderPath path, const std
 							if (gapRvt > 6.0) fail("the ground from pages looks like the ground computed in place");
 							if (gapRvt <= gapPaused + 0.01) fail("the pages are what is drawn (the picture changes when the swap is paused)");
 							if (got) writePngFile(pngPath.substr(0, pngPath.size() - 4) + "_auto_rvt.png", static_cast<int>(kW), static_cast<int>(kH), rvtImg.data());
+							// A Landscape Stamp far from the camera, where the ground is drawn from the far data and from pages painted of
+							// it: the pages must show the stamped ground (they are stale when the far data takes the stamp, 0.3 s after it
+							// rests), in the colours the material gives it in place.
+							{
+								drv.pauseSwap(false);
+								TextureAsset tex;
+								tex.width = tex.height = 64;
+								tex.channels = 4;
+								tex.data.resize(64 * 64 * 4);
+								for (int y = 0; y < 64; ++y)
+									for (int x = 0; x < 64; ++x)
+									{
+										const float d = std::min(1.0f, std::hypot(x - 31.5f, y - 31.5f) / 31.5f);
+										for (int c = 0; c < 4; ++c) tex.data[(static_cast<size_t>(y) * 64 + x) * 4 + c] = static_cast<uint8_t>((1.0f - d) * 255.0f);
+									}
+								const glm::dvec3 at = camPos + glm::dvec3(4200.0, 0.0, 630.0);   // along the view, beyond the tiles in memory
+								const auto se = world.createEntity("Landscape Stamp");
+								TransformComponent& stf = reg.get_or_emplace<TransformComponent>(se);
+								stf.position = glm::vec3(at - origin);
+								stf.position.y = 0.0f;
+								stf.dirty = true;
+								LandscapeStampComponent sc;
+								sc.textureId = content.registerTexture(std::move(tex));
+								sc.sizeM = 1800.0f;
+								sc.heightM = 500.0f;
+								sc.falloff = 0.3f;
+								reg.emplace<LandscapeStampComponent>(se, sc);
+								HE::LandscapeStampSync stampSync;
+								uint32_t repainted = 0;
+								const auto pump = [&] {
+									std::vector<uint8_t> f;
+									const auto p0 = std::chrono::steady_clock::now();
+									for (int i = 0, quiet = 0; i < 4000 && quiet < 12; ++i)
+									{
+										rt.update(world, 0.016f, 5.0, &camPos);
+										const size_t again = stampSync.sync(world, rt, content);
+										const auto st = drv.tick(world, eye);
+										repainted += st.pagesPainted;
+										f.clear();
+										renderer->RenderSceneImage(ov, kW, kH, f);
+										const bool rested = std::chrono::steady_clock::now() - p0 > std::chrono::milliseconds(900);
+										quiet = (rested && again == 0 && rt.active() && rt.store()->settled() && drv.active() && st.pagesPainted == 0) ? quiet + 1 : 0;
+										std::this_thread::sleep_for(std::chrono::milliseconds(1));
+									}
+								};
+								pump();
+								std::vector<uint8_t> stampPages, stampPlace;
+								const bool gotS = shoot(stampPages);
+								drv.pauseSwap(true);
+								drv.tick(world, eye);
+								const bool gotT = shoot(stampPlace);
+								drv.pauseSwap(false);
+								// Where the stamp shows: the pixels the ground in place changed by. There the pages must be the stamped ground.
+								size_t seen = 0;
+								double fresh = 0.0, stale = 0.0;
+								if (gotS && gotT)
+									for (size_t i = 0; i < px; ++i)
+									{
+										if (std::abs(lum(&stampPlace[i * 4]) - lum(&autoImg[i * 4])) <= 12.0) continue;
+										++seen;
+										fresh += std::abs(lum(&stampPages[i * 4]) - lum(&stampPlace[i * 4]));
+										stale += std::abs(lum(&rvtImg[i * 4]) - lum(&stampPlace[i * 4]));
+									}
+								const double n5 = static_cast<double>(std::max<size_t>(seen, 1));
+								std::printf("  virtual texture, a stamp 4.2 km away: it shows in %zu px; there the pages differ from the ground in place by %.2f/255 "
+								            "(pages from before the stamp: %.2f), %u page(s) painted for it\n", seen, fresh / n5, stale / n5, repainted);
+								if (seen < 200) fail("the far stamp shows in the picture");
+								else if (fresh / n5 > 0.5 * stale / n5 || fresh / n5 > 10.0) fail("the pages over a far stamp show the stamped ground");
+								if (gotS) writePngFile(pngPath.substr(0, pngPath.size() - 4) + "_auto_rvt_farstamp.png", static_cast<int>(kW), static_cast<int>(kH), stampPages.data());
+								world.destroyEntity(se);
+								pump();
+							}
 							drv.detach();
 
 							// The same with texels so small that the table cannot hold the world (3.1 cm: a volume of 8.2 km in a world of

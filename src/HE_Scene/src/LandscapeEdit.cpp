@@ -634,7 +634,7 @@ void LandscapeEditSession::apply(const std::vector<std::pair<LandscapeTileKey, L
 	}
 	m_runtime.tilesReplaced(inPlace);
 	m_runtime.tileChanged(reload);
-	if (finish) m_runtime.coarseChanged();
+	if (finish) m_runtime.coarseChanged(&reload);
 }
 
 size_t LandscapeEditSession::commit()

@@ -13,6 +13,7 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 
 namespace HE::landscape
 {
@@ -317,7 +318,10 @@ void RvtLandscape::tileGroundTables(HorizonWorld& live, FrameStats& st)
 
     const bool want = t.filled && !m_paused;
     const glm::dvec2 mx = t.anchor + glm::dvec2(double(l.extentM()));
-    m_renderer.SetRvtTileGround(want ? t.consumer : HE::UUID{}, t.anchor, mx);
+    // The native near view, as for the single landscape: HE_RVT_NATIVE_NEAR=0 / 1 over the setting.
+    static const int envNear = [] { const char* v = std::getenv("HE_RVT_NATIVE_NEAR"); return (v && *v) ? (*v == '0' ? 0 : 1) : -1; }();
+    const bool nativeNear = envNear >= 0 ? envNear == 1 : m_settings.nativeNear;
+    m_renderer.SetRvtTileGround(want ? t.consumer : HE::UUID{}, t.anchor, mx, nativeNear ? nativeNearRadius() : 0.0f);
     t.swapOn = want;
     if (want) ++st.activeSegments;
 }

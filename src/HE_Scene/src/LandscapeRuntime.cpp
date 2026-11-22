@@ -228,8 +228,11 @@ void LandscapeRuntime::placeWindow()
 	m_pendingTable.clear();
 }
 
-void LandscapeRuntime::coarseChanged()
+void LandscapeRuntime::coarseChanged(const std::vector<LandscapeTileKey>* keys)
 {
+	// The far levels of these tiles are other data now: a picture painted from them (a virtual texture page over ground the atlas
+	// does not hold) is stale, although no tile was taken up.
+	if (keys) m_changedTiles.insert(keys->begin(), keys->end());
 	++m_coarseRevision;
 	if (!active()) return;
 	// The window's coarse world again: a crop is a copy, and an overlay hands out another object once it has its first edit.

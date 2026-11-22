@@ -976,10 +976,13 @@ TEST_CASE("LandscapeStampSync: a stamp entity reaches the runtime's overlay, an 
 		LandscapeExportPlan plan;
 		LandscapeExportOptions options;
 		options.bakeHlod = false;
-		options.bakeFar = false;
+		options.bakeFar = true;   // painted from the world with its stamps: they are in the plan before the far image is made
 		prepareLandscapePacksForExport(scene, packFile.parent_path(), cm, options, plan, {});
 		REQUIRE(plan.packs.size() == 1);
 		CHECK(plan.packs[0].stamps.size() == 1);
+		CHECK(plan.packs[0].farDone);
+		CHECK(plan.farBake.baked > 0);
+		CHECK(plan.farBake.failed == 0);
 		CHECK(scene.registry().view<LandscapeStampComponent>().empty());
 		const std::filesystem::path copy = tempFile("stamp_export.bin");
 		std::filesystem::copy_file(packFile, copy);

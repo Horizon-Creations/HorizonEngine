@@ -118,7 +118,9 @@ namespace
 		// The world as its author sees it: the pack with its edits (LandscapeEdit.h) on top. An edited tile hashes by its own bytes.
 		LandscapeEditSource edited(source);
 		edited.setWorldId(source->identity());
-		const size_t editedTiles = pack.editsFile.empty() ? 0 : edited.loadFile(pack.editsFile);
+		// The stamps lie over both: a stamped tile is painted as it is shown and hashes by what it shows.
+		const size_t editedTiles = (pack.editsFile.empty() ? 0 : edited.loadFile(pack.editsFile))
+		                         + edited.setStamps(pack.stamps, 3000.0f, /*patchCoarse=*/false).size();
 		const LandscapeFarTileHash packHash = landscapePackTileHash(*source);
 		const LandscapeFarTileHash hash = editedTiles ? LandscapeFarTileHash([&](LandscapeTileKey k) { return edited.contentHash(k, packHash); }) : packHash;
 		const LandscapeTileSource& world = editedTiles ? static_cast<const LandscapeTileSource&>(edited) : *source;
@@ -192,7 +194,7 @@ size_t prepareLandscapePacksForExport(HorizonWorld& world, const std::filesystem
 	const bool hasCells = options.bakeHlod && !world.cellManifestJson().empty() && CellManifest::parse(world.cellManifestJson(), manifest);
 
 	auto& reg = world.registry();
-	size_t firstPack = plan.packs.size();   // of this scene (none yet)
+	bool stampsTaken = false;   // this scene's stamps went to its first pack
 	for (auto e : reg.view<LandscapeWorldComponent>())
 	{
 		LandscapeWorldComponent& lw = reg.get<LandscapeWorldComponent>(e);
@@ -224,6 +226,21 @@ size_t prepareLandscapePacksForExport(HorizonWorld& world, const std::filesystem
 			it = plan.packs.end() - 1;
 		}
 
+		// The scene's stamps (LandscapeStamps.h) go into the shipped pack like brush edits. Taken BEFORE the far image is painted:
+		// it is made from the world as its author sees it, stamps included.
+		// shortcut: a second scene that adds stamps to a pack whose far image an earlier scene baked gets them into the tiles only
+		if (!stampsTaken)
+		{
+			stampsTaken = true;
+			LandscapeStampImages images;
+			std::vector<LandscapeStamp> stamps = landscapeStampsOfWorld(world, content, images);
+			if (!stamps.empty())
+			{
+				say(0, "Landscape stamps: " + std::to_string(stamps.size()) + " baked into the shipped pack");
+				it->stamps.insert(it->stamps.end(), std::make_move_iterator(stamps.begin()), std::make_move_iterator(stamps.end()));
+			}
+		}
+
 		if (hasCells && !it->hlodDone)
 		{
 			it->hlodDone = true;
@@ -252,28 +269,14 @@ size_t prepareLandscapePacksForExport(HorizonWorld& world, const std::filesystem
 			bakeFarImage(*it, lw.textureGroup, content, options, plan, say);
 		}
 
-		if (firstPack == plan.packs.size()) firstPack = static_cast<size_t>(it - plan.packs.begin());
 		if (lw.pack != it->dest)
 		{
 			lw.pack = it->dest;
 			++rewritten;
 		}
 	}
-	// The scene's stamps (LandscapeStamps.h) go into the shipped pack like brush edits, and out of the shipped scene: a game that
-	// found them would lay them over the baked ground a second time.
-	if (firstPack < plan.packs.size())
-	{
-		LandscapeStampImages images;
-		std::vector<LandscapeStamp> stamps = landscapeStampsOfWorld(world, content, images);
-		if (!stamps.empty())
-		{
-			say(0, "Landscape stamps: " + std::to_string(stamps.size()) + " baked into the shipped pack");
-			LandscapeExportPack& p = plan.packs[firstPack];
-			p.stamps.insert(p.stamps.end(), std::make_move_iterator(stamps.begin()), std::make_move_iterator(stamps.end()));
-			// shortcut: the far image painted above does not see the stamps (the heights do), paint it from the stamped tiles when that shows
-		}
-		if (!reg.view<LandscapeStampComponent>().empty()) { reg.clear<LandscapeStampComponent>(); ++rewritten; }
-	}
+	// Out of the shipped scene: a game that found the stamps would lay them over the baked ground a second time.
+	if (stampsTaken && !reg.view<LandscapeStampComponent>().empty()) { reg.clear<LandscapeStampComponent>(); ++rewritten; }
 	return rewritten;
 }
 

@@ -116,8 +116,8 @@ public:
 	void  SetRvtLandscape(uint32_t terrainEntity, const HE::UUID& landscapeMaterial, const HE::UUID& consumerMaterial) override;
 	void  ReleaseRvtConsumer(const HE::UUID& consumerMaterial) override;
 	void  SetRvtNearChunks(uint32_t terrainEntity, const std::vector<uint32_t>& chunkEntities) override;
-	void  SetRvtTileGround(const HE::UUID& consumerMaterial, const glm::dvec2& minXZ, const glm::dvec2& maxXZ) override
-	{ m_tileRvtConsumer = consumerMaterial; m_tileRvtMin = minXZ; m_tileRvtMax = maxXZ; }
+	void  SetRvtTileGround(const HE::UUID& consumerMaterial, const glm::dvec2& minXZ, const glm::dvec2& maxXZ, float nativeNearM) override
+	{ m_tileRvtConsumer = consumerMaterial; m_tileRvtMin = minXZ; m_tileRvtMax = maxXZ; m_tileRvtNearM = nativeNearM; }
 	void  SetSceneVisible(bool visible) override { m_sceneHidden = !visible; }
 	bool  m_sceneHidden = false;   // SetSceneVisible: the offscreen viewport is not shown this frame, its scene passes are skipped
 	bool  ReadRvtFeedback(std::vector<uint32_t>& keys) override;
@@ -1670,6 +1670,7 @@ private:
 	// lie wholly inside into `inside` (drawn with the consumer); false: none, or the consumer cannot be drawn now.
 	HE::UUID   m_tileRvtConsumer{};
 	glm::dvec2 m_tileRvtMin{ 0.0 }, m_tileRvtMax{ 0.0 };
+	float      m_tileRvtNearM = 0.0f;   // patches nearer than this keep the ground's own material (native near view)
 	bool TakeRvtTilePatches(HE::LandscapeRenderFrame& frame, bool gbuffer, std::vector<HE::LandscapeRenderPatch>& inside);
 	GpuMesh  m_giLandMesh;                       // the tile landscape's GI height clipmap as a mesh with its BLAS (EncodeGIAccelBuild)
 	uint64_t m_giLandMeshVersion = 0;            // GiHeightfield::version it was made from

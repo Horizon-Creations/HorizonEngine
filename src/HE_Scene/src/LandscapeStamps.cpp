@@ -110,8 +110,8 @@ size_t LandscapeStampSync::sync(HorizonWorld& world, LandscapeRuntime& runtime, 
 			std::sort(m_pendingCoarse.begin(), m_pendingCoarse.end(), [](const LandscapeTileKey& a, const LandscapeTileKey& b) { return a.x != b.x ? a.x < b.x : a.z < b.z; });
 			m_pendingCoarse.erase(std::unique(m_pendingCoarse.begin(), m_pendingCoarse.end()), m_pendingCoarse.end());
 			edits->patchCoarseFor(m_pendingCoarse);
+			runtime.coarseChanged(&m_pendingCoarse);   // also: what was painted from the far data of these tiles is stale
 			m_pendingCoarse.clear();
-			runtime.coarseChanged();
 		}
 		return 0;
 	}

@@ -814,7 +814,11 @@ public:
     // The tile landscape's ground (SetLandscapeProvider): its patches that lie wholly inside the absolute XZ rectangle are drawn
     // with `consumerMaterial` (which reads the pool through the table SetRvtPageTable gave it), the others with the ground's own
     // material as before. Null `consumerMaterial` = off. A backend without it draws the whole ground with its own material.
-    virtual void SetRvtTileGround(const HE::UUID& /*consumerMaterial*/, const glm::dvec2& /*minXZ*/, const glm::dvec2& /*maxXZ*/) {}
+    // `nativeNearM` > 0: patches closer to the camera than this (horizontally, to the patch's square) keep the ground's own
+    // material too (the native near view: up close the material itself is sharper than any page; the driver passes the distance
+    // at which a mip-0 texel is a pixel, so the change of material is where both are equally sharp).
+    virtual void SetRvtTileGround(const HE::UUID& /*consumerMaterial*/, const glm::dvec2& /*minXZ*/, const glm::dvec2& /*maxXZ*/,
+                                  float /*nativeNearM*/ = 0.0f) {}
     // The pages the lookup's feedback reported since the last call (keys of RvtLookup.h's rvtFeedbackKey, unordered, may repeat),
     // appended to `keys`. False = the backend has no feedback (the driver then serves the camera square alone).
     virtual bool ReadRvtFeedback(std::vector<uint32_t>& /*keys*/) { return false; }

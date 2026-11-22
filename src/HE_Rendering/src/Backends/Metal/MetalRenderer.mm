@@ -16585,6 +16585,13 @@ bool MetalRenderer::TakeRvtTilePatches(HE::LandscapeRenderFrame& frame, bool gbu
 	const glm::dvec2 o(frame.uvOrigin.x, frame.uvOrigin.z);   // patch corners are relative to the floating origin
 	const auto mid = std::stable_partition(frame.patches.begin(), frame.patches.end(), [&](const HE::LandscapeRenderPatch& p) {
 		const double x0 = double(p.x0) + o.x, z0 = double(p.z0) + o.y;
+		// The native near view: a patch within reach of the camera keeps the material itself.
+		if (m_tileRvtNearM > 0.0f)
+		{
+			const float dx = std::max({ p.x0 - frame.cameraRel.x, 0.0f, frame.cameraRel.x - (p.x0 + p.size) });
+			const float dz = std::max({ p.z0 - frame.cameraRel.z, 0.0f, frame.cameraRel.z - (p.z0 + p.size) });
+			if (dx * dx + dz * dz < m_tileRvtNearM * m_tileRvtNearM) return true;
+		}
 		return !(x0 >= m_tileRvtMin.x && z0 >= m_tileRvtMin.y && x0 + double(p.size) <= m_tileRvtMax.x && z0 + double(p.size) <= m_tileRvtMax.y);
 	});
 	inside.assign(mid, frame.patches.end());

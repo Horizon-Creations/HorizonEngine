@@ -100,6 +100,20 @@ Branch `claude/landscape-weltmassstab-100km`, up to `1e118e0a6`.
 * Not verified: the seam between consumer and in-place patches as a pixel row (only as part of whole-frame means), the editor
   by hand with RVT on.
 
+*Fourth session, 22.11.: native near view, far ground under a stamp*
+* Native near view for the tile virtual texture: `SetRvtTileGround(..., nativeNearM)`, `TakeRvtTilePatches` keeps a patch within
+  `RvtLandscape::nativeNearRadius()` of the camera on the material itself (setting `nativeNear`, `HE_RVT_NATIVE_NEAR=0/1`).
+  Whole-frame gap to the ground in place 3.5 -> 1.7/255. Cost: a patch is 128 m and more, so much more than the radius goes in
+  place: 12.7 ms instead of 10.0 (in place 14.2). Switch it off where time matters more than the near ground.
+* Far ground under a stamp: with a material the far ground is the material on the coarse heights, so it shows a stamp once the
+  far data has it. The bug was the virtual texture: pages over ground the atlas does not hold were never marked stale.
+  `LandscapeRuntime::coarseChanged(keys)` now names the tiles (stamp sync, brush stroke end). Witness: a stamp 4.2 km away shows
+  in 1467 px, pages 3.4/255 from the ground in place there (pages from before the stamp: 64.8); **not run without the fix**.
+  Picture `landscape_Metal_engine_material_auto_rvt_farstamp.png`.
+* Export: the stamps are in the plan before the far image is painted (`prepareLandscapePacksForExport`), and `bakeFarImage`
+  paints from the overlay with them. The far image itself is made of the PAINTED layers only (`landscapeFarWeightPainter`): a
+  height stamp does not change its colours, on any backend that reads it (the fixed blend, near and far alike).
+
 *Landscape Stamp (replaces "heightmap import onto a world")*
 * `LandscapeStamp` + `LandscapeEditSource::setStamps / shown / stamped / patchCoarseFor` (`LandscapeEdit.h/.cpp`): stamps lie
   over the tiles AND their brush edits and are applied when a tile is loaded; the brushes edit the ground underneath (the brush

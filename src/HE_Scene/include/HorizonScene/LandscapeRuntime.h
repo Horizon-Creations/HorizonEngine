@@ -206,7 +206,7 @@ public:
 	LandscapeEditSource* edits() const { return m_edits.get(); }
 	const std::filesystem::path& packFile() const { return m_packFile; }
 	void tilesReplaced(const std::vector<std::pair<LandscapeTileKey, std::shared_ptr<const LandscapeTile>>>& tiles);
-	void coarseChanged();
+	void coarseChanged(const std::vector<LandscapeTileKey>* keys = nullptr);   // `keys`: the tiles whose far data changed (takeChangedTiles names them)
 	// What a move of the render window is to the renderer. True: only the far data changed (coarseRevision), the tile atlas and the slot
 	// table stay, nothing near the camera is uploaded again. False (the default, safe with any backend): another landscape, the atlas
 	// begins again. Set it from IRenderer::Capabilities::landscapeCoarseRevision of the backend that draws this runtime.
