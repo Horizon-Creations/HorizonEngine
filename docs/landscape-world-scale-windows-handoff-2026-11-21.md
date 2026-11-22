@@ -178,6 +178,21 @@ Built and checked on the Mac (Metal); details in `docs/landscape-tile-material-s
   one with the tile brush's Stamp tool, move it in the Scene mode, export, and look at the exported game (never done anywhere).
 * **Foliage Mask and Water tools** of the tile brush: CPU only. By hand: paint both, save, reopen, export.
 
+Added later on the 22nd (after the lines above were written):
+
+* `IRenderer::SetRvtTileGround` has a fourth parameter `nativeNearM` (default 0 = off): patches nearer than that keep the
+  ground's own material. A backend that implements the call takes it too (Metal: `TakeRvtTilePatches`). The setting is
+  `ProjectRvtSettings::tileNativeNear`, off by default; `tests/fixtures/game_build_config/HEGameBuildConfig.h` has the new
+  field, so **`test_game_build_config` must pass on Windows as it does on the Mac** (line endings are the usual suspect).
+* `LandscapeRuntime::coarseChanged(keys)`: pages painted from far data go stale when it changes. Nothing per backend.
+* Landscape Stamp: `heightmapFile` (16-bit PNG / PGM / `.r16` through `TerrainHeightmap::readGrey16`, which got a `channel`
+  parameter) and `channel` (red, green, blue, alpha, luminance). CPU only. **By hand on Windows: the file dialog
+  (`LandscapeWorldTools::browseStampFile`, SDL) and a path with backslashes or a drive letter**; relative paths are resolved
+  against the project folder with `std::filesystem`, which was only run on macOS.
+* What each backend has of the tile landscape today (state doc, table at the top): Metal everything; Vulkan the material in the
+  scene pass only (no `landscapePasses`, no `landscapeRvt`); OpenGL the material only where the driver has 24 samplers, never
+  run; D3D11 / D3D12 the fixed blend.
+
 ## Handoff
 
 - **Done / verified / not verified:** see the three docs named at the top; on Windows nothing is verified.
