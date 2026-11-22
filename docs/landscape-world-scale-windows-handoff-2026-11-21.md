@@ -193,6 +193,72 @@ Added later on the 22nd (after the lines above were written):
   scene pass only (no `landscapePasses`, no `landscapeRvt`); OpenGL the material only where the driver has 24 samplers, never
   run; D3D11 / D3D12 the fixed blend.
 
+## 8. The tile ground on every backend: what is proven, what is written and waits for a run, what is not built (22.11.)
+
+Written from the Mac at the owner's request ("catch up Vulkan, both D3D backends and OpenGL as far as you can, so that Windows only
+tests and fills gaps"). Three states: **proven** = ran and judged by a witness on a machine; **written** = code is in, never run,
+behind a switch that is OFF; **not built**.
+
+One tool judges all of it: `landscape_gpu_check --only <gl|vulkan|d3d11|d3d12> --arrays <EngineContent> --out <dir>`. It prints
+`(passes this backend says it has the ground in: shadow .., GI .., SSAO .., velocity .., G-buffer ..)`: a pass a backend claims
+(`Capabilities::landscapePassMask`, bits `kLandscapePass*` in `IRenderer.h`) is a `FAIL` when its witness does not hold, one it
+does not claim prints `not built on this backend`. A backend without `landscapeMaterial` (both D3D, macOS OpenGL) runs the short
+form `fixedBlendPasses` (`EngineCheck.cpp`).
+
+| | Metal | Vulkan | OpenGL | D3D11 | D3D12 |
+|---|---|---|---|---|---|
+| Ground drawn with its material | proven (M5) | proven (MoltenVK) | written, needs 24 fragment samplers: never run | shaders proven offline, C++ not built | as D3D11 |
+| Ground casts into the shadow layers | proven | proven (MoltenVK): 4/255 against 176 | proven (macOS GL): 150 against 223 | **written**, switch | **written**, switch |
+| Ground in the SSAO position pre-pass | proven | **written**, switch: witness reads 0 on MoltenVK | not built | not built | not built |
+| Ground in the GI pre-pass / ray structure | proven | not built | not built | not built | not built |
+| Ground in the velocity pass (TAA) | built, capture cannot show it | not built | not built | not built | not built |
+| Ground in the G-buffer (deferred) | proven | not built (drawn forward on top, lit) | not built | not built | not built |
+| Virtual texture for the ground (`landscapeRvt`) | proven | not built | not built | not built | not built |
+
+**What to run on Windows, in this order**
+
+1. `he_tests` whole, then `he_tests --source-file=*test_landscape*` and `-tc="tile landscape variant*"`. The second test case of
+   that name is the D3D shader contract: every register of the generated HLSL inside Shader Model 5.0, the landscape's data at
+   `MaterialShaderLibrary::kHlslLandscapeGlobalsReg` (b12, b13) and `kHlslLandscapeFirstSrv` (t47..t55).
+   **FXC has never seen these shaders** (glslang's HLSL front end parsed both on the Mac, which is not the same compiler): compile
+   the two texts with `D3DCompile` (`HE_DUMP_LS_HLSL=<dir>` makes the test write `landscape_vs.hlsl` / `landscape_ps.hlsl`).
+2. Shadows, D3D11: `set HE_LANDSCAPE_D3D_PASSES=1` then `landscape_gpu_check --only d3d11 ...`. Must print
+   `the ground casts (fixed blend): a box under the ground is A/255, and B/255 when the ground is not in the shadow maps` with
+   A below 0.8 x B, and `OK (fixed blend: the shadow maps)`. Without the switch the same line shows A = B and
+   `not built on this backend`. Code: `D3D11Landscape::drawDepth`, `renderDepthLayer` in `D3D11Renderer.cpp` (search
+   `landscapeD3dPassesOn`). Things I could not check: that the shadow pass's depth-stencil state is LESS with writes when the
+   ground is drawn (it draws with whatever is set), and that `StateGuard` puts the depth vertex shader back for the next layer.
+3. Shadows, D3D12: the same with `--only d3d12`. Code: `D3D12Landscape::drawDepth` + `depthPsoGet`, `renderDepthLayer` in
+   `D3D12Renderer.cpp`. Unchecked: the depth-only PSO against the shadow array's format (assumed `D32_FLOAT`, as `depthPSO`),
+   the root state put back after the ground (copied from the block before `m_renderGraph.execute`), and the descriptor table the
+   depth draw reuses (`(setNext - 1) % kSets`: on the very first frame no colour draw has written one; the vertex stage reads only
+   the landscape's own images, which every table has). Run it with the debug layer on.
+4. When 2 and 3 hold on the GPU: delete the switch (`landscapeD3dPassesOn` in `LandscapeRenderFrame.h`, its three uses) so the
+   mask is always set. Until then nothing changes for a D3D user.
+5. Vulkan on a real GPU: `landscape_gpu_check --only vulkan` (shadows are on by default; expect the `the ground casts` line as
+   on MoltenVK), then `set HE_LANDSCAPE_VK_SSAO=1` and the same: the line `ambient occlusion: N ground px are darker ...` must
+   be above 60 in the forward run. On MoltenVK N is 0 although the patches are drawn into the position target (pipeline built,
+   140-200 patches a frame); the forward frame there also draws the test box black, so I could not tell a wrong position from a
+   capture that is off. Code: `VulkanLandscape::drawDepth(..., viewForPosition)`, `runSSAO`.
+6. The lavapipe CI job does not run `landscape_gpu_check`; adding it there would give a second Vulkan and, with Mesa's software
+   OpenGL, possibly the first run of the OpenGL material path (it needs `GL_MAX_TEXTURE_IMAGE_UNITS` >= 24). Not done.
+
+**Gaps to fill, largest first** (each has its Metal reference in `MetalRenderer.mm`)
+
+* **D3D11 / D3D12 draw the ground with the fixed blend, not the material.** The shaders exist
+  (`MaterialShaderLibrary::landscapeVertex / landscapeFragment` with `Backend::HLSL`). Missing is the C++: compile the pair for a
+  material hash (beside `GetOrBuildMaterialShaders` / `GetOrBuildMaterialPSO`), and a draw that binds what a mesh draw of that
+  material binds plus the landscape's data at the registers above. The block layouts are the GLSL ones, i.e.
+  `HE::vkls::Globals` / `PatchPush` (`VulkanLandscapeLayout.h`, plain C++), NOT `d3dls::Globals`: a second constant buffer.
+  D3D12 needs b12/b13 and t47..t55 in the material root signature. Reference: `MetalRenderer::BindLandscapeMaterial`,
+  `GetOrBuildLandscapeMaterialPipeline`; Vulkan's `lsDraw` hooks in `drawDCVk`. Then set `Capabilities::landscapeMaterial`.
+* **G-buffer on Vulkan / OpenGL / D3D**: the material's G-buffer fragment with the landscape vertex (Metal:
+  `EncodeLandscapeGBuffer`). Until then a deferred frame draws the ground forward on top.
+* **GI** (Vulkan `runGi` raster, D3D, OpenGL 4.3): the ground in the GI pre-pass and in the ray structure (Metal:
+  `EncodeLandscapePass` kind 1, `m_giLandMesh` in `EncodeGIAccelBuild`).
+* **SSAO** on OpenGL and D3D, **velocity** everywhere but Metal (Metal: `EncodeLandscapePass` kinds 2-4).
+* **Virtual texture** (`landscapeRvt`), section 7b.
+
 ## Handoff
 
 - **Done / verified / not verified:** see the three docs named at the top; on Windows nothing is verified.
