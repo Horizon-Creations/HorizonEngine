@@ -434,6 +434,16 @@ the backends first, the merge of `release/0.8.0` after; origin is pushed after e
   renderer's own mesh pipeline of the reflection pre-pass (the ground's pipelines have one attribute), visible now because
   the check turns reflections on. Not touched.
 
+## 15. 23.11.: `release/0.8.0` merged in
+
+* `b43b3a2d5`: one commit came in (`90dac2af6`, entity cooking: frozen cooked transforms), no conflicts. Built Debug
+  (he_tests, landscape_gpu_check, HorizonEditor); all four `landscape_gpu_check` runs exit 0.
+* Full `he_tests` after the merge (4145 cases): 4 fail. `test_foliage_cluster.cpp:1365` was this branch's own (a source guard
+  that quoted the velocity pass's old `taaPrevViewProj * model`; now `prevHere`), fixed. Left: `test_inspector_ui.cpp:510`
+  (known), `test_hc_codegen_export_build.cpp:181` (known, not looked into), and `test_planner_ui.cpp:2231` "Export PNG"
+  aborting on ImGui's `tex_id != 0` assert (ImTextureData not uploaded), reproducible. The branch changes nothing the
+  planner test uses (no planner, harness or raster file differs from `release/0.8.0`); NOT checked on `release/0.8.0` itself.
+
 ## Handoff
 
 - **Done / verified / not verified:** sections 9 to 14 for Windows; the three docs named at the top for the Mac. Not verified on

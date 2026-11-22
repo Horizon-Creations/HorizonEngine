@@ -1351,12 +1351,13 @@ TEST_CASE("No backend skips a foliage cluster in a per-object pass: velocity, de
 		REQUIRE(!text.empty());
 		CHECK(text.find("if (obj.isCluster()) continue;") == std::string::npos);
 	}
-	// The velocity pass of each Windows backend walks the plants, static (prev = now).
+	// The velocity pass of each Windows backend walks the plants, static (prev = now), with last frame's matrix moved
+	// to this frame's floating origin (HE::taaPrevViewProjAt: a plant's model is this frame's).
 	struct Site { const char* rel; const char* prevPerPlant; };
 	const Site sites[] = {
-		{ "D3D11/D3D11Renderer.cpp",   "c.mvpPrev   = taaPrevViewProj * model;" },
-		{ "D3D12/D3D12Renderer.cpp",   "c.mvpPrev   = p.taaPrevViewProj * model;" },
-		{ "Vulkan/VulkanRenderer.cpp", "const PushConstants pc{ m_taaViewProjJit * model, prevJit * model };" },
+		{ "D3D11/D3D11Renderer.cpp",   "c.mvpPrev   = prevHere * model;" },
+		{ "D3D12/D3D12Renderer.cpp",   "c.mvpPrev   = prevHere * model;" },
+		{ "Vulkan/VulkanRenderer.cpp", "const PushConstants pc{ m_taaViewProjJit * model, prevJitHere * model };" },
 	};
 	for (const Site& s : sites)
 	{
