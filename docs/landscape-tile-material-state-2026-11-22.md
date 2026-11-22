@@ -124,6 +124,10 @@ Branch `claude/landscape-weltmassstab-100km`, up to `1e118e0a6`.
   8-bit step survives. **No picture**: an 8-bit and a 16-bit cone shot side by side (`HE_DUMP_STAMPBITS=8/16`) showed no
   difference a reader could point at. A file that changes on disk is not read again while the editor runs.
 
+* `LandscapeStampComponent::channel` (0 red, 1 green, 2 blue, 3 alpha, 4 luminance; default red): which channel of the texture
+  or file is the height. `TerrainHeightmap::readGrey16(..., channel)`. Inspector "Channel", Stamp tool "Stamp Channel". A colour
+  FILE without a chosen channel used to be read as luminance and is red now. Tested (`test_landscape_edit.cpp`); not by hand.
+
 *Landscape Stamp (replaces "heightmap import onto a world")*
 * `LandscapeStamp` + `LandscapeEditSource::setStamps / shown / stamped / patchCoarseFor` (`LandscapeEdit.h/.cpp`): stamps lie
   over the tiles AND their brush edits and are applied when a tile is loaded; the brushes edit the ground underneath (the brush

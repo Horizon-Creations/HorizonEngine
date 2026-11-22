@@ -885,6 +885,59 @@ TEST_CASE("tile foliage density: an unpainted tile is stored as before, a painte
 	for (const glm::mat4& m : masked) CHECK(m[3].x > -8.0f);
 }
 
+TEST_CASE("LandscapeStamp channel: red, green, blue, alpha or the grey value of a texture or of a file is the height, and a change of "
+          "the channel is a change of the stamp")
+{
+	ContentManager cm{ "." };
+	TextureAsset tex;
+	tex.width = tex.height = 2;
+	tex.channels = 4;
+	for (int i = 0; i < 4; ++i) { tex.data.push_back(10); tex.data.push_back(100); tex.data.push_back(200); tex.data.push_back(50); }
+	HorizonWorld scene;
+	const auto e = scene.createEntity("Stamp");
+	scene.registry().get_or_emplace<TransformComponent>(e);
+	LandscapeStampComponent sc;
+	sc.textureId = cm.registerTexture(std::move(tex));
+	scene.registry().emplace<LandscapeStampComponent>(e, sc);
+	LandscapeStampImages images;
+	const auto first = [&](int channel) {
+		scene.registry().get<LandscapeStampComponent>(e).channel = channel;
+		const std::vector<LandscapeStamp> s = landscapeStampsOfWorld(scene, cm, images);
+		REQUIRE(s.size() == 1);
+		return (*s[0].image)[0];
+	};
+	CHECK(first(0) == doctest::Approx(10.0 / 255.0));
+	CHECK(first(1) == doctest::Approx(100.0 / 255.0));
+	CHECK(first(2) == doctest::Approx(200.0 / 255.0));
+	CHECK(first(3) == doctest::Approx(50.0 / 255.0));
+	CHECK(first(4) == doctest::Approx((0.2126 * 10 + 0.7152 * 100 + 0.0722 * 200) / 255.0));
+	CHECK(images.size() == 5);   // one picture per channel of the same texture
+
+	// A colour file (a binary PPM, three channels): the same choice; without an alpha channel, Alpha is full height.
+	const std::filesystem::path ppm = tempFile("stamp_rgb").string() + ".ppm";
+	{
+		std::ofstream out(ppm, std::ios::binary);
+		out << "P6\n2 2\n255\n";
+		for (int i = 0; i < 4; ++i) { out.put(static_cast<char>(20)); out.put(static_cast<char>(120)); out.put(static_cast<char>(220)); }
+	}
+	scene.registry().get<LandscapeStampComponent>(e).heightmapFile = ppm.string();
+	CHECK(first(0) == doctest::Approx(20.0 / 255.0).epsilon(1e-3));
+	CHECK(first(1) == doctest::Approx(120.0 / 255.0).epsilon(1e-3));
+	CHECK(first(2) == doctest::Approx(220.0 / 255.0).epsilon(1e-3));
+	CHECK(first(3) == doctest::Approx(1.0));
+	CHECK(first(4) > first(0));
+	CHECK(first(4) < first(2));
+	std::filesystem::remove(ppm);
+
+	// Saved with the entity.
+	SceneSerializer ser;
+	scene.registry().get<LandscapeStampComponent>(e).channel = 2;
+	HorizonWorld other;
+	const auto back = ser.instantiatePrefab(other, ser.serializeSubtree(scene, e));
+	REQUIRE(other.registry().try_get<LandscapeStampComponent>(back));
+	CHECK(other.registry().get<LandscapeStampComponent>(back).channel == 2);
+}
+
 TEST_CASE("LandscapeStampSync: a stamp entity reaches the runtime's overlay, an idle frame does nothing, moving it names both footprints, "
           "the component round-trips, and an export bakes the stamp and takes it out of the shipped scene")
 {

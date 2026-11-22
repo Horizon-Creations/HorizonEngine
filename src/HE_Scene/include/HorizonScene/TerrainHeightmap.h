@@ -109,5 +109,8 @@ namespace TerrainHeightmap
     // The same file formats as importFile, read as 16-bit grey (8-bit pictures are widened by 257 so white is 65535, colour
     // pictures become luma), row-major width x height, row 0 = the top of the picture. For the world-scale landscape's tiled
     // import (LandscapePackBuild.h), which has no TerrainComponent to resample onto. False with `error` set in user words.
-    bool readGrey16(const std::string& path, std::vector<uint16_t>& out, uint32_t& width, uint32_t& height, std::string& error);
+    // `channel` 0..3 reads that channel (R, G, B, A) instead of the grey value: a picture with fewer channels answers with what
+    // it has (a grey picture is its grey for R, G and B; without an alpha channel A is white). A .r16 has one channel.
+    bool readGrey16(const std::string& path, std::vector<uint16_t>& out, uint32_t& width, uint32_t& height, std::string& error,
+                    int channel = -1);
 }

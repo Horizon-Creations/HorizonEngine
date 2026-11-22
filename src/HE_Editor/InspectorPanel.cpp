@@ -3651,6 +3651,9 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			// A file keeps 16 bits (65 536 height steps); the texture asset above has 8 (256). The file wins when both are set.
 			Row::inputText("Heightmap File##lstamp", &ls->heightmapFile); trackEdit();
 			if (EditorWidgets::button("Browse Heightmap...##lstamp")) LandscapeWorldTools::browseStampFile(ctx, entity);
+			static const char* const kStampChannels[] = { "Red", "Green", "Blue", "Alpha", "Luminance" };
+			ls->channel = std::clamp(ls->channel, 0, 4);
+			Row::combo("Channel##lstamp", &ls->channel, kStampChannels, 5); trackEdit();
 			Row::dragFloat("Size##lstamp", &ls->sizeM, 1.0f, 1.0f, 100000.0f, "%.0f m"); trackEdit();
 			Row::dragFloat("Height##lstamp", &ls->heightM, 0.5f, -10000.0f, 10000.0f, "%.1f m"); trackEdit();
 			Row::sliderFloat("Falloff##lstamp", &ls->falloff, 0.0f, 1.0f, "%.2f"); trackEdit();

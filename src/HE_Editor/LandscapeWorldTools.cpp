@@ -447,6 +447,7 @@ struct EditState
 	float waterDepth = 2.0f;
 	HE::UUID stampTexture;                                   // Stamp: the heightmap the next placed stamp gets
 	float stampHeight = 100.0f;
+	int   stampChannel = 0;                                    // 0 red .. 3 alpha, 4 luminance (LandscapeStampComponent::channel)
 	std::string status;
 	bool  statusError = false;
 };
@@ -552,6 +553,8 @@ void drawEditBlock(AppContext& ctx)
 		// A file keeps 16 bits (65 536 height steps); a texture asset has 8 (256). The file wins when both are set.
 		Row::inputText("Stamp Heightmap File##tlwe", &st().stampToolFile);
 		if (EditorWidgets::button("Browse Heightmap...##tlwe")) browseStampFile(ctx, entt::null);
+		static const char* const kStampChannels[] = { "Red", "Green", "Blue", "Alpha", "Luminance" };
+		Row::combo("Stamp Channel##tlwe", &e.stampChannel, kStampChannels, 5);
 		Row::dragFloat("Stamp Height##tlwe", &e.stampHeight, 1.0f, -5000.0f, 5000.0f, "%.0f m");
 		ImGui::TextDisabled("A click places a Landscape Stamp entity. Move, turn or scale it in the Scene mode to shift the stamp.");
 	}
@@ -693,6 +696,7 @@ void brushInViewport(AppContext& ctx, const RenderWorld& sceneSnapshot, const Im
 			LandscapeStampComponent sc;
 			sc.textureId = e.stampTexture;
 			sc.heightmapFile = st().stampToolFile;
+			sc.channel = e.stampChannel;
 			sc.sizeM = 2.0f * reach;
 			sc.heightM = e.stampHeight;
 			sc.falloff = reach > 0.0f ? std::clamp(e.falloff / reach, 0.0f, 1.0f) : 0.0f;

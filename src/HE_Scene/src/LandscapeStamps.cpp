@@ -59,7 +59,9 @@ std::vector<LandscapeStamp> landscapeStampsOfWorld(HorizonWorld& world, ContentM
 	for (auto [e, tf, sc] : world.registry().view<TransformComponent, LandscapeStampComponent>().each())
 	{
 		if (!stampHasSource(sc)) continue;
-		const std::string key = stampSourceKey(sc, content);
+		const std::string source = stampSourceKey(sc, content);
+		const int channel = std::clamp(sc.channel, 0, 4);
+		const std::string key = source + "|" + std::to_string(channel);   // one picture per source AND channel
 		auto it = images.find(key);
 		if (it == images.end())
 		{
@@ -70,14 +72,14 @@ std::vector<LandscapeStamp> landscapeStampsOfWorld(HorizonWorld& world, ContentM
 				std::vector<uint16_t> grey;
 				uint32_t w = 0, h = 0;
 				std::string error;
-				if (TerrainHeightmap::readGrey16(key, grey, w, h, error) && w >= 1 && h >= 1)
+				if (TerrainHeightmap::readGrey16(source, grey, w, h, error, channel == 4 ? -1 : channel) && w >= 1 && h >= 1)
 				{
 					auto img = std::make_shared<std::vector<float>>(grey.size());
 					for (size_t i = 0; i < grey.size(); ++i) (*img)[i] = static_cast<float>(grey[i]) / 65535.0f;
 					made = { std::move(img), static_cast<int>(w), static_cast<int>(h) };
 				}
 				else
-					HE_LOG_WARN(Scene, "Landscape stamp: heightmap file '%s' cannot be read (%s); the stamp does nothing", key.c_str(), error.c_str());
+					HE_LOG_WARN(Scene, "Landscape stamp: heightmap file '%s' cannot be read (%s); the stamp does nothing", source.c_str(), error.c_str());
 			}
 			else
 			{
@@ -88,7 +90,16 @@ std::vector<LandscapeStamp> landscapeStampsOfWorld(HorizonWorld& world, ContentM
 				    && t->data.size() >= static_cast<size_t>(t->width) * t->height * t->channels)
 				{
 					auto img = std::make_shared<std::vector<float>>(static_cast<size_t>(t->width) * t->height);
-					for (size_t i = 0; i < img->size(); ++i) (*img)[i] = static_cast<float>(t->data[i * t->channels]) / 255.0f;
+					const size_t C = t->channels;
+					for (size_t i = 0; i < img->size(); ++i)
+					{
+						const uint8_t* p = &t->data[i * C];
+						float v;
+						if (channel == 4) v = C >= 3 ? 0.2126f * p[0] + 0.7152f * p[1] + 0.0722f * p[2] : static_cast<float>(p[0]);   // the grey value
+						else if (channel == 3) v = (C == 2 || C == 4) ? static_cast<float>(p[C - 1]) : 255.0f;                        // no alpha: white
+						else v = static_cast<float>(p[C >= 3 ? static_cast<size_t>(channel) : 0]);                                    // a grey texture: its grey
+						(*img)[i] = v / 255.0f;
+					}
 					made = { std::move(img), static_cast<int>(t->width), static_cast<int>(t->height) };
 				}
 				else
@@ -127,6 +138,7 @@ size_t LandscapeStampSync::sync(HorizonWorld& world, LandscapeRuntime& runtime, 
 		const Placed p = place(world, e, sc);
 		mix(&p.x, sizeof(p.x)); mix(&p.z, sizeof(p.z));
 		mix(sc.heightmapFile.data(), sc.heightmapFile.size());
+		mix(&sc.channel, sizeof(sc.channel));
 		const float f[5] = { p.sizeX, p.sizeZ, p.yaw, p.heightM, p.falloff };
 		mix(f, sizeof(f));
 		mix(&sc.textureId, sizeof(sc.textureId));

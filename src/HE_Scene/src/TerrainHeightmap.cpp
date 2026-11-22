@@ -281,7 +281,7 @@ Result importFile(TerrainComponent& tc, const std::string& path, const Options& 
     return r;
 }
 
-bool readGrey16(const std::string& path, std::vector<uint16_t>& out, uint32_t& width, uint32_t& height, std::string& error)
+bool readGrey16(const std::string& path, std::vector<uint16_t>& out, uint32_t& width, uint32_t& height, std::string& error, int channel)
 {
     out.clear();
     width = height = 0;
@@ -329,6 +329,19 @@ bool readGrey16(const std::string& path, std::vector<uint16_t>& out, uint32_t& w
     src.bytesPerChannel = is16 ? 2u : 1u;
     const GreyReader grey{ src };
     out.resize(static_cast<size_t>(w) * h);
+    if (channel >= 0)
+    {
+        // One channel as it is stored. 1 = grey, 2 = grey + alpha, 3 = RGB, 4 = RGBA.
+        const bool alpha = channel >= 3;
+        const int  c = alpha ? ((ch == 2 || ch == 4) ? ch - 1 : -1) : (ch >= 3 ? channel : 0);
+        for (size_t i = 0; i < out.size(); ++i)
+        {
+            if (c < 0) { out[i] = 65535; continue; }
+            const size_t at = i * static_cast<size_t>(ch) + static_cast<size_t>(c);
+            out[i] = is16 ? static_cast<const uint16_t*>(pixels)[at] : static_cast<uint16_t>(static_cast<const uint8_t*>(pixels)[at] * 257);
+        }
+    }
+    else
     for (int y = 0; y < h; ++y)
         for (int x = 0; x < w; ++x)
             out[static_cast<size_t>(y) * w + x] = static_cast<uint16_t>(std::lround(std::clamp(grey(static_cast<uint32_t>(x), static_cast<uint32_t>(y)), 0.0f, 1.0f) * 65535.0f));

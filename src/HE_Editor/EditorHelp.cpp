@@ -135,6 +135,14 @@ namespace
 	{ "Tile Landscape/Browse Heightmap...", "",
 	  "Opens a file dialog for the Stamp tool's heightmap file.",
 	  "", "editor#landscape-mode" },
+	{ "Landscape Stamp/Channel", "",
+	  "Which channel of the texture or file is the height: red, green, blue, alpha, or the grey value of the colour "
+	  "(Luminance). One packed texture can so hold up to four different stamps. A grey picture gives its grey for red, green "
+	  "and blue; a picture without an alpha channel is white (full height) for Alpha.",
+	  "", "scenes#terrain" },
+	{ "Tile Landscape/Stamp Channel", "",
+	  "The channel of the heightmap the next stamp placed by the Stamp tool reads: red, green, blue, alpha or the grey value.",
+	  "", "editor#landscape-mode" },
 	{ "Landscape Stamp/Size", "",
 	  "Edge length of the stamp's square footprint at scale 1. The entity's X "
 	  "and Z scale stretch it.",
