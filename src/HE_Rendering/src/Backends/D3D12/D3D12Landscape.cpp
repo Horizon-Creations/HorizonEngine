@@ -94,6 +94,15 @@ struct D3D12Landscape::Impl
 	UINT                             srvInc = 0;
 
 	Image                            images[d3dls::kImageCount];   // tile heights, slot table, coarse heights, 3 x tile weights, 3 x coarse weights
+	// The baked far image (LandscapeRenderStatic::farMips): its own resource, since its mip count varies with the world (every image
+	// above has one level). Made once per generation, uploaded directly through the ring below (farPending marks a copy still owed to it).
+	ComPtr<ID3D12Resource>           farTex;
+	std::vector<D3D12_PLACED_SUBRESOURCE_FOOTPRINT> farFp;
+	std::vector<UINT>                farRows;
+	std::vector<UINT64>              farRowBytes;
+	UINT64                           farTotal = 0;
+	bool                             farPending = false;   // this generation made farTex but has not copied its bytes into it yet
+	bool                             farPresent = false;   // farTex holds a real image (set once the copy above is recorded)
 	ComPtr<ID3D12Resource>           indices;
 	D3D12_INDEX_BUFFER_VIEW          ibv{};
 	ComPtr<ID3D12Resource>           globals;
@@ -113,6 +122,8 @@ struct D3D12Landscape::Impl
 	void destroyImages()
 	{
 		for (Image& im : images) im = Image{};
+		farTex.Reset();
+		farFp.clear(); farRows.clear(); farRowBytes.clear(); farTotal = 0; farPending = false; farPresent = false;
 		indices.Reset();
 		ibv = D3D12_INDEX_BUFFER_VIEW{};
 		table.clear();
@@ -182,6 +193,24 @@ struct D3D12Landscape::Impl
 		device->CreateShaderResourceView(res, &sv, cpuSlot(set, slot));
 	}
 
+	// The baked far image's slot (t44, kFarIndex): a plain Texture2D with its real mip chain, not an array like writeBorrowed's. Null
+	// when the world has none, same as the borrowed arrays (the shader does not read it unless texMaps.z says so).
+	void writeFar(unsigned set, ID3D12Resource* res)
+	{
+		D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
+		sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+		sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+		sv.Format = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+		sv.Texture2D.MipLevels = 1;
+		if (res)
+		{
+			const D3D12_RESOURCE_DESC d = res->GetDesc();
+			sv.Format = d.Format;
+			sv.Texture2D.MipLevels = d.MipLevels;
+		}
+		device->CreateShaderResourceView(res, &sv, cpuSlot(set, d3dls::kFarIndex));
+	}
+
 	ID3D12PipelineState* psoFor(DXGI_FORMAT fmt)
 	{
 		for (auto& [f, p] : psos)
@@ -230,8 +259,9 @@ bool D3D12Landscape::init(ID3D12Device* device, std::function<void()> waitIdle, 
 		return false;
 	}
 
-	// root signature: 0 = b12 (the frame's constants, a root CBV), 1 = b13 (the patch, twelve root constants), 2 = t32-t43 (the images),
-	// static sampler s13 (the albedo/normal/mask arrays: linear, repeat, mips, the only one)
+	// root signature: 0 = b12 (the frame's constants, a root CBV), 1 = b13 (the patch, twelve root constants), 2 = t32-t44 (the images,
+	// t44 the baked far image), static samplers s13 (the albedo/normal/mask arrays: linear, repeat, mips) and s14 (the far image: linear,
+	// clamp-to-edge, mips — its uv does not repeat)
 	D3D12_DESCRIPTOR_RANGE range{};
 	range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
 	range.NumDescriptors = d3dls::kSrvCount;
@@ -256,11 +286,19 @@ bool D3D12Landscape::init(ID3D12Device* device, std::function<void()> waitIdle, 
 	smp.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
 	smp.ShaderRegister = d3dls::kSamplerReg;
 	smp.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+	D3D12_STATIC_SAMPLER_DESC farSmp{};   // the baked far image's own: linear + mipped, clamped (its uv does not repeat)
+	farSmp.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+	farSmp.AddressU = farSmp.AddressV = farSmp.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+	farSmp.MaxLOD = D3D12_FLOAT32_MAX;
+	farSmp.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
+	farSmp.ShaderRegister = d3dls::kFarSamplerReg;
+	farSmp.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+	D3D12_STATIC_SAMPLER_DESC smps[2] = { smp, farSmp };
 	D3D12_ROOT_SIGNATURE_DESC rsd{};
 	rsd.NumParameters = 3;
 	rsd.pParameters = params;
-	rsd.NumStaticSamplers = 1;
-	rsd.pStaticSamplers = &smp;
+	rsd.NumStaticSamplers = 2;
+	rsd.pStaticSamplers = smps;
 	ComPtr<ID3DBlob> rsBlob, rsErr;
 	if (FAILED(D3D12SerializeRootSignature(&rsd, D3D_ROOT_SIGNATURE_VERSION_1, rsBlob.GetAddressOf(), rsErr.GetAddressOf()))
 	    || FAILED(device->CreateRootSignature(0, rsBlob->GetBufferPointer(), rsBlob->GetBufferSize(), IID_PPV_ARGS(&m.rootSig))))
@@ -284,6 +322,7 @@ bool D3D12Landscape::init(ID3D12Device* device, std::function<void()> waitIdle, 
 		m.writeBorrowed(s, d3dls::kImageCount, nullptr);
 		m.writeBorrowed(s, d3dls::kImageCount + 1, nullptr);
 		m.writeBorrowed(s, d3dls::kImageCount + 2, nullptr);
+		m.writeFar(s, nullptr);
 	}
 
 	m.globals = makeUploadBuffer(device, m.globalsStride * kGlobalsSlots, &m.globalsMapped);
@@ -370,6 +409,36 @@ void D3D12Landscape::upload(ID3D12GraphicsCommandList* cl, HE::LandscapeRenderFr
 			if (have) jobs.push_back({ 6 + p, 0, w.coarseWeights[p].data() });
 			else { scratch.emplace_back(static_cast<size_t>(cw) * static_cast<size_t>(ch) * 4, 0); jobs.push_back({ 6 + p, 0, scratch.back().data() }); }
 		}
+
+		// The baked far image: its own resource (not `good`-gated — a bad one leaves the world without it, like GL/Vulkan/D3D11, instead
+		// of failing the whole landscape). Copied below, through the same ring as the jobs above, once farPending is seen.
+		if (w.farW > 0 && w.farH > 0 && !w.farMips.empty())
+		{
+			const UINT mips = static_cast<UINT>(w.farMips.size());
+			D3D12_HEAP_PROPERTIES fhp{};
+			fhp.Type = D3D12_HEAP_TYPE_DEFAULT;
+			D3D12_RESOURCE_DESC frd{};
+			frd.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+			frd.Width = static_cast<UINT64>(w.farW);
+			frd.Height = static_cast<UINT>(w.farH);
+			frd.DepthOrArraySize = 1;
+			frd.MipLevels = static_cast<UINT16>(mips);
+			frd.Format = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+			frd.SampleDesc.Count = 1;
+			frd.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+			if (SUCCEEDED(m.device->CreateCommittedResource(&fhp, D3D12_HEAP_FLAG_NONE, &frd, kSrvState, nullptr, IID_PPV_ARGS(&m.farTex))))
+			{
+				m.farFp.resize(mips);
+				m.farRows.resize(mips);
+				m.farRowBytes.resize(mips);
+				m.device->GetCopyableFootprints(&frd, 0, mips, 0, m.farFp.data(), m.farRows.data(), m.farRowBytes.data(), &m.farTotal);
+				m.farPending = true;
+				m.farPresent = true;
+			}
+			else { m.farTex.Reset(); ++m.stats.rejected; }
+		}
+		for (unsigned s = 0; s < kSets; ++s) m.writeFar(s, m.farTex.Get());
+
 		m.world = f.world;
 		++m.stats.generations;
 	}
@@ -408,6 +477,8 @@ void D3D12Landscape::upload(ID3D12GraphicsCommandList* cl, HE::LandscapeRenderFr
 		total += alignUp(m.images[j.image].total, D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT);
 		touched[j.image] = true;
 	}
+	// The far image's own copy, below: not one of `jobs` (its footprints are per-mip, not per-array-slot), but the same ring.
+	if (m.farPending) total += alignUp(m.farTotal, D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT) + D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT;
 	Impl::Ring& ring = m.ring[m.ringNext++ % kRing];
 	if (ring.capacity < total)
 	{
@@ -419,7 +490,7 @@ void D3D12Landscape::upload(ID3D12GraphicsCommandList* cl, HE::LandscapeRenderFr
 		ring.capacity = cap;
 	}
 
-	D3D12_RESOURCE_BARRIER bars[d3dls::kImageCount];
+	D3D12_RESOURCE_BARRIER bars[d3dls::kImageCount + 1];
 	UINT nb = 0;
 	for (unsigned i = 0; i < d3dls::kImageCount; ++i)
 	{
@@ -428,6 +499,16 @@ void D3D12Landscape::upload(ID3D12GraphicsCommandList* cl, HE::LandscapeRenderFr
 		b = D3D12_RESOURCE_BARRIER{};
 		b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
 		b.Transition.pResource = m.images[i].res.Get();
+		b.Transition.StateBefore = kSrvState;
+		b.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
+		b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+	}
+	if (m.farPending)
+	{
+		D3D12_RESOURCE_BARRIER& b = bars[nb++];
+		b = D3D12_RESOURCE_BARRIER{};
+		b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+		b.Transition.pResource = m.farTex.Get();
 		b.Transition.StateBefore = kSrvState;
 		b.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
 		b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
@@ -457,6 +538,39 @@ void D3D12Landscape::upload(ID3D12GraphicsCommandList* cl, HE::LandscapeRenderFr
 		cursor += im.total;
 	}
 
+	if (m.farPending)
+	{
+		cursor = alignUp(cursor, D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT);
+		const UINT64 farBase = cursor;
+		bool sizeOk = true;
+		for (UINT l = 0; l < static_cast<UINT>(m.farFp.size()); ++l)
+		{
+			sizeOk = w.farMips[l].size() == static_cast<size_t>(m.farRowBytes[l]) * m.farRows[l];
+			if (!sizeOk) break;
+			uint8_t* dst = ring.mapped + farBase + m.farFp[l].Offset;
+			const uint8_t* src = w.farMips[l].data();
+			for (UINT y = 0; y < m.farRows[l]; ++y)
+				std::memcpy(dst + static_cast<size_t>(y) * m.farFp[l].Footprint.RowPitch, src + static_cast<size_t>(y) * m.farRowBytes[l], static_cast<size_t>(m.farRowBytes[l]));
+			D3D12_TEXTURE_COPY_LOCATION to{};
+			to.pResource = m.farTex.Get();
+			to.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+			to.SubresourceIndex = l;
+			D3D12_TEXTURE_COPY_LOCATION from{};
+			from.pResource = ring.res.Get();
+			from.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+			from.PlacedFootprint = m.farFp[l];
+			from.PlacedFootprint.Offset += farBase;
+			cl->CopyTextureRegion(&to, 0, 0, 0, &from, nullptr);
+		}
+		if (!sizeOk)   // a mip of the wrong size: leave the world without a far image, like OpenGLLandscape::makeFar / the others
+		{
+			++m.stats.rejected;
+			m.farPresent = false;
+			for (unsigned s = 0; s < kSets; ++s) m.writeFar(s, nullptr);
+		}
+		m.farPending = false;
+	}
+
 	for (UINT i = 0; i < nb; ++i) std::swap(bars[i].Transition.StateBefore, bars[i].Transition.StateAfter);
 	cl->ResourceBarrier(nb, bars);
 }
@@ -473,7 +587,7 @@ void D3D12Landscape::draw(ID3D12GraphicsCommandList* cl, const HE::LandscapeRend
 
 	d3dls::Globals g;
 	d3dls::fillGlobals(g, f, viewProj, shading.sunDir, shading.sunColor, shading.ambient, shading.albedoArray != nullptr,
-	                   shading.normalArray != nullptr, shading.maskArray != nullptr);
+	                   shading.normalArray != nullptr, shading.maskArray != nullptr, m.farPresent);
 	const unsigned slot = m.globalsNext++ % kGlobalsSlots;
 	std::memcpy(m.globalsMapped + static_cast<size_t>(slot) * m.globalsStride, &g, sizeof(g));
 	const unsigned set = m.setNext++ % kSets;

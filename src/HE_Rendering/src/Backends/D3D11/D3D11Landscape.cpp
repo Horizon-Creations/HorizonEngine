@@ -24,11 +24,14 @@ struct D3D11Landscape::Impl
 	ComPtr<ID3D11RasterizerState>   raster;
 	ComPtr<ID3D11BlendState>        blend;
 	ComPtr<ID3D11SamplerState>      sampler;   // the albedo/normal/mask arrays': linear, repeat, mips
+	ComPtr<ID3D11SamplerState>      farSampler; // the baked far image's own: linear, clamp-to-edge, mips (its uv does not repeat)
 	ComPtr<ID3D11Buffer>            globalsCB, patchCB, indices;
 
 	// the nine images, in the register order of kLandscapeHLSL (t32 ..): tile heights, slot table, coarse heights, 3 x tile weights, 3 x coarse weights
 	ComPtr<ID3D11Texture2D>          tex[d3dls::kSrvCount];
 	ComPtr<ID3D11ShaderResourceView> srv[d3dls::kSrvCount];
+	ComPtr<ID3D11Texture2D>          farTex;   // the baked far image, with its real mip chain (every image above has one level)
+	ComPtr<ID3D11ShaderResourceView> farSrv;
 	std::vector<uint16_t> table;      // CPU mirror of the slot table: a change is one UpdateSubresource of the whole (small) image
 	std::shared_ptr<const LandscapeRenderStatic> world;   // what the images were made for
 	Stats stats;
@@ -37,9 +40,46 @@ struct D3D11Landscape::Impl
 	void destroyImages()
 	{
 		for (unsigned i = 0; i < d3dls::kSrvCount; ++i) { srv[i].Reset(); tex[i].Reset(); }
+		farSrv.Reset();
+		farTex.Reset();
 		indices.Reset();
 		table.clear();
 		world.reset();
+	}
+
+	// LandscapeRenderStatic::farMips, when the world has one: an IMMUTABLE texture with every mip level given at creation (unlike the
+	// nine images above, which are streamed per slot after creation). A level of the wrong size leaves the world without a far image,
+	// like OpenGLLandscape::makeFar / MetalLandscape's / VulkanLandscape::makeFar, instead of failing the whole landscape.
+	bool makeFar(const LandscapeRenderStatic& w)
+	{
+		farSrv.Reset();
+		farTex.Reset();
+		if (w.farW <= 0 || w.farH <= 0 || w.farMips.empty()) return true;
+		const UINT mips = static_cast<UINT>(w.farMips.size());
+		std::vector<D3D11_SUBRESOURCE_DATA> init(mips);
+		for (UINT l = 0; l < mips; ++l)
+		{
+			const int lw = std::max(1, w.farW >> l), lh = std::max(1, w.farH >> l);
+			if (w.farMips[l].size() != static_cast<size_t>(lw) * static_cast<size_t>(lh) * 4) return false;
+			init[l].pSysMem = w.farMips[l].data();
+			init[l].SysMemPitch = static_cast<UINT>(lw) * 4;
+		}
+		D3D11_TEXTURE2D_DESC d{};
+		d.Width = static_cast<UINT>(w.farW);
+		d.Height = static_cast<UINT>(w.farH);
+		d.MipLevels = mips;
+		d.ArraySize = 1;
+		d.Format = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+		d.SampleDesc.Count = 1;
+		d.Usage = D3D11_USAGE_IMMUTABLE;
+		d.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+		if (FAILED(device->CreateTexture2D(&d, init.data(), farTex.GetAddressOf()))) { farTex.Reset(); return false; }
+		D3D11_SHADER_RESOURCE_VIEW_DESC v{};
+		v.Format = d.Format;
+		v.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+		v.Texture2D.MipLevels = mips;
+		if (FAILED(device->CreateShaderResourceView(farTex.Get(), &v, farSrv.GetAddressOf()))) { farTex.Reset(); return false; }
+		return true;
 	}
 
 	bool makeImage(unsigned i, DXGI_FORMAT fmt, int w, int h, int layers, const void* data, UINT rowPitch)
@@ -109,13 +149,16 @@ struct StateGuard
 	UINT                            sampleMask = 0xFFFFFFFF;
 	ComPtr<ID3D11Buffer>            vsCB[2], psCB;
 	ComPtr<ID3D11ShaderResourceView> vsSrv[d3dls::kSrvCount], psSrv[d3dls::kSrvCount];
-	ComPtr<ID3D11SamplerState>       psSampler;
+	ComPtr<ID3D11SamplerState>       psSampler, psFarSampler;
 
 	explicit StateGuard(ID3D11DeviceContext* c) : ctx(c)
 	{
 		ID3D11SamplerState* smp = nullptr;
 		ctx->PSGetSamplers(d3dls::kSamplerReg, 1, &smp);
 		psSampler.Attach(smp);
+		ID3D11SamplerState* fsmp = nullptr;
+		ctx->PSGetSamplers(d3dls::kFarSamplerReg, 1, &fsmp);
+		psFarSampler.Attach(fsmp);
 		ctx->VSGetShader(vs.GetAddressOf(), nullptr, nullptr);
 		ctx->PSGetShader(ps.GetAddressOf(), nullptr, nullptr);
 		ctx->IAGetInputLayout(layout.GetAddressOf());
@@ -158,6 +201,8 @@ struct StateGuard
 		ctx->PSSetShaderResources(d3dls::kFirstSrv, d3dls::kSrvCount, p);
 		ID3D11SamplerState* smp = psSampler.Get();
 		ctx->PSSetSamplers(d3dls::kSamplerReg, 1, &smp);
+		ID3D11SamplerState* fsmp = psFarSampler.Get();
+		ctx->PSSetSamplers(d3dls::kFarSamplerReg, 1, &fsmp);
 	}
 };
 } // namespace
@@ -213,6 +258,16 @@ bool D3D11Landscape::init(ID3D11Device* device, std::string* error)
 		if (error) *error = "landscape: sampler state";
 		return false;
 	}
+	D3D11_SAMPLER_DESC fsd{};   // the baked far image: linear + mipped, clamped (its uv does not repeat)
+	fsd.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+	fsd.AddressU = fsd.AddressV = fsd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+	fsd.ComparisonFunc = D3D11_COMPARISON_NEVER;
+	fsd.MaxLOD = D3D11_FLOAT32_MAX;
+	if (FAILED(device->CreateSamplerState(&fsd, m.farSampler.GetAddressOf())))
+	{
+		if (error) *error = "landscape: far sampler state";
+		return false;
+	}
 	D3D11_BUFFER_DESC cb{};
 	cb.Usage = D3D11_USAGE_DYNAMIC;
 	cb.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
@@ -238,7 +293,8 @@ void D3D11Landscape::shutdown()
 {
 	Impl& m = *m_impl;
 	m.destroyImages();
-	m.vs.Reset(); m.ps.Reset(); m.depth.Reset(); m.raster.Reset(); m.blend.Reset(); m.sampler.Reset(); m.globalsCB.Reset(); m.patchCB.Reset();
+	m.vs.Reset(); m.ps.Reset(); m.depth.Reset(); m.raster.Reset(); m.blend.Reset(); m.sampler.Reset(); m.farSampler.Reset();
+	m.globalsCB.Reset(); m.patchCB.Reset();
 	m.device = nullptr;
 	m.ok = false;
 }
@@ -291,6 +347,7 @@ void D3D11Landscape::upload(ID3D11DeviceContext* ctx, HE::LandscapeRenderFrame& 
 			f.tableUpdates.clear();
 			return;
 		}
+		if (!m.makeFar(w)) ++m.stats.rejected;   // not fatal to the landscape: the world just draws without one (see makeFar)
 		m.world = f.world;
 		++m.stats.generations;
 	}
@@ -334,7 +391,7 @@ void D3D11Landscape::draw(ID3D11DeviceContext* ctx, const HE::LandscapeRenderFra
 
 	d3dls::Globals g;
 	d3dls::fillGlobals(g, f, viewProj, shading.sunDir, shading.sunColor, shading.ambient, shading.albedoArray != nullptr,
-	                   shading.normalArray != nullptr, shading.maskArray != nullptr);
+	                   shading.normalArray != nullptr, shading.maskArray != nullptr, m.farSrv != nullptr);
 	D3D11_MAPPED_SUBRESOURCE mapped{};
 	if (FAILED(ctx->Map(m.globalsCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) return;
 	std::memcpy(mapped.pData, &g, sizeof(g));
@@ -346,8 +403,12 @@ void D3D11Landscape::draw(ID3D11DeviceContext* ctx, const HE::LandscapeRenderFra
 	views[d3dls::kImageCount] = shading.albedoArray;
 	views[d3dls::kImageCount + 1] = shading.normalArray;
 	views[d3dls::kImageCount + 2] = shading.maskArray;
+	// t44: the baked far image, or nothing (the shader reads it only where texMaps.z says so)
+	views[d3dls::kFarIndex] = m.farSrv.Get();
 	ID3D11SamplerState* smp = m.sampler.Get();
 	ctx->PSSetSamplers(d3dls::kSamplerReg, 1, &smp);
+	ID3D11SamplerState* farSmp = m.farSampler.Get();
+	ctx->PSSetSamplers(d3dls::kFarSamplerReg, 1, &farSmp);
 	ctx->VSSetShader(m.vs.Get(), nullptr, 0);
 	ctx->PSSetShader(m.ps.Get(), nullptr, 0);
 	ctx->IASetInputLayout(nullptr);   // the grid comes from SV_VertexID

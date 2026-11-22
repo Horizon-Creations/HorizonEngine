@@ -145,16 +145,17 @@ TEST_CASE("landscape shader source: the HLSL port has every GLSL uniform as a me
 		++members;
 	}
 	CHECK(members == 17);
-	// entry points (D3D11Landscape / D3D12Landscape compile them by name), the two blocks and the twelve images: b12/b13, t32-t43, nothing else
+	// entry points (D3D11Landscape / D3D12Landscape compile them by name), the two blocks and the thirteen images: b12/b13, t32-t44, nothing else
 	CHECK(hlsl.find("VSMain(uint vid : SV_VertexID)") != std::string::npos);
 	CHECK(hlsl.find("float4 PSMain(") != std::string::npos);
 	CHECK(hlsl.find("cbuffer LsGlobals : register(b12)") != std::string::npos);
 	CHECK(hlsl.find("cbuffer LsPatch : register(b13)") != std::string::npos);
-	for (int t = 32; t <= 43; ++t) CHECK(hlsl.find("register(t" + std::to_string(t) + ")") != std::string::npos);
-	CHECK(hlsl.find("register(t44)") == std::string::npos);
+	for (int t = 32; t <= 44; ++t) CHECK(hlsl.find("register(t" + std::to_string(t) + ")") != std::string::npos);
+	CHECK(hlsl.find("register(t45)") == std::string::npos);
 	CHECK(hlsl.find("register(t31)") == std::string::npos);    // nothing in the range the D3D11 renderer and its graph materials bind
-	CHECK(hlsl.find("register(s13)") != std::string::npos);     // the albedo/normal/mask arrays' sampler, the only one (D3D11Landscape and D3D12Landscape make it)
-	CHECK(hlsl.find("register(s", hlsl.find("register(s13)") + 1) == std::string::npos);
+	CHECK(hlsl.find("register(s13)") != std::string::npos);     // the albedo/normal/mask arrays' sampler (D3D11Landscape and D3D12Landscape make it)
+	CHECK(hlsl.find("register(s14)") != std::string::npos);     // the far image's own sampler (clamp-to-edge, unlike s13's repeat)
+	CHECK(hlsl.find("register(s", hlsl.find("register(s14)") + 1) == std::string::npos);
 	// the same distance for the morph as the GLSL: horizontal plus the slab term, never the vertex's own height
 	const size_t at = hlsl.find("float d = sqrt(");
 	REQUIRE(at != std::string::npos);

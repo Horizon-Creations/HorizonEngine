@@ -646,7 +646,9 @@ fragment LsReflOut fragmentViewPosMrt(LsVertexOut in [[stage_in]], constant LsGl
 //     sampled (s13: linear, repeat, mips; a D3D12 static sampler, a D3D11 sampler state, the only one — normal and mask reuse it, like the
 //     GLSL/Vulkan/Metal ports). All three are sampled unconditionally, before the discard and outside any branch (a gradient needs uniform
 //     flow), and `tex.y` / `texMaps.x` / `texMaps.y` pick between them and the flat colours / geometric normal / no AO. SRVs above t31 on
-//     purpose: the D3D11 renderer and the graph materials use t0-t26 and do not rebind them after the landscape draw
+//     purpose: the D3D11 renderer and the graph materials use t0-t26 and do not rebind them after the landscape draw. t44 is the baked far
+//     image (LandscapeRenderStatic::farMips), SampleGrad'd with its own gradient (also taken unconditionally) and its own sampler, s14
+//     (linear, clamp-to-edge, mips: its uv does not repeat like the group arrays'); read when `texMaps.z` is 1 and the slot is 65535
 //   * `patch` is a keyword in HLSL, the per-patch block's member is lsPatch
 //   * D3D clip depth is 0..1 but the main scene pass rasterises the plain GL view-projection (kD3DClipFix is NOT applied there, like
 //     Metal): the landscape takes the same matrix, so its depth is the GL ndc z, 0..1 for the half of the frustum that is not clipped
@@ -667,7 +669,7 @@ cbuffer LsGlobals : register(b12)
     float4   sunColor;
     float4   ambient;
     float4   tex;            // x = 1 / metres of one texture tile, y = 1 when the albedo array is bound, zw = fract(origin.xz * x)
-    float4   texMaps;        // x = 1 when the normal array is bound, y = 1 when the mask array is bound
+    float4   texMaps;        // x = 1 when the normal array is bound, y = 1 when the mask array is bound, z = 1 when the far image is bound
 };
 
 cbuffer LsPatch : register(b13)
@@ -689,7 +691,9 @@ Texture2D<float4>      coarseW2      : register(t40);
 Texture2DArray<float4> albedoArr     : register(t41);
 Texture2DArray<float4> normalArr     : register(t42);   // tangent space, OpenGL convention: green = +V = +z in the world
 Texture2DArray<float4> maskArr       : register(t43);   // R = AO, G = roughness, B = height; only AO is used yet
+Texture2D<float4>      farTex        : register(t44);    // sRGB8 + A, the baked far image over the whole world, mipped; read when texMaps.z is 1
 SamplerState           albedoSmp     : register(s13);    // shared by all three arrays, like the GLSL/Vulkan/Metal ports
+SamplerState           farSmp        : register(s14);    // the far image's own sampler (linear, clamp-to-edge, mips: its uv does not repeat)
 
 struct LsVertexOut
 {
@@ -782,6 +786,9 @@ float4 PSMain(LsVertexOut pin) : SV_Target
     float mk2 = maskArr.Sample(albedoSmp, float3(uv, 2.0)).r;
     float mk3 = maskArr.Sample(albedoSmp, float3(uv, 3.0)).r;
     float2 abs2 = pin.worldRel.xz + origin.xz;
+    // The far image's gradient, taken unconditionally like the array samples above: a SampleGrad inside the branch below would be undefined.
+    float2 fuv = abs2 / world.xy;
+    float2 fdx = ddx(fuv), fdy = ddy(fuv);
     if (abs2.x > world.x || abs2.y > world.y || abs2.x < 0.0 || abs2.y < 0.0) discard;
 
     int2 tl = int2(floor(abs2 / world.z));
@@ -789,52 +796,64 @@ float4 PSMain(LsVertexOut pin) : SV_Target
     int mask = int(heightInfo.w) - 1;
     uint slot = slotTable.Load(int3(tl.x & mask, tl.y & mask, 0)).r;
 
-    float4 w0, w1, w2;
-    if (slot == 65535u)
+    float3 n = normalize(cross(dx, dy));
+    if (n.y < 0.0) n = -n;
+
+    float3 albedo;
+    float ao = 1.0;
+    if (texMaps.z > 0.5 && slot == 65535u)
     {
-        // A tile that is not in the atlas (the coarse levels, or one still streaming): the coarse world's weights, one texel per 128 m.
-        uint cw, ch;
-        coarseW0.GetDimensions(cw, ch);
-        int2 cs = int2(int(cw), int(ch));
-        int2 c = clamp(int2(floor(abs2 / world.xy * float2(cs))), int2(0, 0), cs - int2(1, 1));
-        w0 = coarseW0.Load(int3(c, 0));
-        w1 = coarseW1.Load(int3(c, 0));
-        w2 = coarseW2.Load(int3(c, 0));
+        // The baked far image: one filtered access instead of the layer blend (see the GLSL).
+        float4 fc = farTex.SampleGrad(farSmp, fuv, fdx, fdy);
+        albedo = fc.rgb;
+        ao = fc.a;
     }
     else
     {
-        float texel = world.z / float(tile.y);
-        int2 t = clamp(int2(floor((abs2 - float2(tl) * world.z) / texel)), int2(0, 0), int2(tile.y - 1, tile.y - 1));
-        int4 at = int4(t, int(slot), 0);
-        w0 = tileW0.Load(at);
-        w1 = tileW1.Load(at);
-        w2 = tileW2.Load(at);
-    }
-    float3 c0 = layerColor[0].rgb, c1 = layerColor[1].rgb, c2 = layerColor[2].rgb, c3 = layerColor[3].rgb;
-    if (tex.y > 0.5)
-    {
-        c0 = t0; c1 = t1; c2 = t2; c3 = t3;
-    }
-    float3 albedo = w0.x * c0 + w0.y * c1 + w0.z * c2 + w0.w * c3
-                  + w1.x * layerColor[4].rgb + w1.y * layerColor[5].rgb + w1.z * layerColor[6].rgb + w1.w * layerColor[7].rgb
-                  + w2.x * layerColor[8].rgb + w2.y * layerColor[9].rgb + w2.z * layerColor[10].rgb + w2.w * layerColor[11].rgb;
-    float3 n = normalize(cross(dx, dy));
-    if (n.y < 0.0) n = -n;
-    // Normal and AO of layers 0-3 from their maps, in the same world coordinates (see the GLSL); the other layers contribute a flat normal and no occlusion.
-    float ao = 1.0;
-    if (tex.y > 0.5)
-    {
-        float wsum = w0.x + w0.y + w0.z + w0.w;
-        if (texMaps.x > 0.5)
+        float4 w0, w1, w2;
+        if (slot == 65535u)
         {
-            float3 nm = float3(0.0, 0.0, 1.0) * (1.0 - wsum) + w0.x * nm0 + w0.y * nm1 + w0.z * nm2 + w0.w * nm3;
-            nm = normalize(nm);
-            float3 t = normalize(float3(1.0, 0.0, 0.0) - n * n.x);   // +u is +x, +v is +z
-            float3 b = cross(t, n);
-            n = normalize(t * nm.x + b * nm.y + n * nm.z);
+            // A tile that is not in the atlas (the coarse levels, or one still streaming): the coarse world's weights, one texel per 128 m.
+            uint cw, ch;
+            coarseW0.GetDimensions(cw, ch);
+            int2 cs = int2(int(cw), int(ch));
+            int2 c = clamp(int2(floor(abs2 / world.xy * float2(cs))), int2(0, 0), cs - int2(1, 1));
+            w0 = coarseW0.Load(int3(c, 0));
+            w1 = coarseW1.Load(int3(c, 0));
+            w2 = coarseW2.Load(int3(c, 0));
         }
-        if (texMaps.y > 0.5)
-            ao = (1.0 - wsum) + w0.x * mk0 + w0.y * mk1 + w0.z * mk2 + w0.w * mk3;
+        else
+        {
+            float texel = world.z / float(tile.y);
+            int2 t = clamp(int2(floor((abs2 - float2(tl) * world.z) / texel)), int2(0, 0), int2(tile.y - 1, tile.y - 1));
+            int4 at = int4(t, int(slot), 0);
+            w0 = tileW0.Load(at);
+            w1 = tileW1.Load(at);
+            w2 = tileW2.Load(at);
+        }
+        float3 c0 = layerColor[0].rgb, c1 = layerColor[1].rgb, c2 = layerColor[2].rgb, c3 = layerColor[3].rgb;
+        if (tex.y > 0.5)
+        {
+            c0 = t0; c1 = t1; c2 = t2; c3 = t3;
+        }
+        albedo = w0.x * c0 + w0.y * c1 + w0.z * c2 + w0.w * c3
+               + w1.x * layerColor[4].rgb + w1.y * layerColor[5].rgb + w1.z * layerColor[6].rgb + w1.w * layerColor[7].rgb
+               + w2.x * layerColor[8].rgb + w2.y * layerColor[9].rgb + w2.z * layerColor[10].rgb + w2.w * layerColor[11].rgb;
+        // Normal and AO of layers 0-3 from their maps, in the same world coordinates (see the GLSL); the other layers contribute a flat normal and no occlusion.
+        if (tex.y > 0.5)
+        {
+            float wsum = w0.x + w0.y + w0.z + w0.w;
+            if (texMaps.x > 0.5)
+            {
+                float3 nm = float3(0.0, 0.0, 1.0) * (1.0 - wsum) + w0.x * nm0 + w0.y * nm1 + w0.z * nm2 + w0.w * nm3;
+                nm = normalize(nm);
+                float3 t = normalize(float3(1.0, 0.0, 0.0) - n * n.x);   // +u is +x, +v is +z
+                float3 b = cross(t, n);
+                n = normalize(t * nm.x + b * nm.y + n * nm.z);
+            }
+            if (texMaps.y > 0.5)
+                ao = (1.0 - wsum) + w0.x * mk0 + w0.y * mk1 + w0.z * mk2 + w0.w * mk3;
+        }
     }
     float ndl = max(dot(n, normalize(sunDir.xyz)), 0.0);
     return float4(albedo * (ambient.xyz * ao + sunColor.xyz * ndl), 1.0);

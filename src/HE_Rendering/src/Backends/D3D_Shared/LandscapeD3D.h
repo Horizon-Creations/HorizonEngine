@@ -13,11 +13,14 @@
 namespace HE::d3dls
 {
 
-constexpr unsigned kFirstSrv = 32;   // t32 .. t43, above everything the D3D11 renderer and its graph materials bind
-constexpr unsigned kSrvCount = 12;   // tile heights, slot table, coarse heights, three tile weight pages, three coarse weight pages, the
-                                      // albedo/normal/mask arrays (not ours)
-constexpr unsigned kImageCount = 9;  // the images the landscape class owns: the first nine
-constexpr unsigned kSamplerReg = 13; // s13: the albedo/normal/mask arrays' sampler (linear, repeat, mips), the only one
+constexpr unsigned kFirstSrv = 32;   // t32 .. t44, above everything the D3D11 renderer and its graph materials bind
+constexpr unsigned kSrvCount = 13;   // tile heights, slot table, coarse heights, three tile weight pages, three coarse weight pages, the
+                                      // albedo/normal/mask arrays (not ours), and the baked far image (ours again, t44)
+constexpr unsigned kImageCount = 9;  // the images the landscape class owns outright, with one mip each: the first nine
+constexpr unsigned kFarIndex = kImageCount + 3;   // 12 (t44): the baked far image, after the borrowed albedo/normal/mask arrays; its own
+                                                   // slot because its mip count varies with the world, unlike the nine above
+constexpr unsigned kSamplerReg = 13;    // s13: the albedo/normal/mask arrays' sampler (linear, repeat, mips)
+constexpr unsigned kFarSamplerReg = 14; // s14: the far image's own sampler (linear, clamp-to-edge, mips: its uv does not repeat)
 constexpr unsigned kGlobalsReg = 12; // b12 (LsGlobals), b13 (LsPatch)
 constexpr unsigned kPatchReg = 13;
 constexpr int      kGridVerts = 65;  // the grid is (cells + 1)^2; the shader derives (i, j) from SV_VertexID with this
@@ -57,8 +60,9 @@ inline bool worldUsable(const HE::LandscapeRenderStatic& w)
 
 // `albedoBound` / `normalBound` / `maskBound`: the renderer resolved LandscapeRenderStatic::albedoArrayPath / normalArrayPath / maskArrayPath to a
 // real array (not null). The normal and mask arrays only count with the albedo array, like on GL, Vulkan and Metal.
+// `farBound`: the baked far image (LandscapeRenderStatic::farMips) was uploaded and is bound at farTex, independent of the albedo array.
 inline void fillGlobals(Globals& g, const HE::LandscapeRenderFrame& f, const glm::mat4& viewProj, const glm::vec3& sunDir, const glm::vec3& sunColor,
-                        const glm::vec3& ambient, bool albedoBound, bool normalBound, bool maskBound)
+                        const glm::vec3& ambient, bool albedoBound, bool normalBound, bool maskBound, bool farBound)
 {
 	const HE::LandscapeRenderStatic& w = *f.world;
 	g = Globals{};
@@ -88,6 +92,7 @@ inline void fillGlobals(Globals& g, const HE::LandscapeRenderFrame& f, const glm
 	g.tex[3] = static_cast<float>(f.uvOrigin.z * k - std::floor(f.uvOrigin.z * k));
 	g.texMaps[0] = on && normalBound && !w.normalArrayPath.empty() ? 1.0f : 0.0f;
 	g.texMaps[1] = on && maskBound && !w.maskArrayPath.empty() ? 1.0f : 0.0f;
+	g.texMaps[2] = farBound ? 1.0f : 0.0f;
 }
 
 inline void fillPatch(PatchData& d, const HE::LandscapeRenderPatch& p)
