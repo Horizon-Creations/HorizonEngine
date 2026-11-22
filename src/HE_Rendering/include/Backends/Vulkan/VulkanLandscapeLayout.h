@@ -33,6 +33,8 @@ struct alignas(16) Globals
 	float   ambient[4];          // 752  uAmbient
 	float   tex[4];              // 768  uTex      x = 1 / metres of one texture tile, y = 1 when the albedo array is bound, zw = fract(origin.xz * x)
 	float   texMaps[4];          // 784  uTexMaps  x = 1 when the normal array is bound, y = 1 when the mask array is bound
+	float   aux0[16];            // 800  uAux0     the passes besides the scene's: SSAO position = the view matrix
+	float   aux1[16];            // 864  uAux1
 };
 struct alignas(16) PatchPush
 {
@@ -44,9 +46,9 @@ static_assert(offsetof(Globals, cameraRel) == 64 && offsetof(Globals, world) == 
                   && offsetof(Globals, origin) == 112 && offsetof(Globals, tile) == 128 && offsetof(Globals, heightRect) == 144
                   && offsetof(Globals, coarseGrid) == 272 && offsetof(Globals, layerColor) == 528 && offsetof(Globals, sunDir) == 720
                   && offsetof(Globals, sunColor) == 736 && offsetof(Globals, ambient) == 752 && offsetof(Globals, tex) == 768
-                  && offsetof(Globals, texMaps) == 784,
+                  && offsetof(Globals, texMaps) == 784 && offsetof(Globals, aux0) == 800 && offsetof(Globals, aux1) == 864,
               "LsGlobals: the std140 block of the Vulkan prelude and this struct have to put every member at the same offset");
-static_assert(sizeof(Globals) == 800, "LsGlobals: the std140 block is 800 bytes");
+static_assert(sizeof(Globals) == 928, "LsGlobals: the std140 block is 928 bytes");
 static_assert(offsetof(PatchPush, patchPos) == 16 && offsetof(PatchPush, morph) == 32 && sizeof(PatchPush) == 48,
               "LsPatch: the push-constant block is 48 bytes (the guaranteed minimum push-constant size is 128)");
 

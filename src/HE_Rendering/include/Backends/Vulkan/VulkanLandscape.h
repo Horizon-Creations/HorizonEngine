@@ -111,8 +111,10 @@ public:
 	// The ground's depth into another pass of the frame (a shadow layer, a depth pre-pass) that is open on `cmd`: vertex stage only,
 	// the pass's own matrix. `f` is the provider's frame for THAT matrix (its patches are culled for it) and has been through upload().
 	// The caller sets the depth bias (vkCmdSetDepthBias) before, and binds its own pipeline again after.
+	// `viewForPosition`: not depth only but the SSAO position pre-pass, a pass with ONE colour attachment that takes the view-space
+	// position (this matrix times the origin-relative position), alpha 1; no depth bias is used then.
 	void drawDepth(VkCommandBuffer cmd, VkRenderPass pass, VkExtent2D extent, uint32_t frameIndex, const HE::LandscapeRenderFrame& frame,
-	               const glm::mat4& clip);
+	               const glm::mat4& clip, const glm::mat4* viewForPosition = nullptr);
 	const Stats& stats() const;
 
 private:

@@ -261,7 +261,9 @@ TEST_CASE("landscape shader source (Vulkan): LsGlobals is the same block in both
 	CHECK(at("uAmbient") == offsetof(HE::vkls::Globals, ambient));
 	CHECK(at("uTex") == offsetof(HE::vkls::Globals, tex));
 	CHECK(at("uTexMaps") == offsetof(HE::vkls::Globals, texMaps));
-	CHECK(bv.offset.size() == 14);                                  // every member the C++ struct has, nothing more
+	CHECK(at("uAux0") == offsetof(HE::vkls::Globals, aux0));        // the matrices of the passes besides the scene's
+	CHECK(at("uAux1") == offsetof(HE::vkls::Globals, aux1));
+	CHECK(bv.offset.size() == 16);                                  // every member the C++ struct has, nothing more
 
 	// the push-constant block: the three per-patch uniforms, 48 bytes
 	const Std140Block pc = parseStd140(vs, "LsPatch");

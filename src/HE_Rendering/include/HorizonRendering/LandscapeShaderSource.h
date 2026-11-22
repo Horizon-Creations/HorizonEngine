@@ -279,6 +279,8 @@ layout(std140, set = 0, binding = 0) uniform LsGlobals
     vec3  uAmbient;
     vec4  uTex;
     vec4  uTexMaps;
+    mat4  uAux0;      // for the passes that are not the scene's: SSAO position = the view matrix
+    mat4  uAux1;
 };
 layout(push_constant) uniform LsPatch
 {
@@ -310,6 +312,8 @@ layout(std140, set = 0, binding = 0) uniform LsGlobals
     vec3  uAmbient;
     vec4  uTex;
     vec4  uTexMaps;
+    mat4  uAux0;      // for the passes that are not the scene's: SSAO position = the view matrix
+    mat4  uAux1;
 };
 layout(set = 0, binding = 2)  uniform usampler2D     uSlotTable;
 layout(set = 0, binding = 4)  uniform sampler2DArray uTileWeights0;
@@ -334,6 +338,11 @@ inline std::string BuildLandscapeStageGLSL450(const char* prelude, const char* g
 }
 inline std::string BuildLandscapeVertexGLSL450() { return BuildLandscapeStageGLSL450(kLandscapeVulkanVertexPrelude, kLandscapeVS); }
 inline std::string BuildLandscapeFragmentGLSL450() { return BuildLandscapeStageGLSL450(kLandscapeVulkanFragmentPrelude, kLandscapeFS); }
+// The ground for the SSAO position pre-pass: view-space position (uAux0 = the view matrix), a = 1 marks geometry, as ssao_pos.frag.
+inline std::string BuildLandscapeViewPosFragmentGLSL450()
+{
+	return std::string(kLandscapeVulkanFragmentPrelude) + "void main() { fragColor = vec4((uAux0 * vec4(vWorldRel, 1.0)).xyz, 1.0); }\n";
+}
 
 // ─── Metal ───────────────────────────────────────────────────────────────────
 // The same two shaders in MSL, by hand (MetalRenderer's sky is hand-written MSL too). Same maths, line for line: a change to the GLSL

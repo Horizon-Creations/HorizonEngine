@@ -1394,7 +1394,10 @@ IRenderer::Capabilities VulkanRenderer::GetCapabilities() const
     c.supportsVolumetricFog = m_fogReady && m_postFxReady;
     c.landscapeCoarseRevision   = true;   // VulkanLandscape.cpp: new coarse images, the atlas stays
     c.landscapeMaterial         = m_lsMatPipelineLayout != VK_NULL_HANDLE;   // DrawScene: the ground's material draws the patches (after Initialize)
-    c.landscapePassMask         = kLandscapePassShadow;                  // EncodeShadowMap: the ground in every shadow layer (landscapeDepth)
+    // EncodeShadowMap: every shadow layer (proven on MoltenVK). runSSAO's position pre-pass is written and not proven: said only
+    // with its switch on, so the witness judges it where someone turns it on.
+    c.landscapePassMask         = kLandscapePassShadow
+                                | ([] { const char* v = std::getenv("HE_LANDSCAPE_VK_SSAO"); return v && *v == '1'; }() ? kLandscapePassSsao : 0u);
     c.supportsRawCapture        = m_postFxReady;   // RenderSceneImage's rawOutput rides the tonemap pass
     c.supportsRvt               = m_postFxReady && m_matReady && m_matRvt;   // a page is that raw capture copied into the pool
     return c;
@@ -16435,12 +16438,13 @@ void VulkanRenderer::runSSAO(VkCommandBuffer cmd, uint32_t w, uint32_t h,
     const float aspect = w > 0 && h > 0 ? float(w) / float(h) : 1.0f;
     m_extractor.setContentManager(m_contentManager);
     m_extractor.extract(*m_world, m_renderWorld, aspect, &m_editorCamera);
-    if (m_renderWorld.objects.empty()) return;
+    const bool groundScene = m_landscapeProvider && !m_landscapeFailed;   // a scene of ground alone still has occlusion to find
+    if (m_renderWorld.objects.empty() && !groundScene) return;
 
     refineObjectBounds();
 
     cullCameraObjects();
-    if (m_sortedIndices.empty()) return;
+    if (m_sortedIndices.empty() && !groundScene) return;
 
     const glm::mat4 view     = m_renderWorld.camera.view;
     const glm::mat4 proj     = m_renderWorld.camera.projection;
@@ -16490,6 +16494,13 @@ void VulkanRenderer::runSSAO(VkCommandBuffer cmd, uint32_t w, uint32_t h,
     posRPBI.renderArea.extent = { w, h };
     posRPBI.clearValueCount   = reflMrt ? 4u : 2u;
     posRPBI.pClearValues      = posClear;
+    // The ground's patches for this camera, asked for and uploaded before the pass is open.
+    HE::LandscapeRenderFrame ssaoGroundFrame;
+    // NOT PROVEN: on MoltenVK the patches are drawn here (the pipeline builds, 140-200 patches a frame) and the witness still
+    // reads 0 px of occlusion on the ground, in a capture whose forward frame also draws the test box black. Behind
+    // HE_LANDSCAPE_VK_SSAO=1 until a real Vulkan GPU has said which of the two it is (Windows handoff, section 8).
+    static const bool ssaoGroundOn = [] { const char* v = std::getenv("HE_LANDSCAPE_VK_SSAO"); return v && *v == '1'; }();
+    const bool ssaoGround = ssaoGroundOn && !reflMrt && landscapePassFrame(vp, ssaoGroundFrame) && m_landscape && m_landscape->ready();
     vkCmdBeginRenderPass(cmd, &posRPBI, VK_SUBPASS_CONTENTS_INLINE);
 
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -16626,6 +16637,10 @@ void VulkanRenderer::runSSAO(VkCommandBuffer cmd, uint32_t w, uint32_t h,
             drawOne(obj.transform);
         }
     }
+    // The tile landscape's ground: its view-space position into the same target, so occlusion sees it (and what stands on it
+    // is occluded by it). Not in the three-target reflection pre-pass: that one keeps its own shader, the ground is not in it.
+    if (ssaoGround)
+        m_landscape->drawDepth(cmd, m_ssaoPosRenderPass, VkExtent2D{ w, h }, m_currentFrame, ssaoGroundFrame, vp, &view);
     vkCmdEndRenderPass(cmd);
     // posRT transitions to SHADER_READ_ONLY via renderpass finalLayout.
 
