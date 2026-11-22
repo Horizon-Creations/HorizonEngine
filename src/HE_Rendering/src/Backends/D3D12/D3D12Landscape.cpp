@@ -268,6 +268,41 @@ struct D3D12Landscape::Impl
 		if (FAILED(device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&depthPso)))) depthPso.Reset();
 		return depthPso.Get();
 	}
+
+	// The SSAO position pre-pass (drawViewPos): kLandscapeHLSL's PSViewPos into the renderer's RGBA16F position target with its
+	// D32_FLOAT depth, no bias, no culling. Tried once; without it the ground takes no ambient occlusion and is drawn as before.
+	ComPtr<ID3D12PipelineState> viewPosPso;
+	bool viewPosPsoTried = false;
+	ID3D12PipelineState* viewPosPsoGet()
+	{
+		if (viewPosPsoTried) return viewPosPso.Get();
+		viewPosPsoTried = true;
+		ComPtr<ID3DBlob> ps;
+		std::string err;
+		if (!compileStage("PSViewPos", "ps_5_0", ps, err)) return nullptr;
+		D3D12_GRAPHICS_PIPELINE_STATE_DESC pd{};
+		pd.pRootSignature = rootSig.Get();
+		pd.VS = { vsBlob->GetBufferPointer(), vsBlob->GetBufferSize() };
+		pd.PS = { ps->GetBufferPointer(), ps->GetBufferSize() };
+		pd.SampleMask = UINT_MAX;
+		pd.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+		pd.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+		pd.RasterizerState.DepthClipEnable = TRUE;
+		pd.DepthStencilState.DepthEnable = TRUE;
+		pd.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+		pd.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
+		pd.DSVFormat = DXGI_FORMAT_D32_FLOAT;
+		pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+		pd.NumRenderTargets = 1;
+		pd.RTVFormats[0] = DXGI_FORMAT_R16G16B16A16_FLOAT;
+		pd.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+		pd.SampleDesc.Count = 1;
+		if (FAILED(device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&viewPosPso)))) viewPosPso.Reset();
+		return viewPosPso.Get();
+	}
+
+	void drawBare(ID3D12GraphicsCommandList* cl, const HE::LandscapeRenderFrame& f, const glm::mat4& clip, ID3D12PipelineState* pso,
+	              const glm::mat4* view);
 };
 
 D3D12Landscape::D3D12Landscape() : m_impl(std::make_unique<Impl>()) {}
@@ -628,14 +663,27 @@ void D3D12Landscape::upload(ID3D12GraphicsCommandList* cl, HE::LandscapeRenderFr
 
 void D3D12Landscape::drawDepth(ID3D12GraphicsCommandList* cl, const HE::LandscapeRenderFrame& f, const glm::mat4& clip)
 {
-	Impl& m = *m_impl;
+	m_impl->drawBare(cl, f, clip, m_impl->depthPsoGet(), nullptr);
+}
+
+void D3D12Landscape::drawViewPos(ID3D12GraphicsCommandList* cl, const HE::LandscapeRenderFrame& f, const glm::mat4& viewProj, const glm::mat4& view)
+{
+	m_impl->drawBare(cl, f, viewProj, m_impl->viewPosPsoGet(), &view);
+}
+
+// The patches with one of the two pipelines that are not the scene's: depth alone (a shadow layer), or the view-space position
+// (the SSAO pre-pass; `view` then rides in the first four layer colours, d3dls::setViewRows).
+void D3D12Landscape::Impl::drawBare(ID3D12GraphicsCommandList* cl, const HE::LandscapeRenderFrame& f, const glm::mat4& clip,
+                                    ID3D12PipelineState* pso, const glm::mat4* view)
+{
+	Impl& m = *this;
 	if (!m.ok || !f.active || !f.world || f.patches.empty() || !m.world || m.world->generation != f.world->generation) return;
-	ID3D12PipelineState* pso = m.depthPsoGet();
 	if (!pso) return;
 	const LandscapeRenderStatic& w = *m.world;
 
 	d3dls::Globals g;
 	d3dls::fillGlobals(g, f, clip, glm::vec3(0.0f, 1.0f, 0.0f), glm::vec3(1.0f), glm::vec3(0.0f), false, false, false, false);
+	if (view) d3dls::setViewRows(g, *view);
 	const unsigned slot = m.globalsNext++ % kGlobalsSlots;
 	std::memcpy(m.globalsMapped + static_cast<size_t>(slot) * m.globalsStride, &g, sizeof(g));
 	// The table the last colour draw used, as it is: the vertex stage reads the landscape's own images, which sit at the same

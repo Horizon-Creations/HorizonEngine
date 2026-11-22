@@ -867,6 +867,16 @@ float4 PSMain(LsVertexOut pin) : SV_Target
     float ndl = max(dot(n, normalize(sunDir.xyz)), 0.0);
     return float4(albedo * (ambient.xyz * ao + sunColor.xyz * ndl), 1.0);
 }
+
+// The ground for the SSAO position pre-pass (D3D11Landscape / D3D12Landscape::drawViewPos): view-space position, a = 1 marks
+// geometry, what the mesh pre-pass writes (PSPos). The pass has no use for the layer colours, so the view matrix comes in THEIR
+// first four entries, one ROW each (LandscapeD3D.h: setViewRows): the block keeps its layout and both root signatures stay as
+// they are.
+float4 PSViewPos(LsVertexOut pin) : SV_Target
+{
+    float4 p = float4(pin.worldRel, 1.0);
+    return float4(dot(layerColor[0], p), dot(layerColor[1], p), dot(layerColor[2], p), 1.0);
+}
 )HLSL";
 
 } // namespace HE::glsl

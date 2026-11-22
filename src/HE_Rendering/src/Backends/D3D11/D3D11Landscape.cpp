@@ -20,6 +20,8 @@ struct D3D11Landscape::Impl
 {
 	ID3D11Device* device = nullptr;   // not owned: the renderer's, which outlives this
 	bool depthOnly = false;           // set by drawDepth around its call of draw()
+	const glm::mat4* viewPos = nullptr;      // set by drawViewPos: the view matrix, and PSViewPos instead of no pixel stage
+	ComPtr<ID3D11PixelShader> psViewPos;     // kLandscapeHLSL's PSViewPos (the SSAO position pre-pass); null when it did not compile
 	ComPtr<ID3D11VertexShader>      vs;
 	ComPtr<ID3D11PixelShader>       ps;
 	ComPtr<ID3D11DepthStencilState> depth;
@@ -240,6 +242,13 @@ bool D3D11Landscape::init(ID3D11Device* device, std::string* error)
 		if (error) *error = "landscape: CreateVertexShader / CreatePixelShader failed";
 		return false;
 	}
+	{
+		// The SSAO pre-pass's stage: without it the ground is drawn as before, it just takes no ambient occlusion.
+		ComPtr<ID3DBlob> vpb;
+		std::string vpErr;
+		if (compileStage("PSViewPos", "ps_5_0", vpb, vpErr))
+			device->CreatePixelShader(vpb->GetBufferPointer(), vpb->GetBufferSize(), nullptr, m.psViewPos.GetAddressOf());
+	}
 
 	D3D11_DEPTH_STENCIL_DESC ds{};
 	ds.DepthEnable = TRUE;
@@ -403,6 +412,16 @@ void D3D11Landscape::drawDepth(ID3D11DeviceContext* ctx, const HE::LandscapeRend
 	m_impl->depthOnly = false;
 }
 
+void D3D11Landscape::drawViewPos(ID3D11DeviceContext* ctx, const HE::LandscapeRenderFrame& f, const glm::mat4& viewProj, const glm::mat4& view)
+{
+	if (!m_impl->psViewPos) return;
+	m_impl->depthOnly = true;       // the caller's rasteriser and depth state, as for a shadow layer
+	m_impl->viewPos = &view;        // and a pixel stage after all: the view-space position
+	draw(ctx, f, viewProj, Shading{});
+	m_impl->viewPos = nullptr;
+	m_impl->depthOnly = false;
+}
+
 bool D3D11Landscape::drawPatches(ID3D11DeviceContext* ctx, const HE::LandscapeRenderFrame& f, const glm::mat4& viewProj)
 {
 	Impl& m = *m_impl;
@@ -495,6 +514,7 @@ void D3D11Landscape::draw(ID3D11DeviceContext* ctx, const HE::LandscapeRenderFra
 	d3dls::Globals g;
 	d3dls::fillGlobals(g, f, viewProj, shading.sunDir, shading.sunColor, shading.ambient, shading.albedoArray != nullptr,
 	                   shading.normalArray != nullptr, shading.maskArray != nullptr, m.farSrv != nullptr);
+	if (m.viewPos) d3dls::setViewRows(g, *m.viewPos);
 	D3D11_MAPPED_SUBRESOURCE mapped{};
 	if (FAILED(ctx->Map(m.globalsCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) return;
 	std::memcpy(mapped.pData, &g, sizeof(g));
@@ -513,7 +533,7 @@ void D3D11Landscape::draw(ID3D11DeviceContext* ctx, const HE::LandscapeRenderFra
 	ID3D11SamplerState* farSmp = m.farSampler.Get();
 	ctx->PSSetSamplers(d3dls::kFarSamplerReg, 1, &farSmp);
 	ctx->VSSetShader(m.vs.Get(), nullptr, 0);
-	ctx->PSSetShader(depthOnly ? nullptr : m.ps.Get(), nullptr, 0);
+	ctx->PSSetShader(m.viewPos ? m.psViewPos.Get() : depthOnly ? nullptr : m.ps.Get(), nullptr, 0);
 	ctx->IASetInputLayout(nullptr);   // the grid comes from SV_VertexID
 	ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 	ctx->IASetIndexBuffer(m.indices.Get(), DXGI_FORMAT_R16_UINT, 0);

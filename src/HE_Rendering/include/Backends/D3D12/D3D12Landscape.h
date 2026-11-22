@@ -78,6 +78,9 @@ public:
 	// pass's depth bias. `frame` is the provider's for `clip` and has been uploaded. Like draw(), it leaves its own root signature,
 	// pipeline and heap set: the caller rebuilds its own state afterwards.
 	void drawDepth(ID3D12GraphicsCommandList* cl, const HE::LandscapeRenderFrame& frame, const glm::mat4& clip);
+	// The ground into the SSAO position pre-pass's target that is bound (RGBA16F with D32_FLOAT): view-space position (`view` times
+	// the origin-relative position), a = 1. Like drawDepth it leaves its own root signature, pipeline and heap set.
+	void drawViewPos(ID3D12GraphicsCommandList* cl, const HE::LandscapeRenderFrame& frame, const glm::mat4& viewProj, const glm::mat4& view);
 
 	// For a MATERIAL's landscape variant (MaterialShaderLibrary::landscapeVertex / landscapeFragment, HLSL; the renderer's own root
 	// signature, pipeline and descriptor heap, D3D12MaterialRootSignature.h "the tile landscape drawn with a material"):

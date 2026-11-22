@@ -2758,7 +2758,8 @@ struct D3D11RendererImpl
                                       ID3D11InputLayout* il,
                                       ID3D11DepthStencilState* depthSt,
                                       ID3D11RasterizerState* rasterSt,
-                                      bool reflMrt = false, bool aoWanted = true)
+                                      bool reflMrt = false, bool aoWanted = true,
+                                      const std::function<void()>& drawGround = {})
     {
         GpuPassScope _passTimer(this, "SSAO");
         // `reflMrt` and `aoWanted` are SEPARATE gates (plan C2, the same shape
@@ -2867,6 +2868,9 @@ struct D3D11RendererImpl
                 else
                     drawWithTransform(dc->transform);
             }
+            // The tile landscape's ground (Thema 326), into the position-only target: it writes target 0 alone, so not into the
+            // three-target reflection pre-pass (as on Vulkan; Metal has a three-target stage for it).
+            if (drawGround && !reflMrt) drawGround();
         }
 
         // Unbind the pre-pass RTVs so they can be read as SRVs. One null at slot
@@ -8504,7 +8508,19 @@ void D3D11Renderer::DrawScene(int width, int height)
             aoSRV = p.runSSAO(ctx, opaqueDCs_, viewProjClean, camView, camProj, width, height,
                 [&](HE::UUID id) -> const GpuMesh* { return p.resolveMesh(id, m_contentManager); },
                 p.cube, p.inputLayout.Get(), p.depthState.Get(), p.rasterState.Get(),
-                /*reflMrt=*/ssrFrameActive, aoWanted);
+                /*reflMrt=*/ssrFrameActive, aoWanted,
+                [&]()
+                {
+                    // The ground in the position pre-pass, so it takes and gives ambient occlusion like any mesh. The provider
+                    // culls for THIS pass's matrix (unjittered) and hands over the tiles that arrived, which are uploaded whether
+                    // or not the ground is drawn.
+                    if (!HE::landscapeD3dPassesOn() || !m_landscapeProvider || p.landscapeFailed || !p.landscape.ready()) return;
+                    HE::LandscapeRenderFrame lf;
+                    m_landscapeProvider(glm::dmat4(viewProjClean), /*zeroToOne=*/false, lf);
+                    if (!lf.active) return;
+                    p.landscape.upload(ctx, lf);
+                    if (HE::landscapePassesOn()) p.landscape.drawViewPos(ctx, lf, viewProjClean, camView);
+                });
             if (ssrFrameActive)
                 ssrSRV = p.RenderForwardSSR(ctx, width, height, viewProjClean, camView);
 
@@ -10014,7 +10030,7 @@ IRenderer::Capabilities D3D11Renderer::GetCapabilities() const
     c.supportsRawCapture        = m_impl->postFxReady;   // RenderSceneImage's rawOutput rides the tonemap pass
     c.supportsRvt               = m_impl->postFxReady;   // the page is a raw capture copied into the pool
     // The tile landscape's ground in the shadow layers: written, not run (see renderDepthLayer). Said only with the switch on.
-    c.landscapePassMask         = HE::landscapeD3dPassesOn() ? kLandscapePassShadow : 0u;
+    c.landscapePassMask         = HE::landscapeD3dPassesOn() ? (kLandscapePassShadow | kLandscapePassSsao) : 0u;
     c.landscapeCoarseRevision   = true;   // D3D11Landscape.cpp: new coarse and far images, the atlas stays
     c.landscapeMaterial         = m_impl->m_matReady;   // drawDC with lsDraw: the ground through its material's landscape variant
     // Froxel volumetric fog (Thema 225 step 8): Inject/Integrate/Apply compiled and

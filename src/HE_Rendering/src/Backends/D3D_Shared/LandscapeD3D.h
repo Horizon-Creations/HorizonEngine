@@ -102,4 +102,12 @@ inline void fillPatch(PatchData& d, const HE::LandscapeRenderPatch& p)
 	d.morph[0] = p.morphStart; d.morph[1] = p.morphEnd; d.morph[2] = 0.0f; d.morph[3] = 0.0f;
 }
 
+// For the SSAO position pre-pass (kLandscapeHLSL's PSViewPos): the view matrix, a row per entry, in the first four layer
+// colours, which that pass does not read as colours.
+inline void setViewRows(Globals& g, const glm::mat4& view)
+{
+	for (int row = 0; row < 4; ++row)
+		for (int col = 0; col < 4; ++col) g.layerColor[row][col] = view[col][row];
+}
+
 } // namespace HE::d3dls
