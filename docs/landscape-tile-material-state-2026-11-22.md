@@ -114,6 +114,19 @@ Branch `claude/landscape-weltmassstab-100km`, up to `1e118e0a6`.
   paints from the overlay with them. The far image itself is made of the PAINTED layers only (`landscapeFarWeightPainter`): a
   height stamp does not change its colours, on any backend that reads it (the fixed blend, near and far alike).
 
+*Sixth session, 22.11.: the other backends (owner: "catch up Vulkan, D3D, OpenGL as far as you can")*
+* `Capabilities::landscapePassMask` + `kLandscapePass*` (`IRenderer.h`): a backend says pass by pass where it has the ground;
+  `landscape_gpu_check` judges each by its bit, and a backend without the material runs `fixedBlendPasses` (`EngineCheck.cpp`).
+* Shadows: the ground casts into every shadow layer on Vulkan (`VulkanLandscape::drawDepth`, per-pass LsGlobals and set;
+  MoltenVK 4/255 against 176) and OpenGL (`DrawLandscapeDepth`; 150 against 223). D3D11 / D3D12: written
+  (`D3D11Landscape::drawDepth`, `D3D12Landscape::drawDepth`), never run, behind `HE_LANDSCAPE_D3D_PASSES=1`.
+* Vulkan SSAO position pre-pass: written (`drawDepth(..., viewForPosition)`, `uAux0` in the Vulkan LsGlobals), witness reads 0 on
+  MoltenVK, behind `HE_LANDSCAPE_VK_SSAO=1`.
+* D3D material shaders: `landscapeVertex / landscapeFragment` for `Backend::HLSL` with pinned registers (test in
+  `test_material_graph.cpp`, both parse with glslang's HLSL front end). The D3D C++ that draws with them is NOT built.
+* The table of every backend, with commands and expected lines: `docs/landscape-world-scale-windows-handoff-2026-11-21.md`,
+  section 8. The table at the top of THIS file is older; section 8 is right.
+
 *Fifth session, 22.11.: near view off by default, stamps from 16-bit files*
 * The tile ground's native near view has its own setting, `ProjectRvtSettings::tileNativeNear` (Project Settings > Virtual
   Texture, "Native near view on tile landscapes"), **off by default** (owner's decision: 2.7 ms). The single landscape's
