@@ -1577,6 +1577,9 @@ private:
 	bool            m_landscapeInGBuffer = false; // this frame's G-buffer pass drew the ground: no forward draw after the resolve
 	unsigned int    m_landscapePosProgram = 0;    // DrawLandscapeViewPos: the landscape's vertex stage with a view-position fragment
 	bool            m_landscapePosTried = false;
+	void            DrawLandscapeGiGBuf(const glm::mat4& viewProj);   // into the GI pre-pass's targets that are bound
+	unsigned int    m_landscapeGiProgram = 0;     // DrawLandscapeGiGBuf: the same vertex stage with the GI pre-pass's fragment
+	bool            m_landscapeGiTried = false;
 	unsigned int    GetOrBuildLandscapeMaterialProgram(const HE::UUID& materialId, bool gbuffer = false);
 	int             m_maxFragmentSamplers = 0;   // GL_MAX_TEXTURE_IMAGE_UNITS, read at Initialize
 	HE::UUID        m_landscapeMaterialLoadTried{};   // the texture group's material this renderer tried to load from its path

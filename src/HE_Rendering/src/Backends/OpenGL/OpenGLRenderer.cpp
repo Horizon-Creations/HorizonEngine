@@ -7174,6 +7174,11 @@ bool OpenGLRenderer::RenderGIPrepass(const CommandBuffer& cmds, int width, int h
 				drawOne(dc.transform);
 		}
 	}
+	// The tile landscape's ground (Thema 326): its pixels get a position and a normal, so the shadow rays start from them
+	// and the ground takes the ray-traced sun shadow like a mesh.
+	DrawLandscapeGiGBuf(viewProj);
+	glBindVertexArray(0);
+	glUseProgram(0);
 	return true;
 }
 
@@ -7195,7 +7200,10 @@ unsigned int OpenGLRenderer::RenderGIShadow(int width, int height, const glm::ma
 	const bool sepOn = m_giShadowSep && m_giShadowInstanceSSBO;
 	// Test hook (scripts/he_gi_hf_check.py negative control): chunks stay out of the list but the field is not marched.
 	static const bool s_hfMute = [] { const char* v = std::getenv("HE_GI_HEIGHTFIELD_MUTE"); return v && v[0] == '1'; }();
-	const bool hfOn  = sepOn && m_giHfActive && m_giHfTex && !m_renderWorld.heightfields.empty();
+	// The tile landscape's clipmap has no chunk meshes to leave out, so its two lists are the same one and `sepOn` is false:
+	// with `sepOn` alone in this condition the clipmap never occluded anything.
+	const bool hfTile = !m_renderWorld.heightfields.empty() && m_renderWorld.heightfields[0].key == kLandscapeGiHeightfieldKey;
+	const bool hfOn  = (sepOn || hfTile) && m_giHfActive && m_giHfTex && !m_renderWorld.heightfields.empty();
 	glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, sepOn ? m_giShadowInstanceSSBO : m_giInstanceSSBO);
 	glActiveTexture(GL_TEXTURE0);
 	glBindTexture(GL_TEXTURE_2D, m_giGBufPosTex);
@@ -11708,6 +11716,8 @@ void OpenGLRenderer::Shutdown()
 	if (m_ssaoPosInstancedProgram) { glDeleteProgram(m_ssaoPosInstancedProgram); m_ssaoPosInstancedProgram = 0; }
 	if (m_landscapePosProgram) { glDeleteProgram(m_landscapePosProgram); m_landscapePosProgram = 0; }
 	m_landscapePosTried = false;
+	if (m_landscapeGiProgram) { glDeleteProgram(m_landscapeGiProgram); m_landscapeGiProgram = 0; }
+	m_landscapeGiTried = false;
 	if (m_ssaoProgram)     { glDeleteProgram(m_ssaoProgram);     m_ssaoProgram = 0; }
 	if (m_ssaoBlurProgram) { glDeleteProgram(m_ssaoBlurProgram); m_ssaoBlurProgram = 0; }
 	if (m_debugLineProgram) { glDeleteProgram(m_debugLineProgram); m_debugLineProgram = 0; }
@@ -12469,6 +12479,60 @@ void OpenGLRenderer::DrawLandscapeViewPos(const glm::mat4& viewProj, const glm::
 	m_landscape.draw(frame, viewProj, sh);
 #else
 	(void)viewProj; (void)view;
+#endif
+}
+
+// The ground into the GI pre-pass's three targets that are bound: what kGiGBufFS writes for a mesh, the position the shadow
+// rays start from (a = 1), the surface normal (from the position's derivatives, turned up) and a rough, non-metallic surface
+// for the reflection kernel. Built and drawn like DrawLandscapeViewPos.
+void OpenGLRenderer::DrawLandscapeGiGBuf(const glm::mat4& viewProj)
+{
+#if defined(HE_HAVE_SHADERC)
+	if (!m_landscapeProvider || m_landscapeFailed || !m_landscape.ready()) return;
+	if (!m_landscapeGiTried)
+	{
+		m_landscapeGiTried = true;
+		const auto& v = m_matShaderLib.landscapeVertex(HE::MaterialShaderLibrary::Backend::GLSL410);
+		static const char* const kFS =
+			"#version 410 core\n"
+			"layout(location = 3) in vec3 vWorldPos;\n"
+			"layout(location = 0) out vec4 oPos;\n"
+			"layout(location = 1) out vec4 oNorm;\n"
+			"layout(location = 2) out vec4 oMat;\n"
+			"void main() { vec3 n = normalize(cross(dFdx(vWorldPos), dFdy(vWorldPos))); if (n.y < 0.0) n = -n;\n"
+			"              oPos = vec4(vWorldPos, 1.0); oNorm = vec4(n, 0.0); oMat = vec4(1.0, 0.0, 0.0, 1.0); }\n";
+		if (v.ok)
+		{
+			try
+			{
+				const GLuint vs = CompileStage(GL_VERTEX_SHADER, v.source.c_str());
+				const GLuint fs = CompileStage(GL_FRAGMENT_SHADER, kFS);
+				const GLuint prog = glCreateProgram();
+				glAttachShader(prog, vs);
+				glAttachShader(prog, fs);
+				glLinkProgram(prog);
+				glDeleteShader(vs);
+				glDeleteShader(fs);
+				GLint linked = 0;
+				glGetProgramiv(prog, GL_LINK_STATUS, &linked);
+				if (linked) m_landscapeGiProgram = prog;
+				else glDeleteProgram(prog);
+			}
+			catch (const std::exception&) {}
+		}
+		if (!m_landscapeGiProgram)
+			HE_LOG_WARN(RHI, "%s", "OpenGLRenderer: the landscape's GI pre-pass program did not build, the ground takes no ray-traced shadow");
+	}
+	if (!m_landscapeGiProgram) return;
+	HE::LandscapeRenderFrame frame;
+	m_landscapeProvider(glm::dmat4(viewProj), /*zeroToOne=*/false, frame);
+	if (!frame.active) return;
+	if (!HE::landscapePassesOn()) frame.patches.clear();   // the uploads are executed either way
+	OpenGLLandscape::Shading sh;
+	sh.materialProgram = m_landscapeGiProgram;
+	m_landscape.draw(frame, viewProj, sh);
+#else
+	(void)viewProj;
 #endif
 }
 
@@ -15439,6 +15503,9 @@ IRenderer::Capabilities OpenGLRenderer::GetCapabilities() const
 	c.landscapeMaterial          = m_maxFragmentSamplers >= 24;
 	// DrawLandscapeDepth in every shadow layer; with the material also the G-buffer (DrawLandscape gbuffer) and the SSAO
 	// position pre-pass (DrawLandscapeViewPos).
+	// GI is NOT claimed although it is built (DrawLandscapeGiGBuf, the height clipmap in the shadow kernel): on a deferred
+	// frame the witnesses hold (the ground takes and casts the ray-traced shadow, RTX 4070), on a FORWARD frame the ground's
+	// ray-traced shadow comes out faint (under the witness's 20 %) and was not understood. Windows handoff, section 11.
 	c.landscapePassMask          = kLandscapePassShadow | (c.landscapeMaterial ? (kLandscapePassGBuffer | kLandscapePassSsao) : 0u);
 #endif
 	c.supportsRvt                = m_rvtSupported;   // a page is that raw capture blitted into the pool (the programs come from the cross-compiler)
