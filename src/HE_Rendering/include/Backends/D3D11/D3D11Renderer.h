@@ -44,6 +44,13 @@ public:
     bool  ReadbackRvtPageTable(const HE::UUID& consumerMaterial, std::vector<std::vector<uint32_t>>& mips) override;
     void  SetRvtLandscape(uint32_t terrainEntity, const HE::UUID& landscapeMaterial, const HE::UUID& consumerMaterial) override;
     void  SetRvtNearChunks(uint32_t terrainEntity, const std::vector<uint32_t>& chunkEntities) override;
+    // The tile landscape's ground under a virtual texture: the consumer and the absolute XZ rectangle its pages cover
+    // (DrawScene's drawGroundMaterial splits the frame's patches with HE::splitRvtTilePatches).
+    void  SetRvtTileGround(const HE::UUID& consumerMaterial, const glm::dvec2& minXZ, const glm::dvec2& maxXZ, float nativeNearM) override
+    { m_tileRvtConsumer = consumerMaterial; m_tileRvtMin = minXZ; m_tileRvtMax = maxXZ; m_tileRvtNearM = nativeNearM; }
+    HE::UUID   m_tileRvtConsumer{};
+    glm::dvec2 m_tileRvtMin{ 0.0 }, m_tileRvtMax{ 0.0 };
+    float      m_tileRvtNearM = 0.0f;
     void  ReleaseRvtConsumer(const HE::UUID& consumerMaterial) override;
     // One page through the lean page pass (RenderSceneImage routes camera.rvtSlot >= 0 here).
     bool  RenderRvtPage(const EditorCameraOverride& camera, uint32_t px);

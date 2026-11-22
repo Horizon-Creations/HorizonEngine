@@ -43,6 +43,15 @@ namespace
 constexpr double kSlope = 0.1, kBase = 600.0, kPivot = 3072.0, kWorld = 32 * 512.0;
 constexpr uint32_t kW = 480, kH = 270;
 
+// The texture group of the Auto Landscape checks: Forest, or with HE_LGC_GROUP=mountains the Mountains group. A machine whose
+// EngineContent has no Forest arrays (NN-WS03: only Mountains and Mix came down) can then still run the checks that compare
+// textured ground with textured ground; without the arrays the ground is a white noise pattern that pages average away.
+HE::AutoLandscapeGroupId checkGroup()
+{
+	const char* v = std::getenv("HE_LGC_GROUP");
+	return v && (*v == 'm' || *v == 'M') ? HE::AutoLandscapeGroupId::Mountains : HE::AutoLandscapeGroupId::Forest;
+}
+
 // HE_LANDSCAPE_PASSES for the next frames: "0" leaves the ground out of the shadow and GI passes, null puts it back.
 void landscapePasses(const char* value)
 {
@@ -91,7 +100,7 @@ int runEngineCheck(HE::RendererBackend backend, HE::RenderPath path, const std::
 		HE::LandscapeRuntime rt;
 		HE::LandscapeRuntimeConfig cfg;
 		cfg.store.byteBudget = 80ull * 1024 * 1024;
-		if (!arrayRoot.empty()) { cfg.textureGroup = 1; cfg.textureMeters = 8.0f; }   // Forest
+		if (!arrayRoot.empty()) { cfg.textureGroup = static_cast<int>(checkGroup()); cfg.textureMeters = 8.0f; }   // Forest (checkGroup)
 		std::string err;
 		if (!rt.beginFromPack(packPath, cfg, &err)) { std::printf("  runtime: %s\n", err.c_str()); return 1; }
 		const auto t0 = std::chrono::steady_clock::now();
@@ -702,7 +711,7 @@ int runMaterialCheck(HE::RendererBackend backend, HE::RenderPath path, const std
 				HE::matSetRvtEnabled(true);
 				{
 					// as the editor does when the project has RVT on: the material's shader is made again from its graph, now with the read
-					const HE::AutoLandscapeGroup& g0 = HE::autoLandscapeGroup(HE::AutoLandscapeGroupId::Forest);
+					const HE::AutoLandscapeGroup& g0 = HE::autoLandscapeGroup(checkGroup());
 					if (const MaterialAsset* own = content.resolveMaterialRef(HE::UUID{}, g0.materialPath))
 					{
 						const HE::UUID ownId = own->id;
@@ -715,7 +724,7 @@ int runMaterialCheck(HE::RendererBackend backend, HE::RenderPath path, const std
 				const auto lsEnt = world.createEntity("Landscape");
 				LandscapeWorldComponent lw;
 				lw.pack = packPath;
-				lw.textureGroup = 1;
+				lw.textureGroup = static_cast<int>(checkGroup());
 				lw.budgetMB = 80;
 				reg.emplace<LandscapeWorldComponent>(lsEnt, lw);
 				bool began = false;
@@ -745,7 +754,7 @@ int runMaterialCheck(HE::RendererBackend backend, HE::RenderPath path, const std
 						const double n = static_cast<double>(std::max<size_t>(ground, 1));
 						std::printf("  Auto Landscape (Forest): mean ground %.0f/255, mean step between neighbours %.2f/255, %zu px still the fixed blend's green\n", sum / n, step / n, green);
 						{
-							const HE::AutoLandscapeGroup& grp = HE::autoLandscapeGroup(HE::AutoLandscapeGroupId::Forest);
+							const HE::AutoLandscapeGroup& grp = HE::autoLandscapeGroup(checkGroup());
 							const MaterialAsset* own = content.getMaterial(grp.materialId);
 							const bool reads = own && own->customShaderFragGlsl.find("heRvtSample(") != std::string::npos;
 							std::printf("    (RVT %s: the landscape's own material %s)\n", HE::matRvtEnabled() ? "on" : "off",
@@ -1316,7 +1325,7 @@ int runMaterialTiming(HE::RendererBackend backend, HE::RenderPath path, const st
 			tileFixed = median(ov);
 			if (material)
 			{
-				world.registry().get<LandscapeWorldComponent>(lsEnt).textureGroup = 1;   // Forest: the group's Auto Landscape material
+				world.registry().get<LandscapeWorldComponent>(lsEnt).textureGroup = static_cast<int>(checkGroup());   // Forest (checkGroup): the group's Auto Landscape material
 				rt.update(world, 0.016f, 5.0, &camPos);
 				tileMat = median(ov);
 				landscapePasses("0");
@@ -1327,7 +1336,7 @@ int runMaterialTiming(HE::RendererBackend backend, HE::RenderPath path, const st
 				if (renderer->GetCapabilities().supportsRvt && renderer->GetCapabilities().landscapeRvt)
 				{
 					HE::matSetRvtEnabled(true);
-					const HE::AutoLandscapeGroup& g1 = HE::autoLandscapeGroup(HE::AutoLandscapeGroupId::Forest);
+					const HE::AutoLandscapeGroup& g1 = HE::autoLandscapeGroup(checkGroup());
 					if (const MaterialAsset* own = content.resolveMaterialRef(HE::UUID{}, g1.materialPath))
 					{
 						const HE::UUID ownId = own->id;
@@ -1360,7 +1369,7 @@ int runMaterialTiming(HE::RendererBackend backend, HE::RenderPath path, const st
 			HorizonWorld world;
 			renderer->SetWorld(&world);
 			sun(world);
-			const HE::AutoLandscapeGroup& grp = HE::autoLandscapeGroup(HE::AutoLandscapeGroupId::Forest);
+			const HE::AutoLandscapeGroup& grp = HE::autoLandscapeGroup(checkGroup());
 			const MaterialAsset* ma = content.resolveMaterialRef(HE::UUID{}, grp.materialPath);
 			const HE::UUID matId = ma ? ma->id : HE::UUID{};
 			const auto te = world.createEntity("Terrain");
