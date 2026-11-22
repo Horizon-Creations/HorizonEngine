@@ -29,6 +29,10 @@ int runEngineCheck(HE::RendererBackend backend, HE::RenderPath path, const std::
 // `arrayRoot` (optional): an EngineContent folder; then the engine's own Auto Landscape material (Forest) is drawn on the ground as well.
 int runMaterialCheck(HE::RendererBackend backend, HE::RenderPath path, const std::string& packPath, const std::string& pngPath, const std::string& arrayRoot = {});
 
+// Frame times through the real renderer: the tile landscape with its fixed blend, with its material, with its material in the scene
+// pass alone, and a TerrainComponent landscape with the same material (--timing). Prints a table; a measurement, not a check.
+int runMaterialTiming(HE::RendererBackend backend, HE::RenderPath path, const std::string& packPath, const std::string& arrayRoot);
+
 // GL-only: a mirror standing on the tile landscape with GI reflections on, checking that the GI
 // pipelines link (the 'GI pipelines built' log line) and that the mirror's pixel differs from the
 // same render with the landscape's GI heightfield removed (reflections stay on in both — a plain

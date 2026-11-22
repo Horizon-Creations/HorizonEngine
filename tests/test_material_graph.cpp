@@ -2023,8 +2023,20 @@ TEST_CASE("tile landscape variant: the patch vertex and the Auto Landscape fragm
 	REQUIRE(!ls.empty());
 	CHECK(gen.glsl == before);                                   // the material's own text is what it was (it is what an asset bakes)
 	CHECK(ls.find("heLandscapeWeights") == std::string::npos);   // every read goes through the atlas
-	CHECK(ls.find("heLsWeight(") != std::string::npos);
-	CHECK(ls.find("discard;") != std::string::npos);
+	CHECK(ls.find("heLsWeightLod(") != std::string::npos);
+	// the single-page read (its value is never used with three pages) reads nothing: it was the costliest read of the fragment
+	CHECK(ls.find("heLsWeightOnePage(") != std::string::npos);
+	CHECK(ls.find("vec4 heLsWeightOnePage(vec2 uv) { return vec4(0.0); }") != std::string::npos);
+	// no discard at the world's edge (a material fragment that can discard loses hidden-surface removal): the vertex stage clamps
+	CHECK(ls.find("discard;") == gen.glsl.find("discard;"));
+	CHECK(vs.find("clamp(xz + uOrigin.xz, vec2(0.0), uWorld.xy)") != std::string::npos);
+	// the SPIR-V form: images without a sampler, the patch as a push constant; the Metal form reads the pages filtered
+	const std::string spvFs = HE::MaterialShaderLibrary::landscapeFragmentSource(gen.glsl, /*separateImages=*/true);
+	CHECK(spvFs.find("uniform utexture2D") != std::string::npos);
+	CHECK(spvFs.find("uniform usampler2D     heLsSlotTable") == std::string::npos);
+	CHECK(spvFs.find("GL_EXT_samplerless_texture_functions") != std::string::npos);
+	CHECK(HE::MaterialShaderLibrary::landscapeVertexSource(true).find("layout(push_constant) uniform LsPatch") != std::string::npos);
+	CHECK(HE::MaterialShaderLibrary::landscapeFragmentSource(gen.glsl, false, /*filtered=*/true).find("#define HE_LS_FILTERED 1") != std::string::npos);
 	// a read in a form the rewrite does not know is refused, not passed on half rewritten
 	CHECK(HE::MaterialShaderLibrary::landscapeFragmentSource(gen.glsl + "\n// texelFetch(heLandscapeWeights, ivec2(0), 0)\n").empty());
 

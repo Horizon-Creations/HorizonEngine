@@ -604,7 +604,9 @@ public:
     static std::string landscapeVertexSource(bool patchAsPushConstant = false);
     // `separateImages`: the landscape's images as textures without a sampler (the SPIR-V form; the vertex source's push-constant
     // form has them too). A Vulkan set then holds them as SAMPLED_IMAGE descriptors, which do not count as samplers.
-    static std::string landscapeFragmentSource(const std::string& glsl, bool separateImages = false);
+    // `filtered`: the weight pages are read with one linear sample where the footprint is the fragment's own tile's (the
+    // backend's samplers on bindings 52-57 are linear, clamped), instead of four fetches. Not with `separateImages`.
+    static std::string landscapeFragmentSource(const std::string& glsl, bool separateImages = false, bool filtered = false);
 
     // ── Volumetric fog kernels (Thema 225, docs/volumetric-fog-plan.md §10) ──────────────
     // GLSL-450 sources in src/material/FogVolumeShaderSource.h, cross-compiled like every

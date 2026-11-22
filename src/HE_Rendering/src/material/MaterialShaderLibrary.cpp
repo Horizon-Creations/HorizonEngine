@@ -1666,6 +1666,10 @@ void main()
     vec3 n = heLsNormal(g, 1, cell);
     if (m > 0.0) n = normalize(mix(n, heLsNormal(g, 2, cell), m));
 
+    // The top node of the quadtree is bigger than the world. The landscape's own shader discards the fragments beyond the edge; here
+    // the vertices beyond it are pulled ONTO it instead (those triangles collapse), because a material fragment that can discard
+    // loses hidden-surface removal on a tile-based GPU and was 3 ms a frame slower for it.
+    xz = clamp(xz + uOrigin.xz, vec2(0.0), uWorld.xy) - uOrigin.xz;
     vec3 rel = vec3(xz.x, h - uOrigin.y, xz.y);
     vNormal   = n;
     vColor    = vec3(1.0);
@@ -1688,33 +1692,81 @@ layout(set = 0, binding = 56) uniform sampler2D      heLsCoarseWeights1;
 layout(set = 0, binding = 57) uniform sampler2D      heLsCoarseWeights2;
 ivec2 heLsPageSize() { return ivec2(int(uHeightInfo.y), int(uHeightInfo.z)) * uTile.y; }
 ivec2 heLsWeightSize() { ivec2 s = heLsPageSize(); return ivec2(s.x * 3, s.y); }
+// The fragment's own tile and its atlas slot, looked up ONCE a fragment: every weight read of a fragment lies in that tile, but for
+// the texels right on its border. (A material reads its weights six to ten times; a slot-table fetch for each texel of each read
+// was most of what the ground cost.)
+ivec2 heLsTile = ivec2(0);
+uint  heLsSlot = 65535u;
+bool  heLsFound = false;
+void heLsFind()
+{
+    if (heLsFound) return;
+    ivec2 tiles = ivec2(int(uHeightInfo.y), int(uHeightInfo.z));
+    heLsTile = clamp(ivec2(vUV * vec2(tiles)), ivec2(0), tiles - ivec2(1));
+    int mask = int(uHeightInfo.w) - 1;
+    heLsSlot = texelFetch(heLsSlotTable, ivec2(heLsTile.x & mask, heLsTile.y & mask), 0).r;
+    heLsFound = true;
+}
 vec4 heLsTexel(int page, ivec2 p)
 {
     ivec2 size = heLsPageSize();
     p = clamp(p, ivec2(0), size - ivec2(1));
     ivec2 tile = p / uTile.y;
-    int mask = int(uHeightInfo.w) - 1;
-    uint slot = texelFetch(heLsSlotTable, ivec2(tile.x & mask, tile.y & mask), 0).r;
+    uint slot = heLsSlot;
+    if (tile != heLsTile)   // a texel of the neighbour tile: its own slot
+    {
+        int mask = int(uHeightInfo.w) - 1;
+        slot = texelFetch(heLsSlotTable, ivec2(tile.x & mask, tile.y & mask), 0).r;
+    }
     if (slot == 65535u)
     {
         ivec2 cs = textureSize(heLsCoarseWeights0, 0);
         ivec2 c = clamp(ivec2((vec2(p) + 0.5) / vec2(size) * vec2(cs)), ivec2(0), cs - ivec2(1));
-        return page == 0 ? texelFetch(heLsCoarseWeights0, c, 0) : page == 1 ? texelFetch(heLsCoarseWeights1, c, 0) : texelFetch(heLsCoarseWeights2, c, 0);
+        // if / return, not ?: — a conditional expression reads all three images and keeps one
+        if (page == 0) return texelFetch(heLsCoarseWeights0, c, 0);
+        if (page == 1) return texelFetch(heLsCoarseWeights1, c, 0);
+        return texelFetch(heLsCoarseWeights2, c, 0);
     }
     ivec3 at = ivec3(p - tile * uTile.y, int(slot));
-    return page == 0 ? texelFetch(heLsTileWeights0, at, 0) : page == 1 ? texelFetch(heLsTileWeights1, at, 0) : texelFetch(heLsTileWeights2, at, 0);
+    if (page == 0) return texelFetch(heLsTileWeights0, at, 0);
+    if (page == 1) return texelFetch(heLsTileWeights1, at, 0);
+    return texelFetch(heLsTileWeights2, at, 0);
 }
 vec4 heLsWeight(vec2 uv)
 {
     float fx = clamp(uv.x, 0.0, 1.0) * 3.0;
     int page = min(int(fx), 2);
-    vec2 q = vec2(fx - float(page), uv.y) * vec2(heLsPageSize()) - 0.5;
+    vec2 puv = vec2(fx - float(page), uv.y);   // 0..1 over the window, in this page
+    vec2 q = puv * vec2(heLsPageSize()) - 0.5;
     ivec2 i = ivec2(floor(q));
     vec2 f = q - vec2(i);
+    heLsFind();
+#ifdef HE_LS_FILTERED
+    // One filtered read where the four texels are the fragment's tile's own (all but a texel's width along its border), or the
+    // coarse world's where the tile is not in the atlas. Level 0 of a tile sits in the corner of its layer.
+    if (heLsSlot == 65535u)
+    {
+        if (page == 0) return textureLod(heLsCoarseWeights0, puv, 0.0);
+        if (page == 1) return textureLod(heLsCoarseWeights1, puv, 0.0);
+        return textureLod(heLsCoarseWeights2, puv, 0.0);
+    }
+    ivec2 t0 = heLsTile * uTile.y;
+    if (i.x >= t0.x && i.y >= t0.y && i.x + 1 < t0.x + uTile.y && i.y + 1 < t0.y + uTile.y)
+    {
+        vec3 at = vec3((q + 0.5 - vec2(t0)) / vec2(textureSize(heLsTileWeights0, 0).xy), float(heLsSlot));
+        if (page == 0) return textureLod(heLsTileWeights0, at, 0.0);
+        if (page == 1) return textureLod(heLsTileWeights1, at, 0.0);
+        return textureLod(heLsTileWeights2, at, 0.0);
+    }
+#endif
     return mix(mix(heLsTexel(page, i), heLsTexel(page, i + ivec2(1, 0)), f.x),
                mix(heLsTexel(page, i + ivec2(0, 1)), heLsTexel(page, i + ivec2(1, 1)), f.x), f.y);
 }
 vec4 heLsWeightLod(vec2 uv, float lod) { return heLsWeight(uv); }
+// A material also reads its weights ONCE in the form for a single page (implicit level of detail, uv over one page) and keeps
+// that only where the image has one page. Here it always has three, so the value is never used: nothing is read for it. (Read
+// like the others it was the most expensive read of the fragment: its uv, taken as one over three pages, lands in another tile.)
+vec4 heLsWeightOnePage(vec2 uv) { return vec4(0.0); }
 )";
 
 void replaceAll(std::string& s, std::string_view from, std::string_view to)
@@ -1751,7 +1803,7 @@ std::string MaterialShaderLibrary::landscapeVertexSource(bool patchAsPushConstan
          + std::string(vs.substr(at + marker.size(), mainAt - at - marker.size())) + kLandscapeMaterialVertexMain;
 }
 
-std::string MaterialShaderLibrary::landscapeFragmentSource(const std::string& glsl, bool separateImages)
+std::string MaterialShaderLibrary::landscapeFragmentSource(const std::string& glsl, bool separateImages, bool filtered)
 {
     std::string s = glsl;
     // The block goes behind the varyings (the first use of the weights is in main); a material that reads no weights gets the block
@@ -1764,19 +1816,17 @@ std::string MaterialShaderLibrary::landscapeFragmentSource(const std::string& gl
     else return {};
     replaceAll(s, "textureSize(heLandscapeWeights, 0)", "heLsWeightSize()");
     replaceAll(s, "textureLod(heLandscapeWeights, ", "heLsWeightLod(");
-    replaceAll(s, "texture(heLandscapeWeights, ", "heLsWeight(");
+    replaceAll(s, "texture(heLandscapeWeights, ", "heLsWeightOnePage(");
     if (s.find("heLandscapeWeights") != std::string::npos) return {};   // a read this does not know: refuse, the caller keeps the landscape's own shader
-    // The top node of the quadtree is bigger than the world: nothing is drawn beyond its edge (kLandscapeFS does the same).
-    const std::string_view mainOpen = "void main() {\n";
-    const size_t mainAt = s.find(mainOpen);
-    if (mainAt == std::string::npos) return {};
-    s.insert(mainAt + mainOpen.size(), "    if (vUV.x < 0.0 || vUV.y < 0.0 || vUV.x > 1.0 || vUV.y > 1.0) discard;\n");
-    if (separateImages)   // texelFetch on a texture without a sampler
+    // (Nothing is discarded beyond the world's edge here: the vertex stage pulls those vertices onto the edge, landscapeVertexSource.)
+    if (separateImages || filtered)
     {
         const size_t vpos = s.find("#version");
         const size_t eol  = vpos == std::string::npos ? std::string::npos : s.find('\n', vpos);
         if (eol == std::string::npos) return {};
-        s.insert(eol + 1, "#extension GL_EXT_samplerless_texture_functions : require\n");
+        // texelFetch on a texture without a sampler; or the weight pages read with a linear sampler (HE_LS_FILTERED, never both:
+        // a texture without a sampler cannot be filtered)
+        s.insert(eol + 1, separateImages ? "#extension GL_EXT_samplerless_texture_functions : require\n" : "#define HE_LS_FILTERED 1\n");
     }
     return s;
 }
@@ -3304,7 +3354,10 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fragmentVariant(
     using namespace he::shaderc;
     Compiled out;
     // The landscape variant: the same text with its weights read from the tile atlas (landscapeFragmentSource).
-    const std::string landscapeText = landscape ? landscapeFragmentSource(glslIn, /*separateImages=*/backend == Backend::SpirV) : std::string();
+    // Metal reads the weight pages FILTERED: its inline samplers are linear and cost no sampler slot. Vulkan's images have no
+    // sampler at all (see landscapeSeparateImages), and an OpenGL landscape's weight textures are made nearest.
+    const std::string landscapeText = landscape ? landscapeFragmentSource(glslIn, /*separateImages=*/backend == Backend::SpirV,
+                                                                          /*filtered=*/backend == Backend::Metal) : std::string();
     const std::string& glsl = landscape ? landscapeText : glslIn;
     if (landscape && landscapeText.empty())
     {

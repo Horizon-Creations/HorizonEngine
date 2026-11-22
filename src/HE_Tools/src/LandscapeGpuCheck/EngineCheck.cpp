@@ -12,6 +12,9 @@
 #include <HorizonScene/Components/TransformComponent.h>
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/LandscapeRuntime.h>
+#include <HorizonScene/Components/TerrainComponent.h>
+#include <HorizonScene/TerrainSystem.h>
+#include <HorizonScene/TransformHierarchy.h>
 #include <Renderer/IRenderer.h>
 #include <Renderer/RendererFactory.h>
 #include <Window/Window.h>
@@ -725,6 +728,169 @@ int runMaterialCheck(HE::RendererBackend backend, HE::RenderPath path, const std
 	}
 	std::printf("  %s\n", failures == 0 ? "OK" : "FAILED");
 	return failures == 0 ? 0 : 1;
+}
+
+// What a frame costs, old landscape against new, through the real renderer: the median wall time of RenderSceneImage (the frame and
+// its read-back, so the read-back is in every number alike and the DIFFERENCES are the scene's) at 1600 x 900.
+//   tile, fixed blend        the landscape's own shader, as before the material path
+//   tile, material           the engine's Auto Landscape material (Forest) on the tile ground, every pass it is in
+//   tile, material, scene only   the same with HE_LANDSCAPE_PASSES=0: without the ground in the shadow, GI, SSAO and velocity passes
+//   terrain, material        a TerrainComponent landscape of 2 x 2 km (1025 samples a side, chunked) with the same material
+// A measurement of this machine under whatever else runs on it: the table says how many frames each number is the median of.
+int runMaterialTiming(HE::RendererBackend backend, HE::RenderPath path, const std::string& packPath, const std::string& arrayRoot)
+{
+	const char* bname = backend == HE::RendererBackend::Metal ? "Metal" : backend == HE::RendererBackend::Vulkan ? "Vulkan" : backend == HE::RendererBackend::OpenGL ? "OpenGL" : "D3D";
+	std::printf("[%s engine, %s, frame times]\n", bname, path == HE::RenderPath::Deferred ? "deferred" : "forward");
+	if (!RendererFactory::Available(backend)) { std::printf("  not in this binary\n"); return 0; }
+	if (arrayRoot.empty()) { std::printf("  NOT MEASURED: needs --arrays <EngineContent root> for the Auto Landscape material\n"); return 0; }
+	constexpr uint32_t tw = 1600, th = 900;
+	constexpr int kFrames = 60;
+	try
+	{
+		HE::WindowProps wp;
+		wp.title = "landscape_gpu_check (timing)";
+		wp.width = kW;
+		wp.height = kH;
+		wp.vsync = false;
+		wp.api = backend;
+		wp.startHidden = true;
+		auto window = std::make_unique<HE::Window>(wp);
+		std::unique_ptr<IRenderer> renderer = RendererFactory::Create(backend);
+		ContentManager content;
+		content.setEngineContentRoot(arrayRoot);
+		renderer->SetContentManager(&content);
+		renderer->Initialize(window.get());
+		renderer->SetRenderPath(path);
+		const bool material = renderer->GetCapabilities().landscapeMaterial;
+
+		const glm::dvec3 camPos{ 2900.0, 650.0, 3072.0 };
+		const auto camera = [&](const glm::dvec3& origin) {
+			const glm::vec3 eye = glm::vec3(camPos - origin);
+			EditorCameraOverride ov;
+			ov.active = true;
+			ov.view = glm::lookAt(eye, eye + glm::normalize(glm::vec3(1.0f, -0.25f, 0.15f)), glm::vec3(0, 1, 0));
+			ov.position = eye;
+			ov.fovDegrees = 70.0f;
+			ov.nearPlane = 2.0f;
+			ov.farPlane = 20000.0f;
+			return ov;
+		};
+		const auto median = [&](const EditorCameraOverride& ov) {
+			std::vector<uint8_t> rgba;
+			for (int i = 0; i < 20; ++i) { rgba.clear(); renderer->RenderSceneImage(ov, tw, th, rgba); }   // pipelines, textures, cascades
+			std::vector<double> ms;
+			for (int i = 0; i < kFrames; ++i)
+			{
+				rgba.clear();
+				const auto t0 = std::chrono::steady_clock::now();
+				renderer->RenderSceneImage(ov, tw, th, rgba);
+				ms.push_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+			}
+			std::sort(ms.begin(), ms.end());
+			return ms[ms.size() / 2];
+		};
+		const auto sun = [](HorizonWorld& w) {
+			const auto e = w.createEntity("Sun");
+			TransformComponent t;
+			t.rotation = glm::vec3(-45.0f, -45.0f, 0.0f);
+			w.registry().emplace<TransformComponent>(e, t);
+			LightComponent l;
+			l.type = HE::LightType::Directional;
+			w.registry().emplace<LightComponent>(e, l);
+		};
+
+		double tileFixed = 0.0, tileMat = 0.0, tileMatScene = 0.0, terrainMat = 0.0;
+		{
+			HorizonWorld world;
+			const glm::dvec3 origin{ 2048.0, 100.0, 1024.0 };
+			world.setOrigin(origin);
+			renderer->SetWorld(&world);
+			sun(world);
+			const auto lsEnt = world.createEntity("Landscape");
+			LandscapeWorldComponent lw;
+			lw.pack = packPath;
+			lw.textureGroup = -1;   // first the fixed blend with flat colours
+			lw.budgetMB = 80;
+			world.registry().emplace<LandscapeWorldComponent>(lsEnt, lw);
+			HE::LandscapeRuntime rt;
+			const auto settle = [&] {
+				for (const auto t1 = std::chrono::steady_clock::now(); std::chrono::steady_clock::now() - t1 < std::chrono::seconds(120);)
+				{
+					rt.update(world, 0.016f, 5.0, &camPos);
+					if (rt.active() && rt.store()->settled() && rt.atlas()->stats().used == rt.store()->residentKeys().size()) return true;
+					std::this_thread::sleep_for(std::chrono::milliseconds(1));
+				}
+				return false;
+			};
+			if (!settle()) { std::printf("  the landscape did not start\n"); return 1; }
+			renderer->SetLandscapeProvider(rt.renderProvider(world));
+			const EditorCameraOverride ov = camera(origin);
+			tileFixed = median(ov);
+			if (material)
+			{
+				world.registry().get<LandscapeWorldComponent>(lsEnt).textureGroup = 1;   // Forest: the group's Auto Landscape material
+				rt.update(world, 0.016f, 5.0, &camPos);
+				tileMat = median(ov);
+				landscapePasses("0");
+				tileMatScene = median(ov);
+				landscapePasses(nullptr);
+			}
+			renderer->SetLandscapeProvider({});
+			renderer->SetWorld(nullptr);
+		}
+		{
+			HorizonWorld world;
+			renderer->SetWorld(&world);
+			sun(world);
+			const HE::AutoLandscapeGroup& grp = HE::autoLandscapeGroup(HE::AutoLandscapeGroupId::Forest);
+			const MaterialAsset* ma = content.resolveMaterialRef(HE::UUID{}, grp.materialPath);
+			const HE::UUID matId = ma ? ma->id : HE::UUID{};
+			const auto te = world.createEntity("Terrain");
+			TransformComponent tf;
+			tf.position = glm::vec3(1000.0f, 0.0f, 0.0f);   // the camera stands over its near edge and looks along it
+			world.registry().emplace<TransformComponent>(te, tf);
+			TerrainComponent tc;
+			tc.resolution = 1025;
+			tc.sizeX = tc.sizeZ = 2048.0f;
+			tc.heightScale = 0.0f;
+			tc.dirty = true;
+			world.registry().emplace<TerrainComponent>(te, tc);
+			if (matId != HE::UUID{}) world.registry().emplace<MaterialComponent>(te, MaterialComponent{ matId });
+			TerrainSystem::updateTerrains(world, content, renderer.get());
+			HE::propagateTransforms(world);
+			EditorCameraOverride ov;
+			const glm::vec3 eye(0.0f, 60.0f, 0.0f);
+			ov.active = true;
+			ov.view = glm::lookAt(eye, eye + glm::normalize(glm::vec3(1.0f, -0.25f, 0.15f)), glm::vec3(0, 1, 0));
+			ov.position = eye;
+			ov.fovDegrees = 70.0f;
+			ov.nearPlane = 2.0f;
+			ov.farPlane = 20000.0f;
+			terrainMat = matId != HE::UUID{} ? median(ov) : 0.0;
+			std::vector<uint8_t> shot;
+			renderer->RenderSceneImage(ov, kW, kH, shot);
+			if (shot.size() == static_cast<size_t>(kW) * kH * 4)
+				writePngFile(std::string("landscape_") + bname + "_timing_terrain.png", static_cast<int>(kW), static_cast<int>(kH), shot.data());
+			renderer->SetWorld(nullptr);
+		}
+		std::printf("  median of %d frames at %u x %u, ms a frame (with the read-back):\n", kFrames, tw, th);
+		std::printf("    tile landscape, fixed blend              %7.2f\n", tileFixed);
+		if (material)
+		{
+			std::printf("    tile landscape, material                 %7.2f   (%+.2f against the fixed blend)\n", tileMat, tileMat - tileFixed);
+			std::printf("    tile landscape, material, scene only     %7.2f   (the other passes cost %+.2f)\n", tileMatScene, tileMat - tileMatScene);
+		}
+		else
+			std::printf("    tile landscape, material                 not on this backend\n");
+		if (terrainMat > 0.0) std::printf("    TerrainComponent 2 x 2 km, same material %7.2f   (the tile landscape with material is %+.2f against it)\n", terrainMat, tileMat - terrainMat);
+		renderer->Shutdown();
+	}
+	catch (const std::exception& e)
+	{
+		std::printf("  the renderer could not start here: %s\n", e.what());
+		return 3;
+	}
+	return 0;
 }
 
 // GI reflection against the TILE landscape (Thema 326 step 16's hfClosestHit kernel), GL only.

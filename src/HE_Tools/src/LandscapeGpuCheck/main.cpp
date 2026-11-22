@@ -964,6 +964,7 @@ int main(int argc, char** argv)
 	std::filesystem::path outDir = ".";
 	std::string only;
 	bool measure = false;    // --measure: only time the landscape (CPU and GPU) instead of checking pictures
+	bool timing = false;     // --timing: frame times through the real renderer, tile landscape (fixed blend / material) against a TerrainComponent's
 	std::string arrayRoot;   // --arrays <EngineContent root>: also draw the ground from the Forest albedo array found there
 	for (int i = 1; i < argc; ++i)
 	{
@@ -971,6 +972,7 @@ int main(int argc, char** argv)
 		else if (!std::strcmp(argv[i], "--only") && i + 1 < argc) only = argv[++i];
 		else if (!std::strcmp(argv[i], "--arrays") && i + 1 < argc) arrayRoot = argv[++i];
 		else if (!std::strcmp(argv[i], "--measure")) measure = true;
+		else if (!std::strcmp(argv[i], "--timing")) timing = true;
 	}
 	std::filesystem::create_directories(outDir);
 
@@ -989,6 +991,22 @@ int main(int argc, char** argv)
 		if (!w.finish()) { std::printf("pack: finish failed\n"); return 2; }
 	}
 
+	if (timing)
+	{
+		int trc = 0;
+		for (const auto path : { HE::RenderPath::Forward, HE::RenderPath::Deferred })
+		{
+#ifdef HE_CHECK_METAL
+			if (only.empty() || only == "metal") trc = std::max(trc, gpucheck::runMaterialTiming(HE::RendererBackend::Metal, path, pack, arrayRoot));
+#endif
+#ifdef HE_CHECK_VULKAN
+			if (only == "vulkan") trc = std::max(trc, gpucheck::runMaterialTiming(HE::RendererBackend::Vulkan, path, pack, arrayRoot));
+#endif
+		}
+		std::error_code ec;
+		std::filesystem::remove(pack, ec);
+		return trc;
+	}
 	if (measure)
 	{
 		int mrc = 0;
