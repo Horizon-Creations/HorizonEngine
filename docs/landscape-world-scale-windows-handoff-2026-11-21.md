@@ -377,6 +377,10 @@ the backends first, the merge of `release/0.8.0` after; origin is pushed after e
 * **The `--arrays` root here**: `C:\ProgramData\Hive\w\lgc-content`, junctions (PowerShell `New-Item -ItemType Junction`, bash
   `mklink` made broken ones) to the deploy's `EngineContent\{Materials,MaterialFunctions,Meshes,Particles,Widgets}` and
   `%APPDATA%\HorizonEngine\EngineContentCache\Textures`. `HE_LGC_GROUP=mountains` is `checkGroup()` in `EngineCheck.cpp`.
+* **`he_tests` after these commits** (Debug, scratch APPDATA, 4073 cases run): 3 fail, none in files this branch touches.
+  `test_inspector_ui.cpp:510` (clipboard, known), `test_hc_codegen_export_build.cpp:181` (empty build message; run outside
+  vcvars, not looked into), `test_physics_threading.cpp:305` crashes with an SEH exception every time (the branch has no diff
+  under `src/HE_Core/src/Physics`; not looked into, not compared with `release/0.8.0`).
 
 ## Handoff
 
