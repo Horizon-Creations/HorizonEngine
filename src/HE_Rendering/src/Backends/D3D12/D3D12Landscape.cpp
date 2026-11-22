@@ -301,6 +301,40 @@ struct D3D12Landscape::Impl
 		return viewPosPso.Get();
 	}
 
+	// The GI pre-pass (drawGiGBuf): kLandscapeHLSL's PSGiGBuf into the renderer's two targets (position RGBA32F, normal RGBA16F)
+	// with their D32_FLOAT depth. Tried once; without it the ground takes no ray-traced shadow while GI is on.
+	ComPtr<ID3D12PipelineState> giGBufPso;
+	bool giGBufPsoTried = false;
+	ID3D12PipelineState* giGBufPsoGet()
+	{
+		if (giGBufPsoTried) return giGBufPso.Get();
+		giGBufPsoTried = true;
+		ComPtr<ID3DBlob> ps;
+		std::string err;
+		if (!compileStage("PSGiGBuf", "ps_5_0", ps, err)) return nullptr;
+		D3D12_GRAPHICS_PIPELINE_STATE_DESC pd{};
+		pd.pRootSignature = rootSig.Get();
+		pd.VS = { vsBlob->GetBufferPointer(), vsBlob->GetBufferSize() };
+		pd.PS = { ps->GetBufferPointer(), ps->GetBufferSize() };
+		pd.SampleMask = UINT_MAX;
+		pd.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+		pd.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+		pd.RasterizerState.DepthClipEnable = TRUE;
+		pd.DepthStencilState.DepthEnable = TRUE;
+		pd.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+		pd.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
+		pd.DSVFormat = DXGI_FORMAT_D32_FLOAT;
+		pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+		pd.NumRenderTargets = 2;
+		pd.RTVFormats[0] = DXGI_FORMAT_R32G32B32A32_FLOAT;
+		pd.RTVFormats[1] = DXGI_FORMAT_R16G16B16A16_FLOAT;
+		pd.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+		pd.BlendState.RenderTarget[1].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+		pd.SampleDesc.Count = 1;
+		if (FAILED(device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&giGBufPso)))) giGBufPso.Reset();
+		return giGBufPso.Get();
+	}
+
 	void drawBare(ID3D12GraphicsCommandList* cl, const HE::LandscapeRenderFrame& f, const glm::mat4& clip, ID3D12PipelineState* pso,
 	              const glm::mat4* view);
 };
@@ -669,6 +703,11 @@ void D3D12Landscape::drawDepth(ID3D12GraphicsCommandList* cl, const HE::Landscap
 void D3D12Landscape::drawViewPos(ID3D12GraphicsCommandList* cl, const HE::LandscapeRenderFrame& f, const glm::mat4& viewProj, const glm::mat4& view)
 {
 	m_impl->drawBare(cl, f, viewProj, m_impl->viewPosPsoGet(), &view);
+}
+
+void D3D12Landscape::drawGiGBuf(ID3D12GraphicsCommandList* cl, const HE::LandscapeRenderFrame& f, const glm::mat4& viewProj)
+{
+	m_impl->drawBare(cl, f, viewProj, m_impl->giGBufPsoGet(), nullptr);
 }
 
 // The patches with one of the two pipelines that are not the scene's: depth alone (a shadow layer), or the view-space position

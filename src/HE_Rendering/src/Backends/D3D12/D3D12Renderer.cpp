@@ -9675,7 +9675,8 @@ struct D3D12RendererImpl
     bool runGiShadow(ID3D12GraphicsCommandList* cl, UINT fi,
                      const std::vector<const DrawCall*>& opaqueDCs,
                      const glm::mat4& viewProj, int w, int h,
-                     const RenderWorld& rw, ContentManager* cm, bool maskPasses = true)
+                     const RenderWorld& rw, ContentManager* cm, bool maskPasses = true,
+                     const std::function<void()>& drawGround = {})
     {
         GpuPassScope _passTimer(this, "GIShadow");
         createGiPipelines();
@@ -9781,6 +9782,10 @@ struct D3D12RendererImpl
                 else
                     drawOne(dc->transform);
             }
+            // The tile landscape's ground (Thema 326): its pixels get a position and a normal, so the shadow rays below
+            // start from them and the ground takes the ray-traced sun shadow like any mesh. It leaves its own root
+            // signature, pipeline and heap set; the compute stage that follows binds its own.
+            if (drawGround) drawGround();
             const auto kBoth = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE
                              | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
             barrier12(cl, giGBufPosTex.Get(),  giGBufPosState,  kBoth);
@@ -13088,7 +13093,18 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
             const bool maskOk = p.runGiShadow(cl, p.frameIndex, giPrepassDCs, viewProjClean,
                                               std::max(1, width / 2), std::max(1, height / 2),
                                               p.m_renderWorld, m_contentManager,
-                                              /*maskPasses=*/p.giEnabled);
+                                              /*maskPasses=*/p.giEnabled,
+                                              [&]()
+                                              {
+                                                  // The provider culls for THIS pass's matrix (unjittered) and hands over the
+                                                  // tiles that arrived, which are uploaded whether or not the ground is drawn.
+                                                  if (!HE::landscapeD3dPassesOn() || !m_landscapeProvider || p.landscapeFailed || !p.landscape.ready()) return;
+                                                  HE::LandscapeRenderFrame lf;
+                                                  m_landscapeProvider(glm::dmat4(viewProjClean), /*zeroToOne=*/false, lf);
+                                                  if (!lf.active) return;
+                                                  p.landscape.upload(cl, lf);
+                                                  if (HE::landscapePassesOn()) p.landscape.drawGiGBuf(cl, lf, viewProjClean);
+                                              });
             if (maskOk && p.giEnabled)
                 p.dispatchGiProbeUpdate(cl, p.frameIndex, p.m_renderWorld);
             giShadingActive = p.giEnabled && maskOk && p.giIrrTex && p.giVisTex && p.giProbeGridBuilt;
