@@ -1567,12 +1567,17 @@ private:
 
 	// ── World-scale landscape (Thema 326, step 2 part B) ────────────────────
 	// DrawLandscape asks the application's provider (IRenderer::SetLandscapeProvider) for the frame of the camera it is about to render
-	// with and draws it into the bound HDR target, in the opaque pass before the sky. Not in the G-buffer: no shadows, SSAO or GI.
-	void DrawLandscape(const glm::mat4& viewProj, unsigned int csmLightUbo = 0);   // csmLightUbo: a lighting block with the sun's cascades, or 0
+	// with and draws it into the bound HDR target, in the opaque pass before the sky; with `gbuffer` into the G-buffer that is bound
+	// (the material's G-buffer tail; nothing when it has none). Returns whether the ground was drawn by its material.
+	bool DrawLandscape(const glm::mat4& viewProj, unsigned int csmLightUbo = 0, bool gbuffer = false);   // csmLightUbo: a lighting block with the sun's cascades, or 0
 	void DrawLandscapeDepth(const glm::mat4& viewProj);   // into the bound depth-only target (a shadow layer)
+	void DrawLandscapeViewPos(const glm::mat4& viewProj, const glm::mat4& view);   // into the SSAO position pre-pass that is bound
 	OpenGLLandscape m_landscape;
 	bool            m_landscapeFailed = false;   // init failed once: not tried again
-	unsigned int    GetOrBuildLandscapeMaterialProgram(const HE::UUID& materialId);
+	bool            m_landscapeInGBuffer = false; // this frame's G-buffer pass drew the ground: no forward draw after the resolve
+	unsigned int    m_landscapePosProgram = 0;    // DrawLandscapeViewPos: the landscape's vertex stage with a view-position fragment
+	bool            m_landscapePosTried = false;
+	unsigned int    GetOrBuildLandscapeMaterialProgram(const HE::UUID& materialId, bool gbuffer = false);
 	int             m_maxFragmentSamplers = 0;   // GL_MAX_TEXTURE_IMAGE_UNITS, read at Initialize
 	HE::UUID        m_landscapeMaterialLoadTried{};   // the texture group's material this renderer tried to load from its path
 };

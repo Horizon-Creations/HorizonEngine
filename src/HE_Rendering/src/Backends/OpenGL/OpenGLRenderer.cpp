@@ -3997,19 +3997,21 @@ static void (*s_setupMaterialProgram)(GLuint) = nullptr;
 // The program that draws the tile landscape's patches with a material: the landscape's vertex stage and the material's lit fragment
 // with its layer weights from the tile atlas (MaterialShaderLibrary), GLSL 4.10. 0, remembered: no shader, or it does not build or
 // link here (a macOS fragment stage takes sixteen samplers) - the landscape then keeps its fixed blend.
-unsigned int OpenGLRenderer::GetOrBuildLandscapeMaterialProgram(const HE::UUID& materialId)
+// `gbuffer`: the material's G-buffer tail (attributes, lit by the deferred resolve) instead of its lit fragment.
+unsigned int OpenGLRenderer::GetOrBuildLandscapeMaterialProgram(const HE::UUID& materialId, bool gbuffer)
 {
 #if defined(HE_HAVE_SHADERC)
 	uint64_t key = 0; std::string frag, vertBody;
-	if (!m_contentManager || !resolveMaterialShader(materialId, key, frag, vertBody)) return 0;
-	const uint64_t progKey = key ^ 0x7A11E51A2D5C0610ULL;
+	if (!m_contentManager || !(gbuffer ? resolveMaterialShaderGB(materialId, key, frag, vertBody) : resolveMaterialShader(materialId, key, frag, vertBody)))
+		return 0;
+	const uint64_t progKey = key ^ (gbuffer ? 0x7A11E56B0FFE2000ULL : 0x7A11E51A2D5C0610ULL);
 	if (auto it = m_materialPrograms.find(progKey); it != m_materialPrograms.end()) return it->second;
 	// The material's own program first: it is what sets s_setupMaterialProgram, and a material the mesh path cannot build is not
 	// one the landscape can.
-	if (!GetOrBuildMaterialProgram(key, frag, vertBody, nullptr) || !s_setupMaterialProgram) { m_materialPrograms[progKey] = 0; return 0; }
+	if (!GetOrBuildMaterialProgram(key, frag, vertBody, nullptr, gbuffer) || !s_setupMaterialProgram) { m_materialPrograms[progKey] = 0; return 0; }
 	using Backend = HE::MaterialShaderLibrary::Backend;
 	const auto& v = m_matShaderLib.landscapeVertex(Backend::GLSL410);
-	const auto& f = m_matShaderLib.landscapeFragment(key, frag, Backend::GLSL410, /*clustered=*/false);
+	const auto& f = m_matShaderLib.landscapeFragment(progKey, frag, Backend::GLSL410, /*clustered=*/false);
 	GLuint prog = 0;
 	std::string why = v.log + f.log;
 	if (v.ok && f.ok)
@@ -8049,6 +8051,15 @@ unsigned int OpenGLRenderer::RenderSSAO(const CommandBuffer& cmds, int pw, int p
 			glDrawElements(GL_TRIANGLES, range.count, GL_UNSIGNED_INT, range.offset);
 		}
 	}
+	// The tile landscape's ground (Thema 326), into the position-only target: it writes target 0 alone, so not into the
+	// three-target reflection pre-pass (as on Vulkan and D3D). The mesh loop's program and vertex array are bound again by
+	// whatever draws next.
+	if (!reflMrt)
+	{
+		DrawLandscapeViewPos(viewProj, view);
+		glBindVertexArray(0);
+		glUseProgram(0);
+	}
 	// Back to a single draw buffer so nothing downstream inherits the MRT state.
 	if (reflMrt) glDrawBuffers(1, mrt);
 	}
@@ -11693,6 +11704,8 @@ void OpenGLRenderer::Shutdown()
 	if (m_blackTex)       { glDeleteTextures(1, &m_blackTex);        m_blackTex = 0; }
 	if (m_ssaoPosProgram)  { glDeleteProgram(m_ssaoPosProgram);  m_ssaoPosProgram = 0; }
 	if (m_ssaoPosInstancedProgram) { glDeleteProgram(m_ssaoPosInstancedProgram); m_ssaoPosInstancedProgram = 0; }
+	if (m_landscapePosProgram) { glDeleteProgram(m_landscapePosProgram); m_landscapePosProgram = 0; }
+	m_landscapePosTried = false;
 	if (m_ssaoProgram)     { glDeleteProgram(m_ssaoProgram);     m_ssaoProgram = 0; }
 	if (m_ssaoBlurProgram) { glDeleteProgram(m_ssaoBlurProgram); m_ssaoBlurProgram = 0; }
 	if (m_debugLineProgram) { glDeleteProgram(m_debugLineProgram); m_debugLineProgram = 0; }
@@ -12402,13 +12415,70 @@ void OpenGLRenderer::DrawLandscapeDepth(const glm::mat4& viewProj)
 	m_landscape.draw(frame, viewProj, OpenGLLandscape::Shading{});
 }
 
-void OpenGLRenderer::DrawLandscape(const glm::mat4& viewProj, unsigned int csmLightUbo)
+// The ground into the SSAO position pre-pass (forward frames; a deferred one reads the G-buffer's depth): view-space position,
+// a = 1 marks geometry, what the mesh pre-pass writes. The program is the material library's landscape vertex stage (it hands the
+// origin-relative position on as vWorldPos) with a fragment of three lines, drawn through OpenGLLandscape's material path, which
+// finds the landscape's blocks and images by name.
+void OpenGLRenderer::DrawLandscapeViewPos(const glm::mat4& viewProj, const glm::mat4& view)
+{
+#if defined(HE_HAVE_SHADERC)
+	if (!m_landscapeProvider || m_landscapeFailed || !m_landscape.ready()) return;
+	if (!m_landscapePosTried)
+	{
+		m_landscapePosTried = true;
+		const auto& v = m_matShaderLib.landscapeVertex(HE::MaterialShaderLibrary::Backend::GLSL410);
+		static const char* const kFS =
+			"#version 410 core\n"
+			"layout(location = 3) in vec3 vWorldPos;\n"
+			"uniform mat4 uView;\n"
+			"layout(location = 0) out vec4 oViewPos;\n"
+			"void main() { oViewPos = vec4((uView * vec4(vWorldPos, 1.0)).xyz, 1.0); }\n";
+		if (v.ok)
+		{
+			try
+			{
+				const GLuint vs = CompileStage(GL_VERTEX_SHADER, v.source.c_str());
+				const GLuint fs = CompileStage(GL_FRAGMENT_SHADER, kFS);
+				const GLuint prog = glCreateProgram();
+				glAttachShader(prog, vs);
+				glAttachShader(prog, fs);
+				glLinkProgram(prog);
+				glDeleteShader(vs);
+				glDeleteShader(fs);
+				GLint linked = 0;
+				glGetProgramiv(prog, GL_LINK_STATUS, &linked);
+				if (linked) m_landscapePosProgram = prog;
+				else glDeleteProgram(prog);
+			}
+			catch (const std::exception&) {}
+		}
+		if (!m_landscapePosProgram)
+			HE_LOG_WARN(RHI, "%s", "OpenGLRenderer: the landscape's view-position program did not build, the ground takes no ambient occlusion on a forward frame");
+	}
+	if (!m_landscapePosProgram) return;
+	HE::LandscapeRenderFrame frame;
+	m_landscapeProvider(glm::dmat4(viewProj), /*zeroToOne=*/false, frame);
+	if (!frame.active) return;
+	if (!HE::landscapePassesOn()) frame.patches.clear();   // the uploads are executed either way
+	glUseProgram(m_landscapePosProgram);
+	glUniformMatrix4fv(glGetUniformLocation(m_landscapePosProgram, "uView"), 1, GL_FALSE, glm::value_ptr(view));
+	OpenGLLandscape::Shading sh;
+	sh.materialProgram = m_landscapePosProgram;
+	m_landscape.draw(frame, viewProj, sh);
+#else
+	(void)viewProj; (void)view;
+#endif
+}
+
+// `gbuffer`: into the G-buffer that is bound, with the material's G-buffer tail, and only then (no fixed blend into a G-buffer).
+// Returns whether the ground was drawn by its material.
+bool OpenGLRenderer::DrawLandscape(const glm::mat4& viewProj, unsigned int csmLightUbo, bool gbuffer)
 {
 	bool csmBound = false;
-	if (!m_landscapeProvider || m_landscapeFailed) return;
+	if (!m_landscapeProvider || m_landscapeFailed) return false;
 	HE::LandscapeRenderFrame frame;
 	m_landscapeProvider(glm::dmat4(viewProj), /*zeroToOne=*/false, frame);   // viewProj is origin-relative, in GL clip space (-1..1)
-	if (!frame.active) return;                                                // no landscape in this scene: nothing is compiled, nothing drawn
+	if (!frame.active) return false;                                          // no landscape in this scene: nothing is compiled, nothing drawn
 	if (!m_landscape.ready())
 	{
 		std::string err;
@@ -12416,7 +12486,7 @@ void OpenGLRenderer::DrawLandscape(const glm::mat4& viewProj, unsigned int csmLi
 		{
 			HE_LOG_WARN(RHI, "OpenGLRenderer: the world-scale landscape is off: %s", err.c_str());
 			m_landscapeFailed = true;
-			return;
+			return false;
 		}
 	}
 
@@ -12452,7 +12522,7 @@ void OpenGLRenderer::DrawLandscape(const glm::mat4& viewProj, unsigned int csmLi
 		}
 		// the extractor's derived material where the landscape's own cannot be drawn (RenderWorld::tileLandscapeMaterial)
 		const HE::UUID matId = m_renderWorld.tileLandscapeMaterial != HE::UUID{} ? m_renderWorld.tileLandscapeMaterial : frame.materialId;
-		if (const unsigned int prog = GetOrBuildLandscapeMaterialProgram(matId))
+		if (const unsigned int prog = GetOrBuildLandscapeMaterialProgram(matId, gbuffer))
 		{
 			float padded[HE::kMatParamFloats] = { 0 };
 			unsigned int gtex[4] = { 0, 0, 0, 0 };
@@ -12492,6 +12562,8 @@ void OpenGLRenderer::DrawLandscape(const glm::mat4& viewProj, unsigned int csmLi
 		}
 	}
 #endif
+	// The frame's uploads are executed either way (the runtime counts them as done); a G-buffer without a variant gets no ground.
+	if (gbuffer && !sh.materialProgram) frame.patches.clear();
 	m_landscape.draw(frame, viewProj, sh);
 	if (csmBound)   // what the material programs drawn after this expect (as after the deferred resolve)
 	{
@@ -12500,6 +12572,7 @@ void OpenGLRenderer::DrawLandscape(const glm::mat4& viewProj, unsigned int csmLi
 		glBindTexture(GL_TEXTURE_2D_ARRAY, m_localShadowDepthTex ? m_localShadowDepthTex : m_shadowDepthTex);
 		glActiveTexture(GL_TEXTURE0);
 	}
+	return sh.materialProgram != 0;
 }
 
 void OpenGLRenderer::DrawSkyFullscreen(const glm::mat4& invViewProj, const glm::vec3& sunDir,
@@ -14291,6 +14364,21 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 		}
 #endif
 
+		// The tile landscape's ground into the G-buffer with its material's G-buffer tail (Thema 326), so the resolve lights it
+		// with everything else and the G-buffer's depth (SSAO, on this path) has it. Without a variant it is drawn forward
+		// after the resolve, as before.
+		m_landscapeInGBuffer = false;
+		if (deferredActive && HE::landscapePassesOn())
+		{
+			glBindFramebuffer(GL_FRAMEBUFFER, m_gbFBO);
+			glEnable(GL_DEPTH_TEST);
+			glDepthFunc(GL_LESS);
+			glDepthMask(GL_TRUE);
+			glDisable(GL_BLEND);
+			m_landscapeInGBuffer = DrawLandscape(viewProj, 0, /*gbuffer=*/true);
+			glUseProgram(0);
+		}
+
 		// ── Deferred: fullscreen lighting resolve + forward-routed replay ────
 		if (deferredActive)
 		{
@@ -14635,7 +14723,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			glBindBuffer(GL_UNIFORM_BUFFER, 0);
 		}
 #endif
-		DrawLandscape(viewProj, landscapeLightUbo);
+		if (!m_landscapeInGBuffer) DrawLandscape(viewProj, landscapeLightUbo);   // else the G-buffer pass drew it and the resolve lit it
 		GpuTimerEndPass();                 // end "Opaque"
 
 		// ── TAA velocity (A2): screen-space motion of the opaque geometry, right
@@ -15347,7 +15435,9 @@ IRenderer::Capabilities OpenGLRenderer::GetCapabilities() const
 	// landscape adds seven to a material's, and the Auto Landscape material then uses 22. macOS OpenGL 4.1 holds 16, so there
 	// the link fails and the ground keeps its fixed blend (said here, so nothing claims otherwise).
 	c.landscapeMaterial          = m_maxFragmentSamplers >= 24;
-	c.landscapePassMask          = kLandscapePassShadow;   // the shadow pass: DrawLandscapeDepth in every layer
+	// DrawLandscapeDepth in every shadow layer; with the material also the G-buffer (DrawLandscape gbuffer) and the SSAO
+	// position pre-pass (DrawLandscapeViewPos).
+	c.landscapePassMask          = kLandscapePassShadow | (c.landscapeMaterial ? (kLandscapePassGBuffer | kLandscapePassSsao) : 0u);
 #endif
 	c.supportsRvt                = m_rvtSupported;   // a page is that raw capture blitted into the pool (the programs come from the cross-compiler)
 	// SSR: the FORWARD variant only (docs/ssr-cross-backend-plan.md checkpoint
