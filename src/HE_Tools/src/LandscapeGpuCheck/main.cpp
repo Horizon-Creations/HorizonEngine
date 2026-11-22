@@ -1003,7 +1003,8 @@ int main(int argc, char** argv)
 	std::filesystem::path outDir = ".";
 	std::string only;
 	bool measure = false;    // --measure: only time the landscape (CPU and GPU) instead of checking pictures
-	bool timing = false;     // --timing: frame times through the real renderer, tile landscape (fixed blend / material) against a TerrainComponent's
+	std::string writePack;   // --write-pack <file>: write the painted world as a pack and stop
+	bool timing = false;    // --timing: frame times through the real renderer, tile landscape (fixed blend / material) against a TerrainComponent's
 	std::string arrayRoot;   // --arrays <EngineContent root>: also draw the ground from the Forest albedo array found there
 	for (int i = 1; i < argc; ++i)
 	{
@@ -1012,6 +1013,7 @@ int main(int argc, char** argv)
 		else if (!std::strcmp(argv[i], "--arrays") && i + 1 < argc) arrayRoot = argv[++i];
 		else if (!std::strcmp(argv[i], "--measure")) measure = true;
 		else if (!std::strcmp(argv[i], "--timing")) timing = true;
+		else if (!std::strcmp(argv[i], "--write-pack") && i + 1 < argc) writePack = argv[++i];
 	}
 	std::filesystem::create_directories(outDir);
 
@@ -1078,6 +1080,17 @@ int main(int argc, char** argv)
 				ok = src.load({ x, z }, -1, t) && w.add({ x, z }, encodeLandscapeTile(t));
 			}
 		if (!ok || !w.finish()) { std::printf("painted pack: not written, the painted squares are not checked\n"); paintedPack.clear(); }
+	}
+	// --write-pack <file>: keep the painted world as a pack and stop (for a run of the real editor or game: HE_DUMP_TILEWORLD=<file>).
+	if (!writePack.empty())
+	{
+		std::error_code ec;
+		std::filesystem::remove(pack, ec);
+		if (paintedPack.empty()) return 2;
+		std::filesystem::rename(paintedPack, writePack, ec);
+		if (ec) { std::filesystem::copy_file(paintedPack, writePack, std::filesystem::copy_options::overwrite_existing, ec); std::filesystem::remove(paintedPack); }
+		std::printf("%s the painted %d x %d tile world as %s\n", ec ? "could not write" : "wrote", gpucheck::kPaintTilesX, gpucheck::kPaintTilesZ, writePack.c_str());
+		return ec ? 2 : 0;
 	}
 	// A copy of the pack that carries a far image in a colour no layer has: what the engine pass "far image" draws.
 	std::string markerPack = pack + ".far";

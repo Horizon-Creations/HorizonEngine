@@ -807,6 +807,14 @@ int runMaterialCheck(HE::RendererBackend backend, HE::RenderPath path, const std
 			world.destroyEntity(boxEnt);
 			std::vector<uint8_t> alone;
 			if (!shoot(alone)) fail("RenderSceneImage gave an image (the ground alone)");
+			else
+			{
+				// ... and the ground is IN it: the passes that used to leave early without objects now go on for the landscape.
+				size_t groundPx = 0;
+				for (size_t i = 0; i < px; ++i) groundPx += isBlue(&alone[i * 4]) ? 1 : 0;
+				std::printf("  the ground alone (no mesh in the scene): %zu of %zu px are ground\n", groundPx, px);
+				if (groundPx < px * 2 / 5) fail("a scene with no mesh still draws the ground with its material", std::to_string(groundPx) + " px");
+			}
 		}
 		renderer->SetLandscapeProvider({});
 		renderer->Shutdown();

@@ -107,6 +107,7 @@ static void onProjectWriteRefused(const char* what);   // ProjectWriteGate handl
 #include <HorizonScene/WaterLake.h>
 #include <HorizonScene/WaterMesh.h>
 #include <HorizonScene/Components/TerrainComponent.h>
+#include <HorizonScene/Components/LandscapeWorldComponent.h>   // HE_DUMP_TILEWORLD
 #include <HorizonScene/Components/FoliageComponent.h>   // HE_DUMP_FOLIAGETEST witness
 #include <HorizonScene/FoliageSystem.h>
 #include <HorizonScene/LayerMeshPresets.h>   // HE_DUMP_AUTOLANDMESHES witness
@@ -8098,6 +8099,24 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 	//              between backends from the material's
 	//   =plaingraph a lit graph material that is only a constant grey: the
 	//              graph lighting path without textures or normal map
+	// HE_DUMP_TILEWORLD=<pack file>[,<texture group 0..3>]: a TILE landscape in the dump scene (LandscapeWorldComponent, Thema 326),
+	// through the editor's own runtime, provider and renderer. The pack is any landscape pack (landscape_gpu_check --write-pack
+	// writes a small painted one). The tiles are streamed in before the capture, further down.
+	if (const char* tw = std::getenv("HE_DUMP_TILEWORLD"); tw && *tw && m_editorWorld)
+	{
+		std::string packFile(tw);
+		int group = 1;
+		if (const size_t comma = packFile.rfind(','); comma != std::string::npos)
+		{
+			group = std::atoi(packFile.c_str() + comma + 1);
+			packFile.resize(comma);
+		}
+		const Entity e = m_editorWorld->createEntity("TileLandscape");
+		LandscapeWorldComponent lw;
+		lw.pack = packFile;
+		lw.textureGroup = group;
+		m_editorWorld->registry().emplace<LandscapeWorldComponent>(e, lw);
+	}
 	if (const char* al = std::getenv("HE_DUMP_AUTOLAND"); al && *al && m_editorWorld)
 	{
 		auto& reg = m_editorWorld->registry();
@@ -10685,6 +10704,33 @@ void EditorApplication::dumpFrameHeadless()
 	int settleFrames = 3;
 	if (const char* sf = std::getenv("HE_DUMP_FRAMES"); sf && *sf)
 		settleFrames = std::clamp(std::atoi(sf), 1, 240);
+	// HE_DUMP_TILEWORLD: the dump renders without scene ticks, so the tile landscape is started and streamed in here, with the same
+	// calls the frame loop makes (the runtime on the world, the provider on the renderer, update around the editor camera).
+	if (const char* tw = std::getenv("HE_DUMP_TILEWORLD"); tw && *tw && m_editorWorld && r)
+	{
+		m_editorWorld->setLandscapeRuntime(&m_landscape);
+		if (!m_landscapeBound)
+		{
+			r->SetLandscapeProvider([this](const glm::dmat4& vp, bool zeroToOne, HE::LandscapeRenderFrame& out) {
+				if (m_editorWorld) m_landscape.buildRenderFrame(vp, m_editorWorld->origin(), zeroToOne, out);
+			});
+			m_landscape.setWindowKeepsAtlas(r->GetCapabilities().landscapeCoarseRevision);
+			m_landscapeBound = true;
+		}
+		const glm::dvec3 eye = glm::dvec3(m_editorCamera.position()) + m_editorWorld->origin();
+		bool settled = false;
+		for (const auto t0 = std::chrono::steady_clock::now(); std::chrono::steady_clock::now() - t0 < std::chrono::seconds(60);)
+		{
+			m_landscape.update(*m_editorWorld, 0.016f, 5.0, &eye);
+			if (m_landscape.active() && m_landscape.store()->settled() && m_landscape.atlas()->stats().used == m_landscape.store()->residentKeys().size()
+			    && m_landscape.giHeightfield().active())
+			{ settled = true; break; }
+			std::this_thread::sleep_for(std::chrono::milliseconds(1));
+		}
+		HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_TILEWORLD %s: %zu tile(s) resident, renderer draws the ground with %s",
+		            settled ? "streamed in" : "DID NOT SETTLE", m_landscape.active() ? m_landscape.store()->residentKeys().size() : size_t(0),
+		            r->GetCapabilities().landscapeMaterial ? "its material" : "the fixed blend");
+	}
 	// The dump renders without scene ticks, so the trail clipmap (HE_DUMP_TRAILTEST's footprints) is brought in
 	// line with the camera's final pose here, once.
 	if (const char* tt = std::getenv("HE_DUMP_TRAILTEST"); tt && *tt && *tt != '0' && m_editorWorld)
