@@ -355,17 +355,39 @@ the backends first, the merge of `release/0.8.0` after; origin is pushed after e
   folder, and they are only copied there when the exe relinks. After an engine-only edit: copy them
   (`out/build/x64-debug/src/HE_Rendering/HorizonRendering.dll`, `out/build/x64-debug/Shaders/`) before believing a result.
 
+## 12. Fourth Windows session of 22.11.: GI on OpenGL forward, the virtual texture on all four
+
+* **OpenGL forward GI** (`c05e75a92`): the ground's forward draw ran before any mesh material draw had bound units 14 to 17 (the
+  GI shadow mask and its neighbours), so it read whatever was there. `OpenGLRenderer::DrawScene` binds them before
+  `DrawLandscape`; OpenGL claims `kLandscapePassGi` now.
+* **The virtual texture on the tile ground** (section 7b), `Capabilities::landscapeRvt` on D3D11 (`ada4667c4`), D3D12
+  (`b2d17d7a8`), Vulkan (`7d9b6956f`), OpenGL (`3862c05bb`). One shape everywhere: `SetRvtTileGround` stores consumer + rectangle
+  in `m_tileRvt*`; the ground's material draw (`drawGroundMaterial`, on OpenGL `DrawLandscape`) splits the frame's patches with
+  `HE::splitRvtTilePatches` (`HorizonRendering/RvtTilePatches.h`) and draws the inside ones with the consumer; a page with
+  `rvtTileGround` draws the ground with `rvtMaterial`, a page of meshes leaves the ground out.
+* **Evidence** (`--arrays`, `HE_LGC_GROUP=mountains`, forward and deferred, all four backends the same within 0.04/255): pages
+  0.00 from the ground computed in place; a stamp 4.2 km away shows (0.00 to 0.04 against 22 to 30 for the pages from before
+  it); 93 pages stale and painted again after a tile is re-read; floating origin moved 1 km: 0.02 to 0.03; the camera-centred
+  volume swaps once over 2.5 km and never falls back. Without `--arrays` every backend exits 0.
+* **What `--arrays` cannot show on this machine**: only the Mountains arrays are here, and that group paints uniform snow, so
+  "the pages are what is drawn (the picture changes when the swap is paused)" and "the ground has texture in it" fail on all
+  four; with the default Forest group the arrays are missing and the pages differ from the in-place ground by 10 to 14/255 on
+  all four (the page material and the in-place fallback are not the same picture without textures). Neither is a backend
+  difference. A machine with the Forest arrays has to run it once.
+* **The `--arrays` root here**: `C:\ProgramData\Hive\w\lgc-content`, junctions (PowerShell `New-Item -ItemType Junction`, bash
+  `mklink` made broken ones) to the deploy's `EngineContent\{Materials,MaterialFunctions,Meshes,Particles,Widgets}` and
+  `%APPDATA%\HorizonEngine\EngineContentCache\Textures`. `HE_LGC_GROUP=mountains` is `checkGroup()` in `EngineCheck.cpp`.
+
 ## Handoff
 
-- **Done / verified / not verified:** sections 9 to 11 for Windows; the three docs named at the top for the Mac. Not verified on
+- **Done / verified / not verified:** sections 9 to 12 for Windows; the three docs named at the top for the Mac. Not verified on
   Windows: D3D12 under the debug layer (not installed) and its SOFTWARE GI kernel (this machine takes DXR), a Release build,
-  `--arrays`, the editor by hand (section 5; also the Mountain rows and the path splines), the full `he_tests` run.
-- **Open, in this order:** (1) OpenGL forward with GI on: the ground's ray-traced shadow is faint (`shadow, GI on: 0 px`, and 2872
-  px darker once the clipmap is in), deferred is right; not understood, the GI bit is not claimed there. (2) Velocity on all four
+  `--arrays` with the Forest arrays (section 12), the editor by hand (section 5; also the Mountain rows and the path splines),
+  the full `he_tests` run.
+- **Open, in this order:** (1) Velocity on all four
   (D3D: `kTaaVelocityHLSL` shows the output; the matrices can ride in the layer colours like `setViewRows`; Vulkan has `uAux0/1`;
-  the tool has NO witness for it: write one first, e.g. edge sharpness under a moving camera with TAA on). (3) The virtual
-  texture (section 7b). (4) With SSR on the ground takes no SSAO (the three-target reflection pre-pass). Then `release/0.8.0`
-  into this branch (PR 233 among its commits).
+  the tool has NO witness for it: write one first, e.g. edge sharpness under a moving camera with TAA on). (2) With SSR on the
+  ground takes no SSAO (the three-target reflection pre-pass). Then `release/0.8.0` into this branch (PR 233 among its commits).
 - **Do not:** bump the landscape's generation for an edit (it empties every backend's atlas); rely on `LandscapeTileSource::coarse()`
   (null for a pack in coarse regions: `coarseWindow`); name anything `far`, `near` or `small` (Windows macros).
 - **Order:** 0, 1, 2, 3, then 5. Items 2 and 3 are board steps 27 and 28; item 1 has none yet.
