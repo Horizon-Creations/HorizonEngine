@@ -896,6 +896,135 @@ namespace
 	}
 }
 
+// ── Frozen transforms: the scan leaves the cooked entities of a packed world alone ──────────────
+// The scan is the one generic per-frame system over every entity. In a world loaded from a packed
+// cooked scene it must not read the cooked ones, yet every way an entity can still change has to show
+// in the very next extract (the hooks) or, for a write nobody told, within one slice cycle.
+
+namespace
+{
+	struct FrozenWorld
+	{
+		Scene          s;
+		HorizonWorld   w;
+		RenderExtractor ex;
+		RenderWorld    rw;
+
+		FrozenWorld()
+		{
+			s.build(60);
+			load(w, pack(s, true));
+			setUp(ex, s.cm, false);   // the world's own flag cooks it
+			ex.extract(w, rw, 1.0f);  // builds the block (and freezes); a full walk, the first pass of a load
+		}
+		const HE::CookedStatic& block() { return *w.registry().ctx().find<HE::CookedStatic>(); }
+		Entity cooked(size_t k) { return w.findByEntityId(s.world.registry().get<EntityIdComponent>(s.statics[k]).id); }
+		float  drawnX(Entity e) const
+		{
+			const RenderObject* o = objectOf(rw, e);
+			REQUIRE(o != nullptr);
+			return o->transform[3].x;
+		}
+	};
+}
+
+TEST_CASE("CookedStatic frozen: exactly the cooked rows are frozen and an idle pass reads none of them")
+{
+	FrozenWorld f;
+	const HE::CookedStatic& c = f.block();
+	REQUIRE(c.freezeUsable());
+	size_t frozen = 0;
+	for (const uint8_t b : c.frozen) frozen += b;
+	CHECK(frozen == f.s.statics.size());
+	for (const Entity e : f.s.movable)   // the ones that stay on the walk are not frozen
+		CHECK_FALSE(c.isFrozen(f.w.findByEntityId(f.s.world.registry().get<EntityIdComponent>(e).id)));
+
+	f.ex.extract(f.w, f.rw, 1.0f);
+	const HE::PropagateStats st = HE::lastPropagateStats(f.w);
+	CHECK(st.scanned);
+	CHECK(st.flagged == 0u);
+}
+
+TEST_CASE("CookedStatic frozen: a write nobody was told about is found within one slice cycle, never lost")
+{
+	FrozenWorld f;
+	const HE::CookedStatic& c = f.block();
+	const uint32_t next = c.scanSlice % HE::CookedStatic::kScanSlices;
+	Entity e{};
+	bool   found = false;
+	for (size_t k = 0; k < f.s.statics.size() && !found; ++k)
+		if (const size_t sl = static_cast<size_t>(entt::to_entity(f.cooked(k))) % HE::CookedStatic::kScanSlices;
+		    sl != next && sl != (next + 1) % HE::CookedStatic::kScanSlices)   // a pass or two may scan per extract
+		{
+			e = f.cooked(k);
+			found = true;
+		}
+	REQUIRE(found);
+
+	const float before = f.drawnX(e);
+	f.w.registry().get<TransformComponent>(e).position.x += 5.0f;   // a raw write: no hook, no flag
+	f.ex.extract(f.w, f.rw, 1.0f);
+	CHECK(f.drawnX(e) == doctest::Approx(before));   // this pass did not read it (positive control that the skip exists)
+	for (uint32_t i = 0; i < HE::CookedStatic::kScanSlices; ++i) f.ex.extract(f.w, f.rw, 1.0f);
+	CHECK(f.drawnX(e) == doctest::Approx(before + 5.0f));   // its slice came round
+	CHECK_FALSE(f.block().isFrozen(e));                      // and it is scanned like any entity from here on
+}
+
+TEST_CASE("CookedStatic frozen: the setters and a script arriving show in the very next extract")
+{
+	FrozenWorld f;
+	const uint32_t next = f.block().scanSlice % HE::CookedStatic::kScanSlices;
+	std::vector<Entity> pick;   // entities whose slice is NOT the next pass: only the hooks can make them show now
+	for (size_t k = 0; k < f.s.statics.size() && pick.size() < 3; ++k)
+		if (const size_t sl = static_cast<size_t>(entt::to_entity(f.cooked(k))) % HE::CookedStatic::kScanSlices;
+		    sl != next && sl != (next + 1) % HE::CookedStatic::kScanSlices)
+			pick.push_back(f.cooked(k));
+	REQUIRE(pick.size() == 3);
+
+	SUBCASE("ScriptApi::setPosition")
+	{
+		ScriptApi::setPosition(f.w, static_cast<uint32_t>(pick[0]), { 90.0f, 1.0f, 2.0f });
+		f.ex.extract(f.w, f.rw, 1.0f);
+		CHECK(f.drawnX(pick[0]) == doctest::Approx(90.0f));
+	}
+	SUBCASE("ScriptApi::setScale")
+	{
+		const float before = objectOf(f.rw, pick[1])->transform[0][0];
+		ScriptApi::setScale(f.w, static_cast<uint32_t>(pick[1]), { 3.0f, 3.0f, 3.0f });
+		f.ex.extract(f.w, f.rw, 1.0f);
+		CHECK(objectOf(f.rw, pick[1])->transform[0][0] != doctest::Approx(before));
+	}
+	SUBCASE("uncookEntity, for a raw write the editor knows about")
+	{
+		f.w.registry().get<TransformComponent>(pick[2]).position.x = 91.0f;
+		HE::uncookEntity(f.w.registry(), pick[2]);
+		f.ex.extract(f.w, f.rw, 1.0f);
+		CHECK(f.drawnX(pick[2]) == doctest::Approx(91.0f));
+	}
+	SUBCASE("a script component arriving, then a raw write")
+	{
+		f.w.registry().emplace<ScriptComponent>(pick[0]);
+		f.w.registry().get<TransformComponent>(pick[0]).position.x = 92.0f;
+		f.ex.extract(f.w, f.rw, 1.0f);
+		CHECK(f.drawnX(pick[0]) == doctest::Approx(92.0f));
+	}
+}
+
+TEST_CASE("CookedStatic frozen: a world that is not a packed cooked scene freezes nothing")
+{
+	Scene s;
+	s.build(40);
+	RenderExtractor cook; setUp(cook, s.cm, true);   // HE_COOK_STATIC=1 style: cooked, but not packed
+	RenderWorld rw;
+	warm(s, cook, rw);
+	CHECK_FALSE(block(s).freezeUsable());
+	cook.extract(s.world, rw, 1.0f);
+	// the plain write (no hook) shows in the next pass, as ever: every entity is scanned
+	const Entity e = s.statics[2];
+	s.world.registry().get<TransformComponent>(e).position = { 40.0f, 1.0f, 2.0f };
+	checkShowsNow(s, cook, rw, e);
+}
+
 TEST_CASE("CookedStatic cells: a streamed cell is cooked, leaves with its cell and comes back cooked")
 {
 	Scene ed;

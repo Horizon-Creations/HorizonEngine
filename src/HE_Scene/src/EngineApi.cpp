@@ -12,6 +12,7 @@
 #include "HorizonScene/Components/CameraRigComponent.h"
 #include "HorizonScene/CameraRigController.h"   // blendTo/isBlending live on the controller
 #include "HorizonScene/Components/TransformComponent.h"
+#include "HorizonScene/CookedStatic.h"
 #include "HorizonScene/Components/HierarchyComponent.h"   // the parent chain the world/local boundary walks
 #include "HorizonScene/Components/EnvironmentComponent.h"
 #include "HorizonScene/Components/NameComponent.h"
@@ -580,6 +581,8 @@ void applyStateJson(Ctx& c, Entity e, const SaveStateComponent& ss, const nlohma
         {
             if (auto* tc = c.world->registry().try_get<TransformComponent>((entt::entity)e))
             {
+                // Written raw below: a cooked entity leaves the block (its transform is scanned again) first.
+                HE::uncookEntity(c.world->registry(), (entt::entity)e);
                 auto vec3 = [&](const char* key, glm::vec3& out) {
                     auto it = t->find(key);
                     if (it != t->end() && it->is_array() && it->size() >= 3)
