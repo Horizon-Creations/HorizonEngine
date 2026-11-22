@@ -5,6 +5,7 @@
 #include <ContentManager/TextureBlockDecode.h> // CPU BC1/BC3/BC4/BC5 expand when the device cannot sample them
 #include <Renderer/UIFont.h>
 #include <HorizonRendering/RenderWorld.h>
+#include <HorizonRendering/GiHeightfield.h>   // the tile landscape's height clipmap for the GI shadow kernels
 #include <HorizonRendering/RvtNearChunks.h>
 #include <HorizonRendering/GiCasterRange.h>
 #include <Diagnostics/EngineProfiler.h>
@@ -2973,7 +2974,7 @@ struct D3D12RendererImpl
         for (const char* e : { "VSMain", "VSMainInstanced", "VSDepth", "VSDepthInstanced" })
             submit(sceneSource, "scene", e, "vs_5_0", flags);
         // createGiPipelines
-        submit(std::string(kGiTraversalHLSL) + kGiShadowCSHLSL, "gi", "GiShadowCS", "cs_5_0", flags);
+        submit(std::string(kGiTraversalHLSL) + kGiHeightfieldHLSL + kGiShadowCSHLSL, "gi", "GiShadowCS", "cs_5_0", flags);
         submit(std::string(kGiTraversalHLSL) + kGiProbeCSHLSL,  "gi", "GiProbeCS",  "cs_5_0", flags);
         submit(kGiGBufHLSL, "gi", "GiGBufVS", "vs_5_0", flags);
         submit(kGiGBufHLSL, "gi", "GiGBufPS", "ps_5_0", flags);
@@ -8004,6 +8005,77 @@ struct D3D12RendererImpl
     // Per-frame CBs (persistently mapped upload buffers, one slot per frame in flight).
     ComPtr<ID3D12Resource> giShadowCB[k_frameCount];   uint8_t* giShadowCBPtr[k_frameCount]{};
     ComPtr<ID3D12Resource> giCountCB[k_frameCount];    uint8_t* giCountCBPtr[k_frameCount]{};
+    // The tile landscape's GI height clipmap for the two shadow kernels (Thema 326; kGiHeightfieldHLSL and
+    // gi_shadow_hw.hlsl: b2 + t5). An R32F texture with a max pyramid in its mips; a replaced one waits out the frames
+    // in flight in giHfRetired. The block (b2) is bound on every dispatch, with w = 0 while there is no clipmap.
+    ComPtr<ID3D12Resource> giHfCB[k_frameCount];       uint8_t* giHfCBPtr[k_frameCount]{};
+    ComPtr<ID3D12Resource> giHfTex, giHfUpload;
+    uint64_t giHfVersion = 0, giHfKey = 0;
+    int      giHfTopLevel = 0;
+    float    giHfMaxH = 0.0f;
+    struct GiHfRetired { ComPtr<ID3D12Resource> tex, upload; int frames; };
+    std::vector<GiHfRetired> giHfRetired;
+    // Uploads `hf` when it is another one than the texture holds. False: no texture (the kernel then gets w = 0).
+    bool ensureGiHeightfield(ID3D12GraphicsCommandList* cl, const GiHeightfield& hf)
+    {
+        for (auto it = giHfRetired.begin(); it != giHfRetired.end();)
+            it = --it->frames <= 0 ? giHfRetired.erase(it) : it + 1;
+        if (giHfTex && giHfVersion == hf.version && giHfKey == hf.key) return true;
+        const HE::GiHeightPyramid pyr = HE::BuildGiHeightPyramid(hf);   // GiHeightfield.h
+        if (pyr.levels.empty()) return false;
+        const UINT mips = static_cast<UINT>(pyr.levels.size());
+        D3D12_HEAP_PROPERTIES hp{}; hp.Type = D3D12_HEAP_TYPE_DEFAULT;
+        D3D12_RESOURCE_DESC rd{};
+        rd.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        rd.Width = hf.res; rd.Height = hf.res;
+        rd.DepthOrArraySize = 1;
+        rd.MipLevels = static_cast<UINT16>(mips);
+        rd.Format = DXGI_FORMAT_R32_FLOAT;
+        rd.SampleDesc.Count = 1;
+        ComPtr<ID3D12Resource> tex;
+        if (FAILED(device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&tex))))
+            return false;
+        std::vector<D3D12_PLACED_SUBRESOURCE_FOOTPRINT> fp(mips);
+        std::vector<UINT> rows(mips);
+        std::vector<UINT64> rowBytes(mips);
+        UINT64 total = 0;
+        device->GetCopyableFootprints(&rd, 0, mips, 0, fp.data(), rows.data(), rowBytes.data(), &total);
+        uint8_t* mapped = nullptr;
+        ComPtr<ID3D12Resource> upload = createUploadBuffer(total, reinterpret_cast<void**>(&mapped));
+        if (!upload || !mapped) return false;
+        for (UINT k = 0; k < mips; ++k)
+        {
+            const size_t w = static_cast<size_t>(pyr.dims[k]) * sizeof(float);
+            if (pyr.levels[k].size() != static_cast<size_t>(pyr.dims[k]) * pyr.dims[k] || rowBytes[k] < w || rows[k] != static_cast<UINT>(pyr.dims[k]))
+                return false;
+            for (UINT y = 0; y < rows[k]; ++y)
+                std::memcpy(mapped + fp[k].Offset + static_cast<size_t>(y) * fp[k].Footprint.RowPitch,
+                            pyr.levels[k].data() + static_cast<size_t>(y) * pyr.dims[k], w);
+            D3D12_TEXTURE_COPY_LOCATION to{};
+            to.pResource = tex.Get();
+            to.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+            to.SubresourceIndex = k;
+            D3D12_TEXTURE_COPY_LOCATION from{};
+            from.pResource = upload.Get();
+            from.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+            from.PlacedFootprint = fp[k];
+            cl->CopyTextureRegion(&to, 0, 0, 0, &from, nullptr);
+        }
+        barrier12(cl, tex.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        if (giHfTex) giHfRetired.push_back({ giHfTex, giHfUpload, static_cast<int>(k_frameCount) + 2 });
+        giHfTex = tex; giHfUpload = upload;
+        giHfVersion = hf.version; giHfKey = hf.key;
+        giHfTopLevel = static_cast<int>(mips) - 1;
+        giHfMaxH = pyr.maxHeight;
+        D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
+        sv.Format = DXGI_FORMAT_R32_FLOAT;
+        sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        sv.Texture2D.MipLevels = mips;
+        device->CreateShaderResourceView(giHfTex.Get(), &sv, giSrvCpu(k_giHfTable + 2));
+        HE_LOG_INFO(RHI, "D3D12Renderer: GI height field %ux%u, %u mips, max height %.2f", hf.res, hf.res, mips, giHfMaxH);
+        return true;
+    }
     ComPtr<ID3D12Resource> giTemporalCB[k_frameCount]; uint8_t* giTemporalCBPtr[k_frameCount]{};
     ComPtr<ID3D12Resource> giAtrousCB[k_frameCount];   uint8_t* giAtrousCBPtr[k_frameCount]{}; // one k_cbSlot per a-trous iteration
     ComPtr<ID3D12Resource> giProbeCB[k_frameCount];    uint8_t* giProbeCBPtr[k_frameCount]{};
@@ -8135,7 +8207,10 @@ struct D3D12RendererImpl
     //  [38..40] mix with blur:                    raw,  blur, gbufNorm
     //  [41..44] landscape weightmaps, the trace's table 2 (t8..t11; null views for an auto entry / none)
     //  [45] the GI-reflection sky cube (TextureCube, t12): the real sky a missed ray reads (renderSkyReflCube)
-    static constexpr UINT k_giSrvSlots   = 46;
+    //  [46..49] the shadow kernel's table while the tile landscape's height clipmap is in: gbufPos (t0), gbufNorm (t1),
+    //           the clipmap (t5), a null view (t6)
+    static constexpr UINT k_giSrvSlots   = 50;
+    static constexpr UINT k_giHfTable    = 46;
     static constexpr UINT k_giReflLand   = 41;
     static constexpr UINT k_giReflSky    = 45;
     static constexpr UINT k_giReflCompute = 23; // table base of the trace dispatch
@@ -8572,7 +8647,11 @@ struct D3D12RendererImpl
             landRange.BaseShaderRegister                = 8;
             landRange.OffsetInDescriptorsFromTableStart = 0;
 
-            D3D12_ROOT_PARAMETER params[10]{};
+            D3D12_ROOT_PARAMETER params[11]{};
+            // [10] CBV b2 = the height clipmap's block of the two shadow kernels (GiHfCB). The other kernels never name it.
+            params[10].ParameterType    = D3D12_ROOT_PARAMETER_TYPE_CBV;
+            params[10].Descriptor       = { 2, 0 };
+            params[10].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
             params[0].ParameterType    = D3D12_ROOT_PARAMETER_TYPE_CBV;
             params[0].Descriptor       = { 0, 0 };
             params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
@@ -8626,7 +8705,7 @@ struct D3D12RendererImpl
             linSamp.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
             linSamp.MaxLOD           = D3D12_FLOAT32_MAX;
             D3D12_ROOT_SIGNATURE_DESC rsd{};
-            rsd.NumParameters = 10; rsd.pParameters = params;
+            rsd.NumParameters = 11; rsd.pParameters = params;
             rsd.NumStaticSamplers = 1; rsd.pStaticSamplers = &linSamp;
             ComPtr<ID3DBlob> sig, e;
             ok = SUCCEEDED(D3D12SerializeRootSignature(&rsd, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &e))
@@ -8673,7 +8752,7 @@ struct D3D12RendererImpl
         ComPtr<ID3DBlob> gbufVS, gbufPS, shadowCS, probeCS, fsVS, temporalPS, atrousPS;
         ok = ok && compile(kGiGBufHLSL, "GiGBufVS", "vs_5_0", gbufVS)
                 && compile(kGiGBufHLSL, "GiGBufPS", "ps_5_0", gbufPS)
-                && compile(std::string(kGiTraversalHLSL) + kGiShadowCSHLSL, "GiShadowCS", "cs_5_0", shadowCS)
+                && compile(std::string(kGiTraversalHLSL) + kGiHeightfieldHLSL + kGiShadowCSHLSL, "GiShadowCS", "cs_5_0", shadowCS)
                 && compile(std::string(kGiTraversalHLSL) + kGiProbeCSHLSL, "GiProbeCS", "cs_5_0", probeCS)
                 && compile(kFSTriangleVS, "main", "vs_5_0", fsVS)
                 && compile(kGiTemporalHLSL, "main", "ps_5_0", temporalPS)
@@ -8758,6 +8837,8 @@ struct D3D12RendererImpl
         {
             giShadowCB[f]   = createUploadBuffer(k_cbSlot, reinterpret_cast<void**>(&giShadowCBPtr[f]));
             giCountCB[f]    = createUploadBuffer(k_cbSlot, reinterpret_cast<void**>(&giCountCBPtr[f]));
+            giHfCB[f]       = createUploadBuffer(k_cbSlot, reinterpret_cast<void**>(&giHfCBPtr[f]));
+            if (giHfCBPtr[f]) std::memset(giHfCBPtr[f], 0, k_cbSlot);   // w = 0: no height clipmap
             giTemporalCB[f] = createUploadBuffer(k_cbSlot, reinterpret_cast<void**>(&giTemporalCBPtr[f]));
             giAtrousCB[f]   = createUploadBuffer(HE::kGIShadowAtrousIterations * k_cbSlot,
                                                  reinterpret_cast<void**>(&giAtrousCBPtr[f]));
@@ -9816,6 +9897,26 @@ struct D3D12RendererImpl
             if (giShadowCBPtr[fi]) std::memcpy(giShadowCBPtr[fi], &scb, sizeof(scb));
             glm::ivec4 cnt(giInstanceCount, 0, 0, 0);
             if (giCountCBPtr[fi]) std::memcpy(giCountCBPtr[fi], &cnt, sizeof(cnt));
+            // The tile landscape's height clipmap (never a TerrainComponent's field: its chunks are in the BVH and the TLAS
+            // here). On: the kernels' own table with the clipmap at t5; off: the usual one and w = 0 in the block.
+            static const bool s_hfOn = [] { const char* v = std::getenv("HE_GI_HEIGHTFIELD"); return !(v && v[0] == '0'); }();
+            const GiHeightfield* tileHf = (s_hfOn && rw.heightfields.size() == 1 && rw.heightfields[0].key == kLandscapeGiHeightfieldKey)
+                                              ? &rw.heightfields[0] : nullptr;
+            const bool hfOn = tileHf && ensureGiHeightfield(cl, *tileHf);
+            {
+                struct { glm::mat4 worldToLocal; glm::vec4 p, p2; } hcb{};
+                if (hfOn)
+                {
+                    hcb.worldToLocal = tileHf->worldToLocal;
+                    hcb.p  = glm::vec4(1.0f / std::max(tileHf->size.x, 1e-4f), 1.0f / std::max(tileHf->size.y, 1e-4f),
+                                       float(tileHf->res - 1), 1.0f);
+                    hcb.p2 = glm::vec4(float(giHfTopLevel), giHfMaxH, 0.0f, 512.0f);
+                    srvIntoHeapSlot(giGBufPosTex.Get(),  kGiGBufPosFormat,               giSrvCpu(k_giHfTable + 0));
+                    srvIntoHeapSlot(giGBufNormTex.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT, giSrvCpu(k_giHfTable + 1));
+                    srvIntoHeapSlot(nullptr,             DXGI_FORMAT_R16G16_FLOAT,       giSrvCpu(k_giHfTable + 3));
+                }
+                if (giHfCBPtr[fi]) std::memcpy(giHfCBPtr[fi], &hcb, sizeof(hcb));
+            }
 
             if (giRawState != D3D12_RESOURCE_STATE_UNORDERED_ACCESS)
             {
@@ -9838,11 +9939,12 @@ struct D3D12RendererImpl
             cl->SetPipelineState(shadowPso);
             cl->SetComputeRootConstantBufferView(0, giShadowCB[fi]->GetGPUVirtualAddress());
             cl->SetComputeRootConstantBufferView(1, giCountCB[fi]->GetGPUVirtualAddress());
-            cl->SetComputeRootDescriptorTable(2, giSrvGpu(0));
+            cl->SetComputeRootDescriptorTable(2, giSrvGpu(hfOn ? k_giHfTable : 0u));
             cl->SetComputeRootShaderResourceView(3, giNodeSB->GetGPUVirtualAddress());
             cl->SetComputeRootShaderResourceView(4, giTriSB->GetGPUVirtualAddress());
             cl->SetComputeRootShaderResourceView(5, giInstanceSB[fi]->GetGPUVirtualAddress());
             cl->SetComputeRootDescriptorTable(6, giSrvGpu(4)); // u0 = raw
+            cl->SetComputeRootConstantBufferView(10, giHfCB[fi]->GetGPUVirtualAddress()); // b2 = GiHfCB (w = 0: off)
 #if HE_D3D12_DXR
             if (giUseHwThisFrame) // t7 = the TLAS, bound as a raw GPU VA
                 cl->SetComputeRootShaderResourceView(7, giTlasBuf[fi]->GetGPUVirtualAddress());
@@ -12216,6 +12318,7 @@ void D3D12Renderer::Shutdown()
         m_impl->giReflFsCB[i].Reset();   m_impl->giReflFsCBPtr[i]   = nullptr;
         m_impl->giShadowCB[i].Reset();   m_impl->giShadowCBPtr[i]   = nullptr;
         m_impl->giCountCB[i].Reset();    m_impl->giCountCBPtr[i]    = nullptr;
+        m_impl->giHfCB[i].Reset();       m_impl->giHfCBPtr[i]       = nullptr;
         m_impl->giTemporalCB[i].Reset(); m_impl->giTemporalCBPtr[i] = nullptr;
         m_impl->giAtrousCB[i].Reset();     m_impl->giAtrousCBPtr[i]     = nullptr;
         m_impl->giProbeCB[i].Reset();    m_impl->giProbeCBPtr[i]    = nullptr;
@@ -14715,7 +14818,7 @@ IRenderer::Capabilities D3D12Renderer::GetCapabilities() const
     c.supportsRawCapture        = m_impl->postFxReady;   // RenderSceneImage's rawOutput rides the tonemap pass
     c.supportsRvt               = m_impl->postFxReady && m_impl->m_matReady;   // a page is that raw capture copied into the pool
     // The tile landscape's ground in the shadow layers: written, not run (see renderDepthLayer). Said only with the switch on.
-    c.landscapePassMask         = HE::landscapeD3dPassesOn() ? (kLandscapePassShadow | kLandscapePassSsao | kLandscapePassGBuffer) : 0u;
+    c.landscapePassMask         = HE::landscapeD3dPassesOn() ? (kLandscapePassShadow | kLandscapePassSsao | kLandscapePassGBuffer | kLandscapePassGi) : 0u;
     c.landscapeCoarseRevision   = true;   // D3D12Landscape.cpp: new coarse and far images, the atlas stays
     c.landscapeMaterial         = m_impl->m_matReady && m_impl->m_lsMatRootSig;   // drawDC12 with lsDraw: the ground through its material's landscape variant
     // Froxel volumetric fog (Thema 225 step 9): Inject/Integrate/Apply built at Initialize. It
