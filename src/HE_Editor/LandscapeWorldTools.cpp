@@ -9,6 +9,7 @@
 #include <HorizonScene/LandscapeEdit.h>
 #include <HorizonScene/LandscapePackBuild.h>
 #include <HorizonScene/LandscapeRuntime.h>
+#include <HorizonScene/TerrainGenerate.h>
 #include <HorizonScene/TerrainPaint.h>
 #include <HorizonScene/TerrainSculpt.h>
 #include <HorizonRendering/RenderWorld.h>
@@ -403,6 +404,8 @@ struct EditState
 	bool  stroke = false;
 	float flattenTo = 0.0f;
 	glm::dvec3 rampFrom{ 0.0 };
+	float mountainHeight = 120.0f;
+	int   mountainSeed = 1;
 	std::string status;
 	bool  statusError = false;
 };
@@ -453,7 +456,7 @@ std::string saveEdits()
 #ifdef HE_IMGUI_ENABLED
 namespace
 {
-const char* const kToolNames[] = { "Raise", "Lower", "Smooth", "Flatten", "Paint Layer", "Roughen", "Ramp" };
+const char* const kToolNames[] = { "Raise", "Lower", "Smooth", "Flatten", "Paint Layer", "Roughen", "Ramp", "Mountain" };
 
 void drawEditBlock(AppContext& ctx)
 {
@@ -468,11 +471,12 @@ void drawEditBlock(AppContext& ctx)
 	EditorWidgets::checkbox("Edit Tiles##tlwe", &e.on);
 	if (e.on && ctx.editorConfig.mode != EditorMode::Landscape)
 		ImGui::TextDisabled("The brush works in the Landscape mode: there the left button belongs to it.");
-	Row::combo("Tile Brush##tlwe", &e.tool, kToolNames, 7);
+	Row::combo("Tile Brush##tlwe", &e.tool, kToolNames, 8);
 	Row::dragFloat("Brush Radius##tlwe", &e.radius, 0.5f, 1.0f, 800.0f, "%.1f m");
 	Row::dragFloat("Brush Falloff##tlwe", &e.falloff, 0.5f, 0.0f, 400.0f, "%.1f m");
 	Row::dragFloat("Brush Strength##tlwe", &e.strength, 0.01f, 0.01f, 5.0f, "%.2f");
 	if (e.tool == 4) Row::dragInt("Paint Layer##tlwe", &e.layer, 0.1f, 0, 11);
+	if (e.tool == 7) Row::dragFloat("Mountain Height##tlwe", &e.mountainHeight, 1.0f, -2000.0f, 2000.0f, "%.0f m");
 	ImGui::BeginDisabled(!session->canUndo());
 	if (EditorWidgets::button("Undo Stroke##tlwe")) session->undo();
 	ImGui::EndDisabled();
@@ -596,6 +600,7 @@ void brushInViewport(AppContext& ctx, const RenderWorld& sceneSnapshot, const Im
 	if (!usable || !viewportHovered || !down) return;
 
 	// The dab. Local space is the region terrain's: centred on the session's centre.
+	const bool strokeBegan = !e.stroke;
 	if (!e.stroke)
 	{
 		session->beginStroke();
@@ -605,6 +610,24 @@ void brushInViewport(AppContext& ctx, const RenderWorld& sceneSnapshot, const Im
 	}
 	TerrainComponent& tc = session->terrain();
 	const float lx = static_cast<float>(p.x - session->centre().x), lz = static_cast<float>(p.z - session->centre().z);
+	if (e.tool == 7)
+	{
+		// Mountain acts ONCE, when the button goes down: one formation in the brush's circle (the Landscape mode's generator), a new
+		// seed each time. Holding the button does nothing more.
+		if (strokeBegan)
+		{
+			TerrainGenerate::Area area;
+			area.centerX = lx; area.centerZ = lz;
+			area.radiusX = area.radiusZ = e.radius + e.falloff;
+			TerrainGenerate::Params mp;
+			mp.maxHeight = e.mountainHeight;
+			mp.falloff = e.falloff;
+			mp.seed = e.mountainSeed++;
+			TerrainGenerate::mountain(tc, area, mp);
+			session->commit();
+		}
+		return;
+	}
 	const bool invert = io.KeyCtrl;   // Ctrl turns Raise and Lower around, as it does in the Landscape mode
 	switch (e.tool)
 	{
