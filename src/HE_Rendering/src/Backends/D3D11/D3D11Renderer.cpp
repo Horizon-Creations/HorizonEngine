@@ -2064,6 +2064,10 @@ struct D3D11RendererImpl
         ctx->OMSetRenderTargets(1, &velRTV, savedDSV.Get());
         ctx->OMSetDepthStencilState(taaVelocityDSS.Get(), 0);
         ctx->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFF);
+        // The tile landscape's ground stands still; the camera's own motion is its velocity. Before the meshes: the pass
+        // writes no depth, so what stands on the ground overwrites it (d3dls::velocityClip). Puts back what it sets.
+        if (landscapeFrameLive && HE::landscapeD3dPassesOn() && HE::landscapePassesOn())
+            landscape.drawVelocity(ctx, landscapeFrame, vpJit, vpClean, taaPrevViewProj);
         ctx->IASetInputLayout(inputLayout.Get());
         ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         ctx->VSSetShader(taaVelocityVS.Get(), nullptr, 0);
@@ -10092,7 +10096,7 @@ IRenderer::Capabilities D3D11Renderer::GetCapabilities() const
     c.supportsRawCapture        = m_impl->postFxReady;   // RenderSceneImage's rawOutput rides the tonemap pass
     c.supportsRvt               = m_impl->postFxReady;   // the page is a raw capture copied into the pool
     // The tile landscape's ground in the shadow layers: written, not run (see renderDepthLayer). Said only with the switch on.
-    c.landscapePassMask         = HE::landscapeD3dPassesOn() ? (kLandscapePassShadow | kLandscapePassSsao | kLandscapePassGBuffer | kLandscapePassGi) : 0u;
+    c.landscapePassMask         = HE::landscapeD3dPassesOn() ? (kLandscapePassShadow | kLandscapePassSsao | kLandscapePassGBuffer | kLandscapePassGi | kLandscapePassVelocity) : 0u;
     c.landscapeCoarseRevision   = true;   // D3D11Landscape.cpp: new coarse and far images, the atlas stays
     c.landscapeMaterial         = m_impl->m_matReady;   // drawDC with lsDraw: the ground through its material's landscape variant
     c.landscapeRvt              = c.landscapeMaterial && c.supportsRvt;   // SetRvtTileGround, rvtTileGround pages (drawGroundMaterial)

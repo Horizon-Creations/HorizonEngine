@@ -878,6 +878,17 @@ float4 PSViewPos(LsVertexOut pin) : SV_Target
     return float4(dot(layerColor[0], p), dot(layerColor[1], p), dot(layerColor[2], p), 1.0);
 }
 
+// The ground for the TAA velocity pass (drawVelocity): what kTaaVelocityHLSL's PSVelocity writes for a mesh, uvNow - uvPrev.
+// The ground stands still, so this is the camera's own motion. The two UNJITTERED view-projections come the way PSViewPos takes
+// its view matrix: this frame's rows in layerColor[0..3], last frame's in layerColor[4..7].
+float2 PSVelocity(LsVertexOut pin) : SV_Target
+{
+    float4 p = float4(pin.worldRel, 1.0);
+    float2 ndcNow  = float2(dot(layerColor[0], p), dot(layerColor[1], p)) / max(dot(layerColor[3], p), 1e-6);
+    float2 ndcPrev = float2(dot(layerColor[4], p), dot(layerColor[5], p)) / max(dot(layerColor[7], p), 1e-6);
+    return (ndcNow - ndcPrev) * float2(0.5, -0.5);
+}
+
 // The ground for the GI pre-pass (drawGiGBuf): what GiGBufPS writes for a mesh (HlslSources.h), the position the shadow rays start
 // from with a >= 1 for geometry, and the normal with the roughness in a. The normal is the surface's own, from the position's
 // derivatives, turned up; the ground is rough (no reflection ray).

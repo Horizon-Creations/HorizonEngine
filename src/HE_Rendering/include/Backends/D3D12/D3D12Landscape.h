@@ -84,6 +84,11 @@ public:
 	// The ground into the GI pre-pass's two targets that are bound (RGBA32F position, RGBA16F normal, D32_FLOAT): the
 	// origin-relative position (a = 1) and the surface normal (a = roughness 1). Leaves its own root signature, pipeline and heap set.
 	void drawGiGBuf(ID3D12GraphicsCommandList* cl, const HE::LandscapeRenderFrame& frame, const glm::mat4& viewProj);
+	// The ground into the TAA velocity target that is bound (RG16F, the scene's D32_FLOAT depth tested, not written): uvNow -
+	// uvPrev from the two unjittered view-projections, rasterised with `viewProjJitter` (the scene draw's matrix; pulled towards
+	// the camera by d3dls::velocityClip). Leaves its own root signature, pipeline and heap set.
+	void drawVelocity(ID3D12GraphicsCommandList* cl, const HE::LandscapeRenderFrame& frame, const glm::mat4& viewProjJitter,
+	                  const glm::mat4& viewProjNow, const glm::mat4& viewProjPrev);
 
 	// For a MATERIAL's landscape variant (MaterialShaderLibrary::landscapeVertex / landscapeFragment, HLSL; the renderer's own root
 	// signature, pipeline and descriptor heap, D3D12MaterialRootSignature.h "the tile landscape drawn with a material"):

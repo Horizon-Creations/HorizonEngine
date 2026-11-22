@@ -77,6 +77,10 @@ public:
 	// The ground into the GI pre-pass's two targets that are bound: the origin-relative position (a = 1) and the surface normal
 	// (a = roughness 1), what the pass writes for a mesh. The rasteriser and depth state that are set.
 	void drawGiGBuf(ID3D11DeviceContext* ctx, const HE::LandscapeRenderFrame& frame, const glm::mat4& viewProj);
+	// The ground into the TAA velocity target that is bound: uvNow - uvPrev from the two unjittered view-projections, rasterised
+	// with `viewProjJitter` (the scene draw's matrix; pulled towards the camera by d3dls::velocityClip). The depth state that is set.
+	void drawVelocity(ID3D11DeviceContext* ctx, const HE::LandscapeRenderFrame& frame, const glm::mat4& viewProjJitter,
+	                  const glm::mat4& viewProjNow, const glm::mat4& viewProjPrev);
 	// The patches alone, for a MATERIAL's landscape variant (MaterialShaderLibrary::landscapeVertex / landscapeFragment, HLSL): the
 	// caller has bound the material's shaders and everything a mesh draw of that material binds; this adds the landscape's data where
 	// those shaders read it (b12 LsGlobals, b13 LsPatch in the GLSL blocks' layout; t47..t55 the nine images, both stages), draws with

@@ -335,8 +335,40 @@ struct D3D12Landscape::Impl
 		return giGBufPso.Get();
 	}
 
+	// The TAA velocity pass (drawVelocity): kLandscapeHLSL's PSVelocity into the renderer's RG16F target, tested LESS_EQUAL
+	// against the scene's D32_FLOAT depth without writing it (the renderer's own velocity pipeline). Tried once.
+	ComPtr<ID3D12PipelineState> velocityPso;
+	bool velocityPsoTried = false;
+	ID3D12PipelineState* velocityPsoGet()
+	{
+		if (velocityPsoTried) return velocityPso.Get();
+		velocityPsoTried = true;
+		ComPtr<ID3DBlob> ps;
+		std::string err;
+		if (!compileStage("PSVelocity", "ps_5_0", ps, err)) return nullptr;
+		D3D12_GRAPHICS_PIPELINE_STATE_DESC pd{};
+		pd.pRootSignature = rootSig.Get();
+		pd.VS = { vsBlob->GetBufferPointer(), vsBlob->GetBufferSize() };
+		pd.PS = { ps->GetBufferPointer(), ps->GetBufferSize() };
+		pd.SampleMask = UINT_MAX;
+		pd.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+		pd.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+		pd.RasterizerState.DepthClipEnable = TRUE;
+		pd.DepthStencilState.DepthEnable = TRUE;
+		pd.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
+		pd.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS_EQUAL;
+		pd.DSVFormat = DXGI_FORMAT_D32_FLOAT;
+		pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+		pd.NumRenderTargets = 1;
+		pd.RTVFormats[0] = DXGI_FORMAT_R16G16_FLOAT;
+		pd.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+		pd.SampleDesc.Count = 1;
+		if (FAILED(device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&velocityPso)))) velocityPso.Reset();
+		return velocityPso.Get();
+	}
+
 	void drawBare(ID3D12GraphicsCommandList* cl, const HE::LandscapeRenderFrame& f, const glm::mat4& clip, ID3D12PipelineState* pso,
-	              const glm::mat4* view);
+	              const glm::mat4* view, const glm::mat4* prev = nullptr);
 };
 
 D3D12Landscape::D3D12Landscape() : m_impl(std::make_unique<Impl>()) {}
@@ -710,10 +742,17 @@ void D3D12Landscape::drawGiGBuf(ID3D12GraphicsCommandList* cl, const HE::Landsca
 	m_impl->drawBare(cl, f, viewProj, m_impl->giGBufPsoGet(), nullptr);
 }
 
-// The patches with one of the two pipelines that are not the scene's: depth alone (a shadow layer), or the view-space position
-// (the SSAO pre-pass; `view` then rides in the first four layer colours, d3dls::setViewRows).
+void D3D12Landscape::drawVelocity(ID3D12GraphicsCommandList* cl, const HE::LandscapeRenderFrame& f, const glm::mat4& viewProjJitter,
+                                  const glm::mat4& viewProjNow, const glm::mat4& viewProjPrev)
+{
+	m_impl->drawBare(cl, f, d3dls::velocityClip(viewProjJitter), m_impl->velocityPsoGet(), &viewProjNow, &viewProjPrev);
+}
+
+// The patches with one of the pipelines that are not the scene's: depth alone (a shadow layer), the view-space position (the
+// SSAO pre-pass; `view` then rides in the first four layer colours, d3dls::setViewRows), or the velocity (`view` is this frame's
+// unjittered view-projection and `prev` last frame's, in the four entries after it).
 void D3D12Landscape::Impl::drawBare(ID3D12GraphicsCommandList* cl, const HE::LandscapeRenderFrame& f, const glm::mat4& clip,
-                                    ID3D12PipelineState* pso, const glm::mat4* view)
+                                    ID3D12PipelineState* pso, const glm::mat4* view, const glm::mat4* prev)
 {
 	Impl& m = *this;
 	if (!m.ok || !f.active || !f.world || f.patches.empty() || !m.world || m.world->generation != f.world->generation) return;
@@ -723,6 +762,7 @@ void D3D12Landscape::Impl::drawBare(ID3D12GraphicsCommandList* cl, const HE::Lan
 	d3dls::Globals g;
 	d3dls::fillGlobals(g, f, clip, glm::vec3(0.0f, 1.0f, 0.0f), glm::vec3(1.0f), glm::vec3(0.0f), false, false, false, false);
 	if (view) d3dls::setViewRows(g, *view);
+	if (prev) d3dls::setViewRows(g, *prev, 4);
 	const unsigned slot = m.globalsNext++ % kGlobalsSlots;
 	std::memcpy(m.globalsMapped + static_cast<size_t>(slot) * m.globalsStride, &g, sizeof(g));
 	// The table the last colour draw used, as it is: the vertex stage reads the landscape's own images, which sit at the same

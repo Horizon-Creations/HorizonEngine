@@ -866,7 +866,66 @@ int runMaterialCheck(HE::RendererBackend backend, HE::RenderPath path, const std
 								std::printf("  TAA, camera panning: the ground's contrast is %.2f/255 with its velocity, %.2f/255 without\n", contrast(withVel), contrast(withoutVel));
 								// Equal numbers: the image capture did not resolve temporally (RenderSceneImage of this backend), so there is
 								// nothing to compare. Said, not failed: the ground's velocity is then unverified here.
-								if (std::abs(contrast(withVel) - contrast(withoutVel)) < 0.01) std::printf("    NOT CHECKED: the capture does not run the temporal resolve\n");
+								if (std::abs(contrast(withVel) - contrast(withoutVel)) < 0.01)
+								{
+									// A still resets the history on this backend. The live viewport does not: the same pan through
+									// Render() and CaptureViewport, against the camera standing at the pan's last position. With
+									// the ground's velocity the history lines up and the moving frame is as sharp as the standing one.
+									const auto live = [&](std::vector<uint8_t>& img, bool moving) {
+										renderer->SetViewportSize(kW, kH);
+										for (int k = 0; k < 16; ++k)
+										{
+											const glm::vec3 e = eye + glm::vec3(0.0f, 0.0f, 0.6f * static_cast<float>(moving ? k : 15));
+											ov.view = glm::lookAt(e, e + glm::normalize(glm::vec3(1.0f, -0.45f, 0.15f)), glm::vec3(0, 1, 0));
+											ov.position = e;
+											renderer->SetEditorCamera(ov);
+											renderer->Render();
+										}
+										uint32_t w = 0, h = 0;
+										img.clear();
+										return renderer->CaptureViewport(img, w, h) && w == kW && h == kH && img.size() == px * 4;
+									};
+									// Misplaced history shows as ghosts of everything larger than a texel (the shadow's edge, the patches
+									// of the texture): the mean difference of 4x4 block averages on the ground, moving against standing.
+									const auto ghost = [&](const std::vector<uint8_t>& a, const std::vector<uint8_t>& b) {
+										double s = 0.0;
+										size_t n3 = 0;
+										for (uint32_t y = 0; y + 4 <= kH; y += 4)
+											for (uint32_t x = 0; x + 4 <= kW; x += 4)
+											{
+												if (!isBlue(&lit[(static_cast<size_t>(y) * kW + x) * 4])) continue;
+												double la = 0.0, lb = 0.0;
+												for (uint32_t j = 0; j < 4; ++j)
+													for (uint32_t i = 0; i < 4; ++i)
+													{
+														const size_t o = (static_cast<size_t>(y + j) * kW + x + i) * 4;
+														la += lum(&a[o]);
+														lb += lum(&b[o]);
+													}
+												s += std::abs(la - lb) / 16.0;
+												++n3;
+											}
+										return s / static_cast<double>(std::max<size_t>(n3, 1));
+									};
+									std::vector<uint8_t> standing, moved, standingOff, movedOff;
+									const bool gotLive = live(standing, false) && live(moved, true);
+									landscapePasses("0");
+									const bool gotOff = gotLive && live(standingOff, false) && live(movedOff, true);
+									landscapePasses(nullptr);
+									ov = still;
+									renderer->SetEditorCamera(EditorCameraOverride{});
+									if (!gotOff) std::printf("    NOT CHECKED: the capture does not run the temporal resolve, and the live viewport gave no image\n");
+									else
+									{
+										const double on = ghost(moved, standing), off = ghost(movedOff, standingOff);
+										std::printf("  TAA, live viewport, panning against standing: the ground differs by %.2f/255 with its velocity, %.2f/255 without\n", on, off);
+										if (off < 0.3) std::printf("    NOT CHECKED: no ghosting to remove in this scene\n");
+										else if (on > off * 0.6)
+											failPass(kLandscapePassVelocity, "the ground's history lines up under TAA while the camera moves (live viewport)");
+										writePngFile(pngPath.substr(0, pngPath.size() - 4) + "_taa_live.png", static_cast<int>(kW), static_cast<int>(kH), moved.data());
+										writePngFile(pngPath.substr(0, pngPath.size() - 4) + "_taa_live_standing.png", static_cast<int>(kW), static_cast<int>(kH), standing.data());
+									}
+								}
 								else if (contrast(withVel) < contrast(withoutVel) * 0.9) fail("the ground stays sharp under TAA while the camera moves");
 								writePngFile(pngPath.substr(0, pngPath.size() - 4) + "_taa.png", static_cast<int>(kW), static_cast<int>(kH), withVel.data());
 								writePngFile(pngPath.substr(0, pngPath.size() - 4) + "_taa_novelocity.png", static_cast<int>(kW), static_cast<int>(kH), withoutVel.data());

@@ -14244,6 +14244,11 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                 auto vdsv = p.viewportDsvHeap->GetCPUDescriptorHandleForHeapStart();
                 cl->OMSetRenderTargets(1, &vrtv, FALSE, &vdsv);
             }
+            // The tile landscape's ground stands still; the camera's own motion is its velocity. Before the meshes: the pass
+            // writes no depth, so what stands on the ground overwrites it (d3dls::velocityClip). It leaves its own root
+            // signature and heap set; this pass sets its own next and the scene's are rebuilt at its end.
+            if (p.landscapeFrameLive && HE::landscapeD3dPassesOn() && HE::landscapePassesOn())
+                p.landscape.drawVelocity(cl, p.landscapeFrame, viewProj, viewProjClean, p.taaPrevViewProj);
             cl->SetGraphicsRootSignature(p.taaVelocityRootSig.Get());
             cl->SetPipelineState(p.taaVelocityPSO.Get());
             cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -14843,7 +14848,7 @@ IRenderer::Capabilities D3D12Renderer::GetCapabilities() const
     c.supportsRawCapture        = m_impl->postFxReady;   // RenderSceneImage's rawOutput rides the tonemap pass
     c.supportsRvt               = m_impl->postFxReady && m_impl->m_matReady;   // a page is that raw capture copied into the pool
     // The tile landscape's ground in the shadow layers: written, not run (see renderDepthLayer). Said only with the switch on.
-    c.landscapePassMask         = HE::landscapeD3dPassesOn() ? (kLandscapePassShadow | kLandscapePassSsao | kLandscapePassGBuffer | kLandscapePassGi) : 0u;
+    c.landscapePassMask         = HE::landscapeD3dPassesOn() ? (kLandscapePassShadow | kLandscapePassSsao | kLandscapePassGBuffer | kLandscapePassGi | kLandscapePassVelocity) : 0u;
     c.landscapeCoarseRevision   = true;   // D3D12Landscape.cpp: new coarse and far images, the atlas stays
     c.landscapeMaterial         = m_impl->m_matReady && m_impl->m_lsMatRootSig;   // drawDC12 with lsDraw: the ground through its material's landscape variant
     c.landscapeRvt              = c.landscapeMaterial && c.supportsRvt;   // SetRvtTileGround, rvtTileGround pages (drawGroundMaterial)

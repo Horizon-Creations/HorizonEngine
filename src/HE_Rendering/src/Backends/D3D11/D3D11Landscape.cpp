@@ -23,6 +23,9 @@ struct D3D11Landscape::Impl
 	const glm::mat4* viewPos = nullptr;      // set by drawViewPos: the view matrix, and PSViewPos instead of no pixel stage
 	ComPtr<ID3D11PixelShader> psViewPos;     // kLandscapeHLSL's PSViewPos (the SSAO position pre-pass); null when it did not compile
 	bool giGBuf = false;                     // set by drawGiGBuf: PSGiGBuf instead of no pixel stage
+	const glm::mat4* velNow = nullptr;       // set by drawVelocity with velPrev: the unjittered view-projections, and PSVelocity
+	const glm::mat4* velPrev = nullptr;
+	ComPtr<ID3D11PixelShader> psVelocity;    // kLandscapeHLSL's PSVelocity (the TAA velocity pass); null when it did not compile
 	ComPtr<ID3D11PixelShader> psGiGBuf;      // kLandscapeHLSL's PSGiGBuf (the GI pre-pass); null when it did not compile
 	ComPtr<ID3D11VertexShader>      vs;
 	ComPtr<ID3D11PixelShader>       ps;
@@ -254,6 +257,10 @@ bool D3D11Landscape::init(ID3D11Device* device, std::string* error)
 		ComPtr<ID3DBlob> gib;
 		if (compileStage("PSGiGBuf", "ps_5_0", gib, vpErr))
 			device->CreatePixelShader(gib->GetBufferPointer(), gib->GetBufferSize(), nullptr, m.psGiGBuf.GetAddressOf());
+		// The velocity pass's stage: without it the ground reports "did not move" and TAA smears it under a moving camera.
+		ComPtr<ID3DBlob> veb;
+		if (compileStage("PSVelocity", "ps_5_0", veb, vpErr))
+			device->CreatePixelShader(veb->GetBufferPointer(), veb->GetBufferSize(), nullptr, m.psVelocity.GetAddressOf());
 	}
 
 	D3D11_DEPTH_STENCIL_DESC ds{};
@@ -438,6 +445,18 @@ void D3D11Landscape::drawGiGBuf(ID3D11DeviceContext* ctx, const HE::LandscapeRen
 	m_impl->depthOnly = false;
 }
 
+void D3D11Landscape::drawVelocity(ID3D11DeviceContext* ctx, const HE::LandscapeRenderFrame& f, const glm::mat4& viewProjJitter,
+                                  const glm::mat4& viewProjNow, const glm::mat4& viewProjPrev)
+{
+	if (!m_impl->psVelocity) return;
+	m_impl->depthOnly = true;       // the caller's rasteriser and depth state (LESS_EQUAL, no writes)
+	m_impl->velNow = &viewProjNow;
+	m_impl->velPrev = &viewProjPrev;
+	draw(ctx, f, d3dls::velocityClip(viewProjJitter), Shading{});
+	m_impl->velNow = m_impl->velPrev = nullptr;
+	m_impl->depthOnly = false;
+}
+
 bool D3D11Landscape::drawPatches(ID3D11DeviceContext* ctx, const HE::LandscapeRenderFrame& f, const glm::mat4& viewProj)
 {
 	Impl& m = *m_impl;
@@ -531,6 +550,7 @@ void D3D11Landscape::draw(ID3D11DeviceContext* ctx, const HE::LandscapeRenderFra
 	d3dls::fillGlobals(g, f, viewProj, shading.sunDir, shading.sunColor, shading.ambient, shading.albedoArray != nullptr,
 	                   shading.normalArray != nullptr, shading.maskArray != nullptr, m.farSrv != nullptr);
 	if (m.viewPos) d3dls::setViewRows(g, *m.viewPos);
+	if (m.velNow) { d3dls::setViewRows(g, *m.velNow, 0); d3dls::setViewRows(g, *m.velPrev, 4); }
 	D3D11_MAPPED_SUBRESOURCE mapped{};
 	if (FAILED(ctx->Map(m.globalsCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) return;
 	std::memcpy(mapped.pData, &g, sizeof(g));
@@ -549,7 +569,7 @@ void D3D11Landscape::draw(ID3D11DeviceContext* ctx, const HE::LandscapeRenderFra
 	ID3D11SamplerState* farSmp = m.farSampler.Get();
 	ctx->PSSetSamplers(d3dls::kFarSamplerReg, 1, &farSmp);
 	ctx->VSSetShader(m.vs.Get(), nullptr, 0);
-	ctx->PSSetShader(m.giGBuf ? m.psGiGBuf.Get() : m.viewPos ? m.psViewPos.Get() : depthOnly ? nullptr : m.ps.Get(), nullptr, 0);
+	ctx->PSSetShader(m.velNow ? m.psVelocity.Get() : m.giGBuf ? m.psGiGBuf.Get() : m.viewPos ? m.psViewPos.Get() : depthOnly ? nullptr : m.ps.Get(), nullptr, 0);
 	ctx->IASetInputLayout(nullptr);   // the grid comes from SV_VertexID
 	ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 	ctx->IASetIndexBuffer(m.indices.Get(), DXGI_FORMAT_R16_UINT, 0);
