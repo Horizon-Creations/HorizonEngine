@@ -195,20 +195,39 @@ struct VulkanLandscape::Impl
 	// The baked far image (LandscapeRenderStatic::farMips), when the world has one: the only image here with more than one mip level, made
 	// with the landscape's images and again whenever the coarse revision says the far data changed (an edit, a render window that moved).
 	// A level of the wrong size leaves the world without a far image, like OpenGLLandscape::makeFar / MetalLandscape's.
-	void makeFar(VkCommandBuffer cb, const LandscapeRenderStatic& w)
+	// `cb` is the caller's open upload batch; on the rare copy failure below it gets flushed, so this clears it to let the caller's own
+	// `batch()` (the `if (!cb)` check in Impl::upload) reopen a fresh one instead of recording into an already-submitted buffer.
+	void makeFar(VkCommandBuffer& cb, const LandscapeRenderStatic& w)
 	{
 		destroyImage(farAlbedo);
 		if (w.farW <= 0 || w.farH <= 0 || w.farMips.empty()) return;
 		const uint32_t mips = static_cast<uint32_t>(w.farMips.size());
+		// Every level's size is checked before anything is recorded: a copy for an earlier, good level must never end up in the batch
+		// alongside a later, rejected one (the image it names would then be destroyed below while the batch still references it).
+		for (uint32_t l = 0; l < mips; ++l)
+		{
+			const int lw = std::max(1, w.farW >> l), lh = std::max(1, w.farH >> l);
+			const size_t bytes = static_cast<size_t>(lw) * static_cast<size_t>(lh) * 4;
+			if (w.farMips[l].size() != bytes) { ++stats.rejected; return; }
+		}
 		bool whole = makeImage(farAlbedo, VK_FORMAT_R8G8B8A8_SRGB, static_cast<uint32_t>(w.farW), static_cast<uint32_t>(w.farH), 1, false, mips);
 		for (uint32_t l = 0; l < mips && whole; ++l)
 		{
 			const int lw = std::max(1, w.farW >> l), lh = std::max(1, w.farH >> l);
 			const size_t bytes = static_cast<size_t>(lw) * static_cast<size_t>(lh) * 4;
-			whole = w.farMips[l].size() == bytes && copyLayer(cb, farAlbedo, 0, static_cast<uint32_t>(lw), static_cast<uint32_t>(lh), w.farMips[l].data(), bytes, l);
+			whole = copyLayer(cb, farAlbedo, 0, static_cast<uint32_t>(lw), static_cast<uint32_t>(lh), w.farMips[l].data(), bytes, l);
 		}
 		if (whole) toRead(cb, farAlbedo);
-		else { destroyImage(farAlbedo); ++stats.rejected; }
+		else
+		{
+			// A staging allocation failed partway: an earlier level's copy may already be in the open batch, naming this image.
+			// Submit and wait before freeing it, like Impl::upload's own !good paths.
+			env.flush();
+			env.waitIdle();
+			destroyImage(farAlbedo);
+			++stats.rejected;
+			cb = VK_NULL_HANDLE;
+		}
 	}
 	void clearImage(VkCommandBuffer cb, Img& im)
 	{
