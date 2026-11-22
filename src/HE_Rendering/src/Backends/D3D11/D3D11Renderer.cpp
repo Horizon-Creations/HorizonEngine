@@ -8305,6 +8305,21 @@ void D3D11Renderer::DrawScene(int width, int height)
                         ctx->DrawIndexed(m.indexCount, 0, 0);
                     });
                 }
+                // The tile landscape's ground casts into the same layer (Thema 326), with the depth bias of the shadow raster
+                // state that is set. Written on the Mac and NOT RUN: behind HE_LANDSCAPE_D3D_PASSES=1 until a Windows run of
+                // `landscape_gpu_check --only d3d11` shows "the ground casts (fixed blend)" passing (Windows handoff, section 8).
+                // The provider culls for this layer's matrix (D3D clip, depth 0..1) and hands over the tiles that arrived, which
+                // are uploaded whether or not the ground is drawn.
+                if (HE::landscapeD3dPassesOn() && m_landscapeProvider && !p.landscapeFailed && p.landscape.ready())
+                {
+                    HE::LandscapeRenderFrame lf;
+                    m_landscapeProvider(glm::dmat4(clip), /*zeroToOne=*/true, lf);
+                    if (lf.active)
+                    {
+                        p.landscape.upload(ctx, lf);
+                        if (HE::landscapePassesOn()) p.landscape.drawDepth(ctx, lf, clip);
+                    }
+                }
             };
             for (int c = 0; c < cascades; ++c)
                 renderDepthLayer(p.shadowDSV[c].Get(), p.shadowSize, p.shadowViews[static_cast<size_t>(c)], cascadeClip[c]);
@@ -9904,6 +9919,8 @@ IRenderer::Capabilities D3D11Renderer::GetCapabilities() const
     c.supportsDeferredRendering = m_impl->postFxReady && m_impl->deferredReady;
     c.supportsRawCapture        = m_impl->postFxReady;   // RenderSceneImage's rawOutput rides the tonemap pass
     c.supportsRvt               = m_impl->postFxReady;   // the page is a raw capture copied into the pool
+    // The tile landscape's ground in the shadow layers: written, not run (see renderDepthLayer). Said only with the switch on.
+    c.landscapePassMask         = HE::landscapeD3dPassesOn() ? kLandscapePassShadow : 0u;
     // Froxel volumetric fog (Thema 225 step 8): Inject/Integrate/Apply compiled and
     // the HeFogVol/dummy resources built at Initialize. False leaves the analytic
     // height-fog (applyFog/uFog) running everywhere, byte-identical to before.
