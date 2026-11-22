@@ -625,6 +625,38 @@ int runMaterialCheck(HE::RendererBackend backend, HE::RenderPath path, const std
 				renderer->SetSSAOSettings(IRenderer::SSAOSettings{});
 			}
 
+			// The G-buffer: on a deferred frame the ground's attributes are in it, or the ground is drawn forward on top of the
+			// resolved picture. The lit pictures of the two are alike by design, so the witness is the G-buffer's own view of
+			// the normals: with the switch off the ground is not in the buffer and the view shows something else there.
+			if (path == HE::RenderPath::Deferred)
+			{
+				std::vector<uint8_t> gbOn, gbOff;
+				renderer->SetViewMode(HE::ViewMode::GBufferNormal);
+				bool got = shoot(gbOn);
+				landscapePasses("0");
+				got = got && shoot(gbOff);
+				landscapePasses(nullptr);
+				renderer->SetViewMode(HE::ViewMode::Lit);
+				if (!got) fail("RenderSceneImage gave an image (G-buffer view)");
+				else
+				{
+					size_t ground = 0, differ = 0, up = 0;
+					for (size_t i = 0; i < px; ++i)
+					{
+						if (!isBlue(&lit[i * 4])) continue;
+						++ground;
+						const uint8_t* a = &gbOn[i * 4];
+						const uint8_t* b = &gbOff[i * 4];
+						differ += std::abs(a[0] - b[0]) + std::abs(a[1] - b[1]) + std::abs(a[2] - b[2]) > 48 ? 1 : 0;
+						up += a[1] > a[0] + 10 && a[1] > a[2] + 10 ? 1 : 0;   // a normal that points up: green leads
+					}
+					std::printf("  G-buffer: the normal view differs on %zu of %zu ground px with the ground in the G-buffer, %zu of them show a normal that points up\n",
+					            differ, ground, up);
+					if (differ < ground / 2) failPass(kLandscapePassGBuffer, "the ground is in the G-buffer on a deferred frame", std::to_string(differ) + " px");
+					writePngFile(pngPath.substr(0, pngPath.size() - 4) + "_gbnormal.png", static_cast<int>(kW), static_cast<int>(kH), gbOn.data());
+				}
+			}
+
 			IRenderer::EnvironmentSettings env = renderer->GetEnvironment();
 			env.fogDensity = 0.004f;
 			env.fogHeightFalloff = 0.0f;   // the ramp stands 600 m up: with a falloff the fog would lie far below it
