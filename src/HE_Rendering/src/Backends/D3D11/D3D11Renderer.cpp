@@ -1852,6 +1852,7 @@ struct D3D11RendererImpl
     D3D11Landscape           landscape;
     bool                     landscapeFailed = false;   // init failed once: not tried again
     bool                     landscapeFrameLive = false; // landscapeFrame belongs to the scene frame in progress
+    HE::UUID                 landscapeMaterialLoadTried;  // the ground's material was asked for by its path, once
     HE::LandscapeRenderFrame landscapeFrame;
     // ── Debug line pipeline ───────────────────────────────────────────────
     ComPtr<ID3D11VertexShader>  debugVS;
@@ -5690,6 +5691,54 @@ struct D3D11RendererImpl
         return &m_materialShaders.emplace(key, std::move(sh)).first->second;
     }
 
+    // The tile landscape's variant of a material (Thema 326): the landscape's vertex stage (the grid from SV_VertexID, heights from
+    // the tile atlas) with the material's fragment, its layer weights read from the tile weight pages. No input layout, no
+    // tessellation stages. Its own key in the same cache; a miss is remembered like any other (the ground keeps its fixed blend).
+    MatShaders* GetOrBuildLandscapeMaterialShaders(uint64_t hash, const std::string& frag)
+    {
+        const uint64_t key = hash ^ 0x7A11E51A2D5C0610ULL;
+        if (auto it = m_materialShaders.find(key); it != m_materialShaders.end())
+            return it->second.vs ? &it->second : nullptr;
+        using Backend = HE::MaterialShaderLibrary::Backend;
+        UINT cflags = 0;
+#ifdef _DEBUG
+        cflags |= D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
+#endif
+        MatShaders sh;
+        const HE::MaterialShaderLibrary::Compiled& vc = m_matShaderLib.landscapeVertex(Backend::HLSL);
+        ComPtr<ID3DBlob> vsb, psb, cerr;
+        std::string why = vc.log;
+        bool built = vc.ok && !vc.source.empty()
+            && SUCCEEDED(timedD3DCompile(vc.source.c_str(), vc.source.size(), "landscapeMatVS", nullptr, nullptr,
+                                         "main", "vs_5_0", cflags, 0, &vsb, &cerr));
+        if (!built && cerr) why += static_cast<const char*>(cerr->GetBufferPointer());
+        // Clustered first, like a mesh draw of the material; the 8-light window variant when that one does not build.
+        for (int pass = matClustered() ? 0 : 1; built && pass < 2 && !psb; ++pass)
+        {
+            const HE::MaterialShaderLibrary::Compiled& fc = m_matShaderLib.landscapeFragment(hash, frag, Backend::HLSL, /*clustered=*/pass == 0);
+            cerr.Reset();
+            if (!fc.ok || fc.source.empty()
+                || FAILED(timedD3DCompile(fc.source.c_str(), fc.source.size(), "landscapeMatPS", nullptr, nullptr,
+                                          "main", "ps_5_0", cflags, 0, &psb, &cerr)))
+            {
+                why += fc.log;
+                if (cerr) why += static_cast<const char*>(cerr->GetBufferPointer());
+                psb.Reset();
+            }
+        }
+        built = built && psb
+            && SUCCEEDED(device->CreateVertexShader(vsb->GetBufferPointer(), vsb->GetBufferSize(), nullptr, &sh.vs))
+            && SUCCEEDED(device->CreatePixelShader(psb->GetBufferPointer(), psb->GetBufferSize(), nullptr, &sh.ps));
+        if (!built)
+        {
+            HE_LOG_WARN(RHI, "D3D11Renderer: the landscape keeps its fixed blend, its material's variant did not build: %s", why.c_str());
+            m_materialShaders.emplace(key, MatShaders{});
+            return nullptr;
+        }
+        HE_LOG_INFO(RHI, "%s", "D3D11Renderer: built a material's tile landscape variant");
+        return &m_materialShaders.emplace(key, std::move(sh)).first->second;
+    }
+
     // ── Screen-space decals ─────────────────────────────────────────────────
     // Build the decal shaders + fixed state once, lazily (like GL's
     // EnsureDecalProgram / Vulkan's EnsureDecalPipelines): a project without a
@@ -7794,8 +7843,11 @@ void D3D11Renderer::DrawScene(int width, int height)
     };
 
     // Trails live in their own per-frame band list, not in `objects`, so a scene
-    // that has nothing BUT a trail still has something to draw past here.
-    if (p.m_renderWorld.objects.empty() && p.m_renderWorld.ribbonBatches.empty()) { drawLandscape(); return; }
+    // that has nothing BUT a trail still has something to draw past here. So has a
+    // scene with nothing but a tile landscape that is drawn with its material: that
+    // draw needs the scene pass (its lighting block, its shadow maps).
+    const bool groundNeedsPass = p.landscapeFrameLive && p.m_matReady && m_contentManager && p.landscapeFrame.materialId != HE::UUID{};
+    if (p.m_renderWorld.objects.empty() && p.m_renderWorld.ribbonBatches.empty() && !groundNeedsPass) { drawLandscape(); return; }
 
     const uint64_t walk = p.m_extractor.fullExtractCount();
     {
@@ -7826,7 +7878,7 @@ void D3D11Renderer::DrawScene(int width, int height)
     }
     p.counters.total   = static_cast<uint32_t>(p.m_renderWorld.objects.size());
     p.counters.visible = static_cast<uint32_t>(p.m_sortedIndices.size());
-    if (p.m_sortedIndices.empty() && p.m_renderWorld.ribbonBatches.empty()) { drawLandscape(); return; }
+    if (p.m_sortedIndices.empty() && p.m_renderWorld.ribbonBatches.empty() && !groundNeedsPass) { drawLandscape(); return; }
 
     if (p.m_renderGraph.empty())
     {
@@ -8630,6 +8682,11 @@ void D3D11Renderer::DrawScene(int width, int height)
         bool gbufferPass = false;
         ID3D11PixelShader* builtinPS = p.ps.Get();
         std::vector<const DrawCall*> deferredForwardDCs;
+        // The tile landscape drawn with its material (Thema 326) goes through drawDC as well, so it gets every bind and every
+        // restore a mesh draw of that material gets: with `lsDraw` set, the draw call names the landscape's material, the shaders
+        // are that material's landscape variant, and the patches are drawn instead of a mesh. `lsDrawn` says it happened.
+        const HE::LandscapeRenderFrame* lsDraw = nullptr;
+        bool lsDrawn = false;
         auto drawDC = [&](const DrawCall& dc) {
             // A trail carries no mesh asset — its geometry sits in the ribbon
             // pool, looked up by the DrawCall that was synthesised for it.
@@ -8661,7 +8718,7 @@ void D3D11Renderer::DrawScene(int width, int height)
                 bool _resolved = false, _fastKey = false, _usesRvt = false;
                 // Fast path: the key is remembered and its shaders are built. Not for a G-buffer or an instanced draw,
                 // which may still have to BUILD a variant from the source this path leaves empty.
-                if (!gbufferPass && !(dc.instanceTotal() > 1 && allowInstancing))
+                if (!gbufferPass && !lsDraw && !(dc.instanceTotal() > 1 && allowInstancing))
                     if (const MaterialAsset* fm = m_contentManager->getMaterial(dc.materialAssetId))
                         if (auto ke = p.matKeyCache.find(dc.materialAssetId);
                             ke != p.matKeyCache.end() && D3D11RendererImpl::matKeyMatches(ke->second, *fm)
@@ -8703,7 +8760,12 @@ void D3D11Renderer::DrawScene(int width, int height)
                                        && dc.instanceTotal() <= p.k_maxInstances
                                        && RenderSorter::graphInstancingEnabled() && p.ensureMatInstVB();
                     D3D11RendererImpl::MatShaders* shInst = nullptr;
-                    if (gbufferPass)
+                    if (lsDraw)
+                    {
+                        sh = p.GetOrBuildLandscapeMaterialShaders(matHash, matFrag);
+                        if (!sh) return;   // no variant: the caller draws the fixed blend, never a mesh
+                    }
+                    else if (gbufferPass)
                     {
                         // The G-buffer tail of the same graph (same expressions,
                         // attributes instead of heLitP). No variant, or one that
@@ -8732,7 +8794,7 @@ void D3D11Renderer::DrawScene(int width, int height)
                             shInst = p.GetOrBuildMaterialShaders(matHash, matFrag, matVertBody, matPre, false,
                                                                  /*gbuffer=*/false, /*instanced=*/true);
                     }
-                    if (sh && sh->vs && sh->ps && sh->il)
+                    if (sh && sh->vs && sh->ps && (sh->il || lsDraw))
                     {
                         // heTex0 = the material's base texture, matching the built-in selection +
                         // hasTex flag: an override material's texture wins (A2), else the mesh's
@@ -8951,7 +9013,15 @@ void D3D11Renderer::DrawScene(int width, int height)
                             p.counters.tris += range.count / 3;
                         };
                         D3D11_MAPPED_SUBRESOURCE im{};
-                        if (shInst && shInst->vs && shInst->ps && shInst->il
+                        if (lsDraw)
+                        {
+                            // The ground: HeParams as for any draw of the material, then the patches with the landscape's own
+                            // blocks and images (D3D11Landscape::drawPatches); the index buffer it leaves is replaced by the
+                            // next draw, the rest by the restore below.
+                            uploadMatDraw(viewProj, glm::mat4(1.0f));
+                            lsDrawn = p.landscape.drawPatches(ctx, *lsDraw, viewProj);
+                        }
+                        else if (shInst && shInst->vs && shInst->ps && shInst->il
                             && SUCCEEDED(ctx->Map(p.m_matInstVB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &im)))
                         {
                             // The batch: every model into m_matInstVB, ONE U with the
@@ -9042,6 +9112,7 @@ void D3D11Renderer::DrawScene(int width, int height)
                     }
                 }
             }
+            if (lsDraw) return;   // no material shaders for the landscape: the caller draws its fixed blend, never a mesh
             // Base color: an explicit MaterialComponent override (dc.materialAssetId), once its
             // material is loaded, fully replaces the mesh's baked texture — even to flat.
             ID3D11ShaderResourceView* albedo = m.texture.Get(); // baked (may be null)
@@ -9394,7 +9465,29 @@ void D3D11Renderer::DrawScene(int width, int height)
 
         // ── World-scale landscape (Thema 326): after the opaque geometry (and, on a deferred frame, the resolve), depth-tested into the same
         // target. Puts every piece of context state it sets back, so the transparent pass and the decals find what they expect.
-        drawLandscape();
+        // With its material when it has one whose landscape variant builds (drawDC with lsDraw): lit, shadowed and fogged like any
+        // other surface of that material. Else, and on the paths that leave DrawScene before this pass, the fixed blend.
+        if (p.landscapeFrameLive && p.m_matReady && m_contentManager && p.landscapeFrame.materialId != HE::UUID{})
+        {
+            const HE::LandscapeRenderFrame& lf = p.landscapeFrame;
+            if (!lf.materialPath.empty() && lf.materialId != p.landscapeMaterialLoadTried && !m_contentManager->getMaterial(lf.materialId))
+            {
+                p.landscapeMaterialLoadTried = lf.materialId;   // the texture group's material is named by no entity: from its path, once
+                if (!m_contentManager->resolveMaterialRef(lf.materialId, lf.materialPath)) m_contentManager->loadAsset(lf.materialPath);
+            }
+            DrawCall ground;
+            // the extractor's derived material where the landscape's own cannot be drawn (RenderWorld::tileLandscapeMaterial)
+            ground.materialAssetId = p.m_renderWorld.tileLandscapeMaterial != HE::UUID{} ? p.m_renderWorld.tileLandscapeMaterial : lf.materialId;
+            const bool wasGBuffer = gbufferPass, wasInstancing = allowInstancing;
+            gbufferPass = false;
+            allowInstancing = false;
+            lsDraw = &lf;
+            drawDC(ground);
+            lsDraw = nullptr;
+            gbufferPass = wasGBuffer;
+            allowInstancing = wasInstancing;
+        }
+        if (!lsDrawn) drawLandscape();
 
         // ── TAA velocity (A2): screen-space motion of the opaque geometry, right
         // after the passes whose depth it tests against and before the decals
@@ -9923,6 +10016,7 @@ IRenderer::Capabilities D3D11Renderer::GetCapabilities() const
     // The tile landscape's ground in the shadow layers: written, not run (see renderDepthLayer). Said only with the switch on.
     c.landscapePassMask         = HE::landscapeD3dPassesOn() ? kLandscapePassShadow : 0u;
     c.landscapeCoarseRevision   = true;   // D3D11Landscape.cpp: new coarse and far images, the atlas stays
+    c.landscapeMaterial         = m_impl->m_matReady;   // drawDC with lsDraw: the ground through its material's landscape variant
     // Froxel volumetric fog (Thema 225 step 8): Inject/Integrate/Apply compiled and
     // the HeFogVol/dummy resources built at Initialize. False leaves the analytic
     // height-fog (applyFog/uFog) running everywhere, byte-identical to before.

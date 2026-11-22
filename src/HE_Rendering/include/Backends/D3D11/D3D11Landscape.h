@@ -71,6 +71,12 @@ public:
 	// The ground's depth into the depth-only target that is bound (a shadow layer): the vertex stage alone, with the rasteriser
 	// state (the caller's depth bias) and the depth state that are set. `frame` is the provider's for `clip` and has been uploaded.
 	void drawDepth(ID3D11DeviceContext* ctx, const HE::LandscapeRenderFrame& frame, const glm::mat4& clip);
+	// The patches alone, for a MATERIAL's landscape variant (MaterialShaderLibrary::landscapeVertex / landscapeFragment, HLSL): the
+	// caller has bound the material's shaders and everything a mesh draw of that material binds; this adds the landscape's data where
+	// those shaders read it (b12 LsGlobals, b13 LsPatch in the GLSL blocks' layout; t47..t55 the nine images, both stages), draws with
+	// its own rasteriser and depth state (no culling, LESS with writes), and takes its registers and states off again. The shaders,
+	// the input layout and the index buffer are the caller's to put back. False when there is nothing to draw (the fixed blend then).
+	bool drawPatches(ID3D11DeviceContext* ctx, const HE::LandscapeRenderFrame& frame, const glm::mat4& viewProj);
 
 	const Stats& stats() const;
 

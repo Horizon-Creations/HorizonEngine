@@ -1,6 +1,7 @@
 #include "Backends/D3D11/D3D11Landscape.h"
 
 #include "Backends/D3D_Shared/LandscapeD3D.h"
+#include "Backends/Vulkan/VulkanLandscapeLayout.h"   // HE::vkls: the GLSL blocks a material's landscape variant reads (no Vulkan header in it)
 
 #include <HorizonRendering/LandscapeShaderSource.h>
 
@@ -27,6 +28,7 @@ struct D3D11Landscape::Impl
 	ComPtr<ID3D11SamplerState>      sampler;   // the albedo/normal/mask arrays': linear, repeat, mips
 	ComPtr<ID3D11SamplerState>      farSampler; // the baked far image's own: linear, clamp-to-edge, mips (its uv does not repeat)
 	ComPtr<ID3D11Buffer>            globalsCB, patchCB, indices;
+	ComPtr<ID3D11Buffer>            matGlobalsCB, matPatchCB;   // drawPatches: the GLSL blocks' layout (HE::vkls), for a material's landscape variant
 
 	// the nine images, in the register order of kLandscapeHLSL (t32 ..): tile heights, slot table, coarse heights, 3 x tile weights, 3 x coarse weights
 	ComPtr<ID3D11Texture2D>          tex[d3dls::kSrvCount];
@@ -295,7 +297,7 @@ void D3D11Landscape::shutdown()
 	Impl& m = *m_impl;
 	m.destroyImages();
 	m.vs.Reset(); m.ps.Reset(); m.depth.Reset(); m.raster.Reset(); m.blend.Reset(); m.sampler.Reset(); m.farSampler.Reset();
-	m.globalsCB.Reset(); m.patchCB.Reset();
+	m.globalsCB.Reset(); m.patchCB.Reset(); m.matGlobalsCB.Reset(); m.matPatchCB.Reset();
 	m.device = nullptr;
 	m.ok = false;
 }
@@ -399,6 +401,86 @@ void D3D11Landscape::drawDepth(ID3D11DeviceContext* ctx, const HE::LandscapeRend
 	m_impl->depthOnly = true;
 	draw(ctx, f, clip, Shading{});
 	m_impl->depthOnly = false;
+}
+
+bool D3D11Landscape::drawPatches(ID3D11DeviceContext* ctx, const HE::LandscapeRenderFrame& f, const glm::mat4& viewProj)
+{
+	Impl& m = *m_impl;
+	if (!m.ok || !f.active || !f.world || f.patches.empty() || !m.world || m.world->generation != f.world->generation) return false;
+	const LandscapeRenderStatic& w = *m.world;
+	// The two blocks in the layout the material variant's GLSL declares (HE::vkls), made on the first material draw.
+	if (!m.matGlobalsCB || !m.matPatchCB)
+	{
+		D3D11_BUFFER_DESC cb{};
+		cb.Usage = D3D11_USAGE_DYNAMIC;
+		cb.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+		cb.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+		cb.ByteWidth = sizeof(vkls::Globals);
+		if (FAILED(m.device->CreateBuffer(&cb, nullptr, m.matGlobalsCB.ReleaseAndGetAddressOf()))) return false;
+		cb.ByteWidth = sizeof(vkls::PatchPush);
+		if (FAILED(m.device->CreateBuffer(&cb, nullptr, m.matPatchCB.ReleaseAndGetAddressOf()))) return false;
+	}
+	vkls::Globals g;
+	vkls::fillGlobals(g, f, viewProj, glm::vec3(0.0f, 1.0f, 0.0f), glm::vec3(1.0f), glm::vec3(0.0f), false, false, false, false);   // the material lights, not these
+	D3D11_MAPPED_SUBRESOURCE mapped{};
+	if (FAILED(ctx->Map(m.matGlobalsCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) return false;
+	std::memcpy(mapped.pData, &g, sizeof(g));
+	ctx->Unmap(m.matGlobalsCB.Get(), 0);
+
+	ComPtr<ID3D11RasterizerState> raster;
+	ComPtr<ID3D11DepthStencilState> depth;
+	UINT stencilRef = 0;
+	ctx->RSGetState(raster.GetAddressOf());
+	ctx->OMGetDepthStencilState(depth.GetAddressOf(), &stencilRef);
+	ctx->RSSetState(m.raster.Get());
+	ctx->OMSetDepthStencilState(m.depth.Get(), 0);
+
+	constexpr UINT kFirst = 47, kCount = d3dls::kImageCount;   // MaterialShaderLibrary::kHlslLandscapeFirstSrv; heights, table, coarse heights, 3 + 3 weight pages
+	constexpr UINT kGlobals = 12;                              // MaterialShaderLibrary::kHlslLandscapeGlobalsReg
+	ID3D11ShaderResourceView* views[kCount];
+	for (unsigned i = 0; i < kCount; ++i) views[i] = m.srv[i].Get();
+	ID3D11Buffer* cbs[2] = { m.matGlobalsCB.Get(), m.matPatchCB.Get() };
+	ctx->VSSetConstantBuffers(kGlobals, 2, cbs);
+	ctx->PSSetConstantBuffers(kGlobals, 1, cbs);
+	ctx->VSSetShaderResources(kFirst, kCount, views);
+	ctx->PSSetShaderResources(kFirst, kCount, views);
+	ctx->IASetInputLayout(nullptr);   // the grid comes from SV_VertexID
+	ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+	ctx->IASetIndexBuffer(m.indices.Get(), DXGI_FORMAT_R16_UINT, 0);
+
+	m.stats.patches = m.stats.drawCalls = 0;
+	const uint32_t total = w.quadrantFirst[3] + w.quadrantCount[3];
+	for (const LandscapeRenderPatch& p : f.patches)
+	{
+		vkls::PatchPush pd;
+		vkls::fillPatch(pd, p);
+		if (FAILED(ctx->Map(m.matPatchCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) break;
+		std::memcpy(mapped.pData, &pd, sizeof(pd));
+		ctx->Unmap(m.matPatchCB.Get(), 0);
+		if ((p.quadrants & 15) == 15)
+		{
+			ctx->DrawIndexed(total, 0, 0);
+			++m.stats.drawCalls;
+		}
+		else
+			for (int q = 0; q < 4; ++q)
+			{
+				if (!(p.quadrants & (1 << q)) || w.quadrantCount[q] == 0) continue;
+				ctx->DrawIndexed(w.quadrantCount[q], w.quadrantFirst[q], 0);
+				++m.stats.drawCalls;
+			}
+		++m.stats.patches;
+	}
+
+	ID3D11ShaderResourceView* none[kCount] = {};
+	ID3D11Buffer* noCb[2] = {};
+	ctx->VSSetShaderResources(kFirst, kCount, none);
+	ctx->PSSetShaderResources(kFirst, kCount, none);
+	ctx->VSSetConstantBuffers(kGlobals, 2, noCb);
+	ctx->PSSetConstantBuffers(kGlobals, 1, noCb);
+	ctx->RSSetState(raster.Get());
+	ctx->OMSetDepthStencilState(depth.Get(), stencilRef);
+	return true;
 }
 
 void D3D11Landscape::draw(ID3D11DeviceContext* ctx, const HE::LandscapeRenderFrame& f, const glm::mat4& viewProj, const Shading& shading)
