@@ -28,6 +28,26 @@ class LandscapeRuntime;
 
 using LandscapeTilePtr = std::shared_ptr<const LandscapeTile>;
 
+// A heightmap laid over the ground, on top of the tiles and their brush edits: a picture of heights with a place, a size and a turn.
+// Nothing is written anywhere: a tile under a stamp gets it added when the tile is LOADED (LandscapeEditSource::load), so a stamp that
+// is not moved costs nothing per frame, and moving one is "these tiles changed". The brushes keep editing the ground underneath.
+// The editor makes these from entities (LandscapeStamps.h); an export bakes them into the shipped pack like brush edits.
+struct LandscapeStamp
+{
+	std::shared_ptr<const std::vector<float>> image;   // w * h values in 0..1, row 0 at the stamp's -Z edge
+	int    w = 0, h = 0;
+	double x = 0.0, z = 0.0;                           // centre, absolute metres
+	float  sizeX = 256.0f, sizeZ = 256.0f;             // metres
+	float  yaw = 0.0f;                                 // radians around +Y
+	float  heightM = 50.0f;                            // what a value of 1 adds; negative digs
+	float  falloff = 0.2f;                             // share of the way from the edge to the centre over which the stamp fades in
+	bool operator==(const LandscapeStamp& o) const
+	{
+		return image == o.image && w == o.w && h == o.h && x == o.x && z == o.z && sizeX == o.sizeX && sizeZ == o.sizeZ && yaw == o.yaw
+		    && heightM == o.heightM && falloff == o.falloff;
+	}
+};
+
 class LandscapeEditSource final : public LandscapeTileSource
 {
 public:
@@ -54,6 +74,16 @@ public:
 	LandscapeTilePtr edited(LandscapeTileKey key) const;
 	std::vector<LandscapeTileKey> editedKeys() const;
 	bool dirty() const { return m_dirty; }   // edits not saved yet
+
+	// Stamps (LandscapeStamp). Main thread. Replaces them all and returns the tiles whose content that changes: the footprints of every
+	// stamp that came, went or changed (hand them to LandscapeRuntime::tileChanged). The coarse copy is patched for those tiles.
+	// `heightScaleM`: metres of a stored 65535 above a stored 0, used when the base does not say (heightRange).
+	std::vector<LandscapeTileKey> setStamps(std::vector<LandscapeStamp> stamps, float heightScaleM);
+	size_t stampCount() const;
+	bool   stamped(LandscapeTileKey key) const;
+	std::vector<LandscapeTileKey> stampedKeys() const;
+	// `tile` (this key's tile without stamps) as it is shown: with the stamps over it, or the same pointer when none reaches it.
+	LandscapeTilePtr shown(LandscapeTileKey key, LandscapeTilePtr tile) const;
 	// A number that changes when the tile's content does: of the edited tile's encoded bytes, else `baseHash(key)`.
 	uint64_t contentHash(LandscapeTileKey key, const std::function<uint64_t(LandscapeTileKey)>& baseHash) const;
 
@@ -78,6 +108,17 @@ private:
 	LandscapeCoarseWorld m_coarse;   // a copy of the base's, made at the first edit
 	bool m_dirty = false;
 	uint64_t m_worldId = 0;
+	// Never changed once made (a job-pool load holds its own reference): the stamps and, per tile, which of them reach it.
+	struct StampSet
+	{
+		std::vector<LandscapeStamp> stamps;
+		std::map<std::pair<int, int>, std::vector<uint32_t>> tiles;
+		float heightScaleM = 0.0f;
+	};
+	std::shared_ptr<const StampSet> m_stampSet;
+	std::shared_ptr<const StampSet> stampSet() const;
+	std::vector<LandscapeTileKey> footprint(const LandscapeStamp& s) const;
+	void applyStamps(const StampSet& set, LandscapeTileKey key, LandscapeTile& tile) const;
 };
 
 // Where a pack's edits live.

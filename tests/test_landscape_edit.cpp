@@ -548,3 +548,116 @@ TEST_CASE("LandscapeEditSession: the single landscape's own brushes work on the 
 	const int wt = edits->geometry().wTexels, C = edits->geometry().channels;
 	CHECK(painted->weights[0][(static_cast<size_t>(wt / 2) * wt + wt / 2) * C + 2] > 200);   // the middle of the tile is layer 2 now
 }
+
+TEST_CASE("LandscapeStamp: a stamp raises the tiles under it when they are loaded, lies over a brush edit without changing it, moves by "
+          "naming old and new footprint, and is baked into a pack")
+{
+	ProceduralLandscapeParams p;
+	p.geometry.hCells = 32;      // 16 m samples on 512 m tiles
+	p.geometry.wTexels = 16;
+	p.geometry.channels = 4;
+	p.tilesX = p.tilesZ = 3;
+	const ProceduralLandscapeSource src(p);
+	const std::filesystem::path packFile = tempFile("stamp_pack.bin");
+	{
+		LandscapePackWriter w;
+		REQUIRE(w.begin(packFile.string(), src.geometry(), 3, 3, 3, 0.0f, 3000.0f));
+		for (int z = 0; z < 3; ++z)
+			for (int x = 0; x < 3; ++x) REQUIRE(w.add({ x, z }, encodeLandscapeTile(src.generate({ x, z }))));
+		REQUIRE(w.finish());
+	}
+	std::string err;
+	{
+		auto pack = LandscapePackSource::open(packFile.string(), &err);
+		REQUIRE_MESSAGE(pack, err);
+		LandscapeEditSource edits(pack);
+		const int dim = 33;
+		const auto at = [&](const LandscapeTile& t, int x, int z) { return static_cast<int>(t.heights[0][static_cast<size_t>(z) * dim + x]); };
+		const LandscapeTilePtr base11 = fullTile(*pack, { 1, 1 });
+
+		// A flat picture of 1, 256 m a side, 300 m high, in the middle of tile (1, 1): 300 / 3000 * 65535 = 6553.5 on every sample inside.
+		LandscapeStamp s;
+		s.image = std::make_shared<std::vector<float>>(4, 1.0f);
+		s.w = s.h = 2;
+		s.x = s.z = 768.0;
+		s.sizeX = s.sizeZ = 256.0f;
+		s.heightM = 300.0f;
+		s.falloff = 0.0f;
+		std::vector<LandscapeTileKey> changed = edits.setStamps({ s }, 0.0f);
+		REQUIRE(changed.size() == 1);
+		CHECK(changed[0] == LandscapeTileKey{ 1, 1 });
+		CHECK(edits.stamped({ 1, 1 }));
+		CHECK_FALSE(edits.stamped({ 0, 0 }));
+		LandscapeTile t;
+		REQUIRE(edits.load({ 1, 1 }, -1, t));
+		CHECK(std::abs(at(t, 16, 16) - at(*base11, 16, 16) - 6554) <= 1);   // the centre, inside
+		CHECK(at(t, 2, 2) == at(*base11, 2, 2));                            // 32 m from the tile's corner, outside
+		CHECK(t.heights.size() == base11->heights.size());                  // the mips were made again
+		CHECK(t.heights[1] != base11->heights[1]);
+		REQUIRE(edits.load({ 1, 1 }, 1, t));
+		CHECK(t.heights.size() == 1);                                       // and fewer levels are still what was asked for
+		REQUIRE(edits.load({ 0, 0 }, -1, t));
+		CHECK(t == *fullTile(*pack, { 0, 0 }));
+		REQUIRE(edits.coarse());
+		{
+			const int cpt = edits.coarse()->cellsPerTile;
+			CHECK(edits.coarse()->heights[0].at(1 * cpt + cpt / 2, 1 * cpt + cpt / 2) > pack->coarse()->heights[0].at(1 * cpt + cpt / 2, 1 * cpt + cpt / 2) + 6000);
+		}
+
+		// A brush edit under the stamp: the overlay keeps the edit as it was made, and shows the stamp on top of it.
+		auto flat = std::make_shared<LandscapeTile>(*base11);
+		for (uint16_t& h : flat->heights[0]) h = 12345;
+		flat->buildMips();
+		edits.set({ { { 1, 1 }, flat } });
+		CHECK(edits.edited({ 1, 1 })->heights[0][0] == 12345);
+		REQUIRE(edits.load({ 1, 1 }, -1, t));
+		CHECK(std::abs(at(t, 16, 16) - 12345 - 6554) <= 1);
+		CHECK(at(t, 2, 2) == 12345);
+		CHECK(std::abs(at(*edits.shown({ 1, 1 }, flat), 16, 16) - 12345 - 6554) <= 1);
+		CHECK(edits.shown({ 0, 0 }, flat) == flat);   // no stamp there: the same tile
+
+		// Moved onto the border between tiles (0, 1) and (1, 1), turned by 45 degrees: old and new footprint are named, and the two
+		// tiles agree on the samples they share.
+		LandscapeStamp moved = s;
+		moved.x = 512.0;
+		moved.yaw = 0.7853982f;
+		changed = edits.setStamps({ moved }, 0.0f);
+		const auto has = [&](LandscapeTileKey k) { return std::find(changed.begin(), changed.end(), k) != changed.end(); };
+		CHECK(has({ 1, 1 }));
+		CHECK(has({ 0, 1 }));
+		LandscapeTile left, right;
+		REQUIRE(edits.load({ 0, 1 }, -1, left));
+		REQUIRE(edits.load({ 1, 1 }, -1, right));
+		const LandscapeTilePtr base01 = fullTile(*pack, { 0, 1 });
+		for (int z = 0; z < dim; ++z) CHECK(at(left, 32, z) - at(*base01, 32, z) == at(right, 0, z) - 12345);
+		CHECK(at(left, 32, 16) - at(*base01, 32, 16) > 6000);
+		CHECK(edits.setStamps({ moved }, 0.0f).empty());   // the same stamps again: nothing changed
+
+		// Baked, as the export does it: the copy holds the tiles as they are shown.
+		const std::filesystem::path copy = tempFile("stamp_copy.bin");
+		std::filesystem::copy_file(packFile, copy);
+		REQUIRE_MESSAGE(landscapePackBakeEdits(copy.string(), edits, &err), err);
+		{
+			auto baked = LandscapePackSource::open(copy.string(), &err);
+			REQUIRE_MESSAGE(baked, err);
+			LandscapeTile b;
+			REQUIRE(baked->load({ 0, 1 }, -1, b));
+			CHECK(b.heights[0] == left.heights[0]);
+			REQUIRE(baked->load({ 1, 1 }, -1, b));
+			CHECK(b.heights[0] == right.heights[0]);
+			REQUIRE(baked->load({ 2, 2 }, -1, b));
+			CHECK(b == *fullTile(*pack, { 2, 2 }));
+		}
+		std::filesystem::remove(copy);
+
+		// Taken away: the ground under it is back, the brush edit is still there.
+		changed = edits.setStamps({}, 0.0f);
+		CHECK(changed.size() >= 2);
+		CHECK(edits.stampCount() == 0);
+		REQUIRE(edits.load({ 0, 1 }, -1, t));
+		CHECK(t == *base01);
+		REQUIRE(edits.load({ 1, 1 }, -1, t));
+		CHECK(at(t, 16, 16) == 12345);
+	}
+	std::filesystem::remove(packFile);
+}

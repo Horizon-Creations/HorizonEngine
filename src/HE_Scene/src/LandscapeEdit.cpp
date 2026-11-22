@@ -30,13 +30,17 @@ LandscapeEditSource::LandscapeEditSource(std::shared_ptr<const LandscapeTileSour
 bool LandscapeEditSource::load(LandscapeTileKey key, int maxLevels, LandscapeTile& out) const
 {
 	LandscapeTilePtr tile;
+	std::shared_ptr<const StampSet> set;
 	{
 		std::lock_guard<std::mutex> lock(m_mutex);
 		const auto it = m_tiles.find({ key.x, key.z });
 		if (it != m_tiles.end()) tile = it->second;
+		if (m_stampSet && m_stampSet->tiles.count({ key.x, key.z })) set = m_stampSet;
 	}
-	if (!tile) return m_base->load(key, maxLevels, out);
-	out = *tile;
+	if (!tile && !set) return m_base->load(key, maxLevels, out);
+	if (tile) out = *tile;
+	else if (!m_base->load(key, -1, out)) return false;   // every level: the stamp goes onto level 0 and the mips are made again
+	if (set) applyStamps(*set, key, out);
 	if (maxLevels >= 0)
 	{
 		out.heights.resize(std::min<size_t>(out.heights.size(), static_cast<size_t>(maxLevels)));
@@ -70,10 +74,10 @@ void LandscapeEditSource::set(const std::vector<std::pair<LandscapeTileKey, Land
 	}
 	for (const auto& [key, tile] : tiles)
 	{
-		if (tile) { patch.emplace_back(key, tile); continue; }
+		if (tile) { patch.emplace_back(key, shown(key, tile)); continue; }
 		// The edit is gone: the base's tile is what the coarse world shows again.
 		auto back = std::make_shared<LandscapeTile>();
-		if (m_base->load(key, -1, *back)) patch.emplace_back(key, std::move(back));
+		if (m_base->load(key, -1, *back)) patch.emplace_back(key, shown(key, std::move(back)));
 	}
 	if (!m_coarse.valid())
 		if (const LandscapeCoarseWorld* c = m_base->coarse()) m_coarse = *c;
@@ -86,14 +90,17 @@ std::shared_ptr<const LandscapeCoarseWorld> LandscapeEditSource::coarseWindow(La
 	if (m_coarse.valid() || m_base->coarse()) return LandscapeTileSource::coarseWindow(origin, tx, tz);   // a crop of coarse(), patched or not
 	std::shared_ptr<const LandscapeCoarseWorld> window = m_base->coarseWindow(origin, tx, tz);
 	if (!window) return nullptr;
-	// The edited tiles inside the window, with keys relative to its corner.
+	// The edited and the stamped tiles inside the window, as they are shown, with keys relative to its corner.
 	std::vector<std::pair<LandscapeTileKey, LandscapeTilePtr>> inside;
-	{
-		std::lock_guard<std::mutex> lock(m_mutex);
-		for (const auto& [k, tile] : m_tiles)
-			if (k.first >= origin.x && k.second >= origin.z && k.first < origin.x + window->tilesX && k.second < origin.z + window->tilesZ)
-				inside.emplace_back(LandscapeTileKey{ k.first - origin.x, k.second - origin.z }, tile);
-	}
+	std::vector<LandscapeTileKey> keys = editedKeys();
+	for (const LandscapeTileKey& k : stampedKeys())
+		if (std::find(keys.begin(), keys.end(), k) == keys.end()) keys.push_back(k);
+	for (const LandscapeTileKey& k : keys)
+		if (k.x >= origin.x && k.z >= origin.z && k.x < origin.x + window->tilesX && k.z < origin.z + window->tilesZ)
+		{
+			auto tile = std::make_shared<LandscapeTile>();
+			if (load(k, -1, *tile)) inside.emplace_back(LandscapeTileKey{ k.x - origin.x, k.z - origin.z }, std::move(tile));
+		}
 	if (inside.empty()) return window;
 	auto patched = std::make_shared<LandscapeCoarseWorld>(*window);
 	landscapeCoarsePatch(*patched, inside);
@@ -116,8 +123,149 @@ std::vector<LandscapeTileKey> LandscapeEditSource::editedKeys() const
 	return keys;
 }
 
+// ── stamps ──────────────────────────────────────────────────────────────────
+
+std::shared_ptr<const LandscapeEditSource::StampSet> LandscapeEditSource::stampSet() const
+{
+	std::lock_guard<std::mutex> lock(m_mutex);
+	return m_stampSet;
+}
+
+size_t LandscapeEditSource::stampCount() const { const auto s = stampSet(); return s ? s->stamps.size() : 0; }
+bool   LandscapeEditSource::stamped(LandscapeTileKey key) const { const auto s = stampSet(); return s && s->tiles.count({ key.x, key.z }) != 0; }
+
+std::vector<LandscapeTileKey> LandscapeEditSource::stampedKeys() const
+{
+	std::vector<LandscapeTileKey> keys;
+	if (const auto s = stampSet())
+		for (const auto& [k, v] : s->tiles) keys.push_back({ k.first, k.second });
+	return keys;
+}
+
+std::vector<LandscapeTileKey> LandscapeEditSource::footprint(const LandscapeStamp& s) const
+{
+	std::vector<LandscapeTileKey> keys;
+	if (!s.image || s.w < 1 || s.h < 1 || s.image->size() < static_cast<size_t>(s.w) * static_cast<size_t>(s.h) || s.sizeX <= 0.0f || s.sizeZ <= 0.0f || s.heightM == 0.0f)
+		return keys;
+	const LandscapeGeometry& g = geometry();
+	const double tileM = g.tileM, cell = tileM / g.hCells;
+	// The turned rectangle's box, a sample wider: a sample on a tile border belongs to both tiles.
+	const double c = std::abs(std::cos(s.yaw)), sn = std::abs(std::sin(s.yaw));
+	const double hx = (s.sizeX * c + s.sizeZ * sn) * 0.5 + cell, hz = (s.sizeX * sn + s.sizeZ * c) * 0.5 + cell;
+	const int x0 = std::max(0, static_cast<int>(std::floor((s.x - hx) / tileM))), x1 = std::min(tilesX() - 1, static_cast<int>(std::floor((s.x + hx) / tileM)));
+	const int z0 = std::max(0, static_cast<int>(std::floor((s.z - hz) / tileM))), z1 = std::min(tilesZ() - 1, static_cast<int>(std::floor((s.z + hz) / tileM)));
+	for (int z = z0; z <= z1; ++z)
+		for (int x = x0; x <= x1; ++x) keys.push_back({ x, z });
+	return keys;
+}
+
+void LandscapeEditSource::applyStamps(const StampSet& set, LandscapeTileKey key, LandscapeTile& tile) const
+{
+	const auto found = set.tiles.find({ key.x, key.z });
+	if (found == set.tiles.end() || tile.heights.empty() || set.heightScaleM <= 0.0f) return;
+	const LandscapeGeometry& g = tile.geometry;
+	const int dim = g.heightDim(0);
+	const double cell = static_cast<double>(g.tileM) / g.hCells, tx0 = key.x * static_cast<double>(g.tileM), tz0 = key.z * static_cast<double>(g.tileM);
+	std::vector<uint16_t>& h = tile.heights[0];
+	if (h.size() != static_cast<size_t>(dim) * static_cast<size_t>(dim)) return;
+	const float k = 65535.0f / set.heightScaleM;
+	bool any = false;
+	for (const uint32_t index : found->second)
+	{
+		const LandscapeStamp& s = set.stamps[index];
+		const std::vector<float>& img = *s.image;
+		const double c = std::cos(s.yaw), sn = std::sin(s.yaw);
+		for (int z = 0; z < dim; ++z)
+			for (int x = 0; x < dim; ++x)
+			{
+				// Absolute position -> the stamp's own square (0..1 across it). The same for a sample two tiles share.
+				const double dx = tx0 + x * cell - s.x, dz = tz0 + z * cell - s.z;
+				const double u = (dx * c - dz * sn) / s.sizeX + 0.5, v = (dx * sn + dz * c) / s.sizeZ + 0.5;
+				if (u < 0.0 || v < 0.0 || u > 1.0 || v > 1.0) continue;
+				const double fx = u * (s.w - 1), fz = v * (s.h - 1);
+				const int ix = std::min(static_cast<int>(fx), std::max(0, s.w - 2)), iz = std::min(static_cast<int>(fz), std::max(0, s.h - 2));
+				const int jx = std::min(ix + 1, s.w - 1), jz = std::min(iz + 1, s.h - 1);
+				const float ax = static_cast<float>(fx - ix), az = static_cast<float>(fz - iz);
+				const auto at = [&](int px, int pz) { return img[static_cast<size_t>(pz) * static_cast<size_t>(s.w) + static_cast<size_t>(px)]; };
+				const float value = (at(ix, iz) * (1 - ax) + at(jx, iz) * ax) * (1 - az) + (at(ix, jz) * (1 - ax) + at(jx, jz) * ax) * az;
+				float fade = 1.0f;
+				if (s.falloff > 0.0f)
+				{
+					const float edge = static_cast<float>(std::min(std::min(u, 1.0 - u), std::min(v, 1.0 - v)) * 2.0);   // 0 at the edge, 1 in the centre
+					const float t = std::clamp(edge / s.falloff, 0.0f, 1.0f);
+					fade = t * t * (3.0f - 2.0f * t);
+				}
+				const float add = value * fade * s.heightM * k;
+				if (add == 0.0f) continue;
+				uint16_t& out = h[static_cast<size_t>(z) * static_cast<size_t>(dim) + static_cast<size_t>(x)];
+				out = static_cast<uint16_t>(std::lround(std::clamp(static_cast<float>(out) + add, 0.0f, 65535.0f)));
+				any = true;
+			}
+	}
+	if (any) tile.buildMips();
+}
+
+LandscapeTilePtr LandscapeEditSource::shown(LandscapeTileKey key, LandscapeTilePtr tile) const
+{
+	const auto set = stampSet();
+	if (!tile || !set || !set->tiles.count({ key.x, key.z })) return tile;
+	auto copy = std::make_shared<LandscapeTile>(*tile);
+	applyStamps(*set, key, *copy);
+	return copy;
+}
+
+std::vector<LandscapeTileKey> LandscapeEditSource::setStamps(std::vector<LandscapeStamp> stamps, float heightScaleM)
+{
+	const auto old = stampSet();
+	auto next = std::make_shared<StampSet>();
+	float mn = 0.0f, scale = 0.0f;
+	next->heightScaleM = (heightRange(mn, scale) && scale > 0.0f) ? scale : heightScaleM;
+	next->stamps = std::move(stamps);
+	std::map<std::pair<int, int>, bool> changed;
+	for (uint32_t i = 0; i < next->stamps.size(); ++i)
+	{
+		const LandscapeStamp& s = next->stamps[i];
+		const bool same = old && std::find(old->stamps.begin(), old->stamps.end(), s) != old->stamps.end();
+		for (const LandscapeTileKey& key : footprint(s))
+		{
+			next->tiles[{ key.x, key.z }].push_back(i);
+			if (!same) changed[{ key.x, key.z }] = true;
+		}
+	}
+	if (old)
+		for (const LandscapeStamp& s : old->stamps)
+			if (std::find(next->stamps.begin(), next->stamps.end(), s) == next->stamps.end())
+				for (const LandscapeTileKey& key : footprint(s)) changed[{ key.x, key.z }] = true;
+	{
+		std::lock_guard<std::mutex> lock(m_mutex);
+		m_stampSet = next->stamps.empty() ? nullptr : std::move(next);
+	}
+	std::vector<LandscapeTileKey> keys;
+	std::vector<std::pair<LandscapeTileKey, LandscapeTilePtr>> patch;
+	for (const auto& [k, yes] : changed)
+	{
+		const LandscapeTileKey key{ k.first, k.second };
+		keys.push_back(key);
+		auto tile = std::make_shared<LandscapeTile>();
+		if (load(key, -1, *tile)) patch.emplace_back(key, std::move(tile));
+	}
+	// The far levels: the coarse copy takes the tiles as they are shown now (made at the first change, like an edit's).
+	if (!patch.empty())
+	{
+		if (!m_coarse.valid())
+			if (const LandscapeCoarseWorld* c = m_base->coarse()) m_coarse = *c;
+		if (m_coarse.valid()) landscapeCoarsePatch(m_coarse, patch);
+	}
+	return keys;
+}
+
 uint64_t LandscapeEditSource::contentHash(LandscapeTileKey key, const std::function<uint64_t(LandscapeTileKey)>& baseHash) const
 {
+	if (stamped(key))
+	{
+		LandscapeTile t;
+		if (load(key, -1, t)) return fnv(encodeLandscapeTile(t));
+	}
 	if (const LandscapeTilePtr t = edited(key)) return fnv(encodeLandscapeTile(*t));
 	return baseHash ? baseHash(key) : 0;
 }
@@ -256,8 +404,7 @@ bool landscapeWriteRegionTerrain(const TerrainComponent& tc, const LandscapeGeom
 bool landscapePackBakeEdits(const std::string& packPath, const LandscapeEditSource& edits, std::string* error)
 {
 	const auto fail = [&](const std::string& why) { if (error) *error = why; return false; };
-	const std::vector<LandscapeTileKey> keys = edits.editedKeys();
-	if (keys.empty()) return true;
+	if (edits.editedKeys().empty() && edits.stampedKeys().empty()) return true;
 	const std::string tmp = packPath + ".bake.tmp";
 	std::error_code ec;
 	{
@@ -280,7 +427,13 @@ bool landscapePackBakeEdits(const std::string& packPath, const LandscapeEditSour
 			for (int x = 0; x < pack->tilesX(); ++x)
 			{
 				const LandscapeTileKey key{ x, z };
-				if (const LandscapeTilePtr t = edits.edited(key)) blob = encodeLandscapeTile(*t);
+				// An edited or stamped tile as the overlay shows it (LandscapeEditSource::load lays the stamps over).
+				if (edits.edited(key) || (edits.stamped(key) && pack->has(key)))
+				{
+					LandscapeTile t;
+					if (!edits.load(key, -1, t)) { std::filesystem::remove(tmp, ec); return fail("an edited tile cannot be read"); }
+					blob = encodeLandscapeTile(t);
+				}
 				else if (!pack->has(key)) continue;
 				else if (!pack->readStored(key, blob)) { std::filesystem::remove(tmp, ec); return fail("a tile of the pack cannot be read"); }
 				if (!w.add(key, blob)) { std::filesystem::remove(tmp, ec); return fail("a tile could not be written"); }
@@ -395,7 +548,7 @@ void LandscapeEditSession::apply(const std::vector<std::pair<LandscapeTileKey, L
 	std::vector<LandscapeTileKey> reload;
 	for (const auto& [key, tile] : tiles)
 	{
-		if (tile && !finish) inPlace.emplace_back(key, tile);
+		if (tile && !finish) inPlace.emplace_back(key, m_edits.shown(key, tile));   // what is drawn has the stamps over it
 		else reload.push_back(key);
 	}
 	m_runtime.tilesReplaced(inPlace);
