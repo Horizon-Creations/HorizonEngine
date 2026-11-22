@@ -396,8 +396,8 @@ void OpenGLLandscape::draw(const LandscapeRenderFrame& f, const glm::mat4& viewP
 			glActiveTexture(GL_TEXTURE0 + kMatUnit + i);
 			glBindTexture(tgts[i], texs[i]);
 		}
-		glDepthFunc(GL_LESS);
-		glDepthMask(GL_TRUE);
+		glDepthFunc(shading.depthReadOnly ? GL_LEQUAL : GL_LESS);
+		glDepthMask(shading.depthReadOnly ? GL_FALSE : GL_TRUE);
 		glDisable(GL_CULL_FACE);
 		glDisable(GL_BLEND);
 		glBindVertexArray(m.vao);   // for its index buffer: the program takes the grid position from gl_VertexID

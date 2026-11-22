@@ -10,6 +10,7 @@
 #include <HorizonRendering/GiCasterRange.h>
 #include <HorizonRendering/GiHeightfield.h>
 #include <HorizonRendering/RvtTilePatches.h>
+#include "Backends/Vulkan/VulkanLandscapeLayout.h"   // HE::vkls::velocityClip, shared by every backend's ground
 #include <HorizonRendering/SsaoKernel.h>     // shared SSAO kernel + rotation noise
 #include <HorizonRendering/GIJitter.h>       // GI: wrapped cone-jitter frame index (all backends)
 #include <HorizonRendering/GIReflectionTier.h> // GI reflections: rays / resolution / blur per tier (all backends)
@@ -5203,6 +5204,8 @@ void OpenGLRenderer::RenderVelocity(int pw, int ph, const glm::mat4& viewProjCle
 	glDepthFunc(GL_LEQUAL);
 	glDepthMask(GL_FALSE);
 	glDisable(GL_BLEND);
+	// The tile landscape's ground first: the pass writes no depth, so what stands on the ground overwrites it.
+	DrawLandscapeVelocity(viewProjJit, viewProjClean, m_taaPrevViewProj);
 	glUseProgram(m_taaVelocityProgram);
 
 	m_taaCurTransforms.clear();
@@ -11719,6 +11722,8 @@ void OpenGLRenderer::Shutdown()
 	m_landscapePosTried = false;
 	if (m_landscapeGiProgram) { glDeleteProgram(m_landscapeGiProgram); m_landscapeGiProgram = 0; }
 	m_landscapeGiTried = false;
+	if (m_landscapeVelProgram) { glDeleteProgram(m_landscapeVelProgram); m_landscapeVelProgram = 0; }
+	m_landscapeVelTried = false;
 	if (m_ssaoProgram)     { glDeleteProgram(m_ssaoProgram);     m_ssaoProgram = 0; }
 	if (m_ssaoBlurProgram) { glDeleteProgram(m_ssaoBlurProgram); m_ssaoBlurProgram = 0; }
 	if (m_debugLineProgram) { glDeleteProgram(m_debugLineProgram); m_debugLineProgram = 0; }
@@ -12534,6 +12539,66 @@ void OpenGLRenderer::DrawLandscapeGiGBuf(const glm::mat4& viewProj)
 	m_landscape.draw(frame, viewProj, sh);
 #else
 	(void)viewProj;
+#endif
+}
+
+// The ground into the TAA velocity target that is bound (RenderVelocity): what kTaaVelocityFS writes for a mesh, uvNow - uvPrev
+// from the two unjittered view-projections. The ground stands still, so this is the camera's own motion. Rasterised with the
+// jittered matrix pulled towards the camera (vkls::velocityClip), tested against the scene's depth, which is not written.
+// Built and drawn like DrawLandscapeViewPos.
+void OpenGLRenderer::DrawLandscapeVelocity(const glm::mat4& viewProjJit, const glm::mat4& viewProjNow, const glm::mat4& viewProjPrev)
+{
+#if defined(HE_HAVE_SHADERC)
+	if (!m_landscapeProvider || m_landscapeFailed || !m_landscape.ready() || !HE::landscapePassesOn()) return;
+	if (!m_landscapeVelTried)
+	{
+		m_landscapeVelTried = true;
+		const auto& v = m_matShaderLib.landscapeVertex(HE::MaterialShaderLibrary::Backend::GLSL410);
+		static const char* const kFS =
+			"#version 410 core\n"
+			"layout(location = 3) in vec3 vWorldPos;\n"
+			"uniform mat4 uNow;\n"
+			"uniform mat4 uPrev;\n"
+			"layout(location = 0) out vec2 oVelocity;\n"
+			"void main() { vec4 p = vec4(vWorldPos, 1.0); vec4 a = uNow * p; vec4 b = uPrev * p;\n"
+			"              oVelocity = (a.xy / max(a.w, 1e-6) - b.xy / max(b.w, 1e-6)) * 0.5; }\n";
+		if (v.ok)
+		{
+			try
+			{
+				const GLuint vs = CompileStage(GL_VERTEX_SHADER, v.source.c_str());
+				const GLuint fs = CompileStage(GL_FRAGMENT_SHADER, kFS);
+				const GLuint prog = glCreateProgram();
+				glAttachShader(prog, vs);
+				glAttachShader(prog, fs);
+				glLinkProgram(prog);
+				glDeleteShader(vs);
+				glDeleteShader(fs);
+				GLint linked = 0;
+				glGetProgramiv(prog, GL_LINK_STATUS, &linked);
+				if (linked) m_landscapeVelProgram = prog;
+				else glDeleteProgram(prog);
+			}
+			catch (const std::exception&) {}
+		}
+		if (!m_landscapeVelProgram)
+			HE_LOG_WARN(RHI, "%s", "OpenGLRenderer: the landscape's velocity program did not build, TAA smears the ground under a moving camera");
+	}
+	if (!m_landscapeVelProgram) return;
+	HE::LandscapeRenderFrame frame;
+	m_landscapeProvider(glm::dmat4(viewProjJit), /*zeroToOne=*/false, frame);
+	if (!frame.active) return;
+	const GLboolean cull = glIsEnabled(GL_CULL_FACE);
+	glUseProgram(m_landscapeVelProgram);
+	glUniformMatrix4fv(glGetUniformLocation(m_landscapeVelProgram, "uNow"), 1, GL_FALSE, glm::value_ptr(viewProjNow));
+	glUniformMatrix4fv(glGetUniformLocation(m_landscapeVelProgram, "uPrev"), 1, GL_FALSE, glm::value_ptr(viewProjPrev));
+	OpenGLLandscape::Shading sh;
+	sh.materialProgram = m_landscapeVelProgram;
+	sh.depthReadOnly = true;
+	m_landscape.draw(frame, HE::vkls::velocityClip(viewProjJit), sh);
+	if (cull) glEnable(GL_CULL_FACE);
+#else
+	(void)viewProjJit; (void)viewProjNow; (void)viewProjPrev;
 #endif
 }
 
@@ -15551,7 +15616,8 @@ IRenderer::Capabilities OpenGLRenderer::GetCapabilities() const
 	c.landscapeMaterial          = m_maxFragmentSamplers >= 24;
 	// DrawLandscapeDepth in every shadow layer; with the material also the G-buffer (DrawLandscape gbuffer) and the SSAO
 	// position pre-pass (DrawLandscapeViewPos).
-	c.landscapePassMask          = kLandscapePassShadow | (c.landscapeMaterial ? (kLandscapePassGBuffer | kLandscapePassSsao | kLandscapePassGi) : 0u);
+	c.landscapePassMask          = kLandscapePassShadow
+	                             | (c.landscapeMaterial ? (kLandscapePassGBuffer | kLandscapePassSsao | kLandscapePassGi | kLandscapePassVelocity) : 0u);
 #endif
 	c.supportsRvt                = m_rvtSupported;   // a page is that raw capture blitted into the pool (the programs come from the cross-compiler)
 	c.landscapeRvt               = c.landscapeMaterial && c.supportsRvt;   // SetRvtTileGround, rvtTileGround pages (DrawLandscape)

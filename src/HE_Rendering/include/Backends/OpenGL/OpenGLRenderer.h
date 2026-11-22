@@ -1587,6 +1587,9 @@ private:
 	void            DrawLandscapeGiGBuf(const glm::mat4& viewProj);   // into the GI pre-pass's targets that are bound
 	unsigned int    m_landscapeGiProgram = 0;     // DrawLandscapeGiGBuf: the same vertex stage with the GI pre-pass's fragment
 	bool            m_landscapeGiTried = false;
+	void            DrawLandscapeVelocity(const glm::mat4& viewProjJit, const glm::mat4& viewProjNow, const glm::mat4& viewProjPrev);   // into the TAA velocity target that is bound
+	unsigned int    m_landscapeVelProgram = 0;    // DrawLandscapeVelocity: the same vertex stage with the velocity fragment
+	bool            m_landscapeVelTried = false;
 	unsigned int    GetOrBuildLandscapeMaterialProgram(const HE::UUID& materialId, bool gbuffer = false);
 	int             m_maxFragmentSamplers = 0;   // GL_MAX_TEXTURE_IMAGE_UNITS, read at Initialize
 	HE::UUID        m_landscapeMaterialLoadTried{};   // the texture group's material this renderer tried to load from its path

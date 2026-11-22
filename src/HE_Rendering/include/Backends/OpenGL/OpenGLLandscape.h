@@ -33,6 +33,8 @@ public:
 		// The renderer's linked program of the ground's material (landscape vertex + the material's fragment with its weights from the
 		// atlas): the patches are drawn with it, the caller has bound what a material draw needs. 0 = the fixed layer blend.
 		unsigned int materialProgram = 0;
+		// With materialProgram: test LEQUAL against the depth that is there and write none (the TAA velocity pass).
+		bool depthReadOnly = false;
 	};
 	struct Stats
 	{
