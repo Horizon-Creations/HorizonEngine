@@ -202,6 +202,7 @@ bool ProjectSettings::operator==(const ProjectSettings& o) const
         && nearlyEqual(rvt.activationRadiusM, o.rvt.activationRadiusM)
         && rvt.maxPagesPerFrame == o.rvt.maxPagesPerFrame
         && rvt.nativeNear == o.rvt.nativeNear
+        && rvt.tileNativeNear == o.rvt.tileNativeNear
         && antiCheat.enabled == o.antiCheat.enabled
         && antiCheat.integrityCheck == o.antiCheat.integrityCheck
         && nearlyEqual(antiCheat.tolerance, o.antiCheat.tolerance)
@@ -395,7 +396,8 @@ void ProjectSettings::toJson(json& out) const
                    { "nearRadiusM",       rvt.nearRadiusM },
                    { "activationRadiusM", rvt.activationRadiusM },
                    { "maxPagesPerFrame",  rvt.maxPagesPerFrame },
-                   { "nativeNear",        rvt.nativeNear } };
+                   { "nativeNear",        rvt.nativeNear },
+                   { "tileNativeNear",    rvt.tileNativeNear } };
 
     out["renderDefaults"] = {
         { "useEditorSettings", renderDefaults.useEditorSettings },
@@ -529,6 +531,7 @@ void ProjectSettings::fromJson(const json& in)
         readNumber(r, "activationRadiusM", rvt.activationRadiusM);
         readNumber(r, "maxPagesPerFrame",  rvt.maxPagesPerFrame);
         readBool  (r, "nativeNear",        rvt.nativeNear);   // missing (a file from before) = the default, on
+        readBool  (r, "tileNativeNear",    rvt.tileNativeNear);   // missing = the default, off
     }
     {
         const json& a = section(in, "anticheat");

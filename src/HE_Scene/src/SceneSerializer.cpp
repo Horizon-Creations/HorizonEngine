@@ -651,6 +651,7 @@ namespace
 			comps["landscapeStamp"] = {
 				{ "enabled", ls->enabled },
 				{ "texture", uuidToJson(ls->textureId) },
+				{ "heightmapFile", ls->heightmapFile },
 				{ "sizeM",   ls->sizeM },
 				{ "heightM", ls->heightM },
 				{ "falloff", ls->falloff },
@@ -1682,6 +1683,7 @@ namespace
 			LandscapeStampComponent ls;
 			ls.enabled   = c.value("enabled", ls.enabled);
 			ls.textureId = jsonToUuid(c.value("texture", json()));
+			ls.heightmapFile = c.value("heightmapFile", ls.heightmapFile);   // absent in a scene from before the file field
 			ls.sizeM     = c.value("sizeM",   ls.sizeM);
 			ls.heightM   = c.value("heightM", ls.heightM);
 			ls.falloff   = c.value("falloff", ls.falloff);

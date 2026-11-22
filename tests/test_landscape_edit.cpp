@@ -26,6 +26,7 @@
 #include <filesystem>
 #include <fstream>
 #include <random>
+#include <set>
 #include <thread>
 
 using namespace HE;
@@ -956,6 +957,34 @@ TEST_CASE("LandscapeStampSync: a stamp entity reaches the runtime's overlay, an 
 		scene.registry().get<LandscapeStampComponent>(stampEnt).enabled = true;
 	}
 
+	// A heightmap FILE keeps 16 bits: a .r16 ramp of 512 values a row arrives as 512 different heights (a texture asset has 256
+	// at most), and the file wins over the texture.
+	{
+		const std::filesystem::path r16 = tempFile("stamp_ramp").string() + ".r16";   // the reader goes by the extension
+		{
+			std::vector<uint16_t> ramp(512 * 512);
+			for (size_t y = 0; y < 512; ++y)
+				for (size_t x = 0; x < 512; ++x) ramp[y * 512 + x] = static_cast<uint16_t>(x * 128);   // 0, 128, 256 ...: steps of half an 8-bit level
+			std::ofstream out(r16, std::ios::binary);
+			out.write(reinterpret_cast<const char*>(ramp.data()), static_cast<std::streamsize>(ramp.size() * 2));
+		}
+		scene.registry().get<LandscapeStampComponent>(stampEnt).heightmapFile = r16.string();
+		LandscapeStampImages images;
+		const std::vector<LandscapeStamp> stamps = landscapeStampsOfWorld(scene, cm, images);
+		REQUIRE(stamps.size() == 1);
+		CHECK(stamps[0].w == 512);
+		CHECK(stamps[0].h == 512);
+		const std::vector<float>& img = *stamps[0].image;
+		CHECK(img[1] == doctest::Approx(128.0 / 65535.0).epsilon(1e-4));   // half an 8-bit step: lost in a texture asset
+		std::set<float> row(img.begin(), img.begin() + 512);
+		CHECK(row.size() == 512);
+		// A file that is not there: the stamp does nothing, and says so once (not a crash, not the texture behind its back).
+		scene.registry().get<LandscapeStampComponent>(stampEnt).heightmapFile = (r16.string() + ".missing");
+		CHECK(landscapeStampsOfWorld(scene, cm, images).empty());
+		scene.registry().get<LandscapeStampComponent>(stampEnt).heightmapFile = "maps/ramp.r16";   // for the round trip below
+		std::filesystem::remove(r16);
+	}
+
 	// The component is saved with its entity.
 	{
 		SceneSerializer ser;
@@ -968,6 +997,8 @@ TEST_CASE("LandscapeStampSync: a stamp entity reaches the runtime's overlay, an 
 		CHECK(back->sizeM == 200.0f);
 		CHECK(back->heightM == 100.0f);
 		CHECK(back->falloff == 0.0f);
+		CHECK(back->heightmapFile == "maps/ramp.r16");
+		scene.registry().get<LandscapeStampComponent>(stampEnt).heightmapFile.clear();   // the export below bakes the texture's stamp
 		CHECK(SceneSerializer::isKnownComponentKey("landscapeStamp"));
 	}
 

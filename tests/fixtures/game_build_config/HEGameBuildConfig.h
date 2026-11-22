@@ -177,7 +177,8 @@ inline constexpr HE::GameBuildConfig kConfig = {
     "metersPerTexel": 0.25,
     "nativeNear": true,
     "nearRadiusM": 64.0,
-    "poolPages": 512
+    "poolPages": 512,
+    "tileNativeNear": false
   },
   "shadows": {
     "cascadeCount": 3,

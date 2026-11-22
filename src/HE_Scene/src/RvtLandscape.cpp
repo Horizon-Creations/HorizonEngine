@@ -569,6 +569,7 @@ RvtLandscape::Settings RvtLandscape::settingsFromProject(const HE::ProjectRvtSet
     s.nearRadiusM       = p.nearRadiusM;
     s.activationRadiusM = p.activationRadiusM;
     s.nativeNear        = p.nativeNear;
+    s.tileNativeNear    = p.tileNativeNear;
     return s;
 }
 

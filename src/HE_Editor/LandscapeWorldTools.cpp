@@ -72,6 +72,11 @@ struct State
 	std::string  dialogPath;
 	int          dialogPurpose = 0;   // 0 none, 1 pack file, 2 output file, 3 import file, 4 import folder
 	std::atomic<bool> dialogReady{ false };
+	// The stamp's heightmap file dialog (browseStampFile); taken up in pump(), so it works with any Inspector section closed.
+	std::atomic<bool> stampFileReady{ false };
+	std::string  stampFilePath;                 // under dialogMutex
+	Entity       stampFileEntity = entt::null;  // null: the Stamp tool's field
+	std::string  stampToolFile;                 // the Stamp tool: the heightmap file the next placed stamp gets (wins over the texture)
 };
 
 State& st()
@@ -194,6 +199,18 @@ void pump(HorizonWorld& world)
 {
 	State& s = st();
 	auto& reg = world.registry();
+	// A heightmap file picked for a stamp (browseStampFile): into the entity's component, or into the Stamp tool's next stamp.
+	if (s.stampFileReady.exchange(false, std::memory_order_acquire))
+	{
+		std::string path;
+		{
+			std::lock_guard<std::mutex> lk(s.dialogMutex);
+			path = s.stampFilePath;
+		}
+		if (s.stampFileEntity == entt::null) s.stampToolFile = path;
+		else if (reg.valid(s.stampFileEntity))
+			if (auto* sc = reg.try_get<LandscapeStampComponent>(s.stampFileEntity)) sc->heightmapFile = path;
+	}
 	if (s.reenable != entt::null)
 	{
 		if (--s.reenableFrames <= 0)
@@ -267,6 +284,20 @@ void openDialog(AppContext& ctx, int purpose)
 	(void)s;
 }
 } // namespace
+
+void browseStampFile(AppContext& ctx, Entity entity)
+{
+	static const SDL_DialogFileFilter kFilter[] = { { "Height maps", "png;pgm;r16;raw;jpg;jpeg;bmp;tga" }, { "All files", "*" } };
+	st().stampFileEntity = entity;
+	const auto cb = [](void*, const char* const* list, int) {
+		State& state = st();
+		if (!list || !list[0]) return;
+		std::lock_guard<std::mutex> lk(state.dialogMutex);
+		state.stampFilePath = list[0];
+		state.stampFileReady.store(true, std::memory_order_release);
+	};
+	SDL_ShowOpenFileDialog(cb, nullptr, ctx.window ? ctx.window->GetNativeWindow() : nullptr, kFilter, 2, nullptr, false);
+}
 
 void drawSection(AppContext& ctx, Entity entity, const std::function<void()>& afterEdit)
 {
@@ -518,6 +549,9 @@ void drawEditBlock(AppContext& ctx)
 	{
 		EditorWidgets::assetDropSlot(ctx, "Stamp Heightmap", e.stampTexture, HE::AssetType::Texture,
 		                             "tlwestamp", "(none — drop a texture here)", "texture", true);
+		// A file keeps 16 bits (65 536 height steps); a texture asset has 8 (256). The file wins when both are set.
+		Row::inputText("Stamp Heightmap File##tlwe", &st().stampToolFile);
+		if (EditorWidgets::button("Browse Heightmap...##tlwe")) browseStampFile(ctx, entt::null);
 		Row::dragFloat("Stamp Height##tlwe", &e.stampHeight, 1.0f, -5000.0f, 5000.0f, "%.0f m");
 		ImGui::TextDisabled("A click places a Landscape Stamp entity. Move, turn or scale it in the Scene mode to shift the stamp.");
 	}
@@ -658,6 +692,7 @@ void brushInViewport(AppContext& ctx, const RenderWorld& sceneSnapshot, const Im
 			tf.dirty = true;
 			LandscapeStampComponent sc;
 			sc.textureId = e.stampTexture;
+			sc.heightmapFile = st().stampToolFile;
 			sc.sizeM = 2.0f * reach;
 			sc.heightM = e.stampHeight;
 			sc.falloff = reach > 0.0f ? std::clamp(e.falloff / reach, 0.0f, 1.0f) : 0.0f;

@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cstdint>
 #include <memory>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -19,7 +20,9 @@ class LandscapeRuntime;
 // The scene's stamp entities (LandscapeStampComponent) as LandscapeStamps: each one's texture read once (its red channel), its place
 // from the entity's world transform and the floating origin. `images` keeps the decoded pictures between calls, by texture id.
 struct LandscapeStampImage { std::shared_ptr<const std::vector<float>> values; int w = 0, h = 0; };   // null values: unreadable, not tried again
-using LandscapeStampImages = std::unordered_map<HE::UUID, LandscapeStampImage>;
+// Keyed by what the picture came from: the heightmap file's resolved path, else the texture asset's id as text.
+// shortcut: a file that changes on disk is not read again while the editor runs, watch its write time when artists iterate on one
+using LandscapeStampImages = std::unordered_map<std::string, LandscapeStampImage>;
 std::vector<LandscapeStamp> landscapeStampsOfWorld(HorizonWorld& world, ContentManager& content, LandscapeStampImages& images);
 
 // Keeps the runtime's ground in step with the stamp entities. Call once a frame after LandscapeRuntime::update.

@@ -10746,6 +10746,38 @@ void EditorApplication::dumpFrameHeadless()
 				sc.textureId = contentManager().registerTexture(std::move(tex));
 				sc.sizeM = size;
 				sc.heightM = height;
+				// HE_DUMP_STAMPBITS=8 / 16: a smooth cone of 1024 x 1024 instead, as a texture asset (8 bits) or written as a .r16
+				// file beside the dump and named in the component (16 bits): the same shape, to see the height steps of each.
+				if (const char* bits = std::getenv("HE_DUMP_STAMPBITS"); bits && *bits)
+				{
+					const int n = 1024;
+					std::vector<uint16_t> cone(static_cast<size_t>(n) * n);
+					for (int y = 0; y < n; ++y)
+						for (int x = 0; x < n; ++x)
+						{
+							const float d = std::min(1.0f, std::hypot(x - (n - 1) * 0.5f, y - (n - 1) * 0.5f) / ((n - 1) * 0.5f));
+							cone[static_cast<size_t>(y) * n + x] = static_cast<uint16_t>(std::lround((1.0f - d) * 65535.0f));
+						}
+					if (std::atoi(bits) == 16)
+					{
+						const char* dump = std::getenv("HE_DUMP_PATH");
+						const std::string file = std::string(dump ? dump : "stamp") + ".stamp.r16";
+						std::ofstream out(file, std::ios::binary);
+						out.write(reinterpret_cast<const char*>(cone.data()), static_cast<std::streamsize>(cone.size() * 2));
+						sc.heightmapFile = file;
+						sc.textureId = HE::UUID{};
+					}
+					else
+					{
+						TextureAsset t8;
+						t8.width = t8.height = static_cast<uint32_t>(n);
+						t8.channels = 4;
+						t8.data.resize(cone.size() * 4);
+						for (size_t i = 0; i < cone.size(); ++i)
+							for (int c = 0; c < 4; ++c) t8.data[i * 4 + static_cast<size_t>(c)] = static_cast<uint8_t>(cone[i] >> 8);
+						sc.textureId = contentManager().registerTexture(std::move(t8));
+					}
+				}
 				m_editorWorld->registry().emplace<LandscapeStampComponent>(se, sc);
 			}
 		}

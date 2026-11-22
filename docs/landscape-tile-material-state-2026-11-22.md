@@ -114,6 +114,16 @@ Branch `claude/landscape-weltmassstab-100km`, up to `1e118e0a6`.
   paints from the overlay with them. The far image itself is made of the PAINTED layers only (`landscapeFarWeightPainter`): a
   height stamp does not change its colours, on any backend that reads it (the fixed blend, near and far alike).
 
+*Fifth session, 22.11.: near view off by default, stamps from 16-bit files*
+* The tile ground's native near view has its own setting, `ProjectRvtSettings::tileNativeNear` (Project Settings > Virtual
+  Texture, "Native near view on tile landscapes"), **off by default** (owner's decision: 2.7 ms). The single landscape's
+  `nativeNear` is unchanged. The build-config fixture carries the new field.
+* `LandscapeStampComponent::heightmapFile`: a picture file read at 16 bits through `TerrainHeightmap::readGrey16` (PNG / PGM 8
+  or 16 bit, `.r16` / `.raw`), absolute or relative to the project folder; it wins over the texture. Inspector field + browse
+  (`LandscapeWorldTools::browseStampFile`), the same in the Stamp tool. Tested: a 512-value ramp arrives as 512 heights, half an
+  8-bit step survives. **No picture**: an 8-bit and a 16-bit cone shot side by side (`HE_DUMP_STAMPBITS=8/16`) showed no
+  difference a reader could point at. A file that changes on disk is not read again while the editor runs.
+
 *Landscape Stamp (replaces "heightmap import onto a world")*
 * `LandscapeStamp` + `LandscapeEditSource::setStamps / shown / stamped / patchCoarseFor` (`LandscapeEdit.h/.cpp`): stamps lie
   over the tiles AND their brush edits and are applied when a tile is loaded; the brushes edit the ground underneath (the brush

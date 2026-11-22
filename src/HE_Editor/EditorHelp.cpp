@@ -120,6 +120,21 @@ namespace
 	  "Off takes the stamp away without deleting the entity; the ground under "
 	  "it goes back to what it was.",
 	  "", "scenes#terrain" },
+	{ "Landscape Stamp/Heightmap File", "",
+	  "The heightmap as a picture file instead of a texture asset: PNG or PGM at 8 or 16 bits, or a headerless .r16 / .raw. "
+	  "A file is read at 16 bits, 65 536 height steps; a texture asset holds 8 bits, 256 steps, which shows as terraces on a "
+	  "tall stamp. Absolute, or relative to the project's folder. When both are set the file is used. The file is only needed "
+	  "while editing: an export bakes the stamps into the landscape.",
+	  "", "scenes#terrain" },
+	{ "Landscape Stamp/Browse Heightmap...", "",
+	  "Opens a file dialog and puts the chosen heightmap file into the field above.",
+	  "", "scenes#terrain" },
+	{ "Tile Landscape/Stamp Heightmap File", "",
+	  "The heightmap file the next stamp placed by the Stamp tool gets (16-bit PNG, PGM, .r16). Used instead of the texture when set.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Browse Heightmap...", "",
+	  "Opens a file dialog for the Stamp tool's heightmap file.",
+	  "", "editor#landscape-mode" },
 	{ "Landscape Stamp/Size", "",
 	  "Edge length of the stamp's square footprint at scale 1. The entity's X "
 	  "and Z scale stretch it.",
@@ -5316,6 +5331,12 @@ namespace
 	  "a high sun.",
 	  "", "rendering#shadows" },
 	// ── World ▸ Virtual Texture ──────────────────────────────────────────────
+	{ "Virtual Texture/Native near view on tile landscapes", "Native near view on tile landscapes",
+	  "The native near view for a Tile Landscape: its ground close to the camera is drawn with the material itself instead of "
+	  "from pages, which is sharper from close up. Off by default, because a tile landscape changes material a whole patch "
+	  "(128 m and more) at a time, so much more ground than the near radius is computed in place: about a fifth more frame "
+	  "time for the ground. Turn it on when the ground right at the camera looks soft and the frame time allows it.",
+	  "", "rendering#performance" },
 	{ "Virtual Texture/Native near view", "Native near view",
 	  "Keeps the landscape's own material close to the camera. A page has a fixed ground resolution (the texel size), the "
 	  "material has its textures' resolution, which is far finer: from close up the pages are blurry whatever their level. "

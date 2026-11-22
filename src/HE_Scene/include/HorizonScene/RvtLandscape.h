@@ -62,6 +62,7 @@ namespace HE::landscape
             // Native near view: the chunks closer than the distance where one mip-0 texel covers one pixel keep the landscape's
             // own material (sharp at any distance), the rest is drawn from the pages. Off = every chunk from the pages.
             bool     nativeNear       = true;
+            bool     tileNativeNear   = false;   // the tile landscape's ground: off by default (it costs more there, ProjectSettings.h)
         };
         struct FrameStats
         {

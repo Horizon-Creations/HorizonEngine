@@ -304,6 +304,9 @@ struct HE_API ProjectRvtSettings
     // Native near view: the landscape chunks closer than the distance where a finest-level texel covers one pixel keep their own
     // material (as sharp as the material is); only the rest is drawn from pages. Live, no rebuild.
     bool  nativeNear        = true;
+    // The same for the TILE landscape's ground, off by default: its patches are 128 m and larger and change material whole, so
+    // the near view takes far more ground off the pages than the radius (2.7 ms of 12.7 at 1600 x 900 on an M5).
+    bool  tileNativeNear    = false;
 
     // One declaration a line: MSVC refuses a second name after a comma in a dllexport class (C2487).
     static constexpr int   kMinPoolPages     = 64;

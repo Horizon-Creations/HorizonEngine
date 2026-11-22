@@ -3,6 +3,9 @@
 #include "HorizonScene/Components/TransformComponent.h"
 #include "HorizonScene/HorizonWorld.h"
 #include "HorizonScene/LandscapeRuntime.h"
+#include "HorizonScene/TerrainHeightmap.h"
+
+#include <filesystem>
 #include "HorizonScene/TransformHierarchy.h"
 
 #include <ContentManager/ContentManager.h>
@@ -38,6 +41,16 @@ Placed place(HorizonWorld& world, entt::entity e, const LandscapeStampComponent&
 	p.falloff = std::clamp(sc.falloff, 0.0f, 1.0f);
 	return p;
 }
+bool stampHasSource(const LandscapeStampComponent& sc) { return sc.enabled && (!sc.heightmapFile.empty() || sc.textureId != HE::UUID{}); }
+
+// What the stamp's picture is read from: the file (relative paths from the project's folder, the content root's parent), else the texture.
+std::string stampSourceKey(const LandscapeStampComponent& sc, const ContentManager& content)
+{
+	if (sc.heightmapFile.empty()) return "tex:" + std::to_string(sc.textureId.hi) + ":" + std::to_string(sc.textureId.lo);
+	std::filesystem::path p(sc.heightmapFile);
+	if (p.is_relative() && !content.contentRoot().empty()) p = std::filesystem::path(content.contentRoot()).parent_path() / p;
+	return p.string();
+}
 } // namespace
 
 std::vector<LandscapeStamp> landscapeStampsOfWorld(HorizonWorld& world, ContentManager& content, LandscapeStampImages& images)
@@ -45,24 +58,43 @@ std::vector<LandscapeStamp> landscapeStampsOfWorld(HorizonWorld& world, ContentM
 	std::vector<LandscapeStamp> out;
 	for (auto [e, tf, sc] : world.registry().view<TransformComponent, LandscapeStampComponent>().each())
 	{
-		if (!sc.enabled || sc.textureId == HE::UUID{}) continue;
-		auto it = images.find(sc.textureId);
+		if (!stampHasSource(sc)) continue;
+		const std::string key = stampSourceKey(sc, content);
+		auto it = images.find(key);
 		if (it == images.end())
 		{
 			LandscapeStampImage made;
-			content.ensureResident(sc.textureId);
-			const TextureAsset* t = content.getTexture(sc.textureId);
-			// shortcut: 8 bits a channel (256 height steps, smoothed by the bilinear read), take 16-bit sources when texture assets hold them
-			if (t && t->format == ::TextureFormat::RGBA8 && t->channels >= 1 && t->width >= 1 && t->height >= 1
-			    && t->data.size() >= static_cast<size_t>(t->width) * t->height * t->channels)
+			if (!sc.heightmapFile.empty())
 			{
-				auto img = std::make_shared<std::vector<float>>(static_cast<size_t>(t->width) * t->height);
-				for (size_t i = 0; i < img->size(); ++i) (*img)[i] = static_cast<float>(t->data[i * t->channels]) / 255.0f;
-				made = { std::move(img), static_cast<int>(t->width), static_cast<int>(t->height) };
+				// A file: 16 bits a pixel (65 536 height steps), which a texture asset cannot hold.
+				std::vector<uint16_t> grey;
+				uint32_t w = 0, h = 0;
+				std::string error;
+				if (TerrainHeightmap::readGrey16(key, grey, w, h, error) && w >= 1 && h >= 1)
+				{
+					auto img = std::make_shared<std::vector<float>>(grey.size());
+					for (size_t i = 0; i < grey.size(); ++i) (*img)[i] = static_cast<float>(grey[i]) / 65535.0f;
+					made = { std::move(img), static_cast<int>(w), static_cast<int>(h) };
+				}
+				else
+					HE_LOG_WARN(Scene, "Landscape stamp: heightmap file '%s' cannot be read (%s); the stamp does nothing", key.c_str(), error.c_str());
 			}
 			else
-				HE_LOG_WARN(Scene, "Landscape stamp: its texture is missing or not stored as plain 8-bit pixels; the stamp does nothing");
-			it = images.emplace(sc.textureId, std::move(made)).first;   // a null stays: not tried again every change
+			{
+				content.ensureResident(sc.textureId);
+				const TextureAsset* t = content.getTexture(sc.textureId);
+				// 8 bits a channel: 256 height steps, smoothed by the bilinear read. The file above is the way to more.
+				if (t && t->format == ::TextureFormat::RGBA8 && t->channels >= 1 && t->width >= 1 && t->height >= 1
+				    && t->data.size() >= static_cast<size_t>(t->width) * t->height * t->channels)
+				{
+					auto img = std::make_shared<std::vector<float>>(static_cast<size_t>(t->width) * t->height);
+					for (size_t i = 0; i < img->size(); ++i) (*img)[i] = static_cast<float>(t->data[i * t->channels]) / 255.0f;
+					made = { std::move(img), static_cast<int>(t->width), static_cast<int>(t->height) };
+				}
+				else
+					HE_LOG_WARN(Scene, "Landscape stamp: its texture is missing or not stored as plain 8-bit pixels; the stamp does nothing");
+			}
+			it = images.emplace(key, std::move(made)).first;   // a null stays: not tried again every change
 		}
 		if (!it->second.values) continue;
 		const Placed p = place(world, e, sc);
@@ -91,9 +123,10 @@ size_t LandscapeStampSync::sync(HorizonWorld& world, LandscapeRuntime& runtime, 
 	size_t count = 0;
 	for (auto [e, tf, sc] : world.registry().view<TransformComponent, LandscapeStampComponent>().each())
 	{
-		if (!sc.enabled || sc.textureId == HE::UUID{}) continue;
+		if (!stampHasSource(sc)) continue;
 		const Placed p = place(world, e, sc);
 		mix(&p.x, sizeof(p.x)); mix(&p.z, sizeof(p.z));
+		mix(sc.heightmapFile.data(), sc.heightmapFile.size());
 		const float f[5] = { p.sizeX, p.sizeZ, p.yaw, p.heightM, p.falloff };
 		mix(f, sizeof(f));
 		mix(&sc.textureId, sizeof(sc.textureId));

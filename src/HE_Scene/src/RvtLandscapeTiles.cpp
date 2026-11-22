@@ -318,9 +318,9 @@ void RvtLandscape::tileGroundTables(HorizonWorld& live, FrameStats& st)
 
     const bool want = t.filled && !m_paused;
     const glm::dvec2 mx = t.anchor + glm::dvec2(double(l.extentM()));
-    // The native near view, as for the single landscape: HE_RVT_NATIVE_NEAR=0 / 1 over the setting.
+    // The native near view: its own setting, off by default; HE_RVT_NATIVE_NEAR=0 / 1 over it, as for the single landscape.
     static const int envNear = [] { const char* v = std::getenv("HE_RVT_NATIVE_NEAR"); return (v && *v) ? (*v == '0' ? 0 : 1) : -1; }();
-    const bool nativeNear = envNear >= 0 ? envNear == 1 : m_settings.nativeNear;
+    const bool nativeNear = envNear >= 0 ? envNear == 1 : m_settings.tileNativeNear;
     m_renderer.SetRvtTileGround(want ? t.consumer : HE::UUID{}, t.anchor, mx, nativeNear ? nativeNearRadius() : 0.0f);
     t.swapOn = want;
     if (want) ++st.activeSegments;
