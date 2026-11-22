@@ -322,15 +322,50 @@ The table of section 8, as it stands now (NN-WS03, Debug, `landscape_gpu_check -
 * **Tried and stopped**: two subagents (Mountain, Vulkan passes) were started and stopped before either changed a file; the empty
   worktree `C:\hw326v` (branch `claude/landscape-vulkan-passes`, at `1cb053dfa`) is theirs and can be removed.
 
+## 11. Third Windows session of 22.11.: G-buffer, GI and SSAO on every Windows backend
+
+The table once more (NN-WS03, Debug, `landscape_gpu_check --only <backend>`, exit 0 on all four). The owner's order: every gap on
+the backends first, the merge of `release/0.8.0` after; origin is pushed after each step.
+
+| | Vulkan | OpenGL 4.6 | D3D11 | D3D12 |
+|---|---|---|---|---|
+| Material, sun shadow both ways, fog | proven | proven | proven | proven |
+| SSAO pre-pass | proven (57739 px) | **proven**: deferred 56170 px (from the G-buffer's depth), forward 116 px | proven (62577) | proven (62577) |
+| G-buffer on a deferred frame | **proven**: 108568 of 110178 px | **proven**: 108216 of 110765 | **proven**: 108365 of 109031 | **proven**: the same |
+| GI: the ground TAKES the ray-traced shadow | **proven**: 5514 px | deferred **proven** (4913 px), forward faint: NOT claimed | **proven**: 5303 px | **proven**: 5303 px |
+| GI: the ground CASTS it | **proven**: 145/255 against 204 | proven on both paths (110 against 217), not claimed | **proven**: 145 against 204 | **proven**: 145 against 204 (DXR) |
+| Velocity (TAA) | not built | not built | not built | not built |
+| Virtual texture (`landscapeRvt`) | not built | not built | not built | not built |
+
+* **New witnesses in the tool** (`EngineCheck.cpp`): `G-buffer: the normal view differs on N of M ground px` (the pass was only
+  reported before), `no self-shadow, GI on: N of M ground px` (the clipmap in the ray structure against the drawn mesh).
+* **The height clipmap never occluded anything on D3D11, Vulkan and OpenGL** although the GI doc of 02.11. says so: all three
+  used it only with a caster list of its own (`sep`), which a `TerrainComponent` has (its chunks are left out) and the clipmap
+  never. And every kernel lifted a ray start onto the field, so nothing under the ground was in its shadow: capped at 8 m in all
+  five copies (`kGiHeightfieldHLSL`, `gi_shadow.comp`, `gi_shadow_hw.comp`, `gi_shadow_hw.hlsl`, the GLSL in `OpenGLRenderer.cpp`).
+* **Hardware ray tracing**: the ground is no mesh, so it is in no TLAS. `gi_shadow_hw.comp` (Vulkan) and `gi_shadow_hw.hlsl`
+  (D3D12 DXR) march the clipmap after their ray query. D3D12 had no height field at all: `ensureGiHeightfield`, root parameter 10
+  (b2), heap slots 46..49.
+* **The pre-pass stages** (position + normal for the GI mask, view position for SSAO): `PSGiGBuf` / `PSViewPos` in
+  `kLandscapeHLSL` (D3D), `fsGiGBuf` in `VulkanLandscape`, `DrawLandscapeGiGBuf` / `DrawLandscapeViewPos` on OpenGL (the material
+  library's landscape vertex stage with a fragment of three lines, drawn through `OpenGLLandscape`'s material path).
+* **`RenderExtractor::extractLandscapeGiHeightfield`** keeps the clipmap entry current on a reused walk and follows
+  `HE_LANDSCAPE_PASSES`.
+* **Trap that cost five runs**: `landscape_gpu_check.exe` loads `HorizonRendering.dll` and `Shaders/*.cso|*.spv` from its own
+  folder, and they are only copied there when the exe relinks. After an engine-only edit: copy them
+  (`out/build/x64-debug/src/HE_Rendering/HorizonRendering.dll`, `out/build/x64-debug/Shaders/`) before believing a result.
+
 ## Handoff
 
-- **Done / verified / not verified:** sections 9 and 10 for Windows; the three docs named at the top for the Mac. Not verified on
-  Windows: D3D12 under the debug layer (not installed), a Release build, `--arrays`, the editor by hand (section 5; also the new
-  Mountain rows and the path splines, and what the new relief looks like), the full `he_tests` run.
-- **Next, largest first:** GI on Vulkan / D3D (with GI on the ground takes NO sun shadow there: the mask comes from a pre-pass the
-  ground is not in; Metal: `EncodeLandscapePass` kind 1, `m_giLandMesh`); the G-buffer variant (`landscapeFragment` of the material's
-  G-buffer tail, Metal: `EncodeLandscapeGBuffer`; the tool does not judge it yet); velocity; the virtual texture (section 7b). Then
-  `release/0.8.0` into this branch (PR 233 among its commits).
+- **Done / verified / not verified:** sections 9 to 11 for Windows; the three docs named at the top for the Mac. Not verified on
+  Windows: D3D12 under the debug layer (not installed) and its SOFTWARE GI kernel (this machine takes DXR), a Release build,
+  `--arrays`, the editor by hand (section 5; also the Mountain rows and the path splines), the full `he_tests` run.
+- **Open, in this order:** (1) OpenGL forward with GI on: the ground's ray-traced shadow is faint (`shadow, GI on: 0 px`, and 2872
+  px darker once the clipmap is in), deferred is right; not understood, the GI bit is not claimed there. (2) Velocity on all four
+  (D3D: `kTaaVelocityHLSL` shows the output; the matrices can ride in the layer colours like `setViewRows`; Vulkan has `uAux0/1`;
+  the tool has NO witness for it: write one first, e.g. edge sharpness under a moving camera with TAA on). (3) The virtual
+  texture (section 7b). (4) With SSR on the ground takes no SSAO (the three-target reflection pre-pass). Then `release/0.8.0`
+  into this branch (PR 233 among its commits).
 - **Do not:** bump the landscape's generation for an edit (it empties every backend's atlas); rely on `LandscapeTileSource::coarse()`
   (null for a pack in coarse regions: `coarseWindow`); name anything `far`, `near` or `small` (Windows macros).
 - **Order:** 0, 1, 2, 3, then 5. Items 2 and 3 are board steps 27 and 28; item 1 has none yet.
