@@ -1571,4 +1571,7 @@ private:
 	void DrawLandscape(const glm::mat4& viewProj);
 	OpenGLLandscape m_landscape;
 	bool            m_landscapeFailed = false;   // init failed once: not tried again
+	unsigned int    GetOrBuildLandscapeMaterialProgram(const HE::UUID& materialId);
+	int             m_maxFragmentSamplers = 0;   // GL_MAX_TEXTURE_IMAGE_UNITS, read at Initialize
+	HE::UUID        m_landscapeMaterialLoadTried{};   // the texture group's material this renderer tried to load from its path
 };

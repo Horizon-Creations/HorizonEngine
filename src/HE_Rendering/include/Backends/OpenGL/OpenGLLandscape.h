@@ -30,6 +30,9 @@ public:
 		glm::vec3 ambient{ 0.12f, 0.14f, 0.18f };
 		unsigned int normalArray = 0, maskArray = 0;   // the same group's normal and mask arrays (0 = not used)
 		unsigned int albedoArray = 0;   // GL texture array of the world-UV ground (LandscapeRenderStatic::albedoArrayPath, resolved by the renderer); 0 = flat colours
+		// The renderer's linked program of the ground's material (landscape vertex + the material's fragment with its weights from the
+		// atlas): the patches are drawn with it, the caller has bound what a material draw needs. 0 = the fixed layer blend.
+		unsigned int materialProgram = 0;
 	};
 	struct Stats
 	{

@@ -3555,6 +3555,7 @@ void OpenGLRenderer::Initialize(HE::Window* window)
 		// MaterialShaderLibrary::kGlFogVolumeTextureUnit).
 		GLint units = 0;
 		glGetIntegerv(GL_MAX_TEXTURE_IMAGE_UNITS, &units);
+		m_maxFragmentSamplers = units;   // also decides Capabilities::landscapeMaterial
 		m_rvtSupported = units >= 26;
 		if (!m_rvtSupported)
 			HE_LOG_INFO(RHI, "OpenGLRenderer: Runtime Virtual Textures off: %d fragment texture units, the lookup needs 26", static_cast<int>(units));
@@ -3989,6 +3990,63 @@ void OpenGLRenderer::UploadClusterLists(const HE::ClusterLightBuild& build)
 	glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
 }
 
+// A material program's uniform-block bindings and sampler units (the lambda inside GetOrBuildMaterialProgram, which is where the
+// list lives): set there, so the landscape's material program below is set up by the very same code.
+static void (*s_setupMaterialProgram)(GLuint) = nullptr;
+
+// The program that draws the tile landscape's patches with a material: the landscape's vertex stage and the material's lit fragment
+// with its layer weights from the tile atlas (MaterialShaderLibrary), GLSL 4.10. 0, remembered: no shader, or it does not build or
+// link here (a macOS fragment stage takes sixteen samplers) - the landscape then keeps its fixed blend.
+unsigned int OpenGLRenderer::GetOrBuildLandscapeMaterialProgram(const HE::UUID& materialId)
+{
+#if defined(HE_HAVE_SHADERC)
+	uint64_t key = 0; std::string frag, vertBody;
+	if (!m_contentManager || !resolveMaterialShader(materialId, key, frag, vertBody)) return 0;
+	const uint64_t progKey = key ^ 0x7A11E51A2D5C0610ULL;
+	if (auto it = m_materialPrograms.find(progKey); it != m_materialPrograms.end()) return it->second;
+	// The material's own program first: it is what sets s_setupMaterialProgram, and a material the mesh path cannot build is not
+	// one the landscape can.
+	if (!GetOrBuildMaterialProgram(key, frag, vertBody, nullptr) || !s_setupMaterialProgram) { m_materialPrograms[progKey] = 0; return 0; }
+	using Backend = HE::MaterialShaderLibrary::Backend;
+	const auto& v = m_matShaderLib.landscapeVertex(Backend::GLSL410);
+	const auto& f = m_matShaderLib.landscapeFragment(key, frag, Backend::GLSL410, /*clustered=*/false);
+	GLuint prog = 0;
+	std::string why = v.log + f.log;
+	if (v.ok && f.ok)
+	{
+		try
+		{
+			const GLuint vs = CompileStage(GL_VERTEX_SHADER, v.source.c_str());
+			const GLuint fs = CompileStage(GL_FRAGMENT_SHADER, f.source.c_str());
+			prog = glCreateProgram();
+			glAttachShader(prog, vs);
+			glAttachShader(prog, fs);
+			glLinkProgram(prog);
+			glDeleteShader(vs);
+			glDeleteShader(fs);
+			GLint linked = 0;
+			glGetProgramiv(prog, GL_LINK_STATUS, &linked);
+			if (!linked)
+			{
+				char log[1024] = {};
+				glGetProgramInfoLog(prog, sizeof(log) - 1, nullptr, log);
+				why = log;
+				glDeleteProgram(prog);
+				prog = 0;
+			}
+		}
+		catch (const std::exception& e) { why = e.what(); prog = 0; }
+	}
+	if (prog) s_setupMaterialProgram(prog);
+	else HE_LOG_WARN(RHI, "OpenGLRenderer: the landscape keeps its fixed blend, its material's variant did not build: %s", why.c_str());
+	m_materialPrograms[progKey] = prog;
+	return prog;
+#else
+	(void)materialId;
+	return 0;
+#endif
+}
+
 unsigned int OpenGLRenderer::GetOrBuildMaterialProgram(uint64_t key, const std::string& fragGlsl,
                                                        const std::string& vertBody,
                                                        const MaterialShaderVariant* precompiled,
@@ -4164,6 +4222,7 @@ unsigned int OpenGLRenderer::GetOrBuildMaterialProgram(uint64_t key, const std::
 		if (GLint l = glGetUniformLocation(prog, "heRvtSurface"); l >= 0) glUniform1i(l, 25);
 		glUseProgram(0);
 	};
+	s_setupMaterialProgram = setupProgram;   // the landscape's material program takes the same blocks and units (GetOrBuildLandscapeMaterialProgram)
 
 	// vertSrc/fragSrc → linked program, 0 on failure (logged).
 	auto linkSources = [&]() -> unsigned int {
@@ -12355,6 +12414,51 @@ void OpenGLRenderer::DrawLandscape(const glm::mat4& viewProj)
 		sh.normalArray = optional(frame.world->normalArrayPath);
 		sh.maskArray = optional(frame.world->maskArrayPath);
 	}
+	// The ground's material, when it has a shader and its landscape program links: bound like a forward draw of that material (its
+	// parameters, the graph's textures, the virtual texture; the frame's lighting block and shadow, sky and occlusion units are
+	// the pass's already), the landscape adds its own blocks and images. Else the fixed blend.
+#if defined(HE_HAVE_SHADERC)
+	if (frame.materialId != HE::UUID{} && m_contentManager && m_maxFragmentSamplers >= 24)   // see GetCapabilities: fewer samplers, no link
+	{
+		if (!frame.materialPath.empty() && frame.materialId != m_landscapeMaterialLoadTried && !m_contentManager->getMaterial(frame.materialId))
+		{
+			m_landscapeMaterialLoadTried = frame.materialId;   // the texture group's material is named by no entity: from its path, once
+			if (!m_contentManager->resolveMaterialRef(frame.materialId, frame.materialPath)) m_contentManager->loadAsset(frame.materialPath);
+		}
+		if (const unsigned int prog = GetOrBuildLandscapeMaterialProgram(frame.materialId))
+		{
+			float padded[HE::kMatParamFloats] = { 0 };
+			unsigned int gtex[4] = { 0, 0, 0, 0 };
+			size_t nTex = 0;
+			if (const MaterialAsset* ma = m_contentManager->getMaterial(frame.materialId))
+			{
+				std::memcpy(padded, ma->shaderParamData.data(), std::min(ma->shaderParamData.size(), size_t(HE::kMatParamFloats)) * sizeof(float));
+				// copied out before the resolves: a load invalidates the asset pointer
+				const uint32_t arrMask = HE::matGlslTextureArrayMask(ma->customShaderFragGlsl);
+				const std::vector<HE::UUID> ids = ma->graphTextureIds;
+				const std::vector<std::string> paths = ma->graphTexturePaths;
+				nTex = std::min<size_t>(4, std::max(paths.size(), ids.size()));
+				for (size_t i = 0; i < nTex; ++i)
+					gtex[i] = ResolveGraphTexture(i < ids.size() ? ids[i] : HE::UUID{}, i < paths.size() ? paths[i] : std::string{}, (arrMask >> i) & 1u);
+			}
+			glUseProgram(prog);
+			glBindBuffer(GL_UNIFORM_BUFFER, m_matParamUBO);
+			glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(padded), padded);
+			glBindBuffer(GL_UNIFORM_BUFFER, 0);
+			m_haveMatParams = false;
+			glBindBufferBase(GL_UNIFORM_BUFFER, 0, m_matLightUBO);
+			glBindBufferBase(GL_UNIFORM_BUFFER, 2, m_matParamUBO);
+			for (size_t i = 0; i < nTex; ++i)
+			{
+				glActiveTexture(GL_TEXTURE1 + static_cast<GLenum>(i));
+				BindGraphTexture(gtex[i]);
+			}
+			BindRvtForDraw(frame.materialId);
+			glActiveTexture(GL_TEXTURE0);
+			sh.materialProgram = prog;
+		}
+	}
+#endif
 	m_landscape.draw(frame, viewProj, sh);
 }
 
@@ -15151,6 +15255,12 @@ IRenderer::Capabilities OpenGLRenderer::GetCapabilities() const
 	c.supportsDeferredRendering  = true;
 	c.supportsRawCapture         = true;   // RenderSceneImage's rawOutput (kTonemapFS)
 	c.landscapeCoarseRevision    = true;   // OpenGLLandscape.cpp: new coarse and far images, the atlas stays
+#if defined(HE_HAVE_SHADERC)
+	// DrawLandscape: the ground's material draws the patches (the scene pass only). Where a fragment stage holds the samplers: the
+	// landscape adds seven to a material's, and the Auto Landscape material then uses 22. macOS OpenGL 4.1 holds 16, so there
+	// the link fails and the ground keeps its fixed blend (said here, so nothing claims otherwise).
+	c.landscapeMaterial          = m_maxFragmentSamplers >= 24;
+#endif
 	c.supportsRvt                = m_rvtSupported;   // a page is that raw capture blitted into the pool (the programs come from the cross-compiler)
 	// SSR: the FORWARD variant only (docs/ssr-cross-backend-plan.md checkpoint
 	// A) — the reflection MRT pre-pass plus last frame's HDR copy, exactly

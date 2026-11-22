@@ -16,6 +16,7 @@ struct OpenGLLandscape::Impl
 {
 	GLuint program = 0;
 	GLuint vao = 0, vbo = 0, ibo = 0;
+	GLuint lsGlobalsUBO = 0, lsPatchUBO = 0;   // LsGlobals / LsPatch of a material's program (Shading::materialProgram), made on first use
 	GLuint tileHeights = 0, slotTable = 0, coarseHeights = 0;
 	GLuint weights[3] = { 0, 0, 0 };
 	GLuint coarseWeights[3] = { 0, 0, 0 };
@@ -186,6 +187,9 @@ void OpenGLLandscape::shutdown()
 	if (m.noArray) glDeleteTextures(1, &m.noArray);
 	m.noArray = 0;
 	if (m.vao) glDeleteVertexArrays(1, &m.vao);
+	if (m.lsGlobalsUBO) glDeleteBuffers(1, &m.lsGlobalsUBO);
+	if (m.lsPatchUBO) glDeleteBuffers(1, &m.lsPatchUBO);
+	m.lsGlobalsUBO = m.lsPatchUBO = 0;
 	if (m.vbo) glDeleteBuffers(1, &m.vbo);
 	if (m.ibo) glDeleteBuffers(1, &m.ibo);
 	if (m.program) glDeleteProgram(m.program);
@@ -331,6 +335,104 @@ void OpenGLLandscape::draw(const LandscapeRenderFrame& f, const glm::mat4& viewP
 		++m.stats.tableUpdates;
 	}
 	if (f.patches.empty()) return;
+
+	// ── drawn by a material ────────────────────────────────────────────────────
+	// The renderer's program of the ground's material (MaterialShaderLibrary::landscapeVertex / landscapeFragment, GLSL 4.10): its
+	// numbers come as two uniform blocks (LsGlobals, LsPatch) and its images by name, on units above everything a material uses
+	// (0-25). The caller has the program's material state bound (lighting, parameters, the graph's textures).
+	if (shading.materialProgram)
+	{
+		constexpr GLuint kGlobalsBinding = 12, kPatchBinding = 13;
+		constexpr int kMatUnit = 26;   // tile heights, slot table (vertex), slot table (fragment: the same image), coarse heights, 3 + 3 weight pages
+		struct alignas(16) Globals   // std140 LsGlobals as the two shaders declare it
+		{
+			float   viewProj[16];
+			float   cameraRel[4];
+			float   world[4];
+			float   heightInfo[4];
+			float   origin[4];
+			int32_t tile[4];
+			int32_t heightRect[8][4];
+			int32_t coarseGrid[16][4];
+		} g{};
+		static_assert(sizeof(Globals) == 528, "LsGlobals: std140 size of the block in MaterialShaderLibrary.cpp");
+		std::memcpy(g.viewProj, glm::value_ptr(viewProj), sizeof(g.viewProj));
+		g.cameraRel[0] = f.cameraRel.x; g.cameraRel[1] = f.cameraRel.y; g.cameraRel[2] = f.cameraRel.z; g.cameraRel[3] = f.slabDistance;
+		g.world[0] = w.worldMaxX; g.world[1] = w.worldMaxZ; g.world[2] = w.tileM; g.world[3] = w.heightScaleM;
+		g.heightInfo[0] = w.heightMinM; g.heightInfo[1] = static_cast<float>(w.tilesX); g.heightInfo[2] = static_cast<float>(w.tilesZ); g.heightInfo[3] = static_cast<float>(w.tableWindow);
+		g.origin[0] = static_cast<float>(f.origin.x); g.origin[1] = static_cast<float>(f.origin.y); g.origin[2] = static_cast<float>(f.origin.z);
+		g.tile[0] = w.hCells; g.tile[1] = w.wTexels; g.tile[2] = w.tileLevels;
+		for (int l = 0; l < w.heightLevels && l < 8; ++l)
+			for (int c = 0; c < 4; ++c) g.heightRect[l][c] = w.heightRect[l][c];
+		for (int gi = 0; gi < w.coarseGridCount && gi < 16; ++gi)
+			for (int c = 0; c < 4; ++c) g.coarseGrid[gi][c] = w.coarseGrid[gi][c];
+		if (!m.lsGlobalsUBO)
+		{
+			glGenBuffers(1, &m.lsGlobalsUBO);
+			glGenBuffers(1, &m.lsPatchUBO);
+			glBindBuffer(GL_UNIFORM_BUFFER, m.lsGlobalsUBO);
+			glBufferData(GL_UNIFORM_BUFFER, sizeof(g), nullptr, GL_DYNAMIC_DRAW);
+			glBindBuffer(GL_UNIFORM_BUFFER, m.lsPatchUBO);
+			glBufferData(GL_UNIFORM_BUFFER, 48, nullptr, GL_DYNAMIC_DRAW);
+		}
+		glBindBuffer(GL_UNIFORM_BUFFER, m.lsGlobalsUBO);
+		glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(g), &g);
+		glBindBufferBase(GL_UNIFORM_BUFFER, kGlobalsBinding, m.lsGlobalsUBO);
+		glBindBufferBase(GL_UNIFORM_BUFFER, kPatchBinding, m.lsPatchUBO);
+
+		const GLuint prog = shading.materialProgram;
+		glUseProgram(prog);
+		if (const GLuint i = glGetUniformBlockIndex(prog, "LsGlobals"); i != GL_INVALID_INDEX) glUniformBlockBinding(prog, i, kGlobalsBinding);
+		if (const GLuint i = glGetUniformBlockIndex(prog, "LsPatch"); i != GL_INVALID_INDEX) glUniformBlockBinding(prog, i, kPatchBinding);
+		static const char* const kNames[10] = { "uTileHeights", "uSlotTable", "heLsSlotTable", "uCoarseHeights", "heLsTileWeights0", "heLsTileWeights1",
+		                                        "heLsTileWeights2", "heLsCoarseWeights0", "heLsCoarseWeights1", "heLsCoarseWeights2" };
+		const GLuint texs[10] = { m.tileHeights, m.slotTable, m.slotTable, m.coarseHeights, m.weights[0], m.weights[1], m.weights[2],
+		                          m.coarseWeights[0], m.coarseWeights[1], m.coarseWeights[2] };
+		const GLenum tgts[10] = { GL_TEXTURE_2D_ARRAY, GL_TEXTURE_2D, GL_TEXTURE_2D, GL_TEXTURE_2D, GL_TEXTURE_2D_ARRAY, GL_TEXTURE_2D_ARRAY,
+		                          GL_TEXTURE_2D_ARRAY, GL_TEXTURE_2D, GL_TEXTURE_2D, GL_TEXTURE_2D };
+		for (int i = 0; i < 10; ++i)
+		{
+			if (const GLint l = glGetUniformLocation(prog, kNames[i]); l >= 0) glUniform1i(l, kMatUnit + i);
+			glActiveTexture(GL_TEXTURE0 + kMatUnit + i);
+			glBindTexture(tgts[i], texs[i]);
+		}
+		glDepthFunc(GL_LESS);
+		glDepthMask(GL_TRUE);
+		glDisable(GL_CULL_FACE);
+		glDisable(GL_BLEND);
+		glBindVertexArray(m.vao);   // for its index buffer: the program takes the grid position from gl_VertexID
+		const uint32_t totalM = w.quadrantFirst[3] + w.quadrantCount[3];
+		glBindBuffer(GL_UNIFORM_BUFFER, m.lsPatchUBO);
+		for (const LandscapeRenderPatch& p : f.patches)
+		{
+			struct { int32_t patch[4]; float patchPos[4]; float morph[4]; } pd{ { p.level, p.cornerX, p.cornerZ, p.coarse ? 1 : 0 },
+			                                                                 { p.x0, p.z0, p.size, static_cast<float>(p.gridIndex) },
+			                                                                 { p.morphStart, p.morphEnd, 0.0f, 0.0f } };
+			glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(pd), &pd);
+			if ((p.quadrants & 15) == 15)
+			{
+				glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(totalM), GL_UNSIGNED_SHORT, nullptr);
+				++m.stats.drawCalls;
+			}
+			else
+				for (int q = 0; q < 4; ++q)
+				{
+					if (!(p.quadrants & (1 << q)) || w.quadrantCount[q] == 0) continue;
+					glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(w.quadrantCount[q]), GL_UNSIGNED_SHORT,
+					               reinterpret_cast<const void*>(static_cast<uintptr_t>(w.quadrantFirst[q]) * sizeof(uint16_t)));
+					++m.stats.drawCalls;
+				}
+			++m.stats.patches;
+		}
+		glBindBuffer(GL_UNIFORM_BUFFER, 0);
+		for (int i = 0; i < 10; ++i)
+		{
+			glActiveTexture(GL_TEXTURE0 + kMatUnit + i);
+			glBindTexture(tgts[i], 0);
+		}
+		glActiveTexture(GL_TEXTURE0);
+		return;
+	}
 
 	// ── draw ───────────────────────────────────────────────────────────────────
 	const GLuint images[kUnits] = { m.tileHeights, m.slotTable, m.coarseHeights, m.weights[0], m.weights[1], m.weights[2], m.coarseWeights[0], m.coarseWeights[1], m.coarseWeights[2], shading.albedoArray ? shading.albedoArray : m.noArray,
