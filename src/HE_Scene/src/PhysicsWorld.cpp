@@ -190,6 +190,14 @@ static void joltEnsureInit()
     static std::once_flag s_flag;
     std::call_once(s_flag, []() {
         JPH::RegisterDefaultAllocator();
+#ifdef JPH_ENABLE_ASSERTS
+        // Debug builds of Jolt: its default handler breaks into the debugger, which without one ends the process (a full
+        // contact cache asserts at the end of Update(), right before it returns the error step() counts). Logged instead.
+        JPH::AssertFailed = [](const char* expr, const char* msg, const char* file, JPH::uint line) -> bool {
+            HE_LOG_WARN(Physics, "Jolt assert: %s%s%s (%s:%u)", expr, msg ? ": " : "", msg ? msg : "", file, static_cast<unsigned>(line));
+            return false;
+        };
+#endif
         JPH::Factory::sInstance = new JPH::Factory();
         JPH::RegisterTypes();
         HE_LOG_INFO(Physics, "%s", "Jolt physics initialised (process-global types registered)");
