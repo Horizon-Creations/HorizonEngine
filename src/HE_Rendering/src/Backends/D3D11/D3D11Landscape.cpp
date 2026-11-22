@@ -22,6 +22,8 @@ struct D3D11Landscape::Impl
 	bool depthOnly = false;           // set by drawDepth around its call of draw()
 	const glm::mat4* viewPos = nullptr;      // set by drawViewPos: the view matrix, and PSViewPos instead of no pixel stage
 	ComPtr<ID3D11PixelShader> psViewPos;     // kLandscapeHLSL's PSViewPos (the SSAO position pre-pass); null when it did not compile
+	bool giGBuf = false;                     // set by drawGiGBuf: PSGiGBuf instead of no pixel stage
+	ComPtr<ID3D11PixelShader> psGiGBuf;      // kLandscapeHLSL's PSGiGBuf (the GI pre-pass); null when it did not compile
 	ComPtr<ID3D11VertexShader>      vs;
 	ComPtr<ID3D11PixelShader>       ps;
 	ComPtr<ID3D11DepthStencilState> depth;
@@ -248,6 +250,10 @@ bool D3D11Landscape::init(ID3D11Device* device, std::string* error)
 		std::string vpErr;
 		if (compileStage("PSViewPos", "ps_5_0", vpb, vpErr))
 			device->CreatePixelShader(vpb->GetBufferPointer(), vpb->GetBufferSize(), nullptr, m.psViewPos.GetAddressOf());
+		// The GI pre-pass's stage: without it the ground takes no ray-traced shadow while GI is on.
+		ComPtr<ID3DBlob> gib;
+		if (compileStage("PSGiGBuf", "ps_5_0", gib, vpErr))
+			device->CreatePixelShader(gib->GetBufferPointer(), gib->GetBufferSize(), nullptr, m.psGiGBuf.GetAddressOf());
 	}
 
 	D3D11_DEPTH_STENCIL_DESC ds{};
@@ -422,6 +428,16 @@ void D3D11Landscape::drawViewPos(ID3D11DeviceContext* ctx, const HE::LandscapeRe
 	m_impl->depthOnly = false;
 }
 
+void D3D11Landscape::drawGiGBuf(ID3D11DeviceContext* ctx, const HE::LandscapeRenderFrame& f, const glm::mat4& viewProj)
+{
+	if (!m_impl->psGiGBuf) return;
+	m_impl->depthOnly = true;       // the caller's rasteriser and depth state
+	m_impl->giGBuf = true;          // and the two-target stage: position and normal
+	draw(ctx, f, viewProj, Shading{});
+	m_impl->giGBuf = false;
+	m_impl->depthOnly = false;
+}
+
 bool D3D11Landscape::drawPatches(ID3D11DeviceContext* ctx, const HE::LandscapeRenderFrame& f, const glm::mat4& viewProj)
 {
 	Impl& m = *m_impl;
@@ -533,7 +549,7 @@ void D3D11Landscape::draw(ID3D11DeviceContext* ctx, const HE::LandscapeRenderFra
 	ID3D11SamplerState* farSmp = m.farSampler.Get();
 	ctx->PSSetSamplers(d3dls::kFarSamplerReg, 1, &farSmp);
 	ctx->VSSetShader(m.vs.Get(), nullptr, 0);
-	ctx->PSSetShader(m.viewPos ? m.psViewPos.Get() : depthOnly ? nullptr : m.ps.Get(), nullptr, 0);
+	ctx->PSSetShader(m.giGBuf ? m.psGiGBuf.Get() : m.viewPos ? m.psViewPos.Get() : depthOnly ? nullptr : m.ps.Get(), nullptr, 0);
 	ctx->IASetInputLayout(nullptr);   // the grid comes from SV_VertexID
 	ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 	ctx->IASetIndexBuffer(m.indices.Get(), DXGI_FORMAT_R16_UINT, 0);

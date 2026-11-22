@@ -578,6 +578,21 @@ int runMaterialCheck(HE::RendererBackend backend, HE::RenderPath path, const std
 					}
 					ov = over;
 					world.destroyEntity(hangEnt);
+					// ... and it must not shadow ITSELF: the first view again, now with the clipmap in the ray structure. The
+					// ground's pixels start their rays on the drawn mesh, which is not exactly the clipmap's surface.
+					std::vector<uint8_t> giField;
+					if (gotB && settle(giField))
+					{
+						size_t ground = 0, self = 0;
+						for (size_t i = 0; i < px; ++i)
+						{
+							if (!isBlue(&giOn[i * 4]) || !isBlue(&giField[i * 4])) continue;
+							++ground;
+							self += lum(&giField[i * 4]) < 0.8 * lum(&giOn[i * 4]) ? 1 : 0;
+						}
+						std::printf("  no self-shadow, GI on: %zu of %zu ground px are darker because the height clipmap is in the ray structure\n", self, ground);
+						if (self > ground / 50) failPass(kLandscapePassGi, "the ground does not shadow itself through its height clipmap", std::to_string(self) + " px");
+					}
 					world.setLandscapeRuntime(nullptr);
 				}
 				gi.enabled = false;

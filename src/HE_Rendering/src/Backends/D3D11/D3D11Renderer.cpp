@@ -4032,7 +4032,8 @@ struct D3D11RendererImpl
                                           ID3D11InputLayout* il,
                                           ID3D11DepthStencilState* depthSt,
                                           ID3D11RasterizerState* rasterSt,
-                                          bool maskPasses = true)
+                                          bool maskPasses = true,
+                                          const std::function<void()>& drawGround = {})
     {
         GpuPassScope _passTimer(this, "GIShadow");
         createGiPipelines();
@@ -4132,6 +4133,9 @@ struct D3D11RendererImpl
                 else
                     drawOne(dc->transform);
             }
+            // The tile landscape's ground (Thema 326): its pixels get a position and a normal, so the shadow rays below
+            // start from them and the ground takes the ray-traced sun shadow like any mesh.
+            if (drawGround) drawGround();
             ID3D11RenderTargetView* nulls[2] = {};
             ctx->OMSetRenderTargets(2, nulls, nullptr);
         }
@@ -4160,8 +4164,10 @@ struct D3D11RendererImpl
             if (SUCCEEDED(ctx->Map(giShadowCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
             { std::memcpy(mapped.pData, &scb, sizeof(scb)); ctx->Unmap(giShadowCB.Get(), 0); }
             // The kernel's instance list: without the terrain chunks while the height field stands in for them.
+            // The height field does not need a list of its own: the tile landscape's clipmap has no chunk meshes to leave out,
+            // so its two lists are the same one and `sep` is false (with `sep` in this condition the clipmap never occluded).
             const bool sep = giShadowInstanceSRV != nullptr;
-            const bool hf  = giHfActive && sep && giHfSRV && giHfCB && !rw.heightfields.empty();
+            const bool hf  = giHfActive && giHfSRV && giHfCB && !rw.heightfields.empty();
             glm::ivec4 cnt(sep ? giShadowInstanceCount : giInstanceCount, 0, 0, 0);
             if (SUCCEEDED(ctx->Map(giCountCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
             { std::memcpy(mapped.pData, &cnt, sizeof(cnt)); ctx->Unmap(giCountCB.Get(), 0); }
@@ -8433,7 +8439,18 @@ void D3D11Renderer::DrawScene(int width, int height)
                 std::max(1, width / 2), std::max(1, height / 2), p.m_renderWorld,
                 [&](HE::UUID id) -> const GpuMesh* { return p.resolveMesh(id, m_contentManager); },
                 p.cube, p.inputLayout.Get(), p.depthState.Get(), p.rasterState.Get(),
-                /*maskPasses=*/p.giEnabled);
+                /*maskPasses=*/p.giEnabled,
+                [&]()
+                {
+                    // The provider culls for THIS pass's matrix (unjittered) and hands over the tiles that arrived, which are
+                    // uploaded whether or not the ground is drawn.
+                    if (!HE::landscapeD3dPassesOn() || !m_landscapeProvider || p.landscapeFailed || !p.landscape.ready()) return;
+                    HE::LandscapeRenderFrame lf;
+                    m_landscapeProvider(glm::dmat4(viewProjClean), /*zeroToOne=*/false, lf);
+                    if (!lf.active) return;
+                    p.landscape.upload(ctx, lf);
+                    if (HE::landscapePassesOn()) p.landscape.drawGiGBuf(ctx, lf, viewProjClean);
+                });
             if (giShadowSRV && p.giEnabled)
                 p.dispatchGiProbeUpdate(ctx, p.m_renderWorld);
             giShadingActive = p.giEnabled && giShadowSRV && p.giIrrSRV && p.giVisSRV && p.giProbeGridBuilt;
@@ -10050,7 +10067,7 @@ IRenderer::Capabilities D3D11Renderer::GetCapabilities() const
     c.supportsRawCapture        = m_impl->postFxReady;   // RenderSceneImage's rawOutput rides the tonemap pass
     c.supportsRvt               = m_impl->postFxReady;   // the page is a raw capture copied into the pool
     // The tile landscape's ground in the shadow layers: written, not run (see renderDepthLayer). Said only with the switch on.
-    c.landscapePassMask         = HE::landscapeD3dPassesOn() ? (kLandscapePassShadow | kLandscapePassSsao | kLandscapePassGBuffer) : 0u;
+    c.landscapePassMask         = HE::landscapeD3dPassesOn() ? (kLandscapePassShadow | kLandscapePassSsao | kLandscapePassGBuffer | kLandscapePassGi) : 0u;
     c.landscapeCoarseRevision   = true;   // D3D11Landscape.cpp: new coarse and far images, the atlas stays
     c.landscapeMaterial         = m_impl->m_matReady;   // drawDC with lsDraw: the ground through its material's landscape variant
     // Froxel volumetric fog (Thema 225 step 8): Inject/Integrate/Apply compiled and

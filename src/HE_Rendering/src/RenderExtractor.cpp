@@ -877,11 +877,21 @@ void windWaterParams(const MaterialAsset& ma, const MaterialComponent* mc,
 	// gate their tile-landscape-only ray-march branch.
 	void extractLandscapeGiHeightfield(HorizonWorld& world, RenderWorld& out)
 	{
-		if (!out.heightfields.empty()) return;
+		// Also called for a frame that reuses its walk (extract(), the reuse branch), which keeps the list: the entry is
+		// brought up to date instead of outliving the runtime, the switch and a new version of the clipmap. Nothing is copied
+		// while it is current.
 		const HE::LandscapeRuntime* lr = world.landscapeRuntime();
-		if (!lr) return;
+		// HE_LANDSCAPE_PASSES=0, the A/B switch of landscape_gpu_check: the ground in the scene pass alone.
+		const bool want = HE::landscapePassesOn() && lr && lr->giHeightfield().active();
+		const auto old = std::find_if(out.heightfields.begin(), out.heightfields.end(),
+		                              [](const GiHeightfield& h) { return h.key == kLandscapeGiHeightfieldKey; });
+		if (old != out.heightfields.end())
+		{
+			if (want && old->version == lr->giHeightfield().version) return;
+			out.heightfields.erase(old);
+		}
+		if (!want || !out.heightfields.empty()) return;
 		const HE::LandscapeGiHeightfield& g = lr->giHeightfield();
-		if (!g.active()) return;
 		GiHeightfield hf;
 		hf.data    = g.data;
 		hf.res     = g.res;
@@ -1911,6 +1921,7 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 			assignLocalShadowLayers(out);
 			m_frameAspect = aspectRatio;
 		}
+		extractLandscapeGiHeightfield(world, out);   // not part of the frame key: the runtime's clipmap arrives from a job
 		++m_reusedExtracts;
 		return;
 	}

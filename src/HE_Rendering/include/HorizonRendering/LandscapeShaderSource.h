@@ -877,6 +877,20 @@ float4 PSViewPos(LsVertexOut pin) : SV_Target
     float4 p = float4(pin.worldRel, 1.0);
     return float4(dot(layerColor[0], p), dot(layerColor[1], p), dot(layerColor[2], p), 1.0);
 }
+
+// The ground for the GI pre-pass (drawGiGBuf): what GiGBufPS writes for a mesh (HlslSources.h), the position the shadow rays start
+// from with a >= 1 for geometry, and the normal with the roughness in a. The normal is the surface's own, from the position's
+// derivatives, turned up; the ground is rough (no reflection ray).
+struct LsGiOut { float4 pos : SV_Target0; float4 norm : SV_Target1; };
+LsGiOut PSGiGBuf(LsVertexOut pin)
+{
+    float3 n = normalize(cross(ddy(pin.worldRel), ddx(pin.worldRel)));
+    if (n.y < 0.0) n = -n;
+    LsGiOut o;
+    o.pos = float4(pin.worldRel, 1.0);
+    o.norm = float4(n, 1.0);
+    return o;
+}
 )HLSL";
 
 } // namespace HE::glsl

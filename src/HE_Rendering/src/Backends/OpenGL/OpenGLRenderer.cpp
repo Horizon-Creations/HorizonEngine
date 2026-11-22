@@ -2066,11 +2066,13 @@ bool hfMarch(vec3 oL, vec3 dL, float tMin, float tMax, out float outT, out vec2 
 	if (t0 >= t1) return false;
 
 	// The receiver sits on a (possibly coarser) LOD mesh that can lie a little under the exact field:
-	// lift the start so a point on the ground is not its own occluder.
+	// lift the start so a point on the ground is not its own occluder. Only as far as a LOD mesh can be
+	// off, though: a start that is metres under the field is not ON the ground but below it, and the
+	// ground is its occluder.
 	vec2  tpS  = tp0 + tpd * t0;
 	float hS   = hfBilinear(tpS);
 	float yS   = oL.y + dL.y * t0;
-	float lift = max(0.0, hS + 0.15 - yS);
+	float lift = (hS - yS) < 8.0 ? max(0.0, hS + 0.15 - yS) : 0.0;
 
 	int   topLvl = int(uHfParams2.x);
 	int   lvl    = min(2, topLvl);
