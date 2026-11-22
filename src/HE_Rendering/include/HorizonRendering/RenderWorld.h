@@ -530,6 +530,10 @@ public:
     // The entry of `landscapes` that is the tile landscape's ground (RenderExtractor), -1 = none: what a backend gives the
     // instance it makes of the GI height clipmap, so a ray's hit on the ground is coloured like one on a landscape chunk.
     int32_t tileLandscapeIndex = -1;
+    // The material a backend draws the tile landscape's ground with, when it is not the one LandscapeRenderFrame::materialId names
+    // (RenderExtractor's tileGroundMaterial: the landscape's material with its virtual-texture read evaluated in place and the
+    // entity's parameter overrides in it). Null: the frame's own.
+    HE::UUID tileLandscapeMaterial{};
 
     // Flat ambient fill added to every lit surface, set by the extractor. A weak
     // floor is always present (so the scene is never fully black); under heavy

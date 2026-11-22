@@ -7,6 +7,10 @@
 #include <HorizonScene/Components/LightComponent.h>
 #include <MaterialGraph/AutoLandscapeMaterial.h>
 #include <MaterialGraph/MaterialGraph.h>
+#include <MaterialGraph/RvtSplit.h>
+
+#include <algorithm>
+#include <cstdlib>
 #include <HorizonScene/Components/MaterialComponent.h>
 #include <HorizonScene/Components/MeshComponent.h>
 #include <HorizonScene/Components/TransformComponent.h>
@@ -529,6 +533,20 @@ int runMaterialCheck(HE::RendererBackend backend, HE::RenderPath path, const std
 				clear.fogDensity = 0.0f;
 				renderer->SetEnvironmentSettings(clear);
 				content.setEngineContentRoot(arrayRoot);
+				// With Runtime Virtual Textures ON, as the editor has them: the Auto Landscape material then READS its colour from
+				// the virtual texture, and the tile ground has no pages (a read without one is a flat grey). The ground must be
+				// drawn with the derived material that computes in place (RenderWorld::tileLandscapeMaterial) and show its texture.
+				HE::matSetRvtEnabled(true);
+				{
+					// as the editor does when the project has RVT on: the material's shader is made again from its graph, now with the read
+					const HE::AutoLandscapeGroup& g0 = HE::autoLandscapeGroup(HE::AutoLandscapeGroupId::Forest);
+					if (const MaterialAsset* own = content.resolveMaterialRef(HE::UUID{}, g0.materialPath))
+					{
+						const HE::UUID ownId = own->id;
+						content.regenerateMaterialFromGraph(ownId);
+						renderer->InvalidateMaterial(ownId);
+					}
+				}
 				// The way the editor and a game get there: a LandscapeWorldComponent in the scene (texture group Forest, no material of
 				// its own) and LandscapeRuntime::update(world). Nothing here loads the material: the renderer finds it from the frame.
 				const auto lsEnt = world.createEntity("Landscape");
@@ -563,6 +581,16 @@ int runMaterialCheck(HE::RendererBackend backend, HE::RenderPath path, const std
 						}
 						const double n = static_cast<double>(std::max<size_t>(ground, 1));
 						std::printf("  Auto Landscape (Forest): mean ground %.0f/255, mean step between neighbours %.2f/255, %zu px still the fixed blend's green\n", sum / n, step / n, green);
+						{
+							const HE::AutoLandscapeGroup& grp = HE::autoLandscapeGroup(HE::AutoLandscapeGroupId::Forest);
+							const MaterialAsset* own = content.getMaterial(grp.materialId);
+							const bool reads = own && own->customShaderFragGlsl.find("heRvtSample(") != std::string::npos;
+							std::printf("    (RVT %s: the landscape's own material %s)\n", HE::matRvtEnabled() ? "on" : "off",
+							            !own ? "is not loaded under its id" : reads ? "reads a virtual texture, so the ground is drawn with the derived one" : "does not read a virtual texture");
+							// An EngineContent folder from before the material read a virtual texture (its Materials are older than this
+							// build's generator) makes this witness say nothing about the derived material: said, not failed.
+							if (!reads) std::printf("    NOT CHECKED: this EngineContent's material computes in place, the derived material is not exercised\n");
+						}
 						if (green > ground / 20) fail("the Auto Landscape material draws the ground");
 						if (sum / n < 12.0) fail("the ground is not black");
 						if (step / n < 0.3) fail("the ground has the material's texture in it");
@@ -713,6 +741,7 @@ int runMaterialCheck(HE::RendererBackend backend, HE::RenderPath path, const std
 					}
 				}
 			}
+			if (!arrayRoot.empty()) HE::matSetRvtEnabled(false);   // as this tool runs otherwise
 			// A scene with no mesh at all still renders its shadow maps for the ground: the frame comes back.
 			world.destroyEntity(boxEnt);
 			std::vector<uint8_t> alone;

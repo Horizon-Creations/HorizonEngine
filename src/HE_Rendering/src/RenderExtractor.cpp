@@ -30,6 +30,8 @@
 #include <HorizonScene/Components/TerrainComponent.h>       // landscape layer weightmap
 #include <HorizonScene/Components/LandscapeWorldComponent.h> // the tile landscape's GI entry
 #include <MaterialGraph/AutoLandscapeMaterial.h>
+#include <MaterialGraph/MaterialGraph.h>
+#include <MaterialGraph/RvtSplit.h>
 #include <HorizonScene/Components/TerrainChunkComponent.h>  // chunk → parent landscape
 #include <HorizonScene/LandscapeRuntime.h>                  // GI height clipmap of a tile landscape
 #include <HorizonScene/WaterQuery.h>                         // queryUnderwaterCamera's WaterIndex
@@ -399,6 +401,62 @@ void windWaterParams(const MaterialAsset& ma, const MaterialComponent* mc,
 	// gather loop, the parallel_for must stay pure maths over `items`.
 	// `cooked` (null = off) is the static-mesh block (HorizonScene/CookedStatic.h): its settled rows
 	// are copied in phase 2, in the same slot the walk would give them, instead of being rebuilt.
+	// The material the TILE landscape's ground is drawn with (RenderWorld::tileLandscapeMaterial). The landscape's own material
+	// cannot be it in two cases, and then a derived asset is made (once, and again when what it is made from changes):
+	//   * its graph reads a Runtime Virtual Texture. The tile ground has no pages (the RVT driver paints a TerrainComponent's), and a
+	//     read without a page is a flat grey, not the material: the derived graph is the one RVT OFF draws (matInlineRvt).
+	//   * the landscape entity overrides parameters. A mesh draw carries the merged block per draw; the ground's draw has no such
+	//     thing, so the values go into the derived graph's parameter nodes (the asset's own current values first, then the entity's).
+	// Needs the graph: a packaged material (graph stripped) is returned as it is.
+	HE::UUID tileGroundMaterial(ContentManager& cm, const HE::UUID& source, const MaterialComponent* mc)
+	{
+		static struct { HE::UUID source; uint64_t key = 0; HE::UUID derived; } cache;   // a scene has one tile landscape
+		const MaterialAsset* ma = cm.getMaterial(source);
+		if (!ma) return source;
+		const bool rvt = ma->customShaderFragGlsl.find("heRvtSample(") != std::string::npos;
+		const bool overridden = mc && !mc->paramOverrides.empty();
+		if ((!rvt && !overridden) || ma->nodeGraphJson.empty()) return source;
+		uint64_t key = 0xcbf29ce484222325ULL;
+		const auto mix = [&](const void* p, size_t n) {
+			for (size_t i = 0; i < n; ++i) key = (key ^ static_cast<const uint8_t*>(p)[i]) * 0x100000001b3ULL;
+		};
+		const size_t sizes[2] = { ma->nodeGraphJson.size(), ma->customShaderFragGlsl.size() };
+		mix(sizes, sizeof(sizes));
+		mix(ma->shaderParamData.data(), ma->shaderParamData.size() * sizeof(float));
+		if (mc)
+			for (const MaterialParamOverride& o : mc->paramOverrides) { mix(o.name.data(), o.name.size()); mix(o.value, sizeof(o.value)); }
+		if (cache.source == source && cache.key == key && cm.getMaterial(cache.derived)) return cache.derived;
+
+		HE::MaterialGraph g;
+		if (!HE::materialGraphFromJson(ma->nodeGraphJson, g)) return source;
+		const std::vector<std::string> names = ma->graphParamNames;   // copied: registering below moves the asset
+		const std::vector<float> data = ma->shaderParamData;
+		g = HE::matInlineRvt(g);
+		for (HE::MatGraphNode& n : g.nodes)
+		{
+			if (n.type != HE::MatNodeType::ParamFloat && n.type != HE::MatNodeType::ParamColor && n.type != HE::MatNodeType::ParamVec4
+			    && n.type != HE::MatNodeType::ParamVec2 && n.type != HE::MatNodeType::ParamBool)
+				continue;
+			for (size_t i = 0; i < names.size(); ++i)
+				if (names[i] == n.s && data.size() >= (i + 1) * 4)
+					for (size_t c = 0; c < 4; ++c) n.p[c] = data[i * 4 + c];
+			if (mc)
+				for (const MaterialParamOverride& o : mc->paramOverrides)
+					if (o.name == n.s)
+						for (size_t c = 0; c < 4; ++c) n.p[c] = o.value[c];
+		}
+		MaterialAsset a;
+		a.type = HE::AssetType::Material;
+		a.name = "TileLandscapeGround";
+		a.nodeGraphJson = HE::materialGraphToJson(g);
+		if (cache.derived != HE::UUID{} && cm.getMaterial(cache.derived)) cm.replaceMaterial(cache.derived, std::move(a));
+		else cache.derived = cm.registerMaterial(std::move(a));
+		cm.regenerateMaterialFromGraph(cache.derived);
+		cache.source = source;
+		cache.key = key;
+		return cache.derived;
+	}
+
 	void extractMeshes(entt::registry& reg, RenderWorld& out, ContentManager* contentManager,
 	                   std::unordered_set<std::string>& sectionMaterialMissing, HE::CookedStatic* cooked)
 	{
@@ -497,6 +555,7 @@ void windWaterParams(const MaterialAsset& ma, const MaterialComponent* mc,
 		// a hit on it is coloured like a hit on a TerrainComponent's auto landscape: grass, dirt, rock and snow by slope and height,
 		// from the means of the material's own albedo array. Another material: no entry, the backend's flat ground colour.
 		out.tileLandscapeIndex = -1;
+		out.tileLandscapeMaterial = HE::UUID{};
 		if (contentManager)
 			for (auto [le, lw] : reg.view<LandscapeWorldComponent>().each())
 			{
@@ -507,6 +566,10 @@ void windWaterParams(const MaterialAsset& ma, const MaterialComponent* mc,
 					mid = HE::autoLandscapeGroup(static_cast<HE::AutoLandscapeGroupId>(lw.textureGroup)).materialId;
 				const MaterialAsset* ma = mid != HE::UUID{} ? contentManager->getMaterial(mid) : nullptr;
 				if (!ma) break;   // not loaded yet (the renderer loads the group's on its first frame)
+				// What the ground is DRAWN with (may register an asset, which moves `ma`: fetched again below).
+				out.tileLandscapeMaterial = tileGroundMaterial(*contentManager, mid, lmat);
+				ma = contentManager->getMaterial(mid);
+				if (!ma) break;
 				HE::GiLandscape ls;
 				ls.terrainEntity = static_cast<uint32_t>(le);
 				auto ov = [lmat](const std::string& name, float& v) {

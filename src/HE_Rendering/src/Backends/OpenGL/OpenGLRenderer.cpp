@@ -12425,12 +12425,14 @@ void OpenGLRenderer::DrawLandscape(const glm::mat4& viewProj)
 			m_landscapeMaterialLoadTried = frame.materialId;   // the texture group's material is named by no entity: from its path, once
 			if (!m_contentManager->resolveMaterialRef(frame.materialId, frame.materialPath)) m_contentManager->loadAsset(frame.materialPath);
 		}
-		if (const unsigned int prog = GetOrBuildLandscapeMaterialProgram(frame.materialId))
+		// the extractor's derived material where the landscape's own cannot be drawn (RenderWorld::tileLandscapeMaterial)
+		const HE::UUID matId = m_renderWorld.tileLandscapeMaterial != HE::UUID{} ? m_renderWorld.tileLandscapeMaterial : frame.materialId;
+		if (const unsigned int prog = GetOrBuildLandscapeMaterialProgram(matId))
 		{
 			float padded[HE::kMatParamFloats] = { 0 };
 			unsigned int gtex[4] = { 0, 0, 0, 0 };
 			size_t nTex = 0;
-			if (const MaterialAsset* ma = m_contentManager->getMaterial(frame.materialId))
+			if (const MaterialAsset* ma = m_contentManager->getMaterial(matId))
 			{
 				std::memcpy(padded, ma->shaderParamData.data(), std::min(ma->shaderParamData.size(), size_t(HE::kMatParamFloats)) * sizeof(float));
 				// copied out before the resolves: a load invalidates the asset pointer
@@ -12453,7 +12455,7 @@ void OpenGLRenderer::DrawLandscape(const glm::mat4& viewProj)
 				glActiveTexture(GL_TEXTURE1 + static_cast<GLenum>(i));
 				BindGraphTexture(gtex[i]);
 			}
-			BindRvtForDraw(frame.materialId);
+			BindRvtForDraw(matId);
 			glActiveTexture(GL_TEXTURE0);
 			sh.materialProgram = prog;
 		}

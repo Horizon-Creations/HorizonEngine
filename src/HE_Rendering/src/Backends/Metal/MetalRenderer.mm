@@ -16513,12 +16513,14 @@ void* MetalRenderer::BindLandscapeMaterial(void* renderEncoder, const HE::Landsc
 		if (!m_contentManager->getMaterial(frame.materialId))
 			HE_LOG_WARN(RHI, "MetalRenderer: the landscape's material %s is not there; the ground keeps its fixed blend", frame.materialPath.c_str());
 	}
-	if (frame.materialId != HE::UUID{} && m_editorCamera.rvtSlot < 0)
-		if (void* pso = GetOrBuildLandscapeMaterialPipeline(frame.materialId, gbuffer))
+	// What is drawn: the extractor's derived material where the landscape's own cannot be (RenderWorld::tileLandscapeMaterial).
+	const HE::UUID matId = m_renderWorld.tileLandscapeMaterial != HE::UUID{} ? m_renderWorld.tileLandscapeMaterial : frame.materialId;
+	if (matId != HE::UUID{} && m_editorCamera.rvtSlot < 0)
+		if (void* pso = GetOrBuildLandscapeMaterialPipeline(matId, gbuffer))
 		{
 			id<MTLRenderCommandEncoder> enc = (__bridge id<MTLRenderCommandEncoder>)renderEncoder;
 			float padded[HE::kMatParamFloats] = { 0 };
-			if (const MaterialAsset* ma = m_contentManager ? m_contentManager->getMaterial(frame.materialId) : nullptr)
+			if (const MaterialAsset* ma = m_contentManager ? m_contentManager->getMaterial(matId) : nullptr)
 			{
 				std::memcpy(padded, ma->shaderParamData.data(), std::min(ma->shaderParamData.size(), size_t(HE::kMatParamFloats)) * sizeof(float));
 				// copied out before the next resolve: a load invalidates the asset pointer
@@ -16535,8 +16537,8 @@ void* MetalRenderer::BindLandscapeMaterial(void* renderEncoder, const HE::Landsc
 			}
 			[enc setFragmentBytes:padded length:sizeof(padded) atIndex:2];
 			void* tex0 = nullptr;
-			if (ResolveMaterialTexture(frame.materialId, tex0) && tex0) [enc setFragmentTexture:(__bridge id<MTLTexture>)tex0 atIndex:0];
-			BindRvtForDraw(renderEncoder, frame.materialId);
+			if (ResolveMaterialTexture(matId, tex0) && tex0) [enc setFragmentTexture:(__bridge id<MTLTexture>)tex0 atIndex:0];
+			BindRvtForDraw(renderEncoder, matId);
 			result = pso;
 		}
 #else

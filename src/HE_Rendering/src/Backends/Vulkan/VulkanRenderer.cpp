@@ -11666,7 +11666,8 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                 if (m_landscape->materialImages(m_currentFrame, m_landscapeFrame, m_landscapeViewProj, lsImages))
                 {
                     DrawCall lsDC{};
-                    lsDC.materialAssetId = m_landscapeFrame.materialId;
+                    // the extractor's derived material where the landscape's own cannot be drawn (RenderWorld::tileLandscapeMaterial)
+                    lsDC.materialAssetId = m_renderWorld.tileLandscapeMaterial != HE::UUID{} ? m_renderWorld.tileLandscapeMaterial : m_landscapeFrame.materialId;
                     const bool gb = gbufferPass;
                     gbufferPass = false;
                     lsDraw = &m_landscapeFrame;
