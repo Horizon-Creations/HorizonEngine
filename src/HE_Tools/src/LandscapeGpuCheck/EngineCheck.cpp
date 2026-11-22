@@ -199,6 +199,109 @@ int runEngineCheck(HE::RendererBackend backend, HE::RenderPath path, const std::
 //   * shadow:    a box stands on the ground. With its shadow switched on, ground pixels are darker than with it switched off (the box itself
 //                is in both frames, so only its shadow differs). GI is off here: the sun's shadow is the cascade map's.
 //   * fog:       with fog in the scene the ground's colour moves.
+// The ground of a backend that draws it with the fixed blend (no Capabilities::landscapeMaterial), in the passes that do not need a
+// material: today the shadow maps (kLandscapePassShadow). The same scene as runMaterialCheck's "the ground casts": a box hangs
+// under the ramp, a camera under the ramp looks at its sunny faces; they are in shadow only when the ground is in the shadow maps.
+static int fixedBlendPasses(IRenderer& renderer, HE::RenderPath path, const std::string& packPath, const std::string& pngPath)
+{
+	const uint32_t mask = renderer.GetCapabilities().landscapePasses ? kLandscapePassAll : renderer.GetCapabilities().landscapePassMask;
+	renderer.SetRenderPath(path);
+	IRenderer::GISettings gi;
+	gi.enabled = false;
+	renderer.SetGISettings(gi);
+	IRenderer::ShadowSettings shadow;
+	shadow.distance = 600.0f;
+	renderer.SetShadowSettings(shadow);
+
+	HorizonWorld world;
+	const glm::dvec3 origin{ 2048.0, 100.0, 1024.0 }, camPos{ 2900.0, 650.0, 3072.0 };
+	world.setOrigin(origin);
+	renderer.SetWorld(&world);
+	auto& reg = world.registry();
+	{
+		const auto sunEnt = world.createEntity("Sun");
+		TransformComponent sunTf;
+		sunTf.rotation = glm::vec3(-45.0f, -45.0f, 0.0f);
+		reg.emplace<TransformComponent>(sunEnt, sunTf);
+		LightComponent sun;
+		sun.type = HE::LightType::Directional;
+		reg.emplace<LightComponent>(sunEnt, sun);
+	}
+	HE::LandscapeRuntime rt;
+	HE::LandscapeRuntimeConfig cfg;
+	cfg.store.byteBudget = 80ull * 1024 * 1024;
+	std::string err;
+	if (!rt.beginFromPack(packPath, cfg, &err)) { std::printf("  runtime: %s\n", err.c_str()); return 1; }
+	for (const auto t0 = std::chrono::steady_clock::now();;)
+	{
+		rt.updateAt(camPos, glm::vec3(0.0f), 5.0, origin);
+		if (rt.store()->settled() && rt.atlas()->stats().used == rt.store()->residentKeys().size()) break;
+		if (std::chrono::steady_clock::now() - t0 > std::chrono::seconds(120)) { std::printf("  the store did not settle\n"); return 1; }
+		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+	}
+	renderer.SetLandscapeProvider(rt.renderProvider(world));
+
+	const double boxX = 3010.0, boxZ = 3090.0;
+	const glm::dvec3 hangAbs(boxX, kBase + kSlope * (boxX - kPivot) - 50.0, boxZ);
+	const auto hangEnt = world.createEntity("Hanging");
+	TransformComponent htf;
+	htf.position = glm::vec3(hangAbs - origin);
+	htf.scale = glm::vec3(30.0f);
+	reg.emplace<TransformComponent>(hangEnt, htf);
+	reg.emplace<MeshComponent>(hangEnt, MeshComponent{ HE::kDefaultCubeMeshId });
+	EditorCameraOverride ov;
+	ov.active = true;
+	const glm::vec3 underEye = htf.position + glm::vec3(80.0f, 5.0f, 80.0f);
+	ov.view = glm::lookAt(underEye, htf.position, glm::vec3(0, 1, 0));
+	ov.position = underEye;
+	ov.fovDegrees = 70.0f;
+	ov.nearPlane = 2.0f;
+	ov.farPlane = 20000.0f;
+	const auto shoot = [&](std::vector<uint8_t>& rgba) {
+		bool got = false;
+		for (int frame = 0; frame < 6; ++frame) { rgba.clear(); got = renderer.RenderSceneImage(ov, kW, kH, rgba); }
+		return got && rgba.size() == static_cast<size_t>(kW) * kH * 4;
+	};
+	const glm::mat4 proj = glm::perspective(glm::radians(70.0f), static_cast<float>(kW) / static_cast<float>(kH), 2.0f, 20000.0f);
+	const glm::vec4 clip = proj * ov.view * glm::vec4(htf.position, 1.0f);
+	const int cx = static_cast<int>((clip.x / clip.w * 0.5f + 0.5f) * kW), cy = static_cast<int>((0.5f - clip.y / clip.w * 0.5f) * kH);
+	const auto boxLum = [&](const std::vector<uint8_t>& img) {
+		double s = 0.0;
+		int n = 0;
+		for (int y = cy - 4; y <= cy + 4; ++y)
+			for (int x = cx - 4; x <= cx + 4; ++x)
+				if (x >= 0 && y >= 0 && x < static_cast<int>(kW) && y < static_cast<int>(kH))
+				{
+					const uint8_t* c = &img[(static_cast<size_t>(y) * kW + static_cast<size_t>(x)) * 4];
+					s += 0.3 * c[0] + 0.59 * c[1] + 0.11 * c[2];
+					++n;
+				}
+		return s / std::max(n, 1);
+	};
+	int failures = 0;
+	std::vector<uint8_t> under, underNoCaster;
+	landscapePasses("0");
+	const bool gotB = shoot(underNoCaster);
+	landscapePasses(nullptr);
+	if (!gotB || !shoot(under)) { ++failures; std::printf("    FAIL  RenderSceneImage gave an image (under the ground)\n"); }
+	else
+	{
+		const double below = boxLum(under), belowNoCaster = boxLum(underNoCaster);
+		std::printf("  the ground casts (fixed blend): a box under the ground is %.0f/255, and %.0f/255 when the ground is not in the shadow maps\n",
+		            below, belowNoCaster);
+		if (below > belowNoCaster * 0.8)
+		{
+			if (mask & kLandscapePassShadow) { ++failures; std::printf("    FAIL  a box under the ground stands in the ground's shadow\n"); }
+			else std::printf("    not built on this backend: a box under the ground stands in the ground's shadow\n");
+		}
+		writePngFile(pngPath.substr(0, pngPath.size() - 4) + "_under.png", static_cast<int>(kW), static_cast<int>(kH), under.data());
+	}
+	renderer.SetLandscapeProvider({});
+	renderer.SetWorld(nullptr);
+	std::printf("  %s\n", failures ? "FAILED" : "OK (fixed blend: the shadow maps)");
+	return failures ? 1 : 0;
+}
+
 int runMaterialCheck(HE::RendererBackend backend, HE::RenderPath path, const std::string& packPath, const std::string& pngPath, const std::string& arrayRoot,
                      const std::string& paintedPack)
 {
@@ -234,8 +337,10 @@ int runMaterialCheck(HE::RendererBackend backend, HE::RenderPath path, const std
 		if (!renderer->GetCapabilities().landscapeMaterial)   // asked after Initialize: a backend may know only then (device limits)
 		{
 			std::printf("  NOT CHECKED: this backend draws the tile landscape with its fixed blend only\n");
+			// What does not need the material is still judged: the ground in the shadow maps.
+			const int rc = fixedBlendPasses(*renderer, path, packPath, pngPath);
 			renderer->Shutdown();
-			return 0;
+			return rc;
 		}
 		passes = renderer->GetCapabilities().landscapePasses;
 		passMask = passes ? kLandscapePassAll : renderer->GetCapabilities().landscapePassMask;

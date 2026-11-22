@@ -12378,6 +12378,30 @@ void OpenGLRenderer::BindSceneLighting(const SceneLightingLocs& L, const SceneSh
 // `allowLowResClouds` is false for previews: the quarter-res pre-pass rebinds
 // its own FBO and viewport, which a small offscreen render has no business
 // doing mid-pass.
+// The ground's depth into the depth-only target that is bound (a shadow layer): the provider's patches for THAT matrix, drawn with the
+// landscape's own program. The target has no colour attachment, so only the depth is kept (the fixed blend's fragment stage runs for
+// nothing; a vertex-only program would save it). HE_LANDSCAPE_PASSES=0 leaves the ground out (the witnesses' A/B switch), the tiles
+// the provider hands over are still taken.
+void OpenGLRenderer::DrawLandscapeDepth(const glm::mat4& viewProj)
+{
+	if (!m_landscapeProvider || m_landscapeFailed) return;
+	HE::LandscapeRenderFrame frame;
+	m_landscapeProvider(glm::dmat4(viewProj), /*zeroToOne=*/false, frame);
+	if (!frame.active) return;
+	if (!m_landscape.ready())
+	{
+		std::string err;
+		if (!m_landscape.init(&err))
+		{
+			HE_LOG_WARN(RHI, "OpenGLRenderer: the world-scale landscape is off: %s", err.c_str());
+			m_landscapeFailed = true;
+			return;
+		}
+	}
+	if (const char* v = std::getenv("HE_LANDSCAPE_PASSES"); v && *v == '0') frame.patches.clear();
+	m_landscape.draw(frame, viewProj, OpenGLLandscape::Shading{});
+}
+
 void OpenGLRenderer::DrawLandscape(const glm::mat4& viewProj)
 {
 	if (!m_landscapeProvider || m_landscapeFailed) return;
@@ -12928,6 +12952,8 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 				// Leave the plain depth program bound: the next layer's lambda
 				// entry assumes it, like the caller's glUseProgram above.
 				if (boundProgram != m_depthProgram) glUseProgram(m_depthProgram);
+				// The tile landscape's ground casts into the same layer, with the polygon offset that is on.
+				DrawLandscapeDepth(vp);
 			};
 
 			if (shadows)
@@ -15262,6 +15288,7 @@ IRenderer::Capabilities OpenGLRenderer::GetCapabilities() const
 	// landscape adds seven to a material's, and the Auto Landscape material then uses 22. macOS OpenGL 4.1 holds 16, so there
 	// the link fails and the ground keeps its fixed blend (said here, so nothing claims otherwise).
 	c.landscapeMaterial          = m_maxFragmentSamplers >= 24;
+	c.landscapePassMask          = kLandscapePassShadow;   // the shadow pass: DrawLandscapeDepth in every layer
 #endif
 	c.supportsRvt                = m_rvtSupported;   // a page is that raw capture blitted into the pool (the programs come from the cross-compiler)
 	// SSR: the FORWARD variant only (docs/ssr-cross-backend-plan.md checkpoint
