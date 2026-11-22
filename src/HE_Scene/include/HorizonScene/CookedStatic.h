@@ -95,6 +95,34 @@ namespace HE
 		std::vector<HE::UUID>     levelMaterialId;
 		std::vector<HE::AABB>     levelBounds;
 
+		// ── Frozen transforms: the scan leaves a cooked entity alone ──────────────
+		// propagateTransforms' scan reads every TransformComponent each frame to find the ones that
+		// changed. A cooked entity is one nothing is meant to write, so in a world that was loaded from a
+		// packed cooked scene (`enabled`) the scan skips them: one byte per entity index here instead of
+		// the component's cache lines. Everything that may change such an entity un-cooks it first
+		// (uncook(), the verdict listeners, the script/engine API setters), and an un-cooked entity is
+		// scanned again from the next frame on. A write that reached nobody is still found: each scan
+		// also checks the 1/kScanSlices of the frozen entities whose index falls in the current slice,
+		// so a raw write is late by at most kScanSlices frames, never lost. Any structural change
+		// thaws everything until the block is rebuilt (`stale`), and the rebuild freezes again.
+		static constexpr uint32_t kScanSlices = 8;
+		std::vector<uint8_t> frozen;        // by entity index, 1 = skipped by the scan
+		bool                 freezeActive = false;
+		uint32_t             scanSlice    = 0;
+
+		// A block that is due a rebuild (`stale`) freezes nothing: the verdict it froze may be gone.
+		bool freezeUsable() const { return freezeActive && !stale; }
+		bool isFrozen(entt::entity e) const
+		{
+			const size_t i = static_cast<size_t>(entt::to_entity(e));
+			return freezeUsable() && i < frozen.size() && frozen[i] != 0;
+		}
+		void thaw(entt::entity e)
+		{
+			const size_t i = static_cast<size_t>(entt::to_entity(e));
+			if (i < frozen.size()) frozen[i] = 0;
+		}
+
 		// The row of `e`, or -1. The entity itself is compared as well: an index
 		// reused by a younger entity must not read an older one's row.
 		int32_t rowOf(entt::entity e) const
@@ -117,6 +145,7 @@ namespace HE
 		{
 			const int32_t r = rowOf(e);
 			if (r >= 0) state[static_cast<size_t>(r)] = State::Pending;
+			thaw(e);
 		}
 
 		// A world matrix was just written for `e` (propagateTransforms, the one writer): a Ready row that
@@ -128,7 +157,10 @@ namespace HE
 			const int32_t r = rowOf(e);
 			if (r >= 0 && state[static_cast<size_t>(r)] == State::Ready &&
 			    std::memcmp(&world[static_cast<size_t>(r)], &w, sizeof(glm::mat4)) != 0)
+			{
 				state[static_cast<size_t>(r)] = State::Pending;
+				thaw(e);
+			}
 		}
 
 		// entt listeners (connected once, in cookedStaticOf). A component that changes the verdict

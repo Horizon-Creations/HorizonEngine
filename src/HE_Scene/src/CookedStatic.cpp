@@ -42,6 +42,9 @@ void CookedStatic::syncContent(const void* manager, uint64_t epoch)
 
 void CookedStatic::onVerdictChanged(entt::registry& reg, entt::entity e)
 {
+	// The entity may be written from now on (a script that just arrived): its transform is scanned again at once,
+	// not only after the rebuild below.
+	thaw(e);
 	if (stale) return;   // a rebuild is already due: the rest of this frame's changes ride along
 	// The entity is a row, or a parent whose new blocker passes down to its children (rule 10).
 	// An entity with neither is not in the block and cannot take anything with it.
@@ -117,6 +120,10 @@ void refreshCookedStatic(entt::registry& reg, uint64_t structureEpoch)
 
 	c.rowOfIndex.assign(slots, -1);
 	c.entity.clear();
+	// Only a world loaded from a packed cooked scene freezes transforms (the editor and a world cooked by
+	// HE_COOK_STATIC=1 keep scanning everything: their writers are not all hooked).
+	c.frozen.assign(slots, 0);
+	c.freezeActive = c.enabled;
 
 	const auto meshes = reg.view<TransformComponent, MeshComponent>();
 	c.entity.reserve(meshes.size_hint());
@@ -126,6 +133,7 @@ void refreshCookedStatic(entt::registry& reg, uint64_t structureEpoch)
 		if (!cookable[i]) continue;
 		c.rowOfIndex[i] = static_cast<int32_t>(c.entity.size());
 		c.entity.push_back(e);
+		c.frozen[i] = 1;
 	}
 	const size_t rows = c.entity.size();
 	// Rows are filled when the walk settles them; sized here so the extract never allocates.
