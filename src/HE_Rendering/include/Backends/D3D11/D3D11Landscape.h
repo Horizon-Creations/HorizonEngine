@@ -73,7 +73,9 @@ public:
 	void drawDepth(ID3D11DeviceContext* ctx, const HE::LandscapeRenderFrame& frame, const glm::mat4& clip);
 	// The ground into the SSAO position pre-pass's target that is bound: view-space position (`view` times the origin-relative
 	// position), a = 1, with the rasteriser and depth state that are set. `frame` is the provider's for `viewProj` and has been uploaded.
-	void drawViewPos(ID3D11DeviceContext* ctx, const HE::LandscapeRenderFrame& frame, const glm::mat4& viewProj, const glm::mat4& view);
+	// `mrt`: into the three-target reflection pre-pass instead (screen-space reflections on): also the octahedral world normal
+	// and the depth, what that pass writes for a mesh.
+	void drawViewPos(ID3D11DeviceContext* ctx, const HE::LandscapeRenderFrame& frame, const glm::mat4& viewProj, const glm::mat4& view, bool mrt = false);
 	// The ground into the GI pre-pass's two targets that are bound: the origin-relative position (a = 1) and the surface normal
 	// (a = roughness 1), what the pass writes for a mesh. The rasteriser and depth state that are set.
 	void drawGiGBuf(ID3D11DeviceContext* ctx, const HE::LandscapeRenderFrame& frame, const glm::mat4& viewProj);

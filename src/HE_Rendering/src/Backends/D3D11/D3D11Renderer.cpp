@@ -2764,7 +2764,7 @@ struct D3D11RendererImpl
                                       ID3D11DepthStencilState* depthSt,
                                       ID3D11RasterizerState* rasterSt,
                                       bool reflMrt = false, bool aoWanted = true,
-                                      const std::function<void()>& drawGround = {})
+                                      const std::function<void(bool mrt)>& drawGround = {})
     {
         GpuPassScope _passTimer(this, "SSAO");
         // `reflMrt` and `aoWanted` are SEPARATE gates (plan C2, the same shape
@@ -2873,9 +2873,9 @@ struct D3D11RendererImpl
                 else
                     drawWithTransform(dc->transform);
             }
-            // The tile landscape's ground (Thema 326), into the position-only target: it writes target 0 alone, so not into the
-            // three-target reflection pre-pass (as on Vulkan; Metal has a three-target stage for it).
-            if (drawGround && !reflMrt) drawGround();
+            // The tile landscape's ground (Thema 326), into the position-only target or, with its three-target stage, into the
+            // reflection pre-pass.
+            if (drawGround) drawGround(reflMrt);
         }
 
         // Unbind the pre-pass RTVs so they can be read as SRVs. One null at slot
@@ -8532,7 +8532,7 @@ void D3D11Renderer::DrawScene(int width, int height)
                 [&](HE::UUID id) -> const GpuMesh* { return p.resolveMesh(id, m_contentManager); },
                 p.cube, p.inputLayout.Get(), p.depthState.Get(), p.rasterState.Get(),
                 /*reflMrt=*/ssrFrameActive, aoWanted,
-                [&]()
+                [&](bool mrt)
                 {
                     // The ground in the position pre-pass, so it takes and gives ambient occlusion like any mesh. The provider
                     // culls for THIS pass's matrix (unjittered) and hands over the tiles that arrived, which are uploaded whether
@@ -8542,7 +8542,7 @@ void D3D11Renderer::DrawScene(int width, int height)
                     m_landscapeProvider(glm::dmat4(viewProjClean), /*zeroToOne=*/false, lf);
                     if (!lf.active) return;
                     p.landscape.upload(ctx, lf);
-                    if (HE::landscapePassesOn()) p.landscape.drawViewPos(ctx, lf, viewProjClean, camView);
+                    if (HE::landscapePassesOn()) p.landscape.drawViewPos(ctx, lf, viewProjClean, camView, mrt);
                 });
             if (ssrFrameActive)
                 ssrSRV = p.RenderForwardSSR(ctx, width, height, viewProjClean, camView);

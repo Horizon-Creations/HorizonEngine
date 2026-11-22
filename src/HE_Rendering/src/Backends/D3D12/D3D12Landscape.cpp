@@ -271,15 +271,18 @@ struct D3D12Landscape::Impl
 
 	// The SSAO position pre-pass (drawViewPos): kLandscapeHLSL's PSViewPos into the renderer's RGBA16F position target with its
 	// D32_FLOAT depth, no bias, no culling. Tried once; without it the ground takes no ambient occlusion and is drawn as before.
-	ComPtr<ID3D12PipelineState> viewPosPso;
-	bool viewPosPsoTried = false;
-	ID3D12PipelineState* viewPosPsoGet()
+	// [1]: the three-target reflection pre-pass that replaces it while screen-space reflections are on (PSViewPosMrt: also the
+	// renderer's RGBA16F attribute and R32F depth targets).
+	ComPtr<ID3D12PipelineState> viewPosPsos[2];
+	bool viewPosPsoTried[2] = { false, false };
+	ID3D12PipelineState* viewPosPsoGet(bool mrt = false)
 	{
-		if (viewPosPsoTried) return viewPosPso.Get();
-		viewPosPsoTried = true;
+		ComPtr<ID3D12PipelineState>& viewPosPso = viewPosPsos[mrt ? 1 : 0];
+		if (viewPosPsoTried[mrt ? 1 : 0]) return viewPosPso.Get();
+		viewPosPsoTried[mrt ? 1 : 0] = true;
 		ComPtr<ID3DBlob> ps;
 		std::string err;
-		if (!compileStage("PSViewPos", "ps_5_0", ps, err)) return nullptr;
+		if (!compileStage(mrt ? "PSViewPosMrt" : "PSViewPos", "ps_5_0", ps, err)) return nullptr;
 		D3D12_GRAPHICS_PIPELINE_STATE_DESC pd{};
 		pd.pRootSignature = rootSig.Get();
 		pd.VS = { vsBlob->GetBufferPointer(), vsBlob->GetBufferSize() };
@@ -293,9 +296,11 @@ struct D3D12Landscape::Impl
 		pd.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
 		pd.DSVFormat = DXGI_FORMAT_D32_FLOAT;
 		pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-		pd.NumRenderTargets = 1;
+		pd.NumRenderTargets = mrt ? 3u : 1u;
 		pd.RTVFormats[0] = DXGI_FORMAT_R16G16B16A16_FLOAT;
-		pd.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+		pd.RTVFormats[1] = mrt ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_UNKNOWN;
+		pd.RTVFormats[2] = mrt ? DXGI_FORMAT_R32_FLOAT : DXGI_FORMAT_UNKNOWN;
+		for (UINT t = 0; t < pd.NumRenderTargets; ++t) pd.BlendState.RenderTarget[t].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
 		pd.SampleDesc.Count = 1;
 		if (FAILED(device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&viewPosPso)))) viewPosPso.Reset();
 		return viewPosPso.Get();
@@ -339,6 +344,8 @@ struct D3D12Landscape::Impl
 	// against the scene's D32_FLOAT depth without writing it (the renderer's own velocity pipeline). Tried once.
 	ComPtr<ID3D12PipelineState> velocityPso;
 	bool velocityPsoTried = false;
+	glm::dvec3 velOrigin{ 0.0 };   // the floating origin of the last velocity draw (vkls::velocityPrev)
+	bool velOriginSet = false;
 	ID3D12PipelineState* velocityPsoGet()
 	{
 		if (velocityPsoTried) return velocityPso.Get();
@@ -732,9 +739,9 @@ void D3D12Landscape::drawDepth(ID3D12GraphicsCommandList* cl, const HE::Landscap
 	m_impl->drawBare(cl, f, clip, m_impl->depthPsoGet(), nullptr);
 }
 
-void D3D12Landscape::drawViewPos(ID3D12GraphicsCommandList* cl, const HE::LandscapeRenderFrame& f, const glm::mat4& viewProj, const glm::mat4& view)
+void D3D12Landscape::drawViewPos(ID3D12GraphicsCommandList* cl, const HE::LandscapeRenderFrame& f, const glm::mat4& viewProj, const glm::mat4& view, bool mrt)
 {
-	m_impl->drawBare(cl, f, viewProj, m_impl->viewPosPsoGet(), &view);
+	m_impl->drawBare(cl, f, viewProj, m_impl->viewPosPsoGet(mrt), &view);
 }
 
 void D3D12Landscape::drawGiGBuf(ID3D12GraphicsCommandList* cl, const HE::LandscapeRenderFrame& f, const glm::mat4& viewProj)
@@ -745,7 +752,8 @@ void D3D12Landscape::drawGiGBuf(ID3D12GraphicsCommandList* cl, const HE::Landsca
 void D3D12Landscape::drawVelocity(ID3D12GraphicsCommandList* cl, const HE::LandscapeRenderFrame& f, const glm::mat4& viewProjJitter,
                                   const glm::mat4& viewProjNow, const glm::mat4& viewProjPrev)
 {
-	m_impl->drawBare(cl, f, vkls::velocityClip(viewProjJitter), m_impl->velocityPsoGet(), &viewProjNow, &viewProjPrev);
+	const glm::mat4 prev = vkls::velocityPrev(viewProjPrev, f.uvOrigin, m_impl->velOrigin, m_impl->velOriginSet);
+	m_impl->drawBare(cl, f, vkls::velocityClip(viewProjJitter), m_impl->velocityPsoGet(), &viewProjNow, &prev);
 }
 
 // The patches with one of the pipelines that are not the scene's: depth alone (a shadow layer), the view-space position (the

@@ -119,7 +119,8 @@ public:
 	// (pulled towards the camera, vkls::velocityClip), `viewForPosition` is then this frame's view-projection and `velocityPrev`
 	// last frame's, both with this frame's jitter; uvNow - uvPrev is written.
 	void drawDepth(VkCommandBuffer cmd, VkRenderPass pass, VkExtent2D extent, uint32_t frameIndex, const HE::LandscapeRenderFrame& frame,
-	               const glm::mat4& clip, const glm::mat4* viewForPosition = nullptr, bool giGBuf = false, const glm::mat4* velocityPrev = nullptr);
+	               const glm::mat4& clip, const glm::mat4* viewForPosition = nullptr, bool giGBuf = false, const glm::mat4* velocityPrev = nullptr,
+	               bool viewPosMrt = false);   // viewPosMrt: with viewForPosition, the THREE-target reflection pre-pass (also normal and depth)
 	const Stats& stats() const;
 
 private:

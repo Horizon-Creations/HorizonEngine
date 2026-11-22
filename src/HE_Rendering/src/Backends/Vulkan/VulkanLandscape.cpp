@@ -60,8 +60,12 @@ struct VulkanLandscape::Impl
 	VkShaderModule        fsViewPos = VK_NULL_HANDLE;
 	std::vector<Pipe>     giGBufPipes;    // the GI pre-pass (fsGiGBuf)
 	VkShaderModule        fsGiGBuf = VK_NULL_HANDLE;   // null when it did not compile: the ground then takes no ray-traced shadow
+	std::vector<Pipe>     viewPosMrtPipes;   // the three-target reflection pre-pass that replaces the SSAO one with reflections on
+	VkShaderModule        fsViewPosMrt = VK_NULL_HANDLE;   // null when it did not compile: no occlusion on the ground then
 	std::vector<Pipe>     velocityPipes;  // the TAA velocity pass (fsVelocity)
 	VkShaderModule        fsVelocity = VK_NULL_HANDLE; // null when it did not compile: the ground then reports "did not move"
+	glm::dvec3            velOrigin{ 0.0 };            // the floating origin of the last velocity draw (vkls::velocityPrev)
+	bool                  velOriginSet = false;
 
 	Img                   img[kImages];
 	Img                   farAlbedo;   // the baked far image (sRGB, mipped); view is null when the world has none
@@ -248,16 +252,19 @@ struct VulkanLandscape::Impl
 	// colour attachments.
 	// `velocity`: the scene's vertex stage with the velocity fragment (fsVelocity) into the TAA velocity pass: one colour
 	// attachment, the scene's depth tested LESS_OR_EQUAL and not written.
-	VkPipeline pipelineFor(VkRenderPass pass, bool depthOnly = false, bool viewPos = false, bool giGBuf = false, bool velocity = false)
+	// `viewPosMrt`: the scene's vertex stage with fsViewPosMrt into the reflection pre-pass: three colour attachments.
+	VkPipeline pipelineFor(VkRenderPass pass, bool depthOnly = false, bool viewPos = false, bool giGBuf = false, bool velocity = false,
+	                       bool viewPosMrt = false)
 	{
-		std::vector<Pipe>& pipes = velocity ? velocityPipes : depthOnly ? depthPipes : viewPos ? viewPosPipes : giGBuf ? giGBufPipes : this->pipes;
+		std::vector<Pipe>& pipes = viewPosMrt ? viewPosMrtPipes : velocity ? velocityPipes : depthOnly ? depthPipes : viewPos ? viewPosPipes
+		                         : giGBuf ? giGBufPipes : this->pipes;
 		for (Pipe& p : pipes)
 			if (p.pass == pass) return p.pipe;
 		VkPipelineShaderStageCreateInfo stages[2]{};
 		stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
 		stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT; stages[0].module = vs; stages[0].pName = "main";
 		stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-		stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT; stages[1].module = velocity ? fsVelocity : viewPos ? fsViewPos : giGBuf ? fsGiGBuf : fs; stages[1].pName = "main";
+		stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT; stages[1].module = viewPosMrt ? fsViewPosMrt : velocity ? fsVelocity : viewPos ? fsViewPos : giGBuf ? fsGiGBuf : fs; stages[1].pName = "main";
 
 		VkVertexInputBindingDescription bind{ 0, sizeof(float) * 2, VK_VERTEX_INPUT_RATE_VERTEX };
 		VkVertexInputAttributeDescription attr{ 0, 0, VK_FORMAT_R32G32_SFLOAT, 0 };
@@ -278,8 +285,8 @@ struct VulkanLandscape::Impl
 		VkPipelineColorBlendAttachmentState cba{};
 		cba.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
 		VkPipelineColorBlendStateCreateInfo cb{ VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO };
-		const VkPipelineColorBlendAttachmentState two[2] = { cba, cba };
-		cb.attachmentCount = depthOnly ? 0u : giGBuf ? 2u : 1u; cb.pAttachments = depthOnly ? nullptr : giGBuf ? two : &cba;
+		const VkPipelineColorBlendAttachmentState many[3] = { cba, cba, cba };
+		cb.attachmentCount = depthOnly ? 0u : viewPosMrt ? 3u : giGBuf ? 2u : 1u; cb.pAttachments = depthOnly ? nullptr : many;
 		rs.depthBiasEnable = depthOnly ? VK_TRUE : VK_FALSE;
 		const VkDynamicState dyn[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR, VK_DYNAMIC_STATE_DEPTH_BIAS };
 		VkPipelineDynamicStateCreateInfo dsi{ VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO };
@@ -345,6 +352,18 @@ bool VulkanLandscape::init(const Env& env, std::string* error)
 		                   "void main() { vec3 n = normalize(cross(dFdy(vWorldRel), dFdx(vWorldRel))); if (n.y < 0.0) n = -n;\n"
 		                   "              fragColor = vec4(vWorldRel, 1.0); lsGiNorm = vec4(n, 1.0); }\n",
 		             he::shaderc::Stage::Fragment, "GI pre-pass fragment shader", m.fsGiGBuf);
+		// The reflection pre-pass's stage: fsViewPos's position plus what MaterialShaderLibrary's kReflPrepassFS writes for a
+		// mesh, the octahedral world normal (b = roughness 0) and the depth. Optional.
+		compileStage(std::string(glsl::kLandscapeVulkanFragmentPrelude)
+		                 + "layout(location = 1) out vec4 lsAttr;\n"
+		                   "layout(location = 2) out float lsNdc;\n"
+		                   "void main() { vec3 n = normalize(cross(dFdy(vWorldRel), dFdx(vWorldRel))); if (n.y < 0.0) n = -n;\n"
+		                   "              vec2 p = n.xy * (1.0 / (abs(n.x) + abs(n.y) + abs(n.z)));\n"
+		                   "              vec2 s = vec2(p.x >= 0.0 ? 1.0 : -1.0, p.y >= 0.0 ? 1.0 : -1.0);\n"
+		                   "              vec2 o = (n.z <= 0.0) ? ((1.0 - abs(p.yx)) * s) : p;\n"
+		                   "              fragColor = vec4((uAux0 * vec4(vWorldRel, 1.0)).xyz, 1.0);\n"
+		                   "              lsAttr = vec4(o * 0.5 + 0.5, 0.0, 0.0); lsNdc = gl_FragCoord.z; }\n",
+		             he::shaderc::Stage::Fragment, "reflection pre-pass fragment shader", m.fsViewPosMrt);
 		// The velocity pass's stage: taa_velocity.frag's uvNow - uvPrev, from the two view-projections in uAux0 / uAux1
 		// (the renderer hands both with THIS frame's jitter, like the meshes', so it cancels). Optional.
 		compileStage(std::string(glsl::kLandscapeVulkanFragmentPrelude)
@@ -427,6 +446,11 @@ void VulkanLandscape::shutdown()
 	m.giGBufPipes.clear();
 	if (m.fsGiGBuf) vkDestroyShaderModule(m.env.device, m.fsGiGBuf, nullptr);
 	m.fsGiGBuf = VK_NULL_HANDLE;
+	for (Impl::Pipe& p : m.viewPosMrtPipes)
+		if (p.pipe) vkDestroyPipeline(m.env.device, p.pipe, nullptr);
+	m.viewPosMrtPipes.clear();
+	if (m.fsViewPosMrt) vkDestroyShaderModule(m.env.device, m.fsViewPosMrt, nullptr);
+	m.fsViewPosMrt = VK_NULL_HANDLE;
 	for (Impl::Pipe& p : m.velocityPipes)
 		if (p.pipe) vkDestroyPipeline(m.env.device, p.pipe, nullptr);
 	m.velocityPipes.clear();
@@ -673,13 +697,15 @@ void VulkanLandscape::draw(VkCommandBuffer cmd, VkRenderPass pass, VkExtent2D ex
 }
 
 void VulkanLandscape::drawDepth(VkCommandBuffer cmd, VkRenderPass pass, VkExtent2D extent, uint32_t frameIndex, const HE::LandscapeRenderFrame& f,
-                                const glm::mat4& clip, const glm::mat4* viewForPosition, bool giGBuf, const glm::mat4* velocityPrev)
+                                const glm::mat4& clip, const glm::mat4* viewForPosition, bool giGBuf, const glm::mat4* velocityPrev, bool viewPosMrt)
 {
 	Impl& m = *m_impl;
 	if (!m.ok || !f.active || !f.world || f.patches.empty() || !m.world || m.world->generation != f.world->generation || frameIndex >= m.env.framesInFlight) return;
 	if (giGBuf && !m.fsGiGBuf) return;
 	if (velocityPrev && (!m.fsVelocity || !viewForPosition)) return;
-	const VkPipeline pipe = velocityPrev ? m.pipelineFor(pass, false, false, false, true)
+	if (viewPosMrt && (!m.fsViewPosMrt || !viewForPosition)) return;
+	const VkPipeline pipe = viewPosMrt ? m.pipelineFor(pass, false, false, false, false, true)
+	                      : velocityPrev ? m.pipelineFor(pass, false, false, false, true)
 	                      : giGBuf ? m.pipelineFor(pass, false, false, true)
 	                               : m.pipelineFor(pass, /*depthOnly=*/viewForPosition == nullptr, /*viewPos=*/viewForPosition != nullptr);
 	if (!pipe) return;
@@ -688,7 +714,11 @@ void VulkanLandscape::drawDepth(VkCommandBuffer cmd, VkRenderPass pass, VkExtent
 	vkls::Globals g;
 	vkls::fillGlobals(g, f, velocityPrev ? vkls::velocityClip(clip) : clip, glm::vec3(0.0f, 1.0f, 0.0f), glm::vec3(1.0f), glm::vec3(0.0f), false, false, false, false);
 	if (viewForPosition) std::memcpy(g.aux0, &(*viewForPosition)[0][0], sizeof(g.aux0));
-	if (velocityPrev) std::memcpy(g.aux1, &(*velocityPrev)[0][0], sizeof(g.aux1));
+	if (velocityPrev)
+	{
+		const glm::mat4 prev = vkls::velocityPrev(*velocityPrev, f.uvOrigin, m.velOrigin, m.velOriginSet);
+		std::memcpy(g.aux1, &prev[0][0], sizeof(g.aux1));
+	}
 	std::memcpy(static_cast<uint8_t*>(m.uboMapped[frameIndex]) + offset, &g, sizeof(g));
 
 	// The whole set, as the scene's: the vertex stage reads the block, the heights and the slot table; the rest is what the layout

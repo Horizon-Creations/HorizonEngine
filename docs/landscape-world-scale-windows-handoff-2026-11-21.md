@@ -404,16 +404,39 @@ the backends first, the merge of `release/0.8.0` after; origin is pushed after e
   D3D11 2.20 / 5.73, D3D12 2.20 / 5.73, Vulkan 2.14 / 5.60, OpenGL 1.53 / 4.05 (/255, with / without the ground's velocity).
   Metal runs this block too now and was NOT run: if `Render()` gives no image there it prints NOT CHECKED, it cannot fail a
   correct backend.
-* **Not covered**: a floating-origin move between two frames (the previous matrix is in the old origin's frame, one frame of
-  wrong velocity, as for meshes); motion blur was not looked at.
+* **Not covered**: motion blur was not looked at.
+
+## 14. Sixth Windows session of 22.11.: velocity across a floating-origin hop, occlusion with reflections on
+
+* **The origin hop.** Last frame's view-projection is in last frame's origin; the ground's positions are relative to this
+  frame's. `vkls::velocityPrev` (`VulkanLandscapeLayout.h`) puts the origin's step into that matrix; each backend keeps the
+  origin of its last velocity draw (`velOrigin` in the three `*Landscape` Impls, `m_landscapeVelOrigin` on OpenGL). A mesh with
+  a remembered model matrix needs nothing (matrix and model are both in the old frame). NOT fixed: foliage clusters and
+  objects seen for the first time use this frame's model with last frame's matrix, one frame of wrong velocity on a hop
+  (`renderTaaVelocity` and its twins, the `isCluster()` branch).
+  Witness "the floating origin hops by (1.5, 0.8) m under a standing camera" (live viewport, one frame after the hop against
+  the settled picture): D3D11 0.44, D3D12 0.44, Vulkan 0.43, OpenGL 0.30 (/255); with the correction switched off D3D11 reads
+  4.55 and fails (limit 1.5).
+* **Occlusion with screen-space reflections on.** A forward frame's position pre-pass is then the three-target reflection
+  pre-pass, and the ground was left out of it. Now in: D3D `PSViewPosMrt` (`drawViewPos(..., mrt)`; D3D12 a second PSO with
+  the RGBA16F / RGBA16F / R32F targets), Vulkan `fsViewPosMrt` (`drawDepth(..., viewPosMrt)`), OpenGL one fragment for both
+  shapes (three outputs; a pass with one draw buffer drops two). Written like `kReflPrepassFS` writes a mesh: view position,
+  octahedral world normal with roughness 0, depth.
+  Witness "ambient occlusion, reflections on" (forward, no `--arrays` needed): D3D11 62577 px, D3D12 62577, Vulkan 57742,
+  OpenGL 56709; with the ground kept out of the three-target pass D3D11 reads 0 px and fails.
+  The reflections themselves on the ground (what the trace does with the ground's normal and depth) were not judged.
+* Vulkan prints one new validation WARNING in these runs, `Vertex attribute at location 2 not consumed by vertex shader`: the
+  renderer's own mesh pipeline of the reflection pre-pass (the ground's pipelines have one attribute), visible now because
+  the check turns reflections on. Not touched.
 
 ## Handoff
 
-- **Done / verified / not verified:** sections 9 to 13 for Windows; the three docs named at the top for the Mac. Not verified on
+- **Done / verified / not verified:** sections 9 to 14 for Windows; the three docs named at the top for the Mac. Not verified on
   Windows: D3D12 under the debug layer (not installed) and its SOFTWARE GI kernel (this machine takes DXR), a Release build,
   `--arrays` with the Forest arrays (section 12), the editor by hand (section 5; also the Mountain rows and the path splines).
-- **Open, in this order:** (1) With SSR on the ground takes no SSAO (the three-target reflection pre-pass). (2) Run the new TAA
-  witness on the Mac. Then `release/0.8.0` into this branch (PR 233 among its commits).
+- **Open, in this order:** (1) Run the new witnesses on the Mac (TAA live viewport, origin hop, occlusion with reflections on:
+  Metal was not run with them). (2) Foliage clusters' velocity on an origin hop (section 14). Then `release/0.8.0` into this
+  branch (PR 233 among its commits).
 - **Do not:** bump the landscape's generation for an edit (it empties every backend's atlas); rely on `LandscapeTileSource::coarse()`
   (null for a pack in coarse regions: `coarseWindow`); name anything `far`, `near` or `small` (Windows macros).
 - **Order:** 0, 1, 2, 3, then 5. Items 2 and 3 are board steps 27 and 28; item 1 has none yet.

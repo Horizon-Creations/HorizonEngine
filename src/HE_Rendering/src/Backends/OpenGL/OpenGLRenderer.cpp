@@ -8065,15 +8065,12 @@ unsigned int OpenGLRenderer::RenderSSAO(const CommandBuffer& cmds, int pw, int p
 			glDrawElements(GL_TRIANGLES, range.count, GL_UNSIGNED_INT, range.offset);
 		}
 	}
-	// The tile landscape's ground (Thema 326), into the position-only target: it writes target 0 alone, so not into the
-	// three-target reflection pre-pass (as on Vulkan and D3D). The mesh loop's program and vertex array are bound again by
+	// The tile landscape's ground (Thema 326), into the position-only target or the three-target reflection pre-pass (its
+	// fragment writes all three; one draw buffer drops two). The mesh loop's program and vertex array are bound again by
 	// whatever draws next.
-	if (!reflMrt)
-	{
-		DrawLandscapeViewPos(viewProj, view);
-		glBindVertexArray(0);
-		glUseProgram(0);
-	}
+	DrawLandscapeViewPos(viewProj, view);
+	glBindVertexArray(0);
+	glUseProgram(0);
 	// Back to a single draw buffer so nothing downstream inherits the MRT state.
 	if (reflMrt) glDrawBuffers(1, mrt);
 	}
@@ -12450,7 +12447,17 @@ void OpenGLRenderer::DrawLandscapeViewPos(const glm::mat4& viewProj, const glm::
 			"layout(location = 3) in vec3 vWorldPos;\n"
 			"uniform mat4 uView;\n"
 			"layout(location = 0) out vec4 oViewPos;\n"
-			"void main() { oViewPos = vec4((uView * vec4(vWorldPos, 1.0)).xyz, 1.0); }\n";
+			// Targets 1 and 2 exist in the three-target reflection pre-pass only (screen-space reflections on) and take what
+			// MaterialShaderLibrary's kReflPrepassFS writes for a mesh: the octahedral world normal and the depth. The
+			// position-only pass has one draw buffer and drops them.
+			"layout(location = 1) out vec4 oAttr;\n"
+			"layout(location = 2) out float oNdc;\n"
+			"void main() { vec3 n = normalize(cross(dFdx(vWorldPos), dFdy(vWorldPos))); if (n.y < 0.0) n = -n;\n"
+			"              vec2 p = n.xy * (1.0 / (abs(n.x) + abs(n.y) + abs(n.z)));\n"
+			"              vec2 s = vec2(p.x >= 0.0 ? 1.0 : -1.0, p.y >= 0.0 ? 1.0 : -1.0);\n"
+			"              vec2 o = (n.z <= 0.0) ? ((1.0 - abs(p.yx)) * s) : p;\n"
+			"              oViewPos = vec4((uView * vec4(vWorldPos, 1.0)).xyz, 1.0);\n"
+			"              oAttr = vec4(o * 0.5 + 0.5, 0.0, 0.0); oNdc = gl_FragCoord.z; }\n";
 		if (v.ok)
 		{
 			try
@@ -12591,7 +12598,8 @@ void OpenGLRenderer::DrawLandscapeVelocity(const glm::mat4& viewProjJit, const g
 	const GLboolean cull = glIsEnabled(GL_CULL_FACE);
 	glUseProgram(m_landscapeVelProgram);
 	glUniformMatrix4fv(glGetUniformLocation(m_landscapeVelProgram, "uNow"), 1, GL_FALSE, glm::value_ptr(viewProjNow));
-	glUniformMatrix4fv(glGetUniformLocation(m_landscapeVelProgram, "uPrev"), 1, GL_FALSE, glm::value_ptr(viewProjPrev));
+	const glm::mat4 prev = HE::vkls::velocityPrev(viewProjPrev, frame.uvOrigin, m_landscapeVelOrigin, m_landscapeVelOriginSet);
+	glUniformMatrix4fv(glGetUniformLocation(m_landscapeVelProgram, "uPrev"), 1, GL_FALSE, glm::value_ptr(prev));
 	OpenGLLandscape::Shading sh;
 	sh.materialProgram = m_landscapeVelProgram;
 	sh.depthReadOnly = true;

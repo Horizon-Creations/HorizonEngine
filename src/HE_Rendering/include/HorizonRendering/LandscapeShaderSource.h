@@ -878,6 +878,25 @@ float4 PSViewPos(LsVertexOut pin) : SV_Target
     return float4(dot(layerColor[0], p), dot(layerColor[1], p), dot(layerColor[2], p), 1.0);
 }
 
+// The same for the three-target reflection pre-pass that replaces the position pre-pass while screen-space reflections are on
+// (drawViewPos with mrt): what MaterialShaderLibrary's kReflPrepassFS writes for a mesh, the view-space position, the octahedral
+// world normal (b = roughness 0) and the depth. The normal is the surface's own, from the position's derivatives, turned up.
+struct LsReflOut { float4 viewPos : SV_Target0; float4 attr : SV_Target1; float ndc : SV_Target2; };
+LsReflOut PSViewPosMrt(LsVertexOut pin)
+{
+    float4 p = float4(pin.worldRel, 1.0);
+    float3 n = normalize(cross(ddy(pin.worldRel), ddx(pin.worldRel)));
+    if (n.y < 0.0) n = -n;
+    float2 q = n.xy * (1.0 / (abs(n.x) + abs(n.y) + abs(n.z)));
+    float2 s = float2(q.x >= 0.0 ? 1.0 : -1.0, q.y >= 0.0 ? 1.0 : -1.0);
+    float2 oct = (n.z <= 0.0) ? ((1.0 - abs(q.yx)) * s) : q;
+    LsReflOut o;
+    o.viewPos = float4(dot(layerColor[0], p), dot(layerColor[1], p), dot(layerColor[2], p), 1.0);
+    o.attr = float4(oct * 0.5 + 0.5, 0.0, 0.0);
+    o.ndc = pin.position.z;
+    return o;
+}
+
 // The ground for the TAA velocity pass (drawVelocity): what kTaaVelocityHLSL's PSVelocity writes for a mesh, uvNow - uvPrev.
 // The ground stands still, so this is the camera's own motion. The two UNJITTERED view-projections come the way PSViewPos takes
 // its view matrix: this frame's rows in layerColor[0..3], last frame's in layerColor[4..7].

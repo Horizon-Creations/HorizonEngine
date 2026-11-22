@@ -648,6 +648,41 @@ int runMaterialCheck(HE::RendererBackend backend, HE::RenderPath path, const std
 				}
 				renderer->SetSSAOSettings(IRenderer::SSAOSettings{});
 			}
+			// The same with screen-space reflections on: a forward frame's position pre-pass is then the three-target reflection
+			// pre-pass (position, normal, depth), and the ground has to be in that one too or it loses its occlusion.
+			if (path == HE::RenderPath::Forward)
+			{
+				IRenderer::SSAOSettings ao;
+				ao.enabled = true;
+				ao.radius = 12.0f;
+				ao.intensity = 1.0f;
+				renderer->SetSSAOSettings(ao);
+				IRenderer::SSRSettings ssr;
+				ssr.enabled = true;
+				renderer->SetSSRSettings(ssr);
+				std::vector<uint8_t> aoOn, aoOff, noAo, noAoNoPasses;
+				const bool gotA = shoot(aoOn);
+				landscapePasses("0");
+				const bool gotB = gotA && shoot(aoOff);
+				ao.enabled = false;
+				renderer->SetSSAOSettings(ao);
+				const bool gotC = gotB && shoot(noAoNoPasses);
+				landscapePasses(nullptr);
+				const bool gotD = gotC && shoot(noAo);
+				if (!gotD) fail("RenderSceneImage gave an image (SSAO with reflections on)");
+				else
+				{
+					size_t darker = 0;
+					for (size_t i = 0; i < px; ++i)
+						if (isBlue(&aoOn[i * 4]) && isBlue(&aoOff[i * 4]))
+							darker += lum(&aoOn[i * 4]) < 0.95 * lum(&aoOff[i * 4]) && !(lum(&noAo[i * 4]) < 0.95 * lum(&noAoNoPasses[i * 4])) ? 1 : 0;
+					std::printf("  ambient occlusion, reflections on: %zu ground px are darker with the ground in the pre-pass than without\n", darker);
+					if (darker < 60) failPass(kLandscapePassSsao, "the ground takes ambient occlusion with screen-space reflections on", std::to_string(darker) + " px");
+					writePngFile(pngPath.substr(0, pngPath.size() - 4) + "_ao_ssr.png", static_cast<int>(kW), static_cast<int>(kH), aoOn.data());
+				}
+				renderer->SetSSRSettings(IRenderer::SSRSettings{});
+				renderer->SetSSAOSettings(IRenderer::SSAOSettings{});
+			}
 
 			// The G-buffer: on a deferred frame the ground's attributes are in it, or the ground is drawn forward on top of the
 			// resolved picture. The lit pictures of the two are alike by design, so the witness is the G-buffer's own view of
@@ -911,6 +946,30 @@ int runMaterialCheck(HE::RendererBackend backend, HE::RenderPath path, const std
 									};
 									std::vector<uint8_t> standing, moved, standingOff, movedOff;
 									const bool gotLive = live(standing, false) && live(moved, true);
+									// The floating origin hops between two frames while the camera stands: last frame's matrix is in the
+									// old origin's frame, and the ground's velocity has to say "did not move" all the same
+									// (vkls::velocityPrev). A small hop on purpose: a wrong velocity of a few pixels ghosts, one of a
+									// kilometre only drops the history.
+									double hopGap = -1.0;
+									if (std::vector<uint8_t> settled, hopped; gotLive && live(settled, false))
+									{
+										const glm::dvec3 hop(1.5, 0.0, 0.8);
+										auto& htf = reg.get<TransformComponent>(boxEnt);
+										world.setOrigin(origin + hop);
+										htf.position -= glm::vec3(hop);
+										htf.dirty = true;
+										const glm::vec3 e = eye + glm::vec3(0.0f, 0.0f, 9.0f) - glm::vec3(hop);
+										ov.view = glm::lookAt(e, e + glm::normalize(glm::vec3(1.0f, -0.45f, 0.15f)), glm::vec3(0, 1, 0));
+										ov.position = e;
+										renderer->SetEditorCamera(ov);
+										renderer->Render();
+										uint32_t w = 0, h = 0;
+										if (renderer->CaptureViewport(hopped, w, h) && w == kW && h == kH && hopped.size() == px * 4) hopGap = ghost(hopped, settled);
+										world.setOrigin(origin);
+										htf.position += glm::vec3(hop);
+										htf.dirty = true;
+										live(hopped, false);   // settled on the old origin again for what follows
+									}
 									landscapePasses("0");
 									const bool gotOff = gotLive && live(standingOff, false) && live(movedOff, true);
 									landscapePasses(nullptr);
@@ -924,6 +983,12 @@ int runMaterialCheck(HE::RendererBackend backend, HE::RenderPath path, const std
 										if (off < 0.3) std::printf("    NOT CHECKED: no ghosting to remove in this scene\n");
 										else if (on > off * 0.6)
 											failPass(kLandscapePassVelocity, "the ground's history lines up under TAA while the camera moves (live viewport)");
+										if (hopGap >= 0.0)
+										{
+											std::printf("  TAA, live viewport, the floating origin hops by (1.5, 0.8) m under a standing camera: the ground differs by %.2f/255 in that frame\n", hopGap);
+											// 0.4 to 0.5 with the origin's part in the matrix, 4.5 and more without it (D3D11, measured both ways)
+											if (hopGap > 1.5) failPass(kLandscapePassVelocity, "the ground's velocity is zero across a floating origin hop");
+										}
 										writePngFile(pngPath.substr(0, pngPath.size() - 4) + "_taa_live.png", static_cast<int>(kW), static_cast<int>(kH), moved.data());
 										writePngFile(pngPath.substr(0, pngPath.size() - 4) + "_taa_live_standing.png", static_cast<int>(kW), static_cast<int>(kH), standing.data());
 									}

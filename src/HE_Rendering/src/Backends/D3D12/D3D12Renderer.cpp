@@ -7707,7 +7707,7 @@ struct D3D12RendererImpl
                  int w, int h,
                  ContentManager* cm,
                  bool reflMrt = false, bool aoWanted = true,
-                 const std::function<void()>& drawGround = {})
+                 const std::function<void(bool mrt)>& drawGround = {})
     {
         GpuPassScope _passTimer(this, "SSAO");
         // `reflMrt` and `aoWanted` are SEPARATE gates (plan C2, the same shape
@@ -7825,10 +7825,9 @@ struct D3D12RendererImpl
             else
                 drawPosOne(dc->transform);
         }
-        // The tile landscape's ground (Thema 326), into the position-only target: it writes target 0 alone, so not into the
-        // three-target reflection pre-pass (as on Vulkan and D3D11). It leaves its own root signature, pipeline and heap set;
-        // everything after this point binds its own.
-        if (drawGround && !reflMrt) drawGround();
+        // The tile landscape's ground (Thema 326), into the position-only target or, with its three-target pipeline, into the
+        // reflection pre-pass. It leaves its own root signature, pipeline and heap set; everything after this point binds its own.
+        if (drawGround) drawGround(reflMrt);
 
         // ── Transition pos RT to SRV, bind ssaoSrvHeap ─────────────────────
         barrier12(cl, ssaoPosRT.Get(), ssaoPosRTState, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
@@ -13278,7 +13277,7 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                       p.m_renderWorld.camera.view, p.m_renderWorld.camera.projection,
                       viewProjClean, width, height, m_contentManager,
                       /*reflMrt=*/ssrFrameActive, aoWanted,
-                      [&]()
+                      [&](bool mrt)
                       {
                           // The ground in the position pre-pass, so it takes and gives ambient occlusion like any mesh. The
                           // provider culls for THIS pass's matrix (unjittered) and hands over the tiles that arrived, which are
@@ -13288,7 +13287,7 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                           m_landscapeProvider(glm::dmat4(viewProjClean), /*zeroToOne=*/false, lf);
                           if (!lf.active) return;
                           p.landscape.upload(cl, lf);
-                          if (HE::landscapePassesOn()) p.landscape.drawViewPos(cl, lf, viewProjClean, p.m_renderWorld.camera.view);
+                          if (HE::landscapePassesOn()) p.landscape.drawViewPos(cl, lf, viewProjClean, p.m_renderWorld.camera.view, mrt);
                       });
             if (ssrFrameActive)
             {

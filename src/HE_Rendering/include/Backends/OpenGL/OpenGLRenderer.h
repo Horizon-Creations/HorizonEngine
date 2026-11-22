@@ -1590,6 +1590,8 @@ private:
 	void            DrawLandscapeVelocity(const glm::mat4& viewProjJit, const glm::mat4& viewProjNow, const glm::mat4& viewProjPrev);   // into the TAA velocity target that is bound
 	unsigned int    m_landscapeVelProgram = 0;    // DrawLandscapeVelocity: the same vertex stage with the velocity fragment
 	bool            m_landscapeVelTried = false;
+	glm::dvec3      m_landscapeVelOrigin{ 0.0 };  // the floating origin of the last velocity draw (vkls::velocityPrev)
+	bool            m_landscapeVelOriginSet = false;
 	unsigned int    GetOrBuildLandscapeMaterialProgram(const HE::UUID& materialId, bool gbuffer = false);
 	int             m_maxFragmentSamplers = 0;   // GL_MAX_TEXTURE_IMAGE_UNITS, read at Initialize
 	HE::UUID        m_landscapeMaterialLoadTried{};   // the texture group's material this renderer tried to load from its path

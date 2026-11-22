@@ -113,4 +113,20 @@ inline glm::mat4 velocityClip(glm::mat4 clip)
 	return clip;
 }
 
+// Last frame's view-projection for the ground's velocity. It was built for LAST frame's floating origin, the ground's
+// positions are relative to this frame's: a point that is p now was p + (originNow - originLast) then, so on a rebase the
+// matrix takes that translation on its right. (A mesh needs none of this: its previous model matrix is in the old frame too.)
+// `originLast` / `have` are the caller's memory of the frame before; both are updated.
+inline glm::mat4 velocityPrev(glm::mat4 prevViewProj, const glm::dvec3& originNow, glm::dvec3& originLast, bool& have)
+{
+	if (have && originNow != originLast)
+	{
+		const glm::vec3 d(originNow - originLast);
+		prevViewProj[3] += prevViewProj[0] * d.x + prevViewProj[1] * d.y + prevViewProj[2] * d.z;
+	}
+	originLast = originNow;
+	have = true;
+	return prevViewProj;
+}
+
 } // namespace HE::vkls

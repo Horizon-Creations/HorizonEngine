@@ -16567,7 +16567,7 @@ void VulkanRenderer::runSSAO(VkCommandBuffer cmd, uint32_t w, uint32_t h,
     // NOT PROVEN: on MoltenVK the patches are drawn here (the pipeline builds, 140-200 patches a frame) and the witness still
     // reads 0 px of occlusion on the ground, in a capture whose forward frame also draws the test box black. So it is off on
     // macOS and on with a real Vulkan driver, where it can be judged (HE::landscapeVkSsaoOn; Windows handoff, section 8).
-    const bool ssaoGround = HE::landscapeVkSsaoOn() && !reflMrt && landscapePassFrame(vp, ssaoGroundFrame) && m_landscape && m_landscape->ready();
+    const bool ssaoGround = HE::landscapeVkSsaoOn() && landscapePassFrame(vp, ssaoGroundFrame) && m_landscape && m_landscape->ready();
     vkCmdBeginRenderPass(cmd, &posRPBI, VK_SUBPASS_CONTENTS_INLINE);
 
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -16705,9 +16705,11 @@ void VulkanRenderer::runSSAO(VkCommandBuffer cmd, uint32_t w, uint32_t h,
         }
     }
     // The tile landscape's ground: its view-space position into the same target, so occlusion sees it (and what stands on it
-    // is occluded by it). Not in the three-target reflection pre-pass: that one keeps its own shader, the ground is not in it.
+    // is occluded by it). With reflections on the pass is the three-target reflection pre-pass and the ground brings its
+    // three-target stage.
     if (ssaoGround)
-        m_landscape->drawDepth(cmd, m_ssaoPosRenderPass, VkExtent2D{ w, h }, m_currentFrame, ssaoGroundFrame, vp, &view);
+        m_landscape->drawDepth(cmd, reflMrt ? m_reflPrepassRP : m_ssaoPosRenderPass, VkExtent2D{ w, h }, m_currentFrame, ssaoGroundFrame, vp,
+                               &view, false, nullptr, /*viewPosMrt=*/reflMrt);
     vkCmdEndRenderPass(cmd);
     // posRT transitions to SHADER_READ_ONLY via renderpass finalLayout.
 
