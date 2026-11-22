@@ -108,6 +108,7 @@ static void onProjectWriteRefused(const char* what);   // ProjectWriteGate handl
 #include <HorizonScene/WaterMesh.h>
 #include <HorizonScene/Components/TerrainComponent.h>
 #include <HorizonScene/Components/LandscapeWorldComponent.h>   // HE_DUMP_TILEWORLD
+#include <HorizonScene/Components/LandscapeStampComponent.h>   // HE_DUMP_STAMP
 #include <HorizonScene/Components/FoliageComponent.h>   // HE_DUMP_FOLIAGETEST witness
 #include <HorizonScene/FoliageSystem.h>
 #include <HorizonScene/LayerMeshPresets.h>   // HE_DUMP_AUTOLANDMESHES witness
@@ -10719,18 +10720,58 @@ void EditorApplication::dumpFrameHeadless()
 			m_landscapeBound = true;
 		}
 		const glm::dvec3 eye = glm::dvec3(m_editorCamera.position()) + m_editorWorld->origin();
+		// HE_DUMP_STAMP=x,z,size,height: a Landscape Stamp entity at that absolute place, with a generated heightmap (a cone with
+		// two rings: a shape no ground has), laid over the tiles by the same sync the frame loop runs.
+		if (const char* st = std::getenv("HE_DUMP_STAMP"); st && *st)
+		{
+			float sx = 0.0f, sz = 0.0f, size = 300.0f, height = 100.0f;
+			if (std::sscanf(st, "%f,%f,%f,%f", &sx, &sz, &size, &height) >= 2)
+			{
+				TextureAsset tex;
+				tex.width = tex.height = 128;
+				tex.channels = 4;
+				tex.data.resize(128 * 128 * 4);
+				for (int y = 0; y < 128; ++y)
+					for (int x = 0; x < 128; ++x)
+					{
+						const float d = std::min(1.0f, std::hypot(x - 63.5f, y - 63.5f) / 63.5f);
+						const float v = (1.0f - d) * (0.75f + 0.25f * std::cos(d * 18.85f));
+						for (int c = 0; c < 4; ++c) tex.data[(static_cast<size_t>(y) * 128 + x) * 4 + c] = static_cast<uint8_t>(std::clamp(v, 0.0f, 1.0f) * 255.0f);
+					}
+				const Entity se = m_editorWorld->createEntity("Landscape Stamp");
+				TransformComponent& stf = m_editorWorld->registry().get_or_emplace<TransformComponent>(se);
+				stf.position = glm::vec3(glm::dvec3(sx, 0.0, sz) - m_editorWorld->origin());
+				stf.dirty = true;
+				LandscapeStampComponent sc;
+				sc.textureId = contentManager().registerTexture(std::move(tex));
+				sc.sizeM = size;
+				sc.heightM = height;
+				m_editorWorld->registry().emplace<LandscapeStampComponent>(se, sc);
+			}
+		}
 		bool settled = false;
+		size_t stampTiles = 0;
 		for (const auto t0 = std::chrono::steady_clock::now(); std::chrono::steady_clock::now() - t0 < std::chrono::seconds(60);)
 		{
 			m_landscape.update(*m_editorWorld, 0.016f, 5.0, &eye);
+			stampTiles += m_landscapeStamps.sync(*m_editorWorld, m_landscape, contentManager());
 			if (m_landscape.active() && m_landscape.store()->settled() && m_landscape.atlas()->stats().used == m_landscape.store()->residentKeys().size()
 			    && m_landscape.giHeightfield().active())
 			{ settled = true; break; }
 			std::this_thread::sleep_for(std::chrono::milliseconds(1));
 		}
-		HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_TILEWORLD %s: %zu tile(s) resident, renderer draws the ground with %s",
+		HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_TILEWORLD %s: %zu tile(s) resident, renderer draws the ground with %s, %zu tile(s) read again for stamps",
 		            settled ? "streamed in" : "DID NOT SETTLE", m_landscape.active() ? m_landscape.store()->residentKeys().size() : size_t(0),
-		            r->GetCapabilities().landscapeMaterial ? "its material" : "the fixed blend");
+		            r->GetCapabilities().landscapeMaterial ? "its material" : "the fixed blend", stampTiles);
+		// What the stamps cost a frame in which nothing moves: the sync alone, a thousand times.
+		if (std::getenv("HE_DUMP_STAMP"))
+		{
+			const auto i0 = std::chrono::steady_clock::now();
+			size_t again = 0;
+			for (int i = 0; i < 1000; ++i) again += m_landscapeStamps.sync(*m_editorWorld, m_landscape, contentManager());
+			const double us = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - i0).count() / 1000.0;
+			HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_STAMP idle: %.3f us a frame for the sync, %zu tile(s) read again in 1000 idle frames", us, again);
+		}
 	}
 	// The dump renders without scene ticks, so the trail clipmap (HE_DUMP_TRAILTEST's footprints) is brought in
 	// line with the camera's final pose here, once.

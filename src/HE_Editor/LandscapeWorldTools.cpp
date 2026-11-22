@@ -3,6 +3,8 @@
 #include "EditorHelp.h"
 #include "NotificationStore.h"
 #include <HorizonScene/Components/LandscapeWorldComponent.h>
+#include <HorizonScene/Components/LandscapeStampComponent.h>
+#include <HorizonScene/Components/TransformComponent.h>
 #include <HorizonScene/Components/NameComponent.h>
 #include <HorizonScene/Components/TerrainComponent.h>
 #include <HorizonScene/HorizonWorld.h>
@@ -406,6 +408,8 @@ struct EditState
 	glm::dvec3 rampFrom{ 0.0 };
 	float mountainHeight = 120.0f;
 	int   mountainSeed = 1;
+	HE::UUID stampTexture;                                     // Stamp: the heightmap the next placed stamp gets
+	float stampHeight = 100.0f;
 	std::string status;
 	bool  statusError = false;
 };
@@ -456,7 +460,7 @@ std::string saveEdits()
 #ifdef HE_IMGUI_ENABLED
 namespace
 {
-const char* const kToolNames[] = { "Raise", "Lower", "Smooth", "Flatten", "Paint Layer", "Roughen", "Ramp", "Mountain" };
+const char* const kToolNames[] = { "Raise", "Lower", "Smooth", "Flatten", "Paint Layer", "Roughen", "Ramp", "Mountain", "Stamp" };
 
 void drawEditBlock(AppContext& ctx)
 {
@@ -471,12 +475,19 @@ void drawEditBlock(AppContext& ctx)
 	EditorWidgets::checkbox("Edit Tiles##tlwe", &e.on);
 	if (e.on && ctx.editorConfig.mode != EditorMode::Landscape)
 		ImGui::TextDisabled("The brush works in the Landscape mode: there the left button belongs to it.");
-	Row::combo("Tile Brush##tlwe", &e.tool, kToolNames, 8);
+	Row::combo("Tile Brush##tlwe", &e.tool, kToolNames, 9);
 	Row::dragFloat("Brush Radius##tlwe", &e.radius, 0.5f, 1.0f, 800.0f, "%.1f m");
 	Row::dragFloat("Brush Falloff##tlwe", &e.falloff, 0.5f, 0.0f, 400.0f, "%.1f m");
 	Row::dragFloat("Brush Strength##tlwe", &e.strength, 0.01f, 0.01f, 5.0f, "%.2f");
 	if (e.tool == 4) Row::dragInt("Paint Layer##tlwe", &e.layer, 0.1f, 0, 11);
 	if (e.tool == 7) Row::dragFloat("Mountain Height##tlwe", &e.mountainHeight, 1.0f, -2000.0f, 2000.0f, "%.0f m");
+	if (e.tool == 8)
+	{
+		EditorWidgets::assetDropSlot(ctx, "Stamp Heightmap", e.stampTexture, HE::AssetType::Texture,
+		                             "tlwestamp", "(none — drop a texture here)", "texture", true);
+		Row::dragFloat("Stamp Height##tlwe", &e.stampHeight, 1.0f, -5000.0f, 5000.0f, "%.0f m");
+		ImGui::TextDisabled("A click places a Landscape Stamp entity. Move, turn or scale it in the Scene mode to shift the stamp.");
+	}
 	ImGui::BeginDisabled(!session->canUndo());
 	if (EditorWidgets::button("Undo Stroke##tlwe")) session->undo();
 	ImGui::EndDisabled();
@@ -569,7 +580,8 @@ void brushInViewport(AppContext& ctx, const RenderWorld& sceneSnapshot, const Im
 		if (q.y <= groundH(q.x, q.z)) t = mid; else tPrev = mid;
 	}
 	p = ro + rd * t;
-	const bool usable = focused && session->focus(p.x, p.z, reach);
+	// A stamp is an entity, not an edit of the region: it needs no editing region and may be larger than one.
+	const bool usable = e.tool == 8 || (focused && session->focus(p.x, p.z, reach));
 
 	// The cursor: the inner and the outer ring on the ground; red when no editing region holds a brush this large here.
 	ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -596,6 +608,28 @@ void brushInViewport(AppContext& ctx, const RenderWorld& sceneSnapshot, const Im
 			prev = cur;
 			prevOk = ok;
 		}
+	}
+	if (e.tool == 8)
+	{
+		// Stamp: a click puts a stamp ENTITY on the ground under the cursor (LandscapeStampComponent); the heightmap is laid over the
+		// tiles by LandscapeStampSync and follows the entity when it is moved afterwards. Nothing of the ground is written.
+		if (viewportHovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !io.KeyAlt)
+		{
+			if (ctx.undoSys) ctx.undoSys->snapshotNow("Place Landscape Stamp");
+			const Entity ent = ctx.world->createEntity("Landscape Stamp");
+			auto& reg = ctx.world->registry();
+			TransformComponent& tf = reg.get_or_emplace<TransformComponent>(ent);
+			tf.position = glm::vec3(p - origin);
+			tf.dirty = true;
+			LandscapeStampComponent sc;
+			sc.textureId = e.stampTexture;
+			sc.sizeM = 2.0f * reach;
+			sc.heightM = e.stampHeight;
+			sc.falloff = reach > 0.0f ? std::clamp(e.falloff / reach, 0.0f, 1.0f) : 0.0f;
+			reg.emplace<LandscapeStampComponent>(ent, sc);
+			ctx.selection.set(ent);
+		}
+		return;
 	}
 	if (!usable || !viewportHovered || !down) return;
 
