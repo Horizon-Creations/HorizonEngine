@@ -4245,6 +4245,7 @@ void EditorApplication::OnRender(float dt)
 				const glm::dvec3 eye = glm::dvec3(m_editorCamera.makeOverride().position) + m_editorWorld->origin();
 				m_landscape.update(*m_editorWorld, gameDt, 1.0, &eye);
 			}
+			m_landscapeStamps.sync(*m_editorWorld, m_landscape, contentManager());   // stamp entities that moved: their tiles are read again
 			m_landscapeProxies.sync(*m_editorWorld, m_landscape, contentManager(), renderer());
 		}
 

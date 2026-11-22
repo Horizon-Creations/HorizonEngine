@@ -25,6 +25,7 @@
 #include <HorizonScene/LandscapeRuntime.h>
 #include <HorizonScene/LandscapeHlodProxies.h>
 #include <HorizonScene/LandscapeWorldProxies.h>
+#include <HorizonScene/LandscapeStamps.h>
 #include <HorizonScene/CellScripts.h>
 #include <HorizonScene/FixedStep.h>
 #include <HorizonScene/AudioEngine.h>
@@ -414,6 +415,7 @@ private:
     std::string m_landscapeContentRoot;   // ContentManager::contentRoot() last given to m_landscape.setProjectRoot(), to skip repeating it
     bool m_landscapeNavigation = false;
     HE::LandscapeHlodProxies m_hlodProxies;         // the baked stand-ins of entity cells that are not built (the pack's HLOD table)
+    HE::LandscapeStampSync    m_landscapeStamps;    // LandscapeStampComponent entities -> the runtime's overlay
     HE::LandscapeWorldProxies m_landscapeProxies;   // its foliage and water as entities the renderers draw already
     bool m_landscapeBound = false;
 };

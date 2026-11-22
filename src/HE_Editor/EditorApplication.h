@@ -53,6 +53,7 @@
 #include "PlayCellStreaming.h"   // a split scene's cells streamed while playing
 #include <HorizonScene/LandscapeRuntime.h>   // the world-scale tile landscape (Thema 326)
 #include <HorizonScene/LandscapeWorldProxies.h>
+#include <HorizonScene/LandscapeStamps.h>
 #include <atomic>
 #include <filesystem>
 #include <functional>
@@ -791,6 +792,7 @@ private:
 	bool m_landscapeNavigation = false;
 	std::string m_landscapeContentRoot;   // ContentManager::contentRoot() last given to m_landscape.setProjectRoot(), to skip repeating it
 	bool        m_landscapeToolsBound = false;   // LandscapeWorldTools::setRuntime(&m_landscape) was called
+	HE::LandscapeStampSync    m_landscapeStamps;    // LandscapeStampComponent entities -> the runtime's overlay
 	HE::LandscapeWorldProxies m_landscapeProxies;   // its foliage and water as entities the renderers draw already
 	bool m_landscapeBound = false;
 	// The headless dump's rings (HE_DUMP_WATERRIPPLE): no physics runs there, so the witness

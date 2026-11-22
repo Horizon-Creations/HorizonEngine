@@ -3,6 +3,14 @@
 #include "doctest.h"
 #include <HorizonScene/LandscapeEdit.h>
 #include <HorizonScene/LandscapeRuntime.h>
+#include <HorizonScene/LandscapeExport.h>
+#include <HorizonScene/LandscapeStamps.h>
+#include <HorizonScene/HorizonWorld.h>
+#include <HorizonScene/SceneSerializer.h>
+#include <HorizonScene/Components/LandscapeStampComponent.h>
+#include <HorizonScene/Components/LandscapeWorldComponent.h>
+#include <HorizonScene/Components/TransformComponent.h>
+#include <ContentManager/ContentManager.h>
 #include <HorizonScene/LandscapeSource.h>
 #include <HorizonScene/LandscapeTileTerrain.h>
 #include <HorizonScene/TerrainPaint.h>
@@ -658,6 +666,119 @@ TEST_CASE("LandscapeStamp: a stamp raises the tiles under it when they are loade
 		CHECK(t == *base01);
 		REQUIRE(edits.load({ 1, 1 }, -1, t));
 		CHECK(at(t, 16, 16) == 12345);
+	}
+	std::filesystem::remove(packFile);
+}
+
+TEST_CASE("LandscapeStampSync: a stamp entity reaches the runtime's overlay, an idle frame does nothing, moving it names both footprints, "
+          "the component round-trips, and an export bakes the stamp and takes it out of the shipped scene")
+{
+	const auto src = world(4);
+	const std::filesystem::path packFile = tempFile("stamp_rt.bin");
+	{
+		LandscapePackWriter w;
+		REQUIRE(w.begin(packFile.string(), src->geometry(), 4, 4, 4, 0.0f, 3000.0f));
+		for (int z = 0; z < 4; ++z)
+			for (int x = 0; x < 4; ++x) REQUIRE(w.add({ x, z }, encodeLandscapeTile(src->generate({ x, z }))));
+		REQUIRE(w.finish());
+	}
+	ContentManager cm{ "." };
+	TextureAsset tex;
+	tex.width = tex.height = 4;
+	tex.channels = 4;
+	tex.data.assign(4 * 4 * 4, 255);   // white: the stamp is its full height everywhere
+	const HE::UUID texId = cm.registerTexture(std::move(tex));
+
+	HorizonWorld scene;
+	const auto lsEnt = scene.createEntity("Landscape");
+	LandscapeWorldComponent lw;
+	lw.pack = packFile.string();
+	scene.registry().emplace<LandscapeWorldComponent>(lsEnt, lw);
+	const auto stampEnt = scene.createEntity("Stamp");
+	auto& tf = scene.registry().get_or_emplace<TransformComponent>(stampEnt);
+	tf.position = glm::vec3(768.0f, 0.0f, 768.0f);   // the middle of tile (1, 1)
+	tf.scale = glm::vec3(1.0f, 2.0f, 1.0f);          // twice the height
+	tf.dirty = true;
+	LandscapeStampComponent sc;
+	sc.textureId = texId;
+	sc.sizeM = 200.0f;
+	sc.heightM = 100.0f;
+	sc.falloff = 0.0f;
+	scene.registry().emplace<LandscapeStampComponent>(stampEnt, sc);
+
+	std::string err;
+	{
+		LandscapeRuntime rt;
+		rt.setEditable(true);
+		REQUIRE_MESSAGE(rt.beginFromPack(packFile.string(), LandscapeRuntimeConfig{}, &err), err);
+		const glm::dvec3 cam(768.0, 400.0, 768.0);
+		REQUIRE(settle(rt, cam));
+		LandscapeStampSync sync;
+		CHECK(sync.sync(scene, rt, cm) == 1);            // tile (1, 1) is read again
+		CHECK(rt.edits()->stamped({ 1, 1 }));
+		CHECK(sync.sync(scene, rt, cm) == 0);            // idle: nothing handed over, nothing read
+		REQUIRE(settle(rt, cam));
+		const LandscapeStore::TilePtr shown = rt.store()->tile({ 1, 1 });
+		REQUIRE(shown);
+		const LandscapeTilePtr base = fullTile(*src, { 1, 1 });
+		const int dim = src->geometry().heightDim(0), mid = dim / 2;
+		// 100 m x scale 2 = 200 m of 3000: 4369 steps
+		CHECK(std::abs(static_cast<int>(shown->heights[0][static_cast<size_t>(mid) * dim + mid]) - static_cast<int>(base->heights[0][static_cast<size_t>(mid) * dim + mid]) - 4369) <= 1);
+
+		// Moved to tile (2, 1): both tiles are read again, once the rate limit of a drag lets it through.
+		scene.registry().get<TransformComponent>(stampEnt).position.x = 1280.0f;
+		scene.registry().get<TransformComponent>(stampEnt).dirty = true;
+		std::this_thread::sleep_for(std::chrono::milliseconds(120));
+		CHECK(sync.sync(scene, rt, cm) == 2);
+		CHECK(rt.edits()->stamped({ 2, 1 }));
+		CHECK_FALSE(rt.edits()->stamped({ 1, 1 }));
+		CHECK_FALSE(rt.edits()->dirty());                // stamps are the scene's, not the edits file's
+
+		// Switched off: gone from the ground.
+		scene.registry().get<LandscapeStampComponent>(stampEnt).enabled = false;
+		std::this_thread::sleep_for(std::chrono::milliseconds(120));
+		CHECK(sync.sync(scene, rt, cm) == 1);
+		CHECK(rt.edits()->stampCount() == 0);
+		scene.registry().get<LandscapeStampComponent>(stampEnt).enabled = true;
+	}
+
+	// The component is saved with its entity.
+	{
+		SceneSerializer ser;
+		const std::vector<uint8_t> blob = ser.serializeSubtree(scene, stampEnt);
+		HorizonWorld other;
+		const auto e = ser.instantiatePrefab(other, blob);
+		const auto* back = other.registry().try_get<LandscapeStampComponent>(e);
+		REQUIRE(back);
+		CHECK(back->textureId == texId);
+		CHECK(back->sizeM == 200.0f);
+		CHECK(back->heightM == 100.0f);
+		CHECK(back->falloff == 0.0f);
+		CHECK(SceneSerializer::isKnownComponentKey("landscapeStamp"));
+	}
+
+	// Export: the plan carries the stamp, the scene that ships has none, and the copy of the pack holds the raised ground.
+	{
+		LandscapeExportPlan plan;
+		LandscapeExportOptions options;
+		options.bakeHlod = false;
+		options.bakeFar = false;
+		prepareLandscapePacksForExport(scene, packFile.parent_path(), cm, options, plan, {});
+		REQUIRE(plan.packs.size() == 1);
+		CHECK(plan.packs[0].stamps.size() == 1);
+		CHECK(scene.registry().view<LandscapeStampComponent>().empty());
+		const std::filesystem::path copy = tempFile("stamp_export.bin");
+		std::filesystem::copy_file(packFile, copy);
+		REQUIRE_MESSAGE(finishExportedPack(plan.packs[0], copy, &err), err);
+		auto baked = LandscapePackSource::open(copy.string(), &err);
+		REQUIRE_MESSAGE(baked, err);
+		LandscapeTile t;
+		REQUIRE(baked->load({ 2, 1 }, -1, t));
+		const LandscapeTilePtr base = fullTile(*src, { 2, 1 });
+		const int dim = src->geometry().heightDim(0), mid = dim / 2;
+		CHECK(std::abs(static_cast<int>(t.heights[0][static_cast<size_t>(mid) * dim + mid]) - static_cast<int>(base->heights[0][static_cast<size_t>(mid) * dim + mid]) - 4369) <= 1);
+		baked.reset();
+		std::filesystem::remove(copy);
 	}
 	std::filesystem::remove(packFile);
 }

@@ -1702,6 +1702,7 @@ void GameApplication::updateLandscape(float dt)
 			                                        m_landscape.config().store.loadRadius, m_landscape.config().store.keepFactor);
 		if (!HE::sameRegionConfig(want, m_cellRuntime.streamer().regionConfig())) m_cellRuntime.streamer().setRegionConfig(want);
 	}
+	m_landscapeStamps.sync(*m_world, m_landscape, contentManager());   // a project run without an export: its stamps are not baked yet
 	m_landscapeProxies.sync(*m_world, m_landscape, contentManager(), renderer());
 	// Entity cells that are not built yet (or any more) stand in as their baked proxy while the pack has one; the cell streamer ran
 	// the frame before, so this reads what it holds.

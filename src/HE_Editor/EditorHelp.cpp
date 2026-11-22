@@ -109,6 +109,29 @@ namespace
 	  "A generated landscape: a heightfield the size of the entity, split into "
 	  "chunks with their own level of detail, sculptable and paintable.",
 	  "", "scenes#terrain" },
+	{ "Component/Landscape Stamp", "Landscape Stamp",
+	  "A heightmap laid over the Tile Landscape: the texture's red channel is "
+	  "added to the ground under this entity. Move, turn and scale the entity "
+	  "to place it, as often as you like; the landscape is not changed until an "
+	  "export bakes the stamps into the shipped pack. A stamp that is not "
+	  "moved costs nothing while the editor runs.",
+	  "", "scenes#terrain" },
+	{ "Landscape Stamp/Enabled", "",
+	  "Off takes the stamp away without deleting the entity; the ground under "
+	  "it goes back to what it was.",
+	  "", "scenes#terrain" },
+	{ "Landscape Stamp/Size", "",
+	  "Edge length of the stamp's square footprint at scale 1. The entity's X "
+	  "and Z scale stretch it.",
+	  "", "scenes#terrain" },
+	{ "Landscape Stamp/Height", "",
+	  "How many metres a white pixel adds, at scale 1 (the entity's Y scale "
+	  "multiplies it). A negative value digs instead of raising.",
+	  "", "scenes#terrain" },
+	{ "Landscape Stamp/Falloff", "",
+	  "How far in from its edge the stamp fades out, as a share of the way to "
+	  "the centre. 0 is a hard edge, 1 fades over the whole stamp.",
+	  "", "scenes#terrain" },
 	{ "Component/Tile Landscape", "Tile Landscape",
 	  "A landscape too big to hold in memory: a grid of 512 m tiles in a pack "
 	  "file, streamed in around the camera and drawn with a quadtree of "
@@ -10675,7 +10698,7 @@ namespace
 		"Transform", "Transform 2D", "Mesh", "Skeletal Mesh", "Material", "Light",
 		"Decal", "Rope", "Spline", "Trail", "Rigid Body", "Collider", "Joint", "Character Controller", "Movement",
 		"Replication",
-		"Camera", "Camera Rig", "Script", "Terrain", "Tile Landscape", "Foliage", "Nav Mesh",
+		"Camera", "Camera Rig", "Script", "Terrain", "Tile Landscape", "Landscape Stamp", "Foliage", "Nav Mesh",
 		"Nav Agent", "Audio Source", "Audio Listener", "Animator", "Animator Blend",
 		"Animator State Machine", "Root Motion", "Animation Layers",
 		"Inverse Kinematics",

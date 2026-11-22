@@ -1,6 +1,7 @@
 #pragma once
 #include "HorizonScene/LandscapeCellHlod.h"
 #include "HorizonScene/LandscapeCellHlodBake.h"
+#include "HorizonScene/LandscapeEdit.h"
 #include "HorizonScene/LandscapeFarBake.h"
 
 #include <filesystem>
@@ -32,6 +33,7 @@ struct LandscapeExportPack
 	std::shared_ptr<LandscapeFarTable> farTable;    // the baked far image (LandscapeFarBake.h); null: switched off, or nothing came out
 	bool farDone = false;                           // the same for the far image
 	std::filesystem::path editsFile;                // "<pack>.edits" beside the project's pack, when there is one: baked into the copy
+	std::vector<LandscapeStamp> stamps;             // the scenes' stamp entities (LandscapeStamps.h): baked into the copy on top of the edits
 };
 
 struct LandscapeExportPlan
