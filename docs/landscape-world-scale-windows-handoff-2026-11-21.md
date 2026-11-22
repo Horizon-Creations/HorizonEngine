@@ -288,12 +288,49 @@ one when 2 and 3 hold; they hold in the picture, but D3D12 never ran under the d
 
 Fixed on the way: `D3D12Landscape::drawDepth` called `fillGlobals` without step 28's `farBound` argument (the two branches met here).
 
+## 10. Second Windows session of 22.11.: the material and SSAO on D3D, the Mountain generator
+
+The table of section 8, as it stands now (NN-WS03, Debug, `landscape_gpu_check --only <backend>`, exit 0 on all four):
+
+| | Vulkan | OpenGL 4.6 | D3D11 | D3D12 |
+|---|---|---|---|---|
+| Ground drawn with its material | proven | proven | **proven**: 115250 px forward, 109033 deferred | **proven**: the same numbers |
+| Ground takes sun shadow / fog | proven | proven | **proven**: 4561 / 4551 px, fog 65.7 / 68.6 of 255 | **proven**: the same |
+| Ground casts into the shadow layers | proven | proven | proven | proven |
+| Ground in the SSAO pre-pass | proven | not built | **proven**: 62577 / 62453 px | **proven**: the same |
+| GI (pre-pass, ray structure) | not built | not built | not built | not built |
+| G-buffer (deferred) | not built (forward on top, lit) | not built | not built | not built |
+| Velocity (TAA) | not built | not built | not built | not built |
+| Virtual texture (`landscapeRvt`) | not built | not built | not built | not built |
+
+* **How the D3D material draw works** (the Vulkan `lsDraw` pattern): `drawDC` / `drawDC12` with `lsDraw` set gets a draw call that
+  names the ground's material; the shaders are `GetOrBuildLandscapeMaterialShaders` (D3D11) / `GetOrBuildLandscapeMaterialPSO` (D3D12),
+  every bind and restore is the mesh draw's, and `D3D11Landscape::drawPatches` / `D3D12Landscape::drawPatches` add b12 / b13
+  (`HE::vkls` layout) and t47..t55 and draw. D3D12 has `m_lsMatRootSig` (`DescribeLandscapeRootSignature`,
+  `D3D12MaterialRootSignature.h`) and puts the nine views into the next block of the frame's material SRV ring. A scene with nothing
+  but the ground no longer leaves `DrawScene` early (`groundNeedsPass`). The call site: search `lsDraw = &lf`.
+* **SSAO on D3D**: `kLandscapeHLSL::PSViewPos`; the view matrix rides in the first four layer colours (`d3dls::setViewRows`), so the
+  block and the root signatures keep their layout. `drawViewPos`, called from `runSSAO` through `drawGround`. Not in the three-target
+  reflection pre-pass: with SSR on the ground takes no ambient occlusion (as on Vulkan).
+* **Mountain generator** (`TerrainGenerate.h`): ridges, thermal erosion, terraces, paths routed from the summit and cut in as benches,
+  returned in `Result::paths`; the Landscape mode's Mountain tool, the tile brush and MCP `terrain_mountain` take them, both tools can
+  make a Spline entity "Mountain Path" per path. All off by default in `Params`; the two editor tools start with ridges 0.6 and
+  erosion 0.4. The path search needs a cost per TURN (a state is node and direction), else it zigzags every step and the smoothing
+  draws a straight line up the hill.
+* **Tests**: `test_terrain_generate.cpp` (13 cases), `test_mcp_tools_terrain.cpp`, the D3D12 landscape PSO on WARP with its negative
+  control (`test_material_graph.cpp`, "a material's tile landscape variant builds against the landscape root signature").
+* **Tried and stopped**: two subagents (Mountain, Vulkan passes) were started and stopped before either changed a file; the empty
+  worktree `C:\hw326v` (branch `claude/landscape-vulkan-passes`, at `1cb053dfa`) is theirs and can be removed.
+
 ## Handoff
 
-- **Done / verified / not verified:** section 9 for Windows; the three docs named at the top for the Mac. Not verified on Windows:
-  D3D12 under the debug layer, a Release build, `--arrays`, the editor by hand (section 5), the full `he_tests` run after the merge.
-- **Next:** install the D3D12 debug layer and repeat step 3; then the largest gap, D3D11 / D3D12 drawing the ground with its material
-  (section 8, "Gaps to fill"); `release/0.8.0` (116 commits ahead, PR 233 among them) is not merged into this branch yet.
+- **Done / verified / not verified:** sections 9 and 10 for Windows; the three docs named at the top for the Mac. Not verified on
+  Windows: D3D12 under the debug layer (not installed), a Release build, `--arrays`, the editor by hand (section 5; also the new
+  Mountain rows and the path splines, and what the new relief looks like), the full `he_tests` run.
+- **Next, largest first:** GI on Vulkan / D3D (with GI on the ground takes NO sun shadow there: the mask comes from a pre-pass the
+  ground is not in; Metal: `EncodeLandscapePass` kind 1, `m_giLandMesh`); the G-buffer variant (`landscapeFragment` of the material's
+  G-buffer tail, Metal: `EncodeLandscapeGBuffer`; the tool does not judge it yet); velocity; the virtual texture (section 7b). Then
+  `release/0.8.0` into this branch (PR 233 among its commits).
 - **Do not:** bump the landscape's generation for an edit (it empties every backend's atlas); rely on `LandscapeTileSource::coarse()`
   (null for a pack in coarse regions: `coarseWindow`); name anything `far`, `near` or `small` (Windows macros).
 - **Order:** 0, 1, 2, 3, then 5. Items 2 and 3 are board steps 27 and 28; item 1 has none yet.
