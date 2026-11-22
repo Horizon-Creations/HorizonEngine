@@ -379,19 +379,41 @@ the backends first, the merge of `release/0.8.0` after; origin is pushed after e
   `%APPDATA%\HorizonEngine\EngineContentCache\Textures`. `HE_LGC_GROUP=mountains` is `checkGroup()` in `EngineCheck.cpp`.
 * **`he_tests` after these commits** (Debug, scratch APPDATA, 4073 cases run): 3 fail, none in files this branch touches.
   `test_inspector_ui.cpp:510` (clipboard, known), `test_hc_codegen_export_build.cpp:181` (empty build message; run outside
-  vcvars, not looked into), `test_physics_threading.cpp:305` crashes with an SEH exception every time (the branch has no diff
-  under `src/HE_Core/src/Physics`; not looked into, not compared with `release/0.8.0`).
+  vcvars, not looked into), `test_physics_threading.cpp:305` crashes with an SEH exception every time (fixed in section 13).
+
+## 13. Fifth Windows session of 22.11.: the Debug physics crash, velocity on all four
+
+* **`test_physics_threading.cpp:305`** (`360be5ed6`): Jolt is built with asserts in Debug and its default `AssertFailed` breaks
+  into the debugger. `PhysicsSystem::Update` asserts on a full contact cache right before it returns the error
+  `PhysicsWorld::step` counts, so every Debug process died there. `joltEnsureInit` (`PhysicsWorld.cpp:192`) installs a handler
+  that logs and carries on. `--source-file=*test_physics*`: 134 cases pass. Not a landscape change; `release/0.8.0` has the
+  same crash until this branch is merged.
+* **Velocity (TAA)**, `kLandscapePassVelocity` claimed on D3D11 + D3D12 (`b15e66849`), Vulkan (`4583a9b9a`), OpenGL
+  (`ade0b4fc9`). The ground is drawn FIRST in each backend's velocity pass, with the scene's jittered matrix pulled a hair
+  towards the camera (`vkls::velocityClip`, `VulkanLandscapeLayout.h`): the depth it tests against was written by the
+  MATERIAL's vertex stage, which is other code; the pass writes no depth, so the meshes drawn after it overwrite it.
+  D3D: `PSVelocity` in `kLandscapeHLSL`, the two unjittered view-projections as rows in `layerColor[0..3]` / `[4..7]`
+  (`d3dls::setViewRows(g, m, first)`), `D3D11Landscape` / `D3D12Landscape::drawVelocity`. Vulkan: `fsVelocity` (`uAux0` /
+  `uAux1`, both with this frame's jitter like the meshes), `drawDepth(..., velocityPrev)`. OpenGL: `DrawLandscapeVelocity`,
+  `OpenGLLandscape::Shading::depthReadOnly` (the pulled-in depth must not be written: at 1 km it is 20 m nearer).
+* **The witness** (`EngineCheck.cpp`, "TAA, live viewport"; needs `--arrays`, any group with texture: Forest without its arrays
+  works). A still resets the TAA history on all four Windows backends, so the old contrast lines say nothing. The pan now also
+  runs through `SetEditorCamera` + `Render()` + `CaptureViewport` and is compared with the camera STANDING at the pan's last
+  position, as 4x4 block averages on the ground (ghosting, not texel noise); the same again with `HE_LANDSCAPE_PASSES=0`.
+  Fails a backend that claims the bit when "with" is above 0.6 x "without". Measured, forward and deferred:
+  D3D11 2.20 / 5.73, D3D12 2.20 / 5.73, Vulkan 2.14 / 5.60, OpenGL 1.53 / 4.05 (/255, with / without the ground's velocity).
+  Metal runs this block too now and was NOT run: if `Render()` gives no image there it prints NOT CHECKED, it cannot fail a
+  correct backend.
+* **Not covered**: a floating-origin move between two frames (the previous matrix is in the old origin's frame, one frame of
+  wrong velocity, as for meshes); motion blur was not looked at.
 
 ## Handoff
 
-- **Done / verified / not verified:** sections 9 to 12 for Windows; the three docs named at the top for the Mac. Not verified on
+- **Done / verified / not verified:** sections 9 to 13 for Windows; the three docs named at the top for the Mac. Not verified on
   Windows: D3D12 under the debug layer (not installed) and its SOFTWARE GI kernel (this machine takes DXR), a Release build,
-  `--arrays` with the Forest arrays (section 12), the editor by hand (section 5; also the Mountain rows and the path splines),
-  the full `he_tests` run.
-- **Open, in this order:** (1) Velocity on all four
-  (D3D: `kTaaVelocityHLSL` shows the output; the matrices can ride in the layer colours like `setViewRows`; Vulkan has `uAux0/1`;
-  the tool has NO witness for it: write one first, e.g. edge sharpness under a moving camera with TAA on). (2) With SSR on the
-  ground takes no SSAO (the three-target reflection pre-pass). Then `release/0.8.0` into this branch (PR 233 among its commits).
+  `--arrays` with the Forest arrays (section 12), the editor by hand (section 5; also the Mountain rows and the path splines).
+- **Open, in this order:** (1) With SSR on the ground takes no SSAO (the three-target reflection pre-pass). (2) Run the new TAA
+  witness on the Mac. Then `release/0.8.0` into this branch (PR 233 among its commits).
 - **Do not:** bump the landscape's generation for an edit (it empties every backend's atlas); rely on `LandscapeTileSource::coarse()`
   (null for a pack in coarse regions: `coarseWindow`); name anything `far`, `near` or `small` (Windows macros).
 - **Order:** 0, 1, 2, 3, then 5. Items 2 and 3 are board steps 27 and 28; item 1 has none yet.
