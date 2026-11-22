@@ -58,6 +58,8 @@ struct VulkanLandscape::Impl
 	std::vector<Pipe>     depthPipes;
 	std::vector<Pipe>     viewPosPipes;   // the SSAO position pre-pass (fsViewPos)
 	VkShaderModule        fsViewPos = VK_NULL_HANDLE;
+	std::vector<Pipe>     giGBufPipes;    // the GI pre-pass (fsGiGBuf)
+	VkShaderModule        fsGiGBuf = VK_NULL_HANDLE;   // null when it did not compile: the ground then takes no ray-traced shadow
 
 	Img                   img[kImages];
 	Img                   farAlbedo;   // the baked far image (sRGB, mipped); view is null when the world has none
@@ -240,16 +242,18 @@ struct VulkanLandscape::Impl
 	// `depthOnly`: the vertex stage alone into a pass without colour attachments, with the depth bias left to the caller
 	// (vkCmdSetDepthBias: a shadow layer sets its own, a pre-pass sets zero).
 	// `viewPos`: the scene's vertex stage with the view-space position fragment (fsViewPos) into a pass with one colour attachment.
-	VkPipeline pipelineFor(VkRenderPass pass, bool depthOnly = false, bool viewPos = false)
+	// `giGBuf`: the scene's vertex stage with the GI pre-pass's fragment (fsGiGBuf: position and normal) into a pass with two
+	// colour attachments.
+	VkPipeline pipelineFor(VkRenderPass pass, bool depthOnly = false, bool viewPos = false, bool giGBuf = false)
 	{
-		std::vector<Pipe>& pipes = depthOnly ? depthPipes : viewPos ? viewPosPipes : this->pipes;
+		std::vector<Pipe>& pipes = depthOnly ? depthPipes : viewPos ? viewPosPipes : giGBuf ? giGBufPipes : this->pipes;
 		for (Pipe& p : pipes)
 			if (p.pass == pass) return p.pipe;
 		VkPipelineShaderStageCreateInfo stages[2]{};
 		stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
 		stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT; stages[0].module = vs; stages[0].pName = "main";
 		stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-		stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT; stages[1].module = viewPos ? fsViewPos : fs; stages[1].pName = "main";
+		stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT; stages[1].module = viewPos ? fsViewPos : giGBuf ? fsGiGBuf : fs; stages[1].pName = "main";
 
 		VkVertexInputBindingDescription bind{ 0, sizeof(float) * 2, VK_VERTEX_INPUT_RATE_VERTEX };
 		VkVertexInputAttributeDescription attr{ 0, 0, VK_FORMAT_R32G32_SFLOAT, 0 };
@@ -269,7 +273,8 @@ struct VulkanLandscape::Impl
 		VkPipelineColorBlendAttachmentState cba{};
 		cba.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
 		VkPipelineColorBlendStateCreateInfo cb{ VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO };
-		cb.attachmentCount = depthOnly ? 0u : 1u; cb.pAttachments = depthOnly ? nullptr : &cba;
+		const VkPipelineColorBlendAttachmentState two[2] = { cba, cba };
+		cb.attachmentCount = depthOnly ? 0u : giGBuf ? 2u : 1u; cb.pAttachments = depthOnly ? nullptr : giGBuf ? two : &cba;
 		rs.depthBiasEnable = depthOnly ? VK_TRUE : VK_FALSE;
 		const VkDynamicState dyn[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR, VK_DYNAMIC_STATE_DEPTH_BIAS };
 		VkPipelineDynamicStateCreateInfo dsi{ VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO };
@@ -323,6 +328,19 @@ bool VulkanLandscape::init(const Env& env, std::string* error)
 		shutdown();
 		if (error) *error = e;
 		return false;
+	}
+	{
+		// The GI pre-pass's stage: what the pass writes for a mesh, the position the shadow rays start from (a = 1) and the
+		// surface normal (a = roughness 1), the normal from the position's derivatives, turned up. Optional.
+		std::string* keep = error;
+		std::string scratch;
+		error = &scratch;
+		compileStage(std::string(glsl::kLandscapeVulkanFragmentPrelude)
+		                 + "layout(location = 1) out vec4 lsGiNorm;\n"
+		                   "void main() { vec3 n = normalize(cross(dFdy(vWorldRel), dFdx(vWorldRel))); if (n.y < 0.0) n = -n;\n"
+		                   "              fragColor = vec4(vWorldRel, 1.0); lsGiNorm = vec4(n, 1.0); }\n",
+		             he::shaderc::Stage::Fragment, "GI pre-pass fragment shader", m.fsGiGBuf);
+		error = keep;
 	}
 
 	// Set 0: the block and the thirteen images (binding numbers in LandscapeShaderSource.h).
@@ -393,6 +411,11 @@ void VulkanLandscape::shutdown()
 	m.viewPosPipes.clear();
 	if (m.fsViewPos) vkDestroyShaderModule(m.env.device, m.fsViewPos, nullptr);
 	m.fsViewPos = VK_NULL_HANDLE;
+	for (Impl::Pipe& p : m.giGBufPipes)
+		if (p.pipe) vkDestroyPipeline(m.env.device, p.pipe, nullptr);
+	m.giGBufPipes.clear();
+	if (m.fsGiGBuf) vkDestroyShaderModule(m.env.device, m.fsGiGBuf, nullptr);
+	m.fsGiGBuf = VK_NULL_HANDLE;
 	m.destroyImages();
 	for (uint32_t i = 0; i < Impl::kMaxFrames; ++i)
 	{
@@ -634,11 +657,13 @@ void VulkanLandscape::draw(VkCommandBuffer cmd, VkRenderPass pass, VkExtent2D ex
 }
 
 void VulkanLandscape::drawDepth(VkCommandBuffer cmd, VkRenderPass pass, VkExtent2D extent, uint32_t frameIndex, const HE::LandscapeRenderFrame& f,
-                                const glm::mat4& clip, const glm::mat4* viewForPosition)
+                                const glm::mat4& clip, const glm::mat4* viewForPosition, bool giGBuf)
 {
 	Impl& m = *m_impl;
 	if (!m.ok || !f.active || !f.world || f.patches.empty() || !m.world || m.world->generation != f.world->generation || frameIndex >= m.env.framesInFlight) return;
-	const VkPipeline pipe = m.pipelineFor(pass, /*depthOnly=*/viewForPosition == nullptr, /*viewPos=*/viewForPosition != nullptr);
+	if (giGBuf && !m.fsGiGBuf) return;
+	const VkPipeline pipe = giGBuf ? m.pipelineFor(pass, false, false, true)
+	                               : m.pipelineFor(pass, /*depthOnly=*/viewForPosition == nullptr, /*viewPos=*/viewForPosition != nullptr);
 	if (!pipe) return;
 	const uint32_t slot = m.passNext++ % Impl::kMaxPasses;
 	const VkDeviceSize offset = Impl::kGlobalsStride * (1 + slot);

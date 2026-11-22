@@ -113,8 +113,10 @@ public:
 	// The caller sets the depth bias (vkCmdSetDepthBias) before, and binds its own pipeline again after.
 	// `viewForPosition`: not depth only but the SSAO position pre-pass, a pass with ONE colour attachment that takes the view-space
 	// position (this matrix times the origin-relative position), alpha 1; no depth bias is used then.
+	// `giGBuf`: the GI pre-pass, a pass with TWO colour attachments: the origin-relative position (a = 1) and the surface normal
+	// (a = roughness 1), what that pass writes for a mesh.
 	void drawDepth(VkCommandBuffer cmd, VkRenderPass pass, VkExtent2D extent, uint32_t frameIndex, const HE::LandscapeRenderFrame& frame,
-	               const glm::mat4& clip, const glm::mat4* viewForPosition = nullptr);
+	               const glm::mat4& clip, const glm::mat4* viewForPosition = nullptr, bool giGBuf = false);
 	const Stats& stats() const;
 
 private:

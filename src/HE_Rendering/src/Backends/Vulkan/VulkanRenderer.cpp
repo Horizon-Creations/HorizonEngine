@@ -1396,7 +1396,7 @@ IRenderer::Capabilities VulkanRenderer::GetCapabilities() const
     c.landscapeMaterial         = m_lsMatPipelineLayout != VK_NULL_HANDLE;   // DrawScene: the ground's material draws the patches (after Initialize)
     // EncodeShadowMap: every shadow layer (proven on MoltenVK). runSSAO's position pre-pass is written and not proven: said only
     // where it is on (HE::landscapeVkSsaoOn: a real Vulkan driver, or the variable), so the witness judges it there.
-    c.landscapePassMask         = kLandscapePassShadow | kLandscapePassGBuffer | (HE::landscapeVkSsaoOn() ? kLandscapePassSsao : 0u);
+    c.landscapePassMask         = kLandscapePassShadow | kLandscapePassGBuffer | kLandscapePassGi | (HE::landscapeVkSsaoOn() ? kLandscapePassSsao : 0u);
     c.supportsRawCapture        = m_postFxReady;   // RenderSceneImage's rawOutput rides the tonemap pass
     c.supportsRvt               = m_postFxReady && m_matReady && m_matRvt;   // a page is that raw capture copied into the pool
     return c;
@@ -14199,6 +14199,7 @@ void VulkanRenderer::createGiHwPipelines()
         bindOf(6, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER),
         bindOf(7, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR),
         bindOf(8, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE),
+        bindOf(9, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &m_giPointSampler),   // uHf: the tile landscape's height clipmap
     }, m_giShadowHwDSL);
     // gi_probe_hw.comp: SW bindings 0-5 + TLAS at 7 (6 intentionally unused).
     ok = ok && makeDSL({
@@ -14250,7 +14251,7 @@ void VulkanRenderer::createGiHwPipelines()
     {
         VkDescriptorPoolSize ps[5] = {
             { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             k_maxFramesInFlight * 6 },
-            { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,     k_maxFramesInFlight * 2 },
+            { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,     k_maxFramesInFlight * 3 }, // shadow gPos + gNorm + the height clipmap
             { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,              k_maxFramesInFlight * 4 }, // shadow raw+local, probe irr+vis
             { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,             k_maxFramesInFlight * 2 },
             { VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, k_maxFramesInFlight * 2 },
@@ -14639,7 +14640,11 @@ void VulkanRenderer::runGi(VkCommandBuffer cmd, uint32_t w, uint32_t h)
     shadowUbo.sunDirRadius = glm::vec4(towardLight, glm::radians(m_giLightRadius));
     // The software kernel's own instance list (without the terrain chunks) while the height field stands in for them.
     const bool sepOn = !useHw && m_giShadowSep;
-    const bool hfOn  = sepOn && m_giHfActive && m_giHfView && !m_renderWorld.heightfields.empty();
+    // The height field answers for a TerrainComponent's chunks where they were left out of the list (sepOn), and for the
+    // tile landscape's clipmap on EITHER kernel: its ground is no mesh, it is in no list and in no TLAS. (With `sepOn`
+    // alone in this condition the clipmap never occluded anything: its two lists are the same one.)
+    const bool hfTile = !m_renderWorld.heightfields.empty() && m_renderWorld.heightfields[0].key == kLandscapeGiHeightfieldKey;
+    const bool hfOn  = (sepOn || hfTile) && m_giHfActive && m_giHfView && !m_renderWorld.heightfields.empty();
     shadowUbo.frame        = glm::vec4(m_giFrameSeed, float(gw), float(gh),
                                        float(sepOn ? m_giShadowInstanceCount : m_giInstanceCount));
     {
@@ -14747,9 +14752,9 @@ void VulkanRenderer::runGi(VkCommandBuffer cmd, uint32_t w, uint32_t h)
         if (useHw) wTlas(shadowSet, 7);
         VkDescriptorImageInfo localSI{ VK_NULL_HANDLE, m_giLocalMask.view, VK_IMAGE_LAYOUT_GENERAL };
         wImg(shadowSet, 8, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &localSI);
-        // Binding 9 exists on the software kernel's layout only; off, any valid float view fills it (never fetched).
+        // Binding 9, on both kernels' layouts; off, any valid float view fills it (never fetched).
         VkDescriptorImageInfo hfSI{ VK_NULL_HANDLE, hfOn ? m_giHfView : m_giGBufPos.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
-        if (!useHw) wImg(shadowSet, 9, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &hfSI);
+        wImg(shadowSet, 9, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &hfSI);
         // Temporal set: gPos, raw (GENERAL), history[prev], UBO.
         VkDescriptorImageInfo rawSamp{ VK_NULL_HANDLE, m_giRaw.view, VK_IMAGE_LAYOUT_GENERAL };
         VkDescriptorImageInfo histBI { VK_NULL_HANDLE, m_giHist[prevIdx].view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
@@ -14797,6 +14802,10 @@ void VulkanRenderer::runGi(VkCommandBuffer cmd, uint32_t w, uint32_t h)
     gRPBI.renderArea.extent = { gw, gh };
     gRPBI.clearValueCount   = 3;
     gRPBI.pClearValues      = clears;
+    // The tile landscape's ground for this pass (Thema 326), asked for and uploaded before the pass is open: its pixels get a
+    // position and a normal, so the shadow rays start from them and the ground takes the ray-traced sun shadow like a mesh.
+    HE::LandscapeRenderFrame giGroundFrame;
+    const bool giGround = landscapePassFrame(vp, giGroundFrame) && m_landscape && m_landscape->ready();
     vkCmdBeginRenderPass(cmd, &gRPBI, VK_SUBPASS_CONTENTS_INLINE);
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_giGBufPipe);
     VkViewport vvp{ 0, 0, float(gw), float(gh), 0, 1 };
@@ -14840,6 +14849,8 @@ void VulkanRenderer::runGi(VkCommandBuffer cmd, uint32_t w, uint32_t h)
             vkCmdDrawIndexed(cmd, gm.indexCount, 1, 0, 0, 0);
         });
     }
+    if (giGround)
+        m_landscape->drawDepth(cmd, m_giGBufRP, VkExtent2D{ gw, gh }, m_currentFrame, giGroundFrame, vp, nullptr, /*giGBuf=*/true);
     vkCmdEndRenderPass(cmd); // colors → SHADER_READ_ONLY (dep covers COMPUTE too)
 
     // ── 2-6. Shadow mask + DDGI probe update: diffuse GI only. A reflections-
