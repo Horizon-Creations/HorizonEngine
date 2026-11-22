@@ -796,15 +796,17 @@ bool exportPng(const Services& services, const UUID& boardId, const std::filesys
 	for (const Node& n : board->nodes)
 		if (n.type != NodeType::Frame) drawNode(&dl, xf, *services.ws, n, n.rect(), false, false);
 
-	// The rasteriser reads CPU textures: the font atlas is copied, the pictures are already there.
-	std::vector<std::pair<ImTextureID, ImTextureID>> atlases;
-	auto cpuAtlas = [&](ImTextureID id) {
+	// The rasteriser reads CPU textures: the font atlas is copied, the pictures are already there. The atlas is taken
+	// from the command's texture DATA, not its id: drawing at the export's zoom can add glyphs and grow the atlas into
+	// a texture the GPU backend creates only at the next frame's render, whose id is still 0 here (ImDrawCmd::GetTexID()
+	// asserts on exactly that). The pixels are on the CPU either way.
+	std::vector<std::pair<const ImTextureData*, ImTextureID>> atlases;
+	auto cpuAtlas = [&](const ImTextureData* t) -> ImTextureID {
 		for (const auto& [from, to] : atlases)
-			if (from == id) return to;
-		ImTextureID to = id;
-		for (ImTextureData* t : ImGui::GetPlatformIO().Textures)
+			if (from == t) return to;
+		ImTextureID to = ImTextureID_Invalid;
+		if (t->Pixels && t->Width > 0 && t->Height > 0)
 		{
-			if (!t || t->GetTexID() != id || !t->Pixels || t->Width <= 0 || t->Height <= 0) continue;
 			const size_t count = static_cast<size_t>(t->Width) * static_cast<size_t>(t->Height);
 			std::vector<std::uint8_t> rgba(count * 4);
 			for (size_t i = 0; i < count; ++i)
@@ -813,17 +815,12 @@ bool exportPng(const Services& services, const UUID& boardId, const std::filesys
 				else std::memcpy(&rgba[i * 4], &t->Pixels[i * 4], 4);
 			}
 			to = he_ui::registerTexture(rgba.data(), t->Width, t->Height);
-			break;
 		}
-		atlases.emplace_back(id, to);
+		atlases.emplace_back(t, to);
 		return to;
 	};
-	auto isPicture = [&](ImTextureID id) {
-		for (const auto& kv : pictures) if (kv.second.id == id && id) return true;
-		return false;
-	};
 	for (ImDrawCmd& cmd : dl.CmdBuffer)
-		if (!cmd.UserCallback && !isPicture(cmd.GetTexID())) cmd.TexRef = ImTextureRef(cpuAtlas(cmd.GetTexID()));
+		if (!cmd.UserCallback && cmd.TexRef._TexData) cmd.TexRef = ImTextureRef(cpuAtlas(cmd.TexRef._TexData));   // a picture is a plain id already
 
 	ImDrawData data;
 	data.Valid = true;
@@ -840,7 +837,7 @@ bool exportPng(const Services& services, const UUID& boardId, const std::filesys
 	blitTexts(img, texts);
 	data.CmdLists.clear();   // dl is ours; the data does not own it
 
-	for (const auto& [from, to] : atlases) if (to != from) he_ui::unregisterTexture(to);
+	for (const auto& [from, to] : atlases) if (to != ImTextureID_Invalid) he_ui::unregisterTexture(to);
 	for (auto& kv : pictures) if (kv.second.id) he_ui::unregisterTexture(kv.second.id);
 	s_exportTex = nullptr;
 	S = savedServices;
