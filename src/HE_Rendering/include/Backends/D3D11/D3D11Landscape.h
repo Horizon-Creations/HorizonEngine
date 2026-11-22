@@ -68,6 +68,9 @@ public:
 	// test LESS with writes, no culling, no blending. Everything it sets on the context (shaders, input assembler, rasteriser, depth and blend
 	// state, constant buffers b12-b13, SRVs t32-t43, sampler s13) is put back as it was found.
 	void draw(ID3D11DeviceContext* ctx, const HE::LandscapeRenderFrame& frame, const glm::mat4& viewProj, const Shading& shading);
+	// The ground's depth into the depth-only target that is bound (a shadow layer): the vertex stage alone, with the rasteriser
+	// state (the caller's depth bias) and the depth state that are set. `frame` is the provider's for `clip` and has been uploaded.
+	void drawDepth(ID3D11DeviceContext* ctx, const HE::LandscapeRenderFrame& frame, const glm::mat4& clip);
 
 	const Stats& stats() const;
 

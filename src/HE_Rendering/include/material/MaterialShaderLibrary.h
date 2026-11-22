@@ -500,6 +500,12 @@ public:
     // samplers are the ones the resolve leaves free (it declares neither heTex0
     // nor heTexP0..3); s7 is the one register still unused.
     static constexpr int kHlslResolveUboReg      = 4;
+    // The tile landscape's material variant on D3D (landscapeVertex / landscapeFragment, Backend::HLSL): the registers the
+    // renderer binds the landscape's data at for a material draw. b12 LsGlobals, b13 LsPatch (the layout of the GLSL blocks, which
+    // is HE::vkls::Globals / PatchPush, NOT the fixed blend's d3dls structs); t47 tile heights, t48 slot table, t49 coarse
+    // heights (vertex stage; the slot table in both), t50..t52 the tile weight pages, t53..t55 the coarse ones. No sampler.
+    static constexpr uint32_t kHlslLandscapeGlobalsReg = 12;
+    static constexpr uint32_t kHlslLandscapeFirstSrv   = 47;
     static constexpr int kHlslResolveGB0Reg      = 27;
     static constexpr int kHlslResolveGB1Reg      = 28;
     static constexpr int kHlslResolveGB2Reg      = 29;

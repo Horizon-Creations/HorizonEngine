@@ -74,6 +74,10 @@ public:
 	// Sets its own root signature, pipeline, descriptor heap, topology and index buffer: the caller rebuilds its own state afterwards.
 	void draw(ID3D12GraphicsCommandList* cl, const HE::LandscapeRenderFrame& frame, const glm::mat4& viewProj, const Shading& shading,
 	          unsigned colorFormat);
+	// The ground's depth into the depth-only target that is bound (a shadow layer, D32_FLOAT): the vertex stage alone with the shadow
+	// pass's depth bias. `frame` is the provider's for `clip` and has been uploaded. Like draw(), it leaves its own root signature,
+	// pipeline and heap set: the caller rebuilds its own state afterwards.
+	void drawDepth(ID3D12GraphicsCommandList* cl, const HE::LandscapeRenderFrame& frame, const glm::mat4& clip);
 
 	const Stats& stats() const;
 

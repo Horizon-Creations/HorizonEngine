@@ -56,6 +56,8 @@ struct VulkanLandscape::Impl
 	VkDescriptorSet       passSets[kMaxFrames][kMaxPasses] = {};
 	uint32_t              passNext = 0;
 	std::vector<Pipe>     depthPipes;
+	std::vector<Pipe>     viewPosPipes;   // the SSAO position pre-pass (fsViewPos)
+	VkShaderModule        fsViewPos = VK_NULL_HANDLE;
 
 	Img                   img[kImages];
 	Img                   farAlbedo;   // the baked far image (sRGB, mipped); view is null when the world has none
@@ -218,16 +220,17 @@ struct VulkanLandscape::Impl
 
 	// `depthOnly`: the vertex stage alone into a pass without colour attachments, with the depth bias left to the caller
 	// (vkCmdSetDepthBias: a shadow layer sets its own, a pre-pass sets zero).
-	VkPipeline pipelineFor(VkRenderPass pass, bool depthOnly = false)
+	// `viewPos`: the scene's vertex stage with the view-space position fragment (fsViewPos) into a pass with one colour attachment.
+	VkPipeline pipelineFor(VkRenderPass pass, bool depthOnly = false, bool viewPos = false)
 	{
-		std::vector<Pipe>& pipes = depthOnly ? depthPipes : this->pipes;
+		std::vector<Pipe>& pipes = depthOnly ? depthPipes : viewPos ? viewPosPipes : this->pipes;
 		for (Pipe& p : pipes)
 			if (p.pass == pass) return p.pipe;
 		VkPipelineShaderStageCreateInfo stages[2]{};
 		stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
 		stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT; stages[0].module = vs; stages[0].pName = "main";
 		stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-		stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT; stages[1].module = fs; stages[1].pName = "main";
+		stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT; stages[1].module = viewPos ? fsViewPos : fs; stages[1].pName = "main";
 
 		VkVertexInputBindingDescription bind{ 0, sizeof(float) * 2, VK_VERTEX_INPUT_RATE_VERTEX };
 		VkVertexInputAttributeDescription attr{ 0, 0, VK_FORMAT_R32G32_SFLOAT, 0 };
@@ -294,7 +297,8 @@ bool VulkanLandscape::init(const Env& env, std::string* error)
 		return true;
 	};
 	if (!compileStage(glsl::BuildLandscapeVertexGLSL450(), he::shaderc::Stage::Vertex, "vertex shader", m.vs)
-	    || !compileStage(glsl::BuildLandscapeFragmentGLSL450(), he::shaderc::Stage::Fragment, "fragment shader", m.fs))
+	    || !compileStage(glsl::BuildLandscapeFragmentGLSL450(), he::shaderc::Stage::Fragment, "fragment shader", m.fs)
+	    || !compileStage(glsl::BuildLandscapeViewPosFragmentGLSL450(), he::shaderc::Stage::Fragment, "view position fragment shader", m.fsViewPos))
 	{
 		const std::string e = error ? *error : std::string();
 		shutdown();
@@ -365,6 +369,11 @@ void VulkanLandscape::shutdown()
 	for (Impl::Pipe& p : m.depthPipes)
 		if (p.pipe) vkDestroyPipeline(m.env.device, p.pipe, nullptr);
 	m.depthPipes.clear();
+	for (Impl::Pipe& p : m.viewPosPipes)
+		if (p.pipe) vkDestroyPipeline(m.env.device, p.pipe, nullptr);
+	m.viewPosPipes.clear();
+	if (m.fsViewPos) vkDestroyShaderModule(m.env.device, m.fsViewPos, nullptr);
+	m.fsViewPos = VK_NULL_HANDLE;
 	m.destroyImages();
 	for (uint32_t i = 0; i < Impl::kMaxFrames; ++i)
 	{
@@ -606,16 +615,17 @@ void VulkanLandscape::draw(VkCommandBuffer cmd, VkRenderPass pass, VkExtent2D ex
 }
 
 void VulkanLandscape::drawDepth(VkCommandBuffer cmd, VkRenderPass pass, VkExtent2D extent, uint32_t frameIndex, const HE::LandscapeRenderFrame& f,
-                                const glm::mat4& clip)
+                                const glm::mat4& clip, const glm::mat4* viewForPosition)
 {
 	Impl& m = *m_impl;
 	if (!m.ok || !f.active || !f.world || f.patches.empty() || !m.world || m.world->generation != f.world->generation || frameIndex >= m.env.framesInFlight) return;
-	const VkPipeline pipe = m.pipelineFor(pass, /*depthOnly=*/true);
+	const VkPipeline pipe = m.pipelineFor(pass, /*depthOnly=*/viewForPosition == nullptr, /*viewPos=*/viewForPosition != nullptr);
 	if (!pipe) return;
 	const uint32_t slot = m.passNext++ % Impl::kMaxPasses;
 	const VkDeviceSize offset = Impl::kGlobalsStride * (1 + slot);
 	vkls::Globals g;
 	vkls::fillGlobals(g, f, clip, glm::vec3(0.0f, 1.0f, 0.0f), glm::vec3(1.0f), glm::vec3(0.0f), false, false, false, false);
+	if (viewForPosition) std::memcpy(g.aux0, &(*viewForPosition)[0][0], sizeof(g.aux0));
 	std::memcpy(static_cast<uint8_t*>(m.uboMapped[frameIndex]) + offset, &g, sizeof(g));
 
 	// The whole set, as the scene's: the vertex stage reads the block, the heights and the slot table; the rest is what the layout

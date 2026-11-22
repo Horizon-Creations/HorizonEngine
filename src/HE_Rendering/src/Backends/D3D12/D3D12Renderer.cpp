@@ -12873,6 +12873,33 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                         ++drawIdx;
                     });
                 }
+                // The tile landscape's ground casts into the same layer (Thema 326). Written on the Mac and NOT RUN there: on by
+                // default on Windows (HE::landscapeD3dPassesOn), HE_LANDSCAPE_D3D_PASSES=0 takes it out. `landscape_gpu_check
+                // --only d3d12` judges it with the line "the ground casts (fixed blend)" (Windows handoff, section 8). The provider culls for this layer's matrix (D3D clip, depth 0..1)
+                // and hands over the tiles that arrived, which are uploaded whether or not the ground is drawn. The landscape sets
+                // its own root signature, heap and pipeline, so what the layers' mesh draws rely on is bound again afterwards:
+                // the same calls as before the graph ran.
+                if (HE::landscapeD3dPassesOn() && m_landscapeProvider && !p.landscapeFailed && p.landscape.ready())
+                {
+                    HE::LandscapeRenderFrame lf;
+                    m_landscapeProvider(glm::dmat4(clip), /*zeroToOne=*/true, lf);
+                    if (lf.active)
+                    {
+                        p.landscape.upload(cl, lf);
+                        if (HE::landscapePassesOn()) p.landscape.drawDepth(cl, lf, clip);
+                        cl->SetGraphicsRootSignature(p.rootSig.Get());
+                        p.bindClusterRoots(cl);
+                        cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+                        cl->SetGraphicsRootConstantBufferView(1, p.perFrameCB[p.frameIndex]->GetGPUVirtualAddress());
+                        if (p.sceneSrvHeap)
+                        {
+                            ID3D12DescriptorHeap* backHeaps[] = { p.sceneSrvHeap.Get() };
+                            cl->SetDescriptorHeaps(1, backHeaps);
+                            cl->SetGraphicsRootDescriptorTable(5, p.sceneSrvGpu(ssrFwdSlot));
+                        }
+                        cl->SetPipelineState(p.depthPSO.Get());
+                    }
+                }
             };
             // One barrier over ALL subresources before each array's loop and
             // one after — the slices are written back to back.
@@ -14485,6 +14512,8 @@ IRenderer::Capabilities D3D12Renderer::GetCapabilities() const
     c.supportsDeferredRendering = m_impl->postFxReady && m_impl->deferredReady;
     c.supportsRawCapture        = m_impl->postFxReady;   // RenderSceneImage's rawOutput rides the tonemap pass
     c.supportsRvt               = m_impl->postFxReady && m_impl->m_matReady;   // a page is that raw capture copied into the pool
+    // The tile landscape's ground in the shadow layers: written, not run (see renderDepthLayer). Said only with the switch on.
+    c.landscapePassMask         = HE::landscapeD3dPassesOn() ? kLandscapePassShadow : 0u;
     // Froxel volumetric fog (Thema 225 step 9): Inject/Integrate/Apply built at Initialize. It
     // draws on the HDR viewport frame only; every other frame keeps the analytic height fog.
     c.supportsVolumetricFog     = m_impl->fogPipelinesOk;

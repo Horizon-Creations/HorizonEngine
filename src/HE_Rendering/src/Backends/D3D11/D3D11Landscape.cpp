@@ -18,6 +18,7 @@ using namespace HE;
 struct D3D11Landscape::Impl
 {
 	ID3D11Device* device = nullptr;   // not owned: the renderer's, which outlives this
+	bool depthOnly = false;           // set by drawDepth around its call of draw()
 	ComPtr<ID3D11VertexShader>      vs;
 	ComPtr<ID3D11PixelShader>       ps;
 	ComPtr<ID3D11DepthStencilState> depth;
@@ -381,6 +382,13 @@ void D3D11Landscape::upload(ID3D11DeviceContext* ctx, HE::LandscapeRenderFrame& 
 	f.tableUpdates.clear();
 }
 
+void D3D11Landscape::drawDepth(ID3D11DeviceContext* ctx, const HE::LandscapeRenderFrame& f, const glm::mat4& clip)
+{
+	m_impl->depthOnly = true;
+	draw(ctx, f, clip, Shading{});
+	m_impl->depthOnly = false;
+}
+
 void D3D11Landscape::draw(ID3D11DeviceContext* ctx, const HE::LandscapeRenderFrame& f, const glm::mat4& viewProj, const Shading& shading)
 {
 	Impl& m = *m_impl;
@@ -388,6 +396,7 @@ void D3D11Landscape::draw(ID3D11DeviceContext* ctx, const HE::LandscapeRenderFra
 	if (!m.ok || !f.active || !f.world || f.patches.empty() || !m.world || m.world->generation != f.world->generation) return;
 	const LandscapeRenderStatic& w = *m.world;
 	StateGuard guard(ctx);
+	const bool depthOnly = m.depthOnly;   // drawDepth: the vertex stage alone, the caller's rasteriser (its depth bias) and depth state
 
 	d3dls::Globals g;
 	d3dls::fillGlobals(g, f, viewProj, shading.sunDir, shading.sunColor, shading.ambient, shading.albedoArray != nullptr,
@@ -410,13 +419,16 @@ void D3D11Landscape::draw(ID3D11DeviceContext* ctx, const HE::LandscapeRenderFra
 	ID3D11SamplerState* farSmp = m.farSampler.Get();
 	ctx->PSSetSamplers(d3dls::kFarSamplerReg, 1, &farSmp);
 	ctx->VSSetShader(m.vs.Get(), nullptr, 0);
-	ctx->PSSetShader(m.ps.Get(), nullptr, 0);
+	ctx->PSSetShader(depthOnly ? nullptr : m.ps.Get(), nullptr, 0);
 	ctx->IASetInputLayout(nullptr);   // the grid comes from SV_VertexID
 	ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 	ctx->IASetIndexBuffer(m.indices.Get(), DXGI_FORMAT_R16_UINT, 0);
-	ctx->RSSetState(m.raster.Get());
-	ctx->OMSetDepthStencilState(m.depth.Get(), 0);
-	ctx->OMSetBlendState(m.blend.Get(), nullptr, 0xFFFFFFFF);
+	if (!depthOnly)
+	{
+		ctx->RSSetState(m.raster.Get());
+		ctx->OMSetDepthStencilState(m.depth.Get(), 0);
+		ctx->OMSetBlendState(m.blend.Get(), nullptr, 0xFFFFFFFF);
+	}
 	ID3D11Buffer* cbs[2] = { m.globalsCB.Get(), m.patchCB.Get() };
 	ctx->VSSetConstantBuffers(d3dls::kGlobalsReg, 2, cbs);
 	ctx->PSSetConstantBuffers(d3dls::kGlobalsReg, 1, cbs);

@@ -20,7 +20,7 @@ namespace
 {
 constexpr D3D12_RESOURCE_STATES kSrvState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
 constexpr unsigned kRing = 4;               // upload buffers in the ring: deeper than the renderer's three frames in flight
-constexpr unsigned kGlobalsSlots = 32;      // LsGlobals copies in the constant buffer: a draw takes the next one, so no two live draws share it
+constexpr unsigned kGlobalsSlots = 128;     // LsGlobals copies in the constant buffer: a draw takes the next one, so no two live draws share it (a frame has up to 21 with the shadow layers, and three frames may be in flight)
 constexpr unsigned kSets = 8;               // descriptor tables in the heap: a draw takes the next one (its albedo descriptor is rewritten), so no two live draws share it
 constexpr UINT64   kMinRingBytes = 4ull * 1024 * 1024;
 
@@ -237,6 +237,34 @@ struct D3D12Landscape::Impl
 		psos.emplace_back(fmt, pso);
 		return psos.back().second.Get();
 	}
+
+	// The vertex stage alone into a depth-only target (a shadow layer): no pixel shader, no render target, and the shadow pass's
+	// depth bias (the renderer's depthPSO: 4 constant, 2 slope scaled). Tried once.
+	ComPtr<ID3D12PipelineState> depthPso;
+	bool depthPsoTried = false;
+	ID3D12PipelineState* depthPsoGet()
+	{
+		if (depthPsoTried) return depthPso.Get();
+		depthPsoTried = true;
+		D3D12_GRAPHICS_PIPELINE_STATE_DESC pd{};
+		pd.pRootSignature = rootSig.Get();
+		pd.VS = { vsBlob->GetBufferPointer(), vsBlob->GetBufferSize() };
+		pd.SampleMask = UINT_MAX;
+		pd.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+		pd.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+		pd.RasterizerState.DepthClipEnable = TRUE;
+		pd.RasterizerState.DepthBias = 4;
+		pd.RasterizerState.SlopeScaledDepthBias = 2.0f;
+		pd.DepthStencilState.DepthEnable = TRUE;
+		pd.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+		pd.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
+		pd.DSVFormat = DXGI_FORMAT_D32_FLOAT;
+		pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+		pd.NumRenderTargets = 0;
+		pd.SampleDesc.Count = 1;
+		if (FAILED(device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&depthPso)))) depthPso.Reset();
+		return depthPso.Get();
+	}
 };
 
 D3D12Landscape::D3D12Landscape() : m_impl(std::make_unique<Impl>()) {}
@@ -342,6 +370,8 @@ void D3D12Landscape::shutdown()
 	m.destroyImages();
 	for (Impl::Ring& r : m.ring) r = Impl::Ring{};
 	m.psos.clear();
+	m.depthPso.Reset();
+	m.depthPsoTried = false;
 	m.globals.Reset();
 	m.globalsMapped = nullptr;
 	m.srvHeap.Reset();
@@ -573,6 +603,46 @@ void D3D12Landscape::upload(ID3D12GraphicsCommandList* cl, HE::LandscapeRenderFr
 
 	for (UINT i = 0; i < nb; ++i) std::swap(bars[i].Transition.StateBefore, bars[i].Transition.StateAfter);
 	cl->ResourceBarrier(nb, bars);
+}
+
+void D3D12Landscape::drawDepth(ID3D12GraphicsCommandList* cl, const HE::LandscapeRenderFrame& f, const glm::mat4& clip)
+{
+	Impl& m = *m_impl;
+	if (!m.ok || !f.active || !f.world || f.patches.empty() || !m.world || m.world->generation != f.world->generation) return;
+	ID3D12PipelineState* pso = m.depthPsoGet();
+	if (!pso) return;
+	const LandscapeRenderStatic& w = *m.world;
+
+	d3dls::Globals g;
+	d3dls::fillGlobals(g, f, clip, glm::vec3(0.0f, 1.0f, 0.0f), glm::vec3(1.0f), glm::vec3(0.0f), false, false, false);
+	const unsigned slot = m.globalsNext++ % kGlobalsSlots;
+	std::memcpy(m.globalsMapped + static_cast<size_t>(slot) * m.globalsStride, &g, sizeof(g));
+	// The table the last colour draw used, as it is: the vertex stage reads the landscape's own images, which sit at the same
+	// place of every table; the borrowed arrays behind them are not read here and must not be rewritten under a frame in flight.
+	const unsigned set = (m.setNext + kSets - 1) % kSets;
+
+	ID3D12DescriptorHeap* heaps[] = { m.srvHeap.Get() };
+	cl->SetDescriptorHeaps(1, heaps);
+	cl->SetGraphicsRootSignature(m.rootSig.Get());
+	cl->SetPipelineState(pso);
+	cl->SetGraphicsRootConstantBufferView(0, m.globals->GetGPUVirtualAddress() + static_cast<UINT64>(slot) * m.globalsStride);
+	D3D12_GPU_DESCRIPTOR_HANDLE table = m.srvHeap->GetGPUDescriptorHandleForHeapStart();
+	table.ptr += static_cast<UINT64>(set) * d3dls::kSrvCount * m.srvInc;
+	cl->SetGraphicsRootDescriptorTable(2, table);
+	cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+	cl->IASetIndexBuffer(&m.ibv);
+
+	const uint32_t total = w.quadrantFirst[3] + w.quadrantCount[3];
+	for (const LandscapeRenderPatch& p : f.patches)
+	{
+		d3dls::PatchData pd;
+		d3dls::fillPatch(pd, p);
+		cl->SetGraphicsRoot32BitConstants(1, sizeof(pd) / 4, &pd, 0);
+		if ((p.quadrants & 15) == 15) cl->DrawIndexedInstanced(total, 1, 0, 0, 0);
+		else
+			for (int q = 0; q < 4; ++q)
+				if ((p.quadrants & (1 << q)) && w.quadrantCount[q] != 0) cl->DrawIndexedInstanced(w.quadrantCount[q], 1, w.quadrantFirst[q], 0, 0);
+	}
 }
 
 void D3D12Landscape::draw(ID3D12GraphicsCommandList* cl, const HE::LandscapeRenderFrame& f, const glm::mat4& viewProj, const Shading& shading,

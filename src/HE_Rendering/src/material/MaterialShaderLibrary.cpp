@@ -1858,6 +1858,16 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::landscapeVertex(Ba
             { { Stage::Vertex, 0, 50, 20 }, { Stage::Vertex, 0, 58, 21 },
               { Stage::Vertex, 0, 59, 20 }, { Stage::Vertex, 0, 51, 21 }, { Stage::Vertex, 0, 60, 22 } }, opts));
     }
+    else if (backend == Backend::HLSL)
+    {
+        // D3D11 / D3D12: LsGlobals and LsPatch where the landscape classes bind theirs (b12, b13: SM 5.0 has b0..b13), the three
+        // height images at the head of the landscape's own range (kHlslLandscapeFirstSrv). Read with texelFetch alone: the
+        // SamplerStates SPIRV-Cross declares for them are dead and go on s0 (unpinned they would be s51 and up, which FXC refuses).
+        out = toCompiled(compileHlslPinned(src, Stage::Vertex,
+            { { Stage::Vertex, 0, 50, kHlslLandscapeGlobalsReg }, { Stage::Vertex, 0, 58, kHlslLandscapeGlobalsReg + 1 },
+              { Stage::Vertex, 0, 59, kHlslLandscapeFirstSrv, 0 }, { Stage::Vertex, 0, 51, kHlslLandscapeFirstSrv + 1, 0 },
+              { Stage::Vertex, 0, 60, kHlslLandscapeFirstSrv + 2, 0 } }));
+    }
     else
         out = toCompiled(compile(src, Stage::Vertex, toTarget(backend)));
     return m_uiVertCache.emplace(key, std::move(out)).first->second;
@@ -3689,6 +3699,19 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fragmentVariant(
             pins.push_back({ Stage::Fragment, 0, 24, 24 }); // HeClusterLights → t24
             pins.push_back({ Stage::Fragment, 0, 25, 25 }); // HeClusterGrid   → t25
             pins.push_back({ Stage::Fragment, 0, 26, 26 }); // HeClusterIdx    → t26
+        }
+        if (landscape)
+        {
+            // The landscape variant (landscapeFragmentSource): LsGlobals where the D3D landscape classes bind theirs (b12), the
+            // slot table and the six weight pages above everything a material binds (t48, t50..t55; the material's own rows end
+            // at t46). All seven are read with texelFetch alone, so their SamplerStates are dead and share s0 with heAO's.
+            pins.push_back({ Stage::Fragment, 0, 50, kHlslLandscapeGlobalsReg });
+            pins.push_back({ Stage::Fragment, 0, 51, kHlslLandscapeFirstSrv + 1, 0 });   // heLsSlotTable
+            for (int p = 0; p < 3; ++p)
+            {
+                pins.push_back({ Stage::Fragment, 0, static_cast<uint32_t>(52 + p), static_cast<uint32_t>(kHlslLandscapeFirstSrv + 3 + p), 0 });   // heLsTileWeights
+                pins.push_back({ Stage::Fragment, 0, static_cast<uint32_t>(55 + p), static_cast<uint32_t>(kHlslLandscapeFirstSrv + 6 + p), 0 });   // heLsCoarseWeights
+            }
         }
         out = toCompiled(compileHlslPinned(withRvtWin(injected, /*allowCold=*/true), Stage::Fragment, pins));
     }

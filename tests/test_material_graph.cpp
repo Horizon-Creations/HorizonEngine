@@ -1994,6 +1994,70 @@ TEST_CASE("PSHD encode/decode roundtrip preserves variants")
 }
 
 #if defined(HE_TESTS_HAVE_SHADERC)
+TEST_CASE("tile landscape variant on D3D: the HLSL of the patch vertex and of the Auto Landscape fragment keeps every register inside "
+          "Shader Model 5.0 and puts the landscape's data where the header says")
+{
+	using B = HE::MaterialShaderLibrary::Backend;
+	using L = HE::MaterialShaderLibrary;
+	HE::MaterialShaderLibrary lib;
+	// Every `register(xN)` of a shader: SM 5.0 has b0..b13 and s0..s15 (t goes to 127); FXC refuses anything beyond (X4509).
+	const auto registers = [](const std::string& s) {
+		std::map<std::string, std::string> byName;   // resource name -> register
+		size_t at = 0;
+		while ((at = s.find("register(", at)) != std::string::npos)
+		{
+			const size_t close = s.find(')', at), lineStart = s.rfind('\n', at) + 1;
+			const std::string reg = s.substr(at + 9, close - at - 9);
+			std::string decl = s.substr(lineStart, at - lineStart);            // "cbuffer LsGlobals : " or "Texture2D<uint4> uSlotTable : "
+			decl.erase(decl.find_last_not_of(" :") + 1);
+			byName[decl.substr(decl.find_last_of(' ') + 1)] = reg;
+			const int n = std::atoi(reg.c_str() + 1);
+			if (reg[0] == 'b') CHECK_MESSAGE(n <= 13, decl, " ", reg);
+			if (reg[0] == 's') CHECK_MESSAGE(n <= 15, decl, " ", reg);
+			if (reg[0] == 't') CHECK_MESSAGE(n <= 127, decl, " ", reg);
+			at = close;
+		}
+		return byName;
+	};
+	const auto t = [](uint32_t n) { return "t" + std::to_string(n); };
+
+	const auto& v = lib.landscapeVertex(B::HLSL);
+	REQUIRE_MESSAGE(v.ok, "landscapeVertex (HLSL) failed: ", v.log);
+	const auto vr = registers(v.source);
+	CHECK(vr.at("LsGlobals") == "b" + std::to_string(L::kHlslLandscapeGlobalsReg));
+	CHECK(vr.at("LsPatch") == "b" + std::to_string(L::kHlslLandscapeGlobalsReg + 1));
+	CHECK(vr.at("uTileHeights") == t(L::kHlslLandscapeFirstSrv));
+	CHECK(vr.at("uSlotTable") == t(L::kHlslLandscapeFirstSrv + 1));
+	CHECK(vr.at("uCoarseHeights") == t(L::kHlslLandscapeFirstSrv + 2));
+
+	HE_TEST::RvtOffScope rvtOff;
+	const HE::MatShaderGen gen = HE::generateFragment(HE::buildAutoLandscapeGraph().graph, HE::weatherFunctionLoader());
+	for (const bool clustered : { false, true })
+	{
+		const auto& f = lib.landscapeFragment(0x327, gen.glsl, B::HLSL, clustered);
+		REQUIRE_MESSAGE(f.ok, "landscapeFragment (HLSL) failed: ", f.log);
+		const auto fr = registers(f.source);
+		CHECK(fr.at("LsGlobals") == "b" + std::to_string(L::kHlslLandscapeGlobalsReg));
+		CHECK(fr.at("heLsSlotTable") == t(L::kHlslLandscapeFirstSrv + 1));
+		for (int p = 0; p < 3; ++p)
+		{
+			CHECK(fr.at("heLsTileWeights" + std::to_string(p)) == t(L::kHlslLandscapeFirstSrv + 3 + static_cast<uint32_t>(p)));
+			CHECK(fr.at("heLsCoarseWeights" + std::to_string(p)) == t(L::kHlslLandscapeFirstSrv + 6 + static_cast<uint32_t>(p)));
+		}
+		// the landscape's images are read without a filter: no live sampler of theirs, the dead ones on s0
+		CHECK(fr.at("_heLsSlotTable_sampler") == "s0");
+		CHECK(fr.at("_heLsTileWeights0_sampler") == "s0");
+		// nothing of the landscape's lands on a register a material binds (its own rows end at t46)
+		for (const auto& [name, reg] : fr)
+			if (name.rfind("heLs", 0) == 0) CHECK_MESSAGE(std::atoi(reg.c_str() + 1) >= static_cast<int>(L::kHlslLandscapeFirstSrv), name, " ", reg);
+		if (const char* dir = std::getenv("HE_DUMP_LS_HLSL"); dir && *dir && !clustered)
+		{
+			std::ofstream(std::string(dir) + "/landscape_vs.hlsl") << v.source;
+			std::ofstream(std::string(dir) + "/landscape_ps.hlsl") << f.source;
+		}
+	}
+}
+
 TEST_CASE("tile landscape variant: the patch vertex and the Auto Landscape fragment with its weights from the tile atlas cross-compile, on Metal inside the slots that are free")
 {
 	using B = HE::MaterialShaderLibrary::Backend;
