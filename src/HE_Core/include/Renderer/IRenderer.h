@@ -25,6 +25,14 @@ class ContentManager;
 // the resulting view matrix here every frame; the projection is rebuilt by the
 // extractor with the backend's current aspect ratio so it always matches the
 // viewport size exactly.
+// The tile landscape's ground in the passes besides the scene's (IRenderer::Capabilities::landscapePassMask).
+constexpr uint32_t kLandscapePassShadow   = 1u << 0;   // casts into the cascades and the local shadow layers
+constexpr uint32_t kLandscapePassGi       = 1u << 1;   // GI: the pre-pass (takes ray-traced shadows) and the ray structure (casts them)
+constexpr uint32_t kLandscapePassSsao     = 1u << 2;   // ambient occlusion sees the ground
+constexpr uint32_t kLandscapePassVelocity = 1u << 3;   // TAA / motion blur velocity
+constexpr uint32_t kLandscapePassGBuffer  = 1u << 4;   // drawn into the G-buffer on a deferred frame (not forward on top of it)
+constexpr uint32_t kLandscapePassAll      = 31u;
+
 struct EditorCameraOverride
 {
     bool      active       = false;
@@ -291,6 +299,9 @@ public:
         // pre-pass and the ray structure, in the SSAO and velocity passes, and in the G-buffer on a deferred frame. Without it
         // the ground receives (shadows of meshes, fog, the lighting) but does not cast, occlude or report motion.
         bool landscapePasses = false;
+        // Which of those passes the backend has, one bit each (kLandscapePass*): a backend that is part of the way there says
+        // so here and leaves landscapePasses false until it has them all. landscapePasses true means every bit.
+        uint32_t landscapePassMask = 0;
         // SetRvtTileGround / EditorCameraOverride::rvtTileGround work: the tile landscape's ground can be painted into virtual
         // texture pages and drawn from them. Without it the ground is computed in place.
         bool landscapeRvt = false;

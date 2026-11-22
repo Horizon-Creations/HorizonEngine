@@ -1394,6 +1394,7 @@ IRenderer::Capabilities VulkanRenderer::GetCapabilities() const
     c.supportsVolumetricFog = m_fogReady && m_postFxReady;
     c.landscapeCoarseRevision   = true;   // VulkanLandscape.cpp: new coarse images, the atlas stays
     c.landscapeMaterial         = m_lsMatPipelineLayout != VK_NULL_HANDLE;   // DrawScene: the ground's material draws the patches (after Initialize)
+    c.landscapePassMask         = kLandscapePassShadow;                  // EncodeShadowMap: the ground in every shadow layer (landscapeDepth)
     c.supportsRawCapture        = m_postFxReady;   // RenderSceneImage's rawOutput rides the tonemap pass
     c.supportsRvt               = m_postFxReady && m_matReady && m_matRvt;   // a page is that raw capture copied into the pool
     return c;
@@ -8711,7 +8712,9 @@ void VulkanRenderer::EncodeShadowMap(VkCommandBuffer cmd, float aspect)
     // still render their atlas (mirrors Metal/GL/D3D).
     const bool wantCsm   = m_renderWorld.shadow.enabled;
     const bool wantLocal = m_renderWorld.shadow.localLayerCount > 0 && m_localShadowImage != VK_NULL_HANDLE;
-    if ((!wantCsm && !wantLocal) || m_renderWorld.objects.empty()) { ensureSampledLayout(); return; }
+    // The tile landscape's ground casts too: a scene of nothing but ground still has shadow maps to fill.
+    const bool ground = m_landscapeProvider && !m_landscapeFailed;
+    if ((!wantCsm && !wantLocal) || (m_renderWorld.objects.empty() && !ground)) { ensureSampledLayout(); return; }
     refineObjectBounds();
 
     // ── Cascade frame constants (mirrors GL's shadowFrame / D3D11) ─────────
@@ -8765,8 +8768,18 @@ void VulkanRenderer::EncodeShadowMap(VkCommandBuffer cmd, float aspect)
     m_frameCull.prepareShadowViews(m_culler, m_renderWorld, m_extractor.fullExtractCount(),
                                    m_shadowViews.data(), static_cast<size_t>(nCascades + nLocalViews),
                                    "VkShadowViews");
+    // The ground's patches for every view, asked for and uploaded BEFORE a pass is open (an upload may make images). The provider
+    // culls for the view's own matrix; the level of detail stays the camera's.
+    m_landscapeShadowFrames.clear();
+    if (ground)
+    {
+        m_landscapeShadowFrames.resize(static_cast<size_t>(nCascades + nLocalViews));
+        for (int v = 0; v < nCascades + nLocalViews; ++v)
+            landscapePassFrame(HE::kVulkanClipFix * m_shadowViews[static_cast<size_t>(v)].viewProj, m_landscapeShadowFrames[static_cast<size_t>(v)]);
+    }
     auto drawDepthLayer = [&](uint32_t size, const ShadowViewCpu& view, const glm::mat4& clip)
     {
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_shadowPipeline);   // the ground's draw below leaves its own bound
         VkViewport vp{ 0.0f, 0.0f, (float)size, (float)size, 0.0f, 1.0f };
         VkRect2D   sc{ { 0, 0 }, { size, size } };
         vkCmdSetViewport(cmd, 0, 1, &vp);
@@ -8802,6 +8815,10 @@ void VulkanRenderer::EncodeShadowMap(VkCommandBuffer cmd, float aspect)
                 vkCmdDrawIndexed(cmd, m.indexCount, 1, 0, 0, 0);
             });
         }
+        // The tile landscape's ground into the same layer, with the same bias (still set: it is dynamic state).
+        const size_t vi = static_cast<size_t>(&view - m_shadowViews.data());
+        if (vi < m_landscapeShadowFrames.size())
+            landscapeDepth(cmd, m_shadowPass, size, size, m_landscapeShadowFrames[vi], clip);
     };
 
     // One depth render per cascade into its own array layer. Each cascade
@@ -10177,7 +10194,41 @@ void VulkanRenderer::landscapeBegin(uint32_t /*width*/, uint32_t /*height*/)
     // passes rasterise the plain GL matrix, this backend's depth is the real 0..1 depth, so the landscape needs no near-plane caveat.
     m_landscapeViewProj = taaJittered(HE::kVulkanClipFix * m_renderWorld.camera.projection * m_renderWorld.camera.view);
     m_landscapeProvider(glm::dmat4(m_landscapeViewProj), /*zeroToOne=*/true, m_landscapeFrame);
-    if (!m_landscapeFrame.active) return;
+    if (!m_landscapeFrame.active || !landscapeEnsure()) return;
+    m_landscape->upload(m_landscapeFrame);
+    m_landscapeFrameLive = true;
+}
+
+// HE_LANDSCAPE_PASSES=0: the ground in the scene pass alone (the A/B switch of the witnesses; read per call, as on Metal).
+static bool landscapePassesOn()
+{
+    const char* v = std::getenv("HE_LANDSCAPE_PASSES");
+    return !(v && *v == '0');
+}
+
+bool VulkanRenderer::landscapePassFrame(const glm::mat4& clip, HE::LandscapeRenderFrame& frame)
+{
+    frame = HE::LandscapeRenderFrame{};
+    if (!m_landscapeProvider || m_landscapeFailed) return false;
+    // Asked even with the passes switched off: the provider hands over the tiles that arrived, and they must reach the atlas.
+    m_landscapeProvider(glm::dmat4(clip), /*zeroToOne=*/true, frame);
+    if (!frame.active || !landscapeEnsure()) return false;
+    m_landscape->upload(frame);
+    if (!landscapePassesOn()) frame.patches.clear();
+    return !frame.patches.empty();
+}
+
+void VulkanRenderer::landscapeDepth(VkCommandBuffer cmd, VkRenderPass pass, uint32_t width, uint32_t height, const HE::LandscapeRenderFrame& frame,
+                                    const glm::mat4& clip)
+{
+    if (!m_landscape || !m_landscape->ready() || frame.patches.empty()) return;
+    m_landscape->drawDepth(cmd, pass, VkExtent2D{ width, height }, m_currentFrame, frame, clip);
+    m_statDraws += static_cast<uint32_t>(m_landscape->stats().drawCalls);
+}
+
+bool VulkanRenderer::landscapeEnsure()
+{
+    if (m_landscapeFailed) return false;
     if (!m_landscape) m_landscape = std::make_unique<HE::VulkanLandscape>();
     if (!m_landscape->ready())
     {
@@ -10201,11 +10252,10 @@ void VulkanRenderer::landscapeBegin(uint32_t /*width*/, uint32_t /*height*/)
             HE_LOG_WARN(RHI, "VulkanRenderer: the world-scale landscape is off: %s", err.c_str());
             m_landscapeFailed = true;
             m_landscape.reset();
-            return;
+            return false;
         }
     }
-    m_landscape->upload(m_landscapeFrame);
-    m_landscapeFrameLive = true;
+    return true;
 }
 
 // Records the patches into the scene pass that is open on `cmd`. The caller restores whatever pipeline and set it needs afterwards.

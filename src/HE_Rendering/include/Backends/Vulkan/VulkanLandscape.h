@@ -108,6 +108,11 @@ public:
 	void draw(VkCommandBuffer cmd, VkRenderPass pass, VkExtent2D extent, uint32_t frameIndex, const HE::LandscapeRenderFrame& frame,
 	          const glm::mat4& viewProj, const Shading& shading);
 
+	// The ground's depth into another pass of the frame (a shadow layer, a depth pre-pass) that is open on `cmd`: vertex stage only,
+	// the pass's own matrix. `f` is the provider's frame for THAT matrix (its patches are culled for it) and has been through upload().
+	// The caller sets the depth bias (vkCmdSetDepthBias) before, and binds its own pipeline again after.
+	void drawDepth(VkCommandBuffer cmd, VkRenderPass pass, VkExtent2D extent, uint32_t frameIndex, const HE::LandscapeRenderFrame& frame,
+	               const glm::mat4& clip);
 	const Stats& stats() const;
 
 private:

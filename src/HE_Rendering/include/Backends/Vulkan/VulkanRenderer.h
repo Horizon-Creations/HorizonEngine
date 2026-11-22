@@ -2142,5 +2142,12 @@ private:
 	HE::LandscapeRenderFrame m_landscapeFrame;
 	glm::mat4                m_landscapeViewProj{ 1.0f };  // the matrix the scene rasterises with (kVulkanClipFix, TAA jitter), for the draw
 	void landscapeBegin(uint32_t width, uint32_t height);                                       // ask the provider, init on first use, run the uploads
+	// The ground in the frame's other passes. landscapePassFrame asks the provider for `clip` (Vulkan clip space) and runs the uploads:
+	// outside a render pass. landscapeDepth draws that frame's patches depth-only into the pass open on `cmd`.
+	bool landscapeEnsure();                                                                     // the VulkanLandscape exists and is ready
+	bool landscapePassFrame(const glm::mat4& clip, HE::LandscapeRenderFrame& frame);
+	void landscapeDepth(VkCommandBuffer cmd, VkRenderPass pass, uint32_t width, uint32_t height, const HE::LandscapeRenderFrame& frame,
+	                    const glm::mat4& clip);
+	std::vector<HE::LandscapeRenderFrame> m_landscapeShadowFrames;                              // one a shadow view of this frame
 	void landscapeDraw(VkCommandBuffer cmd, uint32_t width, uint32_t height, bool hdr);         // inside the scene pass
 };

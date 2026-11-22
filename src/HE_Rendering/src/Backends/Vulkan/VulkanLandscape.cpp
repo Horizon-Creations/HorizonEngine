@@ -48,6 +48,14 @@ struct VulkanLandscape::Impl
 	// recreated has a new handle, which rebuilds the pipeline).
 	struct Pipe { VkRenderPass pass = VK_NULL_HANDLE; VkPipeline pipe = VK_NULL_HANDLE; };
 	std::vector<Pipe>     pipes;
+	// The ground in other passes of the frame (shadow layers, depth pre-passes): depth only, each with its OWN LsGlobals (the matrix of
+	// the pass) and its own set. A frame's uniform buffer holds the scene's block and then kMaxPasses more; passSets[frame][i] names
+	// block i + 1. Handed out round robin (passNext): a frame draws fewer passes than there are.
+	static constexpr uint32_t     kMaxPasses = 32;
+	static constexpr VkDeviceSize kGlobalsStride = (sizeof(vkls::Globals) + 255) & ~VkDeviceSize(255);   // 256 >= any minUniformBufferOffsetAlignment
+	VkDescriptorSet       passSets[kMaxFrames][kMaxPasses] = {};
+	uint32_t              passNext = 0;
+	std::vector<Pipe>     depthPipes;
 
 	Img                   img[kImages];
 	Img                   farAlbedo;   // the baked far image (sRGB, mipped); view is null when the world has none
@@ -208,8 +216,11 @@ struct VulkanLandscape::Impl
 		vkCmdClearColorImage(cb, im.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &zero, 1, &range);
 	}
 
-	VkPipeline pipelineFor(VkRenderPass pass)
+	// `depthOnly`: the vertex stage alone into a pass without colour attachments, with the depth bias left to the caller
+	// (vkCmdSetDepthBias: a shadow layer sets its own, a pre-pass sets zero).
+	VkPipeline pipelineFor(VkRenderPass pass, bool depthOnly = false)
 	{
+		std::vector<Pipe>& pipes = depthOnly ? depthPipes : this->pipes;
 		for (Pipe& p : pipes)
 			if (p.pass == pass) return p.pipe;
 		VkPipelineShaderStageCreateInfo stages[2]{};
@@ -236,13 +247,14 @@ struct VulkanLandscape::Impl
 		VkPipelineColorBlendAttachmentState cba{};
 		cba.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
 		VkPipelineColorBlendStateCreateInfo cb{ VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO };
-		cb.attachmentCount = 1; cb.pAttachments = &cba;
-		const VkDynamicState dyn[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+		cb.attachmentCount = depthOnly ? 0u : 1u; cb.pAttachments = depthOnly ? nullptr : &cba;
+		rs.depthBiasEnable = depthOnly ? VK_TRUE : VK_FALSE;
+		const VkDynamicState dyn[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR, VK_DYNAMIC_STATE_DEPTH_BIAS };
 		VkPipelineDynamicStateCreateInfo dsi{ VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO };
-		dsi.dynamicStateCount = 2; dsi.pDynamicStates = dyn;
+		dsi.dynamicStateCount = depthOnly ? 3u : 2u; dsi.pDynamicStates = dyn;
 
 		VkGraphicsPipelineCreateInfo pci{ VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO };
-		pci.stageCount = 2; pci.pStages = stages;
+		pci.stageCount = depthOnly ? 1u : 2u; pci.pStages = stages;
 		pci.pVertexInputState = &vi; pci.pInputAssemblyState = &ia; pci.pViewportState = &vps; pci.pRasterizationState = &rs;
 		pci.pMultisampleState = &ms; pci.pDepthStencilState = &ds; pci.pColorBlendState = &cb; pci.pDynamicState = &dsi;
 		pci.layout = pipeLayout; pci.renderPass = pass; pci.subpass = 0;
@@ -311,17 +323,20 @@ bool VulkanLandscape::init(const Env& env, std::string* error)
 	plci.pushConstantRangeCount = 1; plci.pPushConstantRanges = &pcr;
 	if (vkCreatePipelineLayout(m.env.device, &plci, nullptr, &m.pipeLayout) != VK_SUCCESS) return fail("landscape: pipeline layout");
 
-	const VkDescriptorPoolSize ps[2] = { { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, m.env.framesInFlight },
-	                                     { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, m.env.framesInFlight * (glsl::kLandscapeVkBindingCount - 1) } };
+	const uint32_t setCount = m.env.framesInFlight * (1 + Impl::kMaxPasses);   // the scene's and the passes' (Impl::passSets)
+	const VkDescriptorPoolSize ps[2] = { { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, setCount },
+	                                     { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, setCount * (glsl::kLandscapeVkBindingCount - 1) } };
 	VkDescriptorPoolCreateInfo dpci{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
-	dpci.maxSets = m.env.framesInFlight; dpci.poolSizeCount = 2; dpci.pPoolSizes = ps;
+	dpci.maxSets = setCount; dpci.poolSizeCount = 2; dpci.pPoolSizes = ps;
 	if (vkCreateDescriptorPool(m.env.device, &dpci, nullptr, &m.pool) != VK_SUCCESS) return fail("landscape: descriptor pool");
 	for (uint32_t i = 0; i < m.env.framesInFlight; ++i)
 	{
 		VkDescriptorSetAllocateInfo dsai{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
 		dsai.descriptorPool = m.pool; dsai.descriptorSetCount = 1; dsai.pSetLayouts = &m.setLayout;
 		if (vkAllocateDescriptorSets(m.env.device, &dsai, &m.sets[i]) != VK_SUCCESS) return fail("landscape: descriptor set");
-		if (!m.makeBuffer(sizeof(vkls::Globals), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, nullptr, m.ubo[i], m.uboMem[i])
+		for (uint32_t p = 0; p < Impl::kMaxPasses; ++p)
+			if (vkAllocateDescriptorSets(m.env.device, &dsai, &m.passSets[i][p]) != VK_SUCCESS) return fail("landscape: pass descriptor set");
+		if (!m.makeBuffer(Impl::kGlobalsStride * (1 + Impl::kMaxPasses), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, nullptr, m.ubo[i], m.uboMem[i])
 		    || vkMapMemory(m.env.device, m.uboMem[i], 0, VK_WHOLE_SIZE, 0, &m.uboMapped[i]) != VK_SUCCESS)
 			return fail("landscape: uniform buffer");
 	}
@@ -347,6 +362,9 @@ void VulkanLandscape::shutdown()
 	for (Impl::Pipe& p : m.pipes)
 		if (p.pipe) vkDestroyPipeline(m.env.device, p.pipe, nullptr);
 	m.pipes.clear();
+	for (Impl::Pipe& p : m.depthPipes)
+		if (p.pipe) vkDestroyPipeline(m.env.device, p.pipe, nullptr);
+	m.depthPipes.clear();
 	m.destroyImages();
 	for (uint32_t i = 0; i < Impl::kMaxFrames; ++i)
 	{
@@ -582,6 +600,63 @@ void VulkanLandscape::draw(VkCommandBuffer cmd, VkRenderPass pass, VkExtent2D ex
 	vkCmdSetScissor(cmd, 0, 1, &sc);
 	vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
 	vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m.pipeLayout, 0, 1, &m.sets[frameIndex], 0, nullptr);
+	const VkDeviceSize zero = 0;
+	vkCmdBindVertexBuffers(cmd, 0, 1, &m.vbo, &zero);
+	drawPatches(cmd, m.pipeLayout, f);
+}
+
+void VulkanLandscape::drawDepth(VkCommandBuffer cmd, VkRenderPass pass, VkExtent2D extent, uint32_t frameIndex, const HE::LandscapeRenderFrame& f,
+                                const glm::mat4& clip)
+{
+	Impl& m = *m_impl;
+	if (!m.ok || !f.active || !f.world || f.patches.empty() || !m.world || m.world->generation != f.world->generation || frameIndex >= m.env.framesInFlight) return;
+	const VkPipeline pipe = m.pipelineFor(pass, /*depthOnly=*/true);
+	if (!pipe) return;
+	const uint32_t slot = m.passNext++ % Impl::kMaxPasses;
+	const VkDeviceSize offset = Impl::kGlobalsStride * (1 + slot);
+	vkls::Globals g;
+	vkls::fillGlobals(g, f, clip, glm::vec3(0.0f, 1.0f, 0.0f), glm::vec3(1.0f), glm::vec3(0.0f), false, false, false, false);
+	std::memcpy(static_cast<uint8_t*>(m.uboMapped[frameIndex]) + offset, &g, sizeof(g));
+
+	// The whole set, as the scene's: the vertex stage reads the block, the heights and the slot table; the rest is what the layout
+	// names, valid and unread.
+	const VkDescriptorSet set = m.passSets[frameIndex][slot];
+	VkDescriptorBufferInfo bi{ m.ubo[frameIndex], offset, sizeof(vkls::Globals) };
+	VkDescriptorImageInfo ii[glsl::kLandscapeVkBindingCount] = {};
+	const VkImageView views[glsl::kLandscapeVkBindingCount] = {
+		VK_NULL_HANDLE,
+		m.img[kHeights].view, m.img[kTable].view, m.img[kCoarseH].view,
+		m.img[kWeights].view, m.img[kWeights + 1].view, m.img[kWeights + 2].view,
+		m.img[kCoarseW].view, m.img[kCoarseW + 1].view, m.img[kCoarseW + 2].view,
+		m.env.whiteArray, m.env.whiteArray, m.env.whiteArray, m.img[kCoarseW].view };
+	VkWriteDescriptorSet wr[glsl::kLandscapeVkBindingCount] = {};
+	for (unsigned i = 0; i < glsl::kLandscapeVkBindingCount; ++i)
+	{
+		wr[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+		wr[i].dstSet = set;
+		wr[i].dstBinding = i;
+		wr[i].descriptorCount = 1;
+		if (i == glsl::kLandscapeVkBindingGlobals)
+		{
+			wr[i].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+			wr[i].pBufferInfo = &bi;
+		}
+		else
+		{
+			const VkSampler smp = i == glsl::kLandscapeVkBindingFar ? m.farSampler : i >= glsl::kLandscapeVkBindingAlbedo ? m.env.arraySampler : m.nearest;
+			ii[i] = { smp, views[i], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+			wr[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+			wr[i].pImageInfo = &ii[i];
+		}
+	}
+	vkUpdateDescriptorSets(m.env.device, glsl::kLandscapeVkBindingCount, wr, 0, nullptr);
+
+	const VkViewport vp{ 0.0f, 0.0f, static_cast<float>(extent.width), static_cast<float>(extent.height), 0.0f, 1.0f };
+	const VkRect2D sc{ { 0, 0 }, extent };
+	vkCmdSetViewport(cmd, 0, 1, &vp);
+	vkCmdSetScissor(cmd, 0, 1, &sc);
+	vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
+	vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m.pipeLayout, 0, 1, &set, 0, nullptr);
 	const VkDeviceSize zero = 0;
 	vkCmdBindVertexBuffers(cmd, 0, 1, &m.vbo, &zero);
 	drawPatches(cmd, m.pipeLayout, f);

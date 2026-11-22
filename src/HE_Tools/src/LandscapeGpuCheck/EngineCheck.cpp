@@ -208,12 +208,13 @@ int runMaterialCheck(HE::RendererBackend backend, HE::RenderPath path, const std
 	// Capabilities::landscapePasses: the ground in the shadow maps, the GI pre-pass and ray structure, SSAO. A witness of those is a
 	// failure only on a backend that says it has them.
 	bool passes = false;
+	uint32_t passMask = 0;   // Capabilities::landscapePassMask: judged pass by pass, so a backend can be part of the way there
 	int notBuilt = 0;
 	if (!RendererFactory::Available(backend)) { std::printf("  not in this binary\n"); return 0; }
 	int failures = 0;
 	const auto fail = [&](const char* what, const std::string& detail = {}) { ++failures; std::printf("    FAIL  %s %s\n", what, detail.c_str()); };
-	const auto failPass = [&](const char* what, const std::string& detail = {}) {
-		if (passes) fail(what, detail);
+	const auto failPass = [&](uint32_t bit, const char* what, const std::string& detail = {}) {
+		if (passMask & bit) fail(what, detail);
 		else { ++notBuilt; std::printf("    not built on this backend: %s\n", what); }
 	};
 	try
@@ -237,7 +238,12 @@ int runMaterialCheck(HE::RendererBackend backend, HE::RenderPath path, const std
 			return 0;
 		}
 		passes = renderer->GetCapabilities().landscapePasses;
-		if (!passes) std::printf("  (this backend draws the ground with its material in the scene pass only: what needs the other passes is reported, not judged)\n");
+		passMask = passes ? kLandscapePassAll : renderer->GetCapabilities().landscapePassMask;
+		if (passMask != kLandscapePassAll)
+			std::printf("  (passes this backend says it has the ground in: shadow %s, GI %s, SSAO %s, velocity %s, G-buffer %s; the others are reported, not judged)\n",
+			            (passMask & kLandscapePassShadow) ? "yes" : "no", (passMask & kLandscapePassGi) ? "yes" : "no",
+			            (passMask & kLandscapePassSsao) ? "yes" : "no", (passMask & kLandscapePassVelocity) ? "yes" : "no",
+			            (passMask & kLandscapePassGBuffer) ? "yes" : "no");
 		renderer->SetRenderPath(path);
 		IRenderer::GISettings gi;
 		gi.enabled = false;
@@ -396,7 +402,7 @@ int runMaterialCheck(HE::RendererBackend backend, HE::RenderPath path, const std
 					std::printf("  the ground casts: a box under the ground is %.0f/255, and %.0f/255 when the ground is not in the shadow maps\n",
 					            below, belowNoCaster);
 					// what is left in the shadow is the sky's light; without the caster the two are equal
-					if (below > belowNoCaster * 0.8) failPass("a box under the ground stands in the ground's shadow");
+					if (below > belowNoCaster * 0.8) failPass(kLandscapePassShadow, "a box under the ground stands in the ground's shadow");
 					writePngFile(pngPath.substr(0, pngPath.size() - 4) + "_under.png", static_cast<int>(kW), static_cast<int>(kH), under.data());
 				}
 				ov = over;
@@ -423,7 +429,7 @@ int runMaterialCheck(HE::RendererBackend backend, HE::RenderPath path, const std
 						darker += isBlue(&giOn[i * 4]) && isBlue(&giOff[i * 4]) && lum(&giOn[i * 4]) < 0.8 * lum(&giOff[i * 4]) ? 1 : 0;
 					std::printf("  shadow, GI on: %zu ground px are darker with the ground in the GI pre-pass than without\n", darker);
 					writePngFile(pngPath.substr(0, pngPath.size() - 4) + "_gi_nopass.png", static_cast<int>(kW), static_cast<int>(kH), giOff.data());
-					if (darker < 150) failPass("the ground takes the box's ray-traced shadow (GI on)", std::to_string(darker) + " px");
+					if (darker < 150) failPass(kLandscapePassGi, "the ground takes the box's ray-traced shadow (GI on)", std::to_string(darker) + " px");
 					writePngFile(pngPath.substr(0, pngPath.size() - 4) + "_gi.png", static_cast<int>(kW), static_cast<int>(kH), giOn.data());
 				}
 				// ... and the ground CASTS with GI on: its height clipmap is in the ray-tracing structure. The box under the ramp again,
@@ -461,7 +467,7 @@ int runMaterialCheck(HE::RendererBackend backend, HE::RenderPath path, const std
 					{
 						std::printf("  the ground casts, GI on: a box under the ground is %.0f/255, and %.0f/255 when the ground is not in the ray-tracing structure\n",
 						            centreLum(with), centreLum(without));
-						if (centreLum(with) > centreLum(without) * 0.8) failPass("a box under the ground stands in the ground's ray-traced shadow");
+						if (centreLum(with) > centreLum(without) * 0.8) failPass(kLandscapePassGi, "a box under the ground stands in the ground's ray-traced shadow");
 						writePngFile(pngPath.substr(0, pngPath.size() - 4) + "_gi_under.png", static_cast<int>(kW), static_cast<int>(kH), with.data());
 					}
 					ov = over;
@@ -506,7 +512,7 @@ int runMaterialCheck(HE::RendererBackend backend, HE::RenderPath path, const std
 					}
 					std::printf("  ambient occlusion: %zu ground px are darker with the ground in the SSAO pre-pass than without\n", darker);
 					std::printf("  no self-shadow: %zu of %zu ground px are darker because the ground is in the shadow maps\n", selfShadow, ground);
-					if (path == HE::RenderPath::Forward && darker < 60) failPass("the ground takes ambient occlusion", std::to_string(darker) + " px");
+					if (path == HE::RenderPath::Forward && darker < 60) failPass(kLandscapePassSsao, "the ground takes ambient occlusion", std::to_string(darker) + " px");
 					if (selfShadow > ground / 100) fail("the plane does not shadow itself", std::to_string(selfShadow) + " px");
 					writePngFile(pngPath.substr(0, pngPath.size() - 4) + "_ao.png", static_cast<int>(kW), static_cast<int>(kH), aoOn.data());
 				}

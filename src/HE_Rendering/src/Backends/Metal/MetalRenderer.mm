@@ -20841,6 +20841,7 @@ IRenderer::Capabilities MetalRenderer::GetCapabilities() const
 #if defined(HE_HAVE_SHADERC)
 	c.landscapeMaterial          = true;   // EncodeLandscape: the ground's material draws the patches
 	c.landscapeRvt               = true;   // SetRvtTileGround, rvtTileGround pages
+	c.landscapePassMask          = kLandscapePassAll;
 	c.landscapePasses            = true;// EncodeLandscapePass / EncodeLandscapeGBuffer / the ground's mesh in the ray structure
 #endif
 #if defined(HE_HAVE_SHADERC)
