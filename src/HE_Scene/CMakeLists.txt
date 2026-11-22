@@ -61,6 +61,7 @@ add_library(HorizonScene SHARED
     src/RvtProducer.cpp
     src/RvtBaseBake.cpp
     src/RvtLandscape.cpp
+    src/RvtLandscapeTiles.cpp
     src/TrailSystem.cpp
     src/TerrainPaint.cpp
     src/TerrainSculpt.cpp

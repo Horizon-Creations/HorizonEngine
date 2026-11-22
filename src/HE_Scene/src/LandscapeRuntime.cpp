@@ -364,7 +364,7 @@ void LandscapeRuntime::updateAt(const glm::dvec3& cameraAbsolute, const glm::vec
 	std::vector<LandscapeAtlas::Release> rel;
 	std::vector<LandscapeAtlas::TableUpdate> tab;
 	m_atlas->sync(*m_store, up, rel, tab, m_config.maxUploadsPerFrame);
-	for (auto& u : up) m_pendingUploads.push_back(std::move(u));
+	for (auto& u : up) { m_changedTiles.insert(u.key); m_pendingUploads.push_back(std::move(u)); }
 	for (auto& r : rel) m_pendingReleases.push_back(r);
 	for (auto& t : tab) m_pendingTable.push_back(t);
 
@@ -387,6 +387,13 @@ void LandscapeRuntime::updateAt(const glm::dvec3& cameraAbsolute, const glm::vec
 void LandscapeRuntime::tilesReplaced(const std::vector<std::pair<LandscapeTileKey, std::shared_ptr<const LandscapeTile>>>& tiles)
 {
 	if (active()) m_store->replace(tiles);
+}
+
+glm::dvec2 LandscapeRuntime::worldSizeM() const
+{
+	if (!m_source) return glm::dvec2(0.0);
+	const double tileM = m_source->geometry().tileM;
+	return glm::dvec2(m_source->tilesX() * tileM, m_source->tilesZ() * tileM);
 }
 
 void LandscapeRuntime::tileChanged(const std::vector<LandscapeTileKey>& keys)

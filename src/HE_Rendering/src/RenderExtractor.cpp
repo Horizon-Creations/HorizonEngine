@@ -9,6 +9,7 @@
 #include <SDL3/SDL_timer.h>
 #include <Renderer/IRenderer.h>
 #include <HorizonScene/HorizonWorld.h>
+#include <HorizonScene/RvtLandscape.h>            // tileGroundKey / tileGroundGraph
 #include <HorizonScene/EnvironmentPush.h>   // the ONE EnvironmentComponent → settings map
 #include <HorizonScene/Components/EnvironmentComponent.h>
 #include <HorizonScene/TransformHierarchy.h>
@@ -416,35 +417,12 @@ void windWaterParams(const MaterialAsset& ma, const MaterialComponent* mc,
 		const bool rvt = ma->customShaderFragGlsl.find("heRvtSample(") != std::string::npos;
 		const bool overridden = mc && !mc->paramOverrides.empty();
 		if ((!rvt && !overridden) || ma->nodeGraphJson.empty()) return source;
-		uint64_t key = 0xcbf29ce484222325ULL;
-		const auto mix = [&](const void* p, size_t n) {
-			for (size_t i = 0; i < n; ++i) key = (key ^ static_cast<const uint8_t*>(p)[i]) * 0x100000001b3ULL;
-		};
-		const size_t sizes[2] = { ma->nodeGraphJson.size(), ma->customShaderFragGlsl.size() };
-		mix(sizes, sizeof(sizes));
-		mix(ma->shaderParamData.data(), ma->shaderParamData.size() * sizeof(float));
-		if (mc)
-			for (const MaterialParamOverride& o : mc->paramOverrides) { mix(o.name.data(), o.name.size()); mix(o.value, sizeof(o.value)); }
+		const uint64_t key = HE::landscape::tileGroundKey(cm, source, mc);
 		if (cache.source == source && cache.key == key && cm.getMaterial(cache.derived)) return cache.derived;
 
 		HE::MaterialGraph g;
-		if (!HE::materialGraphFromJson(ma->nodeGraphJson, g)) return source;
-		const std::vector<std::string> names = ma->graphParamNames;   // copied: registering below moves the asset
-		const std::vector<float> data = ma->shaderParamData;
+		if (!HE::landscape::tileGroundGraph(cm, source, mc, g)) return source;
 		g = HE::matInlineRvt(g);
-		for (HE::MatGraphNode& n : g.nodes)
-		{
-			if (n.type != HE::MatNodeType::ParamFloat && n.type != HE::MatNodeType::ParamColor && n.type != HE::MatNodeType::ParamVec4
-			    && n.type != HE::MatNodeType::ParamVec2 && n.type != HE::MatNodeType::ParamBool)
-				continue;
-			for (size_t i = 0; i < names.size(); ++i)
-				if (names[i] == n.s && data.size() >= (i + 1) * 4)
-					for (size_t c = 0; c < 4; ++c) n.p[c] = data[i * 4 + c];
-			if (mc)
-				for (const MaterialParamOverride& o : mc->paramOverrides)
-					if (o.name == n.s)
-						for (size_t c = 0; c < 4; ++c) n.p[c] = o.value[c];
-		}
 		MaterialAsset a;
 		a.type = HE::AssetType::Material;
 		a.name = "TileLandscapeGround";

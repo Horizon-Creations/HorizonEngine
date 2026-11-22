@@ -16500,7 +16500,7 @@ void MetalRenderer::EncodeLandscapePass(void* renderEncoder, const glm::mat4& cl
 // the graph's textures, the virtual texture); the landscape adds its own images. Lighting and the rest of the preamble are the
 // encoder's already. Returns the pipeline to draw the patches with (the lit one, or the G-buffer one for the deferred pass), or null:
 // the fixed blend. Not on a page camera (rvtSlot): that draws the page material on meshes.
-void* MetalRenderer::BindLandscapeMaterial(void* renderEncoder, const HE::LandscapeRenderFrame& frame, bool gbuffer)
+void* MetalRenderer::BindLandscapeMaterial(void* renderEncoder, const HE::LandscapeRenderFrame& frame, bool gbuffer, const HE::UUID* use)
 {
 	void* result = nullptr;
 #if defined(HE_HAVE_SHADERC)
@@ -16514,8 +16514,11 @@ void* MetalRenderer::BindLandscapeMaterial(void* renderEncoder, const HE::Landsc
 			HE_LOG_WARN(RHI, "MetalRenderer: the landscape's material %s is not there; the ground keeps its fixed blend", frame.materialPath.c_str());
 	}
 	// What is drawn: the extractor's derived material where the landscape's own cannot be (RenderWorld::tileLandscapeMaterial).
-	const HE::UUID matId = m_renderWorld.tileLandscapeMaterial != HE::UUID{} ? m_renderWorld.tileLandscapeMaterial : frame.materialId;
-	if (matId != HE::UUID{} && m_editorCamera.rvtSlot < 0)
+	// `use`: the virtual texture's consumer, for the patches it serves. A page of the ground (rvtTileGround): the layer's view.
+	const HE::UUID matId = use ? *use
+	                     : m_editorCamera.rvtSlot >= 0 ? m_editorCamera.rvtMaterial
+	                     : m_renderWorld.tileLandscapeMaterial != HE::UUID{} ? m_renderWorld.tileLandscapeMaterial : frame.materialId;
+	if (matId != HE::UUID{})
 		if (void* pso = GetOrBuildLandscapeMaterialPipeline(matId, gbuffer))
 		{
 			id<MTLRenderCommandEncoder> enc = (__bridge id<MTLRenderCommandEncoder>)renderEncoder;
@@ -16557,18 +16560,47 @@ bool MetalRenderer::EncodeLandscapeGBuffer(void* renderEncoder, const glm::mat4&
 	m_landscapeProvider(glm::dmat4(viewProj), /*zeroToOne=*/false, frame);
 	if (!frame.active || !EnsureLandscape()) return false;
 	MetalLandscape::Shading sh;
+	std::vector<HE::LandscapeRenderPatch> rvtPatches;
+	const bool rvt = TakeRvtTilePatches(frame, /*gbuffer=*/true, rvtPatches);
 	sh.materialPipeline = BindLandscapeMaterial(renderEncoder, frame, /*gbuffer=*/true);
 	const bool drawn = sh.materialPipeline != nullptr;
 	if (!drawn) frame.patches.clear();
 	m_landscape.encode(renderEncoder, frame, viewProj, sh);
+	if (drawn && rvt)
+	{
+		frame.uploads.clear();
+		frame.tableUpdates.clear();
+		frame.patches = std::move(rvtPatches);
+		sh.materialPipeline = BindLandscapeMaterial(renderEncoder, frame, /*gbuffer=*/true, &m_tileRvtConsumer);
+		m_landscape.encode(renderEncoder, frame, viewProj, sh);
+	}
 	return drawn;
 }
 
-void MetalRenderer::EncodeLandscape(void* renderEncoder, const glm::mat4& viewProj, const HE::LandscapeRenderFrame& frame)
+bool MetalRenderer::TakeRvtTilePatches(HE::LandscapeRenderFrame& frame, bool gbuffer, std::vector<HE::LandscapeRenderPatch>& inside)
+{
+	if (m_tileRvtConsumer == HE::UUID{} || m_editorCamera.rvtSlot >= 0 || !m_rvtPool[0]) return false;
+	if (const auto t = m_rvtTables.find(m_tileRvtConsumer); t == m_rvtTables.end() || !t->second.tex) return false;
+	if (!GetOrBuildLandscapeMaterialPipeline(m_tileRvtConsumer, gbuffer)) return false;
+	const glm::dvec2 o(frame.uvOrigin.x, frame.uvOrigin.z);   // patch corners are relative to the floating origin
+	const auto mid = std::stable_partition(frame.patches.begin(), frame.patches.end(), [&](const HE::LandscapeRenderPatch& p) {
+		const double x0 = double(p.x0) + o.x, z0 = double(p.z0) + o.y;
+		return !(x0 >= m_tileRvtMin.x && z0 >= m_tileRvtMin.y && x0 + double(p.size) <= m_tileRvtMax.x && z0 + double(p.size) <= m_tileRvtMax.y);
+	});
+	inside.assign(mid, frame.patches.end());
+	frame.patches.erase(mid, frame.patches.end());
+	return !inside.empty();
+}
+
+void MetalRenderer::EncodeLandscape(void* renderEncoder, const glm::mat4& viewProj, HE::LandscapeRenderFrame& frame)
 {
 	if (!frame.active || !EnsureLandscape()) return;   // asked for at the top of EncodeScene; no landscape in this scene: nothing compiled, nothing drawn
 
 	MetalLandscape::Shading sh;
+	// A virtual texture page of meshes: the ground stays out of it (its uploads are still applied).
+	if (m_editorCamera.rvtSlot >= 0 && !m_editorCamera.rvtTileGround) frame.patches.clear();
+	std::vector<HE::LandscapeRenderPatch> rvtPatches;
+	const bool rvt = TakeRvtTilePatches(frame, /*gbuffer=*/false, rvtPatches);
 	sh.materialPipeline = BindLandscapeMaterial(renderEncoder, frame, /*gbuffer=*/false);
 	sh.sunDir = glm::normalize(m_renderWorld.sunDirection);
 	sh.ambient = m_renderWorld.ambient;
@@ -16588,6 +16620,14 @@ void MetalRenderer::EncodeLandscape(void* renderEncoder, const glm::mat4& viewPr
 		sh.maskArray = optional(frame.world->maskArrayPath);
 	}
 	m_landscape.encode(renderEncoder, frame, viewProj, sh);
+	if (rvt)
+	{
+		frame.uploads.clear();
+		frame.tableUpdates.clear();
+		frame.patches = std::move(rvtPatches);
+		sh.materialPipeline = BindLandscapeMaterial(renderEncoder, frame, /*gbuffer=*/false, &m_tileRvtConsumer);
+		m_landscape.encode(renderEncoder, frame, viewProj, sh);
+	}
 }
 
 void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,

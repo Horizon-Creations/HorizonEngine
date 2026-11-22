@@ -62,6 +62,9 @@ struct EditorCameraOverride
     // world's components, the three views extract the same scene and the renderer walks it once (the extractor's
     // beginFrame reuse). It also keeps a far-LOD stand-in material (the baked far landscape) out of a page.
     HE::UUID  rvtMaterial;
+    // With rvtSlot >= 0: the page is the TILE landscape's (SetLandscapeProvider), whose ground is then drawn with rvtMaterial.
+    // False: a page of meshes, and the tile ground stays out of it.
+    bool      rvtTileGround = false;
 };
 
 // ─── WorldPreviewEnv ────────────────────────────────────────────────────────
@@ -805,6 +808,10 @@ public:
     // to the camera the material itself is sharper than any page). Replaces the previous set; empty = every chunk swaps.
     // A backend without it swaps every chunk (the near view is then blurrier, nothing else changes).
     virtual void SetRvtNearChunks(uint32_t /*terrainEntity*/, const std::vector<uint32_t>& /*chunkEntities*/) {}
+    // The tile landscape's ground (SetLandscapeProvider): its patches that lie wholly inside the absolute XZ rectangle are drawn
+    // with `consumerMaterial` (which reads the pool through the table SetRvtPageTable gave it), the others with the ground's own
+    // material as before. Null `consumerMaterial` = off. A backend without it draws the whole ground with its own material.
+    virtual void SetRvtTileGround(const HE::UUID& /*consumerMaterial*/, const glm::dvec2& /*minXZ*/, const glm::dvec2& /*maxXZ*/) {}
     // The pages the lookup's feedback reported since the last call (keys of RvtLookup.h's rvtFeedbackKey, unordered, may repeat),
     // appended to `keys`. False = the backend has no feedback (the driver then serves the camera square alone).
     virtual bool ReadRvtFeedback(std::vector<uint32_t>& /*keys*/) { return false; }

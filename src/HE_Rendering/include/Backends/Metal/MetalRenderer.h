@@ -116,6 +116,8 @@ public:
 	void  SetRvtLandscape(uint32_t terrainEntity, const HE::UUID& landscapeMaterial, const HE::UUID& consumerMaterial) override;
 	void  ReleaseRvtConsumer(const HE::UUID& consumerMaterial) override;
 	void  SetRvtNearChunks(uint32_t terrainEntity, const std::vector<uint32_t>& chunkEntities) override;
+	void  SetRvtTileGround(const HE::UUID& consumerMaterial, const glm::dvec2& minXZ, const glm::dvec2& maxXZ) override
+	{ m_tileRvtConsumer = consumerMaterial; m_tileRvtMin = minXZ; m_tileRvtMax = maxXZ; }
 	void  SetSceneVisible(bool visible) override { m_sceneHidden = !visible; }
 	bool  m_sceneHidden = false;   // SetSceneVisible: the offscreen viewport is not shown this frame, its scene passes are skipped
 	bool  ReadRvtFeedback(std::vector<uint32_t>& keys) override;
@@ -1663,7 +1665,12 @@ private:
 	// ── World-scale landscape (Thema 326, step 2 part B) ─────────────────────
 	// EncodeScene asks the application's provider (IRenderer::SetLandscapeProvider) once for the frame of the camera the scene pass rasterises
 	// with, and EncodeLandscape encodes it into that pass, after the skinned meshes and before the sky. Forward geometry: no shadows, SSAO or GI, not in the G-buffer.
-	void EncodeLandscape(void* renderEncoder, const glm::mat4& viewProj, const HE::LandscapeRenderFrame& frame);
+	void EncodeLandscape(void* renderEncoder, const glm::mat4& viewProj, HE::LandscapeRenderFrame& frame);
+	// SetRvtTileGround: the consumer and the absolute XZ rectangle its pages cover. TakeRvtTilePatches moves the frame's patches that
+	// lie wholly inside into `inside` (drawn with the consumer); false: none, or the consumer cannot be drawn now.
+	HE::UUID   m_tileRvtConsumer{};
+	glm::dvec2 m_tileRvtMin{ 0.0 }, m_tileRvtMax{ 0.0 };
+	bool TakeRvtTilePatches(HE::LandscapeRenderFrame& frame, bool gbuffer, std::vector<HE::LandscapeRenderPatch>& inside);
 	GpuMesh  m_giLandMesh;                       // the tile landscape's GI height clipmap as a mesh with its BLAS (EncodeGIAccelBuild)
 	uint64_t m_giLandMeshVersion = 0;            // GiHeightfield::version it was made from
 	HE::UUID m_landscapeMaterialLoadTried{};     // the group material this renderer tried to load from its path
@@ -1673,7 +1680,7 @@ private:
 	void* m_landscapePassPipeline[kLandscapePassKinds] = {};   // the ground's vertex stage for each of those targets
 	bool  m_landscapePassTried[kLandscapePassKinds] = {};
 	void* GetOrBuildLandscapeMaterialPipeline(const HE::UUID& materialId, bool gbuffer = false);
-	void* BindLandscapeMaterial(void* renderEncoder, const HE::LandscapeRenderFrame& frame, bool gbuffer);
+	void* BindLandscapeMaterial(void* renderEncoder, const HE::LandscapeRenderFrame& frame, bool gbuffer, const HE::UUID* use = nullptr);
 	bool  EncodeLandscapeGBuffer(void* renderEncoder, const glm::mat4& viewProj);
 	bool  m_landscapeInGBuffer = false;          // this frame's G-buffer pass drew the ground: the scene pass does not draw it again
 	std::unordered_map<uint64_t, void*> m_landscapeMaterialPipelines;   // key = the material's shader key, salted; null = does not build

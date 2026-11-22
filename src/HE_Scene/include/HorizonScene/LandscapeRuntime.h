@@ -197,6 +197,12 @@ public:
 	// (updateAt: tools, tests) sets it here.
 	void setMaterialId(const HE::UUID& id) { m_materialId = id; m_materialPath.clear(); }
 	const HE::UUID& materialId() const { return m_materialId; }
+	const std::string& materialPath() const { return m_materialPath; }
+	// The tiles the atlas took up since the last call (streamed in, edited, read again): what a painted picture of the ground (a
+	// virtual texture page) under them was made from is stale. A set, so it stays bounded when nobody asks.
+	void takeChangedTiles(std::vector<LandscapeTileKey>& out) const { out.assign(m_changedTiles.begin(), m_changedTiles.end()); m_changedTiles.clear(); }
+	// The whole world's edge lengths in metres (not the render window's).
+	glm::dvec2 worldSizeM() const;
 	LandscapeEditSource* edits() const { return m_edits.get(); }
 	const std::filesystem::path& packFile() const { return m_packFile; }
 	void tilesReplaced(const std::vector<std::pair<LandscapeTileKey, std::shared_ptr<const LandscapeTile>>>& tiles);
@@ -259,6 +265,7 @@ private:
 	HE::UUID                                 m_materialId{};                    // the ground's material this frame (update())
 	std::string                              m_materialPath;                    // its asset path when it is the texture group's
 	uint32_t                                 m_landscapeEntity = 0xFFFFFFFEu;   // PhysicsWorld::kGroundOwner until a component names the entity
+	mutable std::unordered_set<LandscapeTileKey, LandscapeTileKeyHash> m_changedTiles;   // takeChangedTiles
 	std::vector<LandscapeAtlas::Upload>      m_pendingUploads;
 	std::vector<LandscapeAtlas::Release>     m_pendingReleases;
 	std::vector<LandscapeAtlas::TableUpdate> m_pendingTable;
