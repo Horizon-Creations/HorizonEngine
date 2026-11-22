@@ -11,6 +11,7 @@
 #include <HorizonScene/FoliagePaint.h>   // foliage density-mask brush
 #include <HorizonScene/TerrainHeightmap.h> // greyscale heightmap → heights
 #include <HorizonScene/TerrainGenerate.h>  // Mountain: a formation grown in a dragged area
+#include "SplineEdit.h"                    // Mountain: its paths as spline entities
 #include <HorizonScene/WaterBrush.h>       // Water: a stroke into the landscape's water field
 #include <HorizonScene/WaterLake.h>        // Water: "To Lake" on a painted pond
 #include <HorizonRendering/RenderWorld.h>
@@ -110,7 +111,10 @@ static bool        s_rampValid       = false;   // Ramp: a start point was captu
 // work. Radius/Falloff/Strength above do not apply to it; it has its own form.
 enum class MountainShape { Rectangle, Circle };
 static MountainShape           s_mountainShape = MountainShape::Rectangle;
-static TerrainGenerate::Params s_mountain;      // Max Height, Falloff, Roughness, Octaves, Frequency, Seed
+// Max Height, Falloff, Roughness, Octaves, Frequency, Seed, and the Shape and Paths rows. The tool starts with ridges and
+// some erosion on (a mountain, not a noise bump); TerrainGenerate's own defaults stay the plain shape for scripts and old calls.
+static TerrainGenerate::Params s_mountain = [] { TerrainGenerate::Params p; p.ridges = 0.6f; p.erosion = 0.4f; return p; }();
+static bool        s_mountainSplines = true;    // Mountain: every path it cuts also becomes a spline entity
 static glm::vec3   s_areaStartWS{};             // Mountain: world-space point where the drag began
 static glm::vec3   s_areaEndWS{};               // Mountain: last ground point the drag reached
 static bool        s_areaValid       = false;   // Mountain: the drag began on the ground
@@ -1126,8 +1130,19 @@ void sculptInViewport(AppContext& ctx, const RenderWorld& sceneSnapshot,
 							if (ctx.contentManager)
 								TerrainSystem::updateTerrains(*ctx.world, *ctx.contentManager,
 								                              ctx.renderer);
-							HE_LOG_INFO(Editor, "Mountain generated: %u vertices, peak %+.1f m",
-							            res.changed, res.peakAdded);
+							// Its paths as splines, inside the same undo step: a
+							// fence, a road or a script can follow the trail.
+							if (s_mountainSplines && ctx.world)
+								for (const std::vector<TerrainGenerate::PathPoint>& line : res.paths)
+								{
+									std::vector<glm::vec3> pts;
+									pts.reserve(line.size());
+									for (const TerrainGenerate::PathPoint& pt : line)
+										pts.push_back(glm::vec3(terrainWorldPos) + glm::vec3(pt.x, pt.y, pt.z));
+									SplineEdit::createFromPoints(*ctx.world, pts, "Mountain Path");
+								}
+							HE_LOG_INFO(Editor, "Mountain generated: %u vertices, peak %+.1f m, %zu path(s)",
+							            res.changed, res.peakAdded, res.paths.size());
 						}
 					}
 				}
@@ -2600,6 +2615,50 @@ void renderPanel(AppContext& ctx)
                         EditorWidgets::helpForLabel("New Seed##mountain");
                         ImGui::TreePop();
                     }
+                    // The realistic half of the generator: all at "off" until moved.
+                    if (ImGui::TreeNodeEx("Shape (Ridges, Erosion, Terraces)##mountainshape", ImGuiTreeNodeFlags_DefaultOpen))
+                    {
+                        rowLabel("Ridges");
+                        ImGui::SliderFloat("##mountain_ridges", &s_mountain.ridges, 0.0f, 1.0f, "%.2f");
+                        EditorWidgets::helpForLabel("Ridges##mountain");
+                        rowLabel("Erosion");
+                        ImGui::SliderFloat("##mountain_erosion", &s_mountain.erosion, 0.0f, 1.0f, "%.2f");
+                        EditorWidgets::helpForLabel("Erosion##mountain");
+                        rowLabel("Terraces");
+                        ImGui::SliderInt("##mountain_terraces", &s_mountain.terraces, 0, 32);
+                        EditorWidgets::helpForLabel("Terraces##mountain");
+                        if (s_mountain.terraces > 0)
+                        {
+                            rowLabel("Terrace Sharpness");
+                            ImGui::SliderFloat("##mountain_tsharp", &s_mountain.terraceSharpness, 0.0f, 1.0f, "%.2f");
+                            EditorWidgets::helpForLabel("Terrace Sharpness##mountain");
+                        }
+                        ImGui::TreePop();
+                    }
+                    if (ImGui::TreeNodeEx("Paths##mountainpaths", ImGuiTreeNodeFlags_DefaultOpen))
+                    {
+                        rowLabel("Paths");
+                        ImGui::SliderInt("##mountain_paths", &s_mountain.paths, 0, 8);
+                        EditorWidgets::helpForLabel("Paths##mountain");
+                        if (s_mountain.paths > 0)
+                        {
+                            rowLabel("Path Width");
+                            ImGui::DragFloat("##mountain_pwidth", &s_mountain.pathWidth, 0.1f, 0.5f, 100.0f, "%.1f m");
+                            EditorWidgets::helpForLabel("Path Width##mountain");
+                            rowLabel("Path Max Grade");
+                            ImGui::SliderFloat("##mountain_pgrade", &s_mountain.pathMaxGrade, 0.05f, 1.0f, "%.2f");
+                            EditorWidgets::helpForLabel("Path Max Grade##mountain");
+                            EditorWidgets::checkbox("Create Path Splines##mountain", &s_mountainSplines);
+                        }
+                        ImGui::TreePop();
+                    }
+                    s_mountain.ridges           = std::clamp(s_mountain.ridges, 0.0f, 1.0f);
+                    s_mountain.erosion          = std::clamp(s_mountain.erosion, 0.0f, 1.0f);
+                    s_mountain.terraces         = std::clamp(s_mountain.terraces, 0, 256);
+                    s_mountain.terraceSharpness = std::clamp(s_mountain.terraceSharpness, 0.0f, 1.0f);
+                    s_mountain.paths            = std::clamp(s_mountain.paths, 0, 8);
+                    s_mountain.pathWidth        = std::max(0.5f, s_mountain.pathWidth);
+                    s_mountain.pathMaxGrade     = std::clamp(s_mountain.pathMaxGrade, 0.02f, 2.0f);
                     s_mountain.falloff   = std::max(0.0f, s_mountain.falloff);
                     s_mountain.roughness = std::clamp(s_mountain.roughness, 0.0f, 1.0f);
                     s_mountain.octaves   = std::clamp(s_mountain.octaves, 1, 12);

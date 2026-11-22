@@ -7938,6 +7938,46 @@ namespace
 	  "fresh shape with the same settings. Mountains already made stay as "
 	  "they are.",
 	  "", "editor#landscape-mode" },
+	{ "Landscape/Ridges##mountain", "Mountain Ridges",
+	  "How much of the relief is ridged: sharp crests with V-shaped valleys "
+	  "between them, the ridgelines wandering instead of running straight. At 0 "
+	  "the relief is the round noise of the landscape itself. Needs Roughness "
+	  "above 0 to show.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Erosion##mountain", "Mountain Erosion",
+	  "Lets flanks that are steeper than a scree slope (about 40 degrees) shed "
+	  "material downhill, so spikes and cliffs of the noise become the debris "
+	  "fans a real mountain has. Higher values run more passes. The peak still "
+	  "reaches Max Height and the rim stays where it is.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Terraces##mountain", "Mountain Terraces",
+	  "Cuts the height into this many level steps from the ground up to the "
+	  "peak, like rice terraces or the benches of a quarry. 0 turns it off.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Terrace Sharpness##mountain", "Terrace Sharpness",
+	  "How much of each step is a level bench. At 0 the slope stays as it was, "
+	  "at 1 the mountain is a staircase with steep risers.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Paths##mountain", "Mountain Paths",
+	  "How many trails lead from the rim of the area up to the summit, spread "
+	  "evenly round the mountain. Each is cut into the ground as a level bench "
+	  "and turns back on itself where the flank is steeper than Path Max Grade. "
+	  "0 makes none.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Path Width##mountain", "Path Width",
+	  "How wide the level bench of a path is, in metres. It blends into the "
+	  "slope over another half width on either side.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Path Max Grade##mountain", "Path Max Grade",
+	  "The steepest a path should climb, as rise over run: 0.3 is 30 cm up per "
+	  "metre walked. On a steeper flank the path traverses and turns back "
+	  "instead of going straight up. A low value gives long winding trails.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Create Path Splines##mountain", "Create Path Splines",
+	  "On: every path also becomes a Spline entity named Mountain Path that "
+	  "follows the trail, so a fence, a road or a script can use the line. "
+	  "They are created in the same undo step as the mountain.",
+	  "", "editor#landscape-mode" },
 	{ "Landscape/Clear Paint", "",
 	  "Throws away every painted layer weight, putting the whole landscape back "
 	  "on the first layer. It is one undo step, but it removes the entire "
@@ -8076,6 +8116,24 @@ namespace
 	  "", "editor#landscape-mode" },
 	{ "Tile Landscape/Mountain Height", "",
 	  "How high the Mountain tool's peak rises above the ground, in metres. Negative digs a basin. The brush radius is the mountain's foot, the falloff how softly it meets the ground; every click uses another seed, so no two mountains are alike.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Mountain Ridges", "",
+	  "How much of the mountain's relief is ridged: sharp crests with V-shaped valleys between them. At 0 it is the round noise of a plain hill.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Mountain Erosion", "",
+	  "Lets flanks steeper than a scree slope shed material downhill, so spikes of the noise become debris fans. Higher values run more passes.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Mountain Terraces", "",
+	  "Cuts the mountain's height into this many level steps from the ground up to the peak. 0 turns it off.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Mountain Paths", "",
+	  "How many trails lead from the foot of the mountain up to its summit, spread evenly round it. Each is cut into the ground as a level bench and turns back on itself where the flank is too steep. 0 makes none.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Mountain Path Width", "",
+	  "How wide the level bench of a mountain path is, in metres.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Mountain Path Splines", "",
+	  "On: every path the Mountain tool cuts also becomes a Spline entity named Mountain Path that follows the trail. The splines are scene content with their own undo step; the ground is undone with Undo Stroke.",
 	  "", "editor#landscape-mode" },
 	{ "Tile Landscape/Brush Radius", "",
 	  "The radius of full strength, in metres. Radius plus falloff can be about 950 m at most: the brush works on a block of up to 4 x 4 tiles around the cursor, and the ring turns red where no block holds it.",

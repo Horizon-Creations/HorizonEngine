@@ -34,6 +34,7 @@
 #include <SDL3/SDL_dialog.h>
 #include <imgui.h>
 #include "EditorWidgets.h"
+#include "SplineEdit.h"          // the Mountain tool's paths as spline entities
 #endif
 
 namespace fs = std::filesystem;
@@ -442,6 +443,10 @@ struct EditState
 	glm::dvec3 rampFrom{ 0.0 };
 	float mountainHeight = 120.0f;
 	int   mountainSeed = 1;
+	float mountainRidges = 0.6f, mountainErosion = 0.4f;       // TerrainGenerate::Params: the realistic relief, on here by default
+	int   mountainTerraces = 0, mountainPaths = 0;
+	float mountainPathWidth = 4.0f;
+	bool  mountainSplines = true;                              // a spline entity per path
 	HE::water::brush::Stroke waterStroke;                      // Water: the stroke in progress (one body)
 	bool  waterDig = false;
 	float waterDepth = 2.0f;
@@ -545,7 +550,19 @@ void drawEditBlock(AppContext& ctx)
 	Row::dragFloat("Brush Falloff##tlwe", &e.falloff, 0.5f, 0.0f, 400.0f, "%.1f m");
 	Row::dragFloat("Brush Strength##tlwe", &e.strength, 0.01f, 0.01f, 5.0f, "%.2f");
 	if (e.tool == 4) Row::dragInt("Paint Layer##tlwe", &e.layer, 0.1f, 0, 11);
-	if (e.tool == 7) Row::dragFloat("Mountain Height##tlwe", &e.mountainHeight, 1.0f, -2000.0f, 2000.0f, "%.0f m");
+	if (e.tool == 7)
+	{
+		Row::dragFloat("Mountain Height##tlwe", &e.mountainHeight, 1.0f, -2000.0f, 2000.0f, "%.0f m");
+		Row::sliderFloat("Mountain Ridges##tlwe", &e.mountainRidges, 0.0f, 1.0f);
+		Row::sliderFloat("Mountain Erosion##tlwe", &e.mountainErosion, 0.0f, 1.0f);
+		Row::sliderInt("Mountain Terraces##tlwe", &e.mountainTerraces, 0, 32);
+		Row::sliderInt("Mountain Paths##tlwe", &e.mountainPaths, 0, 8);
+		if (e.mountainPaths > 0)
+		{
+			Row::dragFloat("Mountain Path Width##tlwe", &e.mountainPathWidth, 0.1f, 0.5f, 100.0f, "%.1f m");
+			EditorWidgets::checkbox("Mountain Path Splines##tlwe", &e.mountainSplines);
+		}
+	}
 	if (e.tool == 8)
 	{
 		EditorWidgets::assetDropSlot(ctx, "Stamp Heightmap", e.stampTexture, HE::AssetType::Texture,
@@ -731,8 +748,27 @@ void brushInViewport(AppContext& ctx, const RenderWorld& sceneSnapshot, const Im
 			mp.maxHeight = e.mountainHeight;
 			mp.falloff = e.falloff;
 			mp.seed = e.mountainSeed++;
-			TerrainGenerate::mountain(tc, area, mp);
+			mp.ridges = e.mountainRidges;
+			mp.erosion = e.mountainErosion;
+			mp.terraces = e.mountainTerraces;
+			mp.paths = e.mountainPaths;
+			mp.pathWidth = e.mountainPathWidth;
+			const TerrainGenerate::Result res = TerrainGenerate::mountain(tc, area, mp);
 			session->commit();
+			// Its paths as spline entities (the session's heights are absolute metres, its x / z relative to its centre). They
+			// are scene content, so they go into the scene's undo history; the ground itself is the tile brush's own stroke.
+			if (e.mountainSplines && !res.paths.empty())
+			{
+				if (ctx.undoSys) ctx.undoSys->snapshotNow("Mountain Paths");
+				for (const std::vector<TerrainGenerate::PathPoint>& line : res.paths)
+				{
+					std::vector<glm::vec3> pts;
+					pts.reserve(line.size());
+					for (const TerrainGenerate::PathPoint& pt : line)
+						pts.push_back(glm::vec3(glm::dvec3(session->centre().x + pt.x, pt.y, session->centre().z + pt.z) - origin));
+					SplineEdit::createFromPoints(*ctx.world, pts, "Mountain Path");
+				}
+			}
 		}
 		return;
 	}

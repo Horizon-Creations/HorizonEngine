@@ -374,6 +374,39 @@ TEST_CASE("terrain_mountain rises inside the world area and falls off to nothing
 	CHECK(groundAt(f, after, 200.0f, -50.0f) == doctest::Approx(5.0f));
 }
 
+TEST_CASE("terrain_mountain hands its paths back as world points, rim first, on the ground")
+{
+	Fixture f;
+	const Entity e = f.makeTerrain(glm::vec3(200.0f, 5.0f, -50.0f), /*res=*/65);
+	const ToolResult r = f.call("terrain_mountain", json{
+		{ "uuid", f.uuid(e) }, { "x", 200.0 }, { "z", -50.0 }, { "radius", 30.0 },
+		{ "maxHeight", 20.0 }, { "falloff", 30.0 }, { "roughness", 0.0 },
+		{ "terraces", 4 }, { "paths", 2 }, { "pathWidth", 3.0 }, { "pathMaxGrade", 0.3 },
+	});
+	REQUIRE_MESSAGE(!r.isError, codeOf(r));
+	CHECK(r.content["peakAdded"].get<float>() == doctest::Approx(20.0f));
+	REQUIRE(r.content["paths"].is_array());
+	REQUIRE(r.content["paths"].size() == 2);
+	for (const json& line : r.content["paths"])
+	{
+		REQUIRE(line.size() >= 2);
+		const json& first = line.front();
+		const json& last = line.back();
+		// World coordinates: the rim is ~30 m from the centre; the summit is somewhere on the top terrace round it, 20 m above
+		// the entity's ground at y = 5.
+		CHECK(std::hypot(first[0].get<float>() - 200.0f, first[2].get<float>() + 50.0f) > 20.0f);
+		CHECK(std::hypot(last[0].get<float>() - 200.0f, last[2].get<float>() + 50.0f) < 12.0f);
+		CHECK(last[1].get<float>() == doctest::Approx(25.0f).epsilon(0.02));
+		for (const json& pt : line)
+			CHECK(pt[1].get<float>() == doctest::Approx(groundAt(f, e, pt[0].get<float>(), pt[2].get<float>())).epsilon(0.02));
+	}
+	// Without the argument there is no such key.
+	const ToolResult plain = f.call("terrain_mountain", json{
+		{ "uuid", f.uuid(e) }, { "x", 200.0 }, { "z", -50.0 }, { "radius", 30.0 } });
+	REQUIRE_MESSAGE(!plain.isError, codeOf(plain));
+	CHECK_FALSE(plain.content.contains("paths"));
+}
+
 TEST_CASE("terrain_mountain stands on the ground that was sculpted before it")
 {
 	Fixture f;
@@ -488,6 +521,13 @@ TEST_CASE("terrain_mountain refuses what a client can correct, under the code it
 	CHECK(with({ { "octaves", 0 } })      == "invalid_payload");
 	CHECK(with({ { "octaves", 13 } })     == "invalid_payload");
 	CHECK(with({ { "frequency", 0.0 } })  == "invalid_payload");
+	CHECK(with({ { "ridges", 1.5 } })     == "invalid_payload");
+	CHECK(with({ { "erosion", -0.1 } })   == "invalid_payload");
+	CHECK(with({ { "terraces", -1 } })    == "invalid_payload");
+	CHECK(with({ { "terraceSharpness", 2.0 } }) == "invalid_payload");
+	CHECK(with({ { "paths", 9 } })        == "invalid_payload");
+	CHECK(with({ { "pathWidth", 0.0 } })  == "invalid_payload");
+	CHECK(with({ { "pathMaxGrade", 0.0 } }) == "invalid_payload");
 	// None of those left anything behind.
 	CHECK(f.regenCalls == 0);
 
