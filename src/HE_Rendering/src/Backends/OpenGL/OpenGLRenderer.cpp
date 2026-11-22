@@ -14787,6 +14787,18 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 				landscapeLightUbo = m_resolveLightUBO;
 			}
 			glBindBuffer(GL_UNIFORM_BUFFER, 0);
+			// The shared material inputs, which only a graph-material MESH draw binds (units 14-17: sky cube, ambient
+			// occlusion, the two probe atlases). Without them the ground read whatever was left there: no occlusion on a
+			// forward frame, and with GI on white "probes" that lit the box's ray-traced shadow away.
+			glActiveTexture(GL_TEXTURE14);
+			glBindTexture(GL_TEXTURE_CUBE_MAP, MaterialSkyCube());
+			glActiveTexture(GL_TEXTURE15);
+			glBindTexture(GL_TEXTURE_2D, aoActive ? aoTex : m_whiteTex);
+			glActiveTexture(GL_TEXTURE16);
+			glBindTexture(GL_TEXTURE_2D, giShadingActive ? m_giIrrAtlas : m_whiteTex);
+			glActiveTexture(GL_TEXTURE17);
+			glBindTexture(GL_TEXTURE_2D, giShadingActive ? m_giVisAtlas : m_whiteTex);
+			glActiveTexture(GL_TEXTURE0);
 		}
 #endif
 		if (!m_landscapeInGBuffer) DrawLandscape(viewProj, landscapeLightUbo);   // else the G-buffer pass drew it and the resolve lit it
@@ -15503,10 +15515,7 @@ IRenderer::Capabilities OpenGLRenderer::GetCapabilities() const
 	c.landscapeMaterial          = m_maxFragmentSamplers >= 24;
 	// DrawLandscapeDepth in every shadow layer; with the material also the G-buffer (DrawLandscape gbuffer) and the SSAO
 	// position pre-pass (DrawLandscapeViewPos).
-	// GI is NOT claimed although it is built (DrawLandscapeGiGBuf, the height clipmap in the shadow kernel): on a deferred
-	// frame the witnesses hold (the ground takes and casts the ray-traced shadow, RTX 4070), on a FORWARD frame the ground's
-	// ray-traced shadow comes out faint (under the witness's 20 %) and was not understood. Windows handoff, section 11.
-	c.landscapePassMask          = kLandscapePassShadow | (c.landscapeMaterial ? (kLandscapePassGBuffer | kLandscapePassSsao) : 0u);
+	c.landscapePassMask          = kLandscapePassShadow | (c.landscapeMaterial ? (kLandscapePassGBuffer | kLandscapePassSsao | kLandscapePassGi) : 0u);
 #endif
 	c.supportsRvt                = m_rvtSupported;   // a page is that raw capture blitted into the pool (the programs come from the cross-compiler)
 	// SSR: the FORWARD variant only (docs/ssr-cross-backend-plan.md checkpoint
