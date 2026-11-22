@@ -166,6 +166,7 @@ struct Header
 	LandscapeCodec    codec;
 	int               hLevels = 0, wLevels = 0;
 	bool              water = false;   // flag bit 1: two streams after the weights
+	bool              foliage = false; // flag bit 2: one stream after those (a reader from before it stops before it and loses nothing else)
 };
 
 bool readHeader(const uint8_t* d, size_t size, Header& h, std::string* error)
@@ -177,6 +178,7 @@ bool readHeader(const uint8_t* d, size_t size, Header& h, std::string* error)
 	h.codec.backend   = static_cast<LandscapeCodec::Backend>(d[5]);
 	h.codec.predictor = (d[6] & 1) != 0;
 	h.water           = (d[6] & 2) != 0;
+	h.foliage         = (d[6] & 4) != 0;
 	h.hLevels         = d[7];
 	h.wLevels         = d[8];
 	h.geometry.channels = d[9];
@@ -226,7 +228,7 @@ size_t LandscapeTile::bytes() const
 	size_t s = 0;
 	for (const auto& h : heights) s += h.size() * 2;
 	for (const auto& w : weights) s += w.size();
-	s += waterCoverage.size() + waterOwner.size() * 2;
+	s += waterCoverage.size() + waterOwner.size() * 2 + foliageDensity.size();
 	return s;
 }
 
@@ -296,7 +298,8 @@ std::vector<uint8_t> encodeLandscapeTile(const LandscapeTile& tile, LandscapeCod
 	out.push_back(kLandscapeTileVersion);
 	out.push_back(static_cast<uint8_t>(codec.backend));
 	const bool water = tile.hasWater() && tile.waterCoverage.size() == static_cast<size_t>(g.weightDim(0)) * g.weightDim(0);
-	out.push_back(static_cast<uint8_t>((codec.predictor ? 1 : 0) | (water ? 2 : 0)));
+	const bool foliage = tile.foliageDensity.size() == static_cast<size_t>(g.weightDim(0)) * g.weightDim(0);
+	out.push_back(static_cast<uint8_t>((codec.predictor ? 1 : 0) | (water ? 2 : 0) | (foliage ? 4 : 0)));
 	out.push_back(static_cast<uint8_t>(g.heightLevels()));
 	out.push_back(static_cast<uint8_t>(g.weightLevels()));
 	out.push_back(g.channels);
@@ -332,6 +335,12 @@ std::vector<uint8_t> encodeLandscapeTile(const LandscapeTile& tile, LandscapeCod
 		else stream(tile.waterCoverage.data(), tile.waterCoverage.size());
 		if (codec.predictor) { heightForward(tile.waterOwner, w, w, tmp); stream(tmp.data(), tmp.size()); }
 		else stream(reinterpret_cast<const uint8_t*>(tile.waterOwner.data()), tile.waterOwner.size() * 2);
+	}
+	if (foliage)
+	{
+		const int w = g.weightDim(0);
+		if (codec.predictor) { weightForward(tile.foliageDensity, w, w, 1, tmp); stream(tmp.data(), tmp.size()); }
+		else stream(tile.foliageDensity.data(), tile.foliageDensity.size());
 	}
 	return out;
 }
@@ -409,6 +418,17 @@ bool decodeLandscapeTile(const uint8_t* data, size_t size, LandscapeTile& out, i
 		if (!decompress(h.codec.backend, p, stored, raw.data(), texels * 2)) return fail(error, "tile water owner stream is corrupt");
 		if (h.codec.predictor) heightInverse(raw.data(), w, w, out.waterOwner);
 		else { out.waterOwner.resize(texels); std::memcpy(out.waterOwner.data(), raw.data(), texels * 2); }
+	}
+	if (h.foliage && wl > 0)
+	{
+		const int w = g.weightDim(0);
+		const size_t texels = static_cast<size_t>(w) * w;
+		const uint8_t* p = nullptr; uint32_t stored = 0;
+		if (!next(texels, p, stored)) return false;
+		raw.resize(texels);
+		if (!decompress(h.codec.backend, p, stored, raw.data(), texels)) return fail(error, "tile foliage stream is corrupt");
+		if (h.codec.predictor) weightInverse(raw.data(), w, w, 1, out.foliageDensity);
+		else out.foliageDensity = raw;
 	}
 	return true;
 }

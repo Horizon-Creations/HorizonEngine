@@ -109,6 +109,17 @@ bool landscapeRegionTerrain(const std::function<std::shared_ptr<const LandscapeT
 			}
 	}
 
+	out.foliageRes = wr;
+	out.foliageDensity.assign(static_cast<size_t>(wr) * wr, 255);
+	for (int tj = 0; tj < n; ++tj)
+		for (int ti = 0; ti < n; ++ti)
+		{
+			const std::vector<uint8_t>& f = tiles[static_cast<size_t>(tj) * n + ti]->foliageDensity;
+			if (f.size() != static_cast<size_t>(wt) * wt) continue;
+			for (uint32_t z = 0; z < wt; ++z)
+				std::copy_n(&f[static_cast<size_t>(z) * wt], wt, &out.foliageDensity[(static_cast<size_t>(tj) * wt + z) * wr + static_cast<size_t>(ti) * wt]);
+		}
+
 	out.origin = origin;
 	out.n = n;
 	out.centre = { (origin.x + n * 0.5) * static_cast<double>(g.tileM), 0.0, (origin.z + n * 0.5) * static_cast<double>(g.tileM) };

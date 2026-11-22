@@ -61,6 +61,9 @@ struct LandscapeTile
 	std::vector<uint8_t>               waterCoverage;
 	std::vector<uint16_t>              waterOwner;
 	bool   hasWater() const { return !waterCoverage.empty() && waterOwner.size() == waterCoverage.size(); }
+	// The painted foliage density, at the same raster: 255 = every foliage layer scatters as its rules say, 0 = nothing grows here.
+	// Empty = 255 everywhere (a tile nobody painted, and every tile written before this existed). One mask for all layers.
+	std::vector<uint8_t>               foliageDensity;
 
 	// Memory the tile holds (what the store's budget counts).
 	size_t bytes() const;
@@ -69,7 +72,8 @@ struct LandscapeTile
 	void   buildMips();
 	bool   operator==(const LandscapeTile& o) const
 	{
-		return geometry == o.geometry && heights == o.heights && weights == o.weights && waterCoverage == o.waterCoverage && waterOwner == o.waterOwner;
+		return geometry == o.geometry && heights == o.heights && weights == o.weights && waterCoverage == o.waterCoverage && waterOwner == o.waterOwner
+		    && foliageDensity == o.foliageDensity;
 	}
 };
 

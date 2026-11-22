@@ -59,6 +59,10 @@ struct LandscapeRegionTerrain
 	int              n = 0;         // tiles a side
 	glm::dvec3       centre{ 0.0 }; // absolute world position of the terrain's local origin
 	bool             hasWater = false;
+	// The tiles' painted foliage density side by side (LandscapeTile::foliageDensity), foliageRes a side, laid over the terrain like
+	// its weights. Always filled (255 where a tile has none), so a brush has something to paint into.
+	std::vector<uint8_t> foliageDensity;
+	uint32_t             foliageRes = 0;
 };
 
 // `tileAt` hands out the resident tile of a key (null when it is not in memory). False when any tile of the region is missing, `n` is

@@ -4,6 +4,8 @@
 #include "NotificationStore.h"
 #include <HorizonScene/Components/LandscapeWorldComponent.h>
 #include <HorizonScene/Components/LandscapeStampComponent.h>
+#include <HorizonScene/Components/FoliageComponent.h>
+#include <HorizonScene/FoliagePaint.h>
 #include <HorizonScene/Components/TransformComponent.h>
 #include <HorizonScene/Components/NameComponent.h>
 #include <HorizonScene/Components/TerrainComponent.h>
@@ -460,7 +462,7 @@ std::string saveEdits()
 #ifdef HE_IMGUI_ENABLED
 namespace
 {
-const char* const kToolNames[] = { "Raise", "Lower", "Smooth", "Flatten", "Paint Layer", "Roughen", "Ramp", "Mountain", "Stamp" };
+const char* const kToolNames[] = { "Raise", "Lower", "Smooth", "Flatten", "Paint Layer", "Roughen", "Ramp", "Mountain", "Stamp", "Foliage Mask" };
 
 void drawEditBlock(AppContext& ctx)
 {
@@ -475,7 +477,7 @@ void drawEditBlock(AppContext& ctx)
 	EditorWidgets::checkbox("Edit Tiles##tlwe", &e.on);
 	if (e.on && ctx.editorConfig.mode != EditorMode::Landscape)
 		ImGui::TextDisabled("The brush works in the Landscape mode: there the left button belongs to it.");
-	Row::combo("Tile Brush##tlwe", &e.tool, kToolNames, 9);
+	Row::combo("Tile Brush##tlwe", &e.tool, kToolNames, 10);
 	Row::dragFloat("Brush Radius##tlwe", &e.radius, 0.5f, 1.0f, 800.0f, "%.1f m");
 	Row::dragFloat("Brush Falloff##tlwe", &e.falloff, 0.5f, 0.0f, 400.0f, "%.1f m");
 	Row::dragFloat("Brush Strength##tlwe", &e.strength, 0.01f, 0.01f, 5.0f, "%.2f");
@@ -677,6 +679,16 @@ void brushInViewport(AppContext& ctx, const RenderWorld& sceneSnapshot, const Im
 		                    lx, lz, static_cast<float>(groundH(p.x, p.z)), e.radius, e.falloff, std::clamp(e.strength * dt * 6.0f, 0.0f, 1.0f));
 		break;
 	case 5: TerrainSculpt::apply(tc, lx, lz, TerrainSculpt::Op::Roughen, e.radius, e.falloff, e.strength * dt * 20.0f); break;   // the op's stable per-vertex hash, as far as Raise would lift
+	case 9:
+	{
+		// Foliage Mask: the single landscape's density brush on the region's mask (one for every foliage layer). Erases; Ctrl grows back.
+		FoliageLayer mask;
+		mask.maskRes = session->foliageRes();
+		mask.densityMask = std::move(session->foliageDensity());
+		FoliagePaint::paint(mask, tc, lx, lz, e.radius, e.falloff, std::clamp(e.strength * dt * 6.0f, 0.0f, 1.0f), invert ? 1.0f : 0.0f);
+		session->foliageDensity() = std::move(mask.densityMask);
+		break;
+	}
 	default: TerrainPaint::paint(tc, lx, lz, std::clamp(e.layer, 0, 11), e.radius, e.falloff, std::clamp(e.strength * dt * 6.0f, 0.0f, 1.0f)); break;
 	}
 	session->commit();

@@ -131,7 +131,8 @@ inline std::filesystem::path landscapeEditsFile(const std::filesystem::path& pac
 bool landscapeWriteRegionTerrain(const TerrainComponent& terrain, const LandscapeGeometry& geometry, LandscapeTileKey origin, int n,
                                  const LandscapeTileTerrainParams& params,
                                  const std::function<LandscapeTilePtr(LandscapeTileKey)>& current,
-                                 std::vector<std::pair<LandscapeTileKey, LandscapeTilePtr>>& out);
+                                 std::vector<std::pair<LandscapeTileKey, LandscapeTilePtr>>& out,
+                                 const std::vector<uint8_t>* foliageDensity = nullptr);   // the region's (LandscapeRegionTerrain), written back too
 
 // A streaming rewrite of `packPath` with the overlay's tiles in place of the pack's (water table, cell HLOD and far image carried over):
 // what "bake the edits" and the export's copy do. Written beside and renamed over. `edits` must be an overlay of this pack's world.
@@ -153,6 +154,9 @@ public:
 	bool hasRegion() const { return m_n > 0; }
 	// The region as a terrain: centred on centre(), heights in absolute metres. Edit it with the single landscape's brushes, then commit().
 	TerrainComponent& terrain() { return m_region.terrain; }
+	// The region's painted foliage density (LandscapeRegionTerrain::foliageDensity, foliageRes() a side): paint it, then commit().
+	std::vector<uint8_t>& foliageDensity() { return m_region.foliageDensity; }
+	uint32_t foliageRes() const { return m_region.foliageRes; }
 	const glm::dvec3& centre() const { return m_region.centre; }
 	// Metres of a stored height 0 and of 65535 above it: what a height is quantised to when it is written back.
 	const LandscapeTileTerrainParams& params() const { return m_params; }

@@ -202,6 +202,13 @@ void LandscapeFoliage::update(const LandscapeStore& store, const std::vector<glm
 				const TerrainComponent tc = landscapeTileTerrain(*tile, params);
 				if (tc.sizeX > 0.0f)
 				{
+					// The tile's painted density (one mask for every layer), where it has one.
+					const size_t wt = static_cast<size_t>(tile->geometry.weightDim(0));
+					if (tile->foliageDensity.size() == wt * wt)
+					{
+						layer.maskRes = static_cast<uint32_t>(wt);
+						layer.densityMask = tile->foliageDensity;
+					}
 					FoliageSystem::scatterLayer(tc, glm::vec3(0.0f), layer);
 					result = layer.store;
 				}

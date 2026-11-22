@@ -352,7 +352,7 @@ size_t LandscapeEditSource::loadFile(const std::filesystem::path& file)
 
 bool landscapeWriteRegionTerrain(const TerrainComponent& tc, const LandscapeGeometry& g, LandscapeTileKey origin, int n,
                                  const LandscapeTileTerrainParams& params, const std::function<LandscapeTilePtr(LandscapeTileKey)>& current,
-                                 std::vector<std::pair<LandscapeTileKey, LandscapeTilePtr>>& out)
+                                 std::vector<std::pair<LandscapeTileKey, LandscapeTilePtr>>& out, const std::vector<uint8_t>* foliageDensity)
 {
 	out.clear();
 	const uint32_t cells = g.hCells, res = static_cast<uint32_t>(n) * cells + 1, dim = cells + 1;
@@ -392,7 +392,22 @@ bool landscapeWriteRegionTerrain(const TerrainComponent& tc, const LandscapeGeom
 						}
 					}
 			}
-			if (tile->heights[0] == was->heights[0] && tile->weights[0] == was->weights[0]) continue;
+			// The painted foliage density: a tile that is 255 everywhere holds none (what an unpainted tile is).
+			if (foliageDensity && foliageDensity->size() == static_cast<size_t>(wr) * wr)
+			{
+				std::vector<uint8_t> f(static_cast<size_t>(wt) * wt);
+				bool painted = false;
+				for (uint32_t z = 0; z < wt; ++z)
+					for (uint32_t x = 0; x < wt; ++x)
+					{
+						const uint8_t v = (*foliageDensity)[(static_cast<size_t>(tj) * wt + z) * wr + static_cast<size_t>(ti) * wt + x];
+						f[static_cast<size_t>(z) * wt + x] = v;
+						painted = painted || v != 255;
+					}
+				if (painted) tile->foliageDensity = std::move(f);
+				else tile->foliageDensity.clear();
+			}
+			if (tile->heights[0] == was->heights[0] && tile->weights[0] == was->weights[0] && tile->foliageDensity == was->foliageDensity) continue;
 			tile->buildMips();
 			out.emplace_back(key, std::move(tile));
 		}
@@ -561,7 +576,7 @@ size_t LandscapeEditSession::commit()
 	if (m_n == 0) return 0;
 	std::vector<std::pair<LandscapeTileKey, LandscapeTilePtr>> changed;
 	if (!landscapeWriteRegionTerrain(m_region.terrain, m_edits.geometry(), m_region.origin, m_n, m_params,
-	                                 [this](LandscapeTileKey k) { return read(k); }, changed) || changed.empty())
+	                                 [this](LandscapeTileKey k) { return read(k); }, changed, &m_region.foliageDensity) || changed.empty())
 		return 0;
 	// The undo step keeps what each tile was BEFORE its first change in this stroke.
 	const bool own = !m_inStroke;

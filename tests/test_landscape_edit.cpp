@@ -670,6 +670,85 @@ TEST_CASE("LandscapeStamp: a stamp raises the tiles under it when they are loade
 	std::filesystem::remove(packFile);
 }
 
+TEST_CASE("tile foliage density: an unpainted tile is stored as before, a painted one round-trips, the region carries it to the tiles "
+          "it covers, and the scatter leaves the erased ground bare")
+{
+	const auto src = world(4);
+	const LandscapeGeometry g = src->geometry();
+	const size_t wt = static_cast<size_t>(g.weightDim(0));
+	const LandscapeTilePtr plain = fullTile(*src, { 1, 1 });
+
+	// The blob: no mask, no flag (byte for byte what was written before the mask existed); with one, it comes back.
+	const std::vector<uint8_t> blob = encodeLandscapeTile(*plain);
+	REQUIRE(blob.size() > 7);
+	CHECK((blob[6] & 4) == 0);
+	LandscapeTile painted = *plain;
+	painted.foliageDensity.assign(wt * wt, 255);
+	for (size_t z = 0; z < wt; ++z)
+		for (size_t x = 0; x < wt / 2; ++x) painted.foliageDensity[z * wt + x] = 0;   // the west half is bare
+	const std::vector<uint8_t> blob2 = encodeLandscapeTile(painted);
+	CHECK((blob2[6] & 4) != 0);
+	LandscapeTile back;
+	REQUIRE(decodeLandscapeTile(blob2.data(), blob2.size(), back));
+	CHECK(back == painted);
+	REQUIRE(decodeLandscapeTile(blob.data(), blob.size(), back));
+	CHECK(back.foliageDensity.empty());
+
+	// The region: 2 x 2 tiles, all 255; a square erased inside tile (1, 1) changes that tile alone.
+	const auto tileAt = [&](LandscapeTileKey k) { return fullTile(*src, k); };
+	LandscapeRegionTerrain region;
+	REQUIRE(landscapeRegionTerrain(tileAt, { 0, 0 }, 2, {}, nullptr, region));
+	REQUIRE(region.foliageRes == 2 * wt);
+	REQUIRE(region.foliageDensity.size() == 4 * wt * wt);
+	std::vector<std::pair<LandscapeTileKey, LandscapeTilePtr>> out;
+	REQUIRE(landscapeWriteRegionTerrain(region.terrain, g, { 0, 0 }, 2, {}, tileAt, out, &region.foliageDensity));
+	CHECK(out.empty());   // untouched: nothing to write
+	for (size_t z = wt + 10; z < wt + 20; ++z)
+		for (size_t x = wt + 10; x < wt + 20; ++x) region.foliageDensity[z * 2 * wt + x] = 0;
+	REQUIRE(landscapeWriteRegionTerrain(region.terrain, g, { 0, 0 }, 2, {}, tileAt, out, &region.foliageDensity));
+	REQUIRE(out.size() == 1);
+	CHECK(out[0].first == LandscapeTileKey{ 1, 1 });
+	CHECK(out[0].second->foliageDensity.size() == wt * wt);
+	CHECK(out[0].second->foliageDensity[15 * wt + 15] == 0);
+	CHECK(out[0].second->foliageDensity[0] == 255);
+	CHECK(out[0].second->heights == plain->heights);
+
+	// The scatter: with the west half erased, nothing grows there and the east half is as it was.
+	auto edits = std::make_shared<LandscapeEditSource>(src);
+	LandscapeStoreConfig cfg;
+	cfg.loadRadius = 1500.0f;
+	const glm::dvec3 cam(768.0, 600.0, 768.0);
+	const auto scatter = [&](std::vector<glm::mat4>& local) {
+		LandscapeStore store(edits, cfg);
+		for (int i = 0; i < 20000 && !(store.update({ { cam } }, 5.0), store.settled()); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+		FoliageLayer l;
+		l.meshAssetId = HE::UUID{ 1, 0 };
+		l.density = 0.004f;
+		l.drawDistance = 200.0f;
+		l.seed = 21;
+		LandscapeFoliage fol;
+		fol.setLayers({ l });
+		for (int i = 0; i < 4000; ++i)
+		{
+			fol.update(store, { cam }, 0.0f, 3000.0f);
+			if (fol.stats().pending == 0 && fol.storeOf({ 1, 1 }, 0)) break;
+			std::this_thread::sleep_for(std::chrono::milliseconds(1));
+		}
+		const auto s = fol.storeOf({ 1, 1 }, 0);
+		local = s ? s->local : std::vector<glm::mat4>{};
+	};
+	std::vector<glm::mat4> all, masked;
+	scatter(all);
+	edits->set({ { { 1, 1 }, std::make_shared<LandscapeTile>(painted) } });
+	scatter(masked);
+	REQUIRE(all.size() > 100);
+	size_t east = 0;
+	for (const glm::mat4& m : all) east += m[3].x > 8.0f ? 1 : 0;   // local: the tile's centre is 0; two texels of soft edge
+	CHECK(masked.size() < all.size());
+	CHECK(masked.size() >= east * 9 / 10);
+	for (const glm::mat4& m : masked) CHECK(m[3].x > -8.0f);
+}
+
 TEST_CASE("LandscapeStampSync: a stamp entity reaches the runtime's overlay, an idle frame does nothing, moving it names both footprints, "
           "the component round-trips, and an export bakes the stamp and takes it out of the shipped scene")
 {
