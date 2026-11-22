@@ -20833,7 +20833,8 @@ IRenderer::Capabilities MetalRenderer::GetCapabilities() const
 	c.landscapeCoarseRevision    = true;   // MetalLandscape.mm: new coarse and far images, the atlas stays
 #if defined(HE_HAVE_SHADERC)
 	c.landscapeMaterial          = true;   // EncodeLandscape: the ground's material draws the patches
-	c.landscapePasses            = true;   // EncodeLandscapePass / EncodeLandscapeGBuffer / the ground's mesh in the ray structure
+	c.landscapeRvt               = true;   // SetRvtTileGround, rvtTileGround pages
+	c.landscapePasses            = true;// EncodeLandscapePass / EncodeLandscapeGBuffer / the ground's mesh in the ray structure
 #endif
 #if defined(HE_HAVE_SHADERC)
 	// A page is that raw capture blitted into the pool; the consumer is a graph material (MSL from the cross-compiler).

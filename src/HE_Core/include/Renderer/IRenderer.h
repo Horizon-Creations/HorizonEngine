@@ -291,6 +291,9 @@ public:
         // pre-pass and the ray structure, in the SSAO and velocity passes, and in the G-buffer on a deferred frame. Without it
         // the ground receives (shadows of meshes, fog, the lighting) but does not cast, occlude or report motion.
         bool landscapePasses = false;
+        // SetRvtTileGround / EditorCameraOverride::rvtTileGround work: the tile landscape's ground can be painted into virtual
+        // texture pages and drawn from them. Without it the ground is computed in place.
+        bool landscapeRvt = false;
         // CreateRvtPool / EditorCameraOverride::rvtSlot work: the backend can hold the page pool of the Runtime
         // Virtual Textures and fill a slice of it from RenderSceneImage (Thema 333). False = the landscape keeps
         // running its material directly.

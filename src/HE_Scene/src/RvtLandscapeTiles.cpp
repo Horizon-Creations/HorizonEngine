@@ -67,7 +67,7 @@ bool RvtLandscape::tileGroundWanted(HorizonWorld& live)
 {
     TileGround& t = m_tiles;
     const HE::LandscapeRuntime* rt = live.landscapeRuntime();
-    if (!rt || !rt->active() || rt->materialId() == HE::UUID{} || !m_renderer.GetCapabilities().landscapeMaterial)
+    if (!rt || !rt->active() || rt->materialId() == HE::UUID{} || !m_renderer.GetCapabilities().landscapeRvt)
     {
         removeTileGround();
         return false;

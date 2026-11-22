@@ -16,6 +16,7 @@
 #include <HorizonScene/Components/TransformComponent.h>
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/LandscapeRuntime.h>
+#include <HorizonScene/RvtLandscape.h>
 #include <HorizonScene/Components/TerrainComponent.h>
 #include <HorizonScene/TerrainSystem.h>
 #include <HorizonScene/TransformHierarchy.h>
@@ -739,6 +740,93 @@ int runMaterialCheck(HE::RendererBackend backend, HE::RenderPath path, const std
 						world.setOrigin(origin);
 						btf.position += glm::vec3(shift);
 						btf.dirty = true;
+
+						// The ground through the Runtime Virtual Texture (RvtLandscapeTiles.cpp): the driver the editor and the game tick.
+						// Pages are painted from the live ground, the patches inside the volume are then drawn with the consumer. It must
+						// look like the ground computed in place (the frame above), and must not BE it: with the swap paused the picture
+						// goes back to that one.
+						if (renderer->GetCapabilities().supportsRvt && renderer->GetCapabilities().landscapeRvt)
+						{
+							world.setLandscapeRuntime(&rt);
+							HE::landscape::RvtLandscape drv(content, *renderer);
+							std::vector<uint8_t> rvtImg, pausedImg;
+							int quiet = 0, ticks = 0;
+							uint32_t stale = 0;
+							for (; ticks < 600 && quiet < 12; ++ticks)
+							{
+								rt.update(world, 0.016f, 5.0, &camPos);
+								const auto st = drv.tick(world, eye);
+								stale += st.pagesStale;
+								rvtImg.clear();
+								renderer->RenderSceneImage(ov, kW, kH, rvtImg);   // the frame whose feedback asks for the next pages
+								quiet = (drv.active() && st.pagesPainted == 0) ? quiet + 1 : 0;
+							}
+							const auto gapTo = [&](const std::vector<uint8_t>& a, const std::vector<uint8_t>& b) {
+								double gap = 0.0; size_t n3 = 0;
+								if (a.size() != px * 4 || b.size() != px * 4) return 1e9;
+								for (size_t i = 0; i < px; ++i)
+									if (isBlue(&lit[i * 4])) { gap += std::abs(lum(&a[i * 4]) - lum(&b[i * 4])); ++n3; }
+								return gap / static_cast<double>(std::max<size_t>(n3, 1));
+							};
+							const bool on = drv.active();
+							const bool got = shoot(rvtImg);
+							const HE::landscape::RvtLandscape::DebugInfo di = drv.debugInfo();
+							// The floating origin moves under the pages: the consumer's volume vector follows, the picture stays.
+							{
+								const glm::dvec3 shift2(1000.3, 0.0, 517.7);
+								world.setOrigin(origin + shift2);
+								btf.position -= glm::vec3(shift2);
+								btf.dirty = true;
+								const EditorCameraOverride kept2 = ov;
+								const glm::vec3 eye3 = glm::vec3(camPos - (origin + shift2));
+								ov.view = glm::lookAt(eye3, eye3 + glm::normalize(glm::vec3(1.0f, -0.45f, 0.15f)), glm::vec3(0, 1, 0));
+								ov.position = eye3;
+								std::vector<uint8_t> movedRvt;
+								for (int i = 0; i < 4; ++i) { rt.update(world, 0.016f, 5.0, &camPos); drv.tick(world, eye3); }
+								const bool gotM = shoot(movedRvt) && shoot(movedRvt);
+								const double gapM = gotM ? gapTo(movedRvt, rvtImg) : 1e9;
+								std::printf("  virtual texture, floating origin moved by (1000.3, 517.7) m: the ground differs by %.2f/255, still %s\n",
+								            gapM, drv.active() ? "drawn from pages" : "NOT drawn from pages");
+								if (gapM > 2.0 || !drv.active()) fail("the pages stay on the ground when the floating origin moves");
+								ov = kept2;
+								world.setOrigin(origin);
+								btf.position += glm::vec3(shift2);
+								btf.dirty = true;
+							}
+							// A tile is read again (what an edit does): the pages over it are marked stale and painted again.
+							{
+								const double tileM = static_cast<double>(rt.quadtree().tileM);
+								const HE::LandscapeTileKey under{ static_cast<int>(camPos.x / tileM), static_cast<int>(camPos.z / tileM) };
+								const uint64_t before = drv.pagesPaintedTotal();
+								rt.tileChanged({ under });
+								uint32_t marked = 0;
+								for (int i = 0; i < 200; ++i)
+								{
+									rt.update(world, 0.016f, 5.0, &camPos);
+									const auto st = drv.tick(world, eye);
+									marked += st.pagesStale;
+									if (marked && st.pagesPainted == 0 && i > 20) break;
+									std::this_thread::sleep_for(std::chrono::milliseconds(1));
+								}
+								std::printf("  virtual texture, tile (%d, %d) read again: %u page(s) marked stale, %llu painted again\n", under.x, under.z, marked,
+								            static_cast<unsigned long long>(drv.pagesPaintedTotal() - before));
+								if (marked == 0 || drv.pagesPaintedTotal() == before) fail("a changed tile repaints the pages over it");
+							}
+							drv.pauseSwap(true);
+							drv.tick(world, eye);
+							const bool gotP = shoot(pausedImg);
+							const double gapRvt = got ? gapTo(rvtImg, autoImg) : 1e9, gapPaused = gotP ? gapTo(pausedImg, autoImg) : 1e9;
+							std::printf("  virtual texture on the tile ground: %s after %d ticks, %llu pages painted, %u resident, %u marked stale; "
+							            "differs from the ground computed in place by %.2f/255 (swap paused: %.2f)\n",
+							            on ? "drawn from pages" : "NOT drawn from pages", ticks, static_cast<unsigned long long>(di.pagesPaintedTotal),
+							            di.resident, stale, gapRvt, gapPaused);
+							if (!on || di.pagesPaintedTotal == 0) fail("the tile ground is drawn from virtual texture pages");
+							if (gapRvt > 6.0) fail("the ground from pages looks like the ground computed in place");
+							if (gapRvt <= gapPaused + 0.01) fail("the pages are what is drawn (the picture changes when the swap is paused)");
+							if (got) writePngFile(pngPath.substr(0, pngPath.size() - 4) + "_auto_rvt.png", static_cast<int>(kW), static_cast<int>(kH), rvtImg.data());
+							drv.detach();
+							world.setLandscapeRuntime(nullptr);
+						}
 					}
 				}
 			}
@@ -897,7 +985,8 @@ int runMaterialTiming(HE::RendererBackend backend, HE::RenderPath path, const st
 			w.registry().emplace<LightComponent>(e, l);
 		};
 
-		double tileFixed = 0.0, tileMat = 0.0, tileMatScene = 0.0, terrainMat = 0.0;
+		double tileFixed = 0.0, tileMat = 0.0, tileMatScene = 0.0, terrainMat = 0.0, tileRvt = 0.0, tileRvtPageMs = 0.0, terrainRvt = 0.0;
+		bool tileRvtOn = false, terrainRvtOn = false;
 		{
 			HorizonWorld world;
 			const glm::dvec3 origin{ 2048.0, 100.0, 1024.0 };
@@ -932,6 +1021,36 @@ int runMaterialTiming(HE::RendererBackend backend, HE::RenderPath path, const st
 				landscapePasses("0");
 				tileMatScene = median(ov);
 				landscapePasses(nullptr);
+				// With the Runtime Virtual Texture, in the steady state: the driver has painted what this view needs and is not
+				// ticked while the frames are timed, so no page is painted in them.
+				if (renderer->GetCapabilities().supportsRvt && renderer->GetCapabilities().landscapeRvt)
+				{
+					HE::matSetRvtEnabled(true);
+					const HE::AutoLandscapeGroup& g1 = HE::autoLandscapeGroup(HE::AutoLandscapeGroupId::Forest);
+					if (const MaterialAsset* own = content.resolveMaterialRef(HE::UUID{}, g1.materialPath))
+					{
+						const HE::UUID ownId = own->id;
+						content.regenerateMaterialFromGraph(ownId);
+						renderer->InvalidateMaterial(ownId);
+					}
+					world.setLandscapeRuntime(&rt);
+					HE::landscape::RvtLandscape drv(content, *renderer);
+					std::vector<uint8_t> img;
+					double paintMs = 0.0; uint32_t pages = 0;
+					for (int i = 0, quiet = 0; i < 900 && quiet < 30; ++i)
+					{
+						rt.update(world, 0.016f, 5.0, &camPos);
+						const auto st = drv.tick(world, ov.position);
+						if (i > 0) { paintMs += st.paintMs; pages += st.pagesPainted; }   // the first tick compiles the page shaders
+						renderer->RenderSceneImage(ov, tw, th, img);
+						quiet = (drv.active() && st.pagesPainted == 0) ? quiet + 1 : 0;
+					}
+					tileRvtOn = drv.active();
+					tileRvt = median(ov);
+					tileRvtPageMs = pages ? paintMs / pages : 0.0;
+					drv.detach();
+					world.setLandscapeRuntime(nullptr);
+				}
 			}
 			renderer->SetLandscapeProvider({});
 			renderer->SetWorld(nullptr);
@@ -965,6 +1084,21 @@ int runMaterialTiming(HE::RendererBackend backend, HE::RenderPath path, const st
 			ov.nearPlane = 2.0f;
 			ov.farPlane = 20000.0f;
 			terrainMat = matId != HE::UUID{} ? median(ov) : 0.0;
+			// The same landscape with ITS virtual texture driver settled: the fair row to hold the tile ground's against.
+			if (matId != HE::UUID{} && HE::matRvtEnabled() && renderer->GetCapabilities().supportsRvt)
+			{
+				HE::landscape::RvtLandscape drv(content, *renderer);
+				std::vector<uint8_t> img;
+				for (int i = 0, quiet = 0; i < 900 && quiet < 30; ++i)
+				{
+					const auto st = drv.tick(world, eye);
+					renderer->RenderSceneImage(ov, tw, th, img);
+					quiet = (drv.active() && st.pagesPainted == 0) ? quiet + 1 : 0;
+				}
+				terrainRvtOn = drv.active();
+				terrainRvt = median(ov);
+				drv.detach();
+			}
 			std::vector<uint8_t> shot;
 			renderer->RenderSceneImage(ov, kW, kH, shot);
 			if (shot.size() == static_cast<size_t>(kW) * kH * 4)
@@ -980,7 +1114,13 @@ int runMaterialTiming(HE::RendererBackend backend, HE::RenderPath path, const st
 		}
 		else
 			std::printf("    tile landscape, material                 not on this backend\n");
-		if (terrainMat > 0.0) std::printf("    TerrainComponent 2 x 2 km, same material %7.2f   (the tile landscape with material is %+.2f against it)\n", terrainMat, tileMat - terrainMat);
+		if (tileRvt > 0.0)
+			std::printf("    tile landscape, virtual texture          %7.2f   (%+.2f against the material in place; %s; a page costs %.2f ms to paint)\n",
+			            tileRvt, tileRvt - tileMat, tileRvtOn ? "drawn from pages" : "NOT drawn from pages", tileRvtPageMs);
+		if (terrainMat > 0.0) std::printf("    TerrainComponent 2 x 2 km, same material %7.2f   (no pages painted: with RVT on this is a grey ground)\n", terrainMat);
+		if (terrainRvt > 0.0)
+			std::printf("    TerrainComponent, virtual texture        %7.2f   (%s; the tile landscape with its virtual texture is %+.2f against it)\n",
+			            terrainRvt, terrainRvtOn ? "drawn from pages" : "NOT drawn from pages", tileRvt - terrainRvt);
 		renderer->Shutdown();
 	}
 	catch (const std::exception& e)
