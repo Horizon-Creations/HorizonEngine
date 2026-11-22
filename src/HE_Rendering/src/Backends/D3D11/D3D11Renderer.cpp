@@ -8306,8 +8306,9 @@ void D3D11Renderer::DrawScene(int width, int height)
                     });
                 }
                 // The tile landscape's ground casts into the same layer (Thema 326), with the depth bias of the shadow raster
-                // state that is set. Written on the Mac and NOT RUN: behind HE_LANDSCAPE_D3D_PASSES=1 until a Windows run of
-                // `landscape_gpu_check --only d3d11` shows "the ground casts (fixed blend)" passing (Windows handoff, section 8).
+                // state that is set. Written on the Mac and NOT RUN there: on by default on Windows (HE::landscapeD3dPassesOn),
+                // HE_LANDSCAPE_D3D_PASSES=0 takes it out. `landscape_gpu_check --only d3d11` judges it with the line
+                // "the ground casts (fixed blend)" (Windows handoff, section 8).
                 // The provider culls for this layer's matrix (D3D clip, depth 0..1) and hands over the tiles that arrived, which
                 // are uploaded whether or not the ground is drawn.
                 if (HE::landscapeD3dPassesOn() && m_landscapeProvider && !p.landscapeFailed && p.landscape.ready())

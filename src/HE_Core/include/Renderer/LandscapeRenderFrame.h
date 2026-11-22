@@ -136,12 +136,33 @@ inline bool landscapePassesOn()
 	const char* v = std::getenv("HE_LANDSCAPE_PASSES");
 	return !(v && *v == '0');
 }
-// HE_LANDSCAPE_D3D_PASSES=1: the D3D11 / D3D12 code for the ground in the other passes, which was written without a machine that
-// runs D3D. Off until a Windows run has shown each pass (docs/landscape-world-scale-windows-handoff-2026-11-21.md, section 8);
-// then the switch goes and the passes are on. Read once.
+// Passes of the ground that were written without a machine to run them (docs/landscape-world-scale-windows-handoff-2026-11-21.md,
+// section 8). Each is ON by default on the platform where it can run and be judged, and off where it cannot or was seen not to
+// work; the variable forces it either way (`=1` on, `=0` off), which is also the way out if one misbehaves. Read once.
+inline bool landscapeUnprovenPass(const char* variable, bool platformDefault)
+{
+	const char* v = std::getenv(variable);
+	return (v && (*v == '0' || *v == '1')) ? *v == '1' : platformDefault;
+}
+// HE_LANDSCAPE_D3D_PASSES: the ground in D3D11's and D3D12's shadow layers. D3D is Windows, so: on there.
 inline bool landscapeD3dPassesOn()
 {
-	static const bool on = [] { const char* v = std::getenv("HE_LANDSCAPE_D3D_PASSES"); return v && *v == '1'; }();
+#if defined(_WIN32)
+	static const bool on = landscapeUnprovenPass("HE_LANDSCAPE_D3D_PASSES", true);
+#else
+	static const bool on = landscapeUnprovenPass("HE_LANDSCAPE_D3D_PASSES", false);
+#endif
+	return on;
+}
+// HE_LANDSCAPE_VK_SSAO: the ground in Vulkan's SSAO position pre-pass. On with a real Vulkan driver (Windows, Linux); off on macOS,
+// where Vulkan is MoltenVK and the witness read no occlusion on the ground although the patches were drawn.
+inline bool landscapeVkSsaoOn()
+{
+#if defined(__APPLE__)
+	static const bool on = landscapeUnprovenPass("HE_LANDSCAPE_VK_SSAO", false);
+#else
+	static const bool on = landscapeUnprovenPass("HE_LANDSCAPE_VK_SSAO", true);
+#endif
 	return on;
 }
 

@@ -4331,6 +4331,14 @@ namespace
 	  "and this machine actually support — some features (ray-traced GI) exist "
 	  "on some backends and not on others.",
 	  "", "rendering#backends" },
+	{ "Preferences/Display/Renderer Capabilities", "Renderer Capabilities",
+	  "What the renderer the editor is running on can do on this platform: each line is a feature, yes or no. The answers "
+	  "come from the backend itself, for this machine: a feature can be missing because the graphics API has no way to do "
+	  "it, because the driver is short of something it needs, or because it is not built for this backend yet. A feature "
+	  "that says no is skipped without an error: the frame is drawn without it. The Tile Landscape lines say where its "
+	  "ground takes part (shadows, ambient occlusion, GI, the virtual texture); they differ most between backends. A "
+	  "backend picked in the list above only starts with the next launch, so until then the list is still the running one's.",
+	  "", "rendering#backends" },
 	{ "Preferences/Display/Render Path", "",
 	  "Forward shades each object as it is drawn. Deferred shades the whole screen "
 	  "at once, which is what lifts the light count and turns on SSAO and SSR.",

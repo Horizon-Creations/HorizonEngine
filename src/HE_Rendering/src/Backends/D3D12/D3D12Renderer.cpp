@@ -12873,9 +12873,9 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                         ++drawIdx;
                     });
                 }
-                // The tile landscape's ground casts into the same layer (Thema 326). Written on the Mac and NOT RUN: behind
-                // HE_LANDSCAPE_D3D_PASSES=1 until a Windows run of `landscape_gpu_check --only d3d12` shows "the ground casts (fixed
-                // blend)" passing (Windows handoff, section 8). The provider culls for this layer's matrix (D3D clip, depth 0..1)
+                // The tile landscape's ground casts into the same layer (Thema 326). Written on the Mac and NOT RUN there: on by
+                // default on Windows (HE::landscapeD3dPassesOn), HE_LANDSCAPE_D3D_PASSES=0 takes it out. `landscape_gpu_check
+                // --only d3d12` judges it with the line "the ground casts (fixed blend)" (Windows handoff, section 8). The provider culls for this layer's matrix (D3D clip, depth 0..1)
                 // and hands over the tiles that arrived, which are uploaded whether or not the ground is drawn. The landscape sets
                 // its own root signature, heap and pipeline, so what the layers' mesh draws rely on is bound again afterwards:
                 // the same calls as before the graph ran.

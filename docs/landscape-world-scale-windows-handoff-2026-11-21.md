@@ -196,8 +196,16 @@ Added later on the 22nd (after the lines above were written):
 ## 8. The tile ground on every backend: what is proven, what is written and waits for a run, what is not built (22.11.)
 
 Written from the Mac at the owner's request ("catch up Vulkan, both D3D backends and OpenGL as far as you can, so that Windows only
-tests and fills gaps"). Three states: **proven** = ran and judged by a witness on a machine; **written** = code is in, never run,
-behind a switch that is OFF; **not built**.
+tests and fills gaps"). Three states: **proven** = ran and judged by a witness on a machine; **written** = code is in, never run
+on a machine, behind a switch; **not built**.
+
+**The switches depend on the platform** (owner's decision, `LandscapeRenderFrame.h`): a written pass is ON by default on the
+platform where it can run and be judged, off elsewhere, and the variable forces it either way (`=1` / `=0`).
+`HE_LANDSCAPE_D3D_PASSES`: on under Windows. `HE_LANDSCAPE_VK_SSAO`: on with a real Vulkan driver (Windows, Linux), off on macOS
+(MoltenVK). **So on Windows the unrun D3D shadow code and the unproven Vulkan SSAO pass are live from the first start**: if the
+ground or the shadows look wrong, set the variable to `0` first to see whether it is this code.
+The editor lists what the running renderer says it can do under Preferences > Display > Backend > Renderer Capabilities
+(`EditorSettingsPanel.cpp`): the "Tile landscape: ..." lines are `landscapePassMask`, so a pass that is switched off reads "no".
 
 One tool judges all of it: `landscape_gpu_check --only <gl|vulkan|d3d11|d3d12> --arrays <EngineContent> --out <dir>`. It prints
 `(passes this backend says it has the ground in: shadow .., GI .., SSAO .., velocity .., G-buffer ..)`: a pass a backend claims
@@ -222,9 +230,9 @@ form `fixedBlendPasses` (`EngineCheck.cpp`).
    `MaterialShaderLibrary::kHlslLandscapeGlobalsReg` (b12, b13) and `kHlslLandscapeFirstSrv` (t47..t55).
    **FXC has never seen these shaders** (glslang's HLSL front end parsed both on the Mac, which is not the same compiler): compile
    the two texts with `D3DCompile` (`HE_DUMP_LS_HLSL=<dir>` makes the test write `landscape_vs.hlsl` / `landscape_ps.hlsl`).
-2. Shadows, D3D11: `set HE_LANDSCAPE_D3D_PASSES=1` then `landscape_gpu_check --only d3d11 ...`. Must print
+2. Shadows, D3D11: `landscape_gpu_check --only d3d11 ...` (the pass is on under Windows). Must print
    `the ground casts (fixed blend): a box under the ground is A/255, and B/255 when the ground is not in the shadow maps` with
-   A below 0.8 x B, and `OK (fixed blend: the shadow maps)`. Without the switch the same line shows A = B and
+   A below 0.8 x B, and `OK (fixed blend: the shadow maps)`. With `set HE_LANDSCAPE_D3D_PASSES=0` the same line shows A = B and
    `not built on this backend`. Code: `D3D11Landscape::drawDepth`, `renderDepthLayer` in `D3D11Renderer.cpp` (search
    `landscapeD3dPassesOn`). Things I could not check: that the shadow pass's depth-stencil state is LESS with writes when the
    ground is drawn (it draws with whatever is set), and that `StateGuard` puts the depth vertex shader back for the next layer.
@@ -234,9 +242,10 @@ form `fixedBlendPasses` (`EngineCheck.cpp`).
    depth draw reuses (`(setNext - 1) % kSets`: on the very first frame no colour draw has written one; the vertex stage reads only
    the landscape's own images, which every table has). Run it with the debug layer on.
 4. When 2 and 3 hold on the GPU: delete the switch (`landscapeD3dPassesOn` in `LandscapeRenderFrame.h`, its three uses) so the
-   mask is always set. Until then nothing changes for a D3D user.
-5. Vulkan on a real GPU: `landscape_gpu_check --only vulkan` (shadows are on by default; expect the `the ground casts` line as
-   on MoltenVK), then `set HE_LANDSCAPE_VK_SSAO=1` and the same: the line `ambient occlusion: N ground px are darker ...` must
+   mask is always set. If one of them does NOT hold and cannot be fixed at once: make the Windows default `false` there, so D3D
+   users are back on the old behaviour.
+5. Vulkan on a real GPU: `landscape_gpu_check --only vulkan` (shadows and, off macOS, the SSAO pass are on; expect the
+   `the ground casts` line as on MoltenVK). For SSAO the line `ambient occlusion: N ground px are darker ...` must
    be above 60 in the forward run. On MoltenVK N is 0 although the patches are drawn into the position target (pipeline built,
    140-200 patches a frame); the forward frame there also draws the test box black, so I could not tell a wrong position from a
    capture that is off. Code: `VulkanLandscape::drawDepth(..., viewForPosition)`, `runSSAO`.
