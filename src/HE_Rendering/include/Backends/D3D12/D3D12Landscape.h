@@ -79,6 +79,16 @@ public:
 	// pipeline and heap set: the caller rebuilds its own state afterwards.
 	void drawDepth(ID3D12GraphicsCommandList* cl, const HE::LandscapeRenderFrame& frame, const glm::mat4& clip);
 
+	// For a MATERIAL's landscape variant (MaterialShaderLibrary::landscapeVertex / landscapeFragment, HLSL; the renderer's own root
+	// signature, pipeline and descriptor heap, D3D12MaterialRootSignature.h "the tile landscape drawn with a material"):
+	// writeMaterialViews puts the nine images' views (t47..t55: heights, slot table, coarse heights, 3 + 3 weight pages) at `count`
+	// consecutive descriptors of the caller's heap, `cpuFirst` being a raw D3D12_CPU_DESCRIPTOR_HANDLE::ptr; drawPatches writes
+	// LsGlobals in the GLSL blocks' layout (HE::vkls) to root parameter `rootGlobals`, each patch as root constants to `rootPatch`,
+	// and draws. It sets the index buffer and the topology and nothing else. False when there is nothing to draw (the fixed blend then).
+	bool writeMaterialViews(size_t cpuFirst, unsigned increment) const;
+	bool drawPatches(ID3D12GraphicsCommandList* cl, const HE::LandscapeRenderFrame& frame, const glm::mat4& viewProj, unsigned rootGlobals,
+	                 unsigned rootPatch);
+
 	const Stats& stats() const;
 
 private:

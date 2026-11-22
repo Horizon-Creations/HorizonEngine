@@ -315,5 +315,73 @@ inline void DescribeResolveRootSignature(ResolveRootSignature& out)
     out.desc.pStaticSamplers   = out.samplers;
     out.desc.Flags             = D3D12_ROOT_SIGNATURE_FLAG_NONE; // buffer-less fullscreen triangle
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The tile landscape drawn with a material (Thema 326):
+// MaterialShaderLibrary::landscapeVertex / landscapeFragment(HLSL) are a
+// material's shaders with the landscape's data added, so the signature is the
+// material one plus what only they read — the kHlslLandscape* contract:
+//   b12       LsGlobals (HE::vkls::Globals, both stages)            → param 9
+//   b13       LsPatch   (HE::vkls::PatchPush, 12 root constants)    → param 10
+//   t47..t55  tile heights, slot table, coarse heights, 3 + 3 weight
+//             pages, in a table of their own (the landscape's images
+//             change with the world, not with the draw)             → param 11
+// Params 0..8 keep their indices, so every bind of a mesh draw of the material
+// (and bindClusterRoots) works on this signature unchanged. No input layout:
+// the grid comes from SV_VertexID.
+constexpr UINT kRootLandscapeGlobals = kParamCount;       // 9
+constexpr UINT kRootLandscapePatch   = kParamCount + 1;   // 10
+constexpr UINT kRootLandscapeTable   = kParamCount + 2;   // 11
+constexpr UINT kLandscapeParamCount  = kParamCount + 3;
+constexpr UINT kLandscapeGlobalsReg  = 12;                // == MaterialShaderLibrary::kHlslLandscapeGlobalsReg
+constexpr UINT kLandscapeFirstSrv    = 47;                // == MaterialShaderLibrary::kHlslLandscapeFirstSrv
+constexpr UINT kLandscapeSrvCount    = 9;
+constexpr UINT kLandscapePatchDwords = 12;                // sizeof(HE::vkls::PatchPush) / 4
+
+struct LandscapeRootSignature
+{
+    D3D12_ROOT_PARAMETER      params[kLandscapeParamCount]{};
+    D3D12_DESCRIPTOR_RANGE    ranges[kRangeCount]{};
+    D3D12_DESCRIPTOR_RANGE    images{};
+    D3D12_STATIC_SAMPLER_DESC samplers[kSamplerCount]{};
+    D3D12_ROOT_SIGNATURE_DESC desc{};
+};
+
+inline void DescribeLandscapeRootSignature(LandscapeRootSignature& out)
+{
+    MaterialRootSignature mat;
+    DescribeMaterialRootSignature(mat);
+    out = LandscapeRootSignature{};
+    for (UINT i = 0; i < kParamCount; ++i)   out.params[i]   = mat.params[i];
+    for (UINT i = 0; i < kRangeCount; ++i)   out.ranges[i]   = mat.ranges[i];
+    for (UINT i = 0; i < kSamplerCount; ++i) out.samplers[i] = mat.samplers[i];
+    out.params[kRootSrvTable].DescriptorTable.pDescriptorRanges = out.ranges;
+
+    out.params[kRootLandscapeGlobals].ParameterType    = D3D12_ROOT_PARAMETER_TYPE_CBV;
+    out.params[kRootLandscapeGlobals].Descriptor       = { kLandscapeGlobalsReg, 0 };
+    out.params[kRootLandscapeGlobals].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+
+    out.params[kRootLandscapePatch].ParameterType            = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    out.params[kRootLandscapePatch].Constants.ShaderRegister = kLandscapeGlobalsReg + 1;
+    out.params[kRootLandscapePatch].Constants.RegisterSpace  = 0;
+    out.params[kRootLandscapePatch].Constants.Num32BitValues = kLandscapePatchDwords;
+    out.params[kRootLandscapePatch].ShaderVisibility         = D3D12_SHADER_VISIBILITY_VERTEX;
+
+    out.images.RangeType                         = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    out.images.NumDescriptors                    = kLandscapeSrvCount;
+    out.images.BaseShaderRegister                = kLandscapeFirstSrv;
+    out.images.RegisterSpace                     = 0;
+    out.images.OffsetInDescriptorsFromTableStart = 0;
+    out.params[kRootLandscapeTable].ParameterType                       = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    out.params[kRootLandscapeTable].DescriptorTable.NumDescriptorRanges = 1;
+    out.params[kRootLandscapeTable].DescriptorTable.pDescriptorRanges   = &out.images;
+    out.params[kRootLandscapeTable].ShaderVisibility                    = D3D12_SHADER_VISIBILITY_ALL;
+
+    out.desc.NumParameters     = kLandscapeParamCount;
+    out.desc.pParameters       = out.params;
+    out.desc.NumStaticSamplers = kSamplerCount;
+    out.desc.pStaticSamplers   = out.samplers;
+    out.desc.Flags             = D3D12_ROOT_SIGNATURE_FLAG_NONE;
+}
 } // namespace HE::d3d12mat
 #endif // _WIN32

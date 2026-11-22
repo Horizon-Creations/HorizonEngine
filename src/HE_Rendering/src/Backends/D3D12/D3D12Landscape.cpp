@@ -1,6 +1,7 @@
 #include "Backends/D3D12/D3D12Landscape.h"
 
 #include "Backends/D3D_Shared/LandscapeD3D.h"
+#include "Backends/Vulkan/VulkanLandscapeLayout.h"   // HE::vkls: the GLSL blocks a material's landscape variant reads (no Vulkan header in it)
 
 #include <HorizonRendering/LandscapeShaderSource.h>
 
@@ -71,6 +72,7 @@ struct D3D12Landscape::Impl
 		UINT                               rows = 0;
 		UINT64                             rowBytes = 0;
 		UINT64                             total = 0;
+		D3D12_SHADER_RESOURCE_VIEW_DESC    view{};    // as makeImage wrote it into the class's own tables (writeMaterialViews writes it again)
 	};
 	struct Ring
 	{
@@ -163,6 +165,7 @@ struct D3D12Landscape::Impl
 		}
 		for (unsigned s = 0; s < kSets; ++s)   // the image sits at the same place of every table of the ring
 			device->CreateShaderResourceView(im.res.Get(), &sv, cpuSlot(s, i));
+		im.view = sv;
 		return true;
 	}
 
@@ -661,6 +664,62 @@ void D3D12Landscape::drawDepth(ID3D12GraphicsCommandList* cl, const HE::Landscap
 			for (int q = 0; q < 4; ++q)
 				if ((p.quadrants & (1 << q)) && w.quadrantCount[q] != 0) cl->DrawIndexedInstanced(w.quadrantCount[q], 1, w.quadrantFirst[q], 0, 0);
 	}
+}
+
+bool D3D12Landscape::writeMaterialViews(size_t cpuFirst, unsigned increment) const
+{
+	const Impl& m = *m_impl;
+	if (!m.ok || !m.world) return false;
+	for (unsigned i = 0; i < d3dls::kImageCount; ++i)
+	{
+		if (!m.images[i].res) return false;
+		D3D12_CPU_DESCRIPTOR_HANDLE h{};
+		h.ptr = cpuFirst + static_cast<SIZE_T>(i) * increment;
+		m.device->CreateShaderResourceView(m.images[i].res.Get(), &m.images[i].view, h);
+	}
+	return true;
+}
+
+bool D3D12Landscape::drawPatches(ID3D12GraphicsCommandList* cl, const HE::LandscapeRenderFrame& f, const glm::mat4& viewProj, unsigned rootGlobals,
+                                 unsigned rootPatch)
+{
+	Impl& m = *m_impl;
+	if (!m.ok || !f.active || !f.world || f.patches.empty() || !m.world || m.world->generation != f.world->generation) return false;
+	const LandscapeRenderStatic& w = *m.world;
+
+	// A slot of the same ring the fixed blend's globals use: the GLSL block is no larger than a slot.
+	static_assert(sizeof(vkls::Globals) <= 1024 && sizeof(d3dls::Globals) <= 1024, "LsGlobals of either layout has to fit a 1024-byte ring slot");
+	if (m.globalsStride < sizeof(vkls::Globals)) return false;
+	vkls::Globals g;
+	vkls::fillGlobals(g, f, viewProj, glm::vec3(0.0f, 1.0f, 0.0f), glm::vec3(1.0f), glm::vec3(0.0f), false, false, false, false);   // the material lights, not these
+	const unsigned slot = m.globalsNext++ % kGlobalsSlots;
+	std::memcpy(m.globalsMapped + static_cast<size_t>(slot) * m.globalsStride, &g, sizeof(g));
+	cl->SetGraphicsRootConstantBufferView(rootGlobals, m.globals->GetGPUVirtualAddress() + static_cast<UINT64>(slot) * m.globalsStride);
+	cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+	cl->IASetIndexBuffer(&m.ibv);
+
+	m.stats.patches = m.stats.drawCalls = 0;
+	const uint32_t total = w.quadrantFirst[3] + w.quadrantCount[3];
+	for (const LandscapeRenderPatch& p : f.patches)
+	{
+		vkls::PatchPush pd;
+		vkls::fillPatch(pd, p);
+		cl->SetGraphicsRoot32BitConstants(rootPatch, sizeof(pd) / 4, &pd, 0);
+		if ((p.quadrants & 15) == 15)
+		{
+			cl->DrawIndexedInstanced(total, 1, 0, 0, 0);
+			++m.stats.drawCalls;
+		}
+		else
+			for (int q = 0; q < 4; ++q)
+			{
+				if (!(p.quadrants & (1 << q)) || w.quadrantCount[q] == 0) continue;
+				cl->DrawIndexedInstanced(w.quadrantCount[q], 1, w.quadrantFirst[q], 0, 0);
+				++m.stats.drawCalls;
+			}
+		++m.stats.patches;
+	}
+	return true;
 }
 
 void D3D12Landscape::draw(ID3D12GraphicsCommandList* cl, const HE::LandscapeRenderFrame& f, const glm::mat4& viewProj, const Shading& shading,

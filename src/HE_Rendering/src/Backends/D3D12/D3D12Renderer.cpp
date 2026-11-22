@@ -4136,6 +4136,75 @@ struct D3D12RendererImpl
                                                bool hdr, bool transparent, bool gbuffer = false,
                                                bool instanced = false);
 
+    // The tile landscape's variant of a material (Thema 326): the landscape's vertex stage (the grid from SV_VertexID, heights
+    // from the tile atlas) with the material's fragment, its layer weights read from the tile weight pages, against
+    // m_lsMatRootSig (the material signature plus b12 / b13 / t47..t55, D3D12MaterialRootSignature.h). No input layout, no
+    // tessellation stages. A miss is remembered: the ground keeps its fixed blend.
+    ComPtr<ID3D12RootSignature> m_lsMatRootSig;
+    std::unordered_map<uint64_t, ComPtr<ID3D12PipelineState>> m_lsMatPSOs;   // key = hash ^ hdr
+    HE::UUID landscapeMaterialLoadTried;                                      // the ground's material was asked for by its path, once
+    ID3D12PipelineState* GetOrBuildLandscapeMaterialPSO(uint64_t hash, const std::string& frag, bool hdr)
+    {
+        if (!m_lsMatRootSig) return nullptr;
+        const uint64_t key = hash ^ (hdr ? 0x9E3779B97F4A7C15ULL : 0ULL);
+        if (auto it = m_lsMatPSOs.find(key); it != m_lsMatPSOs.end()) return it->second.Get();
+        using Backend = HE::MaterialShaderLibrary::Backend;
+        UINT cflags = 0;
+#ifdef _DEBUG
+        cflags |= D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
+#endif
+        const HE::MaterialShaderLibrary::Compiled& vc = m_matShaderLib.landscapeVertex(Backend::HLSL);
+        ComPtr<ID3DBlob> vs, ps, cerr;
+        std::string why = vc.log;
+        bool built = vc.ok && !vc.source.empty()
+            && SUCCEEDED(D3DCompile(vc.source.c_str(), vc.source.size(), "landscapeMatVS", nullptr, nullptr, "main", "vs_5_0", cflags, 0, &vs, &cerr));
+        if (!built && cerr) why += static_cast<const char*>(cerr->GetBufferPointer());
+        // Clustered first, like a mesh draw of the material; the 8-light window variant when that one does not build.
+        for (int pass = matClustered() ? 0 : 1; built && pass < 2 && !ps; ++pass)
+        {
+            const HE::MaterialShaderLibrary::Compiled& fc = m_matShaderLib.landscapeFragment(hash, frag, Backend::HLSL, /*clustered=*/pass == 0);
+            cerr.Reset();
+            if (!fc.ok || fc.source.empty()
+                || FAILED(D3DCompile(fc.source.c_str(), fc.source.size(), "landscapeMatPS", nullptr, nullptr, "main", "ps_5_0", cflags, 0, &ps, &cerr)))
+            {
+                why += fc.log;
+                if (cerr) why += static_cast<const char*>(cerr->GetBufferPointer());
+                ps.Reset();
+            }
+        }
+        ComPtr<ID3D12PipelineState> pso;
+        if (built && ps)
+        {
+            D3D12_GRAPHICS_PIPELINE_STATE_DESC pd{};
+            pd.pRootSignature        = m_lsMatRootSig.Get();
+            pd.VS                    = { vs->GetBufferPointer(), vs->GetBufferSize() };
+            pd.PS                    = { ps->GetBufferPointer(), ps->GetBufferSize() };
+            pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+            pd.NumRenderTargets      = 1;
+            pd.RTVFormats[0]         = hdr ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_R8G8B8A8_UNORM;
+            pd.DSVFormat             = DXGI_FORMAT_D32_FLOAT;
+            pd.SampleDesc.Count      = 1;
+            pd.SampleMask            = UINT_MAX;
+            pd.RasterizerState.FillMode        = D3D12_FILL_MODE_SOLID;
+            pd.RasterizerState.CullMode        = D3D12_CULL_MODE_NONE;
+            pd.RasterizerState.DepthClipEnable = TRUE;
+            pd.DepthStencilState.DepthEnable    = TRUE;
+            pd.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+            pd.DepthStencilState.DepthFunc      = D3D12_COMPARISON_FUNC_LESS;
+            pd.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+            if (FAILED(device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&pso))))
+            {
+                why += " CreateGraphicsPipelineState failed";
+                pso.Reset();
+            }
+        }
+        if (!pso)
+            HE_LOG_WARN(RHI, "D3D12Renderer: the landscape keeps its fixed blend, its material's variant did not build: %s", why.c_str());
+        else
+            HE_LOG_INFO(RHI, "%s", "D3D12Renderer: built a material's tile landscape variant");
+        return m_lsMatPSOs.emplace(key, pso).first->second.Get();
+    }
+
     // ── Screen-space decals (forward) ───────────────────────────────────────
     // docs/decals-cross-backend-plan.md §6c. D3D12 has no G-buffer, so a decal is
     // not composited into a base-colour attachment like on Metal/GL — it samples
@@ -10670,6 +10739,21 @@ void D3D12RendererImpl::createMaterialResources()
         m_matRootSig.Reset();
         return;
     }
+    {
+        // The tile landscape's (GetOrBuildLandscapeMaterialPSO). Without it the ground keeps its fixed blend, nothing else changes.
+        static_assert(HE::d3d12mat::kLandscapeGlobalsReg == HE::MaterialShaderLibrary::kHlslLandscapeGlobalsReg
+                      && HE::d3d12mat::kLandscapeFirstSrv == HE::MaterialShaderLibrary::kHlslLandscapeFirstSrv,
+                      "D3D12MaterialRootSignature.h's landscape registers must be the kHlslLandscape* contract");
+        HE::d3d12mat::LandscapeRootSignature lsRs;
+        HE::d3d12mat::DescribeLandscapeRootSignature(lsRs);
+        ComPtr<ID3DBlob> lsSig, lsErr;
+        if (FAILED(D3D12SerializeRootSignature(&lsRs.desc, D3D_ROOT_SIGNATURE_VERSION_1, &lsSig, &lsErr)) ||
+            FAILED(device->CreateRootSignature(0, lsSig->GetBufferPointer(), lsSig->GetBufferSize(), IID_PPV_ARGS(&m_lsMatRootSig))))
+        {
+            HE_LOG_WARN(RHI, "%s", "D3D12Renderer: the tile landscape's material root signature failed, the ground keeps its fixed blend");
+            m_lsMatRootSig.Reset();
+        }
+    }
 
     // Two heaps, kept separate from sceneSrvHeap so the material draw doesn't disturb the
     // A1/A2/A3 mesh-texture slot allocator (the draw path switches the bound heap and
@@ -12351,8 +12435,12 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
     };
 
     // Trails live in their own per-frame band list, not in `objects`, so a scene
-    // that has nothing BUT a trail still has something to draw past here.
-    if (p.m_renderWorld.objects.empty() && p.m_renderWorld.ribbonBatches.empty()) { drawLandscape(); return; }
+    // that has nothing BUT a trail still has something to draw past here. So has a
+    // scene with nothing but a tile landscape that is drawn with its material: that
+    // draw needs the scene pass (its lighting block, its shadow maps).
+    const bool groundNeedsPass = p.landscapeFrameLive && p.m_matReady && p.m_lsMatRootSig && m_contentManager
+                              && p.landscapeFrame.materialId != HE::UUID{};
+    if (p.m_renderWorld.objects.empty() && p.m_renderWorld.ribbonBatches.empty() && !groundNeedsPass) { drawLandscape(); return; }
 
     const uint64_t walk = p.m_extractor.fullExtractCount();
     {
@@ -12384,7 +12472,7 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
     }
     p.statTotal   = static_cast<uint32_t>(p.m_renderWorld.objects.size());
     p.statVisible = static_cast<uint32_t>(p.m_sortedIndices.size());
-    if (p.m_sortedIndices.empty() && p.m_renderWorld.ribbonBatches.empty()) { drawLandscape(); return; }
+    if (p.m_sortedIndices.empty() && p.m_renderWorld.ribbonBatches.empty() && !groundNeedsPass) { drawLandscape(); return; }
 
     if (p.m_renderGraph.empty())
     {
@@ -13181,6 +13269,11 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
         // `deferredForward`, Metal's `forwardOpaque`, D3D11's replay.
         bool gbufferPass = false;
         std::vector<const DrawCall*> deferredForwardDCs;
+        // The tile landscape drawn with its material (Thema 326) goes through drawDC12 as well, so it gets every bind and every
+        // restore a mesh draw of that material gets: with `lsDraw` set, the draw call names the landscape's material, the
+        // pipeline is that material's landscape variant on m_lsMatRootSig, and the patches are drawn instead of a mesh.
+        const HE::LandscapeRenderFrame* lsDraw = nullptr;
+        bool lsDrawn = false;
         auto drawDC12 = [&](const DrawCall& dc) {
             if (drawIdx >= k_maxDraws) { p.noteDrawRingFull(); return; }
             // A trail carries no mesh asset — its geometry sits in this frame's
@@ -13229,7 +13322,12 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                     const bool wantTwin = dc.instanceTotal() > 1 && allowInstancing && !matTransp
                                        && instArena && RenderSorter::graphInstancingEnabled();
                     ID3D12PipelineState* matInstPso = nullptr;
-                    if (gbufferPass)
+                    if (lsDraw)
+                    {
+                        matPso = p.GetOrBuildLandscapeMaterialPSO(matHash, matFrag, p.usingHDR);
+                        if (!matPso) return;   // no variant: the caller draws the fixed blend, never a mesh
+                    }
+                    else if (gbufferPass)
                     {
                         // The G-buffer tail of the same graph (same expressions,
                         // attributes instead of heLitP). No variant, or one that
@@ -13399,7 +13497,7 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                         // Switch to the material root sig + ring SRV heap + material PSO.
                         ID3D12DescriptorHeap* mheaps[] = { p.m_matSrvHeap.Get() };
                         cl->SetDescriptorHeaps(1, mheaps);
-                        cl->SetGraphicsRootSignature(p.m_matRootSig.Get());
+                        cl->SetGraphicsRootSignature(lsDraw ? p.m_lsMatRootSig.Get() : p.m_matRootSig.Get());
                         p.bindClusterRoots(cl); // t24..t26 — fragmentClustered's light lists
                         cl->SetPipelineState(matPso);
                         // A Displacement PSO (HS/DS) takes the same index buffer as patches;
@@ -13460,7 +13558,24 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                         };
                         const UINT instCount = static_cast<UINT>(dc.instanceTotal());
                         D3D12RendererImpl::InstSlice isl;
-                        if (matInstPso && p.allocInstances(p.frameIndex, instCount, isl))
+                        if (lsDraw)
+                        {
+                            // The ground: HeParams as for any draw of the material; the landscape's nine images in the NEXT
+                            // block of this frame's ring (the table of root parameter 11), then the patches with the
+                            // landscape's own blocks (D3D12Landscape::drawPatches).
+                            UINT& cur = p.m_matSrvCursor[p.frameIndex];
+                            if (cur < D3D12RendererImpl::k_matMaxDraws && bindMatSlot(viewProj, glm::mat4(1.0f)))
+                            {
+                                const UINT lsBlk = (p.frameIndex * D3D12RendererImpl::k_matMaxDraws + cur++) * D3D12RendererImpl::k_matSrvPerDraw;
+                                if (p.landscape.writeMaterialViews(p.matSrvCpu(lsBlk).ptr, p.m_matSrvInc))
+                                {
+                                    cl->SetGraphicsRootDescriptorTable(HE::d3d12mat::kRootLandscapeTable, p.matSrvGpu(lsBlk));
+                                    lsDrawn = p.landscape.drawPatches(cl, *lsDraw, viewProj, HE::d3d12mat::kRootLandscapeGlobals,
+                                                                      HE::d3d12mat::kRootLandscapePatch);
+                                }
+                            }
+                        }
+                        else if (matInstPso && p.allocInstances(p.frameIndex, instCount, isl))
                         {
                             // The batch: every model into the model half of its arena slot,
                             // ONE U slot with the batch-constant half (U.mvp = viewProj, the
@@ -13508,6 +13623,7 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                     }
                 }
             }
+            if (lsDraw) return;   // no material pipeline for the landscape: the caller draws its fixed blend, never a mesh
             // Base color: an explicit MaterialComponent override (dc.materialAssetId) wins
             // over the mesh's own baked texture; else the mesh's baked texture (A1); else flat.
             if (mesh) p.ensureMeshAlbedo(cl, m, dc.meshAssetId, m_contentManager);
@@ -13890,9 +14006,31 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
 
         // ── World-scale landscape (Thema 326): after the opaque geometry (and, on a deferred frame, the resolve), depth-tested into the same
         // target. It brings its own root signature, pipeline and descriptor heap, so the scene state is rebuilt the way the skinned pass above does.
+        // With its material when it has one whose landscape variant builds (drawDC12 with lsDraw): lit, shadowed and fogged like
+        // any other surface of that material. Else, and on the paths that leave DrawScene before this pass, the fixed blend.
         if (p.landscapeFrameLive)
         {
-            drawLandscape();
+            if (p.m_matReady && m_contentManager && p.landscapeFrame.materialId != HE::UUID{})
+            {
+                const HE::LandscapeRenderFrame& lf = p.landscapeFrame;
+                if (!lf.materialPath.empty() && lf.materialId != p.landscapeMaterialLoadTried && !m_contentManager->getMaterial(lf.materialId))
+                {
+                    p.landscapeMaterialLoadTried = lf.materialId;   // the texture group's material is named by no entity: from its path, once
+                    if (!m_contentManager->resolveMaterialRef(lf.materialId, lf.materialPath)) m_contentManager->loadAsset(lf.materialPath);
+                }
+                DrawCall ground;
+                // the extractor's derived material where the landscape's own cannot be drawn (RenderWorld::tileLandscapeMaterial)
+                ground.materialAssetId = p.m_renderWorld.tileLandscapeMaterial != HE::UUID{} ? p.m_renderWorld.tileLandscapeMaterial : lf.materialId;
+                const bool wasGBuffer = gbufferPass, wasInstancing = allowInstancing;
+                gbufferPass = false;
+                allowInstancing = false;
+                lsDraw = &lf;
+                drawDC12(ground);
+                lsDraw = nullptr;
+                gbufferPass = wasGBuffer;
+                allowInstancing = wasInstancing;
+            }
+            if (!lsDrawn) drawLandscape();
             restoreSceneRoot();
             cl->SetPipelineState(scenePso);
         }
@@ -14515,6 +14653,7 @@ IRenderer::Capabilities D3D12Renderer::GetCapabilities() const
     // The tile landscape's ground in the shadow layers: written, not run (see renderDepthLayer). Said only with the switch on.
     c.landscapePassMask         = HE::landscapeD3dPassesOn() ? kLandscapePassShadow : 0u;
     c.landscapeCoarseRevision   = true;   // D3D12Landscape.cpp: new coarse and far images, the atlas stays
+    c.landscapeMaterial         = m_impl->m_matReady && m_impl->m_lsMatRootSig;   // drawDC12 with lsDraw: the ground through its material's landscape variant
     // Froxel volumetric fog (Thema 225 step 9): Inject/Integrate/Apply built at Initialize. It
     // draws on the HDR viewport frame only; every other frame keeps the analytic height fog.
     c.supportsVolumetricFog     = m_impl->fogPipelinesOk;

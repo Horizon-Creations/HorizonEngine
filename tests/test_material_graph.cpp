@@ -6278,6 +6278,82 @@ TEST_CASE("D3D12: a lit graph material's PSO needs the FULL material root signat
 	}
 }
 
+TEST_CASE("D3D12: a material's tile landscape variant builds against the landscape root signature, and not against the material's (WARP, Thema 326)")
+{
+	using Microsoft::WRL::ComPtr;
+	using B = HE::MaterialShaderLibrary::Backend;
+	WarpDevice w;
+	const bool haveWarp = createWarpDevice(w);
+	REQUIRE_MESSAGE(haveWarp, w.log);
+
+	HE_TEST::RvtOffScope rvtOff;
+	HE::MaterialShaderLibrary lib;
+	std::string err;
+	const HE::MatShaderGen gen = HE::generateFragment(HE::buildAutoLandscapeGraph().graph, HE::weatherFunctionLoader());
+	const auto& v = lib.landscapeVertex(B::HLSL);
+	REQUIRE_MESSAGE(v.ok, v.log);
+	ComPtr<ID3DBlob> vs = fxcBlob(v.source, "vs_5_0", err);
+	REQUIRE_MESSAGE(vs.Get() != nullptr, "landscape vertex: ", err);
+
+	// What D3D12RendererImpl::GetOrBuildLandscapeMaterialPSO describes: no input layout (the grid is SV_VertexID).
+	const auto makePso = [&](ID3D12RootSignature* rs, ID3DBlob* ps, ComPtr<ID3D12PipelineState>& out)
+	{
+		D3D12_GRAPHICS_PIPELINE_STATE_DESC pd{};
+		pd.pRootSignature        = rs;
+		pd.VS                    = { vs->GetBufferPointer(), vs->GetBufferSize() };
+		pd.PS                    = { ps->GetBufferPointer(), ps->GetBufferSize() };
+		pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+		pd.NumRenderTargets      = 1;
+		pd.RTVFormats[0]         = DXGI_FORMAT_R16G16B16A16_FLOAT;
+		pd.DSVFormat             = DXGI_FORMAT_D32_FLOAT;
+		pd.SampleDesc.Count      = 1;
+		pd.SampleMask            = UINT_MAX;
+		pd.RasterizerState.FillMode        = D3D12_FILL_MODE_SOLID;
+		pd.RasterizerState.CullMode        = D3D12_CULL_MODE_NONE;
+		pd.RasterizerState.DepthClipEnable = TRUE;
+		pd.DepthStencilState.DepthEnable    = TRUE;
+		pd.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+		pd.DepthStencilState.DepthFunc      = D3D12_COMPARISON_FUNC_LESS;
+		pd.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+		return w.device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&out));
+	};
+
+	HE::d3d12mat::LandscapeRootSignature ls;
+	HE::d3d12mat::DescribeLandscapeRootSignature(ls);
+	ComPtr<ID3D12RootSignature> lsRs;
+	{
+		const HRESULT hr = makeRootSignature(w.device.Get(), ls.desc, lsRs, err);
+		const std::string why = drainInfoQueue(w);
+		REQUIRE_MESSAGE(SUCCEEDED(hr), "landscape root signature: ", err, why);
+	}
+	// The negative control: the plain material signature has neither b12 / b13 nor t47..t55.
+	HE::d3d12mat::MaterialRootSignature mat;
+	HE::d3d12mat::DescribeMaterialRootSignature(mat);
+	ComPtr<ID3D12RootSignature> matRs;
+	REQUIRE(SUCCEEDED(makeRootSignature(w.device.Get(), mat.desc, matRs, err)));
+	drainInfoQueue(w);
+
+	for (const bool clustered : { false, true })
+	{
+		const auto& f = lib.landscapeFragment(0x32612, gen.glsl, B::HLSL, clustered);
+		REQUIRE_MESSAGE(f.ok, f.log);
+		ComPtr<ID3DBlob> ps = fxcBlob(f.source, "ps_5_0", err);
+		REQUIRE_MESSAGE(ps.Get() != nullptr, "landscape fragment (clustered ", clustered, "): ", err);
+		{
+			ComPtr<ID3D12PipelineState> pso;
+			const HRESULT hr = makePso(lsRs.Get(), ps.Get(), pso);
+			const std::string why = drainInfoQueue(w);
+			CHECK_MESSAGE(SUCCEEDED(hr), "PSO against the landscape signature failed (clustered ", clustered, "), hr=", hr, ": ", why);
+		}
+		{
+			ComPtr<ID3D12PipelineState> pso;
+			const HRESULT hr = makePso(matRs.Get(), ps.Get(), pso);
+			drainInfoQueue(w);
+			CHECK_MESSAGE(FAILED(hr), "the material signature took the landscape variant: the negative control does not hold");
+		}
+	}
+}
+
 TEST_CASE("D3D12: the deferred resolve and G-buffer PSOs build against their signatures (WARP, Thema 150)")
 {
 	// docs/deferred-renderer-plan.md §10.8 Schritt 3. The resolve is heLitP in a
