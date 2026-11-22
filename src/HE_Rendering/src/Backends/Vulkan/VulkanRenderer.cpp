@@ -34,6 +34,7 @@
 #include <HorizonRendering/ClipSpace.h>
 #include <HorizonRendering/GiCasterRange.h>
 #include <HorizonRendering/GiHeightfield.h>
+#include <HorizonRendering/RvtTilePatches.h>   // the tile ground's patches a virtual texture's consumer serves
 #include <Diagnostics/EngineProfiler.h>
 #include <HorizonRendering/GIJitter.h>       // GI: wrapped cone-jitter frame index (all backends)
 #include <HorizonRendering/GIReflectionTier.h> // GI reflections: quality tier + blur reach (shared, D3D/Vulkan)
@@ -1399,6 +1400,7 @@ IRenderer::Capabilities VulkanRenderer::GetCapabilities() const
     c.landscapePassMask         = kLandscapePassShadow | kLandscapePassGBuffer | kLandscapePassGi | (HE::landscapeVkSsaoOn() ? kLandscapePassSsao : 0u);
     c.supportsRawCapture        = m_postFxReady;   // RenderSceneImage's rawOutput rides the tonemap pass
     c.supportsRvt               = m_postFxReady && m_matReady && m_matRvt;   // a page is that raw capture copied into the pool
+    c.landscapeRvt              = c.landscapeMaterial && c.supportsRvt;      // SetRvtTileGround, rvtTileGround pages (drawGroundMaterial)
     return c;
 }
 
@@ -11444,6 +11446,9 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
         bool groundInGBuffer = false;
         auto drawGroundMaterial = [&](bool gbuffer) -> bool
         {
+            // A virtual texture page of meshes: the ground stays out of it (and so does the fixed blend).
+            const bool page = m_editorCamera.rvtSlot >= 0;
+            if (page && !m_editorCamera.rvtTileGround) return true;
             if (!(m_landscapeFrameLive && m_landscapeFrame.materialId != HE::UUID{} && m_lsMatPipelineLayout != VK_NULL_HANDLE && m_matReady
                   && m_contentManager))
                 return false;
@@ -11456,17 +11461,38 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                     m_contentManager->loadAsset(m_landscapeFrame.materialPath);
             }
             if (!m_landscape->materialImages(m_currentFrame, m_landscapeFrame, m_landscapeViewProj, lsImages)) return false;
-            DrawCall lsDC{};
-            // the extractor's derived material where the landscape's own cannot be drawn (RenderWorld::tileLandscapeMaterial)
-            lsDC.materialAssetId = m_renderWorld.tileLandscapeMaterial != HE::UUID{} ? m_renderWorld.tileLandscapeMaterial : m_landscapeFrame.materialId;
             const bool gb = gbufferPass;
             gbufferPass = gbuffer;
-            lsDraw = &m_landscapeFrame;
-            lsDrawn = false;
-            drawDCVk(lsDC);
-            lsDraw = nullptr;
+            const auto drawWith = [&](const HE::UUID& material, const HE::LandscapeRenderFrame& frame) -> bool
+            {
+                if (frame.patches.empty()) return false;
+                DrawCall lsDC{};
+                lsDC.materialAssetId = material;
+                lsDraw = &frame;
+                lsDrawn = false;
+                drawDCVk(lsDC);
+                lsDraw = nullptr;
+                return lsDrawn;
+            };
+            // What is drawn: on a page of the ground (rvtTileGround) the layer's view; else the extractor's derived material
+            // where the landscape's own cannot be drawn (RenderWorld::tileLandscapeMaterial), else the landscape's own.
+            const HE::UUID own = page ? m_editorCamera.rvtMaterial
+                               : m_renderWorld.tileLandscapeMaterial != HE::UUID{} ? m_renderWorld.tileLandscapeMaterial : m_landscapeFrame.materialId;
+            // Under a virtual texture (SetRvtTileGround) the patches inside its rectangle are drawn with the consumer, which
+            // reads the pages; when the consumer's variant does not build they go back to the ground's own material.
+            HE::LandscapeRenderFrame rest = m_landscapeFrame, paged = m_landscapeFrame;
+            paged.patches.clear();
+            bool any = false;
+            if (!page && m_tileRvtConsumer != HE::UUID{} && m_rvtPool[0].view && m_rvtTables.count(m_tileRvtConsumer))
+            {
+                HE::splitRvtTilePatches(rest, m_tileRvtMin, m_tileRvtMax, m_tileRvtNearM, paged.patches);
+                if (drawWith(m_tileRvtConsumer, paged)) any = true;
+                else rest.patches.insert(rest.patches.end(), paged.patches.begin(), paged.patches.end());
+            }
+            if (drawWith(own, rest)) any = true;
             gbufferPass = gb;
-            return lsDrawn;
+            lsDrawn = any;
+            return any;
         };
 
         // Decals into GB0 when this frame is deferred and the variant built;
