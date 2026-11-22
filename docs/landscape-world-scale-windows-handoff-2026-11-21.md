@@ -268,9 +268,32 @@ form `fixedBlendPasses` (`EngineCheck.cpp`).
 * **SSAO** on OpenGL and D3D, **velocity** everywhere but Metal (Metal: `EncodeLandscapePass` kinds 2-4).
 * **Virtual texture** (`landscapeRvt`), section 7b.
 
+## 9. The Windows run of 22.11. (NN-WS03, RTX 4070, Debug build, branch with `claude/landscape-d3d-passes` merged in)
+
+All four `landscape_gpu_check --only <backend> --out <dir>` runs exit 0 (without `--arrays`: the Forest array is not on this machine,
+the tool's "world-uv ground from the Forest array" scene fails with it for that reason alone).
+
+| | Result |
+|---|---|
+| `he_tests --source-file=*test_landscape*,*test_material_graph*,*test_game_build_config*` | 334 cases, 0 failed (incl. `test_landscape_physics.cpp:298` and the D3D shader contract); run before the fixes below |
+| FXC (`fxc /T vs_5_0`, `ps_5_0`, entry `main`) on `landscape_vs.hlsl` / `landscape_ps.hlsl` | both compile; warnings only (X3556 integer divide, X4000 `heLsTexel` possibly uninitialised) |
+| D3D11 shadows (section 8, step 2) | **proven**: 141/255 against 203 (forward), 150 against 222 (deferred); with `HE_LANDSCAPE_D3D_PASSES=0` 203 = 203 |
+| D3D12 shadows (step 3) | **proven** by the same numbers. The debug layer is **not installed** here ("Graphics Tools" feature), so the PSO format, root state and descriptor table were judged by the picture only |
+| D3D11 / D3D12 `coarseRevision` (item 2a) | **built and proven**: `the move uploaded 30 tile(s) of the 191`, 0 of 129600 px apart, far stroke 57 px. `D3D11Landscape::upload` / `D3D12Landscape::upload` (`fresh` against a changed revision), `landscapeCoarseRevision = true`, `refreshesCoarse()` |
+| Vulkan (step 5) | **proven**: shadows 140 against 203, `ambient occlusion: 57739 ground px` (forward), 57570 (deferred): the SSAO pass holds on a real driver |
+| OpenGL 4.6, ground drawn with its material (first run anywhere) | failed, **fixed, proven**. Forward was black: the lighting block is uploaded by the first graph-material mesh only, and the scene had none. And the ground took no sun shadow: the mesh materials' fill has no cascades. `OpenGLRenderer.cpp`, the block before `DrawLandscape(viewProj, landscapeLightUbo)`: 6894 px (forward) / 4631 px (deferred) in the box's shadow |
+
+Decided: the two switches (`landscapeD3dPassesOn`, `landscapeVkSsaoOn`) **stay**, on by default as before. Step 4 said to delete the D3D
+one when 2 and 3 hold; they hold in the picture, but D3D12 never ran under the debug layer. Delete it after one such run.
+
+Fixed on the way: `D3D12Landscape::drawDepth` called `fillGlobals` without step 28's `farBound` argument (the two branches met here).
+
 ## Handoff
 
-- **Done / verified / not verified:** see the three docs named at the top; on Windows nothing is verified.
+- **Done / verified / not verified:** section 9 for Windows; the three docs named at the top for the Mac. Not verified on Windows:
+  D3D12 under the debug layer, a Release build, `--arrays`, the editor by hand (section 5), the full `he_tests` run after the merge.
+- **Next:** install the D3D12 debug layer and repeat step 3; then the largest gap, D3D11 / D3D12 drawing the ground with its material
+  (section 8, "Gaps to fill"); `release/0.8.0` (116 commits ahead, PR 233 among them) is not merged into this branch yet.
 - **Do not:** bump the landscape's generation for an edit (it empties every backend's atlas); rely on `LandscapeTileSource::coarse()`
   (null for a pack in coarse regions: `coarseWindow`); name anything `far`, `near` or `small` (Windows macros).
 - **Order:** 0, 1, 2, 3, then 5. Items 2 and 3 are board steps 27 and 28; item 1 has none yet.
