@@ -61,8 +61,9 @@ Branch `claude/landscape-weltmassstab-100km`, up to `1e118e0a6`.
 **Added after the first version of this file** (up to `9a9a422ad`)
 * `RenderWorld::tileLandscapeMaterial` (`RenderExtractor.cpp`, `tileGroundMaterial`): the ground is drawn with a DERIVED material
   where its own reads a virtual texture (`matInlineRvt`) or the entity overrides parameters. Without this the ground was a flat
-  grey in any build with RVT on (the editor's default). A packaged material without its graph is drawn as it is: **the derived
-  one is not baked at export, so an exported game with RVT on shows grey ground** until that is built.
+  grey in any build with RVT on (the editor's default). A packaged material without its graph is drawn as it is, and then the
+  ground would be grey with RVT on. **Not checked in an export**: whether the pack keeps the graph of a landscape material (the
+  RVT driver's own fallback needs it too, so it probably does) and whether the game can compile the derived shader.
 * Worlds that are not square: the virtual weight image is a square of the longer side (`heLsSide`).
 * Witnesses: 16 x 8 tile world with layers 1 and 5 painted (position, page, channel), ground-alone pixel count, RVT on.
 * `HE_DUMP_TILEWORLD=<pack>` in the editor's dump path; `landscape_gpu_check --write-pack <file>`. Picture of the real editor:
@@ -100,7 +101,7 @@ Branch `claude/landscape-weltmassstab-100km`, up to `1e118e0a6`.
 | Collaboration | no |
 
 **Next steps**
-1. Bake the derived ground material at export (else exported games with RVT on have grey ground).
+1. Export a game with a tile landscape and RVT on and look at the ground (see the derived material above).
 2. RVT for the tile ground, or the far image photographed from the material (survey in the session's notes: `HlodBaker::renderView`
    is the capture to copy, `bakeLandscapeFar`'s painter slot at `LandscapeExport.cpp:103` takes it; a page camera needs the landscape
    drawn with the camera's `rvtMaterial`, and the consumer's id for `BindRvtForDraw`).
