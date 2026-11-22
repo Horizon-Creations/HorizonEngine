@@ -58,8 +58,51 @@ Branch `claude/landscape-weltmassstab-100km`, up to `1e118e0a6`.
 * Tools on tiles still missing: foliage density mask, water brush and lakes, heightmap import onto an existing world.
 * The first frame with a new material compiles on the render thread.
 
+**Added after the first version of this file** (up to `9a9a422ad`)
+* `RenderWorld::tileLandscapeMaterial` (`RenderExtractor.cpp`, `tileGroundMaterial`): the ground is drawn with a DERIVED material
+  where its own reads a virtual texture (`matInlineRvt`) or the entity overrides parameters. Without this the ground was a flat
+  grey in any build with RVT on (the editor's default). A packaged material without its graph is drawn as it is: **the derived
+  one is not baked at export, so an exported game with RVT on shows grey ground** until that is built.
+* Worlds that are not square: the virtual weight image is a square of the longer side (`heLsSide`).
+* Witnesses: 16 x 8 tile world with layers 1 and 5 painted (position, page, channel), ground-alone pixel count, RVT on.
+* `HE_DUMP_TILEWORLD=<pack>` in the editor's dump path; `landscape_gpu_check --write-pack <file>`. Picture of the real editor:
+  `docs/landscape-tile-material-2026-11-21/editor_headless_tileworld.png`.
+* **`landscape_gpu_check --arrays` needs an EngineContent whose `Materials` are this build's** (the main checkout's are older and
+  compute in place; the tool says `NOT CHECKED` then). On the Mac: a folder of links, Materials from the worktree, Textures from
+  the main checkout.
+
+**Limits that are not bugs to fix here**
+* World Position adds the whole floating origin as a float: exact to a millimetre up to about 16 km from the world's zero, 4 mm at
+  50 km, 8 mm at 100 km, which a 2 m texture tile at 2k shows as blockiness close to the camera. It is what the old landscape has at
+  that distance without a floating origin. Wrapping the origin would make the procedural noise jump instead.
+* The check's thresholds for Vulkan were widened three times to get it green on MoltenVK (origin shift 2 -> 8/255, the control's
+  blue share to 10 % of the material's, the TAA comparison to 10 %); Metal passes the narrow ones.
+* Frame times with THIS build's material: the `TerrainComponent` row is 7.0 ms, but its material reads a virtual texture nobody
+  paints in the tool, so it is grey and cheap; with its RVT driver running it was not measured. The tile ground is 14.2 ms.
+
+**Parity: what the single landscape has, and the tile landscape**
+
+| Feature of a `TerrainComponent` landscape | Tile landscape |
+|---|---|
+| Drawn with its material, lit, fogged | yes: Metal, Vulkan; OpenGL where the driver has 24 samplers; D3D no |
+| Receives shadows | yes where drawn with the material |
+| Casts shadows, SSAO, velocity, G-buffer, GI ray hits | Metal only (`landscapePasses`) |
+| Parameter overrides of the landscape entity | yes (derived material) |
+| Runtime Virtual Texture | no: computed in place (slower by about what RVT saves) |
+| Baked far image / HLOD of the ground | the fixed blend reads it; with a material it is not read |
+| Sculpt: Raise, Lower, Smooth, Flatten, Roughen, Ramp, Mountain | yes (tile brush; Mountain is one click, not a dragged area) |
+| Paint layers | yes |
+| Foliage: scatter by rules, by ground layer | yes; the painted density mask no |
+| Water: bodies from the pack, migrated lakes | yes; the water brush and new lakes no |
+| Heightmap import | as a new pack only, not onto an existing world |
+| One Landscape mode, editor undo | no: "Edit Tiles" block with its own undo |
+| Script API, MCP tools, picking, spline tool, outliner | no (they address a `TerrainComponent`) |
+| Collaboration | no |
+
 **Next steps**
-1. Far image photographed from the material, read by the variant for ground outside the atlas.
-2. RVT for the tile ground.
+1. Bake the derived ground material at export (else exported games with RVT on have grey ground).
+2. RVT for the tile ground, or the far image photographed from the material (survey in the session's notes: `HlodBaker::renderView`
+   is the capture to copy, `bakeLandscapeFar`'s painter slot at `LandscapeExport.cpp:103` takes it; a page camera needs the landscape
+   drawn with the camera's `rvtMaterial`, and the consumer's id for `BindRvtForDraw`).
 3. `landscapePasses` on Vulkan (shadow layers `drawDepthLayer`, GI raster in `runGi`, G-buffer), then D3D.
-4. Foliage mask, water, import on tiles.
+4. Foliage mask, water brush, import on tiles; the rows of the table that say no.
