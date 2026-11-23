@@ -1994,9 +1994,6 @@ void startExport(AppContext& ctx)
                 uint8_t texComp;
                 if (s_exportTextureFormat == "None")
                     texComp = static_cast<uint8_t>(0);       // RGBA8 — no block compression
-                else if (ctx.projectManager && ctx.projectManager->currentProject().appProject &&
-                         !ctx.projectManager->currentProject().advancedShaderEffects)
-                    texComp = static_cast<uint8_t>(0);       // RGBA8 — the software renderer samples on the CPU
                 else if (exportAppBundleApplicable(s_exportPlatform))
                     texComp = (ctx.backend == HE::RendererBackend::OpenGL)
                                   ? static_cast<uint8_t>(3)  // BC3 — macOS GL

@@ -241,7 +241,8 @@ TEST_CASE("Block decoders: hand-built blocks")
 	SUBCASE("refusals")
 	{
 		uint8_t blk[16] = {};
-		CHECK_FALSE(HE::decodeBlockLevelToRGBA8(TextureFormat::BC7, blk, sizeof(blk), 4, 4, px));       // no decoder
+		CHECK_FALSE(HE::decodeBlockLevelToRGBA8(TextureFormat::ASTC_4x4, blk, sizeof(blk), 4, 4, px));  // no block decoder here
+		CHECK_FALSE(HE::decodeBlockLevelToRGBA8(TextureFormat::BC7, blk, 8, 4, 4, px));                 // too short
 		CHECK_FALSE(HE::decodeBlockLevelToRGBA8(TextureFormat::BC1, blk, 4, 4, 4, px));                 // too short
 		CHECK_FALSE(HE::decodeBlockLevelToRGBA8(TextureFormat::BC5, blk, sizeof(blk), 0, 4, px));
 		CHECK_FALSE(HE::textureFormatCpuDecodable(TextureFormat::BC7));

@@ -1,9 +1,10 @@
 #pragma once
-// CPU decoders for the BC1 / BC3 / BC4 / BC5 block formats (the S3TC / RGTC family).
-// Two jobs: the RGBA8 fallback a backend takes when its GPU or driver can't sample
-// one of these (instead of a flat texture), and the round-trip tests of the
-// pack-time encoders. BC7 and ASTC are deliberately not here: nothing falls back
-// from them to a decode, and the encoders are upstream-tested.
+// CPU decoders for the BC1 / BC3 / BC4 / BC5 block formats (the S3TC / RGTC family),
+// plus BC7 and ASTC 4x4 for a reader that samples on the CPU (the software renderer).
+// Jobs: the RGBA8 fallback a backend takes when its GPU or driver can't sample one of
+// the S3TC/RGTC formats (instead of a flat texture), the software renderer's texels,
+// and the round-trip tests of the pack-time encoders. BC7 is decoded but is NOT
+// textureFormatCpuDecodable: no GPU backend falls back from it to RGBA8.
 //
 // Output matches what the hardware would hand a shader: BC1/BC3 give RGBA (BC1's
 // transparent texel, 3-colour mode index 3, decodes to alpha 0), BC4 gives
@@ -22,15 +23,15 @@ namespace HE
 HE_API bool textureFormatCpuDecodable(::TextureFormat f);
 
 // Decode ONE mip level (w x h texels, tightly packed blocks as the encoders write
-// them) into `dstRgba8` (w*h*4 bytes). False when `f` isn't decodable or `srcBytes`
+// them) into `dstRgba8` (w*h*4 bytes). BC7 too. False when `f` isn't decodable or `srcBytes`
 // is shorter than textureLevelBytes(f, w, h).
 HE_API bool decodeBlockLevelToRGBA8(::TextureFormat f, const uint8_t* src, size_t srcBytes,
                                     uint32_t w, uint32_t h, uint8_t* dstRgba8);
 
 // The base level of `in` as RGBA8 (width*height*4 bytes into `out`), for a reader that
-// samples on the CPU (the software renderer). Takes RGBA8 as is, BC1/BC3/BC4/BC5, and
-// ASTC 4x4 when astcenc is in the build (what a macOS export cooks). False for BC7 and
-// on a truncated payload.
+// samples on the CPU (the software renderer). Takes RGBA8 as is, BC1/BC3/BC4/BC5/BC7,
+// and ASTC 4x4 when astcenc is in the build (what a macOS export cooks). False on a
+// truncated payload or an ASTC texture in a build without astcenc.
 HE_API bool decodeBaseLevelToRGBA8(const TextureAsset& in, std::vector<uint8_t>& out);
 
 // Decode every slice and level of `in` (2D or array, any decodable format) into an

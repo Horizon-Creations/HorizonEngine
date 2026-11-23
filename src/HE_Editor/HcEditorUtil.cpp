@@ -1737,6 +1737,12 @@ void drawPinDefaultEditor(HorizonCode::Node& n, int unifiedPin, bool& committed,
 			                  "Wire another entity in to act on that one instead.");
 		return;
 	}
+	// A pin shown for the first time starts at the registry's default, not at 0
+	// (ApiParam::def): drawing it is what writes the value into the graph.
+	if (n.pinDefaults.find(di) == n.pinDefaults.end() && pd.type == P::Float &&
+	    n.type == HorizonCode::NodeType::EngineCall)
+		if (const HE::api::ApiFn* fn = HE::api::find(n.s); fn && di < (int)fn->params.size())
+			n.pinDefaults[di] = V::ofFloat(fn->params[(size_t)di].def);
 	// The stored default keeps the PIN's type (retypes re-seed on next edit).
 	V& v = n.pinDefaults[di];
 	// Float → Double keeps the number: the datetime/fs rows moved from one to

@@ -8671,6 +8671,26 @@ const std::vector<ApiFn>& registry()
                 if (std::strcmp(fn.id, id) == 0) { fn.displayName = name; break; }
         }
 
+        // ── Pin defaults that are not 0 (ApiParam::def) ──────────────────────
+        // The same values the thunks fall back on when an argument is missing;
+        // without them a fresh Play Sound node played at volume 0, pitch 0.
+        {
+            struct Def { const char* fn; const char* param; float v; };
+            static constexpr Def kDefs[] = {
+                { "audio.play",          "volume",  1.0f }, { "audio.play",   "pitch", 1.0f },
+                { "audio.playAt",        "volume",  1.0f }, { "audio.playAt", "pitch", 1.0f },
+                { "audio.playAt",        "minDist", 1.0f }, { "audio.playAt", "maxDist", 20.0f },
+                { "audio.setVolume",     "volume",  1.0f }, { "audio.setPitch", "pitch", 1.0f },
+                { "audio.setBusVolume",  "volume",  1.0f },
+                { "settings.setVolume",  "volume",  1.0f },
+            };
+            for (auto& fn : t)
+                for (const Def& d : kDefs)
+                    if (std::strcmp(fn.id, d.fn) == 0)
+                        for (auto& p : fn.params)
+                            if (std::strcmp(p.name, d.param) == 0) p.def = d.v;
+        }
+
         // ── Second post-pass: the Target pin defaults to the caller ──────────
         // A character's own graph called Jump on itself and still had to wire Get
         // Owning Entity into the Entity pin — for Jump, and again for Move, and

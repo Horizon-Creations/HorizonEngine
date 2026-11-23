@@ -1,11 +1,16 @@
 #include "doctest.h"
 #include <ContentManager/BlockEncode.h>
+#include <ContentManager/TextureBlockDecode.h>
 
+#include <cstdlib>
+
+#include <algorithm>
+#include <cstring>
 #include <vector>
 
 // The single-image block encoder the Runtime Virtual Texture's cold pages use (Thema 333 step 6j Metal / step 9 Windows).
-// BC7 decode happens only on the GPU (TextureBlockDecode.h deliberately has no CPU BC7 decoder), so the BC7 cases here
-// check shape and determinism; the lit-diff witness on real D3D11/D3D12/Vulkan hardware proves round-trip colour fidelity.
+// The BC7 round trip goes through the CPU decoder the software renderer uses (TextureBlockDecode.h); the lit-diff witness
+// on real D3D11/D3D12/Vulkan hardware is what proves the GPU reads the same blocks.
 
 TEST_CASE("blockEncodedBytes counts 16 bytes per 4x4 block, partial blocks rounded up")
 {
@@ -90,4 +95,48 @@ TEST_CASE("encodeBlocks: BC7 handles a side that is not a multiple of 4 (clamped
     }
     CHECK(out.size() == HE::blockEncodedBytes(5, 3));
     CHECK(out.size() == 2u * 1u * 16u);
+}
+
+TEST_CASE("BC7: what bc7enc writes, the CPU decoder reads back close to the source (opaque and with alpha)")
+{
+    // Opaque blocks take modes 1/6, blocks with alpha 5/6/7: both halves of what an export cooks.
+    for (const bool alpha : { false, true })
+    {
+        const uint32_t W = 64, H = 64;
+        std::vector<uint8_t> src(W * H * 4);
+        for (uint32_t y = 0; y < H; ++y)
+            for (uint32_t x = 0; x < W; ++x)
+            {
+                uint8_t* p = &src[(y * W + x) * 4];
+                p[0] = uint8_t(x * 4); p[1] = uint8_t(y * 4); p[2] = uint8_t((x ^ y) & 0x20 ? 200 : 30);
+                p[3] = alpha ? uint8_t(255 - x * 3) : 255;
+            }
+        std::vector<uint8_t> blocks;
+        if (!HE::encodeBlocks(HE::BlockFormat::Bc7, src.data(), W, H, false, 1, blocks))
+        {
+            MESSAGE("this build has no BC7 encoder: nothing to check");
+            return;
+        }
+        std::vector<uint8_t> back(src.size());
+        REQUIRE(HE::decodeBlockLevelToRGBA8(::TextureFormat::BC7, blocks.data(), blocks.size(), W, H, back.data()));
+        long sum = 0; int worst = 0;
+        for (size_t i = 0; i < src.size(); ++i)
+        {
+            const int d = std::abs(int(src[i]) - int(back[i]));
+            sum += d; worst = std::max(worst, d);
+        }
+        INFO("alpha " << alpha << " mean " << double(sum) / double(src.size()) << " worst " << worst);
+        CHECK(double(sum) / double(src.size()) < 3.0);
+        CHECK(worst <= 40);
+        if (!alpha) for (size_t i = 3; i < back.size(); i += 4) REQUIRE(back[i] == 255);
+    }
+}
+
+TEST_CASE("BC7: a reserved mode byte decodes to transparent black, never garbage")
+{
+    const uint8_t blk[16] = {};
+    uint8_t out[4 * 4 * 4];
+    std::memset(out, 0x77, sizeof out);
+    REQUIRE(HE::decodeBlockLevelToRGBA8(::TextureFormat::BC7, blk, sizeof blk, 4, 4, out));
+    for (uint8_t b : out) CHECK(b == 0);
 }

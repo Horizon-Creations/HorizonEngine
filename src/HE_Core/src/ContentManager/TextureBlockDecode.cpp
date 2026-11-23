@@ -76,6 +76,100 @@ void decodeBc4Block(const uint8_t* blk, uint8_t out[16])
         out[t] = static_cast<uint8_t>(pal[bits & 7]);
 }
 
+#include "Bc7DecodeTables.inl"
+
+// One BC7 block (16 bytes) into 16 RGBA texels — every mode of the format, since
+// a pak cooked elsewhere may use any of them, not only the four bc7enc writes.
+void decodeBc7Block(const uint8_t* blk, uint8_t out[16][4])
+{
+    struct Mode { uint8_t ns, pb, rb, isb, cb, ab, epb, spb, ib, ib2; };
+    static constexpr Mode kModes[8] = {
+        { 3, 4, 0, 0, 4, 0, 1, 0, 3, 0 }, { 2, 6, 0, 0, 6, 0, 0, 1, 3, 0 },
+        { 3, 6, 0, 0, 5, 0, 0, 0, 2, 0 }, { 2, 6, 0, 0, 7, 0, 1, 0, 2, 0 },
+        { 1, 0, 2, 1, 5, 6, 0, 0, 2, 3 }, { 1, 0, 2, 0, 7, 8, 0, 0, 2, 2 },
+        { 1, 0, 0, 0, 7, 7, 1, 0, 4, 0 }, { 2, 6, 0, 0, 5, 5, 1, 0, 2, 0 },
+    };
+    uint32_t bit = 0;
+    auto read = [&](uint32_t n) {
+        uint32_t v = 0;
+        for (uint32_t i = 0; i < n; ++i, ++bit)
+            v |= static_cast<uint32_t>((blk[bit >> 3] >> (bit & 7)) & 1u) << i;
+        return v;
+    };
+    uint32_t mode = 0;
+    while (mode < 8 && read(1) == 0) ++mode;
+    if (mode == 8) { std::memset(out, 0, 16 * 4); return; }   // reserved: transparent black
+    const Mode& m = kModes[mode];
+    const uint32_t part = read(m.pb), rot = read(m.rb), isb = read(m.isb);
+
+    uint32_t ep[3][2][4] = {};   // [subset][endpoint][channel]
+    for (uint32_t c = 0; c < 3; ++c)
+        for (uint32_t s = 0; s < m.ns; ++s)
+            for (uint32_t e = 0; e < 2; ++e) ep[s][e][c] = read(m.cb);
+    if (m.ab)
+        for (uint32_t s = 0; s < m.ns; ++s)
+            for (uint32_t e = 0; e < 2; ++e) ep[s][e][3] = read(m.ab);
+    uint32_t cbits = m.cb, abits = m.ab;
+    if (m.epb || m.spb)
+    {
+        for (uint32_t s = 0; s < m.ns; ++s)
+        {
+            const uint32_t shared = m.spb ? read(1) : 0;
+            for (uint32_t e = 0; e < 2; ++e)
+            {
+                const uint32_t p = m.epb ? read(1) : shared;
+                for (uint32_t c = 0; c < 4; ++c) ep[s][e][c] = (ep[s][e][c] << 1) | p;
+            }
+        }
+        ++cbits; if (abits) ++abits;
+    }
+    for (uint32_t s = 0; s < m.ns; ++s)
+        for (uint32_t e = 0; e < 2; ++e)
+        {
+            for (uint32_t c = 0; c < 3; ++c)
+            {
+                uint32_t v = ep[s][e][c] << (8 - cbits);
+                ep[s][e][c] = v | (v >> cbits);
+            }
+            if (abits) { uint32_t v = ep[s][e][3] << (8 - abits); ep[s][e][3] = v | (v >> abits); }
+            else ep[s][e][3] = 255;
+        }
+
+    auto subsetOf = [&](uint32_t t) -> uint32_t {
+        return m.ns == 2 ? kBc7_partition2[part * 16 + t]
+             : m.ns == 3 ? kBc7_partition3[part * 16 + t] : 0u;
+    };
+    auto isAnchor = [&](uint32_t t) {
+        if (t == 0) return true;
+        if (m.ns == 2) return t == kBc7_table_anchor_index_second_subset[part];
+        if (m.ns == 3) return t == kBc7_table_anchor_index_third_subset_1[part] ||
+                              t == kBc7_table_anchor_index_third_subset_2[part];
+        return false;
+    };
+    uint32_t idx[16], idx2[16] = {};
+    for (uint32_t t = 0; t < 16; ++t) idx[t] = read(m.ib - (isAnchor(t) ? 1 : 0));
+    if (m.ib2)
+        for (uint32_t t = 0; t < 16; ++t) idx2[t] = read(m.ib2 - (t == 0 ? 1 : 0));
+
+    auto weight = [](uint32_t bits, uint32_t i) -> uint32_t {
+        return bits == 2 ? kBc7_weights2[i] : bits == 3 ? kBc7_weights3[i] : kBc7_weights4[i];
+    };
+    for (uint32_t t = 0; t < 16; ++t)
+    {
+        const uint32_t s = subsetOf(t);
+        uint32_t cw, aw;
+        if (!m.ib2)            { cw = weight(m.ib, idx[t]);   aw = cw; }
+        else if (isb == 0)     { cw = weight(m.ib, idx[t]);   aw = weight(m.ib2, idx2[t]); }
+        else                   { cw = weight(m.ib2, idx2[t]); aw = weight(m.ib, idx[t]); }
+        for (uint32_t c = 0; c < 4; ++c)
+        {
+            const uint32_t w = c == 3 ? aw : cw;
+            out[t][c] = static_cast<uint8_t>(((64 - w) * ep[s][0][c] + w * ep[s][1][c] + 32) >> 6);
+        }
+        if (rot) std::swap(out[t][3], out[t][rot - 1]);
+    }
+}
+
 } // namespace
 
 bool textureFormatCpuDecodable(::TextureFormat f)
@@ -87,7 +181,8 @@ bool textureFormatCpuDecodable(::TextureFormat f)
 bool decodeBlockLevelToRGBA8(::TextureFormat f, const uint8_t* src, size_t srcBytes,
                              uint32_t w, uint32_t h, uint8_t* dst)
 {
-    if (!src || !dst || w == 0 || h == 0 || !textureFormatCpuDecodable(f)) return false;
+    const bool bc7 = f == ::TextureFormat::BC7;   // decoded here, but not a GPU fallback (see header)
+    if (!src || !dst || w == 0 || h == 0 || !(bc7 || textureFormatCpuDecodable(f))) return false;
     if (srcBytes < textureLevelBytes(f, w, h)) return false;
     const uint32_t bw = (w + 3) / 4, bh = (h + 3) / 4, bb = textureFormatBlockBytes(f);
     for (uint32_t by = 0; by < bh; ++by)
@@ -99,6 +194,9 @@ bool decodeBlockLevelToRGBA8(::TextureFormat f, const uint8_t* src, size_t srcBy
             {
             case ::TextureFormat::BC1:
                 decodeBc1Block(blk, px);
+                break;
+            case ::TextureFormat::BC7:
+                decodeBc7Block(blk, px);
                 break;
             case ::TextureFormat::BC3:
             {
@@ -150,7 +248,7 @@ bool decodeBaseLevelToRGBA8(const TextureAsset& in, std::vector<uint8_t>& out)
         out.assign(in.data.begin(), in.data.begin() + static_cast<std::ptrdiff_t>(px));
         return true;
     }
-    if (textureFormatCpuDecodable(in.format))
+    if (textureFormatCpuDecodable(in.format) || in.format == ::TextureFormat::BC7)
     {
         out.resize(px);
         return decodeBlockLevelToRGBA8(in.format, in.data.data(), in.data.size(), w, h, out.data());

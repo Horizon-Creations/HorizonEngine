@@ -470,6 +470,22 @@ HE::ApplicationConfig EditorApplication::GetConfig() const
 	// The config's RHI, unless HE_DUMP_RHI forces another one (EditorBackendChoice.h).
 	cfg.backend = HE::Ed::resolveEditorBackend(m_globalState->getSelectedRHI(),
 	                                           std::getenv("HE_DUMP_RHI"));
+	// Every editor build on this machine shares one config.json, so a dev build with
+	// Vulkan can leave RHI=Vulkan behind for a release build without it — whose window
+	// then asked SDL for Vulkan and aborted on start. Such a choice falls back.
+	if (!RendererFactory::Available(cfg.backend))
+	{
+#ifdef __APPLE__
+		const HE::RendererBackend fallback = HE::RendererBackend::Metal;
+#else
+		const HE::RendererBackend fallback = HE::RendererBackend::OpenGL;
+#endif
+		static bool warned = false;   // GetConfig runs more than once per start
+		if (!std::exchange(warned, true))
+			HE_LOG_WARN(Editor, "EditorApplication: RHI '%s' is not in this build — using '%s'",
+			            getRHIName(cfg.backend).c_str(), getRHIName(fallback).c_str());
+		cfg.backend = fallback;
+	}
 
 	// ── Startup splash ──────────────────────────────────────────────────────
 	// The EDITOR asks for one; it is off by default in HorizonCore so that a

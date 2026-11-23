@@ -3113,6 +3113,11 @@ struct ApiParam
     // "Self" instead of a zero, and the generated node reference says so in
     // words. Both ask this flag rather than keeping their own list.
     bool        selfDefault = false;
+    // What a fresh node's unwired Float pin starts at, when that is not 0 (Play
+    // Sound's volume and pitch: a zero there is a silent sound). Set in the same
+    // post-pass as selfDefault; the editor writes it into the node's pin default
+    // when the pin is first shown, so the graph carries it from then on.
+    float       def = 0.0f;
 };
 
 // How generated C++ reaches a row WITHOUT the registry (HorizonEngine/

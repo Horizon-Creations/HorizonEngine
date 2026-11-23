@@ -865,6 +865,10 @@ void registerHcTools(McpToolRegistry& registry, McpHcHooks hooks)
 				n.hasArg = fn->isExec;
 				for (const auto& p : fn->params)  n.params.push_back({ p.name, p.type, p.isArray });
 				for (const auto& r : fn->results) n.results.push_back({ r.name, r.type, r.isArray });
+				// The registry's non-zero defaults (ApiParam::def), as the canvas seeds them.
+				for (size_t i = 0; i < fn->params.size(); ++i)
+					if (fn->params[i].def != 0.0f && !n.pinDefaults.count((int)i))
+						n.pinDefaults[(int)i] = HC::Value::ofFloat(fn->params[i].def);
 			}
 
 			// The id is minted here rather than by `Graph::addNode`, because the

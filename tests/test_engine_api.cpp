@@ -5513,3 +5513,22 @@ TEST_CASE("Physics: the new joint rows are neutral without a PhysicsWorld")
     REQUIRE(motorOut.size() == 1);
     CHECK_FALSE(motorOut[0].b);
 }
+
+// A fresh Play Sound node played at volume 0 and pitch 0: an unwired Float pin
+// starts at its type's zero unless the row says otherwise (ApiParam::def).
+TEST_CASE("Engine API: audio rows give volume and pitch a default of 1, everything else stays 0")
+{
+    auto def = [](const char* row, const char* param) {
+        const HE::api::ApiFn* fn = HE::api::find(row);
+        REQUIRE(fn != nullptr);
+        for (const auto& p : fn->params)
+            if (std::string(p.name) == param) return p.def;
+        FAIL("no parameter " << param << " on " << row);
+        return -1.0f;
+    };
+    CHECK(def("audio.play", "volume") == 1.0f);
+    CHECK(def("audio.play", "pitch") == 1.0f);
+    CHECK(def("audio.playAt", "maxDist") == 20.0f);
+    CHECK(def("audio.setPitch", "pitch") == 1.0f);
+    CHECK(def("locomotion.look", "pitch") == 0.0f);   // a camera pitch, not a sound's
+}
