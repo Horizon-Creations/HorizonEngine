@@ -5,6 +5,8 @@
 
 #include "SoftwareRaster.h"
 
+#include <unordered_map>
+
 // ── The renderer for an application without a GPU ─────────────────────────────
 // Block G of docs/he-apps-plan.md: the backend a project with "Advanced Shader
 // Effects" switched off ships with, so that it needs no GPU, no driver and no
@@ -73,6 +75,12 @@ private:
     // Draw one window's widgets into its own SDL surface. `windowId` is what
     // WidgetManager knows the window as (0 = the main one).
     void renderTarget(Target& t, uint32_t windowId);
+
+    // A block-compressed texture (ASTC on macOS, BCn elsewhere) expanded once to
+    // RGBA8. `src` is the asset's payload it came from, so a reloaded asset decodes again.
+    struct Decoded { const void* src = nullptr; std::vector<std::uint8_t> rgba; int w = 0, h = 0; };
+    std::unordered_map<HE::UUID, Decoded> m_decoded;
+    static HE::sw::TextureView resolveTexture(const HE::UUID& id, void* self);
 
     HE::Window*     m_window = nullptr;
     RenderExtractor m_extractor;

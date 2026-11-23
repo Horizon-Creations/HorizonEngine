@@ -1358,20 +1358,22 @@ void GameApplication::OnInit()
 		m_gameInstance.runtime().setServices(std::move(svc));
 	}
 
-	// GameInstance OnInit fires FIRST — before any world/scene. Its UI (m_widgets)
-	// and objects are app-level, so they're up from frame one and survive scene
-	// loads.
-	m_gameInstance.fireInit();
-
-	// Load the startup scene into a world and hand it to the renderer. The base
+	// The (still empty) world the startup scene is loaded into below. The base
 	// Application renders m_world each frame; OnRender ticks its gameplay systems.
 	// The world borrows the app-level WidgetManager (setWidgetManager) so the
 	// renderer + input see the GameInstance's UI, and a scene switch never clears it.
+	// Built BEFORE fireInit: every widget.* engine call reaches the widgets through
+	// Ctx::world, so a Play Animation in the Construct of a widget OnInit creates
+	// found no world, returned false and the animation never started.
 	m_world = std::make_unique<HorizonWorld>();
 	// Widgets + the level script join the app-wide runtime (shared with the
 	// GameInstance), so any scene script can Get Game Instance / bind its events.
 	m_world->setScriptRuntime(&m_gameInstance.runtime());
 	m_world->setWidgetManager(&m_widgets);   // borrow the app-level UI
+
+	// GameInstance OnInit fires before any scene. Its UI (m_widgets) and objects
+	// are app-level, so they're up from frame one and survive scene loads.
+	m_gameInstance.fireInit();
 
 	SceneSerializer serializer;
 	bool sceneLoaded = false;

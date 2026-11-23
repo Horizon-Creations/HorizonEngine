@@ -27,6 +27,7 @@ inline bool isPathChar(uint8_t c)
     {
     case '_': case '-': case '.': case '/': case '\\': case ' ': case '(': case ')': case '+':
     case '&': case '\'': case ',': case '[': case ']': case '@': case '#': case '~': case '!':
+    case '$': case '%': case '=': case ';': case '{': case '}': case '^': case '`':
         return true;
     default: return false;
     }

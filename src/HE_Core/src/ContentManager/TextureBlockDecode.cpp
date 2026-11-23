@@ -6,6 +6,10 @@
 #include <cstring>
 #include <vector>
 
+#ifdef HE_HAVE_ASTCENC
+#  include <astcenc.h>
+#endif
+
 namespace HE
 {
 
@@ -133,6 +137,49 @@ bool decodeBlockLevelToRGBA8(::TextureFormat f, const uint8_t* src, size_t srcBy
             }
         }
     return true;
+}
+
+bool decodeBaseLevelToRGBA8(const TextureAsset& in, std::vector<uint8_t>& out)
+{
+    const uint32_t w = in.width, h = in.height;
+    if (w == 0 || h == 0 || in.data.empty()) return false;
+    const size_t px = static_cast<size_t>(w) * h * 4;
+    if (in.format == ::TextureFormat::RGBA8)
+    {
+        if (in.data.size() < px) return false;
+        out.assign(in.data.begin(), in.data.begin() + static_cast<std::ptrdiff_t>(px));
+        return true;
+    }
+    if (textureFormatCpuDecodable(in.format))
+    {
+        out.resize(px);
+        return decodeBlockLevelToRGBA8(in.format, in.data.data(), in.data.size(), w, h, out.data());
+    }
+#ifdef HE_HAVE_ASTCENC
+    if (in.format == ::TextureFormat::ASTC_4x4)
+    {
+        const size_t bytes = textureLevelBytes(in.format, w, h);
+        if (in.data.size() < bytes) return false;
+        // Plain LDR, as the cook encodes it (HpakWriter encodeAstc4x4): sRGB stays in the bytes.
+        astcenc_config cfg{};
+        if (astcenc_config_init(ASTCENC_PRF_LDR, 4, 4, 1, ASTCENC_PRE_FASTEST,
+                                ASTCENC_FLG_DECOMPRESS_ONLY, &cfg) != ASTCENC_SUCCESS)
+            return false;
+        astcenc_context* ctx = nullptr;
+        if (astcenc_context_alloc(&cfg, 1, &ctx) != ASTCENC_SUCCESS) return false;
+        out.resize(px);
+        astcenc_image img{};
+        img.dim_x = w; img.dim_y = h; img.dim_z = 1;
+        img.data_type = ASTCENC_TYPE_U8;
+        void* slices[1] = { out.data() };
+        img.data = slices;
+        const astcenc_swizzle swz{ ASTCENC_SWZ_R, ASTCENC_SWZ_G, ASTCENC_SWZ_B, ASTCENC_SWZ_A };
+        const astcenc_error e = astcenc_decompress_image(ctx, in.data.data(), bytes, &img, &swz, 0);
+        astcenc_context_free(ctx);
+        return e == ASTCENC_SUCCESS;
+    }
+#endif
+    return false;
 }
 
 bool decodeTextureToRGBA8(const TextureAsset& in, TextureAsset& out)

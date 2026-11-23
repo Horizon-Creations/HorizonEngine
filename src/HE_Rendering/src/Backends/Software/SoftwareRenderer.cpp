@@ -2,6 +2,7 @@
 
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
+#include <ContentManager/TextureBlockDecode.h>
 #include <Diagnostics/Logger.h>
 #include <Window/Window.h>
 
@@ -15,39 +16,51 @@ namespace
     // an application does not change colour with its renderer.
     constexpr std::uint8_t kClear[4] = { 18, 18, 22, 255 };
 
-    // Turn a texture asset into bytes the rasterizer can sample. Textures already
-    // live on the CPU (TextureAsset keeps its pixels), so there is no upload path
-    // to write — only this lookup.
-    //
-    // RGBA8 only, on purpose. BCn and ASTC are block-compressed formats meant to
-    // save GPU memory for 3D; an application's UI textures are small, and the
-    // export profile for a software build bakes them uncompressed. Writing a CPU
-    // decoder here would be a large piece of work for a case that should not
-    // arise — so an unusable format is reported once and the quad draws its tint.
-    HE::sw::TextureView resolveTexture(const HE::UUID& id, void* user)
+}
+
+// Turn a texture asset into bytes the rasterizer can sample. Textures already
+// live on the CPU (TextureAsset keeps its pixels), so there is no upload path.
+// An export cooks every texture to the target GPU's block format (ASTC for a
+// Mac, BC7 elsewhere) whatever renderer the player ends up on, so a non-RGBA8
+// base level is expanded once and kept; `src` notices a reloaded asset.
+HE::sw::TextureView SoftwareRenderer::resolveTexture(const HE::UUID& id, void* self)
+{
+    auto* r = static_cast<SoftwareRenderer*>(self);
+    ContentManager* cm = r ? r->m_contentManager : nullptr;
+    if (!cm) return {};
+    const TextureAsset* t = cm->getTexture(id);
+    if (!t || t->data.empty() || t->width <= 0 || t->height <= 0) return {};
+    HE::sw::TextureView v;
+    if (t->format == TextureFormat::RGBA8)
     {
-        auto* cm = static_cast<ContentManager*>(user);
-        if (!cm) return {};
-        const TextureAsset* t = cm->getTexture(id);
-        if (!t || t->data.empty() || t->width <= 0 || t->height <= 0) return {};
-        if (t->format != TextureFormat::RGBA8)
-        {
-            static bool warned = false;
-            if (!warned)
-            {
-                warned = true;
-                HE_LOG_WARN(RHI, "%s",
-                    "SoftwareRenderer: compressed textures are not decoded on the CPU — "
-                    "export UI textures as RGBA8. Those quads draw their tint instead.");
-            }
-            return {};
-        }
-        HE::sw::TextureView v;
         v.rgba   = t->data.data();
         v.width  = static_cast<int>(t->width);
         v.height = static_cast<int>(t->height);
         return v;
     }
+    Decoded& d = r->m_decoded[id];
+    if (d.src != t->data.data())
+    {
+        d.src = t->data.data();
+        d.w = d.h = 0;
+        if (HE::decodeBaseLevelToRGBA8(*t, d.rgba))
+        {
+            d.w = static_cast<int>(t->width);
+            d.h = static_cast<int>(t->height);
+        }
+        else
+        {
+            d.rgba.clear();
+            HE_LOG_WARN(RHI, "SoftwareRenderer: texture format %d has no CPU decoder here — "
+                        "that quad draws its tint. Export with Textures = None.",
+                        static_cast<int>(t->format));
+        }
+    }
+    if (d.w == 0) return {};
+    v.rgba   = d.rgba.data();
+    v.width  = d.w;
+    v.height = d.h;
+    return v;
 }
 
 SoftwareRenderer::SoftwareRenderer() = default;
@@ -67,6 +80,7 @@ void SoftwareRenderer::Shutdown()
     m_window = nullptr;
     m_primary = Target{};
     m_secondaries.clear();
+    m_decoded.clear();
 }
 
 void SoftwareRenderer::AttachWindow(HE::Window* window)
@@ -205,7 +219,7 @@ void SoftwareRenderer::renderTarget(Target& t, uint32_t windowId)
     for (const glm::vec4& r : t.dirty)
     {
         t.frame.clearRect(r, kClear[0], kClear[1], kClear[2], kClear[3]);
-        HE::sw::draw(t.frame, m_renderWorld.uiObjects, r, &resolveTexture, m_contentManager);
+        HE::sw::draw(t.frame, m_renderWorld.uiObjects, r, &resolveTexture, this);
         t.lastPixels += static_cast<uint64_t>(std::max(0.0f, r.z) * std::max(0.0f, r.w));
     }
     t.prevObjects = m_renderWorld.uiObjects;
@@ -264,7 +278,7 @@ bool SoftwareRenderer::RenderWidgetThumbnail(const std::vector<UIRenderObject>& 
     HE::sw::Image img;
     img.resize(static_cast<int>(size), static_cast<int>(size));
     img.clear(0, 0, 0, 0);
-    HE::sw::draw(img, uiObjects, glm::vec4(0.0f), &resolveTexture, m_contentManager);
+    HE::sw::draw(img, uiObjects, glm::vec4(0.0f), &resolveTexture, this);
     outRgba8 = std::move(img.rgba);
     return true;
 }

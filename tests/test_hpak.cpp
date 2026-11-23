@@ -10,6 +10,8 @@
 #include <ContentManager/Assets.h>
 #include <MaterialGraph/MaterialGraph.h>
 #include <MaterialGraph/RvtSplit.h>
+#include <ContentManager/TextureBlockDecode.h>
+#include <Backends/Software/SoftwareRenderer.h>
 #ifdef HE_HAVE_ASTCENC
 #  include <astcenc.h>
 #endif
@@ -781,6 +783,21 @@ TEST_CASE("Cook: ASTC texture round-trips and decodes close to the original")
     CHECK(std::abs(int(decoded[0]) - 200) <= 6);
     CHECK(std::abs(int(decoded[1]) - 100) <= 6);
     CHECK(std::abs(int(decoded[2]) -  50) <= 6);
+    // The software renderer's path (HE::decodeBaseLevelToRGBA8) lands on the same texels.
+    std::vector<uint8_t> base;
+    REQUIRE(HE::decodeBaseLevelToRGBA8(*t, base));
+    CHECK(base == decoded);
+    // …and an image quad on the software renderer shows those texels, not a white block.
+    SoftwareRenderer sw;
+    sw.SetContentManager(&cm);
+    UIRenderObject q; q.position = { 0.0f, 0.0f }; q.size = { 8.0f, 8.0f }; q.type = 0;
+    q.textureAssetId = texId;
+    std::vector<uint8_t> px;
+    REQUIRE(sw.RenderWidgetThumbnail({ q }, 8, px));
+    const size_t mid = (4 * 8 + 4) * 4;
+    CHECK(std::abs(int(px[mid + 0]) - 200) <= 6);
+    CHECK(std::abs(int(px[mid + 1]) - 100) <= 6);
+    CHECK(std::abs(int(px[mid + 2]) -  50) <= 6);
     he_test::removeAllQuiet(dir);
 }
 #endif

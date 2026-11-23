@@ -150,6 +150,22 @@ TEST_CASE("Reach: every spelling of a reference is found")
 	CHECK(keptWith(bytesOf("{\"mesh\":\"Content/other.hasset\"}")).empty());
 }
 
+TEST_CASE("Reach: a file name with $ and other legal punctuation is found by path")
+{
+	// An imported song kept its download name; the GameInstance graph named it in a pin.
+	Project p("dollar");
+	const std::string name = "ES_MOON & STARS (Live) - Baha=Bank$%;{1}^`";
+	{
+		ContentManager cm(p.dir.string());
+		TextureAsset t; t.type = HE::AssetType::Texture; t.name = name; t.path = name + ".hasset";
+		t.width = 2; t.height = 2; t.channels = 4; t.data = std::vector<uint8_t>(16, 0x55);
+		REQUIRE(cm.saveAsset(t));
+	}
+	Hpak::PackSettings s; s.onlyReferenced = true;
+	s.referenceRoots.push_back(bytesOf("{\"i\":0,\"v\":\"" + name + ".hasset\"}"));
+	CHECK(pack(p, s).count(name + ".hasset"));
+}
+
 TEST_CASE("Reach: scenes are nodes: one nothing loads is left out, one a reached scene loads stays")
 {
 	Project p("scenes");

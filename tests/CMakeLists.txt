@@ -593,6 +593,8 @@ add_executable(he_tests
     # the UI style vocabulary ACTUALLY draws is answerable headless — the one
     # thing about "Schicht 0" that used to need a GPU and a pair of eyes.
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/Backends/Software/SoftwareRaster.cpp
+    # …and its shell, for the texture lookup (a cooked ASTC/BCn image on a quad).
+    ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/Backends/Software/SoftwareRenderer.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorUndo.cpp
     # The editor's selection set: handles in, handles out, no ImGui — so what
     # a Ctrl-click, a Shift-range and a peer's delete do to it is answerable here.
