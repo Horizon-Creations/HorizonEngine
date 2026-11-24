@@ -350,6 +350,7 @@ add_executable(he_tests
     test_document_types.cpp
     test_autostart.cpp
     test_software_raster.cpp
+    test_mat_cpu_eval.cpp
     test_app_todo.cpp
     test_dev_stats_tile.cpp
     test_app_preview_outliner.cpp
