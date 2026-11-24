@@ -1,6 +1,7 @@
 #include "doctest.h"
 
 #include <Backends/Software/SoftwareRaster.h>
+#include <MaterialGraph/MatCpuEval.h>
 #include <Renderer/UIFont.h>
 #include <UIWidget/UIElements.h>
 #include <UIWidget/UIWidgetTree.h>
@@ -751,6 +752,87 @@ TEST_CASE("Software raster: a picture drawn small reads its mips instead of shim
 			const Px p = at(img, x, y);
 			CHECK(std::abs(static_cast<int>(p.r) - 128) < 12);
 		}
+}
+
+// ── Materials on the CPU ─────────────────────────────────────────────────────
+// A quad with a material the CPU can run is shaded by it; a Backdrop material
+// sees what was drawn before it, blurred. Both must come out the same in
+// stripes as on one thread — the backdrop being the one read that crosses rows.
+namespace
+{
+	struct Mats
+	{
+		HE::MatCpuProgram gradient, frosted;
+		HE::UUID gradientId{ 9, 1 }, frostedId{ 9, 2 };
+		Mats()
+		{
+			// BaseColor = (ElementUV.x, ElementUV.y, 0), translucent at 1.
+			HE::MaterialGraph g;
+			const int out = g.addNode(HE::MatNodeType::Output);
+			g.findNode(out)->p[1] = 2; g.findNode(out)->p[3] = 1;
+			const int uv = g.addNode(HE::MatNodeType::ElementUV);
+			REQUIRE(g.connect(uv, 0, out, HE::kMatOutputBaseColorPin));
+			REQUIRE(gradient.compile(g));
+			// BaseColor = Backdrop(12 px).
+			HE::MaterialGraph f;
+			const int fo = f.addNode(HE::MatNodeType::Output);
+			f.findNode(fo)->p[1] = 2; f.findNode(fo)->p[3] = 1;
+			const int bd = f.addNode(HE::MatNodeType::Backdrop);
+			const int r = f.addNode(HE::MatNodeType::ConstFloat);
+			f.findNode(r)->p[0] = 12.0f;
+			REQUIRE(f.connect(r, 0, bd, 0));
+			REQUIRE(f.connect(bd, 0, fo, HE::kMatOutputBaseColorPin));
+			REQUIRE(frosted.compile(f));
+			REQUIRE(frosted.usesBackdrop());
+		}
+	};
+	HE::sw::MaterialView resolveMat(const HE::UUID& id, void* user)
+	{
+		const Mats* m = static_cast<const Mats*>(user);
+		HE::sw::MaterialView v;
+		if (id == m->gradientId) v.program = &m->gradient;
+		if (id == m->frostedId)  v.program = &m->frosted;
+		return v;
+	}
+}
+
+TEST_CASE("Software raster: a material quad is shaded by its graph, a backdrop blurs what is behind")
+{
+	Mats mats;
+	std::vector<UIRenderObject> quads;
+	// Hard black/white stripes, 4 px wide, over the whole canvas: a blur of
+	// them is grey, a copy of them is not.
+	for (int x = 0; x < 640; x += 8)
+		quads.push_back(solid(static_cast<float>(x), 0.0f, 4.0f, 400.0f, { 1, 1, 1, 1 }));
+	UIRenderObject g = solid(20.0f, 20.0f, 200.0f, 100.0f, { 1, 1, 1, 0 });   // transparent tint: still drawn
+	g.materialAssetId = mats.gradientId;
+	quads.push_back(g);
+	UIRenderObject f = solid(300.0f, 150.0f, 240.0f, 160.0f, { 1, 1, 1, 1 });
+	f.materialAssetId = mats.frostedId;
+	quads.push_back(f);
+	quads.push_back(solid(320.0f, 330.0f, 60.0f, 40.0f, { 0.2f, 0.8f, 0.3f, 1 }));
+
+	HE::sw::DrawOptions one, many;
+	one.material = many.material = &resolveMat;
+	one.materialUser = many.materialUser = &mats;
+	one.threads = false;
+	Image a = canvas(640, 400), b = canvas(640, 400);
+	HE::sw::draw(a, quads, one);
+	HE::sw::draw(b, quads, many);
+	CHECK(a.rgba == b.rgba);
+
+	// The gradient: red follows x across the element, green follows y.
+	const Px left = at(a, 22, 70), right = at(a, 217, 70), bottom = at(a, 120, 117);
+	CHECK(left.r < 10);
+	CHECK(right.r > 245);
+	CHECK(bottom.g > 245);
+	// The frosted panel: grey where the stripes were black and white.
+	for (int x = 360; x < 480; x += 3)
+	{
+		const Px p = at(a, x, 230);
+		CHECK(p.r > 60);
+		CHECK(p.r < 200);
+	}
 }
 
 // What a full repaint of a big application window costs, single-threaded and

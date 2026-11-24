@@ -10031,7 +10031,184 @@ void EditorApplication::dumpFrameHeadless()
 	// Everything here goes through the ordinary path — a widget asset, the
 	// widget manager, the extractor, the backend's UI shader — so what the
 	// capture shows is what an application would get, not a demo drawn beside it.
-	if (const char* ui = std::getenv("HE_DUMP_UITEST"); ui && *ui && m_editorWorld)
+	// HE_DUMP_UITEST=materials: twelve tiles, each a widget MATERIAL — plain
+	// math, logic, a checker, a texture read with tiling, parameters, the
+	// element inputs, and the shipped UI effects (State Tint, Inner Border,
+	// Edge Fade, Soft Rounded Mask, Scanlines, Frosted Glass over stripes).
+	// The same sheet on Metal, GL and Software is the proof that the CPU
+	// interpreter (MatCpuProgram) draws what the GPU draws. Nothing here reads
+	// Time: two captures could not agree on the clock.
+	if (const char* ui = std::getenv("HE_DUMP_UITEST"); ui && std::string_view(ui) == "materials" && m_editorWorld)
+	{
+		using MT = HE::MatNodeType;
+		HE::UIWidgetTree t;
+		t.canvasWidth = 1280.0f; t.canvasHeight = 720.0f;
+		t.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+		auto panel = [&](float x, float y, float w, float h, glm::vec4 c) -> HE::UIElement&
+		{
+			HE::UIElement& e = *t.find(t.add(HE::UIWidgetType::Panel));
+			HE::uiSetAnchorPreset(e, 0);
+			e.pivotX = e.pivotY = 0.0f;
+			e.posX = x; e.posY = y; e.sizeX = w; e.sizeY = h;
+			e.setProp("Color", HE::UIPropValue::ofColor(c));
+			return e;
+		};
+		// An opaque page, so a backdrop reads the UI and not the sky behind it.
+		panel(0, 0, 1280, 720, { 0.12f, 0.13f, 0.16f, 1.0f });
+		for (float x = 350.0f; x < 610.0f; x += 8.0f)   // stripes under the frosted tile
+			panel(x, 410.0f, 4.0f, 130.0f, { 1.0f, 1.0f, 1.0f, 1.0f });
+
+		// An asymmetric 8x4 picture, sRGB like an imported colour texture.
+		{
+			TextureAsset ta;
+			ta.name = "__matWitnessTex"; ta.path = "__matWitnessTex.hasset";
+			ta.width = 8; ta.height = 4; ta.channels = 4; ta.srgb = true;
+			ta.data.resize(8 * 4 * 4);
+			for (uint32_t y = 0; y < 4; ++y)
+				for (uint32_t x = 0; x < 8; ++x)
+				{
+					uint8_t* p = &ta.data[(y * 8 + x) * 4];
+					p[0] = static_cast<uint8_t>(30 + 28 * x);
+					p[1] = static_cast<uint8_t>(40 + 60 * y);
+					p[2] = (x + y) % 3 == 0 ? 220 : 40;
+					p[3] = 255;
+				}
+			contentManager().registerTexture(std::move(ta));
+		}
+
+		int idx = 0;
+		auto materialTile = [&](HE::MaterialGraph g, int blend)
+		{
+			for (auto& n : g.nodes)
+				if (n.type == MT::Output) { n.p[1] = static_cast<float>(blend); n.p[3] = 1.0f; }
+			MaterialAsset ma;
+			ma.name = "__matWitness" + std::to_string(idx);
+			ma.path = ma.name + ".hasset";
+			ma.nodeGraphJson = HE::materialGraphToJson(g);
+			const std::string path = ma.path;
+			const HE::UUID mid = contentManager().registerMaterial(std::move(ma));
+			contentManager().regenerateMaterialFromGraph(mid);
+			const int col = idx % 4, row = idx / 4;
+			HE::UIElement& e = panel(60.0f + col * 300.0f, 80.0f + row * 170.0f, 240.0f, 110.0f,
+			                         { 1.0f, 1.0f, 1.0f, 1.0f });
+			e.material = path;
+			++idx;
+		};
+		auto graph = [](int& out) { HE::MaterialGraph g; out = g.addNode(MT::Output); return g; };
+		auto fnCall = [](HE::MaterialGraph& g, const char* name)
+		{
+			const int c = g.addNode(MT::FunctionCall);
+			g.findNode(c)->s = std::string("Engine/MaterialFunctions/") + name + ".hasset";
+			return c;
+		};
+		auto constant = [](HE::MaterialGraph& g, MT type, float a, float b = 0, float c = 0)
+		{
+			const int n = g.addNode(type);
+			g.findNode(n)->p[0] = a; g.findNode(n)->p[1] = b; g.findNode(n)->p[2] = c;
+			return n;
+		};
+		const int kBase = HE::kMatOutputBaseColorPin, kOpacity = HE::kMatOutputOpacityPin;
+		{   // 0: the element UV as colour
+			int o; HE::MaterialGraph g = graph(o);
+			g.connect(g.addNode(MT::ElementUV), 0, o, kBase);
+			materialTile(g, 0);
+		}
+		{   // 1: a checker between two colours
+			int o; HE::MaterialGraph g = graph(o);
+			const int a = constant(g, MT::ConstColor, 0.9f, 0.4f, 0.1f), b = constant(g, MT::ConstColor, 0.1f, 0.3f, 0.8f);
+			const int ch = g.addNode(MT::Checker), s = constant(g, MT::ConstFloat, 6.0f), l = g.addNode(MT::Lerp);
+			g.connect(s, 0, ch, 1); g.connect(a, 0, l, 0); g.connect(b, 0, l, 1); g.connect(ch, 0, l, 2);
+			g.connect(l, 0, o, kBase);
+			materialTile(g, 0);
+		}
+		{   // 2: If (u > 0.5) times a smoothstep over v
+			int o; HE::MaterialGraph g = graph(o);
+			const int uv = g.addNode(MT::ElementUV), sp = g.addNode(MT::SplitRGBA);
+			g.connect(uv, 0, sp, 0);
+			const int gt = g.addNode(MT::Greater), half = constant(g, MT::ConstFloat, 0.5f);
+			g.connect(sp, 0, gt, 0); g.connect(half, 0, gt, 1);
+			const int iff = g.addNode(MT::If);
+			g.connect(gt, 0, iff, 0);
+			g.connect(constant(g, MT::ConstColor, 0.2f, 0.9f, 0.4f), 0, iff, 1);
+			g.connect(constant(g, MT::ConstColor, 0.9f, 0.2f, 0.5f), 0, iff, 2);
+			const int ss = g.addNode(MT::Smoothstep);
+			g.connect(constant(g, MT::ConstFloat, 0.2f), 0, ss, 0);
+			g.connect(constant(g, MT::ConstFloat, 0.8f), 0, ss, 1);
+			g.connect(sp, 1, ss, 2);
+			const int m = g.addNode(MT::Multiply);
+			g.connect(iff, 0, m, 0); g.connect(ss, 0, m, 1);
+			g.connect(m, 0, o, kBase);
+			materialTile(g, 0);
+		}
+		{   // 3: a texture read, tiled twice across
+			int o; HE::MaterialGraph g = graph(o);
+			const int uv = constant(g, MT::UV, 2.0f, 1.0f);
+			const int tx = g.addNode(MT::TextureSample);
+			g.findNode(tx)->s = "__matWitnessTex.hasset";
+			g.connect(uv, 0, tx, 0);
+			g.connect(tx, 0, o, kBase);
+			materialTile(g, 0);
+		}
+		{   // 4: State Tint on a colour
+			int o; HE::MaterialGraph g = graph(o);
+			const int c = fnCall(g, "StateTint");
+			g.connect(constant(g, MT::ConstColor, 0.3f, 0.5f, 0.9f), 0, c, 0);
+			g.connect(c, 0, o, kBase);
+			materialTile(g, 0);
+		}
+		for (const char* maskFn : { "InnerBorder", "EdgeFade", "SoftRoundedMask" })
+		{   // 5-7: a colour, its opacity from the effect's mask
+			int o; HE::MaterialGraph g = graph(o);
+			g.connect(constant(g, MT::ConstColor, 0.95f, 0.75f, 0.3f), 0, o, kBase);
+			g.connect(fnCall(g, maskFn), 0, o, kOpacity);
+			materialTile(g, 2);
+		}
+		{   // 8: Scanlines as a multiplier
+			int o; HE::MaterialGraph g = graph(o);
+			const int m = g.addNode(MT::Multiply);
+			g.connect(constant(g, MT::ConstColor, 0.4f, 0.9f, 0.6f), 0, m, 0);
+			g.connect(fnCall(g, "Scanlines"), 0, m, 1);
+			g.connect(m, 0, o, kBase);
+			materialTile(g, 0);
+		}
+		{   // 9: Frosted Glass over the stripes
+			int o; HE::MaterialGraph g = graph(o);
+			g.connect(fnCall(g, "FrostedGlass"), 0, o, kBase);
+			materialTile(g, 0);
+		}
+		{   // 10: the element's own shapes: Rounded Rect mask, border distance
+			int o; HE::MaterialGraph g = graph(o);
+			const int rr = g.addNode(MT::RoundedRectSDF), bd = g.addNode(MT::BorderDistance);
+			const int k = constant(g, MT::ConstFloat, 0.05f), mul = g.addNode(MT::Multiply);
+			g.connect(bd, 0, mul, 0); g.connect(k, 0, mul, 1);
+			const int sat = g.addNode(MT::Saturate);
+			g.connect(mul, 0, sat, 0);
+			const int c3 = g.addNode(MT::Combine3), sp = g.addNode(MT::SplitRGBA);
+			g.connect(sat, 0, sp, 0);
+			g.connect(rr, 1, c3, 0); g.connect(sp, 0, c3, 1);
+			g.connect(c3, 0, o, kBase);
+			materialTile(g, 0);
+		}
+		{   // 11: a colour parameter times the element UV
+			int o; HE::MaterialGraph g = graph(o);
+			const int p = constant(g, MT::ParamColor, 0.2f, 0.7f, 0.9f);
+			g.findNode(p)->s = "Tint";
+			const int m = g.addNode(MT::Multiply);
+			g.connect(p, 0, m, 0); g.connect(g.addNode(MT::ElementUV), 0, m, 1);
+			g.connect(m, 0, o, kBase);
+			materialTile(g, 0);
+		}
+
+		UIWidgetAsset wa;
+		wa.type = HE::AssetType::Widget;
+		wa.name = "__uiMaterialWitness";
+		wa.path = "__uiMaterialWitness.hasset";
+		wa.treeJson = HE::uiWidgetTreeToJson(t);
+		if (contentManager().registerWidget(std::move(wa)) != HE::UUID{})
+			if (const int inst = m_editorWorld->widgets().createWidget(contentManager(), "__uiMaterialWitness.hasset"))
+				m_editorWorld->widgets().showWidget(inst);
+	}
+	else if (const char* ui = std::getenv("HE_DUMP_UITEST"); ui && *ui && m_editorWorld)
 	{
 		HE::UIWidgetTree t;
 		t.canvasWidth = 1280.0f; t.canvasHeight = 720.0f;

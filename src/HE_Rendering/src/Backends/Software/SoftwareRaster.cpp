@@ -1,9 +1,11 @@
 #include "../../../include/Backends/Software/SoftwareRaster.h"
 
 #include <JobSystem/JobSystem.h>
+#include <MaterialGraph/MatCpuEval.h>
 #include <Renderer/UIFont.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 
 namespace HE::sw
@@ -92,6 +94,78 @@ namespace
         if (f <= 0.0f || l0 >= t.mipCount) return ca;
         const TextureLevel b = level(t, l0 + 1);
         return glm::mix(ca, sampleRGBA8(b.rgba, b.width, b.height, u, v), f);
+    }
+}
+
+namespace
+{
+    // sRGB-encoded byte → linear, what an sRGB texture format hands a shader.
+    const float* srgbToLinearTable()
+    {
+        static const auto table = []
+        {
+            std::array<float, 256> t{};
+            for (int i = 0; i < 256; ++i)
+            {
+                const float c = static_cast<float>(i) / 255.0f;
+                t[static_cast<std::size_t>(i)] = c <= 0.04045f ? c / 12.92f
+                                                               : std::pow((c + 0.055f) / 1.055f, 2.4f);
+            }
+            return t;
+        }();
+        return table.data();
+    }
+
+    // A material's texture read: repeat addressing (a Panner scrolls off the
+    // edge and back in), sRGB decoded before filtering, bilinear.
+    // shortcut: always the base level — the GPU picks a mip from the pixel's UV
+    // derivatives, which a per-pixel interpreter does not have; a texture drawn
+    // much smaller than it is shimmers here. Upgrade: derivatives by finite
+    // differences per quad row when a material texture is seen minified.
+    glm::vec4 sampleMaterialTexture(const TextureView& t, glm::vec2 uv)
+    {
+        if (!t.rgba || t.width <= 0 || t.height <= 0) return glm::vec4(1.0f);
+        const float x = (uv.x - std::floor(uv.x)) * static_cast<float>(t.width) - 0.5f;
+        const float y = (uv.y - std::floor(uv.y)) * static_cast<float>(t.height) - 0.5f;
+        const int x0 = static_cast<int>(std::floor(x)), y0 = static_cast<int>(std::floor(y));
+        const float fx = x - static_cast<float>(x0), fy = y - static_cast<float>(y0);
+        const float* lin = t.srgb ? srgbToLinearTable() : nullptr;
+        auto at = [&](int xi, int yi)
+        {
+            xi = ((xi % t.width) + t.width) % t.width;
+            yi = ((yi % t.height) + t.height) % t.height;
+            const std::uint8_t* p = t.rgba + (static_cast<std::size_t>(yi) * t.width + xi) * 4;
+            if (lin) return glm::vec4(lin[p[0]], lin[p[1]], lin[p[2]], p[3] / 255.0f);
+            return glm::vec4(p[0], p[1], p[2], p[3]) * (1.0f / 255.0f);
+        };
+        return glm::mix(glm::mix(at(x0, y0), at(x0 + 1, y0), fx),
+                        glm::mix(at(x0, y0 + 1), at(x0 + 1, y0 + 1), fx), fy);
+    }
+
+    // heBackdropBlur: one mip level of the snapshot, log2(radius), and a ring
+    // of eight taps at 0.6 radius around the centre, weights 0.28 + 8 x 0.09.
+    glm::vec3 backdropBlur(const TextureView& snap, glm::vec2 uv, float radius)
+    {
+        const glm::vec2 vp(std::max(1, snap.width), std::max(1, snap.height));
+        const float r = std::max(radius, 0.0f);
+        const float lod = std::log2(std::max(r, 1.0f));
+        const glm::vec2 s = (r * 0.6f) / vp;
+        const glm::vec2 d = s * 0.70710678f;
+        auto bd = [&](glm::vec2 p)
+        {
+            p = glm::clamp(p, glm::vec2(0.0f), glm::vec2(1.0f));
+            return glm::vec3(sampleTexture(snap, p.x, p.y, lod));
+        };
+        glm::vec3 c = bd(uv) * 0.28f;
+        c += bd(uv + glm::vec2( s.x, 0.0f)) * 0.09f;
+        c += bd(uv + glm::vec2(-s.x, 0.0f)) * 0.09f;
+        c += bd(uv + glm::vec2(0.0f,  s.y)) * 0.09f;
+        c += bd(uv + glm::vec2(0.0f, -s.y)) * 0.09f;
+        c += bd(uv + glm::vec2( d.x,  d.y)) * 0.09f;
+        c += bd(uv + glm::vec2(-d.x, -d.y)) * 0.09f;
+        c += bd(uv + glm::vec2( d.x, -d.y)) * 0.09f;
+        c += bd(uv + glm::vec2(-d.x,  d.y)) * 0.09f;
+        return c;
     }
 }
 
@@ -209,25 +283,14 @@ glm::vec4 quadBounds(const UIRenderObject& o)
 
 namespace
 {
-    // Does this quad put the same pixels down as that one? Every field the
-    // fragment reads, and nothing else — `layer` and the ids that only decide
-    // ORDER are compared too, because a reordering changes what covers what.
+    // Does this quad put the same pixels down as that one? `layer` and the ids
+    // that only decide ORDER count too, because a reordering changes what
+    // covers what.
     bool sameQuad(const UIRenderObject& a, const UIRenderObject& b)
     {
-        return a.position == b.position && a.size == b.size && a.color == b.color &&
-               a.materialAssetId == b.materialAssetId &&
-               a.textureAssetId == b.textureAssetId &&
-               a.type == b.type && a.pixelated == b.pixelated && a.layer == b.layer &&
-               a.uvMin == b.uvMin && a.uvMax == b.uvMax &&
-               a.cornerRadius == b.cornerRadius &&
-               a.borderWidth == b.borderWidth && a.borderColor == b.borderColor &&
-               a.gradient == b.gradient && a.gradientColor == b.gradientColor &&
-               a.gradientAngleDeg == b.gradientAngleDeg &&
-               a.gradientShape == b.gradientShape &&
-               a.blur == b.blur && a.innerShadowBlur == b.innerShadowBlur &&
-               a.innerShadowColor == b.innerShadowColor &&
-               a.fontAtlasKey == b.fontAtlasKey && a.clipRect == b.clipRect &&
-               a.rotation == b.rotation && a.rotationPivot == b.rotationPivot;
+        // Every field, element state included: a material reads it (Element
+        // State), so a hover that changes nothing but the state is a change.
+        return a == b;
     }
 
     glm::vec4 unite(const glm::vec4& a, const glm::vec4& b)
@@ -299,7 +362,18 @@ bool dirtyRects(const std::vector<UIRenderObject>& prev,
 void draw(Image& target, const std::vector<UIRenderObject>& objects, const glm::vec4& clip,
           TextureResolver texResolve, void* texUser, bool threads)
 {
+    DrawOptions o;
+    o.clip = clip; o.texture = texResolve; o.textureUser = texUser; o.threads = threads;
+    draw(target, objects, o);
+}
+
+void draw(Image& target, const std::vector<UIRenderObject>& objects, const DrawOptions& options)
+{
     if (!target.valid()) return;
+    const glm::vec4& clip = options.clip;
+    const TextureResolver texResolve = options.texture;
+    void* const texUser = options.textureUser;
+    const bool threads = options.threads;
 
     // The window's own rectangle, narrowed by the caller's (a partial redraw).
     int wx0 = 0, wy0 = 0, wx1 = target.width, wy1 = target.height;
@@ -322,6 +396,8 @@ void draw(Image& target, const std::vector<UIRenderObject>& objects, const glm::
         const HE::BakedUIFont* font = nullptr;
         TextureView tv{};
         float lod = 0.0f;   // mip level the picture is drawn at (0 = full size)
+        MaterialView mat{};       // a material the CPU can run, else none
+        bool backdrop = false;    // …and that material reads what is behind it
     };
     std::vector<Prep> prep(objects.size());
     for (std::size_t k = 0; k < objects.size(); ++k)
@@ -333,10 +409,16 @@ void draw(Image& target, const std::vector<UIRenderObject>& objects, const glm::
         if (o.type == 2 && o.fontAtlasKey != 0)
             if (const HE::BakedUIFont* f = HE::UIFontCache::find(o.fontAtlasKey)) p.font = f;
 
-        // A picture on the quad, if there is one and if anybody can find it. A
-        // MATERIAL is deliberately not looked at: it is a translated shader
-        // graph, which a CPU rasterizer cannot run, so such a quad falls back to
-        // Schicht 0 plus its tint — the documented D5 contract, not an accident.
+        // A material the CPU can run owns the quad's pixels, as it does on the
+        // GPU. One it cannot run is not looked at: the quad draws Schicht 0
+        // plus its tint (the D5 fallback contract).
+        if (o.type == 0 && options.material && o.materialAssetId != HE::UUID{})
+        {
+            p.mat = options.material(o.materialAssetId, options.materialUser);
+            if (p.mat.program && !p.mat.program->valid()) p.mat = MaterialView{};
+            p.backdrop = p.mat.program && p.mat.program->usesBackdrop();
+        }
+        // A picture on the quad, if there is one and if anybody can find it.
         if (o.type == 0 && texResolve && o.textureAssetId != HE::UUID{} &&
             o.size.x > 0.0f && o.size.y > 0.0f)
         {
@@ -350,10 +432,33 @@ void draw(Image& target, const std::vector<UIRenderObject>& objects, const glm::
         }
     }
 
-    // One horizontal stripe of the region, every quad in list order.
-    auto drawRows = [&](int ry0, int ry1)
+    // The picture so far, with its mips, for a Backdrop material (see below).
+    Image snapshot;
+    std::vector<std::vector<std::uint8_t>> snapMipBytes;
+    std::vector<TextureLevel> snapMips;
+    TextureView snap{};
+
+    // What a material pixel reads from outside its graph.
+    struct MatCtx { const MaterialView* mat; const TextureView* backdrop; };
+    MatCpuHooks hooks;
+    hooks.sample = [](void* user, int slot, glm::vec2 uv) -> glm::vec4
     {
-    for (std::size_t k = 0; k < objects.size(); ++k)
+        const MatCtx* c = static_cast<const MatCtx*>(user);
+        if (slot < 0 || slot >= c->mat->textureCount) return glm::vec4(1.0f);
+        return sampleMaterialTexture(c->mat->textures[slot], uv);
+    };
+    hooks.backdrop = [](void* user, glm::vec2 uv, float radius) -> glm::vec3
+    {
+        const MatCtx* c = static_cast<const MatCtx*>(user);
+        return c->backdrop && c->backdrop->rgba ? backdropBlur(*c->backdrop, uv, radius) : glm::vec3(0.0f);
+    };
+    const MatCpuElement screenProto{ glm::vec2(1.0f), glm::vec2(0.0f), glm::vec4(0.0f), glm::vec4(0.0f),
+                                     glm::vec2(static_cast<float>(target.width), static_cast<float>(target.height)) };
+
+    // One horizontal stripe of the region, the quads [k0, k1) in list order.
+    auto drawRows = [&](int ry0, int ry1, std::size_t k0, std::size_t k1)
+    {
+    for (std::size_t k = k0; k < k1; ++k)
     {
         const UIRenderObject& o = objects[k];
         const HE::BakedUIFont* font = prep[k].font;
@@ -366,7 +471,7 @@ void draw(Image& target, const std::vector<UIRenderObject>& objects, const glm::
         // pixel), and this line made the CPU renderer the odd one out: the
         // focus ring was there on Metal and GL and missing in the software
         // runtime and in every test that rasterises.
-        if (o.color.a <= 0.0f && o.type != 2 && o.borderWidth <= 0.0f) continue;
+        if (o.color.a <= 0.0f && o.type != 2 && o.borderWidth <= 0.0f && !prep[k].mat.program) continue;
 
         // The object's own scissor, intersected with the stripe being drawn.
         int ox0 = wx0, oy0 = ry0, ox1 = wx1, oy1 = ry1;
@@ -403,7 +508,7 @@ void draw(Image& target, const std::vector<UIRenderObject>& objects, const glm::
         // under it. The same pixel-centre test and the same byte rounding as the
         // general path (source-over at alpha 1 is the source), so the picture is
         // identical, only without the per-pixel shading.
-        if (o.type == 0 && !tv.rgba && rot == 0.0f && maxR <= 0.0f && o.borderWidth <= 0.0f &&
+        if (o.type == 0 && !tv.rgba && !prep[k].mat.program && rot == 0.0f && maxR <= 0.0f && o.borderWidth <= 0.0f &&
             o.blur <= 0.0f && o.innerShadowBlur <= 0.0f && !o.gradient && o.color.a >= 1.0f)
         {
             const std::uint8_t r = static_cast<std::uint8_t>(clamp01(o.color.r) * 255.0f + 0.5f);
@@ -442,7 +547,21 @@ void draw(Image& target, const std::vector<UIRenderObject>& objects, const glm::
 
             // ── The fragment, ported from uiFragment / kUIFS ─────────────────
             glm::vec4 src;
-            if (o.type == 2)
+            if (const HE::MatCpuProgram* prog = prep[k].mat.program)
+            {
+                // The material's own colour, nothing stamped on it — on the GPU
+                // the material pipeline replaces the UI fragment entirely.
+                MatCpuElement e = screenProto;
+                e.size = o.size; e.pos = o.position;
+                e.radius = o.cornerRadius; e.state = o.uiState;
+                MatCtx mc{ &prep[k].mat, &snap };
+                MatCpuHooks h = hooks;
+                h.user = &mc;
+                bool discard = false;
+                src = prog->eval(e, glm::vec2(lu, lv), glm::vec3(o.color), options.time, h, discard);
+                if (discard) continue;
+            }
+            else if (o.type == 2)
             {
                 // A glyph: alpha out of the font atlas, tinted by the colour.
                 const float u = mixf(o.uvMin.x, o.uvMax.x, lu);
@@ -560,16 +679,45 @@ void draw(Image& target, const std::vector<UIRenderObject>& objects, const glm::
     constexpr int kStripeRows = 16;
     const long long area = static_cast<long long>(wx1 - wx0) * (wy1 - wy0);
     const int stripes = (wy1 - wy0 + kStripeRows - 1) / kStripeRows;
-    if (!threads || area < 256 * 256 || stripes < 2)
+    auto drawRange = [&](std::size_t k0, std::size_t k1)
     {
-        drawRows(wy0, wy1);
-        return;
+        if (k0 >= k1) return;
+        if (!threads || area < 256 * 256 || stripes < 2)
+        {
+            drawRows(wy0, wy1, k0, k1);
+            return;
+        }
+        ::parallel_for(static_cast<std::size_t>(stripes), [&](std::size_t s)
+        {
+            const int y0 = wy0 + static_cast<int>(s) * kStripeRows;
+            drawRows(y0, std::min(wy1, y0 + kStripeRows), k0, k1);
+        }, "SoftwareRaster", 1);
+    };
+
+    // A Backdrop material reads everything drawn before it, blurred — which a
+    // stripe cannot know while its neighbours are still drawing. So the list is
+    // drawn in phases: up to such a quad, then a snapshot of the whole target
+    // (with mips: the blur is a mip level plus nine taps, as on the GPU), then
+    // on. The GPU path takes the same snapshot at the same place.
+    std::size_t from = 0;
+    for (std::size_t k = 0; k < objects.size(); ++k)
+    {
+        if (!prep[k].backdrop) continue;
+        drawRange(from, k);
+        snapshot = target;
+        buildMipChain(snapshot.rgba.data(), snapshot.width, snapshot.height, snapMipBytes);
+        snapMips.clear();
+        int mw = snapshot.width, mh = snapshot.height;
+        for (const auto& m : snapMipBytes)
+        {
+            mw = std::max(1, mw / 2); mh = std::max(1, mh / 2);
+            snapMips.push_back({ m.data(), mw, mh });
+        }
+        snap = TextureView{ snapshot.rgba.data(), snapshot.width, snapshot.height,
+                            snapMips.data(), static_cast<int>(snapMips.size()) };
+        from = k;
     }
-    ::parallel_for(static_cast<std::size_t>(stripes), [&](std::size_t s)
-    {
-        const int y0 = wy0 + static_cast<int>(s) * kStripeRows;
-        drawRows(y0, std::min(wy1, y0 + kStripeRows));
-    }, "SoftwareRaster", 1);
+    drawRange(from, objects.size());
 }
 
 } // namespace HE::sw

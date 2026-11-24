@@ -69,7 +69,120 @@ HE::sw::TextureView SoftwareRenderer::resolveTexture(const HE::UUID& id, void* s
     v.height   = d.h;
     v.mips     = d.mips.data();
     v.mipCount = static_cast<int>(d.mips.size());
+    v.srgb     = t->srgb;
     return v;
+}
+
+// A material for the rasterizer: its graph compiled for the CPU, its parameters
+// bound, its textures resolved. Compiled once per graph (an instance compiles
+// its PARENT's graph with its own switch overrides, as ContentManager's
+// syncMaterialInstance does for the GPU) and rebound every call, so a
+// parameter a script sets shows up the next frame without a recompile.
+//
+// Everything read out of the asset is copied first: the next loadAsset (the
+// parent, a function, a texture) moves every getter pointer.
+HE::sw::MaterialView SoftwareRenderer::resolveMaterial(const HE::UUID& id, void* self)
+{
+    auto* r = static_cast<SoftwareRenderer*>(self);
+    ContentManager* cm = r ? r->m_contentManager : nullptr;
+    if (!cm) return {};
+    const MaterialAsset* ma = cm->getMaterial(id);
+    if (!ma) return {};
+    std::string json = ma->nodeGraphJson;
+    const std::string parent = ma->parentMaterialPath;
+    const std::vector<std::string> paramNames = ma->graphParamNames;
+    const std::vector<float> paramData = ma->shaderParamData;
+    const std::vector<std::string> swNames = ma->instanceSwitchNames;
+    const std::vector<uint8_t> swValues = ma->instanceSwitchValues;
+    const std::string name = ma->path;
+    if (!parent.empty())
+    {
+        const HE::UUID pid = cm->loadAsset(parent);
+        const MaterialAsset* pa = pid == HE::UUID{} ? nullptr : cm->getMaterial(pid);
+        json = pa ? pa->nodeGraphJson : std::string();
+    }
+    if (json.empty()) return {};
+
+    // A function's JSON as it is NOW (path → text), loaded on first sight.
+    auto functionJson = [cm](const std::string& path) -> std::string
+    {
+        const HE::UUID fid = cm->loadAsset(path);
+        const MaterialFunctionAsset* fa = fid == HE::UUID{} ? nullptr : cm->getMaterialFunction(fid);
+        return fa ? fa->nodeGraphJson : std::string();
+    };
+
+    CpuMaterial& e = r->m_materials[id];
+    bool stale = !e.compiled || e.graphJson != json || e.switchNames != swNames || e.switchValues != swValues;
+    for (const auto& [path, text] : e.functionJson)
+        if (!stale && functionJson(path) != text) stale = true;
+    if (stale)
+    {
+        e = CpuMaterial{};
+        e.graphJson = json; e.switchNames = swNames; e.switchValues = swValues; e.compiled = true;
+        HE::MaterialGraph graph;
+        std::string error;
+        bool ok = HE::materialGraphFromJson(json, graph);
+        if (ok)
+        {
+            const HE::MatFunctionLoader loader = [r, &e, &functionJson](const std::string& path) -> const HE::MaterialGraph*
+            {
+                const std::string text = functionJson(path);
+                if (text.empty()) return nullptr;
+                e.functionJson[path] = text;
+                HE::MaterialGraph g;
+                if (!HE::materialGraphFromJson(text, g)) return nullptr;
+                return &(r->m_functions[path] = std::move(g));
+            };
+            std::map<std::string, bool> overrides;
+            for (size_t i = 0; i < swNames.size() && i < swValues.size(); ++i) overrides[swNames[i]] = swValues[i] != 0;
+            ok = e.program.compile(graph, loader, overrides.empty() ? nullptr : &overrides, &error);
+        }
+        else
+            error = "its graph could not be read";
+        if (!ok)
+        {
+            HE_LOG_WARN(RHI, "SoftwareRenderer: material '%s' draws its plain surface — %s %s",
+                        name.c_str(), error.empty() ? "" : "the CPU cannot run", error.c_str());
+            return {};
+        }
+        for (const std::string& path : e.program.textures())
+            e.textureIds.push_back(cm->loadAsset(path));
+    }
+    if (!e.program.valid()) return {};
+    e.program.bindParams(paramNames, paramData);
+    e.views.clear();
+    for (const HE::UUID& tid : e.textureIds)
+        e.views.push_back(tid == HE::UUID{} ? HE::sw::TextureView{} : resolveTexture(tid, r));
+    HE::sw::MaterialView v;
+    v.program = &e.program;
+    v.textures = e.views.data();
+    v.textureCount = static_cast<int>(e.views.size());
+    return v;
+}
+
+void SoftwareRenderer::InvalidateMaterial(const HE::UUID& materialId)
+{
+    m_materials.erase(materialId);
+}
+
+HE::sw::DrawOptions SoftwareRenderer::drawOptions(const std::vector<UIRenderObject>& quads, bool* animated)
+{
+    HE::sw::DrawOptions o;
+    o.texture = &resolveTexture;   o.textureUser = this;
+    o.material = &resolveMaterial; o.materialUser = this;
+    // The GPU UI pass's clock (EncodeUIPass / RenderUIPass: SDL ticks).
+    o.time = static_cast<float>(SDL_GetTicks()) / 1000.0f;
+    if (animated)
+    {
+        *animated = false;
+        for (const UIRenderObject& q : quads)
+            if (q.type == 0 && q.materialAssetId != HE::UUID{})
+            {
+                const HE::sw::MaterialView mv = resolveMaterial(q.materialAssetId, this);
+                if (mv.program && (mv.program->usesTime() || mv.program->usesBackdrop())) { *animated = true; break; }
+            }
+    }
+    return o;
 }
 
 SoftwareRenderer::SoftwareRenderer() = default;
@@ -90,6 +203,8 @@ void SoftwareRenderer::Shutdown()
     m_primary = Target{};
     m_secondaries.clear();
     m_decoded.clear();
+    m_materials.clear();
+    m_functions.clear();
 }
 
 void SoftwareRenderer::AttachWindow(HE::Window* window)
@@ -207,7 +322,13 @@ void SoftwareRenderer::renderTarget(Target& t, uint32_t windowId)
     const bool surfaceChanged = (surf != t.lastSurface);
     t.lastSurface = surf;
 
-    bool partial = !sizeChanged && !surfaceChanged && t.haveFrame &&
+    // A material that reads the clock or what is behind it can change while
+    // its quad does not, and a backdrop read outside a repainted rectangle
+    // would see last frame's finished picture — so a frame with either is
+    // painted whole, as every GPU frame is.
+    bool animated = false;
+    HE::sw::DrawOptions opts = drawOptions(m_renderWorld.uiObjects, &animated);
+    bool partial = !animated && !sizeChanged && !surfaceChanged && t.haveFrame &&
                    HE::sw::dirtyRects(t.prevObjects, m_renderWorld.uiObjects, pw, ph, t.dirty);
     if (partial && t.dirty.empty())
     {
@@ -228,7 +349,8 @@ void SoftwareRenderer::renderTarget(Target& t, uint32_t windowId)
     for (const glm::vec4& r : t.dirty)
     {
         t.frame.clearRect(r, kClear[0], kClear[1], kClear[2], kClear[3]);
-        HE::sw::draw(t.frame, m_renderWorld.uiObjects, r, &resolveTexture, this);
+        opts.clip = r;
+        HE::sw::draw(t.frame, m_renderWorld.uiObjects, opts);
         t.lastPixels += static_cast<uint64_t>(std::max(0.0f, r.z) * std::max(0.0f, r.w));
     }
     t.prevObjects = m_renderWorld.uiObjects;
@@ -282,14 +404,15 @@ bool SoftwareRenderer::CaptureViewport(std::vector<uint8_t>& rgba,
 
 bool SoftwareRenderer::RasterizeUI(const std::vector<UIRenderObject>& uiObjects,
                                    uint32_t width, uint32_t height,
-                                   const glm::vec4& clear, std::vector<uint8_t>& outRgba8)
+                                   const glm::vec4& clear, std::vector<uint8_t>& outRgba8,
+                                   bool* animated)
 {
     if (width == 0 || height == 0) return false;
     HE::sw::Image img;
     img.resize(static_cast<int>(width), static_cast<int>(height));
     auto b = [](float v) { return static_cast<std::uint8_t>(std::clamp(v, 0.0f, 1.0f) * 255.0f + 0.5f); };
     img.clear(b(clear.r), b(clear.g), b(clear.b), 255);
-    HE::sw::draw(img, uiObjects, glm::vec4(0.0f), &resolveTexture, this);
+    HE::sw::draw(img, uiObjects, drawOptions(uiObjects, animated));
     outRgba8 = std::move(img.rgba);
     return true;
 }
@@ -301,7 +424,7 @@ bool SoftwareRenderer::RenderWidgetThumbnail(const std::vector<UIRenderObject>& 
     HE::sw::Image img;
     img.resize(static_cast<int>(size), static_cast<int>(size));
     img.clear(0, 0, 0, 0);
-    HE::sw::draw(img, uiObjects, glm::vec4(0.0f), &resolveTexture, this);
+    HE::sw::draw(img, uiObjects, drawOptions(uiObjects, nullptr));
     outRgba8 = std::move(img.rgba);
     return true;
 }

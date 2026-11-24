@@ -4400,6 +4400,7 @@ void* softwareCanvas(AppContext& ctx, const std::vector<UIRenderObject>& quads,
 		void*  tex = nullptr;
 		double at  = -1.0;
 		IRenderer* owner = nullptr;
+		bool animated = false;
 	};
 	struct Retired { void* tex; IRenderer* owner; int frame; };
 	static Slot s_slots[IRenderer::kUIPreviewSlots];
@@ -4421,16 +4422,20 @@ void* softwareCanvas(AppContext& ctx, const std::vector<UIRenderObject>& quads,
 	Slot& s = s_slots[std::min<uint32_t>(slot, IRenderer::kUIPreviewSlots - 1)];
 	if (s.owner != ctx.renderer) s = Slot{};
 	const double now = ImGui::GetTime();
+	// A material that reads the clock or the backdrop changes under the same
+	// quads, so such a picture is never reused.
 	const bool same = s.tex && s.owner == ctx.renderer && s.w == w && s.h == h &&
-	                  now - s.at < 1.0 && s.quads == quads;
+	                  !s.animated && now - s.at < 1.0 && s.quads == quads;
 	if (same) return s.tex;
 
 	std::vector<uint8_t> px;
-	if (!s_cpu->RasterizeUI(quads, w, h, clear, px)) return nullptr;
+	bool animated = false;
+	if (!s_cpu->RasterizeUI(quads, w, h, clear, px, &animated)) return nullptr;
 	void* tex = ctx.renderer->CreateImGuiTexture(px.data(), int(w), int(h));
 	if (!tex) return nullptr;
 	if (s.tex) s_retired.push_back({ s.tex, s.owner, frame });
 	s.tex = tex; s.owner = ctx.renderer; s.w = w; s.h = h; s.at = now; s.quads = quads;
+	s.animated = animated;
 	return tex;
 }
 

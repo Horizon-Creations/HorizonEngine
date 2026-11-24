@@ -1036,11 +1036,13 @@ public:
     // top-down, cleared to the opaque `clear`) exactly as this backend draws a
     // frame. Only the Software backend has it — it is how the widget designer
     // shows an application that SHIPS on the software renderer its real
-    // picture (materials fall back to Schicht 0 there, as in the app). false =
-    // not a CPU backend.
+    // picture (its materials run on the CPU, as in the app). `animated`
+    // (optional) is set when a material in it reads Time or Backdrop, so the
+    // same quads can come out differently next frame. false = not a CPU backend.
     virtual bool RasterizeUI(const std::vector<UIRenderObject>& /*uiObjects*/,
                              uint32_t /*width*/, uint32_t /*height*/,
-                             const glm::vec4& /*clear*/, std::vector<uint8_t>& /*outRgba8*/)
+                             const glm::vec4& /*clear*/, std::vector<uint8_t>& /*outRgba8*/,
+                             bool* /*animated*/ = nullptr)
     { return false; }
     virtual void* RenderUIPreview(const std::vector<UIRenderObject>& /*uiObjects*/,
                                   uint32_t /*width*/, uint32_t /*height*/,

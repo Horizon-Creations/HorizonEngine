@@ -1,6 +1,8 @@
 #pragma once
 #include <Renderer/UIRenderObject.h>
 
+namespace HE { class MatCpuProgram; }
+
 #include <cstdint>
 #include <vector>
 
@@ -23,11 +25,11 @@
 // with the same branches in the same order, so a change to the look happens in
 // three places or in none.
 //
-// The hard limit, stated rather than hidden (the D5 fallback contract): a quad
-// with a MATERIAL cannot be drawn here, because a material is a translated
-// shader graph. Such a quad draws Schicht 0 plus its tint — the rounding, the
-// border, the gradient and the shadows, only without the graph. That is what
-// the closed vocabulary is FOR.
+// Materials: a quad with a MATERIAL is shaded by the graph run on the CPU
+// (HE::MatCpuProgram) when every node in it is one the CPU evaluates — the
+// widget node set an application with Advanced Shader Effects off is offered.
+// A material that is not (a node that needs a mesh or a world) still falls
+// back to Schicht 0 plus its tint: the D5 contract for what cannot be drawn.
 namespace HE::sw
 {
 
@@ -85,13 +87,37 @@ struct TextureView
     // them, which is what a GPU's trilinear filter does.
     const TextureLevel* mips = nullptr;
     int mipCount = 0;
+    // Colour data stored sRGB-encoded. An Image quad samples the bytes as they
+    // are (the UI pass does); a MATERIAL decodes them to linear first, as the
+    // GPU's sRGB texture formats do — so only material sampling reads this.
+    bool srgb = false;
+};
+
+// A material on a quad, ready to run (HE::MatCpuProgram, the graph compiled
+// for the CPU) with its textures in the program's slot order.
+struct MaterialView
+{
+    const HE::MatCpuProgram* program = nullptr;
+    const TextureView* textures = nullptr;
+    int textureCount = 0;
+};
+using MaterialResolver = MaterialView (*)(const HE::UUID& id, void* user);
+using TextureResolver = TextureView (*)(const HE::UUID& id, void* user);
+
+// Everything draw() can be handed besides the quads.
+struct DrawOptions
+{
+    glm::vec4 clip{ 0.0f };                 // {0,0,0,0} = the whole image
+    TextureResolver texture = nullptr;  void* textureUser = nullptr;
+    MaterialResolver material = nullptr; void* materialUser = nullptr;
+    float time = 0.0f;                      // what a material's Time node reads
+    bool threads = true;
 };
 // Box-filters `base` (w x h RGBA8) down to 1x1, appending every level after the
 // base to `out` (out[0] is level 1). The caller keeps the bytes and points
 // TextureView::mips into them.
 void buildMipChain(const std::uint8_t* base, int w, int h,
                    std::vector<std::vector<std::uint8_t>>& out);
-using TextureResolver = TextureView (*)(const HE::UUID& id, void* user);
 
 // Draw `objects` over whatever `target` already holds. The caller owns the
 // clear: a full redraw clears first, a dirty-rectangle redraw does not.
@@ -111,6 +137,14 @@ void draw(Image& target, const std::vector<UIRenderObject>& objects,
           const glm::vec4& clip = glm::vec4(0.0f),
           TextureResolver tex = nullptr, void* texUser = nullptr,
           bool threads = true);
+
+// The same with materials: a quad whose material resolves to a program is
+// shaded by it (what the GPU's material pipeline would put there), one that
+// does not falls back to Schicht 0 plus its tint. A material reading Backdrop
+// sees everything drawn before it, blurred the way the GPU blurs its snapshot
+// (a mip level plus nine taps) — the list is drawn in phases around each such
+// quad, because the blur reads rows other stripes would still be writing.
+void draw(Image& target, const std::vector<UIRenderObject>& objects, const DrawOptions& options);
 
 // Every pixel a quad can possibly touch, as {x, y, w, h}. Wider than the quad's
 // own rectangle by design: a rotated quad's corners swing out past it, and a
