@@ -54,11 +54,20 @@ widget materials run on the CPU, and the editor offers exactly the nodes that wo
   and frame 0 is the top-left cell in pixels.
 - Full ctest 383/383 and `editor_help_audit --check`.
 
+**Afterwards (same day)**
+- Exporter (cfb93f72e): `installBuiltGame(keepRuntimeEngine)`. A Development export of an
+  app keeps the AppBasic/AppAdvanced engine; the prebuilt runtimes are dev builds.
+  Verified: the app reports `runtime flavour 'app-basic'` and draws.
+- UI materials read textures upright (749fbe358): a UI-domain Texture Sample flips v, in
+  codegen and on the CPU. Upright on Software, Metal and GL, with a ±1 match.
+- Time materials keep `WidgetManager::isAnimating` true (on every backend).
+- Windows follow-ups: Hive topic 354.
+
 **Not verified / known**
-- **Exporter finding (separate from this):** an Advanced-off app on this Mac ships the
-  game runtime even with Shipping ("game compiled from the release SDK"). The AppBasic
-  bundle next to the editor is never used. See `findRuntimeBundle` vs. the
-  SDK-compile path in `ProjectExporter.cpp`.
+- **Shipping still carries the full engine:** there is no release build of the app
+  engine (the SDK has the full engine only as release; runtimes are dev builds). The
+  export says so in the log. Fix: build app runtimes or SDK lib sets per flavour and
+  profile.
 - Frosted Glass ±9: the different capture size (1600×900 vs 1280×720) is the likely
   cause, not a proven one.
 - Vulkan/D3D: no font atlas mips (no Pixelated, no UI preview either), so small text
@@ -68,10 +77,6 @@ widget materials run on the CPU, and the editor offers exactly the nodes that wo
   were already red before it.
 - Material textures on the CPU always read the base level. There is a `shortcut:` comment
   in `SoftwareRaster.cpp`; the GPU uses mips.
-- Time materials in an event-driven app animate only when the app redraws anyway (on the
-  heartbeat). That matches the GPU path, but it is a limitation of both.
-- A UI material shows a texture upside down (vUV top-left, textures stored bottom-up) on
-  all backends equally. This predates the change and was not changed.
 - No full-window material timing was measured.
 - Not looked at in the running editor window.
 - Sprite sheets are not animated in the designer (it shows frame 0).
