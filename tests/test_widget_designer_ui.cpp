@@ -93,6 +93,24 @@ namespace
 		~Harness() { ImGui::DestroyContext(); }
 	};
 
+	// A renderer that draws nothing and uploads into the headless ImGui raster.
+	class UploadOnlyRenderer final : public IRenderer
+	{
+	public:
+		void Initialize(HE::Window*) override {}
+		void Shutdown() override {}
+		void Render() override {}
+		Capabilities GetCapabilities() const override { return {}; }
+		void* CreateImGuiTexture(const void* rgba, int w, int h) override
+		{
+			return reinterpret_cast<void*>(static_cast<uintptr_t>(he_ui::registerTexture(rgba, w, h)));
+		}
+		void DestroyImGuiTexture(void* t) override
+		{
+			he_ui::unregisterTexture(static_cast<ImTextureID>(reinterpret_cast<uintptr_t>(t)));
+		}
+	};
+
 	// Everything AppContext insists on being given (same shape as
 	// test_inspector_ui.cpp).
 	struct ContextBits
@@ -150,6 +168,12 @@ namespace
 			};
 			ctx.world   = &world;
 			ctx.undoSys = &undo;
+			// The editor always has a renderer, and the canvas is drawn through
+			// it — here one that can only upload, so the designer takes its CPU
+			// path (softwareCanvas) and the canvas is the software rasterizer's
+			// picture. A test that wants another one sets its own.
+			static UploadOnlyRenderer s_upload;
+			ctx.renderer = &s_upload;
 			return ctx;
 		}
 	};
@@ -400,14 +424,11 @@ TEST_CASE("ui shot: widget designer — the Details panel as it is (Thema 92)")
 // the fix's regression test (Schritt 2).
 namespace
 {
-	// Every texture the thumbnail cache uploads, and at what size.
+	// Every texture uploaded through the stub below, and at what size.
 	std::vector<std::pair<int, int>> g_uploads107;
-	// The bytes of the last upload of at least 1024 px — the full image.
-	std::vector<uint8_t> g_fullUpload107;
-	int g_fullW107 = 0, g_fullH107 = 0;
 
 	// A renderer that renders nothing and uploads into the software rasterizer:
-	// enough for AssetThumbnailCache to hand the canvas a texture headless.
+	// enough for the canvas (its CPU path) and the thumbnail cache headless.
 	class ThumbUploadRenderer final : public IRenderer
 	{
 	public:
@@ -418,12 +439,6 @@ namespace
 		void* CreateImGuiTexture(const void* rgba, int w, int h) override
 		{
 			g_uploads107.push_back({ w, h });
-			if (w >= 1024 || h >= 1024)
-			{
-				const auto* p = static_cast<const uint8_t*>(rgba);
-				g_fullUpload107.assign(p, p + size_t(w) * h * 4);
-				g_fullW107 = w; g_fullH107 = h;
-			}
 			return reinterpret_cast<void*>(static_cast<uintptr_t>(he_ui::registerTexture(rgba, w, h)));
 		}
 		void DestroyImGuiTexture(void* t) override
@@ -557,33 +572,33 @@ TEST_CASE("repro 107: designer canvas draws the texture itself, not the thumbnai
 	Designer d{ ctx, (root / "UI" / "Startup.hasset").string() };
 	d.beforeFrame = [] { static double now = 0.0; AssetThumbnailCache::beginFrame(now += 1.0 / 60.0); };
 
-	// Negative control: no renderer, no texture — the checker greys are absent.
+	// Control: the page with no thumbnail cache behind it — the checker greys the
+	// Content Browser tile carries are absent, so any that appear below came from it.
 	AssetThumbnailCache::setContext(nullptr, &cm, "");
 	const he_ui::Image none = d.shoot("repro107-canvas-no-texture");
 	REQUIRE(none.valid());
 	const int ctl90 = countGrey(none, 90), ctl130 = countGrey(none, 130);
 
+	// The canvas is the renderer's picture of the page (the CPU path here: the
+	// stub can only upload), so what goes up is that picture — never the
+	// Content Browser's 128 px tile, which is what the canvas once borrowed.
 	ThumbUploadRenderer stub;
 	g_uploads107.clear();
 	AssetThumbnailCache::setContext(&stub, &cm, "");
+	ctx.renderer = &stub;
 	d.shoot("repro107-warmup");
 	const he_ui::Image img = d.shoot("repro107-canvas-image");
 	REQUIRE(img.valid());
 
-	// (4) What reached the canvas is the texture at its own size. No tile at all:
-	// the Content Browser is not drawn here, so a 128 px upload could only be the
-	// canvas borrowing one again.
 	const int S = static_cast<int>(AssetThumbnailCache::thumbnailSize());
 	REQUIRE(!g_uploads107.empty());
-	bool tileSized = false, fullSized = false;
+	bool tileSized = false;
 	for (const auto& [w, h] : g_uploads107)
 	{
 		MESSAGE("upload " << w << "x" << h);
 		if (w == S && h == S) tileSized = true;
-		if (w >= 1024 || h >= 1024) fullSized = true;
 	}
 	CHECK_FALSE(tileSized);
-	CHECK(fullSized);
 
 	// (1) No checkerboard: the tile's 90/130 greys are not on the canvas — the
 	// transparent background lets the page show through.
@@ -593,19 +608,11 @@ TEST_CASE("repro 107: designer canvas draws the texture itself, not the thumbnai
 	CHECK(n130 < ctl130 + 200);
 
 	// The generated picture's own facts, so the checks above cannot pass by the
-	// canvas drawing nothing: the upload keeps its alpha (corner transparent,
-	// centre opaque orange), and the orange disc is on the canvas.
-	if (texRel != "UI/HE_Logo.hasset")
+	// canvas drawing nothing: the orange disc is on the canvas, in its own
+	// colour, with the page showing through around it (no checker greys above).
+	// Only for the generated picture: a real logo (HE_REPRO107_LOGO) has its own colours.
+	if (const char* own = std::getenv("HE_REPRO107_LOGO"); !own || !*own)
 	{
-		REQUIRE(g_fullW107 == 1024);
-		REQUIRE(g_fullH107 == 1024);
-		CHECK(g_fullUpload107[3] == 0);   // (0,0): outside the disc
-		const size_t c = (size_t(512) * 1024 + 512) * 4;
-		CHECK(g_fullUpload107[c + 3] == 255);
-		const size_t o = (size_t(300) * 1024 + 512) * 4;   // above the band
-		CHECK(g_fullUpload107[o]     == 216);
-		CHECK(g_fullUpload107[o + 1] == 128);
-		CHECK(g_fullUpload107[o + 2] == 24);
 		const int orange = countColour(img, 216, 128, 24);
 		MESSAGE("orange canvas pixels: " << orange << " (control " << countColour(none, 216, 128, 24) << ")");
 		CHECK(orange > 5000);
@@ -1905,18 +1912,9 @@ TEST_CASE("repro 107: all four fixes together on one canvas")
 	CHECK(fa.mean    > 0.35);                   // …about half way at half a second
 	CHECK(fa.mean    < 0.65);
 
-	// (1) + (4) on the same canvas, at every moment: the texture itself went up,
-	// no 128 px tile, and none of the tile's checker greys where the page shows
-	// through the picture's transparent corners.
-	const int S = static_cast<int>(AssetThumbnailCache::thumbnailSize());
-	bool tileSized = false, fullSized = false;
-	for (const auto& [w, h] : g_uploads107)
-	{
-		if (w == S && h == S) tileSized = true;
-		if (w >= 1024 || h >= 1024) fullSized = true;
-	}
-	CHECK_FALSE(tileSized);
-	CHECK(fullSized);
+	// (1) on the same canvas, at every moment: none of the Content Browser
+	// tile's checker greys where the page shows through the picture's
+	// transparent corners.
 	for (const he_ui::Image* img : { &after.start, &after.mid, &after.end })
 	{
 		CHECK(countGrey(*img, 90)  < 200);
@@ -2248,15 +2246,17 @@ TEST_CASE("ui shot: widget designer — Pre Construct shows on the canvas, never
 	MESSAGE("green canvas pixels: " << green);
 	CHECK(green > 5000);
 
-	// The same green when the RENDERER draws the canvas: the copy it emits
-	// from is taken while the shown values are in the tree.
+	// The same green through the GPU preview path (the shot above went through
+	// the CPU one): the copy both emit from is taken while the shown values are
+	// in the tree.
 	{
+		IRenderer* const before = ctx.renderer;
 		UIPreviewRenderer pr;
 		pr.cm = &cm;
 		ctx.renderer = &pr;
 		ctx.backend  = HE::RendererBackend::Metal;
 		const he_ui::Image ri = d.shoot("widget-designer-pre-construct-rendered");
-		ctx.renderer = nullptr;
+		ctx.renderer = before;
 		REQUIRE(ri.valid());
 		CHECK(pr.calls > 0);
 		long rg = 0;
@@ -2270,7 +2270,7 @@ TEST_CASE("ui shot: widget designer — Pre Construct shows on the canvas, never
 		MESSAGE("green canvas pixels through the renderer: " << rg);
 		CHECK(rg > 5000);
 	}
-	d.shoot("widget-designer-pre-construct-again");   // back on the replica
+	d.shoot("widget-designer-pre-construct-again");   // back on the CPU canvas
 
 	// …while the document, between frames, still holds what was designed.
 	HE::UIWidgetTree* live = UIEditorPanel::liveTree(rel);

@@ -64,8 +64,25 @@ canvas is the active renderer's own picture of the runtime's quads.
 - Also works on Vulkan/D3D (only `CreateImGuiTexture` is needed). Not looked at in the
   running editor.
 
+**Expansion (same day, a76af3e3d and the following commit)**
+- Toolbar "State" (Normal/Hovered/Pressed/Focused/Disabled) shows the selection in that
+  state. Focused uses the runtime's ring, now shared as `HE::uiEmitRing` /
+  `uiFocusRingTarget`. Nothing is written; `UIEditorPanel::setPreviewState` is for tests.
+- Vulkan/D3D (no `RenderUIPreview`): CPU picture via `softwareCanvas` instead of the replica.
+- **ImGui replica removed** (`drawElementPreview`, `drawSurfacePreview`, `pathRoundedRect`,
+  about 700 lines). What remains is `drawElementAids`: ref outline, grid tracks, box/padding
+  bounds, list ghost rows (below the header band the runtime draws), spacer arrows and
+  slot dashes. Without any renderer the canvas shows only the aids. The test harness
+  therefore gets an `UploadOnlyRenderer` by default.
+- Software renderer: opaque plain-rectangle fast path (byte-identical, 1440p repaint
+  15.7 → 9.6 ms). Gamma-correct blending deliberately not added: GPU and Software blend
+  the same way.
+
 **Next steps**
 1. Open a widget in the editor on Metal and on GL, and compare it with Play
-   (materials, text, Pixelated). Do the same for an app project with Advanced off.
-2. Vulkan/D3D: implement `RenderUIPreview` (until then games keep the replica there).
-3. Once the renderer path has been proven, the content half of `drawElementPreview` can go.
+   (materials, text, Pixelated, State switch). Do the same for an app project with
+   Advanced off.
+2. Vulkan/D3D: implement `RenderUIPreview` (until then they show the CPU picture without
+   materials).
+3. If the software renderer is ever too slow: SIMD in the fragment loop, or an interior
+   fast path for rounded or bordered surfaces (bench: `he_tests -tc="Software raster bench*" --no-skip`).

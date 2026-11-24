@@ -1,5 +1,5 @@
 #include "UIEditorPanel.h"
-#include <imgui_internal.h>   // ShadeVertsLinearColorGradientKeepAlpha — see drawSurfacePreview
+#include <imgui_internal.h>
 #include <Types/TypeRegistry.h>
 #include "EditorToolbar.h"   // shared toolbar strip
 #include "EditorInput.h"           // trackpadActive — swipe pans, pinch (Ctrl/Cmd+scroll) zooms
@@ -291,12 +291,6 @@ Rect parentCanvasRect(const UIWidgetTree& tree, int parentId,
 	return parent;
 }
 
-ImU32 toCol32(const glm::vec4& c)
-{
-	return IM_COL32(int(c.r * 255.0f), int(c.g * 255.0f),
-	                int(c.b * 255.0f), int(c.a * 255.0f));
-}
-
 const char* typeName(UIWidgetType t) { return HE::uiWidgetTypeName(t); }
 
 // Element display name (custom name, else type name).
@@ -323,10 +317,6 @@ std::string elementName(const UIElement& e)
 // about either the theme or the mode.
 const HE::UITheme* g_previewTheme = nullptr;
 HE::UIThemeMode    g_previewMode  = HE::UIThemeMode::Dark;
-
-// True while the canvas shows the RENDERER's picture of the widget: the ImGui
-// replica below then draws only the designer's aids on top (drawElementPreview).
-bool g_aidsOnly = false;
 
 // The interaction state the canvas shows the SELECTION in (toolbar "State"):
 // 0 = as authored, 1 = hovered, 2 = pressed, 3 = focused, 4 = disabled. A way
@@ -453,11 +443,6 @@ std::string previewThemeLabel(const State& st)
 	return s;
 }
 
-glm::vec4 propColorOr(const UIElement& e, const char* name, const glm::vec4& fb)
-{
-	const UIPropValue v = e.getProp(name);
-	return themedColor(e, name, v.type == UIPropType::Color ? v.col : fb);
-}
 std::string propStringOr(const UIElement& e, const char* name, const std::string& fb)
 {
 	const UIPropValue v = e.getProp(name);
@@ -467,21 +452,6 @@ float propFloatOr(const UIElement& e, const char* name, float fb)
 {
 	const UIPropValue v = e.getProp(name);
 	return themedFloat(e, name, v.type == UIPropType::Float ? v.f : fb);
-}
-bool propBoolOr(const UIElement& e, const char* name, bool fb)
-{
-	const UIPropValue v = e.getProp(name);
-	return v.type == UIPropType::Bool ? v.b : fb;
-}
-// Its own reader, because these guards are typed and an Int read through
-// propFloatOr silently comes back as the FALLBACK — the value lives in `.i`,
-// `.f` is zero, and the type check sends it to the default. That is what made
-// the designer draw every label left-middle no matter which of the nine cells
-// was picked, while the engine drew it correctly.
-int propIntOr(const UIElement& e, const char* name, int fb)
-{
-	const UIPropValue v = e.getProp(name);
-	return v.type == UIPropType::Int ? v.i : fb;
 }
 
 // ── Design-time values never reach the document ───────────────────────────────
@@ -3682,290 +3652,17 @@ void handleDelta(int handle, const ImVec2& d, ImVec2& dMin, ImVec2& dMax)
 	}
 }
 
-// One rounded rectangle with four independent radii, as an ImDrawList path.
-// ImGui's own AddRectFilled takes ONE rounding and a set of corner flags, which
-// cannot express "8 at the top, square at the bottom" — the shape a tab is. A
-// radius of 0 makes PathArcTo emit the centre point alone, so a square corner
-// falls out of the same four calls.
-void pathRoundedRect(ImDrawList* dl, const ImVec2& a, const ImVec2& b, const glm::vec4& r)
+// ── What the designer adds on top of the picture ────────────────────────────
+// The canvas is the renderer's picture of the runtime's own quads (see
+// drawCanvas), so nothing a widget LOOKS like is drawn here. What is drawn is
+// what the runtime does NOT show and an author needs to see: the bounds and
+// padding of boxes and grids, a grid's tracks, a list's ghost rows, a spacer's
+// arrows, a slot's dashes and a reference's outline.
+void drawElementAids(ImDrawList* dl, const UIElement& n, const ImVec2& mn,
+                     const ImVec2& mx, float s, const HE::UIWidgetTree* tree = nullptr)
 {
-	constexpr float kPi = 3.14159265358979323846f;   // IM_PI is imgui_internal
-	const float lim = 0.5f * std::min(b.x - a.x, b.y - a.y);
-	const float tl = std::clamp(r.x, 0.0f, lim), tr = std::clamp(r.y, 0.0f, lim);
-	const float br = std::clamp(r.z, 0.0f, lim), bl = std::clamp(r.w, 0.0f, lim);
-	dl->PathArcTo(ImVec2(a.x + tl, a.y + tl), tl, kPi,          kPi * 1.5f);
-	dl->PathArcTo(ImVec2(b.x - tr, a.y + tr), tr, kPi * 1.5f,   kPi * 2.0f);
-	dl->PathArcTo(ImVec2(b.x - br, b.y - br), br, 0.0f,         kPi * 0.5f);
-	dl->PathArcTo(ImVec2(a.x + bl, b.y - bl), bl, kPi * 0.5f,   kPi);
-}
-
-// The element's own surface, exactly as "Schicht 0" describes it: the authored
-// rounding, the fill (flat or faded), and the border drawn INSIDE the shape.
-//
-// Drawn here once for every type that HAS a surface, instead of six types each
-// hard-coding a rounding of 3 or 4 and ignoring what the author set. The
-// designer's whole job is to show what the engine will draw, and until this it
-// showed a rounding nobody had asked for and no border or gradient at all.
-void drawSurfacePreview(ImDrawList* dl, const UIElement& n, const ImVec2& mn,
-                        const ImVec2& mx, float s, const glm::vec4& fill,
-                        float alpha, float dim, void* texHandle, bool drawFill)
-{
-	const auto C = [&](const glm::vec4& c)
-	{
-		return toCol32({ c.r * dim, c.g * dim, c.b * dim, c.a * alpha });
-	};
-	// Read through the theme like every colour here: a style may decide the
-	// rounding, and "Corner Radius" is one value for all four corners, which is
-	// what the property means when it is bound (uiApplyTheme writes all four).
-	const float themedR = themedFloat(n, "Corner Radius", n.cornerRadius.x);
-	const glm::vec4 radii =
-		(themedR == n.cornerRadius.x ? n.cornerRadius : glm::vec4(themedR)) * s;
-	// The drop shadow, under everything this element draws. ImDrawList has no
-	// soft edge, so it is approximated by a handful of nested shapes at rising
-	// alpha — the same picture, out of coarser material.
-	if (drawFill && n.shadow && n.shadowColor.a > 0.001f)
-	{
-		const float blur = std::max(0.0f, n.shadowBlur * s);
-		const ImVec2 o(n.shadowOffsetX * s, n.shadowOffsetY * s);
-		// Outermost first, each the same faint alpha: stacked "over", they build
-		// up to roughly the authored alpha where they all overlap and fade out
-		// where only the widest one reaches. That is a falloff, drawn with the
-		// only tool a draw list has.
-		constexpr int kSteps = 6;
-		glm::vec4 c = n.shadowColor;
-		c.a /= kSteps;
-		for (int i = kSteps; i >= 1; --i)
-		{
-			const float g = blur * static_cast<float>(i) / kSteps;
-			pathRoundedRect(dl, ImVec2(mn.x + o.x - g, mn.y + o.y - g),
-			                    ImVec2(mx.x + o.x + g, mx.y + o.y + g), radii + g);
-			dl->PathFillConvex(C(c));
-		}
-	}
-	// A picture on the surface is the surface: the texture is drawn square (a
-	// rounded image needs a clip ImDrawList cannot express along a path), and
-	// the border still follows the authored shape on top of it.
-	if (!drawFill)
-	{
-		// The caller drew its own picture; only the outline is left to add.
-	}
-	else if (texHandle)
-		dl->AddImage(reinterpret_cast<ImTextureID>(texHandle), mn, mx,
-		             ImVec2(0, 0), ImVec2(1, 1), C(fill));
-	else
-	{
-		const int vtx0 = dl->VtxBuffer.Size;
-		pathRoundedRect(dl, mn, mx, radii);
-		// A radial fade reaches its far colour at the corners, so that is what
-		// the shape is filled with and the rings below work inwards from it.
-		dl->PathFillConvex(C(n.gradient && n.gradientShape == 1 ? n.gradientColor : fill));
-		if (n.gradient && n.gradientShape != 1)
-		{
-			// The same rule the shaders use: an angle clockwise from "down",
-			// projected onto the box. Shading the vertices the fill just wrote
-			// is how a path gets a gradient at all — AddRectFilledMultiColor is
-			// axis-aligned and square.
-			const float rad = n.gradientAngle * 0.017453292f;
-			const ImVec2 c((mn.x + mx.x) * 0.5f, (mn.y + mx.y) * 0.5f);
-			const ImVec2 d(std::sin(rad), std::cos(rad));
-			const float  half = 0.5f * (std::abs(d.x) * (mx.x - mn.x) +
-			                            std::abs(d.y) * (mx.y - mn.y));
-			ImGui::ShadeVertsLinearColorGradientKeepAlpha(
-				dl, vtx0, dl->VtxBuffer.Size,
-				ImVec2(c.x - d.x * half, c.y - d.y * half),
-				ImVec2(c.x + d.x * half, c.y + d.y * half),
-				C(fill), C(n.gradientColor));
-		}
-		else if (n.gradient)
-		{
-			// Radial. ImGui can shade a path's VERTICES, and this path's are all
-			// on its outline — every one of them out at the far stop — so
-			// shading it comes out flat. Rings do the fade instead.
-			//
-			// They stop at the circle INSCRIBED in the box, never at the corner:
-			// a circle centred in a rounded rectangle and no wider than its
-			// shorter side cannot leave it, and ImDrawList has no way to clip to
-			// a path. So the corners keep the far colour and only the last ring
-			// is a slightly compressed step. The engine fades all the way to the
-			// farthest corner; this is the preview's approximation of it.
-			const ImVec2 c((mn.x + mx.x) * 0.5f, (mn.y + mx.y) * 0.5f);
-			const float w = mx.x - mn.x, h = mx.y - mn.y;
-			const float farR = std::max(1e-4f, 0.5f * std::sqrt(w * w + h * h));
-			const float inR  = 0.5f * std::min(w, h);
-			constexpr int kRings = 24;
-			for (int i = kRings; i >= 1; --i)
-			{
-				const float r = inR * static_cast<float>(i) / kRings;
-				const glm::vec4 col = fill + (n.gradientColor - fill) * (r / farR);
-				dl->AddCircleFilled(c, r, C(col), 48);
-			}
-		}
-	}
-	// The inner shadow, over the fill and under the border: rings drawn just
-	// inside the edge, the same stacking trick as the drop shadow. They stay
-	// within the shape by construction, so nothing spills.
-	if (drawFill && n.innerShadow && n.innerShadowColor.a > 0.001f)
-	{
-		const float depth = std::max(1.0f, n.innerShadowBlur * s);
-		constexpr int kSteps = 5;
-		glm::vec4 c = n.innerShadowColor;
-		c.a /= kSteps;
-		for (int i = 1; i <= kSteps; ++i)
-		{
-			const float g = depth * static_cast<float>(i) / kSteps;
-			if (mx.x - g <= mn.x + g || mx.y - g <= mn.y + g) break;
-			pathRoundedRect(dl, ImVec2(mn.x + g * 0.5f, mn.y + g * 0.5f),
-			                    ImVec2(mx.x - g * 0.5f, mx.y - g * 0.5f),
-			                    radii - g * 0.5f);
-			dl->PathStroke(C(c), ImDrawFlags_Closed, g);
-		}
-	}
-	if (n.borderWidth > 0.0f)
-	{
-		// Inside the shape, like the shaders draw it: the stroke is centred on
-		// the path, so the path moves in by half the width.
-		const float bw = std::max(1.0f, n.borderWidth * s);
-		const ImVec2 im(mn.x + bw * 0.5f, mn.y + bw * 0.5f);
-		const ImVec2 ix(mx.x - bw * 0.5f, mx.y - bw * 0.5f);
-		if (ix.x > im.x && ix.y > im.y)
-		{
-			pathRoundedRect(dl, im, ix, radii - bw * 0.5f);
-			dl->PathStroke(C(n.borderColor), ImDrawFlags_Closed, bw);
-		}
-	}
-}
-
-// Draw a simplified WYSIWYG preview of one element from its generic properties.
-void drawElementPreview(ImDrawList* dl, const UIElement& n, const ImVec2& mn,
-                        const ImVec2& mx, float s, void* texHandle = nullptr,
-                        float alpha = 1.0f, float dim = 1.0f,
-                        const HE::UIWidgetTree* tree = nullptr)
-{
-	// Under the renderer's picture only what the runtime does NOT draw is left
-	// for ImGui: the bounds of boxes, grids and spacers, a slot's dashes, a
-	// list's ghost rows, a reference's outline. The rest is in the picture.
-	if (g_aidsOnly)
-		switch (n.type())
-		{
-		case UIWidgetType::Grid: case UIWidgetType::WrapBox:
-		case UIWidgetType::VerticalBox: case UIWidgetType::HorizontalBox:
-		case UIWidgetType::ListView: case UIWidgetType::Spacer:
-		case UIWidgetType::NamedSlot: case UIWidgetType::WidgetRef:
-			break;
-		default:
-			return;
-		}
-	// Every colour of the element itself goes through here: faded by the
-	// inherited opacity and knocked back while it is disabled, exactly as
-	// WidgetManager does it to the real quads.
-	const auto C = [&](const glm::vec4& c)
-	{
-		return toCol32({ c.r * dim, c.g * dim, c.b * dim, c.a * alpha });
-	};
-	// The authored surface first, for every type that has one — the same rule
-	// WidgetManager stamps onto the first quad. What follows in each case is
-	// only what is drawn ON that surface.
-	// An Image is left out here and gets its outline AFTER the switch: its
-	// surface is the picture, which it draws itself (nine pieces when sliced),
-	// and a tinted rectangle under it would be a colour nobody authored.
-	if (!g_aidsOnly && n.hasSurfaceStyle() && n.type() != UIWidgetType::Image)
-	{
-		// Which of its colours IS the surface. Every one of these types names it
-		// differently, and that name is the only thing they disagree about.
-		const char* key =
-			n.type() == UIWidgetType::Panel  ? "Color" :
-			n.type() == UIWidgetType::Button ? "Normal Color" : "Back Color";
-		const glm::vec4 fallback =
-			n.type() == UIWidgetType::Panel       ? glm::vec4{ 0.12f, 0.12f, 0.14f, 0.85f } :
-			n.type() == UIWidgetType::Button      ? glm::vec4{ 0.20f, 0.20f, 0.20f, 1 } :
-			n.type() == UIWidgetType::TextInput   ? glm::vec4{ 0.10f, 0.10f, 0.10f, 1 }
-			                                      : glm::vec4{ 0.15f, 0.15f, 0.15f, 1 };
-		drawSurfacePreview(dl, n, mn, mx, s, propColorOr(n, key, fallback),
-		                   alpha, dim, texHandle, /*drawFill=*/true);
-	}
 	switch (n.type())
 	{
-	case UIWidgetType::Panel:
-		break;   // nothing but its surface
-	case UIWidgetType::Image:
-	{
-		if (texHandle)
-		{
-			const ImU32 tint = C(propColorOr(n, "Tint", { 1,1,1,1 }));
-			// 9-sliced images are drawn as nine pieces here too, from the same
-			// margins the runtime uses — a frame that only looks right in play
-			// mode is a frame nobody can author.
-			const float sl = propFloatOr(n, "Slice Left",   0.0f);
-			const float stp= propFloatOr(n, "Slice Top",    0.0f);
-			const float sr = propFloatOr(n, "Slice Right",  0.0f);
-			const float sb = propFloatOr(n, "Slice Bottom", 0.0f);
-			const bool  sliced = n.textureW > 0 && n.textureH > 0 &&
-			                     (sl > 0.0f || stp > 0.0f || sr > 0.0f || sb > 0.0f);
-			// Flip the way UIImage::render does: every piece moves to its
-			// mirrored place in the box and reads its source rect backwards.
-			const bool flipH = propBoolOr(n, "Flip Horizontal", false);
-			const bool flipV = propBoolOr(n, "Flip Vertical",   false);
-			const auto piece = [&](ImVec2 p0, ImVec2 p1, ImVec2 uv0, ImVec2 uv1)
-			{
-				if (flipH)
-				{
-					p0.x = mn.x + mx.x - p0.x; p1.x = mn.x + mx.x - p1.x;
-					std::swap(p0.x, p1.x); std::swap(uv0.x, uv1.x);
-				}
-				if (flipV)
-				{
-					p0.y = mn.y + mx.y - p0.y; p1.y = mn.y + mx.y - p1.y;
-					std::swap(p0.y, p1.y); std::swap(uv0.y, uv1.y);
-				}
-				dl->AddImage(reinterpret_cast<ImTextureID>(texHandle), p0, p1, uv0, uv1, tint);
-			};
-			if (!sliced)
-			{
-				piece(mn, mx, ImVec2(0, 0), ImVec2(1, 1));
-				break;
-			}
-			const float w = mx.x - mn.x, h = mx.y - mn.y;
-			auto fitPair = [](float a, float b, float extent, float& oa, float& ob)
-			{
-				oa = std::max(0.0f, a); ob = std::max(0.0f, b);
-				const float sum = oa + ob;
-				if (sum > extent && sum > 0.0f) { const float k = extent / sum; oa *= k; ob *= k; }
-			};
-			float l, r, t2, b2;
-			fitPair(sl * s, sr * s, w, l, r);
-			fitPair(stp * s, sb * s, h, t2, b2);
-			const float tw = static_cast<float>(n.textureW), th = static_cast<float>(n.textureH);
-			const float xs[4] = { mn.x, mn.x + l, mx.x - r, mx.x };
-			const float ys[4] = { mn.y, mn.y + t2, mx.y - b2, mx.y };
-			const float us[4] = { 0.0f, sl / tw, 1.0f - sr / tw, 1.0f };
-			const float vs[4] = { 0.0f, stp / th, 1.0f - sb / th, 1.0f };
-			const bool fillCentre = propBoolOr(n, "Slice Fill Centre", true);
-			for (int row = 0; row < 3; ++row)
-				for (int col = 0; col < 3; ++col)
-				{
-					if (row == 1 && col == 1 && !fillCentre) continue;
-					if (xs[col + 1] <= xs[col] || ys[row + 1] <= ys[row]) continue;
-					piece(ImVec2(xs[col], ys[row]), ImVec2(xs[col + 1], ys[row + 1]),
-					      ImVec2(us[col], vs[row]), ImVec2(us[col + 1], vs[row + 1]));
-				}
-			break;
-		}
-		dl->AddRectFilled(mn, mx, C(propColorOr(n, "Tint", { 1,1,1,1 })));
-		if (n.material.empty())
-		{
-			// Placeholder crossed box so an unstyled image is visible.
-			dl->AddRect(mn, mx, IM_COL32(160,160,170,120));
-			dl->AddLine(mn, mx, IM_COL32(160,160,170,90));
-			dl->AddLine(ImVec2(mn.x, mx.y), ImVec2(mx.x, mn.y), IM_COL32(160,160,170,90));
-		}
-		else
-		{
-			const std::string matName = std::filesystem::path(n.material).stem().string();
-			dl->AddText(nullptr, 12.0f * std::max(0.6f, s),
-				ImVec2(mn.x + 3, mn.y + 3), IM_COL32(220,220,230,140), matName.c_str());
-		}
-		break;
-	}
 	case UIWidgetType::WidgetRef:
 	{
 		// Just the outline of the slot: the embedded widget itself is drawn on
@@ -4015,188 +3712,6 @@ void drawElementPreview(ImDrawList* dl, const UIElement& n, const ImVec2& mn,
 		}
 		break;
 	}
-	case UIWidgetType::TabBox:
-	{
-		// The strip, from the SAME layout the runtime clicks against
-		// (UITabBox::tabLayout) — a designer that spaced the tabs its own way
-		// would show an author a strip they cannot hit where they see it.
-		const auto* tb = dynamic_cast<const HE::UITabBox*>(&n);
-		if (!tb) break;
-		const float tabH = tb->tabHeight * s;
-		dl->AddRectFilled(mn, ImVec2(mx.x, mn.y + tabH),
-		                  C(themedColor(n, "Strip Color", tb->stripColor)));
-		std::vector<std::string> labels;
-		if (tree)
-			for (const auto& cp : tree->elements)
-				if (cp && cp->parentId == n.id)
-					labels.push_back(cp->name.empty() ? std::string("Page") : cp->name);
-		std::vector<float> tx, tw;
-		HE::UITabBox::tabLayout({ mn.x, mn.y, mx.x - mn.x, mx.y - mn.y },
-		                        tb->fontSize * s, tb->tabPadding * s, labels,
-		                        n.fontAtlasKey, tx, tw);
-		for (size_t i = 0; i < tx.size(); ++i)
-		{
-			if (tx[i] >= mx.x) break;
-			const float w = std::min(tw[i], mx.x - tx[i]);
-			const bool on = static_cast<int>(i) == tb->activeTab;
-			dl->AddRectFilled(ImVec2(tx[i], mn.y), ImVec2(tx[i] + w, mn.y + tabH),
-			                  C(themedColor(n, on ? "Active Tab Color" : "Tab Color",
-			                                on ? tb->activeColor : tb->tabColor)));
-			const float fs = tb->fontSize * s;
-			dl->AddText(nullptr, fs,
-			            ImVec2(tx[i] + tb->tabPadding * s, mn.y + (tabH - fs) * 0.5f),
-			            C(themedColor(n, "Text Color", tb->textColor)), labels[i].c_str());
-		}
-		// …and the page area's outline, so an empty Tab Box is something you can
-		// aim a drop at rather than a strip with nothing under it.
-		dl->AddRect(ImVec2(mn.x, mn.y + tabH), mx, IM_COL32(120, 190, 255, 90));
-		break;
-	}
-	case UIWidgetType::Splitter:
-	{
-		const auto* sp = dynamic_cast<const HE::UISplitter*>(&n);
-		if (!sp) break;
-		const float len = sp->vertical ? (mx.y - mn.y) : (mx.x - mn.x);
-		const float div = std::min(sp->dividerSize * s, len);
-		const float first = sp->clampedRatio(len, s) * std::max(0.0f, len - div);
-		const ImU32 c = C(themedColor(n, "Divider Color", sp->dividerColor));
-		if (sp->vertical)
-			dl->AddRectFilled(ImVec2(mn.x, mn.y + first), ImVec2(mx.x, mn.y + first + div), c);
-		else
-			dl->AddRectFilled(ImVec2(mn.x + first, mn.y), ImVec2(mn.x + first + div, mx.y), c);
-		dl->AddRect(mn, mx, IM_COL32(120, 190, 255, 90));
-		break;
-	}
-	case UIWidgetType::Accordion:
-	{
-		// The SAME layout the runtime folds with (UIAccordion::sectionLayout),
-		// so a heading is where the author sees it. The heights come from the
-		// tree and not from the element's drawing cache: the designer's preview
-		// has not necessarily drawn a frame yet.
-		const auto* ac = dynamic_cast<const HE::UIAccordion*>(&n);
-		if (!ac) break;
-		std::vector<std::string> labels;
-		std::vector<float> bodies;
-		if (tree)
-			for (const auto& cp : tree->elements)
-				if (cp && cp->parentId == n.id)
-				{
-					labels.push_back(cp->name.empty() ? std::string("Section") : cp->name);
-					bodies.push_back(cp->sizeY * s);
-				}
-		const float headH = ac->headerHeight * s;
-		const uint32_t m  = ac->effectiveMask(static_cast<int>(bodies.size()));
-		std::vector<HE::UIAccordion::Slot> slots;
-		HE::UIAccordion::sectionLayout(mn.y - ac->scrollOffset * s, headH,
-		                               ac->spacing * s, bodies, m, slots);
-		for (std::size_t i = 0; i < slots.size(); ++i)
-		{
-			if (slots[i].headerY >= mx.y) break;
-			const bool open = i < 32 && (m & (1u << static_cast<unsigned>(i))) != 0u;
-			const float y1 = std::min(slots[i].headerY + headH, mx.y);
-			if (y1 <= slots[i].headerY) continue;
-			dl->AddRectFilled(ImVec2(mn.x, slots[i].headerY), ImVec2(mx.x, y1),
-			                  C(themedColor(n, open ? "Open Header Color" : "Header Color",
-			                                open ? ac->openHeaderColor : ac->headerColor)));
-			const float fs = ac->fontSize * s;
-			dl->AddText(nullptr, fs,
-			            ImVec2(mn.x + ac->textIndent * s,
-			                   slots[i].headerY + (headH - fs) * 0.5f),
-			            C(themedColor(n, "Text Color", ac->textColor)), labels[i].c_str());
-		}
-		// …and the frame, so an accordion with nothing in it is something you
-		// can aim a drop at rather than an empty rectangle.
-		dl->AddRect(mn, mx, IM_COL32(120, 190, 255, 90));
-		break;
-	}
-	case UIWidgetType::DatePicker:
-	{
-		// The SAME layout the runtime clicks against, so an author cannot see
-		// the 12th where a click would land on the 13th.
-		const auto* dp = dynamic_cast<const HE::UIDatePicker*>(&n);
-		if (!dp) break;
-		const HE::UIWidgetRect r{ mn.x, mn.y, mx.x - mn.x, mx.y - mn.y };
-		const auto L = HE::UIDatePicker::layoutIn(r);
-		dl->AddRectFilled(mn, mx, C(themedColor(n, "Back Color", dp->backColor)));
-		dl->AddRectFilled(ImVec2(L.header.x, L.header.y),
-		                  ImVec2(L.header.x + L.header.w, L.header.y + L.header.h),
-		                  C(themedColor(n, "Header Color", dp->headerColor)));
-		const float fs = dp->fontSize * s;
-		const ImU32 tc = C(themedColor(n, "Text Color", dp->textColor));
-		const ImU32 mc = C(themedColor(n, "Muted Color", dp->mutedColor));
-		const std::string cap = dp->caption();
-		dl->AddText(nullptr, fs,
-		            ImVec2(L.header.x + L.header.w * 0.5f - fs * 0.28f * cap.size(),
-		                   L.header.y + (L.header.h - fs) * 0.5f), tc, cap.c_str());
-		for (int c = 0; c < HE::UIDatePicker::kCols; ++c)
-			dl->AddText(nullptr, fs * 0.85f,
-			            ImVec2(L.weekdays.x + L.cellW * (c + 0.5f) - fs * 0.25f,
-			                   L.weekdays.y + (L.weekdays.h - fs * 0.85f) * 0.5f),
-			            mc, HE::UIDatePicker::weekdayInitial(c, dp->mondayFirst));
-		const int sel = dp->selectedCell();
-		for (int i = 0; i < HE::UIDatePicker::kCells; ++i)
-		{
-			const float cx = L.grid.x + L.cellW * (i % HE::UIDatePicker::kCols);
-			const float cy = L.grid.y + L.cellH * (i / HE::UIDatePicker::kCols);
-			if (i == sel)
-				dl->AddRectFilled(ImVec2(cx, cy), ImVec2(cx + L.cellW, cy + L.cellH),
-				                  C(themedColor(n, "Selected Color", dp->selectedColor)),
-				                  std::min(L.cellW, L.cellH) * 0.5f);
-			int dy = 0, dm = 0, dd = 0;
-			dp->dateAtCell(i, dy, dm, dd);
-			char num[4];
-			std::snprintf(num, sizeof(num), "%d", dd);
-			dl->AddText(nullptr, fs,
-			            ImVec2(cx + L.cellW * 0.5f - fs * 0.28f * std::strlen(num),
-			                   cy + (L.cellH - fs) * 0.5f),
-			            dp->cellInMonth(i) ? tc : mc, num);
-		}
-		break;
-	}
-	case UIWidgetType::ColorPicker:
-	{
-		// The field and the strip out of ImGui's own vertex colours: a designer
-		// has to see WHICH colour is picked, and a flat rectangle would show a
-		// picker that looks the same whatever it holds.
-		const auto* cp = dynamic_cast<const HE::UIColorPicker*>(&n);
-		if (!cp) break;
-		const HE::UIWidgetRect r{ mn.x, mn.y, mx.x - mn.x, mx.y - mn.y };
-		const auto p = HE::UIColorPicker::partsIn(r, cp->barWidth * s, cp->gap * s,
-		                                          cp->showAlpha);
-		dl->AddRectFilled(mn, mx, C(themedColor(n, "Back Color", cp->backColor)));
-		const glm::vec3 pure = HE::uiHsvToRgb(cp->hueOf(), 1.0f, 1.0f);
-		const ImU32 white = IM_COL32_WHITE;
-		const ImU32 hueC  = IM_COL32((int)(pure.r * 255), (int)(pure.g * 255),
-		                             (int)(pure.b * 255), 255);
-		dl->AddRectFilledMultiColor(ImVec2(p.sv.x, p.sv.y),
-		                            ImVec2(p.sv.x + p.sv.w, p.sv.y + p.sv.h),
-		                            white, hueC, hueC, white);
-		dl->AddRectFilledMultiColor(ImVec2(p.sv.x, p.sv.y),
-		                            ImVec2(p.sv.x + p.sv.w, p.sv.y + p.sv.h),
-		                            IM_COL32(0, 0, 0, 0), IM_COL32(0, 0, 0, 0),
-		                            IM_COL32(0, 0, 0, 255), IM_COL32(0, 0, 0, 255));
-		const float segH = p.hue.h / 6.0f;
-		for (int i = 0; i < 6; ++i)
-		{
-			const glm::vec3 a = HE::uiHsvToRgb(i * 60.0f, 1.0f, 1.0f);
-			const glm::vec3 b = HE::uiHsvToRgb((i + 1) * 60.0f, 1.0f, 1.0f);
-			const ImU32 ca = IM_COL32((int)(a.r * 255), (int)(a.g * 255), (int)(a.b * 255), 255);
-			const ImU32 cb = IM_COL32((int)(b.r * 255), (int)(b.g * 255), (int)(b.b * 255), 255);
-			dl->AddRectFilledMultiColor(ImVec2(p.hue.x, p.hue.y + segH * i),
-			                            ImVec2(p.hue.x + p.hue.w, p.hue.y + segH * (i + 1)),
-			                            ca, ca, cb, cb);
-		}
-		if (p.hasAlpha)
-			dl->AddRectFilledMultiColor(
-				ImVec2(p.alpha.x, p.alpha.y),
-				ImVec2(p.alpha.x + p.alpha.w, p.alpha.y + p.alpha.h),
-				C(glm::vec4(glm::vec3(cp->color), 1.0f)), C(glm::vec4(glm::vec3(cp->color), 1.0f)),
-				IM_COL32(180, 180, 180, 255), IM_COL32(180, 180, 180, 255));
-		dl->AddCircle(ImVec2(p.sv.x + p.sv.w * cp->saturationOf(),
-		                     p.sv.y + p.sv.h * (1.0f - cp->valueOf())),
-		              std::max(3.0f, p.hue.w * 0.22f), IM_COL32_WHITE);
-		break;
-	}
 	case UIWidgetType::WrapBox:
 	case UIWidgetType::VerticalBox:
 	case UIWidgetType::HorizontalBox:
@@ -4213,7 +3728,7 @@ void drawElementPreview(ImDrawList* dl, const UIElement& n, const ImVec2& mn,
 	}
 	case UIWidgetType::ListView:
 	{
-		// Its surface is drawn above. What is drawn here is what the designer
+		// Its surface is in the picture. What is drawn here is what the designer
 		// CANNOT have: the rows, which only exist while the application runs.
 		// Ghost rows at the authored height, so the row size and the padding are
 		// something you can see and aim at instead of two numbers in a panel.
@@ -4223,37 +3738,11 @@ void drawElementPreview(ImDrawList* dl, const UIElement& n, const ImVec2& mn,
 		const std::string tpl = propStringOr(n, "Row Widget", "");
 		const ImU32 ghost = tpl.empty() ? IM_COL32(200, 120, 120, 70)
 		                                : IM_COL32(150, 210, 160, 70);
-		// The header band, from the SAME arithmetic the runtime draws it with —
-		// the third consumer of headerLayout, and the reason it is one function.
-		// The titles come from the row template and only exist once something
-		// has run, so the designer shows the band and its seams; a preview run
-		// fills the names in and they appear here too.
+		// Below the header band, which the runtime draws itself (it is in the
+		// renderer's picture underneath).
 		float y = mn.y + pad;
-		if (const auto* lvp = dynamic_cast<const HE::UIListView*>(&n);
-		    lvp && lvp->headerExtent() > 0.0f)
-		{
-			const float hh = lvp->headerExtent() * s;
-			dl->AddRectFilled(ImVec2(mn.x + pad, y), ImVec2(mx.x - pad, y + hh),
-			                  C(themedColor(n, "Header Color", lvp->headerColor)));
-			const ImU32 htc = C(themedColor(n, "Header Text Color", lvp->headerTextColor));
-			std::vector<float> hx, hw;
-			lvp->headerLayout({ mn.x, mn.y, mx.x - mn.x, mx.y - mn.y }, hx, hw);
-			for (std::size_t i = 0; i < hx.size(); ++i)
-			{
-				if (hx[i] >= mx.x - pad) break;
-				dl->AddText(nullptr, std::max(6.0f, lvp->headerFontSize * s),
-				            ImVec2(hx[i] + 2.0f, y + 2.0f), htc,
-				            lvp->headerLabels[i].c_str());
-				if (i + 1 < hx.size())
-					dl->AddLine(ImVec2(hx[i] + hw[i], y), ImVec2(hx[i] + hw[i], y + hh),
-					            htc & 0x40FFFFFFu);
-			}
-			if (hx.empty())
-				dl->AddText(nullptr, 12.0f * std::max(0.6f, s),
-					ImVec2(mn.x + pad + 4, y + 2), IM_COL32(210, 200, 160, 200),
-					"columns come from the row widget");
-			y += hh;
-		}
+		if (const auto* lvp = dynamic_cast<const HE::UIListView*>(&n))
+			y += lvp->headerExtent() * s;
 		for (int i = 0; i < 64 && y + rowH <= mx.y - pad; ++i)
 		{
 			dl->AddRect(ImVec2(mn.x + pad, y), ImVec2(mx.x - pad, y + rowH), ghost);
@@ -4296,209 +3785,6 @@ void drawElementPreview(ImDrawList* dl, const UIElement& n, const ImVec2& mn,
 		}
 		break;
 	}
-	case UIWidgetType::Text:
-	{
-		const float fs = propFloatOr(n, "FontSize", 22.0f) * s;
-		const std::string txt = propStringOr(n, "Text", "");
-		const char* shown = txt.empty() ? "(empty)" : txt.c_str();
-		// Honour Align H/Align V. This used to draw at the rect's top-left
-		// corner unconditionally, which made every label look pinned there and
-		// disagree with what the engine actually drew — the designer's whole job
-		// is to show what you will get.
-		// WORD WRAP, if the element asks for it. This used to measure and draw
-		// with no wrap column at all, so a wrapping label was one long line here
-		// and several in the engine — and an AUTO-SIZED wrapping label looked
-		// worst of all, because its height came from the engine's wrapped
-		// measurement while the designer drew it as a single line running out of
-		// its own box.
-		const bool wrap = n.getProp("WordWrap").b;
-		const float wrapW = wrap ? std::max(1.0f, mx.x - mn.x) : FLT_MAX;
-		const ImVec2 ts = ImGui::GetFont()->CalcTextSizeA(fs, FLT_MAX, wrapW, shown);
-		const int aH = propIntOr(n, "Align H", 0);
-		const int aV = propIntOr(n, "Align V", 1);
-		const float slackX = std::max(0.0f, (mx.x - mn.x) - ts.x);
-		const float slackY = std::max(0.0f, (mx.y - mn.y) - ts.y);
-		const ImVec2 at(mn.x + (aH == 1 ? slackX * 0.5f : aH == 2 ? slackX : 0.0f),
-		                mn.y + (aV == 1 ? slackY * 0.5f : aV == 2 ? slackY : 0.0f));
-		dl->AddText(nullptr, fs, at, C(propColorOr(n, "Color", { 1,1,1,1 })), shown,
-		            nullptr, wrap ? wrapW : 0.0f);
-		break;
-	}
-	case UIWidgetType::Button:
-	{
-		// Nothing but its surface, which is drawn above from the AUTHORED
-		// rounding, border and gradient — this used to hard-code a rounding of 4
-		// and an outline the engine never drew.
-		//
-		// No caption either: a Button is a surface, and what sits on it is a
-		// CHILD element that this same function draws in its own turn.
-		break;
-	}
-	case UIWidgetType::CheckBox:
-	{
-		// Box sized by the LABEL and capped at the element's height, centred in
-		// it — the same rule UICheckBox::render uses, so the designer does not
-		// show a different checkbox than the game does.
-		const float fs = propFloatOr(n, "FontSize", 18.0f) * s;
-		const float boxSz = std::min(mx.y - mn.y, fs * 1.15f);
-		const float byTop = mn.y + ((mx.y - mn.y) - boxSz) * 0.5f;
-		const ImVec2 bmn(mn.x, byTop), bmx(mn.x + boxSz, byTop + boxSz);
-		dl->AddRectFilled(bmn, bmx, C(propColorOr(n, "Box Color", { 0.20f,0.20f,0.20f,1 })), 3.0f * s);
-		dl->AddRect(bmn, bmx, IM_COL32(200,200,210,90), 3.0f * s);
-		if (propBoolOr(n, "Checked", false))
-		{
-			const float pad = boxSz * 0.22f;
-			dl->AddRectFilled(ImVec2(bmn.x + pad, bmn.y + pad), ImVec2(bmx.x - pad, bmx.y - pad),
-				C(propColorOr(n, "Check Color", { 0.30f,0.80f,0.40f,1 })), 2.0f * s);
-		}
-		const std::string lbl = propStringOr(n, "Label", "");
-		if (!lbl.empty())
-			dl->AddText(nullptr, fs, ImVec2(bmx.x + 0.4f * boxSz, (mn.y + mx.y - fs) * 0.5f),
-				C(propColorOr(n, "Text Color", { 1,1,1,1 })), lbl.c_str());
-		break;
-	}
-	case UIWidgetType::Slider:
-	{
-		// Track, fill up to normalized value, round handle at the value.
-		const float minV = propFloatOr(n, "Min", 0.0f);
-		const float maxV = propFloatOr(n, "Max", 1.0f);
-		const float val  = propFloatOr(n, "Value", 0.5f);
-		const float span = maxV - minV;
-		float t = span > 0.0f ? (val - minV) / span : 0.0f;
-		t = t < 0.0f ? 0.0f : (t > 1.0f ? 1.0f : t);
-		const float cy = (mn.y + mx.y) * 0.5f;
-		const float trackH = std::max(2.0f, (mx.y - mn.y) * 0.28f);
-		dl->AddRectFilled(ImVec2(mn.x, cy - trackH * 0.5f), ImVec2(mx.x, cy + trackH * 0.5f),
-			C(propColorOr(n, "Track Color", { 0.20f,0.20f,0.20f,1 })), trackH * 0.5f);
-		const float hx = mn.x + t * (mx.x - mn.x);
-		dl->AddRectFilled(ImVec2(mn.x, cy - trackH * 0.5f), ImVec2(hx, cy + trackH * 0.5f),
-			C(propColorOr(n, "Fill Color", { 0.30f,0.60f,0.90f,1 })), trackH * 0.5f);
-		dl->AddCircleFilled(ImVec2(hx, cy), std::max(3.0f, (mx.y - mn.y) * 0.4f),
-			C(propColorOr(n, "Handle Color", { 0.90f,0.90f,0.90f,1 })));
-		break;
-	}
-	case UIWidgetType::ProgressBar:
-	{
-		// The track is the surface (drawn above); only the fill on top of it
-		// belongs here.
-		float val = propFloatOr(n, "Value", 0.5f);
-		val = val < 0.0f ? 0.0f : (val > 1.0f ? 1.0f : val);
-		dl->AddRectFilled(mn, ImVec2(mn.x + val * (mx.x - mn.x), mx.y),
-			C(propColorOr(n, "Fill Color", { 0.30f,0.70f,0.40f,1 })),
-			std::min(n.cornerRadius.x, n.cornerRadius.w) * s);
-		break;
-	}
-	case UIWidgetType::TextInput:
-	{
-		// Background and outline are the surface, drawn above.
-		const std::string txt = propStringOr(n, "Text", "");
-		const bool placeholder = txt.empty();
-		std::string shown = placeholder ? propStringOr(n, "Placeholder", "") : txt;
-		// A password field shows dots here too, or the designer is the one
-		// place the secret is on screen.
-		if (!placeholder && propBoolOr(n, "Password", false))
-		{
-			std::string dots;
-			for (size_t i = 0; i < shown.size(); i = HE::uiUtf8Next(shown, i))
-				dots += "\xE2\x80\xA2";
-			shown.swap(dots);
-		}
-		if (!shown.empty())
-		{
-			const float fs = propFloatOr(n, "FontSize", 18.0f) * s;
-			dl->AddText(nullptr, fs, ImVec2(mn.x + 4 * s, (mn.y + mx.y - fs) * 0.5f),
-				placeholder ? IM_COL32(160,160,170,140)
-				            : C(propColorOr(n, "Text Color", { 1,1,1,1 })), shown.c_str());
-		}
-		break;
-	}
-	case UIWidgetType::ComboBox:
-	{
-		// Background and outline are the surface, drawn above.
-		// Current option = Options[Selected Index].
-		std::string shown;
-		const UIPropValue opts = n.getProp("Options");
-		const int idx = n.getProp("Selected Index").i;
-		if (opts.type == UIPropType::StringList && idx >= 0 && idx < (int)opts.list.size())
-			shown = opts.list[idx];
-		const float fs = propFloatOr(n, "FontSize", 18.0f) * s;
-		if (!shown.empty())
-			dl->AddText(nullptr, fs, ImVec2(mn.x + 4 * s, (mn.y + mx.y - fs) * 0.5f),
-				C(propColorOr(n, "Text Color", { 1,1,1,1 })), shown.c_str());
-		// The dropdown triangle, from the ELEMENT'S own geometry rather than from
-		// numbers typed twice — this used to sit slightly higher and slightly
-		// smaller here than the engine drew it, and its colour was a hard-coded
-		// grey instead of the combo's own text colour.
-		{
-			const HE::UIComboBox::Arrow a = HE::UIComboBox::arrowIn(
-				{ mn.x, mn.y, mx.x - mn.x, mx.y - mn.y });
-			glm::vec4 ac = propColorOr(n, "Text Color", { 1, 1, 1, 1 });
-			ac.a *= 0.8f;
-			dl->AddTriangleFilled(ImVec2(a.cx - a.halfW, a.cy - a.height * 0.5f),
-			                      ImVec2(a.cx + a.halfW, a.cy - a.height * 0.5f),
-			                      ImVec2(a.cx,           a.cy + a.height * 0.5f), C(ac));
-		}
-		break;
-	}
-	case UIWidgetType::RadioButton:
-	{
-		// The checkbox's row with a circle in it: same box size, same gap, so a
-		// form that mixes the two lines up here exactly as it does at runtime.
-		const float fs = propFloatOr(n, "FontSize", 18.0f) * s;
-		const float boxSz = std::min(mx.y - mn.y, fs * 1.15f);
-		const float cy = (mn.y + mx.y) * 0.5f;
-		const ImVec2 c(mn.x + boxSz * 0.5f, cy);
-		dl->AddCircleFilled(c, boxSz * 0.5f, C(propColorOr(n, "Box Color", { 0.20f,0.20f,0.20f,1 })));
-		dl->AddCircle(c, boxSz * 0.5f, IM_COL32(200,200,210,90));
-		if (propBoolOr(n, "Checked", false))
-			dl->AddCircleFilled(c, boxSz * 0.22f,
-				C(propColorOr(n, "Check Color", { 0.30f,0.80f,0.40f,1 })));
-		const std::string lbl = propStringOr(n, "Label", "");
-		if (!lbl.empty())
-			dl->AddText(nullptr, fs, ImVec2(mn.x + boxSz + 0.4f * boxSz, cy - fs * 0.5f),
-				C(propColorOr(n, "Text Color", { 1,1,1,1 })), lbl.c_str());
-		break;
-	}
-	case UIWidgetType::TreeView:
-	{
-		// Its surface is drawn above. The rows are AUTHORED here (unlike a
-		// list's), so the designer can show the tree itself: every node, at its
-		// indent, with the fold arrow it will have. All open — folds are runtime
-		// state and the designer has none.
-		const auto* tv = dynamic_cast<const HE::UITreeView*>(&n);
-		if (!tv) break;
-		const float pad  = propFloatOr(n, "Padding", 4.0f) * s;
-		const float rowH = std::max(2.0f, propFloatOr(n, "Row Height", 24.0f) * s);
-		const float ind  = propFloatOr(n, "Indent", 18.0f) * s;
-		const float fs   = std::max(6.0f, propFloatOr(n, "FontSize", 14.0f) * s);
-		const ImU32 tc = C(propColorOr(n, "Text Color", { 0.92f,0.92f,0.95f,1 }));
-		const ImU32 ac = C(propColorOr(n, "Arrow Color", { 0.75f,0.75f,0.80f,0.9f }));
-		const std::vector<HE::UITreeView::Node>& ns = tv->nodes();
-		dl->PushClipRect(ImVec2(mn.x + pad, mn.y + pad), ImVec2(mx.x - pad, mx.y - pad), true);
-		float y = mn.y + pad;
-		for (std::size_t i = 0; i < ns.size() && y < mx.y - pad; ++i, y += rowH)
-		{
-			const HE::UITreeView::Node& node = ns[i];
-			if (node.hasChildren)
-			{
-				// The same arithmetic render() draws with, so the arrow sits
-				// where a press will find it.
-				const HE::UITreeView::Arrow a =
-					HE::UITreeView::arrowIn(mn.x + pad, y, rowH, ind, node.depth);
-				const float hw = a.size * 0.5f, hh = a.size * 0.3f;
-				dl->AddTriangleFilled(ImVec2(a.cx - hw, a.cy - hh), ImVec2(a.cx + hw, a.cy - hh),
-				                      ImVec2(a.cx, a.cy + hh), ac);
-			}
-			dl->AddText(nullptr, fs, ImVec2(mn.x + pad + ind * (node.depth + 1), y + (rowH - fs) * 0.5f),
-			            tc, node.label.c_str());
-		}
-		dl->PopClipRect();
-		if (ns.empty())
-			dl->AddText(nullptr, 12.0f * std::max(0.6f, s),
-				ImVec2(mn.x + pad + 4, mn.y + pad + 2),
-				IM_COL32(210, 200, 160, 200), "no Items: one node per line, indent = depth");
-		break;
-	}
 	case UIWidgetType::NamedSlot:
 	{
 		// A hole with a name on it. Dashed so it reads as "something goes here"
@@ -4526,12 +3812,6 @@ void drawElementPreview(ImDrawList* dl, const UIElement& n, const ImVec2& mn,
 	}
 	default: break;
 	}
-
-	// The Image's outline last, over the picture it just drew — the one type
-	// whose surface is not a colour, so the fill half of this is skipped.
-	if (n.type() == UIWidgetType::Image && n.borderWidth > 0.0f)
-		drawSurfacePreview(dl, n, mn, mx, s, glm::vec4(0.0f), alpha, dim,
-		                   nullptr, /*drawFill=*/false);
 }
 
 // ── Embedded widgets in the designer ─────────────────────────────────────────
@@ -4742,23 +4022,12 @@ void designValuesBack()
 		if (p->outDepth > 0 && --p->outDepth == 0) p->putBack();
 }
 
-// One element of a tree, with the two things every element needs resolved
-// first: its picture and the inherited opacity / disabled dim. Shared by the
-// page itself and by everything embedded in it.
-//
-// The picture is the texture itself (AssetThumbnailCache::image), not the
-// Content Browser's tile: the tile is 128 px with a checkerboard baked in and
-// alpha forced opaque, which on the canvas read as a blurred logo on squares
-// where the page should show through (Thema 107).
-void drawElementIn(ImDrawList* dl, AppContext& ctx, const HE::UIWidgetTree& tree,
+// One element's designer aids, shared by the page and everything embedded in
+// it (the element itself is in the renderer's picture underneath).
+void drawElementIn(ImDrawList* dl, AppContext&, const HE::UIWidgetTree& tree,
                    const UIElement& n, const ImVec2& mn, const ImVec2& mx, float s)
 {
-	void* texHandle = nullptr;
-	if (n.hasTextureSlot() && !n.texture.empty() && n.material.empty() && ctx.contentManager)
-		texHandle = AssetThumbnailCache::image(ctx.contentManager->contentRoot() + "/" + n.texture);
-	const float alpha = HE::uiElementEffectiveOpacity(tree, n);
-	const float dim   = HE::uiElementEffectiveEnabled(tree, n) ? 1.0f : HE::kUIDisabledDim;
-	drawElementPreview(dl, n, mn, mx, s, texHandle, alpha, dim, &tree);
+	drawElementAids(dl, n, mn, mx, s, &tree);
 }
 
 // The embedded widget's canvas laid against `slotW` x `slotH` host units — the
@@ -5136,16 +4405,21 @@ void* softwareCanvas(AppContext& ctx, const std::vector<UIRenderObject>& quads,
 	static Slot s_slots[IRenderer::kUIPreviewSlots];
 	static std::vector<Retired> s_retired;
 
+	// A texture is released only through the renderer that made it, and only
+	// while that is still the editor's renderer: after a backend switch the old
+	// one is gone, and its textures went with it.
 	const int frame = ImGui::GetFrameCount();
 	for (std::size_t i = 0; i < s_retired.size();)
-		if (frame - s_retired[i].frame > 3)
+		if (s_retired[i].owner != ctx.renderer || frame - s_retired[i].frame > 3)
 		{
-			s_retired[i].owner->DestroyImGuiTexture(s_retired[i].tex);
+			if (s_retired[i].owner == ctx.renderer)
+				ctx.renderer->DestroyImGuiTexture(s_retired[i].tex);
 			s_retired.erase(s_retired.begin() + static_cast<std::ptrdiff_t>(i));
 		}
 		else ++i;
 
 	Slot& s = s_slots[std::min<uint32_t>(slot, IRenderer::kUIPreviewSlots - 1)];
+	if (s.owner != ctx.renderer) s = Slot{};
 	const double now = ImGui::GetTime();
 	const bool same = s.tex && s.owner == ctx.renderer && s.w == w && s.h == h &&
 	                  now - s.at < 1.0 && s.quads == quads;
@@ -5543,7 +4817,8 @@ void drawCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 	// through the active backend's own UI pass, into a target the size of the
 	// VISIBLE part of the canvas in framebuffer pixels — sharp on a Retina
 	// screen and never larger than the panel, however far it is zoomed in.
-	// A backend without that path (nullptr) keeps the ImGui replica below.
+	// A backend without that path (nullptr) gets the CPU rasterizer's picture
+	// of the same quads; ImGui only draws the designer's aids on top.
 	const float grid = 64.0f * s;
 	void* canvasTex = nullptr;
 	bool  cpuCanvas = false;
@@ -5602,8 +4877,7 @@ void drawCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 			: ctx.renderer->RenderUIPreview(quads, static_cast<uint32_t>(tw),
 			                                static_cast<uint32_t>(th), clear, slot);
 		// A backend with no GPU preview (Vulkan, D3D) still gets the runtime's
-		// quads, drawn on the CPU — closer to the game than the ImGui replica,
-		// which only remains for a designer without any renderer.
+		// quads, drawn on the CPU.
 		if (!canvasTex && !cpuCanvas)
 		{
 			cpuCanvas = true;
@@ -5628,10 +4902,6 @@ void drawCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 	}
 	dl->AddRect(cTL, ImVec2(cTL.x + canvasPx.x, cTL.y + canvasPx.y),
 	            IM_COL32(90, 90, 100, 255));
-	// The replica below now draws only what the picture does not contain;
-	// switched back off right after the element loop.
-	g_aidsOnly = canvasTex != nullptr;
-
 	// Paint order: (layer, depth) ascending — same rule as the runtime.
 	struct DrawItem { const UIElement* n; int layer; int depth; Rect r; };
 	std::vector<DrawItem> items;
@@ -5695,7 +4965,6 @@ void drawCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 		if (clipped) dl->PopClipRect();
 	}
 	dl->PopClipRect();
-	g_aidsOnly = false;
 
 	// What the Pre Construct sandbox turned down, where the author is looking:
 	// a value the graph would load at runtime is missing on the canvas, and
