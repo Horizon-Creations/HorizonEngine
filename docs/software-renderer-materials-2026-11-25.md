@@ -44,9 +44,28 @@ widget materials run on the CPU, and the editor offers exactly the nodes that wo
 - Real export (Tamagochi copy, Advanced off, material built over MCP: texture × Engine
   Pulse): it draws on Software, every panel pixel changes between frames 40 and 100, and
   there is no fallback warning.
+  - The export runs the "game" runtime with `backend=Software`.
+  - The same pak on the locally built `app-basic` runtime (`scripts/build_runtimes.py
+    --flavor app-basic`; log `runtime flavour 'app-basic'`, no shaderc): the material
+    draws and moves, with no warning.
+- A parameter change (`setMaterialParam`) repaints the next frame: `test_mat_cpu_eval`
+  checks this through `RasterizeUI`.
+- Sprite sheet through `WidgetManager`: isAnimating, two clock moments give two cells,
+  and frame 0 is the top-left cell in pixels.
 - Full ctest 383/383 and `editor_help_audit --check`.
 
 **Not verified / known**
+- **Exporter finding (separate from this):** an Advanced-off app on this Mac ships the
+  game runtime even with Shipping ("game compiled from the release SDK"). The AppBasic
+  bundle next to the editor is never used. See `findRuntimeBundle` vs. the
+  SDK-compile path in `ProjectExporter.cpp`.
+- Frosted Glass ±9: the different capture size (1600×900 vs 1280×720) is the likely
+  cause, not a proven one.
+- Vulkan/D3D: no font atlas mips (no Pixelated, no UI preview either), so small text
+  there now looks different from Metal/GL/Software.
+- Windows CI for these commits had not finished. The last finished run (designer +
+  RendererFactory stub) was green for this work; `test_physics` and `test_animation_ik`
+  were already red before it.
 - Material textures on the CPU always read the base level. There is a `shortcut:` comment
   in `SoftwareRaster.cpp`; the GPU uses mips.
 - Time materials in an event-driven app animate only when the app redraws anyway (on the
