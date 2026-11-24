@@ -11247,6 +11247,20 @@ void* OpenGLRenderer::RenderUIPreview(const std::vector<UIRenderObject>& uiObjec
 	m_renderWorld.uiObjects = uiObjects;
 	RenderUIPass(W, H);
 	m_renderWorld.uiObjects.swap(saved);
+	// HE_UIPREVIEW_DUMP=<file.ppm>: the target read back (headless proof; the
+	// editor's UITEST hook calls this with the witness sheet). GL is bottom-up.
+	if (const char* dump = std::getenv("HE_UIPREVIEW_DUMP"); dump && *dump)
+	{
+		std::vector<uint8_t> px((size_t)W * H * 3);
+		glPixelStorei(GL_PACK_ALIGNMENT, 1);
+		glReadPixels(0, 0, W, H, GL_RGB, GL_UNSIGNED_BYTE, px.data());
+		if (std::ofstream f(dump, std::ios::binary); f)
+		{
+			f << "P6\n" << W << " " << H << "\n255\n";
+			for (int y = H - 1; y >= 0; --y)
+				f.write(reinterpret_cast<const char*>(px.data() + (size_t)y * W * 3), (std::streamsize)W * 3);
+		}
+	}
 	glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)prevFBO);
 	glViewport(prevVP[0], prevVP[1], prevVP[2], prevVP[3]);
 	glUseProgram(0);

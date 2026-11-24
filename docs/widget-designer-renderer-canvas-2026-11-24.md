@@ -29,16 +29,24 @@ canvas is the active renderer's own picture of the runtime's quads.
 
 **Verified**
 - `UITEST=pixelated RHI=Software`: md5 identical before and after the extract refactor.
-- `test_widget_designer_ui` "the canvas is the renderer's picture of the runtime's quads":
-  - the designer's quads equal `WidgetManager::extract` for the same widget at the same
-    size, quad for quad (rounded, border, gradient, shadow, rotation);
-  - the shot shows the rasterized picture.
+- `test_widget_designer_ui`, with a stub renderer whose `RenderUIPreview` is the software
+  rasterizer:
+  - "the canvas is the renderer's picture…": the designer's quads equal
+    `WidgetManager::extract` quad for quad (rounded, border, gradient, shadow, rotation).
+    At framebuffer scale 2 (Retina) the target and quads are twice as large.
+  - "an embedded component…": a ref with a parameter, a page child in a NamedSlot and a
+    ref under a clipping panel all equal the runtime graft quad for quad.
+  - Pre Construct shows its green on the renderer path too.
+- Metal and OpenGL: `HE_UIPREVIEW_DUMP=<ppm> scripts/he_shot.py OUT UITEST=1 RHI=<backend>`
+  writes the `RenderUIPreview` target of the witness sheet. Tile interiors against the
+  game frame: 1716 samples, maximum difference 0 on both backends.
 - Full ctest 382/382 and `editor_help_audit --check`.
+- Missing assets: a missed path is left out for 2 s (`s_missedAt`), so the log does not
+  fill 60 times a second.
 
 **Not verified**
-- The Metal and OpenGL paths in the running editor. Both compile; no frame has been
-  looked at, because there is no headless capture of the ImGui window.
-- Pixel comparison between the designer canvas and the game frame on GPU.
+- The designer image in the running editor window (the ImGui window cannot be captured
+  headless). The GL V flip follows the convention of `RenderWorldPreview`.
 - Backdrop materials in the designer (the pass gets cmdBuf and pass, but untested).
 
 **Next steps**

@@ -10138,6 +10138,17 @@ void EditorApplication::dumpFrameHeadless()
 			if (inst) m_editorWorld->widgets().showWidget(inst);
 			else HE_LOG_WARN(Editor, "%s",
 				"EditorApplication: the UI style witness could not be instantiated");
+			// HE_UIPREVIEW_DUMP=<file.ppm>: the same sheet once more through
+			// RenderUIPreview, the widget designer's path, which the backend
+			// writes out (see its implementation) — the headless proof that the
+			// designer's target holds the frame's picture.
+			if (const char* pv = std::getenv("HE_UIPREVIEW_DUMP"); inst && pv && *pv && renderer())
+			{
+				std::vector<UIRenderObject> quads;
+				m_editorWorld->widgets().extract(1280.0f, 720.0f, quads);
+				renderer()->RenderUIPreview(quads, 1280, 720,
+					glm::vec4(12.0f / 255.0f, 12.0f / 255.0f, 14.0f / 255.0f, 1.0f), 0);
+			}
 		}
 	}
 

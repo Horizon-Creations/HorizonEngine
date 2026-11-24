@@ -11115,7 +11115,42 @@ void* MetalRenderer::RenderUIPreview(const std::vector<UIRenderObject>& uiObject
 			EncodeUIPass((__bridge void*)enc, W, H, (__bridge void*)cb, (__bridge void*)rp);
 		m_renderWorld.uiObjects.swap(saved);
 		[enc endEncoding];
+
+		// HE_UIPREVIEW_DUMP=<file.ppm>: read the target back once (headless proof;
+		// the editor's UITEST hook calls this with the witness sheet).
+		const char* dump = std::getenv("HE_UIPREVIEW_DUMP");
+		id<MTLTexture> staging = nil;
+		if (dump && *dump)
+		{
+			MTLTextureDescriptor* sd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:kSwapchainFormat
+				width:W height:H mipmapped:NO];
+			sd.storageMode = MTLStorageModeManaged; sd.usage = MTLTextureUsageShaderRead;
+			staging = [device newTextureWithDescriptor:sd];
+			id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+			[blit copyFromTexture:(__bridge id<MTLTexture>)t.color
+			          sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0)
+			           sourceSize:MTLSizeMake(W, H, 1) toTexture:staging destinationSlice:0
+			     destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)];
+			[blit synchronizeResource:staging];
+			[blit endEncoding];
+		}
 		[cb commit];
+		if (staging)
+		{
+			[cb waitUntilCompleted];
+			std::vector<uint8_t> px((size_t)W * H * 4);
+			[staging getBytes:px.data() bytesPerRow:W * 4
+			       fromRegion:MTLRegionMake2D(0, 0, W, H) mipmapLevel:0];
+			if (std::ofstream f(dump, std::ios::binary); f)
+			{
+				f << "P6\n" << W << " " << H << "\n255\n";
+				for (size_t i = 0; i < px.size(); i += 4)
+				{
+					const char rgb[3] = { (char)px[i + 2], (char)px[i + 1], (char)px[i] };   // BGRA
+					f.write(rgb, 3);
+				}
+			}
+		}
 	}
 	return t.color;
 }

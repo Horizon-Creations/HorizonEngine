@@ -4972,13 +4972,33 @@ void emitTreeQuads(AppContext& ctx, HE::UIWidgetTree& tree, const HE::UIWidgetCa
 			}
 	}
 
+	// Resolved every frame, which is a hash lookup for an asset that is loaded.
+	// One that is NOT is a disk probe and an error in the log, sixty times a
+	// second, so a path that missed is left out (on this copy) for two seconds
+	// before it is asked for again — long enough to be quiet, short enough that
+	// a texture imported a moment later shows up.
+	static std::unordered_map<std::string, double> s_missedAt;
+	const double now = ImGui::GetTime();
+	auto recentlyMissed = [&](const std::string& p)
+	{
+		if (p.empty()) return false;
+		const auto it = s_missedAt.find(p);
+		return it != s_missedAt.end() && now - it->second < 2.0;
+	};
 	std::unordered_map<int, HE::UUID> materials;
 	if (ctx.contentManager)
 		for (auto& ep : tree.elements)
 			if (ep)
 			{
-				const HE::UUID m = WidgetManager::resolveElementAssets(*ctx.contentManager, *ep);
-				if (m != HE::UUID{}) materials[ep->id] = m;
+				UIElement& e = *ep;
+				if (recentlyMissed(e.texture))  e.texture.clear();
+				if (recentlyMissed(e.font))     e.font.clear();
+				if (recentlyMissed(e.material)) e.material.clear();
+				const HE::UUID m = WidgetManager::resolveElementAssets(*ctx.contentManager, e);
+				if (m != HE::UUID{}) materials[e.id] = m;
+				if (!e.texture.empty()  && e.textureAssetId == HE::UUID{}) s_missedAt[e.texture]  = now;
+				if (!e.font.empty()     && e.fontAtlasKey == 0)            s_missedAt[e.font]     = now;
+				if (!e.material.empty() && m == HE::UUID{})                s_missedAt[e.material] = now;
 			}
 
 	HE::UIWidgetCanvas canvas;

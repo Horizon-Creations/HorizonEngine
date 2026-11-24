@@ -33,6 +33,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -267,6 +268,54 @@ namespace
 	std::filesystem::path tempRoot()
 	{
 		return std::filesystem::temp_directory_path() / "he_widget_designer_ui";
+	}
+
+	// A renderer whose UI preview path is the software UI rasterizer, uploaded
+	// into the headless ImGui raster: with it the designer takes its renderer
+	// path (the canvas is the picture of the runtime's quads), and every quad it
+	// handed over is kept for the assertions.
+	class UIPreviewRenderer final : public IRenderer
+	{
+	public:
+		ContentManager*             cm = nullptr;
+		std::vector<UIRenderObject> lastQuads;
+		uint32_t                    lastW = 0, lastH = 0;
+		int                         calls = 0;
+		ImTextureID                 tex = 0;
+
+		void Initialize(HE::Window*) override {}
+		void Shutdown() override {}
+		void Render() override {}
+		Capabilities GetCapabilities() const override { return {}; }
+		void* RenderUIPreview(const std::vector<UIRenderObject>& quads, uint32_t w, uint32_t h,
+		                      const glm::vec4& clear, uint32_t) override
+		{
+			++calls;
+			lastQuads = quads; lastW = w; lastH = h;
+			HE::sw::Image img;
+			img.resize(int(w), int(h));
+			img.clear(uint8_t(clear.r * 255.0f + 0.5f), uint8_t(clear.g * 255.0f + 0.5f),
+			          uint8_t(clear.b * 255.0f + 0.5f), 255);
+			HE::sw::draw(img, quads, glm::vec4(0.0f),
+				[](const HE::UUID& id, void* u) -> HE::sw::TextureView {
+					const TextureAsset* t = static_cast<ContentManager*>(u)->getTexture(id);
+					if (!t || t->format != TextureFormat::RGBA8) return {};
+					HE::sw::TextureView v;
+					v.rgba = t->data.data(); v.width = int(t->width); v.height = int(t->height);
+					return v;
+				}, cm, false);
+			if (tex) he_ui::unregisterTexture(tex);
+			tex = he_ui::registerTexture(img.rgba.data(), int(w), int(h));
+			return reinterpret_cast<void*>(static_cast<uintptr_t>(tex));
+		}
+		~UIPreviewRenderer() override { if (tex) he_ui::unregisterTexture(tex); }
+	};
+
+	// A grid hairline the designer puts under the widget (see drawCanvas).
+	bool isGridQuad(const UIRenderObject& q)
+	{
+		return q.color == glm::vec4(1.0f, 1.0f, 1.0f, 10.0f / 255.0f) &&
+		       (q.size.x <= 2.5f || q.size.y <= 2.5f);
 	}
 }
 
@@ -2181,6 +2230,30 @@ TEST_CASE("ui shot: widget designer — Pre Construct shows on the canvas, never
 	MESSAGE("green canvas pixels: " << green);
 	CHECK(green > 5000);
 
+	// The same green when the RENDERER draws the canvas: the copy it emits
+	// from is taken while the shown values are in the tree.
+	{
+		UIPreviewRenderer pr;
+		pr.cm = &cm;
+		ctx.renderer = &pr;
+		ctx.backend  = HE::RendererBackend::Metal;
+		const he_ui::Image ri = d.shoot("widget-designer-pre-construct-rendered");
+		ctx.renderer = nullptr;
+		REQUIRE(ri.valid());
+		CHECK(pr.calls > 0);
+		long rg = 0;
+		for (int y = 0; y < ri.height; ++y)
+			for (int x = 0; x < ri.width; ++x)
+			{
+				std::uint8_t r, g8, b, a;
+				ri.pixel(x, y, r, g8, b, a);
+				if (isGreen(r, g8, b)) ++rg;
+			}
+		MESSAGE("green canvas pixels through the renderer: " << rg);
+		CHECK(rg > 5000);
+	}
+	d.shoot("widget-designer-pre-construct-again");   // back on the replica
+
 	// …while the document, between frames, still holds what was designed.
 	HE::UIWidgetTree* live = UIEditorPanel::liveTree(rel);
 	REQUIRE(live != nullptr);
@@ -2476,56 +2549,10 @@ TEST_CASE("ui shot: widget designer — the hierarchy clips rows out of view")
 // With a renderer that has a UI preview path, the designer no longer paints an
 // ImGui imitation of the widget: it hands the renderer the quads the RUNTIME
 // would (HE::uiEmitElement) and shows the picture that comes back. Here the
-// "renderer" is the software UI rasterizer, so the picture can be looked at;
-// the assertion that matters is that the quads ARE the runtime's — the same
-// list WidgetManager::extract produces for the same widget at the same size.
-namespace
-{
-	class UIPreviewRenderer final : public IRenderer
-	{
-	public:
-		ContentManager*             cm = nullptr;
-		std::vector<UIRenderObject> lastQuads;
-		uint32_t                    lastW = 0, lastH = 0;
-		int                         calls = 0;
-		ImTextureID                 tex = 0;
-
-		void Initialize(HE::Window*) override {}
-		void Shutdown() override {}
-		void Render() override {}
-		Capabilities GetCapabilities() const override { return {}; }
-		void* RenderUIPreview(const std::vector<UIRenderObject>& quads, uint32_t w, uint32_t h,
-		                      const glm::vec4& clear, uint32_t) override
-		{
-			++calls;
-			lastQuads = quads; lastW = w; lastH = h;
-			HE::sw::Image img;
-			img.resize(int(w), int(h));
-			img.clear(uint8_t(clear.r * 255.0f + 0.5f), uint8_t(clear.g * 255.0f + 0.5f),
-			          uint8_t(clear.b * 255.0f + 0.5f), 255);
-			HE::sw::draw(img, quads, glm::vec4(0.0f),
-				[](const HE::UUID& id, void* u) -> HE::sw::TextureView {
-					const TextureAsset* t = static_cast<ContentManager*>(u)->getTexture(id);
-					if (!t || t->format != TextureFormat::RGBA8) return {};
-					HE::sw::TextureView v;
-					v.rgba = t->data.data(); v.width = int(t->width); v.height = int(t->height);
-					return v;
-				}, cm, false);
-			if (tex) he_ui::unregisterTexture(tex);
-			tex = he_ui::registerTexture(img.rgba.data(), int(w), int(h));
-			return reinterpret_cast<void*>(static_cast<uintptr_t>(tex));
-		}
-		~UIPreviewRenderer() override { if (tex) he_ui::unregisterTexture(tex); }
-	};
-
-	// A grid hairline the designer puts under the widget (see drawCanvas).
-	bool isGridQuad(const UIRenderObject& q)
-	{
-		return q.color == glm::vec4(1.0f, 1.0f, 1.0f, 10.0f / 255.0f) &&
-		       (q.size.x <= 2.5f || q.size.y <= 2.5f);
-	}
-}
-
+// "renderer" is the software UI rasterizer (UIPreviewRenderer, top of file), so
+// the picture can be looked at; the assertion that matters is that the quads
+// ARE the runtime's — the same list WidgetManager::extract produces for the
+// same widget at the same size.
 TEST_CASE("ui shot: widget designer — the canvas is the renderer's picture of the runtime's quads")
 {
 	Harness harness;
@@ -2611,6 +2638,158 @@ TEST_CASE("ui shot: widget designer — the canvas is the renderer's picture of 
 		CHECK(a.rotation == doctest::Approx(b.rotation));
 		CHECK(a.uvMin == b.uvMin);
 		CHECK(a.uvMax == b.uvMax);
+	}
+
+	// A Retina screen: twice the framebuffer pixels per point. The target and
+	// every quad in it double, so the picture stays sharp instead of being
+	// stretched over the canvas.
+	{
+		const uint32_t w1 = renderer.lastW, h1 = renderer.lastH;
+		ImGui::GetIO().DisplayFramebufferScale = ImVec2(2.0f, 2.0f);
+		d.shoot("widget-designer-rendered-canvas-retina");
+		ImGui::GetIO().DisplayFramebufferScale = ImVec2(1.0f, 1.0f);
+		CHECK(renderer.lastW >= 2 * w1 - 2);
+		CHECK(renderer.lastW <= 2 * w1 + 2);
+		CHECK(renderer.lastH >= 2 * h1 - 2);
+		CHECK(renderer.lastH <= 2 * h1 + 2);
+		std::vector<UIRenderObject> retina;
+		for (const UIRenderObject& q : renderer.lastQuads)
+			if (!isGridQuad(q)) retina.push_back(q);
+		REQUIRE(retina.size() == designer.size());
+		CHECK(retina.front().size.x == doctest::Approx(designer.front().size.x * 2.0f).epsilon(1e-3));
+	}
+
+	UIEditorPanel::forget(d.assetPath);
+	std::error_code ec;
+	std::filesystem::remove_all(root, ec);
+}
+
+// The same, for a page that EMBEDS a component: a parameter set on the
+// reference, a page child filling the component's slot, and the reference
+// inside a clipping panel. The runtime grafts the component into the page; the
+// designer lays it out on its own — both have to come out as the same quads.
+TEST_CASE("ui shot: widget designer — an embedded component draws as the runtime grafts it")
+{
+	Harness harness;
+	const std::filesystem::path root = tempRoot() / "embed";
+	std::filesystem::create_directories(root / "UI");
+	ContentManager cm;
+	cm.setContentRoot(root.string());
+
+	auto place = [](HE::UIWidgetTree& t, HE::UIWidgetType type, const char* name,
+	                float x, float y, float w, float h, int parent = 0) -> HE::UIElement&
+	{
+		HE::UIElement& e = *t.find(t.add(type));
+		e.parentId = parent;
+		e.name = name;
+		HE::uiSetAnchorPreset(e, 0);
+		e.pivotX = e.pivotY = 0.0f;
+		e.posX = x; e.posY = y; e.sizeX = w; e.sizeY = h;
+		return e;
+	};
+
+	// The component: a rounded card, a label the host can set, a slot.
+	HE::UIWidgetTree card;
+	card.canvasWidth = 300.0f; card.canvasHeight = 160.0f;
+	{
+		HE::UIElement& bg = place(card, HE::UIWidgetType::Panel, "CardBg", 0, 0, 300, 160);
+		bg.setProp("Color", HE::UIPropValue::ofColor({ 0.20f, 0.35f, 0.80f, 1.0f }));
+		bg.cornerRadius = glm::vec4(16.0f);
+		HE::UIElement& label = place(card, HE::UIWidgetType::Text, "Label", 12, 8, 276, 40);
+		label.setProp("Text", HE::UIPropValue::ofString("default"));
+		place(card, HE::UIWidgetType::NamedSlot, "Body", 12, 60, 276, 88);
+		card.params.push_back({ "Label", label.id, "Text", "" });
+	}
+	{
+		UIWidgetAsset a;
+		a.name = "Card"; a.path = "UI/Card.hasset";
+		a.treeJson = HE::uiWidgetTreeToJson(card);
+		REQUIRE(cm.registerWidget(std::move(a)) != HE::UUID{});
+	}
+
+	// The page: the card twice, the second one half outside a clipping panel.
+	HE::UIWidgetTree page;
+	page.canvasWidth = 1280.0f; page.canvasHeight = 720.0f;
+	{
+		place(page, HE::UIWidgetType::Panel, "Background", 0, 0, 1280, 720);
+		HE::UIElement& clip = place(page, HE::UIWidgetType::Panel, "Clip", 500, 100, 400, 300);
+		clip.clipChildren = true;
+		HE::UIElement& r1 = place(page, HE::UIWidgetType::WidgetRef, "First", 80, 100, 300, 160);
+		auto* ref1 = dynamic_cast<HE::UIWidgetRef*>(&r1);
+		REQUIRE(ref1);
+		ref1->widgetPath = "UI/Card.hasset";
+		ref1->paramValues.push_back({ "Label", HE::UIPropValue::ofString("Hello") });
+		HE::UIElement& fill = place(page, HE::UIWidgetType::Panel, "Body", 0, 0, 276, 88, r1.id);
+		fill.setProp("Color", HE::UIPropValue::ofColor({ 0.20f, 0.80f, 0.30f, 1.0f }));
+		HE::UIElement& r2 = place(page, HE::UIWidgetType::WidgetRef, "Second", 300, 200, 300, 160, clip.id);
+		auto* ref2 = dynamic_cast<HE::UIWidgetRef*>(&r2);
+		REQUIRE(ref2);
+		ref2->widgetPath = "UI/Card.hasset";
+	}
+	{
+		UIWidgetAsset a;
+		a.name = "EmbedPage"; a.path = "UI/EmbedPage.hasset";
+		a.treeJson = HE::uiWidgetTreeToJson(page);
+		REQUIRE(cm.registerWidget(std::move(a)) != HE::UUID{});
+	}
+
+	HorizonWorld world;
+	EditorUndo   undo;
+	ContextBits  bits;
+	AppContext   ctx = bits.make(world, undo);
+	ctx.contentManager = &cm;
+	UIPreviewRenderer renderer;
+	renderer.cm = &cm;
+	ctx.renderer = &renderer;
+	ctx.backend  = HE::RendererBackend::Metal;
+
+	Designer d{ ctx, (root / "UI" / "EmbedPage.hasset").string() };
+	const he_ui::Image img = d.shoot("widget-designer-rendered-embed");
+	REQUIRE(img.valid());
+	REQUIRE(renderer.calls > 0);
+
+	std::vector<UIRenderObject> designer;
+	for (const UIRenderObject& q : renderer.lastQuads)
+		if (!isGridQuad(q)) designer.push_back(q);
+	REQUIRE_FALSE(designer.empty());
+	const glm::vec2 off = designer.front().position;
+	const float k = designer.front().size.x / 1280.0f;
+
+	WidgetManager wm;
+	const int id = wm.createWidget(cm, "UI/EmbedPage.hasset");
+	REQUIRE(id != 0);
+	wm.showWidget(id);
+	std::vector<UIRenderObject> runtime;
+	wm.extract(1280.0f * k, 720.0f * k, runtime);
+
+	auto describe = [&](const UIRenderObject& q, glm::vec2 o)
+	{
+		std::ostringstream s;
+		s << "pos " << q.position.x - o.x << "," << q.position.y - o.y
+		  << " size " << q.size.x << "x" << q.size.y
+		  << " col " << q.color.r << "," << q.color.g << "," << q.color.b << "," << q.color.a
+		  << " type " << int(q.type) << " clip " << q.clipRect.x - (q.clipRect.z > 0 ? o.x : 0.0f)
+		  << "," << q.clipRect.y - (q.clipRect.z > 0 ? o.y : 0.0f) << "," << q.clipRect.z << "," << q.clipRect.w;
+		return s.str();
+	};
+	std::string dl, rl;
+	for (const auto& q : designer) dl += describe(q, off) + "\n";
+	for (const auto& q : runtime)  rl += describe(q, glm::vec2(0.0f)) + "\n";
+	INFO("designer:\n" << dl << "runtime:\n" << rl);
+	REQUIRE(designer.size() == runtime.size());
+	for (std::size_t i = 0; i < runtime.size(); ++i)
+	{
+		const UIRenderObject& a = designer[i];
+		const UIRenderObject& b = runtime[i];
+		INFO("quad " << i);
+		CHECK(a.position.x - off.x == doctest::Approx(b.position.x).epsilon(1e-3));
+		CHECK(a.position.y - off.y == doctest::Approx(b.position.y).epsilon(1e-3));
+		CHECK(a.size.x == doctest::Approx(b.size.x).epsilon(1e-3));
+		CHECK(a.size.y == doctest::Approx(b.size.y).epsilon(1e-3));
+		CHECK(a.color == b.color);
+		CHECK(a.type == b.type);
+		CHECK(a.clipRect.z == doctest::Approx(b.clipRect.z).epsilon(1e-3));
+		CHECK(a.clipRect.w == doctest::Approx(b.clipRect.w).epsilon(1e-3));
 	}
 
 	UIEditorPanel::forget(d.assetPath);
