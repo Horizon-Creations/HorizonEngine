@@ -37,6 +37,9 @@ public:
                          uint32_t& width, uint32_t& height) override;
     bool RenderWidgetThumbnail(const std::vector<UIRenderObject>& uiObjects,
                                uint32_t size, std::vector<uint8_t>& outRgba8) override;
+    bool RasterizeUI(const std::vector<UIRenderObject>& uiObjects,
+                     uint32_t width, uint32_t height,
+                     const glm::vec4& clear, std::vector<uint8_t>& outRgba8) override;
     FrameGpuStats GetFrameGpuStats() const override;
 
     // ── A second window (docs/he-apps-plan.md §13.3) ──────────────────────────

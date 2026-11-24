@@ -101,6 +101,10 @@ struct UIRenderObject {
     // It rides on the quad rather than on the material because the whole point
     // is that two widgets sharing one material are in different states.
     glm::vec4   uiState{ 0.0f, 0.0f, 0.0f, 0.0f };
+
+    // Every field: "would this put down the same pixels" — what a cache of a
+    // drawn picture asks (the widget designer's software canvas).
+    bool operator==(const UIRenderObject&) const = default;
 };
 
 namespace HE {

@@ -1031,6 +1031,17 @@ public:
     // designers docked side by side in one frame take two slots. nullptr = no
     // such path on this backend; the caller draws its own approximation.
     static constexpr uint32_t kUIPreviewSlots = 4;
+
+    // The same on the CPU: the quads drawn into `outRgba8` (width x height,
+    // top-down, cleared to the opaque `clear`) exactly as this backend draws a
+    // frame. Only the Software backend has it — it is how the widget designer
+    // shows an application that SHIPS on the software renderer its real
+    // picture (materials fall back to Schicht 0 there, as in the app). false =
+    // not a CPU backend.
+    virtual bool RasterizeUI(const std::vector<UIRenderObject>& /*uiObjects*/,
+                             uint32_t /*width*/, uint32_t /*height*/,
+                             const glm::vec4& /*clear*/, std::vector<uint8_t>& /*outRgba8*/)
+    { return false; }
     virtual void* RenderUIPreview(const std::vector<UIRenderObject>& /*uiObjects*/,
                                   uint32_t /*width*/, uint32_t /*height*/,
                                   const glm::vec4& /*clear*/, uint32_t /*slot*/ = 0)

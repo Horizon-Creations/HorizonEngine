@@ -1,6 +1,7 @@
 #include "doctest.h"
 #include "ImGuiSoftwareRaster.h"
 #include <Backends/Software/SoftwareRaster.h>
+#include <Backends/Software/SoftwareRenderer.h>
 
 #include "UIEditorPanel.h"
 #include "EditorApplication.h"   // AppContext
@@ -307,6 +308,23 @@ namespace
 			if (tex) he_ui::unregisterTexture(tex);
 			tex = he_ui::registerTexture(img.rgba.data(), int(w), int(h));
 			return reinterpret_cast<void*>(static_cast<uintptr_t>(tex));
+		}
+		// Plain uploads (the software canvas of an app project goes this way),
+		// counted, the last one kept.
+		int                  uploads = 0;
+		std::vector<uint8_t> lastUpload;
+		int                  upW = 0, upH = 0;
+		void* CreateImGuiTexture(const void* rgba, int w, int h) override
+		{
+			++uploads;
+			const auto* p = static_cast<const uint8_t*>(rgba);
+			lastUpload.assign(p, p + size_t(w) * h * 4);
+			upW = w; upH = h;
+			return reinterpret_cast<void*>(static_cast<uintptr_t>(he_ui::registerTexture(rgba, w, h)));
+		}
+		void DestroyImGuiTexture(void* t) override
+		{
+			he_ui::unregisterTexture(static_cast<ImTextureID>(reinterpret_cast<uintptr_t>(t)));
 		}
 		~UIPreviewRenderer() override { if (tex) he_ui::unregisterTexture(tex); }
 	};
@@ -2668,6 +2686,95 @@ TEST_CASE("ui shot: widget designer — the canvas is the renderer's picture of 
 // reference, a page child filling the component's slot, and the reference
 // inside a clipping panel. The runtime grafts the component into the page; the
 // designer lays it out on its own — both have to come out as the same quads.
+// An application with Advanced Shader Effects off ships on the software
+// renderer, so its designer canvas is the CPU rasterizer's picture: drawn by a
+// SoftwareRenderer (RasterizeUI) and uploaded, not handed to the GPU preview.
+// Asserted against the app's own frame: the same quads through the same
+// rasterizer at the same size give the same pixels.
+TEST_CASE("ui shot: widget designer — an app on the software renderer gets the CPU picture")
+{
+	Harness harness;
+	const std::filesystem::path root = tempRoot() / "swapp";
+	std::filesystem::create_directories(root / "UI");
+	ContentManager cm;
+	cm.setContentRoot(root.string());
+
+	HE::UIWidgetTree page = samplePage();
+	{
+		HE::UIElement& card = *page.find(page.add(HE::UIWidgetType::Panel));
+		card.name = "Card";
+		HE::uiSetAnchorPreset(card, 0);
+		card.pivotX = card.pivotY = 0.0f;
+		card.posX = 80.0f; card.posY = 420.0f; card.sizeX = 300.0f; card.sizeY = 200.0f;
+		card.setProp("Color", HE::UIPropValue::ofColor({ 0.85f, 0.30f, 0.20f, 1.0f }));
+		card.cornerRadius = glm::vec4(24.0f);
+		card.gradient = true; card.gradientColor = glm::vec4(0.2f, 0.3f, 0.9f, 1.0f);
+	}
+	UIWidgetAsset asset;
+	asset.name = "AppPage"; asset.path = "UI/AppPage.hasset";
+	asset.treeJson = HE::uiWidgetTreeToJson(page);
+	REQUIRE(cm.registerWidget(std::move(asset)) != HE::UUID{});
+
+	HorizonWorld world;
+	EditorUndo   undo;
+	ContextBits  bits;
+	AppContext   ctx = bits.make(world, undo);
+	ctx.contentManager = &cm;
+	ProjectManager pm;
+	pm.currentProject().appProject = true;
+	pm.currentProject().advancedShaderEffects = false;
+	ctx.projectManager = &pm;
+	UIPreviewRenderer renderer;
+	renderer.cm = &cm;
+	ctx.renderer = &renderer;
+	ctx.backend  = HE::RendererBackend::OpenGL;   // an upload is top-down even here
+
+	Designer d{ ctx, (root / "UI" / "AppPage.hasset").string() };
+	const he_ui::Image img = d.shoot("widget-designer-software-app");
+	REQUIRE(img.valid());
+	CHECK(renderer.calls == 0);          // never the GPU preview
+	REQUIRE(renderer.uploads > 0);
+	REQUIRE(renderer.upW > 100);
+	REQUIRE(renderer.upH > 100);
+
+	WidgetManager wm;
+	const int id = wm.createWidget(cm, "UI/AppPage.hasset");
+	REQUIRE(id != 0);
+	wm.showWidget(id);
+	const int uploadsBefore = renderer.uploads;
+	d.shoot("widget-designer-software-app-again");
+	CHECK(renderer.uploads == uploadsBefore);   // nothing changed, nothing re-drawn
+
+	// The app's own frame (the runtime's quads through a SoftwareRenderer at
+	// the authored size) has the card's gradient colour at the card's centre.
+	// The quads themselves are pinned equal to the runtime's by the test above;
+	// this asks that the CPU rasterizer drew them: that colour is in the upload.
+	std::vector<UIRenderObject> runtime;
+	wm.extract(1280.0f, 720.0f, runtime);
+	SoftwareRenderer sw;
+	sw.Initialize(nullptr);
+	sw.SetContentManager(&cm);
+	std::vector<uint8_t> ref;
+	REQUIRE(sw.RasterizeUI(runtime, 1280, 720, glm::vec4(12, 12, 14, 255) / 255.0f, ref));
+	auto px = [](const std::vector<uint8_t>& p, int w, int x, int y)
+	{ const size_t i = (size_t(y) * w + x) * 4; return glm::ivec3(p[i], p[i + 1], p[i + 2]); };
+	const glm::ivec3 want = px(ref, 1280, 230, 520);
+	// Find that colour in the upload, within the card: the picture is the
+	// same rasterizer at another scale, so the card's centre colour is there.
+	bool found = false;
+	for (int y = 0; y < renderer.upH && !found; ++y)
+		for (int x = 0; x < renderer.upW && !found; ++x)
+		{
+			const glm::ivec3 c = px(renderer.lastUpload, renderer.upW, x, y);
+			found = std::abs(c.r - want.r) <= 2 && std::abs(c.g - want.g) <= 2 && std::abs(c.b - want.b) <= 2;
+		}
+	CHECK(found);
+
+	UIEditorPanel::forget(d.assetPath);
+	std::error_code ec;
+	std::filesystem::remove_all(root, ec);
+}
+
 TEST_CASE("ui shot: widget designer — an embedded component draws as the runtime grafts it")
 {
 	Harness harness;

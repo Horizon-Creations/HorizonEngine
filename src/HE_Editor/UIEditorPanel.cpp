@@ -34,6 +34,7 @@
 #include <UIWidget/UIWidgetBinding.h>
 #include <UIWidget/WidgetManager.h>               // design-time Pre Construct run (sandbox)
 #include <Renderer/IRenderer.h>                    // RenderUIPreview: the canvas drawn by the renderer
+#include <Renderer/RendererFactory.h>              // the software canvas of an app that ships on it
 #include <HorizonCode/HorizonCode.h>
 #include <HorizonCode/HorizonCodeRuntime.h>
 #include <ContentManager/ContentManager.h>
@@ -5072,6 +5073,68 @@ void emitTreeQuads(AppContext& ctx, HE::UIWidgetTree& tree, const HE::UIWidgetCa
 	}
 }
 
+// ── The canvas of an application that ships on the software renderer ─────────
+// Its picture is the CPU rasterizer's, so that is what the designer shows: the
+// quads go through a SoftwareRenderer of the editor's own (RasterizeUI, the
+// app's own texture decode and draw) and the pixels are uploaded through the
+// editor's renderer. Materials therefore fall back to Schicht 0 here, exactly
+// as they do in the shipped application.
+//
+// Rasterized and uploaded only when the quads change (or once a second, for a
+// texture that finished loading under the same id) — a CPU frame plus an
+// upload every frame for a canvas nobody touches would be waste. There is no
+// in-place texture update on IRenderer, so a changed picture is a new texture;
+// the old one is released a few frames later, never while a frame in flight
+// may still sample it.
+void* softwareCanvas(AppContext& ctx, const std::vector<UIRenderObject>& quads,
+                     uint32_t w, uint32_t h, const glm::vec4& clear, uint32_t slot)
+{
+	static std::unique_ptr<IRenderer> s_cpu;
+	if (!s_cpu)
+	{
+		if (!RendererFactory::Available(HE::RendererBackend::Software)) return nullptr;
+		s_cpu = RendererFactory::Create(HE::RendererBackend::Software);
+		if (!s_cpu) return nullptr;
+		s_cpu->Initialize(nullptr);
+	}
+	s_cpu->SetContentManager(ctx.contentManager);
+
+	struct Slot
+	{
+		std::vector<UIRenderObject> quads;
+		uint32_t w = 0, h = 0;
+		void*  tex = nullptr;
+		double at  = -1.0;
+		IRenderer* owner = nullptr;
+	};
+	struct Retired { void* tex; IRenderer* owner; int frame; };
+	static Slot s_slots[IRenderer::kUIPreviewSlots];
+	static std::vector<Retired> s_retired;
+
+	const int frame = ImGui::GetFrameCount();
+	for (std::size_t i = 0; i < s_retired.size();)
+		if (frame - s_retired[i].frame > 3)
+		{
+			s_retired[i].owner->DestroyImGuiTexture(s_retired[i].tex);
+			s_retired.erase(s_retired.begin() + static_cast<std::ptrdiff_t>(i));
+		}
+		else ++i;
+
+	Slot& s = s_slots[std::min<uint32_t>(slot, IRenderer::kUIPreviewSlots - 1)];
+	const double now = ImGui::GetTime();
+	const bool same = s.tex && s.owner == ctx.renderer && s.w == w && s.h == h &&
+	                  now - s.at < 1.0 && s.quads == quads;
+	if (same) return s.tex;
+
+	std::vector<uint8_t> px;
+	if (!s_cpu->RasterizeUI(quads, w, h, clear, px)) return nullptr;
+	void* tex = ctx.renderer->CreateImGuiTexture(px.data(), int(w), int(h));
+	if (!tex) return nullptr;
+	if (s.tex) s_retired.push_back({ s.tex, s.owner, frame });
+	s.tex = tex; s.owner = ctx.renderer; s.w = w; s.h = h; s.at = now; s.quads = quads;
+	return tex;
+}
+
 // The open clip's values, in the tree for exactly as long as this object lives.
 // See the comment at its use in drawCanvas for why it is an RAII guard and not
 // a pair of calls.
@@ -5458,6 +5521,7 @@ void drawCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 	// A backend without that path (nullptr) keeps the ImGui replica below.
 	const float grid = 64.0f * s;
 	void* canvasTex = nullptr;
+	bool  cpuCanvas = false;
 	ImVec2 visMn(std::max(cTL.x, origin.x), std::max(cTL.y, origin.y));
 	ImVec2 visMx(std::min(cTL.x + canvasPx.x, origin.x + avail.x),
 	             std::min(cTL.y + canvasPx.y, origin.y + avail.y));
@@ -5491,13 +5555,23 @@ void drawCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 		// must not show each other's picture (IRenderer::kUIPreviewSlots).
 		static int slotFrame = -1, slotNext = 0;
 		if (slotFrame != ImGui::GetFrameCount()) { slotFrame = ImGui::GetFrameCount(); slotNext = 0; }
-		canvasTex = ctx.renderer->RenderUIPreview(quads, static_cast<uint32_t>(tw),
-			static_cast<uint32_t>(th), glm::vec4(12.0f / 255.0f, 12.0f / 255.0f, 14.0f / 255.0f, 1.0f),
-			static_cast<uint32_t>(slotNext++));
+		const glm::vec4 clear(12.0f / 255.0f, 12.0f / 255.0f, 14.0f / 255.0f, 1.0f);
+		const uint32_t slot = static_cast<uint32_t>(slotNext++);
+		// An application with Advanced Shader Effects off SHIPS on the software
+		// renderer (BackendRules::forExport), so that is the picture it gets.
+		cpuCanvas = ctx.projectManager &&
+		            ctx.projectManager->currentProject().appProject &&
+		            !ctx.projectManager->currentProject().advancedShaderEffects;
+		canvasTex = cpuCanvas
+			? softwareCanvas(ctx, quads, static_cast<uint32_t>(tw), static_cast<uint32_t>(th), clear, slot)
+			: ctx.renderer->RenderUIPreview(quads, static_cast<uint32_t>(tw),
+			                                static_cast<uint32_t>(th), clear, slot);
 	}
 	if (canvasTex)
 	{
-		const bool flipY = (ctx.backend == HE::RendererBackend::OpenGL);
+		// The GL target is bottom-up; an uploaded CPU picture is top-down on
+		// every backend.
+		const bool flipY = !cpuCanvas && ctx.backend == HE::RendererBackend::OpenGL;
 		dl->AddImage(reinterpret_cast<ImTextureID>(canvasTex), visMn, visMx,
 		             flipY ? ImVec2(0, 1) : ImVec2(0, 0), flipY ? ImVec2(1, 0) : ImVec2(1, 1));
 	}

@@ -49,11 +49,23 @@ canvas is the active renderer's own picture of the runtime's quads.
   headless). The GL V flip follows the convention of `RenderWorldPreview`.
 - Backdrop materials in the designer (the pass gets cmdBuf and pass, but untested).
 
+**Software apps (added the same day)**
+- Rule: `appProject && !advancedShaderEffects` (the same one `BackendRules::forExport` uses
+  to ship `"Software"`). The designer then draws through `softwareCanvas`
+  (`UIEditorPanel.cpp`):
+  - a `SoftwareRenderer` of its own from `RendererFactory`, with the new
+    `IRenderer::RasterizeUI` (same texture decode and mips as the app);
+  - the result uploaded via `CreateImGuiTexture`, top-down, with no V flip on any backend.
+- Rasterized and uploaded only when the quads change (`UIRenderObject::operator==`,
+  defaulted) or once a second. Old textures are released 4 frames later.
+- `tests/WidgetDesignerLinkStubs.cpp`: `RendererFactory` for he_tests (Software only).
+- Test "an app on the software renderer gets the CPU picture": no GPU preview call, an
+  upload containing the app frame's gradient colour, and no re-upload without a change.
+- Also works on Vulkan/D3D (only `CreateImGuiTexture` is needed). Not looked at in the
+  running editor.
+
 **Next steps**
 1. Open a widget in the editor on Metal and on GL, and compare it with Play
-   (materials, text, Pixelated).
-2. For projects that ship on Software ("Advanced off"): optionally let the designer
-   draw through `HE::sw::draw` so it matches the CPU rasterizer exactly (materials fall
-   back to Schicht 0).
-3. Vulkan/D3D: implement `RenderUIPreview` (until then they keep the replica).
-4. Once the renderer path has been proven, the content half of `drawElementPreview` can go.
+   (materials, text, Pixelated). Do the same for an app project with Advanced off.
+2. Vulkan/D3D: implement `RenderUIPreview` (until then games keep the replica there).
+3. Once the renderer path has been proven, the content half of `drawElementPreview` can go.

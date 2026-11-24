@@ -280,6 +280,20 @@ bool SoftwareRenderer::CaptureViewport(std::vector<uint8_t>& rgba,
     return true;
 }
 
+bool SoftwareRenderer::RasterizeUI(const std::vector<UIRenderObject>& uiObjects,
+                                   uint32_t width, uint32_t height,
+                                   const glm::vec4& clear, std::vector<uint8_t>& outRgba8)
+{
+    if (width == 0 || height == 0) return false;
+    HE::sw::Image img;
+    img.resize(static_cast<int>(width), static_cast<int>(height));
+    auto b = [](float v) { return static_cast<std::uint8_t>(std::clamp(v, 0.0f, 1.0f) * 255.0f + 0.5f); };
+    img.clear(b(clear.r), b(clear.g), b(clear.b), 255);
+    HE::sw::draw(img, uiObjects, glm::vec4(0.0f), &resolveTexture, this);
+    outRgba8 = std::move(img.rgba);
+    return true;
+}
+
 bool SoftwareRenderer::RenderWidgetThumbnail(const std::vector<UIRenderObject>& uiObjects,
                                              uint32_t size, std::vector<uint8_t>& outRgba8)
 {
