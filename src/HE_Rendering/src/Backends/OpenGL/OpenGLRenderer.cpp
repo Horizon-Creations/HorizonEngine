@@ -11204,6 +11204,55 @@ bool OpenGLRenderer::RenderWidgetThumbnail(const std::vector<UIRenderObject>& ui
 	return true;
 }
 
+void* OpenGLRenderer::RenderUIPreview(const std::vector<UIRenderObject>& uiObjects,
+                                      uint32_t width, uint32_t height,
+                                      const glm::vec4& clear, uint32_t slot)
+{
+	const int W = std::clamp(static_cast<int>(width),  1, 8192);
+	const int H = std::clamp(static_cast<int>(height), 1, 8192);
+	UIPreviewTarget& t = m_uiPreview[std::min<uint32_t>(slot, IRenderer::kUIPreviewSlots - 1)];
+	if (!t.fbo || t.w != W || t.h != H)
+	{
+		if (t.color) glDeleteTextures(1, &t.color);
+		if (t.depth) glDeleteRenderbuffers(1, &t.depth);
+		if (!t.fbo) glGenFramebuffers(1, &t.fbo);
+		glBindFramebuffer(GL_FRAMEBUFFER, t.fbo);
+		glGenTextures(1, &t.color);
+		glBindTexture(GL_TEXTURE_2D, t.color);
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, W, H, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, t.color, 0);
+		glGenRenderbuffers(1, &t.depth);
+		glBindRenderbuffer(GL_RENDERBUFFER, t.depth);
+		glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, W, H);
+		glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, t.depth);
+		glBindFramebuffer(GL_FRAMEBUFFER, 0);
+		glBindTexture(GL_TEXTURE_2D, 0);
+		t.w = W; t.h = H;
+	}
+	if (!t.fbo) return nullptr;
+
+	GLint prevFBO = 0; glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prevFBO);
+	GLint prevVP[4]; glGetIntegerv(GL_VIEWPORT, prevVP);
+	glBindFramebuffer(GL_FRAMEBUFFER, t.fbo);
+	glViewport(0, 0, W, H);
+	glClearColor(clear.r, clear.g, clear.b, 1.0f);
+	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+	// The game frame's own UI pass, on a borrowed list (see RenderWidgetThumbnail).
+	std::vector<UIRenderObject> saved;
+	saved.swap(m_renderWorld.uiObjects);
+	m_renderWorld.uiObjects = uiObjects;
+	RenderUIPass(W, H);
+	m_renderWorld.uiObjects.swap(saved);
+	glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)prevFBO);
+	glViewport(prevVP[0], prevVP[1], prevVP[2], prevVP[3]);
+	glUseProgram(0);
+	return reinterpret_cast<void*>(static_cast<uintptr_t>(t.color));
+}
+
 void* OpenGLRenderer::RenderParticlePreview(ContentManager& cm, const HE::UUID& /*meshId*/,
                                            const HE::UUID& materialId,
                                            const std::vector<ParticlePreviewInstance>& particles,
@@ -11509,6 +11558,13 @@ void OpenGLRenderer::Shutdown()
 	if (m_thumbColor)         { glDeleteTextures(1, &m_thumbColor);       m_thumbColor = 0; }
 	if (m_thumbDepth)         { glDeleteRenderbuffers(1, &m_thumbDepth);  m_thumbDepth = 0; }
 	if (m_thumbFBO)           { glDeleteFramebuffers(1, &m_thumbFBO);     m_thumbFBO = 0; }
+	for (UIPreviewTarget& t : m_uiPreview)
+	{
+		if (t.color) glDeleteTextures(1, &t.color);
+		if (t.depth) glDeleteRenderbuffers(1, &t.depth);
+		if (t.fbo)   glDeleteFramebuffers(1, &t.fbo);
+		t = UIPreviewTarget{};
+	}
 	if (m_meshPreviewProgram) { glDeleteProgram(m_meshPreviewProgram);    m_meshPreviewProgram = 0; }
 	// World-preview targets (RenderWorldPreview), every slot; their programs
 	// are the skeletal preview's, freed with those.

@@ -7288,6 +7288,12 @@ void MetalRenderer::Shutdown()
 	if (m_thumbUIDepthTex)     { CFBridgingRelease(m_thumbUIDepthTex);     m_thumbUIDepthTex = nullptr; }
 	m_thumbSize = 0;
 	m_thumbUISize = 0;
+	for (UIPreviewTarget& t : m_uiPreview)
+	{
+		if (t.color) CFBridgingRelease(t.color);
+		if (t.depth) CFBridgingRelease(t.depth);
+		t = UIPreviewTarget{};
+	}
 	// World-preview targets (RenderWorldPreview), every slot; their pipelines
 	// are the skeletal / mesh preview's, released with those.
 	for (WorldPreviewTarget& wp : m_worldPreview)
@@ -11054,6 +11060,64 @@ bool MetalRenderer::RenderWidgetThumbnail(const std::vector<UIRenderObject>& uiO
 	for (size_t i = 0; i < outRgba8.size(); i += 4)
 		std::swap(outRgba8[i], outRgba8[i + 2]);   // BGRA → RGBA
 	return true;
+}
+
+void* MetalRenderer::RenderUIPreview(const std::vector<UIRenderObject>& uiObjects,
+                                     uint32_t width, uint32_t height,
+                                     const glm::vec4& clear, uint32_t slot)
+{
+	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+	id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)m_commandQueue;
+	if (!device || !queue || !m_uiPipeline) return nullptr;
+	const int W = std::clamp(static_cast<int>(width),  1, 8192);
+	const int H = std::clamp(static_cast<int>(height), 1, 8192);
+	UIPreviewTarget& t = m_uiPreview[std::min<uint32_t>(slot, IRenderer::kUIPreviewSlots - 1)];
+	if (!t.color || t.w != W || t.h != H)
+	{
+		if (t.color) CFBridgingRelease(t.color);
+		if (t.depth) CFBridgingRelease(t.depth);
+		MTLTextureDescriptor* cd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:kSwapchainFormat
+			width:W height:H mipmapped:NO];
+		cd.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+		cd.storageMode = MTLStorageModePrivate;
+		t.color = (void*)CFBridgingRetain([device newTextureWithDescriptor:cd]);
+		MTLTextureDescriptor* dd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:kDepthFormat
+			width:W height:H mipmapped:NO];
+		dd.usage = MTLTextureUsageRenderTarget; dd.storageMode = MTLStorageModePrivate;
+		t.depth = (void*)CFBridgingRetain([device newTextureWithDescriptor:dd]);
+		t.w = W; t.h = H;
+	}
+	if (!t.color || !t.depth) return nullptr;
+
+	@autoreleasepool
+	{
+		MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];
+		rp.colorAttachments[0].texture     = (__bridge id<MTLTexture>)t.color;
+		rp.colorAttachments[0].loadAction  = MTLLoadActionClear;
+		rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+		rp.colorAttachments[0].clearColor  = MTLClearColorMake(clear.r, clear.g, clear.b, 1.0);
+		rp.depthAttachment.texture     = (__bridge id<MTLTexture>)t.depth;
+		rp.depthAttachment.loadAction  = MTLLoadActionClear;
+		rp.depthAttachment.storeAction = MTLStoreActionDontCare;
+		rp.depthAttachment.clearDepth  = 1.0;
+
+		// Committed on the same queue ahead of the frame that shows it, so the
+		// ImGui pass sampling the target runs after this — no wait, no readback.
+		id<MTLCommandBuffer> cb = [queue commandBuffer];
+		id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
+		// The list EncodeUIPass reads is borrowed for one pass, as the
+		// thumbnail and the secondary windows do; cmdBuf and the pass go in so
+		// a Backdrop material can cut the pass and snapshot what is behind it.
+		std::vector<UIRenderObject> saved;
+		saved.swap(m_renderWorld.uiObjects);
+		m_renderWorld.uiObjects = uiObjects;
+		enc = (__bridge id<MTLRenderCommandEncoder>)
+			EncodeUIPass((__bridge void*)enc, W, H, (__bridge void*)cb, (__bridge void*)rp);
+		m_renderWorld.uiObjects.swap(saved);
+		[enc endEncoding];
+		[cb commit];
+	}
+	return t.color;
 }
 
 bool MetalRenderer::RenderAssetThumbnail(ContentManager& cm, ThumbnailKind kind,

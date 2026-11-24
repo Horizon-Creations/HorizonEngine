@@ -1,5 +1,6 @@
 #include "doctest.h"
 #include "ImGuiSoftwareRaster.h"
+#include <Backends/Software/SoftwareRaster.h>
 
 #include "UIEditorPanel.h"
 #include "EditorApplication.h"   // AppContext
@@ -2469,4 +2470,150 @@ TEST_CASE("ui shot: widget designer — the hierarchy clips rows out of view")
 	UIEditorPanel::forget(d.assetPath);
 	std::error_code ec;
 	std::filesystem::remove(root / "UI" / "LongList.hasset", ec);
+}
+
+// ── The canvas drawn by the renderer ─────────────────────────────────────────
+// With a renderer that has a UI preview path, the designer no longer paints an
+// ImGui imitation of the widget: it hands the renderer the quads the RUNTIME
+// would (HE::uiEmitElement) and shows the picture that comes back. Here the
+// "renderer" is the software UI rasterizer, so the picture can be looked at;
+// the assertion that matters is that the quads ARE the runtime's — the same
+// list WidgetManager::extract produces for the same widget at the same size.
+namespace
+{
+	class UIPreviewRenderer final : public IRenderer
+	{
+	public:
+		ContentManager*             cm = nullptr;
+		std::vector<UIRenderObject> lastQuads;
+		uint32_t                    lastW = 0, lastH = 0;
+		int                         calls = 0;
+		ImTextureID                 tex = 0;
+
+		void Initialize(HE::Window*) override {}
+		void Shutdown() override {}
+		void Render() override {}
+		Capabilities GetCapabilities() const override { return {}; }
+		void* RenderUIPreview(const std::vector<UIRenderObject>& quads, uint32_t w, uint32_t h,
+		                      const glm::vec4& clear, uint32_t) override
+		{
+			++calls;
+			lastQuads = quads; lastW = w; lastH = h;
+			HE::sw::Image img;
+			img.resize(int(w), int(h));
+			img.clear(uint8_t(clear.r * 255.0f + 0.5f), uint8_t(clear.g * 255.0f + 0.5f),
+			          uint8_t(clear.b * 255.0f + 0.5f), 255);
+			HE::sw::draw(img, quads, glm::vec4(0.0f),
+				[](const HE::UUID& id, void* u) -> HE::sw::TextureView {
+					const TextureAsset* t = static_cast<ContentManager*>(u)->getTexture(id);
+					if (!t || t->format != TextureFormat::RGBA8) return {};
+					HE::sw::TextureView v;
+					v.rgba = t->data.data(); v.width = int(t->width); v.height = int(t->height);
+					return v;
+				}, cm, false);
+			if (tex) he_ui::unregisterTexture(tex);
+			tex = he_ui::registerTexture(img.rgba.data(), int(w), int(h));
+			return reinterpret_cast<void*>(static_cast<uintptr_t>(tex));
+		}
+		~UIPreviewRenderer() override { if (tex) he_ui::unregisterTexture(tex); }
+	};
+
+	// A grid hairline the designer puts under the widget (see drawCanvas).
+	bool isGridQuad(const UIRenderObject& q)
+	{
+		return q.color == glm::vec4(1.0f, 1.0f, 1.0f, 10.0f / 255.0f) &&
+		       (q.size.x <= 2.5f || q.size.y <= 2.5f);
+	}
+}
+
+TEST_CASE("ui shot: widget designer — the canvas is the renderer's picture of the runtime's quads")
+{
+	Harness harness;
+	const std::filesystem::path root = tempRoot();
+	std::filesystem::create_directories(root / "UI");
+	ContentManager cm;
+	cm.setContentRoot(root.string());
+
+	// The sample page plus a card carrying everything "Schicht 0" stamps on:
+	// rounded corners, a border, a gradient, a drop shadow, a rotation.
+	HE::UIWidgetTree page = samplePage();
+	{
+		HE::UIElement& card = *page.find(page.add(HE::UIWidgetType::Panel));
+		card.name = "Card";
+		HE::uiSetAnchorPreset(card, 0);
+		card.pivotX = card.pivotY = 0.0f;
+		card.posX = 80.0f; card.posY = 420.0f; card.sizeX = 300.0f; card.sizeY = 200.0f;
+		card.setProp("Color", HE::UIPropValue::ofColor({ 0.85f, 0.30f, 0.20f, 1.0f }));
+		card.cornerRadius = glm::vec4(24.0f);
+		card.borderWidth = 4.0f; card.borderColor = glm::vec4(1.0f, 0.8f, 0.2f, 1.0f);
+		card.gradient = true; card.gradientColor = glm::vec4(0.2f, 0.3f, 0.9f, 1.0f);
+		card.shadow = true; card.shadowColor = glm::vec4(0.0f, 0.0f, 0.0f, 0.6f);
+		card.shadowBlur = 12.0f; card.shadowOffsetX = 6.0f; card.shadowOffsetY = 6.0f;
+		card.rotation = 8.0f;
+	}
+	UIWidgetAsset asset;
+	asset.name     = "RenderedPage";
+	asset.path     = "UI/RenderedPage.hasset";
+	asset.treeJson = HE::uiWidgetTreeToJson(page);
+	REQUIRE(cm.registerWidget(std::move(asset)) != HE::UUID{});
+
+	HorizonWorld world;
+	EditorUndo   undo;
+	ContextBits  bits;
+	AppContext   ctx = bits.make(world, undo);
+	ctx.contentManager = &cm;
+	UIPreviewRenderer renderer;
+	renderer.cm = &cm;
+	ctx.renderer = &renderer;
+	ctx.backend  = HE::RendererBackend::Metal;   // top-down handle, no V flip
+
+	Designer d{ ctx, (root / "UI" / "RenderedPage.hasset").string() };
+	const he_ui::Image img = d.shoot("widget-designer-rendered-canvas");
+	REQUIRE(img.valid());
+	REQUIRE(renderer.calls > 0);
+	REQUIRE(renderer.lastW > 100);
+	REQUIRE(renderer.lastH > 100);
+
+	// The designer's element quads, without its grid. The first is the
+	// Background panel at the canvas origin, which gives the zoom and offset.
+	std::vector<UIRenderObject> designer;
+	for (const UIRenderObject& q : renderer.lastQuads)
+		if (!isGridQuad(q)) designer.push_back(q);
+	REQUIRE_FALSE(designer.empty());
+	const glm::vec2 off = designer.front().position;
+	const float k = designer.front().size.x / 1280.0f;
+	REQUIRE(k > 0.1f);
+
+	// The runtime's quads for the same widget at the same size.
+	WidgetManager wm;
+	const int id = wm.createWidget(cm, "UI/RenderedPage.hasset");
+	REQUIRE(id != 0);
+	wm.showWidget(id);
+	std::vector<UIRenderObject> runtime;
+	wm.extract(1280.0f * k, 720.0f * k, runtime);
+
+	REQUIRE(designer.size() == runtime.size());
+	for (std::size_t i = 0; i < runtime.size(); ++i)
+	{
+		const UIRenderObject& a = designer[i];
+		const UIRenderObject& b = runtime[i];
+		INFO("quad " << i);
+		CHECK(a.position.x - off.x == doctest::Approx(b.position.x).epsilon(1e-3));
+		CHECK(a.position.y - off.y == doctest::Approx(b.position.y).epsilon(1e-3));
+		CHECK(a.size.x == doctest::Approx(b.size.x).epsilon(1e-3));
+		CHECK(a.size.y == doctest::Approx(b.size.y).epsilon(1e-3));
+		CHECK(a.color == b.color);
+		CHECK(a.type == b.type);
+		CHECK(a.cornerRadius == b.cornerRadius);
+		CHECK(a.borderWidth == doctest::Approx(b.borderWidth));
+		CHECK(a.gradient == b.gradient);
+		CHECK(a.blur == doctest::Approx(b.blur));
+		CHECK(a.rotation == doctest::Approx(b.rotation));
+		CHECK(a.uvMin == b.uvMin);
+		CHECK(a.uvMax == b.uvMax);
+	}
+
+	UIEditorPanel::forget(d.assetPath);
+	std::error_code ec;
+	std::filesystem::remove_all(root, ec);
 }

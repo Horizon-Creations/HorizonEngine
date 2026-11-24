@@ -402,6 +402,28 @@ inline constexpr float kUIDraggedAlpha = 0.45f;
 // element is entirely hidden — the caller skips drawing and hit-testing it.
 HE_API bool uiElementClipRect(const UIWidgetTree& tree, const UIElement& e,
                               UIWidgetRect& out, const UIWidgetCanvas* canvas = nullptr);
+
+// Everything ONE element puts on screen, in pixels of `canvas`: its drop
+// shadow, its own quads (UIElement::render), the surface style stamped onto
+// the first of them, the material state, inherited opacity and the disabled
+// dim, the clip and the folded rotation. `rect` is uiElementRect for the same
+// canvas. Returns false when a clipping ancestor hides the element entirely
+// (nothing is emitted).
+//
+// The one producer of UI quads: WidgetManager::extract draws the running game
+// through it and the widget designer draws its canvas through it, so the two
+// cannot disagree about what a property looks like. What belongs to a RUNNING
+// manager — the focus ring, the scrim, dropdowns, tooltips — stays there.
+// `px`/`eus`/`evs` hand back what the caller needs to put such things around it.
+struct UIEmitted
+{
+    UIWidgetRect px{};
+    float eus = 1.0f, evs = 1.0f;
+};
+HE_API bool uiEmitElement(const UIWidgetTree& tree, const UIElement& e,
+                          const UIWidgetRect& rect, const UIWidgetCanvas& canvas,
+                          const UIElementRenderState& st, const HE::UUID& material,
+                          std::vector<UIRenderObject>& out, UIEmitted* info = nullptr);
 // Let every element that auto-sizes fit itself to its content. Call BEFORE
 // uiElementRect so the rects already reflect the new sizes; cheap enough to run
 // each frame (only text elements with AutoSize on do any work).

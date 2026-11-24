@@ -1016,6 +1016,26 @@ public:
     // knows how to draw UIRenderObjects but nothing about widget assets. `size`
     // is the tile edge; the quads must already be laid out for a square viewport
     // of that many pixels, since UI layout is resolution-dependent.
+    // ── UI preview ─────────────────────────────────────────────────────────
+    // Draw a list of UI quads (what HE::uiEmitElement / WidgetManager::extract
+    // produce) into a dedicated offscreen target of width x height pixels,
+    // cleared to the opaque `clear` colour, and return its ImGui handle. It is
+    // the SAME UI pass the game frame draws its widgets with — materials,
+    // fonts, Pixelated, clipping and all — which is the point: the widget
+    // designer shows the renderer's picture rather than an ImGui imitation.
+    // Opaque on purpose: a transparent target composited a second time by
+    // ImGui puts dark fringes on every translucent edge.
+    //
+    // Same handle conventions as RenderWorldPreview (OpenGL's is bottom-up, the
+    // caller flips V) and the same slot rule: one target per slot, so two
+    // designers docked side by side in one frame take two slots. nullptr = no
+    // such path on this backend; the caller draws its own approximation.
+    static constexpr uint32_t kUIPreviewSlots = 4;
+    virtual void* RenderUIPreview(const std::vector<UIRenderObject>& /*uiObjects*/,
+                                  uint32_t /*width*/, uint32_t /*height*/,
+                                  const glm::vec4& /*clear*/, uint32_t /*slot*/ = 0)
+    { return nullptr; }
+
     virtual bool RenderWidgetThumbnail(const std::vector<UIRenderObject>& /*uiObjects*/,
                                        uint32_t /*size*/, std::vector<uint8_t>& /*outRgba8*/)
     { return false; }

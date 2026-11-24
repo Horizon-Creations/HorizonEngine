@@ -97,6 +97,9 @@ public:
 	                              uint32_t size, std::vector<uint8_t>& outRgba8) override;
 	bool  RenderWidgetThumbnail(const std::vector<UIRenderObject>& uiObjects,
 	                            uint32_t size, std::vector<uint8_t>& outRgba8) override;
+	void* RenderUIPreview(const std::vector<UIRenderObject>& uiObjects,
+	                      uint32_t width, uint32_t height,
+	                      const glm::vec4& clear, uint32_t slot) override;
 	void  InvalidateMesh    (const HE::UUID& meshId)     override;
 	void  InvalidateTexture (const HE::UUID& textureId)  override;
 	void  SetBloomSettings(const BloomSettings& settings) override;
@@ -412,6 +415,9 @@ private:
 	// editor, so this target only ever holds one thumbnail at a time.
 	unsigned int m_thumbFBO = 0, m_thumbColor = 0, m_thumbDepth = 0;
 	int          m_thumbSize = 0;
+	// RenderUIPreview's targets, one per slot (IRenderer::kUIPreviewSlots).
+	struct UIPreviewTarget { unsigned int fbo = 0, color = 0, depth = 0; int w = 0, h = 0; };
+	UIPreviewTarget m_uiPreview[IRenderer::kUIPreviewSlots];
 	// Unlit-ish mesh program shared by the mesh thumbnails and by materials that
 	// have no node graph (built-in PBR): pos/normal/uv in, fixed sun + ambient
 	// plus a roughness/metallic-driven highlight, so a flat material still reads

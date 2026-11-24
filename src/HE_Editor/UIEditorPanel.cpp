@@ -33,6 +33,7 @@
 #include <UIWidget/UIElements.h>
 #include <UIWidget/UIWidgetBinding.h>
 #include <UIWidget/WidgetManager.h>               // design-time Pre Construct run (sandbox)
+#include <Renderer/IRenderer.h>                    // RenderUIPreview: the canvas drawn by the renderer
 #include <HorizonCode/HorizonCode.h>
 #include <HorizonCode/HorizonCodeRuntime.h>
 #include <ContentManager/ContentManager.h>
@@ -318,6 +319,10 @@ std::string elementName(const UIElement& e)
 // about either the theme or the mode.
 const HE::UITheme* g_previewTheme = nullptr;
 HE::UIThemeMode    g_previewMode  = HE::UIThemeMode::Dark;
+
+// True while the canvas shows the RENDERER's picture of the widget: the ImGui
+// replica below then draws only the designer's aids on top (drawElementPreview).
+bool g_aidsOnly = false;
 
 // A value the element holds, resolved through the theme when the theme has
 // something to say about it — a role binding, or the element's style.
@@ -3825,6 +3830,20 @@ void drawElementPreview(ImDrawList* dl, const UIElement& n, const ImVec2& mn,
                         float alpha = 1.0f, float dim = 1.0f,
                         const HE::UIWidgetTree* tree = nullptr)
 {
+	// Under the renderer's picture only what the runtime does NOT draw is left
+	// for ImGui: the bounds of boxes, grids and spacers, a slot's dashes, a
+	// list's ghost rows, a reference's outline. The rest is in the picture.
+	if (g_aidsOnly)
+		switch (n.type())
+		{
+		case UIWidgetType::Grid: case UIWidgetType::WrapBox:
+		case UIWidgetType::VerticalBox: case UIWidgetType::HorizontalBox:
+		case UIWidgetType::ListView: case UIWidgetType::Spacer:
+		case UIWidgetType::NamedSlot: case UIWidgetType::WidgetRef:
+			break;
+		default:
+			return;
+		}
 	// Every colour of the element itself goes through here: faded by the
 	// inherited opacity and knocked back while it is disabled, exactly as
 	// WidgetManager does it to the real quads.
@@ -3838,7 +3857,7 @@ void drawElementPreview(ImDrawList* dl, const UIElement& n, const ImVec2& mn,
 	// An Image is left out here and gets its outline AFTER the switch: its
 	// surface is the picture, which it draws itself (nine pieces when sliced),
 	// and a tinted rectangle under it would be a colour nobody authored.
-	if (n.hasSurfaceStyle() && n.type() != UIWidgetType::Image)
+	if (!g_aidsOnly && n.hasSurfaceStyle() && n.type() != UIWidgetType::Image)
 	{
 		// Which of its colours IS the surface. Every one of these types names it
 		// differently, and that name is the only thing they disagree about.
@@ -4902,6 +4921,137 @@ void drawEmbeddedTree(ImDrawList* dl, AppContext& ctx, const HE::UIWidgetTree& t
 	}
 }
 
+// ── The canvas through the renderer ──────────────────────────────────────────
+// The same tree, turned into the quads the RUNTIME would hand its renderer:
+// one HE::uiEmitElement per element (WidgetManager::extract's own producer),
+// assets resolved the way a live widget resolves them. The renderer then draws
+// them with the game's own UI pass, so materials, fonts, Pixelated, clipping,
+// shadows and rotation look here exactly as they will in play.
+//
+// `tree` is a COPY the caller may write to (theme applied, assets resolved).
+// `layout` is what the tree is laid out against (null = its authored canvas),
+// `kx`/`ky` turn one of its units into a target pixel and `off` is where its
+// origin lands in the target. `outer` is a clip in target pixels inherited from
+// whatever this tree sits in (w <= 0 = none). The recursion into embedded
+// widgets mirrors drawEmbeddedTree, so the picture and the aids drawn on top of
+// it put a component's elements in the same places.
+glm::vec4 intersectClip(const glm::vec4& a, const glm::vec4& b)
+{
+	if (a.z <= 0.0f) return b;
+	if (b.z <= 0.0f) return a;
+	const float x0 = std::max(a.x, b.x), y0 = std::max(a.y, b.y);
+	const float x1 = std::min(a.x + a.z, b.x + b.z), y1 = std::min(a.y + a.w, b.y + b.w);
+	return { x0, y0, std::max(0.0f, x1 - x0), std::max(0.0f, y1 - y0) };
+}
+
+void emitTreeQuads(AppContext& ctx, HE::UIWidgetTree& tree, const HE::UIWidgetCanvas* layout,
+                   float kx, float ky, const glm::vec2& off, const glm::vec4& outer,
+                   int depth, const HE::UIWidgetTree* host, const HE::UIWidgetRef* hostRef,
+                   int designOffset, std::vector<UIRenderObject>& out)
+{
+	// The page is depth 0, so this allows drawEmbeddedTree's four levels below it.
+	constexpr int kMaxDepth = 5;
+	if (depth > kMaxDepth) return;
+
+	// A slot the page has filled hides its default content — drawEmbeddedTree's
+	// rule, for the same reason.
+	if (host && hostRef)
+	{
+		std::vector<HE::UINamedSlot*> slots;
+		for (auto& sp : tree.elements)
+			if (auto* ns = sp ? dynamic_cast<HE::UINamedSlot*>(sp.get()) : nullptr)
+				slots.push_back(ns);
+		if (!slots.empty())
+			for (const auto& cp : host->elements)
+			{
+				if (!cp || cp->parentId != hostRef->id) continue;
+				HE::UINamedSlot* target = slots.front();
+				for (HE::UINamedSlot* ns : slots) if (ns->name == cp->name) { target = ns; break; }
+				target->filled = true;
+				target->ownIdFloor = 0;
+			}
+	}
+
+	std::unordered_map<int, HE::UUID> materials;
+	if (ctx.contentManager)
+		for (auto& ep : tree.elements)
+			if (ep)
+			{
+				const HE::UUID m = WidgetManager::resolveElementAssets(*ctx.contentManager, *ep);
+				if (m != HE::UUID{}) materials[ep->id] = m;
+			}
+
+	HE::UIWidgetCanvas canvas;
+	canvas.width  = layout ? layout->width  : tree.canvasWidth;
+	canvas.height = layout ? layout->height : tree.canvasHeight;
+	canvas.scaleX = kx;
+	canvas.scaleY = ky;
+
+	struct Item { UIElement* n; int key; HE::UIWidgetRect r; };
+	std::vector<Item> items;
+	for (const auto& ep : tree.elements)
+	{
+		UIElement& e = *ep;
+		if (!HE::uiElementEffectiveVisible(tree, e)) continue;
+		int d = 0;
+		for (const UIElement* c = &e; c->parentId != 0 && d < 255; ++d)
+		{
+			const UIElement* p = tree.find(c->parentId);
+			if (!p) break;
+			c = p;
+		}
+		items.push_back({ &e, e.layer * 256 + d, HE::uiElementRect(tree, e, layout) });
+	}
+	std::stable_sort(items.begin(), items.end(),
+		[](const Item& a, const Item& b){ return a.key < b.key; });
+
+	for (const Item& it : items)
+	{
+		const auto mit = materials.find(it.n->id);
+		const HE::UUID mat = mit != materials.end() ? mit->second : HE::UUID{};
+		const std::size_t first = out.size();
+		if (!HE::uiEmitElement(tree, *it.n, it.r, canvas, HE::UIElementRenderState{}, mat, out))
+			continue;
+		for (std::size_t i = first; i < out.size(); ++i)
+		{
+			UIRenderObject& q = out[i];
+			q.position += off;
+			q.rotationPivot += off;
+			if (q.clipRect.z > 0.0f && q.clipRect.w > 0.0f)
+			{ q.clipRect.x += off.x; q.clipRect.y += off.y; }
+			if (outer.z > 0.0f)
+			{
+				q.clipRect = intersectClip(q.clipRect, outer);
+				// Clipped away entirely: a zero-sized scissor would read as
+				// "unclipped" downstream, so the quad is made invisible instead.
+				if (q.clipRect.z <= 0.0f || q.clipRect.w <= 0.0f)
+				{ q.color.a = 0.0f; q.borderWidth = 0.0f; q.size = glm::vec2(0.0f); }
+			}
+		}
+
+		if (it.n->type() != UIWidgetType::WidgetRef) continue;
+		const auto* ref = dynamic_cast<const HE::UIWidgetRef*>(it.n);
+		const HE::UIWidgetTree* sub = embeddedTreeFor(ctx, it.n->getProp("Widget").s);
+		if (!sub) continue;
+		// The ref's own clip (from ITS ancestors) bounds everything inside it.
+		glm::vec4 inner = outer;
+		HE::UIWidgetRect clip{};
+		if (HE::uiElementClipRect(tree, *it.n, clip, layout))
+		{
+			inner = intersectClip(inner, { off.x + clip.x * kx, off.y + clip.y * ky,
+			                               std::max(0.0f, clip.w * kx), std::max(0.0f, clip.h * ky) });
+			if (inner.z <= 0.0f || inner.w <= 0.0f) continue;
+		}
+		const HE::UIWidgetCanvas subCanvas = embeddedCanvasFor(*sub, it.r.w, it.r.h);
+		const int subOffset = depth == 0 ? designOffsetOf(it.n->id)
+		                    : designOffset < 0 ? -1 : designOffsetOf(designOffset + it.n->id);
+		HE::UIWidgetTree laid = laidEmbeddedCopy(*sub, ref, subCanvas, subOffset);
+		emitTreeQuads(ctx, laid, &subCanvas, subCanvas.scaleX * kx, subCanvas.scaleY * ky,
+		              { off.x + it.r.x * kx, off.y + it.r.y * ky }, inner, depth + 1,
+		              depth == 0 ? &tree : nullptr, ref, subOffset, out);
+	}
+}
+
 // The open clip's values, in the tree for exactly as long as this object lives.
 // See the comment at its use in drawCanvas for why it is an RAII guard and not
 // a pair of calls.
@@ -5272,8 +5422,66 @@ void drawCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 	                  IM_COL32(28, 28, 30, 255));
 	dl->AddRectFilled(cTL, ImVec2(cTL.x + canvasPx.x, cTL.y + canvasPx.y),
 	                  IM_COL32(12, 12, 14, 255));
+
+	// Auto-sizing elements fit themselves before the rects resolve, so the
+	// designer shows the same box the runtime will (see uiApplyAutoSize).
+	HE::uiApplyAutoSize(st.tree, layoutCanvas);
+	// …and every WidgetRef learns where its component's slots are, so a child
+	// authored under it resolves into the slot below, not over the whole ref.
+	refreshDesignSlots(ctx, st.tree, layoutCanvas);
+
+	// ── The picture, drawn by the renderer ───────────────────────────────────
+	// The widget as the game will draw it: the tree's quads (emitTreeQuads)
+	// through the active backend's own UI pass, into a target the size of the
+	// VISIBLE part of the canvas in framebuffer pixels — sharp on a Retina
+	// screen and never larger than the panel, however far it is zoomed in.
+	// A backend without that path (nullptr) keeps the ImGui replica below.
 	const float grid = 64.0f * s;
-	if (grid > 8.0f)
+	void* canvasTex = nullptr;
+	ImVec2 visMn(std::max(cTL.x, origin.x), std::max(cTL.y, origin.y));
+	ImVec2 visMx(std::min(cTL.x + canvasPx.x, origin.x + avail.x),
+	             std::min(cTL.y + canvasPx.y, origin.y + avail.y));
+	if (ctx.renderer && visMx.x > visMn.x + 1.0f && visMx.y > visMn.y + 1.0f)
+	{
+		const ImVec2 fb = ImGui::GetIO().DisplayFramebufferScale;
+		const int tw = static_cast<int>(std::ceil((visMx.x - visMn.x) * fb.x));
+		const int th = static_cast<int>(std::ceil((visMx.y - visMn.y) * fb.y));
+		const glm::vec2 off((cTL.x - visMn.x) * fb.x, (cTL.y - visMn.y) * fb.y);
+		std::vector<UIRenderObject> quads;
+		// The grid goes in UNDER the widget, as hairline quads, so the picture
+		// can stay opaque and still have the grid behind it.
+		if (grid > 8.0f)
+			for (int axis = 0; axis < 2; ++axis)
+				for (float t = 0.0f; t <= (axis ? canvasPx.y : canvasPx.x) + 0.5f; t += grid)
+				{
+					UIRenderObject g;
+					g.color = { 1.0f, 1.0f, 1.0f, 10.0f / 255.0f };
+					g.position = axis ? glm::vec2(off.x, off.y + t * fb.y) : glm::vec2(off.x + t * fb.x, off.y);
+					g.size     = axis ? glm::vec2(canvasPx.x * fb.x, fb.y) : glm::vec2(fb.x, canvasPx.y * fb.y);
+					quads.push_back(g);
+				}
+		// A copy: the theme resolves bound colours INTO the tree at runtime, and
+		// the document must keep what the author wrote (see g_previewTheme).
+		HE::UIWidgetTree page = st.tree;
+		if (g_previewTheme) HE::uiApplyTheme(page, *g_previewTheme, g_previewMode);
+		HE::uiApplyAutoSize(page, layoutCanvas);
+		emitTreeQuads(ctx, page, layoutCanvas, s * fb.x, s * fb.y, off, glm::vec4(0.0f),
+		              0, nullptr, nullptr, -1, quads);
+		// One target per designer drawn this frame: two docked side by side
+		// must not show each other's picture (IRenderer::kUIPreviewSlots).
+		static int slotFrame = -1, slotNext = 0;
+		if (slotFrame != ImGui::GetFrameCount()) { slotFrame = ImGui::GetFrameCount(); slotNext = 0; }
+		canvasTex = ctx.renderer->RenderUIPreview(quads, static_cast<uint32_t>(tw),
+			static_cast<uint32_t>(th), glm::vec4(12.0f / 255.0f, 12.0f / 255.0f, 14.0f / 255.0f, 1.0f),
+			static_cast<uint32_t>(slotNext++));
+	}
+	if (canvasTex)
+	{
+		const bool flipY = (ctx.backend == HE::RendererBackend::OpenGL);
+		dl->AddImage(reinterpret_cast<ImTextureID>(canvasTex), visMn, visMx,
+		             flipY ? ImVec2(0, 1) : ImVec2(0, 0), flipY ? ImVec2(1, 0) : ImVec2(1, 1));
+	}
+	else if (grid > 8.0f)
 	{
 		for (float x = cTL.x; x <= cTL.x + canvasPx.x + 0.5f; x += grid)
 			dl->AddLine(ImVec2(x, cTL.y), ImVec2(x, cTL.y + canvasPx.y), IM_COL32(255,255,255,10));
@@ -5282,13 +5490,9 @@ void drawCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 	}
 	dl->AddRect(cTL, ImVec2(cTL.x + canvasPx.x, cTL.y + canvasPx.y),
 	            IM_COL32(90, 90, 100, 255));
-
-	// Auto-sizing elements fit themselves before the rects resolve, so the
-	// designer shows the same box the runtime will (see uiApplyAutoSize).
-	HE::uiApplyAutoSize(st.tree, layoutCanvas);
-	// …and every WidgetRef learns where its component's slots are, so a child
-	// authored under it resolves into the slot below, not over the whole ref.
-	refreshDesignSlots(ctx, st.tree, layoutCanvas);
+	// The replica below now draws only what the picture does not contain;
+	// switched back off right after the element loop.
+	g_aidsOnly = canvasTex != nullptr;
 
 	// Paint order: (layer, depth) ascending — same rule as the runtime.
 	struct DrawItem { const UIElement* n; int layer; int depth; Rect r; };
@@ -5353,6 +5557,7 @@ void drawCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 		if (clipped) dl->PopClipRect();
 	}
 	dl->PopClipRect();
+	g_aidsOnly = false;
 
 	// What the Pre Construct sandbox turned down, where the author is looking:
 	// a value the graph would load at runtime is missing on the canvas, and

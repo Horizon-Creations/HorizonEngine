@@ -148,6 +148,9 @@ public:
 	                              uint32_t size, std::vector<uint8_t>& outRgba8) override;
 	bool  RenderWidgetThumbnail(const std::vector<UIRenderObject>& uiObjects,
 	                            uint32_t size, std::vector<uint8_t>& outRgba8) override;
+	void* RenderUIPreview(const std::vector<UIRenderObject>& uiObjects,
+	                      uint32_t width, uint32_t height,
+	                      const glm::vec4& clear, uint32_t slot) override;
 	void  InvalidateMesh    (const HE::UUID& meshId)     override;
 	void  InvalidateTexture (const HE::UUID& textureId)  override;
 	void  SetBloomSettings(const BloomSettings& settings) override;
@@ -938,6 +941,11 @@ private:
 	void* m_thumbUIColorTex = nullptr; // id<MTLTexture> (retained), BGRA8
 	void* m_thumbUIDepthTex = nullptr; // id<MTLTexture> (retained)
 	int   m_thumbUISize     = 0;
+	// RenderUIPreview's targets, one per slot (IRenderer::kUIPreviewSlots): the
+	// swapchain format for the same reason as the thumbnail target above, plus
+	// the depth attachment the UI pipelines declare.
+	struct UIPreviewTarget { void* color = nullptr; void* depth = nullptr; int w = 0, h = 0; };
+	UIPreviewTarget m_uiPreview[IRenderer::kUIPreviewSlots];
 	// Unskinned mesh pipeline shared by the mesh thumbnails and by materials that
 	// have no node graph (built-in PBR): the counterpart of m_skelPreviewPipeline
 	// with the bone buffers removed and a metallic/roughness-driven highlight.
