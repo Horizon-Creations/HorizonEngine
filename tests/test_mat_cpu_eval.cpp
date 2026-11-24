@@ -4,6 +4,7 @@
 #include <ContentManager/ContentManager.h>
 #include <MaterialGraph/MatCpuEval.h>
 #include <MaterialGraph/MaterialGraph.h>
+#include <Backends/Software/SoftwareRenderer.h>
 
 #include <algorithm>
 #include <cmath>
@@ -50,7 +51,7 @@ namespace
         return p.eval(e, uv, color, time, HE::MatCpuHooks{}, discard);
     }
 
-    bool near(float a, float b) { return std::abs(a - b) < 1e-5f; }
+    bool approx(float a, float b) { return std::abs(a - b) < 1e-5f; }
 }
 
 TEST_CASE("CPU material: arithmetic and coercion follow the codegen")
@@ -76,9 +77,9 @@ TEST_CASE("CPU material: arithmetic and coercion follow the codegen")
     std::string err;
     REQUIRE_MESSAGE(p.compile(m.g, {}, nullptr, &err), err);
     const glm::vec4 c = run(p, { 0.25f, 0.9f });
-    CHECK(near(c.r, 0.75f));
-    CHECK(near(c.b, 0.25f));
-    CHECK(near(c.a, 1.0f));          // 0.25 / 1e-5, saturated
+    CHECK(approx(c.r, 0.75f));
+    CHECK(approx(c.b, 0.25f));
+    CHECK(approx(c.a, 1.0f));          // 0.25 / 1e-5, saturated
 }
 
 TEST_CASE("CPU material: logic, Step, Smoothstep, Checker and If as the GPU computes them")
@@ -112,12 +113,12 @@ TEST_CASE("CPU material: logic, Step, Smoothstep, Checker and If as the GPU comp
     HE::MatCpuProgram p;
     REQUIRE(p.compile(m.g));
     const glm::vec4 a = run(p, { 0.1f, 0.1f });   // checker cell (0,0) → 0
-    CHECK(near(a.g, 1.0f));
-    CHECK(near(a.r, 0.0f));
-    CHECK(near(a.b, 0.0f));
-    CHECK(near(a.a, 1.0f));
+    CHECK(approx(a.g, 1.0f));
+    CHECK(approx(a.r, 0.0f));
+    CHECK(approx(a.b, 0.0f));
+    CHECK(approx(a.a, 1.0f));
     const glm::vec4 b = run(p, { 0.6f, 0.1f });   // cell (1,0) → 1
-    CHECK(near(b.b, 1.0f));
+    CHECK(approx(b.b, 1.0f));
 }
 
 TEST_CASE("CPU material: functions inline with their authored defaults; switches resolve")
@@ -148,10 +149,10 @@ TEST_CASE("CPU material: functions inline with their authored defaults; switches
 
     HE::MatCpuProgram p;
     REQUIRE(p.compile(m.g, loader));
-    CHECK(near(run(p).r, 0.5f));      // 0.25 * 2, splatted
+    CHECK(approx(run(p).r, 0.5f));      // 0.25 * 2, splatted
     std::map<std::string, bool> off{ { "Flip", false } };
     REQUIRE(p.compile(m.g, loader, &off));
-    CHECK(near(run(p).r, 0.0f));
+    CHECK(approx(run(p).r, 0.0f));
 }
 
 TEST_CASE("CPU material: parameters come from the asset by name, Bool thresholded")
@@ -166,11 +167,11 @@ TEST_CASE("CPU material: parameters come from the asset by name, Bool thresholde
 
     HE::MatCpuProgram p;
     REQUIRE(p.compile(m.g));
-    CHECK(near(run(p).g, 0.2f));    // authored default before anything is bound
-    CHECK(near(run(p).a, 0.0f));
+    CHECK(approx(run(p).g, 0.2f));    // authored default before anything is bound
+    CHECK(approx(run(p).a, 0.0f));
     p.bindParams({ "On", "Tint" }, { 0.7f, 0, 0, 0,   0.9f, 0.8f, 0.7f, 0 });
-    CHECK(near(run(p).r, 0.9f));
-    CHECK(near(run(p).a, 1.0f));     // 0.7 → step(0.5, 0.7)
+    CHECK(approx(run(p).r, 0.9f));
+    CHECK(approx(run(p).a, 1.0f));     // 0.7 → step(0.5, 0.7)
 }
 
 TEST_CASE("CPU material: the element inputs, Masked discard, and refusing what needs a world")
@@ -196,8 +197,8 @@ TEST_CASE("CPU material: the element inputs, Masked discard, and refusing what n
     bool discard = false;
     const glm::vec4 mid = p.eval(e, { 0.5f, 0.5f }, glm::vec3(1.0f), 0.0f, {}, discard);
     CHECK_FALSE(discard);
-    CHECK(near(mid.r, 1.0f));
-    CHECK(near(mid.b, 0.5f));
+    CHECK(approx(mid.r, 1.0f));
+    CHECK(approx(mid.b, 0.5f));
     p.eval(e, { 0.005f, 0.005f }, glm::vec3(1.0f), 0.0f, {}, discard);
     CHECK(discard);
 
@@ -258,3 +259,46 @@ TEST_CASE("CPU material: every shipped UI effect compiles for the CPU")
     }
 }
 #endif
+
+// The software renderer end to end: a material asset (graph → generated param
+// block, as the editor saves it) on a quad, drawn through RasterizeUI. A
+// parameter set later — what a script's setMaterialParam does — changes the
+// picture while every quad stays the same, so the renderer must say so once
+// (a frame painted whole), draw the new value, and then stop saying it.
+TEST_CASE("CPU material: a changed parameter repaints, once")
+{
+    ContentManager cm;
+    G m(HE::MatBlendMode::Opaque);
+    const int col = m.add(MatNodeType::ParamColor, 1.0f, 0.0f, 0.0f);
+    m.g.findNode(col)->s = "Tint";
+    m.link(col, 0, m.out, HE::kMatOutputBaseColorPin);
+    MaterialAsset ma;
+    ma.name = "ParamWitness"; ma.path = "ParamWitness.hasset";
+    ma.nodeGraphJson = HE::materialGraphToJson(m.g);
+    const HE::UUID id = cm.registerMaterial(std::move(ma));
+    REQUIRE(id != HE::UUID{});
+    cm.regenerateMaterialFromGraph(id);
+    REQUIRE(cm.getMaterial(id)->graphParamNames.size() == 1);
+
+    SoftwareRenderer sw;
+    sw.Initialize(nullptr);
+    sw.SetContentManager(&cm);
+    UIRenderObject q;
+    q.position = { 0, 0 }; q.size = { 8, 8 }; q.materialAssetId = id;
+    std::vector<uint8_t> px;
+    bool animated = false;
+    REQUIRE(sw.RasterizeUI({ q }, 8, 8, glm::vec4(0, 0, 0, 1), px, &animated));
+    CHECK(animated);                 // first sight: compiled, a new picture
+    CHECK(px[0] == 255);
+    REQUIRE(sw.RasterizeUI({ q }, 8, 8, glm::vec4(0, 0, 0, 1), px, &animated));
+    CHECK_FALSE(animated);           // nothing changed
+
+    cm.getMaterialMutable(id)->shaderParamData[0] = 0.0f;   // Tint → blue
+    cm.getMaterialMutable(id)->shaderParamData[2] = 1.0f;
+    REQUIRE(sw.RasterizeUI({ q }, 8, 8, glm::vec4(0, 0, 0, 1), px, &animated));
+    CHECK(animated);
+    CHECK(px[0] == 0);
+    CHECK(px[2] == 255);
+    REQUIRE(sw.RasterizeUI({ q }, 8, 8, glm::vec4(0, 0, 0, 1), px, &animated));
+    CHECK_FALSE(animated);
+}

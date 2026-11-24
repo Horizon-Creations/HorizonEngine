@@ -119,6 +119,7 @@ HE::sw::MaterialView SoftwareRenderer::resolveMaterial(const HE::UUID& id, void*
     {
         e = CpuMaterial{};
         e.graphJson = json; e.switchNames = swNames; e.switchValues = swValues; e.compiled = true;
+        e.changed = true;   // a recompiled material is a new picture
         HE::MaterialGraph graph;
         std::string error;
         bool ok = HE::materialGraphFromJson(json, graph);
@@ -150,6 +151,7 @@ HE::sw::MaterialView SoftwareRenderer::resolveMaterial(const HE::UUID& id, void*
     }
     if (!e.program.valid()) return {};
     e.program.bindParams(paramNames, paramData);
+    if (paramData != e.drawnParams) { e.drawnParams = paramData; e.changed = true; }
     e.views.clear();
     for (const HE::UUID& tid : e.textureIds)
         e.views.push_back(tid == HE::UUID{} ? HE::sw::TextureView{} : resolveTexture(tid, r));
@@ -174,12 +176,20 @@ HE::sw::DrawOptions SoftwareRenderer::drawOptions(const std::vector<UIRenderObje
     o.time = static_cast<float>(SDL_GetTicks()) / 1000.0f;
     if (animated)
     {
+        // A material that reads the clock or the backdrop, or one whose graph or
+        // parameters changed since the last frame (a script's setMaterialParam):
+        // the quads alone cannot tell, so the frame is painted whole.
         *animated = false;
         for (const UIRenderObject& q : quads)
             if (q.type == 0 && q.materialAssetId != HE::UUID{})
             {
                 const HE::sw::MaterialView mv = resolveMaterial(q.materialAssetId, this);
-                if (mv.program && (mv.program->usesTime() || mv.program->usesBackdrop())) { *animated = true; break; }
+                if (mv.program && (mv.program->usesTime() || mv.program->usesBackdrop())) *animated = true;
+                if (auto it = m_materials.find(q.materialAssetId); it != m_materials.end() && it->second.changed)
+                {
+                    *animated = true;
+                    it->second.changed = false;
+                }
             }
     }
     return o;

@@ -14141,7 +14141,8 @@ void EditorApplication::setupMcpTools()
 	// The same node set the Material Editor's add menu offers (MaterialEditorPanel
 	// ::cpuNodesOnly): with Advanced Shader Effects off, what the CPU can run.
 	material.cpuNodesOnly = [this] {
-		return !m_projectManager.currentProject().advancedShaderEffects;
+		const auto& proj = m_projectManager.currentProject();
+		return proj.appProject && !proj.advancedShaderEffects;
 	};
 	material.publishCreate = [this](const std::string& rel, const std::string& abs) {
 		if (m_collab.inSession()) m_collab.publishAssetCreate(rel, abs);

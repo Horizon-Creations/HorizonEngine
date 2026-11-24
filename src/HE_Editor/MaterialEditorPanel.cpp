@@ -142,7 +142,10 @@ const HE::MaterialGraph* loadFunctionGraph(AppContext& ctx, const std::string& r
 // toolbar says whether the graph as it stands runs there.
 bool cpuNodesOnly(AppContext& ctx)
 {
-	return ctx.projectManager && !ctx.projectManager->currentProject().advancedShaderEffects;
+	// The export's rule (BackendRules::forExport): only an APPLICATION with the
+	// switch off ships the software renderer; a game always has a GPU one.
+	return ctx.projectManager && ctx.projectManager->currentProject().appProject &&
+	       !ctx.projectManager->currentProject().advancedShaderEffects;
 }
 
 // Why the software renderer cannot run this graph, or "" when it can. A

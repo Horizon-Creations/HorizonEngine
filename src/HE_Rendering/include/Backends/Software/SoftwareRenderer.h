@@ -115,6 +115,11 @@ private:
         std::vector<HE::UUID> textureIds;                  // program.textures() resolved
         std::vector<HE::sw::TextureView> views;            // this frame's views of them
         bool compiled = false, warned = false;
+        // What it was last drawn with, and whether that changed since the last
+        // frame asked: a parameter a script set changes the picture while every
+        // quad stays the same, so the dirty-rectangle diff alone would miss it.
+        std::vector<float> drawnParams;
+        bool changed = false;
     };
     std::unordered_map<HE::UUID, CpuMaterial> m_materials;
     std::unordered_map<std::string, HE::MaterialGraph> m_functions;   // parsed, by path

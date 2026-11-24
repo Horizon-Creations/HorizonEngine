@@ -5,6 +5,9 @@
 #include <Renderer/UIRenderObject.h>
 #include <UIWidget/UIElements.h>
 #include <UIWidget/UIWidgetTree.h>
+#include <UIWidget/WidgetManager.h>
+#include <ContentManager/Assets.h>
+#include <ContentManager/ContentManager.h>
 
 #include <cstdint>
 #include <string>
@@ -346,4 +349,72 @@ TEST_CASE("UI Image sprite sheet: the clock picks the cell, json only when on")
 	CHECK(back->sheetColumns == 3);
 	CHECK(back->sheetRows == 1);
 	CHECK(back->sheetFps == doctest::Approx(8.0f));
+}
+
+// The sheet through the real path: a widget whose Image plays a 2x2 sheet keeps
+// the manager animating, two moments of its clock extract two different cells,
+// and frame 0 is the picture's TOP-LEFT quarter in pixels — the row order a
+// sheet is authored in, whatever way up the texture is stored.
+TEST_CASE("UI Image sprite sheet: animates through the widget manager, frame 0 is the top-left cell")
+{
+	const std::vector<std::uint8_t> tex = distinctTexels(4, 4);
+	ContentManager cm;
+	{
+		TextureAsset ta;
+		ta.name = "Sheet"; ta.path = "Sheet.hasset";
+		ta.width = 4; ta.height = 4; ta.channels = 4;
+		ta.data = tex;
+		REQUIRE(cm.registerTexture(std::move(ta)) != HE::UUID{});
+	}
+	HE::UIWidgetTree t;
+	t.canvasWidth = 64.0f; t.canvasHeight = 64.0f;
+	{
+		HE::UIElement& e = *t.find(t.add(HE::UIWidgetType::Image));
+		HE::uiSetAnchorPreset(e, 0);
+		e.pivotX = e.pivotY = 0.0f;
+		e.posX = 0; e.posY = 0; e.sizeX = 64; e.sizeY = 64;
+		e.texture = "Sheet.hasset";
+		e.setProp("Sheet Columns", HE::UIPropValue::ofInt(2));
+		e.setProp("Sheet Rows", HE::UIPropValue::ofInt(2));
+		e.setProp("Sheet FPS", HE::UIPropValue::ofFloat(4.0f));
+	}
+	UIWidgetAsset wa;
+	wa.name = "SheetPage"; wa.path = "SheetPage.hasset";
+	wa.treeJson = HE::uiWidgetTreeToJson(t);
+	REQUIRE(cm.registerWidget(std::move(wa)) != HE::UUID{});
+
+	WidgetManager wm;
+	const int id = wm.createWidget(cm, "SheetPage.hasset");
+	REQUIRE(id != 0);
+	wm.showWidget(id);
+	wm.tick(0.01f);
+	CHECK(wm.isAnimating());
+	std::vector<UIRenderObject> a, b;
+	wm.extract(64.0f, 64.0f, a);
+	wm.tick(0.3f);                        // 0.31 s at 4 fps: frame 1
+	wm.extract(64.0f, 64.0f, b);
+	REQUIRE(a.size() == 1);
+	REQUIRE(b.size() == 1);
+	CHECK(a[0].uvMin != b[0].uvMin);
+
+	// Frame 0 against the whole picture: its texel (0,0) of the top-left
+	// quarter fills (0..32, 0..32) here and (0..16, 0..16) there.
+	HE::UIImage sheet, plain;
+	sheet.textureAssetId = plain.textureAssetId = HE::UUID{ 5, 6 };
+	sheet.sheetColumns = sheet.sheetRows = 2;
+	const Src src{ tex.data(), 4, 4 };
+	const HE::UIWidgetRect box{ 0.0f, 0.0f, 64.0f, 64.0f };
+	const HE::sw::Image f0 = rasterise(sheet, box, src);
+	const HE::sw::Image whole = rasterise(plain, box, src);
+	// ±8: the blue channel alternates texel by texel, and the two drawings
+	// sample it at different sub-pixel offsets; red and green name the cell.
+	auto close = [&](int ax, int ay, int bx, int by)
+	{
+		const Rgb p = px(f0, ax, ay), q = px(whole, bx, by);
+		return std::abs(p.r - q.r) <= 8 && std::abs(p.g - q.g) <= 8 && std::abs(p.b - q.b) <= 8;
+	};
+	CHECK(close(16, 16, 8, 8));
+	CHECK(close(48, 16, 24, 8));
+	CHECK(close(16, 48, 8, 24));
+	CHECK_FALSE(close(16, 16, 8, 40));   // not the bottom-left quarter
 }
