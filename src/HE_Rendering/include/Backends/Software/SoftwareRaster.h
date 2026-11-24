@@ -69,11 +69,28 @@ float roundedBoxSDF(float px, float py, float halfW, float halfH,
 // CPU anyway (TextureAsset keeps its bytes), so the rasterizer needs no upload
 // path — only somebody who knows how to turn an asset id into these four
 // numbers, which is the shell's job and not this file's.
-struct TextureView
+struct TextureLevel
 {
     const std::uint8_t* rgba = nullptr;   // width * height * 4, row-major
     int width = 0, height = 0;
 };
+struct TextureView
+{
+    const std::uint8_t* rgba = nullptr;   // width * height * 4, row-major
+    int width = 0, height = 0;
+    // Smaller copies, each half the one before, down to 1x1 (level 1 first).
+    // Optional: without them a picture drawn much smaller than it is samples
+    // only four of the many texels under a pixel, and shimmers. With them the
+    // rasterizer picks the two levels that match the on-screen size and blends
+    // them, which is what a GPU's trilinear filter does.
+    const TextureLevel* mips = nullptr;
+    int mipCount = 0;
+};
+// Box-filters `base` (w x h RGBA8) down to 1x1, appending every level after the
+// base to `out` (out[0] is level 1). The caller keeps the bytes and points
+// TextureView::mips into them.
+void buildMipChain(const std::uint8_t* base, int w, int h,
+                   std::vector<std::vector<std::uint8_t>>& out);
 using TextureResolver = TextureView (*)(const HE::UUID& id, void* user);
 
 // Draw `objects` over whatever `target` already holds. The caller owns the
@@ -84,10 +101,16 @@ using TextureResolver = TextureView (*)(const HE::UUID& id, void* user);
 // same, only less of it reaches the image.
 //
 // `tex` resolves a quad's texture; null means no quad has one, which is what a
-// test that only cares about Schicht 0 passes.
+// test that only cares about Schicht 0 passes. It is only ever called on the
+// calling thread, before any pixel is written.
+//
+// A large region is split into horizontal stripes drawn on the job pool. Every
+// pixel still sees the quads in list order, so the picture is the same byte for
+// byte as a single-threaded one; `threads = false` forces that single thread.
 void draw(Image& target, const std::vector<UIRenderObject>& objects,
           const glm::vec4& clip = glm::vec4(0.0f),
-          TextureResolver tex = nullptr, void* texUser = nullptr);
+          TextureResolver tex = nullptr, void* texUser = nullptr,
+          bool threads = true);
 
 // Every pixel a quad can possibly touch, as {x, y, w, h}. Wider than the quad's
 // own rectangle by design: a rotated quad's corners swing out past it, and a

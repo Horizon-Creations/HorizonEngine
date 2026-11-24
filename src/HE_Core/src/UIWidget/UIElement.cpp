@@ -636,6 +636,7 @@ const UIPropTable& UIImage::propTable() const
         uiprop::slot<&UIImage::sliceFillCentre>({ "Slice Fill Centre", UIPropType::Bool }),
         uiprop::slot<&UIImage::flipH>({ "Flip Horizontal", UIPropType::Bool }),
         uiprop::slot<&UIImage::flipV>({ "Flip Vertical",   UIPropType::Bool }),
+        uiprop::slot<&UIImage::pixelated>({ "Pixelated", UIPropType::Bool }),
     };
     return t;
 }
@@ -1287,6 +1288,8 @@ void UIImage::render(const UIWidgetRect& px, const UIElementRenderState& rs,
 {
     const std::size_t first = out.size();
     renderUnflipped(px, rs, mat, pxScaleY, out);
+    if (pixelated)
+        for (std::size_t i = first; i < out.size(); ++i) out[i].pixelated = true;
     if (!flipH && !flipV) return;
     // Flip is a mirror of what was just emitted, piece by piece, inside the
     // element's own box: each quad moves to its mirrored place and reads its
@@ -2853,6 +2856,7 @@ void UIImage::writeJson(nlohmann::json& j) const
     // The same bargain: an unflipped image writes neither key.
     if (flipH) j["flipH"] = true;
     if (flipV) j["flipV"] = true;
+    if (pixelated) j["pixelated"] = true;
 }
 void UIImage::readJson(const nlohmann::json& j)
 {
@@ -2865,6 +2869,7 @@ void UIImage::readJson(const nlohmann::json& j)
     sliceFillCentre = j.value("sliceFillCentre", sliceFillCentre);
     flipH = j.value("flipH", false);
     flipV = j.value("flipV", false);
+    pixelated = j.value("pixelated", false);
 }
 
 void UIText::writeJson(nlohmann::json& j) const

@@ -244,3 +244,54 @@ TEST_CASE("UI Image flip on a 9-slice, rasterised: the left border ends up on th
 	CHECK(same(px(f, 62, 32), { 255, 0, 0 }));
 	CHECK(same(px(f, 0, 32), { 128, 128, 128 }));
 }
+
+// ── Pixelated ────────────────────────────────────────────────────────────────
+// Off by default and absent from json until switched on, like Flip; on, every
+// quad the image emits carries it, and the picture comes out in hard squares.
+TEST_CASE("UI Image pixelated: a property, saved only when on, and drawn without smoothing")
+{
+	HE::UIImage img;
+	CHECK_FALSE(img.pixelated);
+	img.setProp("Pixelated", HE::UIPropValue::ofBool(true));
+	CHECK(img.pixelated);
+	CHECK(img.clone()->getProp("Pixelated").b);
+
+	HE::UIWidgetTree t;
+	const int id = t.add(HE::UIWidgetType::Image);
+	CHECK(HE::uiWidgetTreeToJson(t).find("pixelated") == std::string::npos);
+	auto* e = dynamic_cast<HE::UIImage*>(t.find(id));
+	REQUIRE(e != nullptr);
+	e->pixelated = true;
+	{
+		HE::UIWidgetTree r;
+		REQUIRE(HE::uiWidgetTreeFromJson(HE::uiWidgetTreeToJson(t), r));
+		auto* back = dynamic_cast<HE::UIImage*>(r.find(id));
+		REQUIRE(back != nullptr);
+		CHECK(back->pixelated);
+	}
+	HE::UIImage over;
+	over.pixelated = true;
+	over.readJson(nlohmann::json::object());
+	CHECK_FALSE(over.pixelated);
+
+	// 4x4 distinct texels on 64x64: each texel is a 16x16 block. One pixel
+	// inside a block's edge, nearest gives that block's own colour exactly,
+	// where linear has already started blending toward the neighbour.
+	const std::vector<std::uint8_t> tex = distinctTexels(4, 4);
+	const Src src{ tex.data(), 4, 4 };
+	const HE::UIWidgetRect box{ 0.0f, 0.0f, 64.0f, 64.0f };
+	HE::UIImage soft;
+	soft.textureAssetId = HE::UUID{ 1, 2 };
+	HE::UIImage hard = soft;
+	hard.pixelated = true;
+	std::vector<UIRenderObject> quads;
+	hard.render(box, HE::UIElementRenderState{}, HE::UUID{}, 1.0f, quads);
+	REQUIRE_FALSE(quads.empty());
+	for (const UIRenderObject& q : quads) CHECK(q.pixelated);
+
+	const HE::sw::Image s = rasterise(soft, box, src);
+	const HE::sw::Image h = rasterise(hard, box, src);
+	CHECK(same(h, 15, 8, h, 8, 8));     // the whole block one colour…
+	CHECK_FALSE(same(s, 15, 8, s, 8, 8)); // …where smoothing has already moved
+	CHECK_FALSE(same(h, 15, 8, h, 16, 8)); // and the next block is the next texel
+}

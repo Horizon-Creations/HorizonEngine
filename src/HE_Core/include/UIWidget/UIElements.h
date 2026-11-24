@@ -60,6 +60,11 @@ public:
     // frame is mirrored as a whole, not re-cut. One arrow texture pointing both
     // ways, one corner ornament for all four corners.
     bool  flipH = false, flipV = false;
+    // ── Pixelated ────────────────────────────────────────────────────────────
+    // Reads the picture without smoothing: every texel stays a hard-edged square
+    // however large the element is drawn. Off (the default) blends neighbouring
+    // texels, which is right for photos and wrong for pixel art.
+    bool  pixelated = false;
 
     UIImage() { sizeX = 128.0f; sizeY = 128.0f; }
     UIWidgetType type() const override { return UIWidgetType::Image; }

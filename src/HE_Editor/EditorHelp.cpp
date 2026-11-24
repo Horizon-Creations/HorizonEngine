@@ -7130,6 +7130,13 @@ namespace
 	  "whole frame is mirrored, so the Slice Left margin ends up on the right edge. "
 	  "The editor preview and the running game flip the same way.",
 	  "", "ui#elements" },
+	{ "UI Widget/Pixelated", "",
+	  "Draws the image without smoothing: every pixel of the picture stays a sharp "
+	  "square however large the element is, which is what pixel art wants. Off "
+	  "blends neighbouring pixels, which suits photos and icons. The designer "
+	  "preview always draws smoothed; Play and the exported game show the setting "
+	  "(Software, Metal and OpenGL; Vulkan and Direct3D still smooth).",
+	  "", "ui#elements" },
 	{ "UI Widget/Flip Vertical", "",
 	  "Mirrors the image top to bottom inside its box. Combined with Flip "
 	  "Horizontal it is the picture turned half a circle. On a 9-sliced image the "

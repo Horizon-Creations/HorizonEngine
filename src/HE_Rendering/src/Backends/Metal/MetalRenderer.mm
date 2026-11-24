@@ -1480,8 +1480,10 @@ fragment float4 uiFragment(UIVert in [[stage_in]],
         return float4(color.rgb, color.a * a);
     }
     if (shape.x > 1.5) {
+        // 3 = "Pixelated": nearest, and no mip filter, so the base level's texel.
         constexpr sampler s(filter::linear);
-        float4 t = atlas.sample(s, in.uv);
+        constexpr sampler sn(filter::nearest);
+        float4 t = shape.x > 2.5 ? atlas.sample(sn, in.uv) : atlas.sample(s, in.uv);
         float4 c = float4(color.rgb * t.rgb, color.a * t.a);
         if (shape.y <= 0.0) return c;
         // A rounded image is the same SDF the solid path uses, applied to the
@@ -15902,7 +15904,7 @@ void* MetalRenderer::EncodeUIPass(void* renderEncoderPtr, int width, int height,
 		// shape = { mode, maxCornerRadius, rectW, rectH } (see uiFragment): the
 		// maximum is what the "is this rounded at all" fast path asks, the four
 		// radii themselves go in their own slot.
-		const float mode = obj.type == 2 ? 1.0f : (textured ? 2.0f : 0.0f);
+		const float mode = obj.type == 2 ? 1.0f : (textured ? (obj.pixelated ? 3.0f : 2.0f) : 0.0f);
 		const float maxR = std::max(std::max(obj.cornerRadius.x, obj.cornerRadius.y),
 		                            std::max(obj.cornerRadius.z, obj.cornerRadius.w));
 		const simd::float4 shape = { mode, maxR, obj.size.x, obj.size.y };

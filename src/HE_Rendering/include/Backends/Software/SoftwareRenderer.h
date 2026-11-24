@@ -76,9 +76,19 @@ private:
     // WidgetManager knows the window as (0 = the main one).
     void renderTarget(Target& t, uint32_t windowId);
 
-    // A block-compressed texture (ASTC on macOS, BCn elsewhere) expanded once to
-    // RGBA8. `src` is the asset's payload it came from, so a reloaded asset decodes again.
-    struct Decoded { const void* src = nullptr; std::vector<std::uint8_t> rgba; int w = 0, h = 0; };
+    // A texture as the rasterizer samples it: the base level (a block-compressed
+    // one, ASTC on macOS or BCn elsewhere, expanded once to RGBA8 into `rgba`; an
+    // RGBA8 one read in place through `base`) plus a box-filtered mip chain.
+    // `src` is the asset's payload it came from, so a reloaded asset is redone.
+    struct Decoded
+    {
+        const void* src = nullptr;
+        std::vector<std::uint8_t> rgba;
+        const std::uint8_t* base = nullptr;
+        int w = 0, h = 0;
+        std::vector<std::vector<std::uint8_t>> mipBytes;
+        std::vector<HE::sw::TextureLevel>      mips;
+    };
     std::unordered_map<HE::UUID, Decoded> m_decoded;
     static HE::sw::TextureView resolveTexture(const HE::UUID& id, void* self);
 

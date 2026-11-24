@@ -18,6 +18,10 @@ struct UIRenderObject {
     // is no whole-string kind; 1 is unused and left as a hole to keep the values
     // that every backend already branches on stable.
     uint8_t     type      = 0;
+    // How a textured quad (type 0 with a texture) reads its picture: false =
+    // linear, the smooth default; true = nearest, every texel a hard-edged
+    // square, which is what pixel art enlarged wants (UIImage "Pixelated").
+    bool        pixelated = false;
     int         layer     = 0;
     glm::vec2   uvMin     = {0.0f, 0.0f}; // glyph quads: atlas UV rect
     glm::vec2   uvMax     = {0.0f, 0.0f};

@@ -3290,8 +3290,9 @@ float heMaxRadius(vec4 radii)
     return max(max(radii.x, radii.y), max(radii.z, radii.w));
 }
 // uMode: 0 = solid colour, 1 = font-atlas glyph (alpha from .r), 2 = textured
-// quad (RGBA, tinted by uColor). Modes 1 and 2 share the sampler: a glyph run
-// binds the atlas on unit 0, an image its own texture.
+// quad (RGBA, tinted by uColor), 3 = the same with no filtering ("Pixelated":
+// the base-level texel the point falls in). Modes 1-3 share the sampler: a
+// glyph run binds the atlas on unit 0, an image its own texture.
 void main()
 {
     if (uMode > 0.5 && uMode < 1.5)
@@ -3302,7 +3303,15 @@ void main()
     }
     if (uMode > 1.5)
     {
-        vec4 t = texture(uFontAtlas, vUV);
+        vec4 t;
+        if (uMode > 2.5)
+        {
+            ivec2 sz = textureSize(uFontAtlas, 0);
+            ivec2 tc = clamp(ivec2(clamp(vUV, 0.0, 1.0) * vec2(sz)), ivec2(0), sz - 1);
+            t = texelFetch(uFontAtlas, tc, 0);
+        }
+        else
+            t = texture(uFontAtlas, vUV);
         vec4 c = vec4(uColor.rgb * t.rgb, uColor.a * t.a);
         if (heMaxRadius(uCornerRadius) <= 0.0) { FragColor = c; return; }
         // A rounded image is the solid path's SDF applied to the sampled alpha.
@@ -8543,7 +8552,7 @@ void OpenGLRenderer::RenderUIPass(int pw, int ph)
 		glUniform4f(m_uUIColor, obj.color.r, obj.color.g, obj.color.b, obj.color.a);
 		glUniform4f(m_uUIUVRect, obj.uvMin.x, obj.uvMin.y, obj.uvMax.x, obj.uvMax.y);
 		glUniform4f(m_uUIRotation, obj.rotation, obj.rotationPivot.x, obj.rotationPivot.y, 0.0f);
-		glUniform1f(m_uUIMode, obj.type == 2 ? 1.0f : (textured ? 2.0f : 0.0f));
+		glUniform1f(m_uUIMode, obj.type == 2 ? 1.0f : (textured ? (obj.pixelated ? 3.0f : 2.0f) : 0.0f));
 		glUniform4f(m_uUICornerRadius, obj.cornerRadius.x, obj.cornerRadius.y,
 		            obj.cornerRadius.z, obj.cornerRadius.w);
 		glUniform1f(m_uUIBorderWidth, obj.borderWidth);

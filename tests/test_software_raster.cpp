@@ -674,3 +674,80 @@ TEST_CASE("Focus ring: it follows a rounded field instead of boxing it")
         MESSAGE("focus ring sheet written to " << out.string());
     }
 }
+
+// ── Threads, mips ────────────────────────────────────────────────────────────
+// A large region is drawn in stripes on the job pool. Each stripe walks the
+// whole list in order, so the picture must be the single-threaded one, byte
+// for byte — anything else would be a race showing through.
+TEST_CASE("Software raster: drawing in stripes gives the single-threaded picture")
+{
+	std::vector<UIRenderObject> quads;
+	for (int i = 0; i < 40; ++i)
+	{
+		UIRenderObject o = solid(static_cast<float>((i * 37) % 500), static_cast<float>((i * 53) % 330),
+		                         120.0f, 70.0f,
+		                         { (i % 3) / 2.0f, (i % 5) / 4.0f, (i % 7) / 6.0f, 0.6f + 0.01f * i });
+		o.cornerRadius = glm::vec4(static_cast<float>(i % 4) * 6.0f);
+		o.gradient = (i % 2) == 0;
+		o.gradientColor = { 0.2f, 0.9f, 0.4f, 1.0f };
+		o.gradientAngleDeg = static_cast<float>(i * 17);
+		o.blur = (i % 6 == 0) ? 8.0f : 0.0f;
+		o.borderWidth = (i % 4 == 1) ? 3.0f : 0.0f;
+		o.rotation = (i % 5 == 2) ? 0.4f : 0.0f;
+		o.rotationPivot = o.position + o.size * 0.5f;
+		quads.push_back(o);
+	}
+	Image one = canvas(640, 400), many = canvas(640, 400);
+	HE::sw::draw(one, quads, glm::vec4(0.0f), nullptr, nullptr, /*threads=*/false);
+	HE::sw::draw(many, quads);
+	CHECK(one.rgba == many.rgba);
+}
+
+TEST_CASE("Software raster: a mip chain halves down to one texel")
+{
+	std::vector<std::uint8_t> base(5 * 3 * 4, 200);
+	std::vector<std::vector<std::uint8_t>> mips;
+	HE::sw::buildMipChain(base.data(), 5, 3, mips);
+	REQUIRE(mips.size() == 2);            // 5x3 -> 2x1 -> 1x1
+	CHECK(mips[0].size() == 2 * 1 * 4);
+	CHECK(mips[1].size() == 1 * 1 * 4);
+	CHECK(mips[1][0] == 200);             // a flat picture stays flat
+}
+
+TEST_CASE("Software raster: a picture drawn small reads its mips instead of shimmering")
+{
+	// 64x64 one-texel checkerboard drawn into 8x8: 64 texels per pixel. Without
+	// mips each pixel picks four texels out of that and lands near black or
+	// white depending on where it falls; with them every pixel is the average.
+	const int n = 64;
+	std::vector<std::uint8_t> board(static_cast<std::size_t>(n) * n * 4);
+	for (int y = 0; y < n; ++y)
+		for (int x = 0; x < n; ++x)
+		{
+			std::uint8_t* p = &board[(static_cast<std::size_t>(y) * n + x) * 4];
+			p[0] = p[1] = p[2] = ((x + y) % 2) ? 255 : 0;
+			p[3] = 255;
+		}
+	std::vector<std::vector<std::uint8_t>> bytes;
+	HE::sw::buildMipChain(board.data(), n, n, bytes);
+	std::vector<HE::sw::TextureLevel> levels;
+	for (std::size_t i = 0, w = n / 2; i < bytes.size(); ++i, w = std::max<std::size_t>(1, w / 2))
+		levels.push_back({ bytes[i].data(), static_cast<int>(w), static_cast<int>(w) });
+	struct Ctx { HE::sw::TextureView v; } ctx;
+	ctx.v.rgba = board.data(); ctx.v.width = n; ctx.v.height = n;
+	ctx.v.mips = levels.data(); ctx.v.mipCount = static_cast<int>(levels.size());
+
+	UIRenderObject q = solid(4.0f, 4.0f, 8.0f, 8.0f, { 1.0f, 1.0f, 1.0f, 1.0f });
+	q.textureAssetId = HE::UUID{ 7, 7 };
+	q.uvMin = { 0.0f, 0.0f };
+	q.uvMax = { 1.0f, 1.0f };
+	Image img = canvas(16, 16);
+	HE::sw::draw(img, { q }, glm::vec4(0.0f),
+		[](const HE::UUID&, void* u) { return static_cast<Ctx*>(u)->v; }, &ctx);
+	for (int y = 5; y < 11; ++y)
+		for (int x = 5; x < 11; ++x)
+		{
+			const Px p = at(img, x, y);
+			CHECK(std::abs(static_cast<int>(p.r) - 128) < 12);
+		}
+}

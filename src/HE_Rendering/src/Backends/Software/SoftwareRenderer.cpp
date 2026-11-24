@@ -30,36 +30,45 @@ HE::sw::TextureView SoftwareRenderer::resolveTexture(const HE::UUID& id, void* s
     if (!cm) return {};
     const TextureAsset* t = cm->getTexture(id);
     if (!t || t->data.empty() || t->width <= 0 || t->height <= 0) return {};
-    HE::sw::TextureView v;
-    if (t->format == TextureFormat::RGBA8)
-    {
-        v.rgba   = t->data.data();
-        v.width  = static_cast<int>(t->width);
-        v.height = static_cast<int>(t->height);
-        return v;
-    }
     Decoded& d = r->m_decoded[id];
     if (d.src != t->data.data())
     {
         d.src = t->data.data();
         d.w = d.h = 0;
-        if (HE::decodeBaseLevelToRGBA8(*t, d.rgba))
-        {
-            d.w = static_cast<int>(t->width);
-            d.h = static_cast<int>(t->height);
-        }
+        d.base = nullptr;
+        d.rgba.clear();
+        const std::size_t baseBytes = static_cast<std::size_t>(t->width) * t->height * 4;
+        if (t->format == TextureFormat::RGBA8 && t->data.size() >= baseBytes)
+            d.base = t->data.data();
+        else if (HE::decodeBaseLevelToRGBA8(*t, d.rgba))
+            d.base = d.rgba.data();
         else
-        {
-            d.rgba.clear();
             HE_LOG_WARN(RHI, "SoftwareRenderer: texture format %d has no CPU decoder here — "
                         "that quad draws its tint. Export with Textures = None.",
                         static_cast<int>(t->format));
+        if (d.base)
+        {
+            d.w = static_cast<int>(t->width);
+            d.h = static_cast<int>(t->height);
+            // Built here rather than taken from the asset: a cooked chain is in
+            // the GPU's block format, and a loose RGBA8 asset often has none.
+            HE::sw::buildMipChain(d.base, d.w, d.h, d.mipBytes);
+            d.mips.clear();
+            int mw = d.w, mh = d.h;
+            for (const auto& m : d.mipBytes)
+            {
+                mw = std::max(1, mw / 2); mh = std::max(1, mh / 2);
+                d.mips.push_back({ m.data(), mw, mh });
+            }
         }
     }
     if (d.w == 0) return {};
-    v.rgba   = d.rgba.data();
-    v.width  = d.w;
-    v.height = d.h;
+    HE::sw::TextureView v;
+    v.rgba     = d.base;
+    v.width    = d.w;
+    v.height   = d.h;
+    v.mips     = d.mips.data();
+    v.mipCount = static_cast<int>(d.mips.size());
     return v;
 }
 

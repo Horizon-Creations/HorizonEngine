@@ -1,5 +1,6 @@
 #include "../../../include/Backends/Software/SoftwareRaster.h"
 
+#include <JobSystem/JobSystem.h>
 #include <Renderer/UIFont.h>
 
 #include <algorithm>
@@ -59,6 +60,68 @@ namespace
         const glm::vec4 a = at(x0, y0), b = at(x0 + 1, y0);
         const glm::vec4 c = at(x0, y0 + 1), d = at(x0 + 1, y0 + 1);
         return glm::mix(glm::mix(a, b, fx), glm::mix(c, d, fx), fy);
+    }
+
+    // The texel the point falls in, no blending: "Pixelated". Always the full
+    // picture, like the GPU paths (a nearest sampler with no mip filter).
+    glm::vec4 sampleNearest(const std::uint8_t* px, int w, int h, float u, float v)
+    {
+        if (!px || w <= 0 || h <= 0) return glm::vec4(1.0f);
+        const int xi = std::clamp(static_cast<int>(clamp01(u) * static_cast<float>(w)), 0, w - 1);
+        const int yi = std::clamp(static_cast<int>(clamp01(v) * static_cast<float>(h)), 0, h - 1);
+        const std::uint8_t* p = px + (static_cast<std::size_t>(yi) * w + xi) * 4;
+        return glm::vec4(p[0], p[1], p[2], p[3]) * (1.0f / 255.0f);
+    }
+
+    TextureLevel level(const TextureView& t, int i)
+    {
+        if (i <= 0 || !t.mips || t.mipCount <= 0) return { t.rgba, t.width, t.height };
+        return t.mips[std::min(i, t.mipCount) - 1];
+    }
+
+    // Trilinear: the two levels either side of `lod`, each bilinear, blended.
+    // lod <= 0 (drawn at its size or larger) is the plain base-level sample.
+    glm::vec4 sampleTexture(const TextureView& t, float u, float v, float lod)
+    {
+        if (lod <= 0.0f || !t.mips || t.mipCount <= 0)
+            return sampleRGBA8(t.rgba, t.width, t.height, u, v);
+        const int l0 = static_cast<int>(lod);
+        const float f = lod - static_cast<float>(l0);
+        const TextureLevel a = level(t, l0);
+        const glm::vec4 ca = sampleRGBA8(a.rgba, a.width, a.height, u, v);
+        if (f <= 0.0f || l0 >= t.mipCount) return ca;
+        const TextureLevel b = level(t, l0 + 1);
+        return glm::mix(ca, sampleRGBA8(b.rgba, b.width, b.height, u, v), f);
+    }
+}
+
+void buildMipChain(const std::uint8_t* base, int w, int h,
+                   std::vector<std::vector<std::uint8_t>>& out)
+{
+    out.clear();
+    if (!base || w <= 0 || h <= 0) return;
+    const std::uint8_t* src = base;
+    while (w > 1 || h > 1)
+    {
+        const int nw = std::max(1, w / 2), nh = std::max(1, h / 2);
+        std::vector<std::uint8_t> dst(static_cast<std::size_t>(nw) * nh * 4);
+        for (int y = 0; y < nh; ++y)
+        for (int x = 0; x < nw; ++x)
+        {
+            // 2x2 box; an odd edge repeats its last texel rather than reading past it.
+            const int x0 = std::min(2 * x, w - 1), x1 = std::min(2 * x + 1, w - 1);
+            const int y0 = std::min(2 * y, h - 1), y1 = std::min(2 * y + 1, h - 1);
+            for (int c = 0; c < 4; ++c)
+            {
+                auto at = [&](int xi, int yi)
+                { return static_cast<int>(src[(static_cast<std::size_t>(yi) * w + xi) * 4 + c]); };
+                dst[(static_cast<std::size_t>(y) * nw + x) * 4 + c] = static_cast<std::uint8_t>(
+                    (at(x0, y0) + at(x1, y0) + at(x0, y1) + at(x1, y1) + 2) / 4);
+            }
+        }
+        out.push_back(std::move(dst));
+        src = out.back().data();
+        w = nw; h = nh;
     }
 }
 
@@ -154,7 +217,7 @@ namespace
         return a.position == b.position && a.size == b.size && a.color == b.color &&
                a.materialAssetId == b.materialAssetId &&
                a.textureAssetId == b.textureAssetId &&
-               a.type == b.type && a.layer == b.layer &&
+               a.type == b.type && a.pixelated == b.pixelated && a.layer == b.layer &&
                a.uvMin == b.uvMin && a.uvMax == b.uvMax &&
                a.cornerRadius == b.cornerRadius &&
                a.borderWidth == b.borderWidth && a.borderColor == b.borderColor &&
@@ -234,7 +297,7 @@ bool dirtyRects(const std::vector<UIRenderObject>& prev,
 }
 
 void draw(Image& target, const std::vector<UIRenderObject>& objects, const glm::vec4& clip,
-          TextureResolver texResolve, void* texUser)
+          TextureResolver texResolve, void* texUser, bool threads)
 {
     if (!target.valid()) return;
 
@@ -251,8 +314,50 @@ void draw(Image& target, const std::vector<UIRenderObject>& objects, const glm::
 
     const HE::BakedUIFont& shared = HE::sharedUIFont();
 
-    for (const UIRenderObject& o : objects)
+    // Everything that asks somebody else (the font cache, the texture resolver
+    // and with it the ContentManager) happens here, once, on this thread. The
+    // stripes below only read what this pass left behind.
+    struct Prep
     {
+        const HE::BakedUIFont* font = nullptr;
+        TextureView tv{};
+        float lod = 0.0f;   // mip level the picture is drawn at (0 = full size)
+    };
+    std::vector<Prep> prep(objects.size());
+    for (std::size_t k = 0; k < objects.size(); ++k)
+    {
+        const UIRenderObject& o = objects[k];
+        Prep& p = prep[k];
+        // Which atlas a glyph quad samples; 0 = the shared default font.
+        p.font = &shared;
+        if (o.type == 2 && o.fontAtlasKey != 0)
+            if (const HE::BakedUIFont* f = HE::UIFontCache::find(o.fontAtlasKey)) p.font = f;
+
+        // A picture on the quad, if there is one and if anybody can find it. A
+        // MATERIAL is deliberately not looked at: it is a translated shader
+        // graph, which a CPU rasterizer cannot run, so such a quad falls back to
+        // Schicht 0 plus its tint — the documented D5 contract, not an accident.
+        if (o.type == 0 && texResolve && o.textureAssetId != HE::UUID{} &&
+            o.size.x > 0.0f && o.size.y > 0.0f)
+        {
+            p.tv = texResolve(o.textureAssetId, texUser);
+            // Texels per screen pixel along the worse axis. A rotation turns the
+            // quad but does not change its scale, so the upright ratio holds.
+            const float rx = std::abs(o.uvMax.x - o.uvMin.x) * static_cast<float>(p.tv.width)  / o.size.x;
+            const float ry = std::abs(o.uvMax.y - o.uvMin.y) * static_cast<float>(p.tv.height) / o.size.y;
+            const float rho = std::max(rx, ry);
+            p.lod = rho > 1.0f ? std::min(std::log2(rho), static_cast<float>(p.tv.mipCount)) : 0.0f;
+        }
+    }
+
+    // One horizontal stripe of the region, every quad in list order.
+    auto drawRows = [&](int ry0, int ry1)
+    {
+    for (std::size_t k = 0; k < objects.size(); ++k)
+    {
+        const UIRenderObject& o = objects[k];
+        const HE::BakedUIFont* font = prep[k].font;
+        const TextureView& tv = prep[k].tv;
         if (o.size.x <= 0.0f || o.size.y <= 0.0f) continue;
         // Invisible FILL is not invisible OBJECT: an outlined rectangle with no
         // fill is how a ring is drawn — the border is blended over the fill, so
@@ -263,21 +368,8 @@ void draw(Image& target, const std::vector<UIRenderObject>& objects, const glm::
         // runtime and in every test that rasterises.
         if (o.color.a <= 0.0f && o.type != 2 && o.borderWidth <= 0.0f) continue;
 
-        // Which atlas a glyph quad samples; 0 = the shared default font.
-        const HE::BakedUIFont* font = &shared;
-        if (o.type == 2 && o.fontAtlasKey != 0)
-            if (const HE::BakedUIFont* f = HE::UIFontCache::find(o.fontAtlasKey)) font = f;
-
-        // A picture on the quad, if there is one and if anybody can find it. A
-        // MATERIAL is deliberately not looked at: it is a translated shader
-        // graph, which a CPU rasterizer cannot run, so such a quad falls back to
-        // Schicht 0 plus its tint — the documented D5 contract, not an accident.
-        TextureView tv{};
-        if (o.type == 0 && texResolve && o.textureAssetId != HE::UUID{})
-            tv = texResolve(o.textureAssetId, texUser);
-
-        // The object's own scissor, intersected with the region being drawn.
-        int ox0 = wx0, oy0 = wy0, ox1 = wx1, oy1 = wy1;
+        // The object's own scissor, intersected with the stripe being drawn.
+        int ox0 = wx0, oy0 = ry0, ox1 = wx1, oy1 = ry1;
         if (o.clipRect.z > 0.0f && o.clipRect.w > 0.0f)
         {
             ox0 = std::max(ox0, static_cast<int>(std::floor(o.clipRect.x)));
@@ -339,7 +431,9 @@ void draw(Image& target, const std::vector<UIRenderObject>& objects, const glm::
                 // shape the solid path uses (an avatar with rounded corners).
                 const float u = mixf(o.uvMin.x, o.uvMax.x, lu);
                 const float v = mixf(o.uvMin.y, o.uvMax.y, lv);
-                const glm::vec4 t = sampleRGBA8(tv.rgba, tv.width, tv.height, u, v);
+                const glm::vec4 t = o.pixelated
+                    ? sampleNearest(tv.rgba, tv.width, tv.height, u, v)
+                    : sampleTexture(tv, u, v, prep[k].lod);
                 src = glm::vec4(o.color.r * t.r, o.color.g * t.g, o.color.b * t.b,
                                 o.color.a * t.a);
                 if (maxR > 0.0f)
@@ -430,6 +524,25 @@ void draw(Image& target, const std::vector<UIRenderObject>& objects, const glm::
                 static_cast<std::uint8_t>(clamp01(sa + da * (1.0f - sa)) * 255.0f + 0.5f);
         }
     }
+    };
+
+    // A hover state's few hundred pixels are not worth waking a thread for; a
+    // full window is. Stripes write disjoint rows, so they need no locking, and
+    // each one walks the whole list in order, so the result does not depend on
+    // how the rows were shared out.
+    constexpr int kStripeRows = 16;
+    const long long area = static_cast<long long>(wx1 - wx0) * (wy1 - wy0);
+    const int stripes = (wy1 - wy0 + kStripeRows - 1) / kStripeRows;
+    if (!threads || area < 256 * 256 || stripes < 2)
+    {
+        drawRows(wy0, wy1);
+        return;
+    }
+    ::parallel_for(static_cast<std::size_t>(stripes), [&](std::size_t s)
+    {
+        const int y0 = wy0 + static_cast<int>(s) * kStripeRows;
+        drawRows(y0, std::min(wy1, y0 + kStripeRows));
+    }, "SoftwareRaster", 1);
 }
 
 } // namespace HE::sw

@@ -10085,9 +10085,12 @@ void EditorApplication::dumpFrameHeadless()
 		// Kept off the plain "=1" sheet so the Thema-133 baselines stay as measured.
 		// The widget refers to its picture by path and the manager resolves it
 		// again on instantiation, so the texture is registered under that path.
-		if (std::string_view(ui) == "image")
+		// HE_DUMP_UITEST=pixelated is the same tile from a 4x4 picture with
+		// Pixelated on: the colour seams must be hard steps, not 60 px fades.
+		const bool pixelatedTile = std::string_view(ui) == "pixelated";
+		if (std::string_view(ui) == "image" || pixelatedTile)
 		{
-			constexpr uint32_t kSz = 64;
+			const uint32_t kSz = pixelatedTile ? 4u : 64u;
 			TextureAsset ta;
 			ta.name = "__uiImageWitness";
 			ta.path = "__uiImageWitness.hasset";
@@ -10119,6 +10122,7 @@ void EditorApplication::dumpFrameHeadless()
 			e.sizeX = 240.0f; e.sizeY = 110.0f;
 			e.texture = "__uiImageWitness.hasset";
 			e.setProp("Tint", HE::UIPropValue::ofColor({ 1.0f, 1.0f, 1.0f, 1.0f }));
+			if (pixelatedTile) e.setProp("Pixelated", HE::UIPropValue::ofBool(true));
 		}
 
 		UIWidgetAsset wa;
