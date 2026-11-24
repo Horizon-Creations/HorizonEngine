@@ -295,3 +295,55 @@ TEST_CASE("UI Image pixelated: a property, saved only when on, and drawn without
 	CHECK_FALSE(same(s, 15, 8, s, 8, 8)); // …where smoothing has already moved
 	CHECK_FALSE(same(h, 15, 8, h, 16, 8)); // and the next block is the next texel
 }
+
+// ── Sprite sheet ─────────────────────────────────────────────────────────────
+// The picture cut into a grid of frames, played off the manager's clock: which
+// cell is drawn follows from the time alone, and the json carries the sheet
+// only while there is one.
+TEST_CASE("UI Image sprite sheet: the clock picks the cell, json only when on")
+{
+	HE::UIImage img;
+	CHECK_FALSE(img.playsSheet());
+	CHECK_FALSE(img.movesWithTime());
+	img.textureAssetId = HE::UUID{ 3, 4 };
+	img.setProp("Sheet Columns", HE::UIPropValue::ofInt(4));
+	img.setProp("Sheet Rows", HE::UIPropValue::ofInt(2));
+	img.setProp("Sheet Frames", HE::UIPropValue::ofInt(6));   // last two cells unused
+	img.setProp("Sheet FPS", HE::UIPropValue::ofFloat(10.0f));
+	CHECK(img.playsSheet());
+	CHECK(img.movesWithTime());
+
+	// Frame f sits at column f % 4, row f / 4. Compared against a plain 4x2
+	// picture drawn with that cell's own uv rect through the same helper.
+	auto cellOf = [&](float time)
+	{
+		HE::UIElementRenderState rs;
+		rs.time = time;
+		std::vector<UIRenderObject> out;
+		img.render(HE::UIWidgetRect{ 0, 0, 64, 32 }, rs, HE::UUID{}, 1.0f, out);
+		REQUIRE(out.size() == 1);
+		return out[0];
+	};
+	const UIRenderObject f0 = cellOf(0.0f), f5 = cellOf(0.55f), wrap = cellOf(0.65f);
+	// Frame 5 = column 1, row 1: a quarter across, half way down the picture.
+	CHECK(std::abs(std::min(f5.uvMin.x, f5.uvMax.x) - 0.25f) < 1e-6f);
+	CHECK(std::abs(std::max(f5.uvMin.x, f5.uvMax.x) - 0.50f) < 1e-6f);
+	CHECK(f5.uvMin.y != f0.uvMin.y);
+	// 0.65 s = frame 6 → wraps to frame 0, since only 6 frames are used.
+	CHECK(wrap.uvMin == f0.uvMin);
+	CHECK(wrap.uvMax == f0.uvMax);
+
+	HE::UIWidgetTree t;
+	const int id = t.add(HE::UIWidgetType::Image);
+	CHECK(HE::uiWidgetTreeToJson(t).find("sheet") == std::string::npos);
+	auto* e = dynamic_cast<HE::UIImage*>(t.find(id));
+	REQUIRE(e);
+	e->sheetColumns = 3; e->sheetFps = 8.0f;
+	HE::UIWidgetTree r;
+	REQUIRE(HE::uiWidgetTreeFromJson(HE::uiWidgetTreeToJson(t), r));
+	auto* back = dynamic_cast<HE::UIImage*>(r.find(id));
+	REQUIRE(back);
+	CHECK(back->sheetColumns == 3);
+	CHECK(back->sheetRows == 1);
+	CHECK(back->sheetFps == doctest::Approx(8.0f));
+}

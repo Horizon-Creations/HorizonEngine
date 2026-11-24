@@ -7164,6 +7164,24 @@ namespace
 	  "preview always draws smoothed; Play and the exported game show the setting "
 	  "(Software, Metal and OpenGL; Vulkan and Direct3D still smooth).",
 	  "", "ui#elements" },
+	{ "UI Widget/Sheet Columns", "",
+	  "Plays the picture as a sprite sheet: how many frames sit side by side in "
+	  "it. 1 column and 1 row is an ordinary picture. Frames play left to right, "
+	  "then row by row, looping.",
+	  "", "ui#elements" },
+	{ "UI Widget/Sheet Rows", "",
+	  "How many rows of frames the sprite sheet has. Together with Sheet Columns "
+	  "it cuts the picture into equal cells.",
+	  "", "ui#elements" },
+	{ "UI Widget/Sheet Frames", "",
+	  "How many of the cells are frames, counted from the top left. 0 uses every "
+	  "cell; fewer leaves the last cells of the grid out, for a sheet whose last "
+	  "row is not full.",
+	  "", "ui#elements" },
+	{ "UI Widget/Sheet FPS", "",
+	  "Frames per second the sheet plays at. 0 holds the first frame. The "
+	  "designer shows the first frame; Play and the exported application animate.",
+	  "", "ui#elements" },
 	{ "UI Widget/Flip Vertical", "",
 	  "Mirrors the image top to bottom inside its box. Combined with Flip "
 	  "Horizontal it is the picture turned half a circle. On a 9-sliced image the "

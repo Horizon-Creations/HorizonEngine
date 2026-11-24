@@ -2833,9 +2833,10 @@ void WidgetManager::tick(float dt)
 			if (!w.visible) continue;
 			for (const auto& ep : w.tree.elements)
 			{
-				const auto* pb = dynamic_cast<const HE::UIProgressBar*>(ep.get());
-				if (!pb || !pb->indeterminate) continue;
-				if (!HE::uiElementEffectiveVisible(w.tree, *pb)) continue;
+				// An indeterminate bar, a playing sprite sheet: the picture is a
+				// function of the clock.
+				if (!ep || !ep->movesWithTime()) continue;
+				if (!HE::uiElementEffectiveVisible(w.tree, *ep)) continue;
 				m_spinning = true;
 				break;
 			}

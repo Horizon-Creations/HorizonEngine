@@ -637,6 +637,10 @@ const UIPropTable& UIImage::propTable() const
         uiprop::slot<&UIImage::flipH>({ "Flip Horizontal", UIPropType::Bool }),
         uiprop::slot<&UIImage::flipV>({ "Flip Vertical",   UIPropType::Bool }),
         uiprop::slot<&UIImage::pixelated>({ "Pixelated", UIPropType::Bool }),
+        uiprop::slot<&UIImage::sheetColumns>({ "Sheet Columns", UIPropType::Int, 1.0f, 64.0f }),
+        uiprop::slot<&UIImage::sheetRows>   ({ "Sheet Rows",    UIPropType::Int, 1.0f, 64.0f }),
+        uiprop::slot<&UIImage::sheetFrames> ({ "Sheet Frames",  UIPropType::Int, 0.0f, 4096.0f }),
+        uiprop::slot<&UIImage::sheetFps>    ({ "Sheet FPS",     UIPropType::Float, 0.0f, 120.0f }),
     };
     return t;
 }
@@ -1313,9 +1317,26 @@ void UIImage::render(const UIWidgetRect& px, const UIElementRenderState& rs,
     }
 }
 
-void UIImage::renderUnflipped(const UIWidgetRect& px, const UIElementRenderState&,
+void UIImage::renderUnflipped(const UIWidgetRect& px, const UIElementRenderState& rs,
                               const HE::UUID& mat, float, std::vector<UIRenderObject>& out) const
 {
+    // A sprite sheet: one cell of the grid, chosen by the manager's clock, in
+    // the picture's own terms (top-left cell first). A caller without a clock
+    // (the designer, a thumbnail) sees the first frame.
+    if (playsSheet() && textureAssetId != HE::UUID{})
+    {
+        const int cols = std::max(1, sheetColumns), rows = std::max(1, sheetRows);
+        const int cells = cols * rows;
+        const int frames = sheetFrames > 0 ? std::min(sheetFrames, cells) : cells;
+        const int f = sheetFps > 0.0f
+            ? static_cast<int>(std::floor(rs.time * sheetFps)) % frames : 0;
+        const int c = f % cols, r = f / cols;
+        const glm::vec2 uv0(static_cast<float>(c) / cols, static_cast<float>(r) / rows);
+        const glm::vec2 uv1(static_cast<float>(c + 1) / cols, static_cast<float>(r + 1) / rows);
+        quad(out, px.x, px.y, px.w, px.h, tint, mat, 0.0f, textureAssetId, uv0, uv1);
+        return;
+    }
+
     // Plain stretch when nothing is sliced, when there is no texture to slice,
     // or when the source size is not known yet (the runtime fills it in when it
     // resolves the path — until then a stretched picture beats nothing).
@@ -2857,6 +2878,9 @@ void UIImage::writeJson(nlohmann::json& j) const
     if (flipH) j["flipH"] = true;
     if (flipV) j["flipV"] = true;
     if (pixelated) j["pixelated"] = true;
+    // Only a sheet writes its numbers, so a plain picture saves as before.
+    if (playsSheet())
+        j["sheet"] = { sheetColumns, sheetRows, sheetFrames, sheetFps };
 }
 void UIImage::readJson(const nlohmann::json& j)
 {
@@ -2870,6 +2894,14 @@ void UIImage::readJson(const nlohmann::json& j)
     flipH = j.value("flipH", false);
     flipV = j.value("flipV", false);
     pixelated = j.value("pixelated", false);
+    sheetColumns = 1; sheetRows = 1; sheetFrames = 0; sheetFps = 12.0f;
+    if (const auto& s = j.value("sheet", nlohmann::json::array()); startsWithFourNumbers(s))
+    {
+        sheetColumns = std::clamp(s[0].get<int>(), 1, 64);
+        sheetRows    = std::clamp(s[1].get<int>(), 1, 64);
+        sheetFrames  = std::max(0, s[2].get<int>());
+        sheetFps     = std::max(0.0f, s[3].get<float>());
+    }
 }
 
 void UIText::writeJson(nlohmann::json& j) const

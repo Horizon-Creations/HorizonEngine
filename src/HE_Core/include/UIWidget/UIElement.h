@@ -840,6 +840,10 @@ public:
     virtual bool hasMaterialSlot() const { return false; }
     // Types that draw a quad the user may want a picture on.
     virtual bool hasTextureSlot() const { return false; }
+    // Does this element's picture change with the manager's clock alone (an
+    // indeterminate progress bar, an Image playing a sprite sheet)? While one
+    // is visible an event-driven application keeps asking for frames.
+    virtual bool movesWithTime() const { return false; }
 
     // ── Does this type have a SURFACE to style? ──────────────────────────────
     // True for the types whose FIRST quad covers their whole rect — a

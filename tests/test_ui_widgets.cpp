@@ -142,7 +142,11 @@ TEST_CASE("element property tables are the pinned on-disk name/type list")
             { "Slice Fill Centre", UIPropType::Bool },
             { "Flip Horizontal", UIPropType::Bool },
             { "Flip Vertical", UIPropType::Bool },
-            { "Pixelated", UIPropType::Bool } } },
+            { "Pixelated", UIPropType::Bool },
+            { "Sheet Columns", UIPropType::Int },
+            { "Sheet Rows", UIPropType::Int },
+            { "Sheet Frames", UIPropType::Int },
+            { "Sheet FPS", UIPropType::Float } } },
         { UIWidgetType::Text, {
             { "Text", UIPropType::String },
             { "FontSize", UIPropType::Float },

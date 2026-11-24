@@ -60,6 +60,15 @@ public:
     // frame is mirrored as a whole, not re-cut. One arrow texture pointing both
     // ways, one corner ornament for all four corners.
     bool  flipH = false, flipV = false;
+    // ── Sprite sheet ─────────────────────────────────────────────────────────
+    // The picture as a grid of frames, played left to right, top to bottom, at
+    // sheetFps frames a second off the manager's clock, looping. Columns and
+    // rows of 1 (the default) is an ordinary picture. sheetFrames 0 = every cell;
+    // fewer leaves the grid's last cells out. A playing sheet draws one frame
+    // stretched over the element — 9-slicing does not apply to it.
+    int   sheetColumns = 1, sheetRows = 1, sheetFrames = 0;
+    float sheetFps = 12.0f;
+    bool  playsSheet() const { return sheetColumns * sheetRows > 1; }
     // ── Pixelated ────────────────────────────────────────────────────────────
     // Reads the picture without smoothing: every texel stays a hard-edged square
     // however large the element is drawn. Off (the default) blends neighbouring
@@ -72,6 +81,7 @@ public:
     bool hasMaterialSlot() const override { return true; }
     bool hasTextureSlot()  const override { return true; }
     bool hasSurfaceStyle() const override { return true; }
+    bool movesWithTime()   const override { return playsSheet() && sheetFps > 0.0f; }
     std::unique_ptr<UIElement> clone() const override
     { return std::make_unique<UIImage>(*this); }
 
@@ -459,6 +469,7 @@ public:
     // The TRACK is the surface; the fill drawn on top of it keeps its own colour.
     bool hasSurfaceStyle() const override { return true; }
     UIWidgetType type() const override { return UIWidgetType::ProgressBar; }
+    bool movesWithTime() const override { return indeterminate; }
     const char*  typeName() const override { return "ProgressBar"; }
     std::unique_ptr<UIElement> clone() const override
     { return std::make_unique<UIProgressBar>(*this); }
