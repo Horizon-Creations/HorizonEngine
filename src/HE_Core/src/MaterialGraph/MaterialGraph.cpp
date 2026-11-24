@@ -1261,9 +1261,16 @@ HE_MG_NOINLINE bool emitTextureNode(EmitCtx& c, const Scope& sc, const MatGraphN
         case MatNodeType::TextureSample:
         {
             const std::string sampler = textureSampler(c, n);
+            std::string uv = inputExpr(c, sc, n, 0, F::Vec2);
+            // A widget's UV runs top-down (v = 0 is the element's top edge, like
+            // every UI coordinate), a texture asset stores its rows bottom-up
+            // (TextureImporter flips on load). Sampled as is, every picture in a
+            // UI material stood on its head; the UI domain reads the picture the
+            // way an Image element shows it. Surface materials keep mesh UVs.
+            if (c.uiDomain) uv = "vec2((" + uv + ").x, 1.0 - (" + uv + ").y)";
             decl = dsStage(sc) // no derivatives → mip 0
-                ? "vec4 " + v + " = textureLod(" + sampler + ", " + inputExpr(c, sc, n, 0, F::Vec2) + ", 0.0);"
-                : "vec4 " + v + " = texture(" + sampler + ", " + inputExpr(c, sc, n, 0, F::Vec2) + ");";
+                ? "vec4 " + v + " = textureLod(" + sampler + ", " + uv + ", 0.0);"
+                : "vec4 " + v + " = texture(" + sampler + ", " + uv + ");";
             pinExpr = { v + ".xyz", v + ".w" };
             break;
         }

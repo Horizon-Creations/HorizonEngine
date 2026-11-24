@@ -96,6 +96,7 @@ namespace
         std::set<std::string> emitting;
         std::vector<std::string> fnStack;
         std::string error;
+        bool uiDomain = false;   // texture reads flip V, as generateFragment's do
 
         int reg() { return P.m_regs++; }
 
@@ -254,7 +255,9 @@ namespace
             case MatNodeType::TextureSample:
             {
                 const Val uv = input(sc, n, 0, F::Vec2);
-                const Val t = push(Op::TexSample, F::Vec4, uv.reg, -1, -1, -1, {}, textureSlot(n.s));
+                // k.x = 1: the UI domain reads the picture upright (see the codegen).
+                const Val t = push(Op::TexSample, F::Vec4, uv.reg, -1, -1, -1,
+                                   glm::vec4(uiDomain ? 1.0f : 0.0f, 0, 0, 0), textureSlot(n.s));
                 return { { t.reg, F::Vec3 }, extract(t, 3) };
             }
             case MatNodeType::Add: case MatNodeType::Multiply:
@@ -441,7 +444,7 @@ bool MatCpuProgram::compile(const MaterialGraph& graph, const MatFunctionLoader&
         return false;
     }
 
-    Compiler c{ *this, loader, switchOverrides, {}, {}, {}, {}, {} };
+    Compiler c{ *this, loader, switchOverrides, {}, {}, {}, {}, {}, uiDomain };
     Scope root;
     root.g = &graph;
     const int blendMode = std::clamp(static_cast<int>(out->p[1]), 0, 2);
@@ -567,9 +570,12 @@ glm::vec4 MatCpuProgram::eval(const MatCpuElement& e, glm::vec2 uv, const glm::v
             break;
         }
         case Op::TexSample:
-            d = (in.aux >= 0 && hooks.sample) ? hooks.sample(hooks.user, in.aux, glm::vec2(r[in.a]))
-                                              : glm::vec4(1.0f);
+        {
+            glm::vec2 tuv(r[in.a]);
+            if (in.k.x > 0.5f) tuv.y = 1.0f - tuv.y;
+            d = (in.aux >= 0 && hooks.sample) ? hooks.sample(hooks.user, in.aux, tuv) : glm::vec4(1.0f);
             break;
+        }
         case Op::RRectSDF:
         {
             const float rad = f(in.a), ins = f(in.b);

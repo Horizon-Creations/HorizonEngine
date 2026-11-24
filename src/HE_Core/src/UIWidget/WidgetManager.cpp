@@ -2,6 +2,7 @@
 #include <HorizonCode/HcCompiledLoader.h>
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
+#include <MaterialGraph/MaterialGraph.h>   // matGlslUsesTime
 #include <Renderer/UIFont.h>
 #include <UIWidget/UIShortcut.h>  // a menu entry's chord, parsed out of its text
 #include <UIWidget/UILayoutScope.h>  // one layout pass per widget in extract and the hit test
@@ -2833,10 +2834,16 @@ void WidgetManager::tick(float dt)
 			if (!w.visible) continue;
 			for (const auto& ep : w.tree.elements)
 			{
-				// An indeterminate bar, a playing sprite sheet: the picture is a
-				// function of the clock.
-				if (!ep || !ep->movesWithTime()) continue;
-				if (!HE::uiElementEffectiveVisible(w.tree, *ep)) continue;
+				// An indeterminate bar, a playing sprite sheet, or a material that
+				// reads Time (a pulse, a sheen, a panner): the picture is a function
+				// of the clock, and an event-driven app has to keep drawing it.
+				if (!ep) continue;
+				bool moves = ep->movesWithTime();
+				if (!moves && m_content)
+					if (const auto mit = w.materials.find(ep->id); mit != w.materials.end())
+						if (const MaterialAsset* ma = m_content->getMaterial(mit->second))
+							moves = HE::matGlslUsesTime(ma->customShaderFragGlsl);
+				if (!moves || !HE::uiElementEffectiveVisible(w.tree, *ep)) continue;
 				m_spinning = true;
 				break;
 			}

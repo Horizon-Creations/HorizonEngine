@@ -5,6 +5,9 @@
 #include <MaterialGraph/MatCpuEval.h>
 #include <MaterialGraph/MaterialGraph.h>
 #include <Backends/Software/SoftwareRenderer.h>
+#include <UIWidget/UIElements.h>
+#include <UIWidget/UIWidgetTree.h>
+#include <UIWidget/WidgetManager.h>
 
 #include <algorithm>
 #include <cmath>
@@ -301,4 +304,78 @@ TEST_CASE("CPU material: a changed parameter repaints, once")
     CHECK(px[2] == 255);
     REQUIRE(sw.RasterizeUI({ q }, 8, 8, glm::vec4(0, 0, 0, 1), px, &animated));
     CHECK_FALSE(animated);
+}
+
+// A UI material reads a texture the way an Image shows it: the element's v
+// runs top-down, the asset's rows bottom-up, so the read flips v — on the GPU
+// (generateFragment) and here alike. A Surface material keeps mesh UVs.
+TEST_CASE("CPU material: a UI-domain texture read is upright, a Surface one is not flipped")
+{
+    auto sampledV = [](HE::MatDomain domain)
+    {
+        G m;
+        m.g.findNode(m.out)->p[3] = static_cast<float>(domain);
+        m.g.findNode(m.out)->p[0] = 0.0f;   // unlit: the CPU runs no light
+        const int tex = m.add(MatNodeType::TextureSample);
+        m.g.findNode(tex)->s = "T.hasset";
+        m.link(m.add(MatNodeType::ElementUV), 0, tex, 0);
+        m.link(tex, 0, m.out, HE::kMatOutputBaseColorPin);
+        HE::MatCpuProgram p;
+        REQUIRE(p.compile(m.g));
+        HE::MatCpuHooks h;
+        float seen = -1.0f;
+        h.user = &seen;
+        h.sample = [](void* u, int, glm::vec2 uv) { *static_cast<float*>(u) = uv.y; return glm::vec4(1.0f); };
+        bool discard = false;
+        p.eval(HE::MatCpuElement{}, { 0.5f, 0.2f }, glm::vec3(1.0f), 0.0f, h, discard);
+        return seen;
+    };
+    CHECK(approx(sampledV(HE::MatDomain::UserInterface), 0.8f));
+    CHECK(approx(sampledV(HE::MatDomain::Surface), 0.2f));
+
+    // …and the generated GLSL says the same.
+    G m;
+    const int tex = m.add(MatNodeType::TextureSample);
+    m.g.findNode(tex)->s = "T.hasset";
+    m.link(tex, 0, m.out, HE::kMatOutputBaseColorPin);
+    CHECK(HE::generateFragment(m.g).glsl.find("1.0 - (") != std::string::npos);
+}
+
+// A widget whose element carries a material reading Time keeps an event-driven
+// app drawing, as an indeterminate progress bar does: the picture changes with
+// the clock and nothing else would ask for the frame.
+TEST_CASE("CPU material: a Time material keeps the widget manager animating")
+{
+    ContentManager cm;
+    auto materialPath = [&](bool time, const char* path)
+    {
+        G m(HE::MatBlendMode::Opaque);
+        const int c3 = m.add(MatNodeType::Combine3);
+        if (time) m.link(m.add(MatNodeType::Time), 0, c3, 0);
+        m.link(c3, 0, m.out, HE::kMatOutputBaseColorPin);
+        MaterialAsset ma;
+        ma.name = path; ma.path = path;
+        ma.nodeGraphJson = HE::materialGraphToJson(m.g);
+        const HE::UUID id = cm.registerMaterial(std::move(ma));
+        cm.regenerateMaterialFromGraph(id);
+        return std::string(path);
+    };
+    auto animates = [&](const std::string& mat)
+    {
+        HE::UIWidgetTree t;
+        HE::UIElement& e = *t.find(t.add(HE::UIWidgetType::Panel));
+        e.material = mat;
+        UIWidgetAsset wa;
+        wa.name = "W" + mat; wa.path = "W" + mat;
+        wa.treeJson = HE::uiWidgetTreeToJson(t);
+        REQUIRE(cm.registerWidget(std::move(wa)) != HE::UUID{});
+        WidgetManager wm;
+        const int id = wm.createWidget(cm, "W" + mat);
+        REQUIRE(id != 0);
+        wm.showWidget(id);
+        wm.tick(0.016f);
+        return wm.isAnimating();
+    };
+    CHECK(animates(materialPath(true, "Clock.hasset")));
+    CHECK_FALSE(animates(materialPath(false, "Still.hasset")));
 }
