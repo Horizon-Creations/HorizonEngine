@@ -343,7 +343,8 @@ void forgetBuildCache(const fs::path& workDir)
 }
 
 std::string installBuiltGame(const GameSdk& sdk, const fs::path& builtExe,
-                             const fs::path& exportedExe, std::vector<std::string>* copied)
+                             const fs::path& exportedExe, std::vector<std::string>* copied,
+                             bool keepRuntimeEngine)
 {
     std::error_code ec;
     if (exportedExe.empty()) return "the export shipped no game executable to replace";
@@ -364,6 +365,9 @@ std::string installBuiltGame(const GameSdk& sdk, const fs::path& builtExe,
             // the prebuilt one, and goes nowhere a non-Python export left it out.
             if (e.path().filename().string().find("HorizonPython") != std::string::npos &&
                 !fs::exists(dstDir / e.path().filename(), ec))
+                continue;
+            // An app runtime keeps its own engine (see the header).
+            if (keepRuntimeEngine && fs::exists(dstDir / e.path().filename(), ec))
                 continue;
             fs::copy_file(e.path(), dstDir / e.path().filename(),
                           fs::copy_options::overwrite_existing, ec);

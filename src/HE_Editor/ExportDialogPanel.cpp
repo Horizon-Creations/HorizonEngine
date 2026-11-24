@@ -789,7 +789,7 @@ static SdkGameResult compileGameFromSdk(const ProjectConfig& planned, const std:
 // the runtime's, links to the bundled copies, a fresh signature. `step` is the
 // ring the lines are filed under.
 static SdkGameResult installSdkGame(const ExportResult& res, const HE::ExportSdk::GameSdk& sdk,
-                                    const SdkGameResult& built, int step)
+                                    const SdkGameResult& built, int step, RuntimeFlavor runtime)
 {
 	namespace fs = std::filesystem;
 	const std::string profile = sdk.profile;
@@ -809,8 +809,23 @@ static SdkGameResult installSdkGame(const ExportResult& res, const HE::ExportSdk
 	const fs::path exe = res.executablePath;
 
 	Build::setActivity("Installing the game compiled from the engine SDK\xe2\x80\xa6");
+	// An app runtime (AppBasic, AppAdvanced) is chosen FOR its engine: the
+	// software renderer alone, no shader compiler. The SDK's libraries are the
+	// full game engine, so they would turn every app back into a game. The
+	// prebuilt runtimes are dev builds (cmake/HorizonBuildProfile.cmake), and
+	// the game refuses an engine of another profile at start, so the runtime's
+	// engine is kept for the dev lib set. A release (Shipping) export has no
+	// release build of the app engine to keep — the SDK's release set is the
+	// full engine — and says so.
+	const bool appRuntime = runtime != RuntimeFlavor::Game;
+	const bool keepRuntimeEngine = appRuntime && profile == "dev";
+	if (appRuntime && !keepRuntimeEngine)
+		Build::log(1, std::string("The engine SDK has no ") + profile + " build of the " +
+		              runtimeFlavorName(runtime) + " engine: this export carries the full engine "
+		              "(it still runs on the backend config.json names).", step);
 	std::vector<std::string> copied;
-	if (const std::string why = HE::ExportSdk::installBuiltGame(sdk, built.artifact, exe, &copied);
+	if (const std::string why = HE::ExportSdk::installBuiltGame(sdk, built.artifact, exe, &copied,
+	                                                            keepRuntimeEngine);
 	    !why.empty())
 		// A half-done copy is neither game: say it loudly.
 		return fail(why + "; the export folder may be mixed, export again");
@@ -844,7 +859,9 @@ static SdkGameResult installSdkGame(const ExportResult& res, const HE::ExportSdk
 	}
 #endif
 	Build::log(0, "Game compiled from the SDK (" + profile + "), " + std::to_string(copied.size()) +
-	              " file(s) replaced; configuration and pak key compiled in", step);
+	              " file(s) replaced; configuration and pak key compiled in" +
+	              (keepRuntimeEngine ? std::string("; the ") + runtimeFlavorName(runtime) + " runtime's engine kept"
+	                                 : std::string()), step);
 	return SdkGameResult{ true, std::string(" — game compiled from the ") + profile + " SDK" +
 	                            (built.cacheHit ? " (build cache hit)" : "") };
 }
@@ -2119,7 +2136,7 @@ void startExport(AppContext& ctx)
                                               gameInstanceJson, hcCompile, hcSources,
                                               stepBuild, stepPackage, stepCleanup, hostTarget,
                                               stepSdkGame, gameSdk, sdkToolchain,
-                                              hcSdk]()
+                                              hcSdk, gotFlavor]()
                 {
                     // An exception escaping a std::thread is std::terminate — and
                     // exportProject touches the filesystem (unreadable dirs,
@@ -2412,7 +2429,7 @@ void startExport(AppContext& ctx)
                         // the built game goes over the runtime's executable there.
                         if (res.success)
                         {
-                            const SdkGameResult installed = installSdkGame(res, gameSdk, game, stepCleanup);
+                            const SdkGameResult installed = installSdkGame(res, gameSdk, game, stepCleanup, gotFlavor);
                             msg = installed.ok ? msg + installed.text : "Error: " + installed.text;
                         }
                     }
