@@ -13912,8 +13912,8 @@ void EditorApplication::setupMcpTools()
 	};
 	// What the Content Browser's create menu would offer in THIS project. Same
 	// rule as kLevelScriptExcluded above: MCP must not create what the menu
-	// refuses. The two gates are the project's scripting language (one language
-	// per project) and Advanced Shader Effects.
+	// refuses. The gate is the project's scripting language (one language per
+	// project).
 	assets.creatableTypes = [this] {
 		const auto& proj = m_projectManager.currentProject();
 		std::vector<HE::AssetType> out {
@@ -13931,11 +13931,10 @@ void EditorApplication::setupMcpTools()
 			HE::AssetType::EnumType,
 			HE::AssetType::SaveGameTemplate,
 		};
-		if (proj.advancedShaderEffects)
-		{
-			out.push_back(HE::AssetType::Material);
-			out.push_back(HE::AssetType::MaterialFunction);
-		}
+		// Materials in every project: with Advanced Shader Effects off they are
+		// limited to the nodes the software renderer runs, not refused.
+		out.push_back(HE::AssetType::Material);
+		out.push_back(HE::AssetType::MaterialFunction);
 		switch (proj.scriptLanguage)
 		{
 		case ProjectScriptLanguage::HorizonCode:
@@ -14097,10 +14096,10 @@ void EditorApplication::setupMcpTools()
 	material.reloadFromDisk = [](const std::string& rel) {
 		return MaterialEditorPanel::reloadByContentPath(rel);
 	};
-	// The same gate the Content Browser's create menu and its "Create Material
-	// Instance" row sit behind (cbAllowMaterials).
-	material.materialsAllowed = [this] {
-		return m_projectManager.currentProject().advancedShaderEffects;
+	// The same node set the Material Editor's add menu offers (MaterialEditorPanel
+	// ::cpuNodesOnly): with Advanced Shader Effects off, what the CPU can run.
+	material.cpuNodesOnly = [this] {
+		return !m_projectManager.currentProject().advancedShaderEffects;
 	};
 	material.publishCreate = [this](const std::string& rel, const std::string& abs) {
 		if (m_collab.inSession()) m_collab.publishAssetCreate(rel, abs);

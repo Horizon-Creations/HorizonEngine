@@ -3703,12 +3703,13 @@ namespace
 
 	// ── Project Hub and the reader itself ────────────────────────────────────
 	{ "Project Hub/Advanced Shader Effects", "",
-	  "Whether this application may author MATERIALS — shader graphs of its own. "
-	  "Off, the editor offers none and the packaged build ships the small renderer: "
-	  "widgets are still styled with rounded corners, borders, gradients and "
-	  "shadows, which is what an interface actually uses. On, everything a game "
-	  "has is available and the build carries a GPU renderer. Offered for "
-	  "applications only, and it cannot be changed afterwards.",
+	  "Which renderer the packaged application ships. Off, it is the small software "
+	  "renderer: no GPU and no driver needed, and materials are limited to the "
+	  "widget nodes it runs itself (colours, parameters, textures, the element's "
+	  "size, state and shape, maths, logic, Backdrop and the shipped UI effects). "
+	  "On, everything a game has is available, every material node included, and "
+	  "the build carries a GPU renderer. Offered for applications only, and it "
+	  "cannot be changed afterwards.",
 	  "", "editor#project-hub" },
 	{ "Project Hub/Remove from list", "",
 	  "Takes the project off this list. The project itself is untouched on disk "

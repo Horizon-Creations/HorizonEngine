@@ -305,12 +305,12 @@ struct ProjectData
 	// physics; the packaged build gets ProjectConfig::appMode and draws only when
 	// something changed. Persisted as ".heproj \"appProject\"".
 	bool appProject = false;
-	// advancedShaderEffects: may this project author MATERIALS (the node graphs
-	// that give a widget a custom shader, "Schicht 1" in the plan)? Off is the
-	// same kind of HARD restriction as scriptLanguage above: the Content Browser
-	// hides the material creators, the material editor stays shut, widgets offer
-	// no material slot, and the packaged runtime can be built without a shader
-	// compiler. Default TRUE, because every project that predates the flag has
+	// advancedShaderEffects: does this project ship a GPU renderer? Off is the
+	// same kind of HARD restriction as scriptLanguage above: the packaged runtime
+	// is the software renderer, built without a shader compiler, and materials
+	// (the node graphs that give a widget a custom look, "Schicht 1" in the plan)
+	// are limited to the nodes it runs itself — HE::matCpuSupports, which is
+	// exactly what the material editor's add menu then offers. Default TRUE, because every project that predates the flag has
 	// them and a game always does.
 	bool advancedShaderEffects = true;
 

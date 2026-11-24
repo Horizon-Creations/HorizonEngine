@@ -49,10 +49,10 @@ struct HE_API ProjectConfig {
     // changed. Rides in the existing flags word, so the file format does not
     // move and an older runtime simply ignores the bit.
     bool         appMode = false;
-    // advancedShaderEffects: may this project use material graphs on its UI
-    // ("Schicht 1")? Off means the editor never offered a material asset, so
-    // nothing references one, and the runtime can be built without a shader
-    // compiler. Default TRUE — a game always has them, which is also why the
+    // advancedShaderEffects: does this build carry a GPU renderer? Off, it is
+    // the software renderer and the runtime is built without a shader compiler;
+    // its widget materials ("Schicht 1") run on the CPU (HE::MatCpuProgram), and
+    // the editor only offered the nodes that can. Default TRUE — a game always has them, which is also why the
     // flags bit stores the NEGATION: a config written before this existed has
     // the bit clear and must read back as enabled.
     bool         advancedShaderEffects = true;

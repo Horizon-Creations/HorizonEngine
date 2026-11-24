@@ -6,6 +6,7 @@
 #include <ContentManager/Assets.h>
 #include <ContentManager/ContentManager.h>
 #include <MaterialGraph/MaterialGraph.h>
+#include <MaterialGraph/MatCpuEval.h>
 
 #include <algorithm>
 #include <array>
@@ -1568,6 +1569,8 @@ void addNodeTypes(McpToolRegistry& registry, ContentManager& content,
 			// RvtSample is engine-internal on every asset (Thema 333), same as the
 			// panel's add menu; unlike FnInput/FnOutput this holds for a function too.
 			if (filtered && d.type == HE::MatNodeType::RvtSample) continue;
+			// Advanced Shader Effects off: only what the software renderer runs.
+			if (h->cpuNodesOnly && h->cpuNodesOnly() && !HE::matCpuSupports(d.type)) continue;
 			const char* enumName = nodeTypeName(d.type);
 			if (!matches({ enumName, d.name, d.category })) continue;
 
@@ -1771,6 +1774,12 @@ void addAddNode(McpToolRegistry& registry, ContentManager& content,
 			return ToolResult::fail("refused_by_policy",
 				"'" + typeName + "' is not offered by this material's add menu, so it "
 				"is not inserted here either. " + why);
+		if (h->cpuNodesOnly && h->cpuNodesOnly() && !HE::matCpuSupports(nt))
+			return ToolResult::fail("refused_by_policy",
+				"'" + typeName + "' needs a GPU, and this project has Advanced Shader "
+				"Effects off: it ships on the software renderer, which runs a widget "
+				"material's graph itself and only knows the widget node set. "
+				"material_node_types lists that set for this project.");
 		const HE::MatNodeDesc& desc = HE::matNodeDesc(nt);
 
 		// ── The payloads, checked before the graph is touched ────────────────
@@ -3333,14 +3342,6 @@ ToolResult createGate(const McpMaterialHooks& h)
 			"Play-in-editor is running. Creating an asset now would register it in "
 			"the content manager the running session draws from, so it is refused "
 			"rather than half-applied. Ask the user to stop play mode.");
-	// The project's own gate, mirrored: a project without Advanced Shader
-	// Effects has no Material row in the create menu and no "Create Material
-	// Instance" either. MCP must not create what the menu will not offer.
-	if (h.materialsAllowed && !h.materialsAllowed())
-		return ToolResult::fail("invalid_payload",
-			"This project does not author materials — the Content Browser offers "
-			"neither the Material row nor 'Create Material Instance'. The gate is "
-			"the project's Advanced Shader Effects setting.");
 	return ToolResult::ok(json::object());
 }
 
@@ -3585,13 +3586,23 @@ void addCreate(McpToolRegistry& registry, ContentManager& content,
 		const ToolResult gate = createGate(*h);
 		if (gate.isError) return gate;
 
+		// On the software renderer a material is a widget's: the default is the
+		// UI template, and a lit or swaying one (light, wind) is refused — the
+		// CPU runs neither.
+		const bool cpuOnly = h->cpuNodesOnly && h->cpuNodesOnly();
 		const std::string tplName = hasArg(args, "template") ? strArg(args, "template")
-		                                                     : "OpaquePBR";
+		                                                     : (cpuOnly ? "UserInterface" : "OpaquePBR");
 		const MaterialTemplate* tpl = findTemplate(tplName);
 		if (!tpl)
 			return ToolResult::fail("invalid_payload",
 				"'" + tplName + "' is not a material template. The templates are: " +
-				templateNameList() + ". Omit 'template' for OpaquePBR.");
+				templateNameList() + ". Omit 'template' for " +
+				(cpuOnly ? "UserInterface." : "OpaquePBR."));
+		if (cpuOnly && (tpl->lit || tpl->wind))
+			return ToolResult::fail("refused_by_policy",
+				"'" + tplName + "' needs a GPU (lighting or wind), and this project has "
+				"Advanced Shader Effects off: it ships on the software renderer. Use "
+				"'UserInterface' (the default here) or 'Unlit'.");
 
 		const std::string rawPath = strArg(args, "path");
 		if (rawPath.empty())

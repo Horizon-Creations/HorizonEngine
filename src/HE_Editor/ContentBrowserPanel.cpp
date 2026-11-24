@@ -2065,12 +2065,6 @@ void render(AppContext& ctx, int& tabSelectRequest,
 	// Source root (its .h/.cpp classes + the h/cpp viewer).
 	const bool cbShowSource = ctx.projectManager &&
 		ctx.projectManager->currentProject().scriptLanguage == ProjectScriptLanguage::Cpp;
-	// Same shape of restriction as the language above: a project with Advanced
-	// Shader Effects switched off never authors a material, so it is not offered
-	// one. Existing material FILES stay visible on purpose — a file that exists
-	// and cannot be seen only confuses source control and the reference scan.
-	const bool cbAllowMaterials = !ctx.projectManager ||
-		ctx.projectManager->currentProject().advancedShaderEffects;
     if (ctx.fontHeading) ImGui::PushFont(ctx.fontHeading);
     ImGui::Begin("Content Browser", nullptr, ImGuiWindowFlags_NoTitleBar);
     if (ctx.fontHeading) ImGui::PopFont();
@@ -3968,14 +3962,10 @@ void render(AppContext& ctx, int& tabSelectRequest,
 					break;
 				}
 
-				// Only with Advanced Shader Effects — the same gate as everywhere else.
-				if (cbAllowMaterials)
-				{
-					if (EditorWidgets::menuItem("Material"))
-						tryCreate("NewMaterial", ".hasset", HE::AssetType::Material);
-					if (EditorWidgets::menuItem("Material Function"))
-						tryCreate("NewMaterialFunction", ".hasset", HE::AssetType::MaterialFunction);
-				}
+				if (EditorWidgets::menuItem("Material"))
+					tryCreate("NewMaterial", ".hasset", HE::AssetType::Material);
+				if (EditorWidgets::menuItem("Material Function"))
+					tryCreate("NewMaterialFunction", ".hasset", HE::AssetType::MaterialFunction);
 
 				ImGui::Separator();
 				if (EditorWidgets::menuItem("Folder")) createFolderIn(targetFolder);
@@ -4060,12 +4050,8 @@ void render(AppContext& ctx, int& tabSelectRequest,
 
 			if (ImGui::BeginMenu("Rendering"))
 			{
-				// Materials only where the project allows them (cbAllowMaterials).
-				if (cbAllowMaterials)
-				{
-					if (EditorWidgets::menuItem("Material"))          tryCreate("NewMaterial", ".hasset", HE::AssetType::Material);
-					if (EditorWidgets::menuItem("Material Function")) tryCreate("NewMaterialFunction", ".hasset", HE::AssetType::MaterialFunction);
-				}
+				if (EditorWidgets::menuItem("Material"))          tryCreate("NewMaterial", ".hasset", HE::AssetType::Material);
+				if (EditorWidgets::menuItem("Material Function")) tryCreate("NewMaterialFunction", ".hasset", HE::AssetType::MaterialFunction);
 				if (EditorWidgets::menuItem("Particle System"))   tryCreate("NewParticleSystem", ".hasset", HE::AssetType::ParticleSystem);
 				ImGui::EndMenu();
 			}
@@ -4666,7 +4652,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 				// Allowed even for an engine-default material: it creates a NEW,
 				// separate asset (a plain project one, not "Engine/..."-namespaced)
 				// rather than mutating the default.
-				if (ext == ".hasset" && ctx.contentManager && cbAllowMaterials &&
+				if (ext == ".hasset" && ctx.contentManager &&
 				    MaterialEditorPanel::isMaterialAsset(s_ctxMenuItem) &&
 				    EditorWidgets::menuItem("Create Material Instance"))
 				{

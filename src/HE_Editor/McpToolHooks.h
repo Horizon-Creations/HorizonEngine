@@ -649,12 +649,12 @@ struct McpMaterialHooks
 	// second "is it open" question. Absent = no tabs.
 	std::function<bool(const std::string& contentRel)> reloadFromDisk;
 
-	// Does THIS project author materials at all? The Content Browser's create menu
-	// and its "Create Material Instance" row are both gated on the project's
-	// Advanced Shader Effects setting, and the same rule as everywhere else
-	// applies: MCP must not create what the menu will not offer. Absent = yes,
-	// which is what a test wants.
-	std::function<bool()> materialsAllowed;
+	// Does THIS project's material editor offer only the nodes the CPU can run
+	// (HE::matCpuSupports)? True with Advanced Shader Effects off: such a project
+	// ships on the software renderer, which runs a material's graph itself. The
+	// same rule as everywhere else applies: MCP must not insert what the add
+	// menu will not offer. Absent = no restriction, which is what a test wants.
+	std::function<bool()> cpuNodesOnly;
 
 	// A file that was not there before — the same pair the asset and scene tools
 	// carry, for the same two reasons: a create IS published (nothing refers to a

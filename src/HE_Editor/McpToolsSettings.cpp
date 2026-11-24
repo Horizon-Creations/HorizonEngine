@@ -289,10 +289,11 @@ std::vector<ProjSetting> buildProjectCatalog()
 	                     "Reserved for the `http` API."));
 	t.push_back(boolProj("project.advancedShaderEffects", "Advanced Shader Effects",
 	                     "Application", &ProjectData::advancedShaderEffects,
-	                     "May this project author MATERIALS (the node graphs)? "
-	                     "Off hides the material creators, keeps the material "
-	                     "editor shut and lets the packaged runtime be built "
-	                     "without a shader compiler."));
+	                     "Which renderer the application ships. Off: the "
+	                     "software renderer, no GPU, and materials limited to "
+	                     "the widget nodes it runs itself; the runtime is built "
+	                     "without a shader compiler. On: every material node "
+	                     "and a GPU renderer."));
 
 	// ── What the application is, to the system around it ────────────────────
 	t.push_back(strProj("project.appIconName", "Icon", "Application",

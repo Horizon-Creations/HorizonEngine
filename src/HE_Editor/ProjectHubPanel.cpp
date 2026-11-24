@@ -271,8 +271,8 @@ void render(AppContext& ctx)
             ImGui::Checkbox("Advanced Shader Effects", &ctx.hubAdvancedShaderFx);
             ImGui::SetCursorPosX(padding);
             ImGui::TextDisabled("%s", ctx.hubAdvancedShaderFx
-                ? "Materials and material graphs are available."
-                : "No materials: corner radius, borders, gradients and shadows instead.");
+                ? "Every material node is available."
+                : "Widget materials only; ships the software renderer, no GPU needed.");
         }
         else
             ctx.hubAdvancedShaderFx = true;

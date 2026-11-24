@@ -11,6 +11,7 @@
 #include "GraphEditor.h"                        // shared node-graph canvas frontend
 #include "HcEditorUtil.h"                       // asset dropdowns (texture picker)
 #include <MaterialGraph/MaterialGraph.h>
+#include <MaterialGraph/MatCpuEval.h>
 #include <HorizonScene/SceneSystems.h>          // who else references a mesh (scene refs)
 #include <material/MaterialShaderLibrary.h> // inline compile check (canvas error banner)
 #include <ContentManager/ContentManager.h>
@@ -110,6 +111,10 @@ struct State
 	std::string name;                // filename for the header
 	bool        isFunction = false;  // editing a MaterialFunction asset (FnInput/FnOutput mode)
 	std::string relPath;             // content-root-relative path of this asset
+	// Advanced Shader Effects off: whether the software renderer can run this
+	// graph, re-asked whenever the graph's JSON changes (cpuCheckJson).
+	std::string cpuCheckJson;
+	std::string cpuCheckError;       // empty = every node runs on the CPU
 };
 AssetPanelState<State> s_states;
 
@@ -129,6 +134,31 @@ const HE::MaterialGraph* loadFunctionGraph(AppContext& ctx, const std::string& r
 	if (!fn->nodeGraphJson.empty() && !HE::materialGraphFromJson(fn->nodeGraphJson, g))
 		return nullptr;
 	return &(s_fnGraphCache[relPath] = std::move(g));
+}
+
+// Advanced Shader Effects off: the project ships on the software renderer,
+// which runs a widget material's graph itself (HE::MatCpuProgram) and knows
+// only the widget node set. The add menu offers exactly that set, and the
+// toolbar says whether the graph as it stands runs there.
+bool cpuNodesOnly(AppContext& ctx)
+{
+	return ctx.projectManager && !ctx.projectManager->currentProject().advancedShaderEffects;
+}
+
+// Why the software renderer cannot run this graph, or "" when it can. A
+// function is asked node by node (it has no Output to compile from).
+std::string cpuRefusal(const State& st, AppContext& ctx)
+{
+	if (st.isFunction)
+	{
+		for (const MatGraphNode& n : st.graph.nodes)
+			if (!HE::matCpuSupports(n.type)) return HE::matNodeDesc(n.type).name;
+		return {};
+	}
+	HE::MatCpuProgram program;
+	std::string error;
+	const HE::MatFunctionLoader loader = [&ctx](const std::string& path) { return loadFunctionGraph(ctx, path); };
+	return program.compile(st.graph, loader, nullptr, &error) ? std::string() : error;
 }
 
 // Node width used to size the inline value widgets (kept in sync with the shared
@@ -517,6 +547,15 @@ State& stateFor(const std::string& path, AppContext& ctx)
 			// No graph yet (fresh material, or one with only a hand-written shader):
 			// start from the default. Nothing is written until the first edit.
 			st.graph = MaterialGraph::makeDefault();
+			// On the software renderer a material is a widget's: User Interface,
+			// unlit — the domain the CPU runs.
+			if (cpuNodesOnly(ctx))
+				for (MatGraphNode& n : st.graph.nodes)
+					if (n.type == MatNodeType::Output)
+					{
+						n.p[0] = 0.0f;
+						n.p[3] = static_cast<float>(HE::MatDomain::UserInterface);
+					}
 		}
 		if (!st.isInstance) st.lastGlsl = HE::generateFragmentGlsl(st.graph);
 	}
@@ -1509,7 +1548,9 @@ void drawMaterialCanvas(State& st, AppContext& ctx, bool assetOk,
 			"Math", "Logic", "Channels", "Landscape", "Function",
 		};
 		// True when this node type belongs in the menu at all.
+		const bool cpuOnly = cpuNodesOnly(ctx);
 		auto listed = [&](const HE::MatNodeDesc& d) {
+			if (cpuOnly && !HE::matCpuSupports(d.type)) return false;
 			// Exactly one material Output; FunctionCall comes from the list below.
 			if (d.type == MatNodeType::Output || d.type == MatNodeType::FunctionCall) return false;
 			const bool fnInterface = d.type == MatNodeType::FnInput || d.type == MatNodeType::FnOutput;
@@ -1559,6 +1600,14 @@ void drawMaterialCanvas(State& st, AppContext& ctx, bool assetOk,
 				const std::string fnName = std::filesystem::path(fn->path).stem().string();
 				if (!matches(fnName.c_str(), "Function")) continue;
 				if (st.isFunction && fn->path == st.relPath) continue; // no direct self-call
+				// Only what the software renderer runs, when that is what ships.
+				if (cpuOnly)
+				{
+					HE::MaterialGraph fg;
+					bool runs = HE::materialGraphFromJson(fn->nodeGraphJson, fg);
+					for (const MatGraphNode& n : fg.nodes) runs = runs && HE::matCpuSupports(n.type);
+					if (!runs) continue;
+				}
 				if (!headerShown)
 				{
 					if (*lastCat) ImGui::Spacing();
@@ -2517,6 +2566,26 @@ void render(AppContext& ctx, const std::string& assetPath,
 				s_openAssetRequest = ctx.contentManager->resolveAbsolutePath(
 					mat->parentMaterialPath);
 			}
+			bar.endGroup();
+		}
+
+		// The software renderer's verdict on the graph as it stands.
+		if (cpuNodesOnly(ctx) && !st.isInstance)
+		{
+			const std::string json = HE::materialGraphToJson(st.graph);
+			if (json != st.cpuCheckJson)
+			{
+				st.cpuCheckJson  = json;
+				st.cpuCheckError = cpuRefusal(st, ctx);
+			}
+			bar.group();
+			if (st.cpuCheckError.empty())
+				bar.item("##cpu", T::iconCheck, "Software", false, true,
+				         "Every node runs on the software renderer this project ships with");
+			else
+				bar.itemTinted("##cpu", T::iconWarning, "Software", T::kWarn, true,
+				               ("The software renderer cannot run " + st.cpuCheckError +
+				                " — a widget with this material draws its plain surface").c_str());
 			bar.endGroup();
 		}
 

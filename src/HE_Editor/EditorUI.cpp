@@ -998,33 +998,12 @@ struct AssetPanelOps
 	bool (*reloadFromDisk)(const std::string& path);
 };
 
-// Advanced Shader Effects off = this project does not author materials
-// (docs/he-apps-plan.md E1b). An existing one can still be opened — the file is
-// right there in the browser — but it says why it is inert rather than showing
-// an editor whose result nothing would draw.
+// Every project edits its materials. With Advanced Shader Effects off the
+// editor offers only the nodes the software renderer runs (MaterialEditorPanel
+// ::cpuNodesOnly), which is a restriction inside the panel, not a closed tab.
 void renderMaterialTab(AppContext& ctx, const std::string& path, const ImVec2& pos, const ImVec2& size)
 {
-	const bool allowMaterials = !ctx.projectManager ||
-		ctx.projectManager->currentProject().advancedShaderEffects;
-	if (allowMaterials)
-	{
-		MaterialEditorPanel::render(ctx, path, pos, size);
-		return;
-	}
-#ifdef HE_IMGUI_ENABLED
-	ImGui::SetNextWindowPos(pos);
-	ImGui::SetNextWindowSize(size);
-	ImGui::Begin("##MaterialsDisabled", nullptr,
-	             ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
-	             ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse);
-	ImGui::TextWrapped(
-		"Advanced Shader Effects are switched off for this project, so materials "
-		"are not used. Widgets are styled with corner radius, borders, gradients "
-		"and shadows instead.");
-	ImGui::Spacing();
-	ImGui::TextDisabled("Turn them on in the project settings to edit this asset.");
-	ImGui::End();
-#endif
+	MaterialEditorPanel::render(ctx, path, pos, size);
 }
 
 // Panels whose save() needs no context.
@@ -1738,11 +1717,11 @@ static void drawNewProjectPopup(AppContext& ctx)
         ImGui::TextWrapped("Applies to the whole project and can't be changed after it's created.");
         ImGui::PopStyleColor();
 
-        // Advanced Shader Effects: whether this project may author materials
-        // (docs/he-apps-plan.md A0). Only for APPLICATIONS — a game without
-        // materials is not a thing anyone wants, and offering the switch
-        // everywhere is how an Empty project ended up with materials
-        // disabled by a checkbox its author read as harmless.
+        // Advanced Shader Effects: which renderer this application ships, and
+        // with it how much of the material graph it may use (docs/he-apps-plan.md
+        // A0, and "Materials on the software renderer"). Only for APPLICATIONS —
+        // offering the switch everywhere is how an Empty project ended up with
+        // its materials limited by a checkbox its author read as harmless.
         //
         // Forced back on for every other template, so leaving it unticked and
         // then picking Game cannot carry the setting across.
@@ -1751,8 +1730,8 @@ static void drawNewProjectPopup(AppContext& ctx)
             ImGui::Spacing();
             ImGui::Checkbox("Advanced Shader Effects", &ctx.hubAdvancedShaderFx);
             ImGui::TextDisabled("%s", ctx.hubAdvancedShaderFx
-                ? "Materials and material graphs are available. The packaged build ships a GPU renderer."
-                : "No materials: widgets are styled with corner radius, borders, gradients and shadows. "
+                ? "Every material node is available. The packaged build ships a GPU renderer."
+                : "Widget materials only (the nodes the software renderer runs). "
                   "Smaller build, no GPU required.");
         }
         else
