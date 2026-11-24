@@ -6,6 +6,8 @@
 
 #include <algorithm>
 #include <array>
+#include <mutex>
+#include <unordered_map>
 #include <cmath>
 
 namespace HE::sw
@@ -394,6 +396,7 @@ void draw(Image& target, const std::vector<UIRenderObject>& objects, const DrawO
     struct Prep
     {
         const HE::BakedUIFont* font = nullptr;
+        const std::vector<HE::UIFontMipLevel>* fontMips = nullptr;   // the atlas's smaller copies
         TextureView tv{};
         float lod = 0.0f;   // mip level the picture is drawn at (0 = full size)
         MaterialView mat{};       // a material the CPU can run, else none
@@ -408,6 +411,21 @@ void draw(Image& target, const std::vector<UIRenderObject>& objects, const DrawO
         p.font = &shared;
         if (o.type == 2 && o.fontAtlasKey != 0)
             if (const HE::BakedUIFont* f = HE::UIFontCache::find(o.fontAtlasKey)) p.font = f;
+        // Text drawn smaller than the atlas was baked reads the atlas's mips,
+        // like an image does: 9 px text from a 64 px bake is seven atlas texels
+        // per pixel, and four bilinear taps of them come out patchy.
+        if (o.type == 2 && p.font && p.font->ok && o.size.x > 0.0f && o.size.y > 0.0f)
+        {
+            const float rx = std::abs(o.uvMax.x - o.uvMin.x) * static_cast<float>(p.font->atlasW) / o.size.x;
+            const float ry = std::abs(o.uvMax.y - o.uvMin.y) * static_cast<float>(p.font->atlasH) / o.size.y;
+            const float rho = std::max(rx, ry);
+            if (rho > 1.0f)
+            {
+                p.fontMips = &HE::uiFontMips(*p.font);
+                p.lod = std::clamp(std::log2(rho) + HE::kUIFontLodBias, 0.0f,
+                                   static_cast<float>(p.fontMips->size()));
+            }
+        }
 
         // A material the CPU can run owns the quad's pixels, as it does on the
         // GPU. One it cannot run is not looked at: the quad draws Schicht 0
@@ -566,9 +584,30 @@ void draw(Image& target, const std::vector<UIRenderObject>& objects, const DrawO
                 // A glyph: alpha out of the font atlas, tinted by the colour.
                 const float u = mixf(o.uvMin.x, o.uvMax.x, lu);
                 const float v = mixf(o.uvMin.y, o.uvMax.y, lv);
-                const float a = font && font->ok
-                    ? sampleR8(font->pixels.data(), font->atlasW, font->atlasH, u, v)
-                    : 0.0f;
+                float a = 0.0f;
+                if (font && font->ok)
+                {
+                    const std::vector<HE::UIFontMipLevel>* fm = prep[k].fontMips;
+                    const float lod = prep[k].lod;
+                    if (!fm || lod <= 0.0f)
+                        a = sampleR8(font->pixels.data(), font->atlasW, font->atlasH, u, v);
+                    else
+                    {
+                        // Trilinear: the two levels either side of the lod.
+                        auto level = [&](int l) -> float
+                        {
+                            if (l <= 0) return sampleR8(font->pixels.data(), font->atlasW, font->atlasH, u, v);
+                            const HE::UIFontMipLevel& m = (*fm)[static_cast<std::size_t>(
+                                std::min<int>(l, static_cast<int>(fm->size())) - 1)];
+                            return sampleR8(m.px.data(), m.w, m.h, u, v);
+                        };
+                        const int l0 = static_cast<int>(lod);
+                        const float fr = lod - static_cast<float>(l0);
+                        a = level(l0);
+                        if (fr > 0.0f && l0 < static_cast<int>(fm->size()))
+                            a = mixf(a, level(l0 + 1), fr);
+                    }
+                }
                 src = glm::vec4(o.color.r, o.color.g, o.color.b, o.color.a * a);
             }
             else if (tv.rgba)

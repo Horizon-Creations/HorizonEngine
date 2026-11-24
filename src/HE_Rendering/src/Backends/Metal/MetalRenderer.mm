@@ -40,6 +40,7 @@
 #include <vector>
 #include <algorithm>
 #include <fstream> // HE_DUMP_* headless capture writes PNG/PPM dumps straight to disk
+
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp> // glm::lookAt / glm::perspective (preview cameras)
 #include <glm/gtc/type_ptr.hpp>         // glm::make_mat4 (skeletal-preview bone overlay)
@@ -93,6 +94,25 @@ void attachPassTimer(MTLRenderPassDescriptor* d, id<MTLCounterSampleBuffer> sb, 
 // Half-timers for a MULTI-encoder pass (SSAO = pos/occlusion/blur; Bloom =
 // bright + N blur): start sampled on the FIRST encoder, end on the LAST, so the
 // pair spans the whole feature.
+// A font atlas with its mip chain (HE::uiFontMips — the levels every backend
+// uploads and the software rasterizer samples, so small text matches).
+static id<MTLTexture> makeUIFontAtlas(id<MTLDevice> device, const HE::BakedUIFont& f)
+{
+	const std::vector<HE::UIFontMipLevel>& mips = HE::uiFontMips(f);
+	MTLTextureDescriptor* d = [MTLTextureDescriptor
+		texture2DDescriptorWithPixelFormat:MTLPixelFormatR8Unorm
+		                             width:f.atlasW height:f.atlasH mipmapped:!mips.empty()];
+	d.mipmapLevelCount = 1 + mips.size();
+	d.usage = MTLTextureUsageShaderRead; d.storageMode = MTLStorageModeShared;
+	id<MTLTexture> tex = [device newTextureWithDescriptor:d];
+	[tex replaceRegion:MTLRegionMake2D(0, 0, f.atlasW, f.atlasH)
+	       mipmapLevel:0 withBytes:f.pixels.data() bytesPerRow:f.atlasW];
+	for (size_t i = 0; i < mips.size(); ++i)
+		[tex replaceRegion:MTLRegionMake2D(0, 0, mips[i].w, mips[i].h)
+		       mipmapLevel:i + 1 withBytes:mips[i].px.data() bytesPerRow:mips[i].w];
+	return tex;
+}
+
 API_AVAILABLE(macos(11.0))
 void attachPassStart(MTLRenderPassDescriptor* d, id<MTLCounterSampleBuffer> sb, NSUInteger slot)
 {
@@ -1475,8 +1495,11 @@ fragment float4 uiFragment(UIVert in [[stage_in]],
                            texture2d<float> atlas [[texture(0)]])
 {
     if (shape.x > 0.5 && shape.x < 1.5) {
-        constexpr sampler s(filter::linear);
-        float a = atlas.sample(s, in.uv).r;
+        // Trilinear: the atlas carries its mips (HE::uiFontMips), and small
+        // text reads the level its size, biased by HE::kUIFontLodBias (-1), as
+        // on GL and in the software path.
+        constexpr sampler s(filter::linear, mip_filter::linear);
+        float a = atlas.sample(s, in.uv, bias(-1.0)).r;
         return float4(color.rgb, color.a * a);
     }
     if (shape.x > 1.5) {
@@ -8220,20 +8243,7 @@ void MetalRenderer::CreateScenePipeline()
 			const HE::BakedUIFont& uiFont = HE::sharedUIFont();
 			if (uiFont.ok)
 			{
-				MTLTextureDescriptor* fontDesc = [MTLTextureDescriptor
-					texture2DDescriptorWithPixelFormat:MTLPixelFormatR8Unorm
-					                              width:HE::BakedUIFont::kWidth
-					                             height:HE::BakedUIFont::kHeight
-					                          mipmapped:NO];
-				fontDesc.usage       = MTLTextureUsageShaderRead;
-				fontDesc.storageMode = MTLStorageModeShared;
-				id<MTLTexture> fontTex = [device newTextureWithDescriptor:fontDesc];
-				[fontTex replaceRegion:MTLRegionMake2D(0, 0, HE::BakedUIFont::kWidth,
-				                                       HE::BakedUIFont::kHeight)
-				           mipmapLevel:0
-				             withBytes:uiFont.pixels.data()
-				           bytesPerRow:HE::BakedUIFont::kWidth];
-				m_uiFontTexture = (void*)CFBridgingRetain(fontTex);
+				m_uiFontTexture = (void*)CFBridgingRetain(makeUIFontAtlas(device, uiFont));
 			}
 		}
 
@@ -12234,6 +12244,7 @@ bool MetalRenderer::CaptureViewport(std::vector<uint8_t>& rgba, uint32_t& width,
 // mode 1 = normal (x, z), mode 2 = surface (R, G). Exact: an 8-bit value goes through a float and back unchanged.
 static const char* kRvtPackMSL = R"MSL(
 #include <metal_stdlib>
+
 using namespace metal;
 kernel void rvtPack(texture2d<float, access::read> src [[texture(0)]],
                     texture2d_array<float, access::write> dst [[texture(1)]],
@@ -15744,14 +15755,7 @@ void* MetalRenderer::UIFontAtlasTexture(uint32_t key)
 	const HE::BakedUIFont* f = HE::UIFontCache::find(key);
 	if (!f || !f->ok) return m_uiFontTexture;
 	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
-	MTLTextureDescriptor* d = [MTLTextureDescriptor
-		texture2DDescriptorWithPixelFormat:MTLPixelFormatR8Unorm
-		                             width:f->atlasW height:f->atlasH mipmapped:NO];
-	d.usage = MTLTextureUsageShaderRead; d.storageMode = MTLStorageModeShared;
-	id<MTLTexture> tex = [device newTextureWithDescriptor:d];
-	[tex replaceRegion:MTLRegionMake2D(0, 0, f->atlasW, f->atlasH)
-	       mipmapLevel:0 withBytes:f->pixels.data() bytesPerRow:f->atlasW];
-	void* stored = (void*)CFBridgingRetain(tex);
+	void* stored = (void*)CFBridgingRetain(makeUIFontAtlas(device, *f));
 	m_uiFontAtlases[key] = stored;
 	return stored;
 }

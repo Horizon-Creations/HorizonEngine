@@ -10208,6 +10208,48 @@ void EditorApplication::dumpFrameHeadless()
 			if (const int inst = m_editorWorld->widgets().createWidget(contentManager(), "__uiMaterialWitness.hasset"))
 				m_editorWorld->widgets().showWidget(inst);
 	}
+	// HE_DUMP_UITEST=text: one line of text at 9, 10, 12, 14, 18 and 24 px, light
+	// on dark and dark on light — what small text looks like on each backend,
+	// for comparing the software rasterizer's glyphs with the GPU's.
+	else if (const char* ui = std::getenv("HE_DUMP_UITEST"); ui && std::string_view(ui) == "text" && m_editorWorld)
+	{
+		HE::UIWidgetTree t;
+		t.canvasWidth = 1280.0f; t.canvasHeight = 720.0f;
+		t.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+		auto add = [&](HE::UIWidgetType type, float x, float y, float w, float h) -> HE::UIElement&
+		{
+			HE::UIElement& e = *t.find(t.add(type));
+			HE::uiSetAnchorPreset(e, 0);
+			e.pivotX = e.pivotY = 0.0f;
+			e.posX = x; e.posY = y; e.sizeX = w; e.sizeY = h;
+			return e;
+		};
+		add(HE::UIWidgetType::Panel, 0, 0, 1280, 720)
+			.setProp("Color", HE::UIPropValue::ofColor({ 0.10f, 0.11f, 0.13f, 1.0f }));
+		add(HE::UIWidgetType::Panel, 640, 0, 640, 720)
+			.setProp("Color", HE::UIPropValue::ofColor({ 0.95f, 0.95f, 0.93f, 1.0f }));
+		float y = 40.0f;
+		for (const float size : { 9.0f, 10.0f, 12.0f, 14.0f, 18.0f, 24.0f })
+		{
+			for (int side = 0; side < 2; ++side)
+			{
+				HE::UIElement& e = add(HE::UIWidgetType::Text, 40.0f + side * 640.0f, y, 580.0f, size * 2.0f);
+				e.setProp("Text", HE::UIPropValue::ofString("Settings: Volume 75% - Quick brown fox 0123"));
+				e.setProp("FontSize", HE::UIPropValue::ofFloat(size));
+				e.setProp("Color", HE::UIPropValue::ofColor(side ? glm::vec4(0.1f, 0.1f, 0.12f, 1.0f)
+				                                                 : glm::vec4(0.92f, 0.92f, 0.95f, 1.0f)));
+			}
+			y += size * 2.0f + 30.0f;
+		}
+		UIWidgetAsset wa;
+		wa.type = HE::AssetType::Widget;
+		wa.name = "__uiTextWitness";
+		wa.path = "__uiTextWitness.hasset";
+		wa.treeJson = HE::uiWidgetTreeToJson(t);
+		if (contentManager().registerWidget(std::move(wa)) != HE::UUID{})
+			if (const int inst = m_editorWorld->widgets().createWidget(contentManager(), "__uiTextWitness.hasset"))
+				m_editorWorld->widgets().showWidget(inst);
+	}
 	else if (const char* ui = std::getenv("HE_DUMP_UITEST"); ui && *ui && m_editorWorld)
 	{
 		HE::UIWidgetTree t;

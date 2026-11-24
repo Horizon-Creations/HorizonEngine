@@ -3297,7 +3297,9 @@ void main()
 {
     if (uMode > 0.5 && uMode < 1.5)
     {
-        float a = texture(uFontAtlas, vUV).r;
+        // The atlas's mips, biased by HE::kUIFontLodBias (-1): small text reads
+        // a level its size and keeps even strokes, as in the other backends.
+        float a = texture(uFontAtlas, vUV, -1.0).r;
         FragColor = vec4(uColor.rgb, uColor.a * a);
         return;
     }
@@ -8303,6 +8305,26 @@ unsigned int OpenGLRenderer::RenderForwardSSR(int pw, int ph, const glm::mat4& v
 	return result;
 }
 
+namespace
+{
+// A font atlas into the BOUND texture: the bake and its mip chain (HE::uiFontMips,
+// the same levels every backend uploads and the software rasterizer samples), so
+// text drawn smaller than the 64 px bake reads a level its size instead of four
+// texels out of fifty. Filtering is trilinear from here on; MAG stays linear.
+void uploadUIFontAtlas(const HE::BakedUIFont& f)
+{
+	glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, f.atlasW, f.atlasH, 0, GL_RED, GL_UNSIGNED_BYTE, f.pixels.data());
+	const std::vector<HE::UIFontMipLevel>& mips = HE::uiFontMips(f);
+	for (size_t i = 0; i < mips.size(); ++i)
+		glTexImage2D(GL_TEXTURE_2D, static_cast<GLint>(i + 1), GL_R8, mips[i].w, mips[i].h, 0,
+		             GL_RED, GL_UNSIGNED_BYTE, mips[i].px.data());
+	glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, static_cast<GLint>(mips.size()));
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, mips.empty() ? GL_LINEAR : GL_LINEAR_MIPMAP_LINEAR);
+}
+}
+
 // The R8 atlas texture for a font key (0 = the shared default), uploaded lazily
 // from UIFontCache the first time a glyph quad references it.
 unsigned int OpenGLRenderer::UIFontAtlasTexture(uint32_t key)
@@ -8314,10 +8336,7 @@ unsigned int OpenGLRenderer::UIFontAtlasTexture(uint32_t key)
 	unsigned int tex = 0;
 	glGenTextures(1, &tex);
 	glBindTexture(GL_TEXTURE_2D, tex);
-	glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-	glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, f->atlasW, f->atlasH, 0, GL_RED, GL_UNSIGNED_BYTE, f->pixels.data());
-	glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+	uploadUIFontAtlas(*f);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
@@ -8338,11 +8357,7 @@ void OpenGLRenderer::RenderUIPass(int pw, int ph)
 		{
 			glGenTextures(1, &m_uiFontTexture);
 			glBindTexture(GL_TEXTURE_2D, m_uiFontTexture);
-			glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-			glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, HE::BakedUIFont::kWidth, HE::BakedUIFont::kHeight,
-			             0, GL_RED, GL_UNSIGNED_BYTE, uiFont.pixels.data());
-			glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
-			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+			uploadUIFontAtlas(uiFont);
 			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
 			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);

@@ -255,6 +255,53 @@ TEST_CASE("Software raster: text draws through the shared font atlas")
     CHECK(inked > 100);
 }
 
+// Small text against the truth: the same line drawn four times as large and
+// box-filtered down is what a pixel of 9 px text should hold. The atlas is
+// baked at 64 px, so 9 px text reads it seven times minified — with only the
+// base level that is four texels out of ~50 per pixel, and strokes come out
+// patchy. The atlas mips are what close that gap.
+TEST_CASE("Software raster: small text is close to its supersampled self")
+{
+    const HE::BakedUIFont& f = HE::sharedUIFont();
+    REQUIRE(f.ok);
+    const char* line = "Settings: Volume 75% - Quick brown fox 0123";
+    auto drawAt = [&](float size, int scale, int w, int h)
+    {
+        HE::UITextLayout opts;
+        std::vector<UIRenderObject> glyphs;
+        HE::emitUITextGlyphs(f, 0, line, { 2.0f * scale, 2.0f * scale },
+                             { static_cast<float>(w), static_cast<float>(h) }, size * scale,
+                             glm::vec4(1.0f), 0, opts, glyphs);
+        Image img = canvas(w, h);
+        HE::sw::draw(img, glyphs);
+        return img;
+    };
+    for (const float size : { 9.0f, 12.0f })
+    {
+        const int W = 300, H = 24;
+        const Image small = drawAt(size, 1, W, H);
+        const Image big = drawAt(size, 4, W * 4, H * 4);
+        double err = 0.0;
+        int n = 0;
+        for (int y = 0; y < H; ++y)
+            for (int x = 0; x < W; ++x)
+            {
+                int ref = 0;
+                for (int j = 0; j < 4; ++j)
+                    for (int i = 0; i < 4; ++i) ref += at(big, x * 4 + i, y * 4 + j).r;
+                const int got = at(small, x, y).r;
+                if (ref == 0 && got == 0) continue;
+                err += std::abs(got - ref / 16.0);
+                ++n;
+            }
+        const double mean = n ? err / n : 0.0;
+        MESSAGE(size << " px text: mean error against 4x supersampling " << mean << " over " << n << " pixels");
+        // Measured: 50.8 / 40.9 with the base level only, 20.1 / 14.7 with mips
+        // read at HE::kUIFontLodBias.
+        CHECK(mean < (size < 10.0f ? 26.0 : 20.0));
+    }
+}
+
 // ── Dirty rectangles ─────────────────────────────────────────────────────────
 // A full 4K frame is 8.3 million pixels. Event-driven drawing keeps the idle
 // case free, but dragging a slider repaints sixty times a second, and repainting

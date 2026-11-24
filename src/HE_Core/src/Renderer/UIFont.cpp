@@ -17,6 +17,7 @@
 #include <Renderer/UIFont.h>
 #include <algorithm>
 #include <string>      // std::stof — the markup's size value
+#include <mutex>
 #include <unordered_map>
 
 namespace HE {
@@ -1257,6 +1258,41 @@ void emitUITextGlyphs(const std::string& text, const glm::vec2& rectPos,
                       std::vector<UIRenderObject>& out)
 {
     emitUITextGlyphs(sharedUIFont(), 0, text, rectPos, rectSize, sizePx, color, layer, centerH, out);
+}
+
+const std::vector<UIFontMipLevel>& uiFontMips(const BakedUIFont& f)
+{
+    struct Entry { const void* src = nullptr; int w = 0, h = 0; std::vector<UIFontMipLevel> levels; };
+    static std::mutex m;
+    static std::unordered_map<const BakedUIFont*, Entry> cache;
+    std::lock_guard<std::mutex> lock(m);
+    Entry& e = cache[&f];
+    if (e.src == f.pixels.data() && e.w == f.atlasW && e.h == f.atlasH) return e.levels;
+    e.src = f.pixels.data(); e.w = f.atlasW; e.h = f.atlasH;
+    e.levels.clear();
+    if (!f.ok || f.pixels.empty()) return e.levels;
+    const std::uint8_t* src = f.pixels.data();
+    int w = f.atlasW, h = f.atlasH;
+    while (w > 1 || h > 1)
+    {
+        UIFontMipLevel l;
+        l.w = std::max(1, w / 2); l.h = std::max(1, h / 2);
+        l.px.resize(static_cast<std::size_t>(l.w) * l.h);
+        for (int y = 0; y < l.h; ++y)
+            for (int x = 0; x < l.w; ++x)
+            {
+                // 2x2 box; an odd edge repeats its last texel.
+                const int x0 = std::min(2 * x, w - 1), x1 = std::min(2 * x + 1, w - 1);
+                const int y0 = std::min(2 * y, h - 1), y1 = std::min(2 * y + 1, h - 1);
+                auto at = [&](int xi, int yi) { return static_cast<int>(src[static_cast<std::size_t>(yi) * w + xi]); };
+                l.px[static_cast<std::size_t>(y) * l.w + x] =
+                    static_cast<std::uint8_t>((at(x0, y0) + at(x1, y0) + at(x0, y1) + at(x1, y1) + 2) / 4);
+            }
+        e.levels.push_back(std::move(l));
+        src = e.levels.back().px.data();
+        w = e.levels.back().w; h = e.levels.back().h;
+    }
+    return e.levels;
 }
 
 } // namespace HE
