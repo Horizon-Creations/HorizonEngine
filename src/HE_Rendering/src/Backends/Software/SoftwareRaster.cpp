@@ -397,6 +397,33 @@ void draw(Image& target, const std::vector<UIRenderObject>& objects, const glm::
                                     std::max(o.cornerRadius.z, o.cornerRadius.w));
         const glm::vec2 half = o.size * 0.5f;
 
+        // An opaque, upright, plain rectangle — a page, a panel, a bar — is most
+        // of the pixels of a typical application screen and needs none of the
+        // fragment below: its colour is the same everywhere and covers what is
+        // under it. The same pixel-centre test and the same byte rounding as the
+        // general path (source-over at alpha 1 is the source), so the picture is
+        // identical, only without the per-pixel shading.
+        if (o.type == 0 && !tv.rgba && rot == 0.0f && maxR <= 0.0f && o.borderWidth <= 0.0f &&
+            o.blur <= 0.0f && o.innerShadowBlur <= 0.0f && !o.gradient && o.color.a >= 1.0f)
+        {
+            const std::uint8_t r = static_cast<std::uint8_t>(clamp01(o.color.r) * 255.0f + 0.5f);
+            const std::uint8_t g = static_cast<std::uint8_t>(clamp01(o.color.g) * 255.0f + 0.5f);
+            const std::uint8_t b = static_cast<std::uint8_t>(clamp01(o.color.b) * 255.0f + 0.5f);
+            for (int y = py0; y < py1; ++y)
+            {
+                const float lv = (static_cast<float>(y) + 0.5f - o.position.y) / o.size.y;
+                if (lv < 0.0f || lv > 1.0f) continue;
+                std::uint8_t* p = target.rgba.data() + (static_cast<std::size_t>(y) * target.width + px0) * 4;
+                for (int x = px0; x < px1; ++x, p += 4)
+                {
+                    const float lu = (static_cast<float>(x) + 0.5f - o.position.x) / o.size.x;
+                    if (lu < 0.0f || lu > 1.0f) continue;
+                    p[0] = r; p[1] = g; p[2] = b; p[3] = 255;
+                }
+            }
+            continue;
+        }
+
         for (int y = py0; y < py1; ++y)
         for (int x = px0; x < px1; ++x)
         {

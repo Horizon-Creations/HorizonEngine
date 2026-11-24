@@ -420,6 +420,16 @@ struct UIEmitted
     UIWidgetRect px{};
     float eus = 1.0f, evs = 1.0f;
 };
+// The outline a running manager puts on an element — focus or a drop zone —
+// in the colours below. `uiFocusRingTarget` is the element that WEARS the focus
+// ring for `e`: its nearest ancestor marked focusFrame, else `e` itself.
+inline const glm::vec4 kUIFocusRingColour{ 1.0f, 0.78f, 0.25f, 0.95f };
+inline const glm::vec4 kUIDropRingColour { 0.35f, 0.80f, 1.0f, 0.95f };
+HE_API const UIElement& uiFocusRingTarget(const UIWidgetTree& tree, const UIElement& e);
+HE_API void uiEmitRing(const UIWidgetTree& tree, const UIElement& ringOn,
+                       const UIWidgetCanvas& canvas, const glm::vec4& colour,
+                       std::vector<UIRenderObject>& out);
+
 HE_API bool uiEmitElement(const UIWidgetTree& tree, const UIElement& e,
                           const UIWidgetRect& rect, const UIWidgetCanvas& canvas,
                           const UIElementRenderState& st, const HE::UUID& material,

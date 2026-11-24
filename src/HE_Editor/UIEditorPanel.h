@@ -76,6 +76,9 @@ namespace UIEditorPanel
 	// the reference a clipped frame is compared against; the count is how many
 	// rows the last frame submitted.
 	void setHierarchyRowClipping(bool on);
+	// The toolbar's State for an open designer (0 = Normal, 1 = Hovered,
+	// 2 = Pressed, 3 = Focused, 4 = Disabled) — what a click in its popup sets.
+	void setPreviewState(const std::string& assetPath, int state);
 	int  hierarchyRowsDrawn();
 
 }

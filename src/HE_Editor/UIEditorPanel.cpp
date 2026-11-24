@@ -156,6 +156,9 @@ struct State
 	// the theme because "the same theme, in the other mode" is the commoner of
 	// the two questions.
 	int         themeModeOverride = 0;
+	// The interaction state the selection is shown in (g_stateKind's values).
+	// View state: not saved, not in undo.
+	int         previewState = 0;
 
 	// Designer drag. mode: 0 = none, 1 = move element, 2 = resize element,
 	// 3 = rubber band over the canvas (nothing under the press).
@@ -324,6 +327,13 @@ HE::UIThemeMode    g_previewMode  = HE::UIThemeMode::Dark;
 // True while the canvas shows the RENDERER's picture of the widget: the ImGui
 // replica below then draws only the designer's aids on top (drawElementPreview).
 bool g_aidsOnly = false;
+
+// The interaction state the canvas shows the SELECTION in (toolbar "State"):
+// 0 = as authored, 1 = hovered, 2 = pressed, 3 = focused, 4 = disabled. A way
+// of looking, like the theme preview — nothing is written to the widget.
+// Read by emitTreeQuads; set by drawCanvas for the frame it draws.
+int              g_stateKind = 0;
+std::vector<int> g_stateIds;
 
 // A value the element holds, resolved through the theme when the theme has
 // something to say about it — a role binding, or the element's style.
@@ -5031,8 +5041,23 @@ void emitTreeQuads(AppContext& ctx, HE::UIWidgetTree& tree, const HE::UIWidgetCa
 		const auto mit = materials.find(it.n->id);
 		const HE::UUID mat = mit != materials.end() ? mit->second : HE::UUID{};
 		const std::size_t first = out.size();
-		if (!HE::uiEmitElement(tree, *it.n, it.r, canvas, HE::UIElementRenderState{}, mat, out))
+		// The state the toolbar asks to see the selection in (page elements only:
+		// an embedded component's insides are not what is selected).
+		HE::UIElementRenderState rs;
+		const bool stated = depth == 0 && g_stateKind != 0 &&
+			std::find(g_stateIds.begin(), g_stateIds.end(), it.n->id) != g_stateIds.end();
+		if (stated)
+		{
+			rs.hovered = g_stateKind == 1 || g_stateKind == 2;
+			rs.pressed = g_stateKind == 2;
+			rs.focused = g_stateKind == 3;
+		}
+		if (!HE::uiEmitElement(tree, *it.n, it.r, canvas, rs, mat, out))
 			continue;
+		// Focus wears the runtime's ring, right after the element as it does there.
+		if (stated && g_stateKind == 3)
+			HE::uiEmitRing(tree, HE::uiFocusRingTarget(tree, *it.n), canvas,
+			               HE::kUIFocusRingColour, out);
 		for (std::size_t i = first; i < out.size(); ++i)
 		{
 			UIRenderObject& q = out[i];
@@ -5549,8 +5574,18 @@ void drawCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 		HE::UIWidgetTree page = st.tree;
 		if (g_previewTheme) HE::uiApplyTheme(page, *g_previewTheme, g_previewMode);
 		HE::uiApplyAutoSize(page, layoutCanvas);
+		// The toolbar's State, on the selection: Disabled is the element's own
+		// switch (so its children grey out with it, as at runtime), the others
+		// are the render state emitTreeQuads hands each selected element.
+		g_stateKind = st.previewState;
+		g_stateIds  = selectionIds(st);
+		if (st.previewState == 4)
+			for (int sid : g_stateIds)
+				if (UIElement* e = page.find(sid)) e->enabled = false;
 		emitTreeQuads(ctx, page, layoutCanvas, s * fb.x, s * fb.y, off, glm::vec4(0.0f),
 		              0, nullptr, nullptr, -1, quads);
+		g_stateKind = 0;
+		g_stateIds.clear();
 		// One target per designer drawn this frame: two docked side by side
 		// must not show each other's picture (IRenderer::kUIPreviewSlots).
 		static int slotFrame = -1, slotNext = 0;
@@ -5566,6 +5601,15 @@ void drawCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 			? softwareCanvas(ctx, quads, static_cast<uint32_t>(tw), static_cast<uint32_t>(th), clear, slot)
 			: ctx.renderer->RenderUIPreview(quads, static_cast<uint32_t>(tw),
 			                                static_cast<uint32_t>(th), clear, slot);
+		// A backend with no GPU preview (Vulkan, D3D) still gets the runtime's
+		// quads, drawn on the CPU — closer to the game than the ImGui replica,
+		// which only remains for a designer without any renderer.
+		if (!canvasTex && !cpuCanvas)
+		{
+			cpuCanvas = true;
+			canvasTex = softwareCanvas(ctx, quads, static_cast<uint32_t>(tw),
+			                           static_cast<uint32_t>(th), clear, slot);
+		}
 	}
 	if (canvasTex)
 	{
@@ -7366,6 +7410,7 @@ void render(AppContext& ctx, const std::string& assetPath,
 
 	// ── Toolbar ───────────────────────────────────────────────────────────────
 	bool openThemePopup = false;
+	bool openStatePopup = false;
 	bool openAlignPopup = false;
 	{
 		namespace T = EditorToolbar;
@@ -7432,6 +7477,17 @@ void render(AppContext& ctx, const std::string& assetPath,
 				openThemePopup = true;
 			}
 			bar.endGroup();
+
+			// …and the state the selection is shown in: what a button looks like
+			// under the pointer, pressed, focused or switched off, without pressing
+			// Play. Also a way of LOOKING — the widget is not touched.
+			static const char* const kStateNames[] = { "Normal", "Hovered", "Pressed", "Focused", "Disabled" };
+			bar.group();
+			if (bar.item("##uistate", T::iconEye, kStateNames[std::clamp(st.previewState, 0, 4)],
+			             st.previewState != 0, true,
+			             "Show the selection hovered, pressed, focused or disabled", "ui.state-preview"))
+				openStatePopup = true;
+			bar.endGroup();
 		}
 	}
 
@@ -7468,6 +7524,18 @@ void render(AppContext& ctx, const std::string& assetPath,
 			align(HE::UIAlignOp::DistributeH);
 		if (EditorWidgets::menuItem("Distribute Vertically", nullptr, false, count >= 3))
 			align(HE::UIAlignOp::DistributeV);
+		ImGui::EndPopup();
+	}
+	if (openStatePopup) ImGui::OpenPopup("##uistatepick");
+	if (ImGui::BeginPopup("##uistatepick"))
+	{
+		// Literal labels, one per entry, for the help audit.
+		HE::Ed::Help::Scope helpScope("UI State Preview");
+		if (EditorWidgets::menuItem("Normal",   nullptr, st.previewState == 0)) st.previewState = 0;
+		if (EditorWidgets::menuItem("Hovered",  nullptr, st.previewState == 1)) st.previewState = 1;
+		if (EditorWidgets::menuItem("Pressed",  nullptr, st.previewState == 2)) st.previewState = 2;
+		if (EditorWidgets::menuItem("Focused",  nullptr, st.previewState == 3)) st.previewState = 3;
+		if (EditorWidgets::menuItem("Disabled", nullptr, st.previewState == 4)) st.previewState = 4;
 		ImGui::EndPopup();
 	}
 	if (openThemePopup) ImGui::OpenPopup("##uithemepick");
@@ -8151,6 +8219,10 @@ void render(AppContext& ctx, const std::string& assetPath,
 }
 
 void setHierarchyRowClipping(bool on) { s_hierarchyClipping = on; }
+void setPreviewState(const std::string& assetPath, int state)
+{
+	if (State* st = s_states.find(assetPath)) st->previewState = std::clamp(state, 0, 4);
+}
 int  hierarchyRowsDrawn()             { return s_hierarchyRowsDrawn; }
 
 } // namespace UIEditorPanel

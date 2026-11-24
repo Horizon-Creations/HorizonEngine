@@ -6721,6 +6721,32 @@ namespace
 	  "question every themed widget raises: does this still read on somebody "
 	  "else's palette?",
 	  "", "ui#designer" },
+	// ── Looking at the selection in another state ───────────────────────────
+	{ "ui.state-preview", "State",
+	  "Shows the selected elements as they look under the pointer, pressed, with "
+	  "the keyboard on them or switched off — hover colours, pressed colours, the "
+	  "focus ring, the disabled grey and every material that reads Element State. "
+	  "Only the picture changes; nothing is written to the widget. Needs the "
+	  "renderer-drawn canvas (any backend with a renderer).",
+	  "", "ui#designer" },
+	{ "UI State Preview/Normal", "",
+	  "The selection as authored, with nothing hovering, pressing or focusing it.",
+	  "", "ui#designer" },
+	{ "UI State Preview/Hovered", "",
+	  "The selection as it looks with the pointer resting on it.",
+	  "", "ui#designer" },
+	{ "UI State Preview/Pressed", "",
+	  "The selection while it is held down: hovered and pressed together, as a "
+	  "click is.",
+	  "", "ui#designer" },
+	{ "UI State Preview/Focused", "",
+	  "The selection with the keyboard or gamepad on it, including the focus ring "
+	  "the running application draws (around the Focus Frame ancestor, if one is set).",
+	  "", "ui#designer" },
+	{ "UI State Preview/Disabled", "",
+	  "The selection switched off: greyed out, together with everything inside it, "
+	  "exactly as Enabled = off makes it at runtime.",
+	  "", "ui#designer" },
 	{ "UI Theme Preview/From the preview", "",
 	  "Draw with the theme the running preview uses, which is what the widget "
 	  "will actually look like when the application runs. The default, and where "
@@ -10470,6 +10496,7 @@ namespace
 		{ "UI Widget/",      "editor-ui", "UI Designer", "Widget properties" },
 		{ "UI Graph/",       "editor-ui", "UI Designer", "Widget logic" },
 		{ "UI Theme Preview/", "editor-ui", "UI Designer", "Previewing a theme" },
+		{ "UI State Preview/", "editor-ui", "UI Designer", "Previewing a state" },
 		{ "UI Align/",       "editor-ui", "UI Designer", "Lining widgets up" },
 		{ "UI Timeline/",    "editor-ui", "UI Designer", "The timeline" },
 		{ "UI Graph Node/",  "editor-ui", "UI Designer", "Nodes in the graph" },

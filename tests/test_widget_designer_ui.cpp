@@ -2691,6 +2691,106 @@ TEST_CASE("ui shot: widget designer — the canvas is the renderer's picture of 
 // SoftwareRenderer (RasterizeUI) and uploaded, not handed to the GPU preview.
 // Asserted against the app's own frame: the same quads through the same
 // rasterizer at the same size give the same pixels.
+// The toolbar's State shows the SELECTION as the running application would in
+// that state: the button's hovered and pressed colours, the runtime's focus
+// ring, the disabled grey — while every other element stays as authored and
+// the document is not touched.
+TEST_CASE("ui shot: widget designer — the State switch shows the selection hovered, pressed, focused, disabled")
+{
+	Harness harness;
+	const std::filesystem::path root = tempRoot() / "state";
+	std::filesystem::create_directories(root / "UI");
+	ContentManager cm;
+	cm.setContentRoot(root.string());
+	HE::UIWidgetTree page = samplePage();
+	const glm::vec4 normal (0.20f, 0.40f, 0.80f, 1.0f);
+	const glm::vec4 hovered(0.30f, 0.60f, 0.95f, 1.0f);
+	const glm::vec4 pressed(0.10f, 0.25f, 0.55f, 1.0f);
+	{
+		HE::UIElement& start = *page.find(4);   // the Button
+		REQUIRE(start.type() == HE::UIWidgetType::Button);
+		start.setProp("Normal Color",  HE::UIPropValue::ofColor(normal));
+		start.setProp("Hovered Color", HE::UIPropValue::ofColor(hovered));
+		start.setProp("Pressed Color", HE::UIPropValue::ofColor(pressed));
+	}
+	UIWidgetAsset asset;
+	asset.name = "StatePage"; asset.path = "UI/StatePage.hasset";
+	asset.treeJson = HE::uiWidgetTreeToJson(page);
+	REQUIRE(cm.registerWidget(std::move(asset)) != HE::UUID{});
+
+	HorizonWorld world;
+	EditorUndo   undo;
+	ContextBits  bits;
+	AppContext   ctx = bits.make(world, undo);
+	ctx.contentManager = &cm;
+	UIPreviewRenderer renderer;
+	renderer.cm = &cm;
+	ctx.renderer = &renderer;
+	ctx.backend  = HE::RendererBackend::Metal;
+
+	Designer d{ ctx, (root / "UI" / "StatePage.hasset").string() };
+	d.shoot("widget-designer-state-warmup");
+	REQUIRE(d.clickRow(d.hierarchyRowId("Start##hn4")));
+
+	// The button's surface quad: the one whose rect is the button's, in the
+	// authored colour family. Found by size, which every state keeps.
+	auto buttonQuad = [&]() -> const UIRenderObject*
+	{
+		const UIRenderObject* best = nullptr;
+		for (const UIRenderObject& q : renderer.lastQuads)
+			if (!isGridQuad(q) && q.type == 0 && q.borderWidth <= 0.0f &&
+			    std::abs(q.size.x / q.size.y - 200.0f / 56.0f) < 0.05f)
+				best = best ? best : &q;
+		return best;
+	};
+	auto shootState = [&](int state, const char* name)
+	{
+		UIEditorPanel::setPreviewState(d.assetPath, state);
+		d.shoot(name);
+		return renderer.lastQuads;
+	};
+
+	shootState(0, "widget-designer-state-normal");
+	const UIRenderObject* q = buttonQuad();
+	REQUIRE(q);
+	CHECK(q->color == normal);
+	const std::size_t normalCount = renderer.lastQuads.size();
+
+	shootState(1, "widget-designer-state-hovered");
+	q = buttonQuad(); REQUIRE(q);
+	CHECK(q->color == hovered);
+
+	shootState(2, "widget-designer-state-pressed");
+	q = buttonQuad(); REQUIRE(q);
+	CHECK(q->color == pressed);
+
+	// Focused: exactly one more quad, the runtime's ring in its colour.
+	const auto focused = shootState(3, "widget-designer-state-focused");
+	CHECK(focused.size() == normalCount + 1);
+	int rings = 0;
+	for (const UIRenderObject& r : focused)
+		if (r.borderWidth == 2.0f && r.borderColor == HE::kUIFocusRingColour && r.color.a == 0.0f) ++rings;
+	CHECK(rings == 1);
+
+	// Disabled: the authored colour knocked back by the runtime's dim.
+	shootState(4, "widget-designer-state-disabled");
+	q = buttonQuad(); REQUIRE(q);
+	CHECK(q->color.r == doctest::Approx(normal.r * HE::kUIDisabledDim));
+	CHECK(q->color.g == doctest::Approx(normal.g * HE::kUIDisabledDim));
+	CHECK(q->color.b == doctest::Approx(normal.b * HE::kUIDisabledDim));
+
+	// Only a way of looking: the document still has the button enabled.
+	HE::UIWidgetTree* live = UIEditorPanel::liveTree("UI/StatePage.hasset");
+	REQUIRE(live);
+	CHECK(live->find(4)->enabled);
+	CHECK_FALSE(UIEditorPanel::isDirtyByContentPath("UI/StatePage.hasset"));
+
+	UIEditorPanel::setPreviewState(d.assetPath, 0);
+	UIEditorPanel::forget(d.assetPath);
+	std::error_code ec;
+	std::filesystem::remove_all(root, ec);
+}
+
 TEST_CASE("ui shot: widget designer — an app on the software renderer gets the CPU picture")
 {
 	Harness harness;

@@ -6310,90 +6310,16 @@ void WidgetManager::extract(uint32_t windowId, float vpWidth, float vpHeight,
 			// and rotation — the one producer the designer canvas draws through too.
 			HE::UIEmitted em;
 			if (!HE::uiEmitElement(w.tree, e, it.r, canvas, st, matId, out, &em)) continue;
-			const HE::UIWidgetRect& px = em.px;
-			const float eus = em.eus, evs = em.evs;
-
-			// Focus ring: ONE outlined rectangle around the element the keyboard
-			// or gamepad is on. Drawn here rather than by the widget types
-			// because every type needs it and none of them should have to know.
-			//
-			// It follows the element's OWN corners. It used to be four
-			// hairlines, and four rectangles can only draw a square: around a
-			// rounded search field that put a square ring with its corners
-			// sticking out past the curve, which reads as a drawing mistake
-			// rather than as focus. No fill and a border — the shaders blend the
-			// border over the fill, so a transparent fill leaves the outline.
-			//
-			// Two things ask for one, so the ring itself is written once: the
-			// keyboard is on this element, or something is being dragged over
-			// it. They differ in WHICH element they hang on and in colour, and
-			// in nothing else.
-			auto emitRing = [&](const HE::UIElement& ringOn, const glm::vec4& colour)
-			{
-				constexpr float kRing = 2.0f;   // pixels
-				const size_t ringFirst = out.size();
-				HE::UIWidgetRect rpx{ px.x, px.y, px.w, px.h };
-				float rus = eus, rvs = evs;
-				if (&ringOn != &e)
-				{
-					const HE::UIWidgetRect rr = HE::uiElementRect(w.tree, ringOn, &canvas);
-					rpx = { rr.x * sx, rr.y * sy, rr.w * sx, rr.h * sy };
-					HE::uiElementUnitScale(w.tree, ringOn, rus, rvs, &canvas);
-				}
-				// ON the element's edge, not around it. Outside would be the
-				// prettier ring and it is the one that disappears: a text field
-				// clips its own glyphs to its rect (uiElementClipRect), a list
-				// row is clipped by its box, and a ring drawn two pixels beyond
-				// the edge is two pixels of nothing but clipped-away band. It
-				// also cannot bleed into whatever sits next to it.
-				UIRenderObject ro;
-				ro.position = { rpx.x, rpx.y };
-				ro.size     = { rpx.w, rpx.h };
-				ro.color    = glm::vec4(0.0f);
-				ro.cornerRadius = ringOn.maxCornerRadius() > 0.0f
-					? ringOn.cornerRadius * (sy * rvs) : glm::vec4(0.0f);
-				ro.borderWidth  = kRing;
-				ro.borderColor  = colour;
-				out.push_back(std::move(ro));
-				// Clipped by whatever clips the element the ring is drawn ON —
-				// which for a focus frame is NOT the focused element. The field
-				// clips itself; the frame around it does not, and stamping the
-				// field's clip onto a ring that belongs to the frame is how a
-				// ring ends up cut away to nothing.
-				HE::UIWidgetRect rclip{};
-				if (HE::uiElementClipRect(w.tree, ringOn, rclip, &canvas))
-				{
-					const glm::vec4 r(rclip.x * sx, rclip.y * sy,
-					                  std::max(rclip.w * sx, 0.0f),
-					                  std::max(rclip.h * sy, 0.0f));
-					for (size_t i = ringFirst; i < out.size(); ++i) out[i].clipRect = r;
-				}
-			};
+			// Focus ring around the element the keyboard or gamepad is on — or
+			// around the FRAME that says it is the control (UIElement::focusFrame) —
+			// and the drop zone, in a colour of its own. Both are the manager's to
+			// draw, since no widget type should have to know they exist; the ring
+			// itself is shared with the designer's state preview (uiEmitRing).
 			if (st.focused && m_focusWidget == w.id)
-			{
-				// Around the element, or around the FRAME that says it is the
-				// control (UIElement::focusFrame). A search field is a rounded
-				// panel with an icon and an inset text field inside it: the
-				// field takes the keyboard, but the thing a person sees is the
-				// panel, and a ring around the field is a small rectangle
-				// floating inside a pill.
-				const HE::UIElement* ringOn = &e;
-				for (int p = e.parentId; p != 0; )
-				{
-					const HE::UIElement* anc = w.tree.find(p);
-					if (!anc) break;
-					if (anc->focusFrame) { ringOn = anc; break; }
-					p = anc->parentId;
-				}
-				emitRing(*ringOn, glm::vec4(1.0f, 0.78f, 0.25f, 0.95f));
-			}
-			// The drop zone, in a colour of its own — "this is where it lands"
-			// and "this is where the keys go" are two different promises, and a
-			// person dragging a file has to be able to tell them apart at a
-			// glance. On the ACCEPTING element itself: it is the one that said
-			// it takes drops, so it is the one the drop belongs to.
+				HE::uiEmitRing(w.tree, HE::uiFocusRingTarget(w.tree, e), canvas,
+				               HE::kUIFocusRingColour, out);
 			if (st.dropTarget)
-				emitRing(e, glm::vec4(0.35f, 0.80f, 1.0f, 0.95f));
+				HE::uiEmitRing(w.tree, e, canvas, HE::kUIDropRingColour, out);
 		}
 	}
 

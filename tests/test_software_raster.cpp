@@ -5,6 +5,7 @@
 #include <UIWidget/UIElements.h>
 #include <UIWidget/UIWidgetTree.h>
 
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
@@ -750,4 +751,42 @@ TEST_CASE("Software raster: a picture drawn small reads its mips instead of shim
 			const Px p = at(img, x, y);
 			CHECK(std::abs(static_cast<int>(p.r) - 128) < 12);
 		}
+}
+
+// What a full repaint of a big application window costs, single-threaded and
+// in stripes. A measurement, not a check — run it on purpose:
+//     he_tests -tc="Software raster bench*" --no-skip
+TEST_CASE("Software raster bench: a 2560x1440 repaint" * doctest::skip())
+{
+	// A busy application screen: a page, 40 cards with rounded corners,
+	// borders, gradients and shadows, and 1500 glyph-sized quads of text.
+	std::vector<UIRenderObject> quads;
+	quads.push_back(solid(0.0f, 0.0f, 2560.0f, 1440.0f, { 0.10f, 0.11f, 0.13f, 1.0f }));
+	for (int i = 0; i < 40; ++i)
+	{
+		const float x = static_cast<float>(40 + (i % 8) * 310), y = static_cast<float>(40 + (i / 8) * 270);
+		UIRenderObject sh = solid(x - 12.0f, y - 8.0f, 304.0f, 254.0f, { 0, 0, 0, 0.5f });
+		sh.cornerRadius = glm::vec4(16.0f); sh.blur = 12.0f;
+		quads.push_back(sh);
+		UIRenderObject c = solid(x, y, 280.0f, 230.0f, { 0.22f, 0.25f, 0.32f, 1.0f });
+		c.cornerRadius = glm::vec4(16.0f); c.borderWidth = 2.0f; c.gradient = true;
+		c.gradientColor = { 0.18f, 0.20f, 0.26f, 1.0f };
+		quads.push_back(c);
+	}
+	for (int i = 0; i < 1500; ++i)
+		quads.push_back(solid(static_cast<float>(60 + (i * 13) % 2400), static_cast<float>(60 + (i * 7) % 1320),
+		                      9.0f, 14.0f, { 0.9f, 0.9f, 0.9f, 1.0f }));
+
+	auto time = [&](bool threads)
+	{
+		Image img = canvas(2560, 1440);
+		HE::sw::draw(img, quads, glm::vec4(0.0f), nullptr, nullptr, threads);   // warm
+		const auto t0 = std::chrono::steady_clock::now();
+		constexpr int kRuns = 5;
+		for (int r = 0; r < kRuns; ++r) HE::sw::draw(img, quads, glm::vec4(0.0f), nullptr, nullptr, threads);
+		return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count() / kRuns;
+	};
+	const double one = time(false), many = time(true);
+	MESSAGE("2560x1440 repaint: " << one << " ms on one thread, " << many << " ms in stripes ("
+	        << one / many << "x)");
 }

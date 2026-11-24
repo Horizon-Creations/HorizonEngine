@@ -3542,4 +3542,59 @@ bool uiEmitElement(const UIWidgetTree& tree, const UIElement& e, const UIWidgetR
 	return true;
 }
 
+
+const UIElement& uiFocusRingTarget(const UIWidgetTree& tree, const UIElement& e)
+{
+	// A search field is a rounded panel with an icon and an inset text field
+	// inside it: the field takes the keyboard, but the thing a person sees is the
+	// panel, and a ring around the field is a small rectangle floating inside a
+	// pill. The first ancestor marked focusFrame wears the ring instead.
+	for (int p = e.parentId; p != 0; )
+	{
+		const UIElement* anc = tree.find(p);
+		if (!anc) break;
+		if (anc->focusFrame) return *anc;
+		p = anc->parentId;
+	}
+	return e;
+}
+
+void uiEmitRing(const UIWidgetTree& tree, const UIElement& ringOn, const UIWidgetCanvas& canvas,
+                const glm::vec4& colour, std::vector<UIRenderObject>& out)
+{
+	constexpr float kRing = 2.0f;   // pixels
+	const float sx = canvas.scaleX, sy = canvas.scaleY;
+	const std::size_t ringFirst = out.size();
+	const UIWidgetRect rr = uiElementRect(tree, ringOn, &canvas);
+	float rus = 1.0f, rvs = 1.0f;
+	uiElementUnitScale(tree, ringOn, rus, rvs, &canvas);
+	// It follows the element's OWN corners: four hairlines can only draw a
+	// square, and around a rounded field that reads as a drawing mistake rather
+	// than as focus. No fill and a border — the shaders blend the border over
+	// the fill, so a transparent fill leaves the outline.
+	//
+	// ON the element's edge, not around it. Outside would be the prettier ring
+	// and it is the one that disappears: a text field clips its own glyphs to
+	// its rect, a list row is clipped by its box, and a ring drawn two pixels
+	// beyond the edge is two pixels of clipped-away band.
+	UIRenderObject ro;
+	ro.position = { rr.x * sx, rr.y * sy };
+	ro.size     = { rr.w * sx, rr.h * sy };
+	ro.color    = glm::vec4(0.0f);
+	ro.cornerRadius = ringOn.maxCornerRadius() > 0.0f
+		? ringOn.cornerRadius * (sy * rvs) : glm::vec4(0.0f);
+	ro.borderWidth  = kRing;
+	ro.borderColor  = colour;
+	out.push_back(std::move(ro));
+	// Clipped by whatever clips the element the ring is drawn ON — which for a
+	// focus frame is NOT the focused element.
+	UIWidgetRect rclip{};
+	if (uiElementClipRect(tree, ringOn, rclip, &canvas))
+	{
+		const glm::vec4 r(rclip.x * sx, rclip.y * sy,
+		                  std::max(rclip.w * sx, 0.0f), std::max(rclip.h * sy, 0.0f));
+		for (std::size_t k = ringFirst; k < out.size(); ++k) out[k].clipRect = r;
+	}
+}
+
 } // namespace HE
