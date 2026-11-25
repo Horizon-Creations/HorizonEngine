@@ -285,7 +285,7 @@ TEST_CASE("gltfHasSkin routes a skinned glTF away from the static MeshImporter")
 // than the file had before (here none: one triangle cannot be reduced). The old tail
 // would otherwise stay beside the mesh and the _LOD<n> name convention would keep
 // handing it back as levels of the new geometry.
-TEST_CASE("MeshImporter: a re-import with LODs drops the stale _LOD<n> tail it no longer writes")
+TEST_CASE("MeshImporter: a re-import with LODs merges and removes old _LOD<n> files")
 {
 	const fs::path dir = fs::temp_directory_path() / "he_test_stale_lod_gltf";
 	he_test::removeAllQuiet(dir);
@@ -345,17 +345,22 @@ TEST_CASE("Importer::reimport regenerates a longer-than-default Auto-LOD chain i
 	settings.lodRatios     = fourRatios;
 	auto mesh = MeshImporter::import(dir / "sphere.gltf", contentRoot, {}, settings);
 	REQUIRE(mesh != nullptr);
-	const size_t before = AutoLod::findLodSidecars(contentRoot, mesh->path).size();
+	const auto levelsBefore = AutoLod::levelsInFile(contentRoot, mesh->path);
+	const size_t before = levelsBefore.size();
 	REQUIRE(before == 4u);
+	CHECK(AutoLod::findLodSidecars(contentRoot, mesh->path).empty());   // inside the mesh, no files
 
 	// Re-import without the caller choosing ratios: reimport() must read how many
 	// sidecars the chain already has and regenerate that many on the same curve, not its
 	// own 3-entry default — which would land on the exact same four ratios used above and
 	// so reproduce the same four levels deterministically.
 	REQUIRE(Importer::reimport(contentRoot / mesh->path, contentRoot));
-	const size_t after = AutoLod::findLodSidecars(contentRoot, mesh->path).size();
+	const auto levelsAfter = AutoLod::levelsInFile(contentRoot, mesh->path);
+	const size_t after = levelsAfter.size();
 	CHECK(after > 3u);         // not silently capped to the default run's length
 	CHECK(after == before);    // the whole chain survives, not just its first 3 levels
+	for (size_t i = 0; i < std::min(before, after); ++i)
+		CHECK(levelsAfter[i].id == levelsBefore[i].id);   // and every level keeps its id
 
 	he_test::removeAllQuiet(dir);
 }

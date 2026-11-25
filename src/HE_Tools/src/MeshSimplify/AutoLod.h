@@ -8,16 +8,16 @@
 #include "MeshSimplifier.h"
 
 // Auto-LOD chains (Thema 331, step 3): turns one StaticMeshAsset into a row of
-// simplified LOD meshes written as ordinary sidecar assets, the way the engine's
-// own RockA / RockALod1 / RockALod2 sit next to each other (mesh_gen) — except
-// these are user content, so their UUIDs are random-but-stable instead of fixed.
+// simplified LOD meshes kept INSIDE the mesh's own file (HAsset::CHUNK_MLDI/MLOD).
+// The Content Browser shows one asset; the Static Mesh tab switches between the
+// levels; the runtime swaps them by distance.
 //
-// The link between LOD0 and its sidecars is the NAME, `<stem>_LOD<n>.hasset` in
-// LOD0's folder; no chunk on LOD0 records them. What consumes a chain (a
-// FoliageLayer's lods, a LODComponent) stores the sidecars' UUIDs itself, so a
-// scene never depends on the convention — it only serves regeneration: running
-// the generator again finds the existing files (writeAsset keeps their UUID, so
-// every reference survives) and a Reimport of LOD0 knows whether to refresh them.
+// Every level keeps a UUID of its own (the ContentManager registers it under that
+// id when the mesh loads), so what consumes a chain (a FoliageLayer's lods, a
+// LODComponent, a cooked row) stores level ids exactly as it did when the levels
+// were sidecar files `<stem>_LOD<n>.hasset` beside the mesh. Running the generator
+// again keeps those ids; a mesh that still has such sidecars has them merged in,
+// with their ids, and the files removed.
 namespace AutoLod
 {
 
@@ -63,23 +63,30 @@ struct Chain
     bool               writeFailed = false;   // error came from the disk, not from the mesh
 };
 
-// `<stem>_LOD<n>.hasset` beside `meshPath` (content-relative, forward slashes).
+// `<stem>_LOD<n>.hasset` beside `meshPath`: where a level lived before the levels
+// moved into the mesh. Only migration still looks there.
 std::string lodPath(const std::string& meshPath, int n);
 
-// The sidecars that exist for `meshPath`, LOD1 first, stopping at the first gap.
+// The old sidecars that exist for `meshPath`, LOD1 first, stopping at the first gap.
 std::vector<std::string> findLodSidecars(const std::filesystem::path& contentRoot,
                                          const std::string& meshPath);
 
-// Deletes the sidecars `<stem>_LOD<n>` with n > `keep` (the run of files that
-// findLodSidecars would still hand back as levels of the mesh) and returns how
-// many went. A regeneration that writes fewer levels than an earlier one
-// otherwise leaves the tail on disk, describing the old geometry, and the name
-// convention keeps reporting it as part of the chain. `keep` 0 clears the chain.
-size_t removeStaleSidecars(const std::filesystem::path& contentRoot,
-                           const std::string& meshPath, int keep);
+// The level index inside the mesh file (empty when it has none or cannot be read).
+std::vector<StaticMeshAsset::Lod> levelsInFile(const std::filesystem::path& contentRoot,
+                                               const std::string& meshPath);
 
-// True for a path that IS a LOD sidecar (`…_LOD<n>.hasset`); the editor keeps a
-// sidecar from being run through the generator itself.
+// How many levels the mesh has: the ones inside it, else its old sidecars.
+size_t levelCount(const std::filesystem::path& contentRoot, const std::string& meshPath);
+
+// Drops the levels past `keep` — inside the mesh (the file is rewritten) and any
+// old sidecars `<stem>_LOD<n>` with n > `keep` — and returns how many went. A
+// regeneration that writes fewer levels than an earlier one otherwise leaves the
+// old tail describing the old geometry. `keep` 0 clears the chain.
+size_t removeStaleLevels(const std::filesystem::path& contentRoot,
+                         const std::string& meshPath, int keep);
+
+// True for a path that IS an old LOD sidecar (`…_LOD<n>.hasset`); the editor keeps
+// one from being run through the generator itself.
 bool isLodSidecarPath(const std::string& path);
 
 // One simplified copy of `src` at `ratio`, section by section so the material
@@ -97,9 +104,10 @@ bool buildLevel(const StaticMeshAsset& src, float ratio, const Settings& setting
 Chain build(const StaticMeshAsset& lod0, const Settings& settings,
             std::vector<StaticMeshAsset>* meshes = nullptr);
 
-// build() + write every generated level next to `lod0` (its `path` must be set)
-// as `<stem>_LOD<n>.hasset`. Existing sidecars of the same name are overwritten
-// in place and keep their UUID.
+// build() + rewrite `lod0`'s file (its `path` must be set) with the generated
+// levels inside it. A level keeps the UUID of the level it replaces (from the
+// file's level index, else from an old sidecar, which is then deleted); a new
+// one gets a new UUID. `levels[i].path` is the mesh's own path.
 Chain generate(const StaticMeshAsset& lod0, const std::filesystem::path& contentRoot,
                const Settings& settings);
 

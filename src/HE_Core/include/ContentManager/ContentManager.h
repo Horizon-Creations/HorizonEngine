@@ -96,6 +96,19 @@ public:
 		return out;
 	}
 	bool saveAsset(RuntimeAsset& asset);
+	// Re-reads the detail levels of a loaded static mesh from its file and registers
+	// them — after a tool rewrote the file's levels (AutoLod::generate) — without
+	// reloading the mesh itself. False when the mesh is not loaded or its file has
+	// none (the old ones are then forgotten).
+	bool refreshMeshLods(HE::UUID baseId);
+	// The static mesh a detail level is kept inside (CHUNK_MLDI), or a zero UUID for
+	// anything that is not such a level. Known once the base is loaded, or for a
+	// loose file once the disk scan has read its level index.
+	HE::UUID lodBaseOf(HE::UUID levelId) const
+	{
+		const auto it = m_lodBase.find(levelId);
+		return it != m_lodBase.end() ? it->second : HE::UUID{};
+	}
 	// The same bytes saveAsset() would write, written to `fullPath` instead —
 	// the editor's crash-recovery copy of an asset tab (AssetAutosave). It is a
 	// COPY, not a save: no onAssetSaved notification (a collaboration session
@@ -706,6 +719,12 @@ private:
 	HE::AssetType sniffAssetTypeFromFile(const std::string& path) const;
 	void          initDefaultAssets();
 
+	// Registers the detail levels a static mesh carries in its file (CHUNK_MLOD)
+	// as StaticMeshAssets of their own UUIDs, drawing with the base's material
+	// slots by index. Re-registering replaces them in place. A no-op for a mesh
+	// without levels and for one loaded from a pak (its levels are entries there).
+	void          registerMeshLods(HE::UUID baseId);
+
 	// scanContentDirectory() worker: index one root's .hasset META into
 	// m_diskRegistry, keys prefixed with pathPrefix ("" for content, "Engine/"
 	// for the engine defaults).
@@ -963,6 +982,8 @@ private:
 	// resolve a pak asset that no UUID reference closure reached (e.g. a widget a
 	// HorizonCode script creates by path). Later mounts overwrite (overlay).
 	std::unordered_map<std::string, HE::UUID>     m_pakPathIndex;
+	// Detail level UUID → the static mesh whose file holds it (lodBaseOf).
+	std::unordered_map<HE::UUID, HE::UUID>        m_lodBase;
 	// Reverse of the above (UUID → addressed path), filled from the same
 	// __asset_index__ entries. loadAssetFromMemory() uses it to register a
 	// streamed-by-UUID asset into m_pathToUUID under its ADDRESSED path

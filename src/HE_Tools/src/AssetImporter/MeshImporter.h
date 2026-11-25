@@ -22,8 +22,8 @@ public:
         float uniformScale       = 1.0f;
         bool  importMaterials    = true;
         // Auto-LOD (Thema 331, step 3): after the mesh is written, simplify it into
-        // <name>_LOD1.hasset, _LOD2 … beside it (AutoLod.h). Off by default - it
-        // changes the set of files an import writes.
+        // detail levels kept inside the mesh's file (AutoLod.h). Off by default - it
+        // makes the import slower and the file bigger.
         bool               generateLods = false;
         std::vector<float> lodRatios    = { 0.5f, 0.25f, 0.1f };   // triangle share of LOD1, LOD2 …
         bool               lodFoliage   = false;                   // thin cards: whole pieces may vanish

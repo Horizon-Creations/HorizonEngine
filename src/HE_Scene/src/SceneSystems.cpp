@@ -162,6 +162,7 @@ void SceneSystems::tickWorld(HorizonWorld& world, ContentManager& cm, IRenderer*
     // The refined terrain level near the camera: it becomes levels[0] of the
     // chunk's LOD chain, so it too has to land before LOD picks.
     { HE_PROFILE_SCOPE_N("TerrainTess");    TerrainSystem::updateTessellation(world, cm, renderer, cameraPos); }
+    { HE_PROFILE_SCOPE_N("LODBind");        LODSystem::bindAssetLevels(world, cm); }
     { HE_PROFILE_SCOPE_N("LOD");            LODSystem::update(world, cameraPos); }
     // Needs the levels LOD just chose (a seam is only mixed once both sides
     // have picked theirs), so it is the one thing that runs after it.

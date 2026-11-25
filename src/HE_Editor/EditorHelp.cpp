@@ -1025,12 +1025,12 @@ namespace
 	  "between two levels. The Draw Distance edge is not affected.",
 	  "", "scenes#foliage" },
 	{ "Foliage/Generate LODs", "",
-	  "Makes simpler copies of the layer's mesh as assets next to it (Name_LOD1, "
-	  "Name_LOD2 ...) and replaces this layer's detail levels with them. Each "
+	  "Makes simpler versions of the layer's mesh, kept inside the mesh's own "
+	  "asset, and replaces this layer's detail levels with them. Each "
 	  "level starts at the distance where its error shrinks to the pixel error "
 	  "you choose, and the far ones draw fewer plants. The layer's Draw Distance "
 	  "is kept; a level that would start beyond it is left out. Undo takes the "
-	  "levels back; the generated files stay on disk.",
+	  "layer's levels back; the mesh keeps its new versions.",
 	  "", "scenes#foliage" },
 
 	{ "Foliage/Bake Impostor", "",
@@ -2253,11 +2253,11 @@ namespace
 	  "over.",
 	  "", "rendering#performance" },
 	{ "LOD/Generate LODs", "",
-	  "Makes simpler copies of this entity's mesh as assets next to it (Name_LOD1, "
-	  "Name_LOD2 ...) and replaces the levels here with them: LOD 0 stays the "
+	  "Makes simpler versions of this entity's mesh, kept inside the mesh's own "
+	  "asset, and replaces the levels here with them: LOD 0 stays the "
 	  "mesh itself, each further level shows from the distance where its error "
 	  "shrinks to the pixel error you choose, scaled by the entity's size. Undo "
-	  "takes the levels back; the generated files stay on disk.",
+	  "takes the levels here back; the mesh keeps its new versions.",
 	  "", "rendering#performance" },
 	{ "UI Canvas/Screen Space", "",
 	  "The canvas is drawn flat on the screen, at the same size wherever the "
@@ -2993,10 +2993,28 @@ namespace
 	  "color space setting.",
 	  "", "editor#content-browser" },
 	{ "Content Browser/Generate LODs...", "",
-	  "Makes simpler copies of this static mesh as assets next to it (Name_LOD1, "
-	  "Name_LOD2 ...), e.g. 100 / 50 / 25 / 10 % of the triangles. Material slots "
-	  "are kept. Running it again replaces the copies and keeps their references. "
-	  "A foliage layer or a LOD component then uses them via its own Generate LODs.",
+	  "Makes simpler versions of this static mesh, e.g. 100 / 50 / 25 / 10 % of the "
+	  "triangles, and keeps them inside the mesh's asset: no extra files in the "
+	  "Content Browser. They draw with the mesh's material slots. Every entity that "
+	  "shows the mesh switches between them by distance on its own; the Static Mesh "
+	  "tab shows each one. Running it again replaces them and keeps their references. "
+	  "Old Name_LOD1 files beside the mesh are merged in and removed.",
+	  "", "editor#content-browser" },
+	{ "Mesh Viewer/LOD", "Detail level",
+	  "Which detail level the tab shows. LOD 0 is the mesh itself; the others are "
+	  "the simpler versions kept inside this asset, which the game draws from "
+	  "further away. The views and the numbers on the left follow the choice; the "
+	  "material slots are the mesh's and apply to every level.",
+	  "", "editor#content-browser" },
+	{ "Mesh Viewer/Generate LODs...", "",
+	  "Makes (or remakes) the simpler versions of this mesh inside its asset. "
+	  "Existing levels keep their identity, so whatever uses them keeps working.",
+	  "", "editor#content-browser" },
+	{ "Mesh Viewer/Merge Level Files", "",
+	  "This mesh still has its levels as separate Name_LOD1 files from an older "
+	  "engine version. Rebuilds them inside the mesh's asset from the mesh itself "
+	  "and removes the files. The levels keep their identity, so scenes and foliage "
+	  "layers that use them need no change.",
 	  "", "editor#content-browser" },
 	{ "Content Browser/Color Space...", "",
 	  "Says whether the selected textures hold color (sRGB, decoded by the GPU) "
@@ -4546,11 +4564,11 @@ namespace
 	  "the GPU. It costs RAM and saves a re-read.",
 	  "", "advanced#assets" },
 	{ "Preferences/Content Browser/Generate LODs on Import", "",
-	  "When a static mesh is imported, also write simplified copies next to it "
-	  "(Name_LOD1, Name_LOD2 ... at 50, 25 and 10 % of the triangles). Reimporting "
-	  "a mesh that already has them refreshes them. Off by default: it adds files "
-	  "to every import. Generate LODs in the Content Browser does the same for a "
-	  "mesh that is already in the project.",
+	  "When a static mesh is imported, also make simplified versions of it at 50, "
+	  "25 and 10 % of the triangles, kept inside the mesh's asset. Reimporting "
+	  "a mesh that already has them refreshes them. Off by default: it makes every "
+	  "import slower and every mesh bigger. Generate LODs in the Content Browser does "
+	  "the same for a mesh that is already in the project.",
 	  "", "editor#preferences" },
 	{ "Preferences/Content Browser/Refresh Interval (s)", "",
 	  "How often the Content Browser re-checks the project folder for files "

@@ -38,4 +38,10 @@ struct LODComponent {
     // only, never serialised; a null id means none.
     HE::UUID              stitchedMeshId{};
     uint8_t               stitchedLevel = 0;
+
+    // The levels are the mesh asset's own (StaticMeshAsset::lods), put here by
+    // LODSystem::bindAssetLevels for an entity nobody gave levels by hand. Runtime
+    // only, never serialised: they follow the asset — regenerated levels, or none —
+    // and the component goes away with them.
+    bool                  fromAsset = false;
 };

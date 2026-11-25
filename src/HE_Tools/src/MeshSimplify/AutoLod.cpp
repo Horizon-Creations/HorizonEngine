@@ -1,5 +1,7 @@
 #include "AutoLod.h"
 #include "ImporterCommon.h"
+#include "ContentManager/AssetFile.h"
+#include "ContentManager/HAsset.h"
 #include "Diagnostics/Logger.h"
 
 #include <algorithm>
@@ -64,14 +66,76 @@ std::vector<std::string> findLodSidecars(const std::filesystem::path& contentRoo
     return out;
 }
 
-size_t removeStaleSidecars(const std::filesystem::path& contentRoot,
-                           const std::string& meshPath, int keep)
+std::vector<StaticMeshAsset::Lod> levelsInFile(const std::filesystem::path& contentRoot,
+                                               const std::string& meshPath)
 {
+    std::vector<uint8_t> bytes;
+    std::vector<StaticMeshAsset::Lod> out;
+    if (Importer::readAssetChunk(contentRoot / meshPath, HAsset::CHUNK_MLDI, bytes))
+        HE::decodeMeshLodIndex(bytes, out);
+    return out;
+}
+
+size_t levelCount(const std::filesystem::path& contentRoot, const std::string& meshPath)
+{
+    const size_t inside = levelsInFile(contentRoot, meshPath).size();
+    return inside > 0 ? inside : findLodSidecars(contentRoot, meshPath).size();
+}
+
+size_t removeStaleLevels(const std::filesystem::path& contentRoot,
+                         const std::string& meshPath, int keep)
+{
+    keep = std::max(keep, 0);
     size_t removed = 0;
     std::error_code ec;
-    // Same walk as findLodSidecars: the chain ends at the first gap, so a file
-    // past a gap is not part of it and is left alone.
-    for (int n = std::max(keep, 0) + 1; n < 64; ++n)
+
+    // The levels inside the mesh: the file is rewritten with the first `keep`.
+    {
+        const std::filesystem::path file = contentRoot / meshPath;
+        std::vector<uint8_t> index, blobs;
+        std::vector<StaticMeshAsset::Lod> lods;
+        std::vector<std::vector<uint8_t>> levelBytes;
+        if (Importer::readAssetChunk(file, HAsset::CHUNK_MLDI, index) && HE::decodeMeshLodIndex(index, lods)
+            && lods.size() > static_cast<size_t>(keep))
+        {
+            HAsset::Reader r;
+            if (r.open(file.string()))
+            {
+                HAsset::Writer w;
+                for (const HAsset::Reader::Chunk& c : r.chunks())
+                {
+                    if (c.id == HAsset::CHUNK_MLDI || c.id == HAsset::CHUNK_MLOD)
+                    {
+                        if (keep == 0) continue;   // no levels: neither chunk
+                        if (c.id == HAsset::CHUNK_MLDI)
+                        {
+                            std::vector<StaticMeshAsset::Lod> kept(lods.begin(), lods.begin() + keep);
+                            const auto b = HE::encodeMeshLodIndex(kept);
+                            w.addChunk(c.id, b.data(), b.size());
+                        }
+                        else if (HE::decodeMeshLodBlobs(c.data, levelBytes) && levelBytes.size() >= static_cast<size_t>(keep))
+                        {
+                            levelBytes.resize(static_cast<size_t>(keep));
+                            const auto b = HE::encodeMeshLodBlobs(levelBytes);
+                            w.addChunk(c.id, b.data(), b.size());
+                        }
+                        continue;
+                    }
+                    w.addChunk(c.id, c.data.data(), c.data.size());
+                }
+                if (w.write(file.string(), r.assetType()))
+                {
+                    removed += lods.size() - static_cast<size_t>(keep);
+                    HE_LOG_INFO(Tool, "%s", ("AutoLod: " + meshPath + " keeps " + std::to_string(keep) + " level(s)").c_str());
+                }
+            }
+        }
+    }
+
+    // Sidecar files of a project from before the levels moved into the mesh. Same walk
+    // as findLodSidecars: the chain ends at the first gap, so a file past a gap is not
+    // part of it and is left alone.
+    for (int n = keep + 1; n < 64; ++n)
     {
         const std::filesystem::path file = contentRoot / lodPath(meshPath, n);
         if (!std::filesystem::exists(file, ec)) break;
@@ -266,7 +330,7 @@ Chain generate(const StaticMeshAsset& lod0, const std::filesystem::path& content
     if (!chain.error.empty()) return chain;
     if (lod0.path.empty())
     {
-        chain.error = "The mesh has no asset path to put the levels next to.";
+        chain.error = "The mesh has no asset path to keep the levels in.";
         return chain;
     }
     std::string stem = lod0.path;
@@ -275,26 +339,56 @@ Chain generate(const StaticMeshAsset& lod0, const std::filesystem::path& content
         if (slash != std::string::npos) stem = stem.substr(slash + 1);
         if (stem.size() > 7 && stem.compare(stem.size() - 7, 7, kExt) == 0) stem.resize(stem.size() - 7);
     }
+
+    // The UUIDs the levels had: a scene, a foliage layer or a cooked row names a level
+    // by its id, so a regenerated level keeps it. From the mesh's own level index, or —
+    // a project from before the levels moved into the mesh — from its sidecar files,
+    // which this run absorbs.
+    std::vector<HE::UUID> ids;
+    for (const StaticMeshAsset::Lod& l : levelsInFile(contentRoot, lod0.path)) ids.push_back(l.id);
+    const std::vector<std::string> sidecars = findLodSidecars(contentRoot, lod0.path);
+    if (ids.empty())
+        for (const std::string& rel : sidecars) ids.push_back(Importer::assetIdOf(contentRoot / rel));
+
+    StaticMeshAsset base = lod0;
+    base.lods.clear();
+    base.lodBlobs.clear();
     for (size_t i = 0; i < meshes.size(); ++i)
     {
         StaticMeshAsset& m = meshes[i];
         const int n = static_cast<int>(i) + 1;
-        m.path = lodPath(lod0.path, n);
+        m.id   = (i < ids.size() && ids[i] != HE::UUID{}) ? ids[i] : HE::UUID::generate();
         m.name = stem + "_LOD" + std::to_string(n);
         m.type = HE::AssetType::StaticMesh;
-        m.id   = HE::UUID{};      // writeAsset keeps the UUID of a file that is already there
-        m.sourcePath.clear();     // a sidecar is not importable: no "Reimport" on LOD1
-        if (!Importer::writeAsset(m, contentRoot))
-        {
-            chain.error = "Failed to write " + m.path;
-            chain.writeFailed = true;
-            chain.levels.resize(i + 1);
-            return chain;
-        }
-        Level& l = chain.levels[i + 1];
-        l.path = m.path;
-        l.id   = m.id;
+        m.path.clear();
+        m.sourcePath.clear();
+        // A level draws with the base's slots (ContentManager::registerMeshLods): its own
+        // table carries index ranges only, so renaming a material never has to reach inside.
+        m.materialPath.clear();
+        m.materialId = HE::UUID{};
+        for (MeshSection& sec : m.sections) { sec.materialPath.clear(); sec.materialId = HE::UUID{}; }
+        StaticMeshAsset::Lod l;
+        l.id         = m.id;
+        l.worldError = chain.levels[i + 1].worldError;
+        l.triangles  = chain.levels[i + 1].triangles;
+        base.lods.push_back(l);
+        base.lodBlobs.push_back(HE::encodeAssetBytes(m));
+        chain.levels[i + 1].path = lod0.path;
+        chain.levels[i + 1].id   = m.id;
     }
+    if (!Importer::writeAsset(base, contentRoot))
+    {
+        chain.error = "Failed to write " + lod0.path;
+        chain.writeFailed = true;
+        chain.levels.resize(1);
+        return chain;
+    }
+    // Absorbed: their ids live on inside the mesh.
+    std::error_code ec;
+    for (const std::string& rel : sidecars)
+        if (std::filesystem::remove(contentRoot / rel, ec) && !ec)
+            HE_LOG_INFO(Tool, "%s", ("AutoLod: merged " + rel + " into " + lod0.path).c_str());
+
     HE_LOG_INFO(Tool, "%s",
         ("AutoLod: " + lod0.path + " -> " + std::to_string(chain.levels.size() - 1) + " level(s), "
          + std::to_string(chain.levels.front().triangles) + " -> "

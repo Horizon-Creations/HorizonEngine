@@ -805,6 +805,66 @@ bool HpakWriter::addAlias(const HE::UUID& id, const HE::UUID& target)
     return true;
 }
 
+// A static mesh's detail levels (HAsset::CHUNK_MLOD) become entries of their own: the
+// game loads a level by its UUID like any mesh (and the cook below gives it the same
+// MVBO), so nothing at runtime has to know levels were ever inside another file. The
+// base keeps its level index (MLDI), whose raw UUIDs are also what lets the reach
+// filter follow a reached mesh to its levels. Each level gets the base's material
+// slots, by index, written into its MSEC — the loose file leaves them empty — so the
+// reference rewrite turns them into UUIDs like every other section. False (nothing
+// changed) for a mesh without levels.
+static bool splitMeshLods(std::vector<uint8_t>& baseBytes,
+                          std::vector<std::pair<HE::UUID, std::vector<uint8_t>>>& levels)
+{
+    HAsset::Reader r;
+    if (!r.openData(baseBytes)) return false;
+    const auto* lodChunk = r.findChunk(HAsset::CHUNK_MLOD);
+    if (!lodChunk) return false;
+    std::vector<std::vector<uint8_t>> blobs;
+    if (!HE::decodeMeshLodBlobs(lodChunk->data, blobs)) return false;
+
+    std::vector<MeshSection> slots;
+    if (const auto* c = r.findChunk(HAsset::CHUNK_MSEC)) HE::decodeMeshSections(c->data, slots);
+    const auto* mref = r.findChunk(HAsset::CHUNK_MREF);
+
+    for (const std::vector<uint8_t>& blob : blobs)
+    {
+        HAsset::Reader lr;
+        if (!lr.openData(blob)) continue;
+        HE::UUID id; std::string path; uint16_t type = 0;
+        if (!metaFromHasset(blob, id, path, type) || id == HE::UUID{}) continue;
+        HAsset::Writer w;
+        for (const HAsset::Reader::Chunk& c : lr.chunks())
+        {
+            if (c.id == HAsset::CHUNK_MREF && mref) { w.addChunk(c.id, mref->data.data(), mref->data.size()); continue; }
+            if (c.id == HAsset::CHUNK_MSEC)
+            {
+                std::vector<MeshSection> secs;
+                if (HE::decodeMeshSections(c.data, secs) && !slots.empty())
+                {
+                    for (size_t k = 0; k < secs.size(); ++k)
+                    {
+                        const MeshSection& slot = slots[std::min(k, slots.size() - 1)];
+                        secs[k].materialPath = slot.materialPath;
+                        secs[k].materialId   = slot.materialId;
+                    }
+                    const auto b = HE::encodeMeshSections(secs);
+                    w.addChunk(c.id, b.data(), b.size());
+                    continue;
+                }
+            }
+            w.addChunk(c.id, c.data.data(), c.data.size());
+        }
+        levels.emplace_back(id, w.toBytes(lr.assetType()));
+    }
+
+    HAsset::Writer base;
+    for (const HAsset::Reader::Chunk& c : r.chunks())
+        if (c.id != HAsset::CHUNK_MLOD) base.addChunk(c.id, c.data.data(), c.data.size());
+    baseBytes = base.toBytes(r.assetType());
+    return true;
+}
+
 // Box-downsample an RGBA8 image to half size (min 1px), averaging each 2x2 block
 // (clamped on odd dimensions). Used to bake the mip chain at pack time.
 static std::vector<uint8_t> halveRGBA8(const uint8_t* src, uint32_t w, uint32_t h,
@@ -1253,6 +1313,23 @@ int HpakWriter::addDirectories(const std::vector<SourceRoot>& roots,
                 // a mounted-pak asset that wasn't reached via the scene's UUID closure.
                 m_packedPaths[rel] = id;
                 if (metaInNamespace && path != rel) m_packedPaths[path] = id;
+                std::vector<std::pair<HE::UUID, std::vector<uint8_t>>> levels;
+                if (static_cast<HE::AssetType>(type) == HE::AssetType::StaticMesh)
+                    splitMeshLods(bytes, levels);
+                for (size_t n = 0; n < levels.size(); ++n)
+                {
+                    auto& [levelId, levelBytes] = levels[n];
+                    if (!claimed.insert(levelId).second)
+                    {
+                        warn(rel + ": level " + std::to_string(n + 1) + " has UUID " + uuidText(levelId)
+                             + ", which another asset already has - not packed");
+                        continue;
+                    }
+                    const std::string levelRel = rel + "#LOD" + std::to_string(n + 1);
+                    claimedBy[levelId] = levelRel;
+                    m_packedTypes[levelId] = static_cast<uint16_t>(HE::AssetType::StaticMesh);
+                    pending.push_back({std::move(levelBytes), levelId, levelRel, std::string{}});
+                }
                 pending.push_back({std::move(bytes), id, std::move(rel), std::move(path)});
             } while (false);
             it.increment(ec);

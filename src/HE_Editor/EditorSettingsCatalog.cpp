@@ -107,8 +107,8 @@ std::vector<SettingDesc> buildCatalog()
 	                    "saves a re-read."));
 	t.push_back(boolRow("contentBrowser.autoLodOnImport", "Generate LODs on Import",
 	                    "Content Browser", "autolodimport", &EditorConfig::AutoLodOnImport,
-	                    "Importing a static mesh also writes simplified copies next to it "
-	                    "(Name_LOD1, Name_LOD2 ...)."));
+	                    "Importing a static mesh also makes simplified versions of it, "
+	                    "kept inside the mesh's asset."));
 	t.push_back(intRow("contentBrowser.refreshRate", "Refresh Rate",
 	                   "Content Browser", "cbrefresh",
 	                   &EditorConfig::ContentBrowserRefreshRate, 1, 600,

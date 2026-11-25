@@ -182,6 +182,8 @@ static HE::UUID existingUUID(const std::filesystem::path& file)
 	return meta.id;
 }
 
+HE::UUID assetIdOf(const std::filesystem::path& assetFile) { return existingUUID(assetFile); }
+
 std::string sourceFileOf(const std::filesystem::path& assetFile)
 {
 	MetaFields meta;
@@ -333,6 +335,27 @@ bool writeAsset(RuntimeAsset& asset, const std::filesystem::path& contentRoot,
 	// Re-import: keep the identity the asset already has on disk.
 	if (asset.id == HE::UUID{})
 		asset.id = existingUUID(target);
+
+	// …and a mesh's detail levels with it (HAsset::CHUNK_MLOD): an importer builds the
+	// mesh without them, and a scene names them by UUID. A re-import that had levels
+	// regenerates them right after this write (MeshImporter) and reuses these ids.
+	if (asset.type == HE::AssetType::StaticMesh)
+	{
+		auto& mesh = static_cast<StaticMeshAsset&>(asset);
+		std::vector<uint8_t> index, blobs;
+		if (mesh.lods.empty() && readAssetChunk(target, HAsset::CHUNK_MLDI, index)
+		    && readAssetChunk(target, HAsset::CHUNK_MLOD, blobs))
+		{
+			std::vector<StaticMeshAsset::Lod> lods;
+			std::vector<std::vector<uint8_t>> levelBytes;
+			if (HE::decodeMeshLodIndex(index, lods) && HE::decodeMeshLodBlobs(blobs, levelBytes)
+			    && lods.size() == levelBytes.size())
+			{
+				mesh.lods     = std::move(lods);
+				mesh.lodBlobs = std::move(levelBytes);
+			}
+		}
+	}
 
 	if (!sourceFile.empty())
 	{
@@ -885,18 +908,18 @@ bool reimport(const std::filesystem::path& assetFile,
 	// longer rewrites, so the chain never mixes old and new geometry.
 	if (classifySource(source) == SourceKind::Mesh)
 	{
-		const std::vector<std::string> levels = AutoLod::findLodSidecars(contentRoot, outputs.asset);
-		if (!levels.empty())
+		const size_t levels = AutoLod::levelCount(contentRoot, outputs.asset);
+		if (levels > 0)
 		{
 			options.generateLods = true;
-			if (levels.size() <= options.lodRatios.size())
-				options.lodRatios.resize(levels.size());
+			if (levels <= options.lodRatios.size())
+				options.lodRatios.resize(levels);
 			else
 				// Same step/floor (0.5 / 0.1) the default 3-entry lodRatios comes from
 				// (AutoLodDialog::Options' own defaults) — a chain longer than that is
 				// regenerated on it instead of being silently capped to 3, which used to
-				// delete LOD4+ sidecars as stale even though the old chain was still live.
-				options.lodRatios = AutoLod::ratiosFor(static_cast<int>(levels.size()), 0.5f, 0.1f);
+				// drop LOD4+ as stale even though the old chain was still live.
+				options.lodRatios = AutoLod::ratiosFor(static_cast<int>(levels), 0.5f, 0.1f);
 		}
 	}
 

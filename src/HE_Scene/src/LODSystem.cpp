@@ -6,8 +6,15 @@
 #include "HorizonScene/Components/HierarchyComponent.h"
 #include "HorizonScene/Components/TransformComponent.h"
 #include "HorizonScene/TransformHierarchy.h"   // worldPositionOf — see update()
+#include "HorizonScene/AutoLodApply.h"        // fillLodComponent — the asset's levels as a chain
+#include <ContentManager/ContentManager.h>
 #include <Diagnostics/EngineProfiler.h>
 #include <glm/glm.hpp>
+#include <algorithm>
+#include <cmath>
+#include <unordered_map>
+#include <utility>
+#include <vector>
 
 // Finer-level switch happens at this fraction of the level's maxDistance (see update()).
 static constexpr float kLodFinerHysteresis = 0.95f;
@@ -26,10 +33,20 @@ void LODSystem::update(HorizonWorld& world, const glm::vec3& cameraPos)
     bool         parentComposed = false;   // parentWorld holds parentSeen's matrix
     glm::mat4    parentWorld { 1.0f };
 
+    // Asset-mirrored levels whose entity was given another mesh since (the Details
+    // panel, a script): the levels are not this mesh's any more, so they go rather
+    // than swap the old mesh back in. Removed after the walk.
+    std::vector<entt::entity> stale;
     auto view = registry.view<LODComponent, MeshComponent>();
     for (auto [entity, lod, mesh] : view.each())
     {
         if (lod.levels.empty()) continue;
+        if (lod.fromAsset)
+        {
+            bool ours = false;
+            for (const LODLevel& l : lod.levels) ours = ours || l.meshId == mesh.meshAssetId;
+            if (!ours) { stale.push_back(entity); continue; }
+        }
 
         // Use the WORLD position, not the local one — terrain chunks are children,
         // so their local position is a per-chunk offset; only the world position
@@ -119,5 +136,98 @@ void LODSystem::update(HorizonWorld& world, const glm::vec3& cameraPos)
             mesh.meshAssetId   = chosenId;
             mesh.dirty         = true;
         }
+    }
+    for (entt::entity e : stale) registry.remove<LODComponent>(e);
+}
+
+namespace
+{
+// The asset's levels as the chain AutoLodApply fills a component from.
+std::vector<HE::AutoLodApply::Level> chainOf(const StaticMeshAsset& m)
+{
+    std::vector<HE::AutoLodApply::Level> chain;
+    for (const StaticMeshAsset::Lod& l : m.lods) chain.push_back({ l.id, l.worldError });
+    return chain;
+}
+
+bool sameLevels(const LODComponent& lod, const StaticMeshAsset& m)
+{
+    if (lod.levels.size() != m.lods.size() + 1) return false;
+    for (size_t i = 0; i < m.lods.size(); ++i)
+        if (!(lod.levels[i + 1].meshId == m.lods[i].id)) return false;
+    return true;
+}
+
+// Every level resident; the missing ones are asked for (a pak streams them).
+bool levelsResident(ContentManager& cm, const StaticMeshAsset& m)
+{
+    std::vector<HE::UUID> missing;
+    for (const StaticMeshAsset::Lod& l : m.lods)
+        if (!cm.isLoaded(l.id)) missing.push_back(l.id);
+    for (const HE::UUID& id : missing) cm.loadAssetAsync(id);
+    return missing.empty();
+}
+
+float largestScale(const entt::registry& reg, entt::entity e)
+{
+    const auto* tc = reg.try_get<TransformComponent>(e);
+    if (!tc) return 1.0f;
+    return std::max({ std::abs(tc->scale.x), std::abs(tc->scale.y), std::abs(tc->scale.z) });
+}
+
+struct BindGate
+{
+    uint64_t epoch    = ~0ull;
+    size_t   meshes   = ~size_t(0);
+    int      countdown = 0;
+};
+} // namespace
+
+void LODSystem::bindAssetLevels(HorizonWorld& world, ContentManager& cm)
+{
+    auto& reg = world.registry();
+    // Per registry: the editor's world and a play session's tick side by side.
+    static std::unordered_map<const entt::registry*, BindGate> s_gates;
+    BindGate& gate = s_gates[&reg];
+    const auto* meshPool = std::as_const(reg).storage<MeshComponent>();
+    const size_t meshes  = meshPool ? meshPool->size() : 0;
+    if (gate.epoch == cm.contentEpoch() && gate.meshes == meshes && --gate.countdown > 0) return;
+    gate.epoch     = cm.contentEpoch();
+    gate.meshes    = meshes;
+    gate.countdown = 30;   // also every 30 ticks: a level streaming in, a mesh swapped on an entity
+
+    const HE::LodScreenMetrics screen;
+    // Keep the mirrored ones in step with their asset.
+    std::vector<entt::entity> unbind;
+    for (auto [e, lod, mc] : reg.view<LODComponent, MeshComponent>().each())
+    {
+        if (!lod.fromAsset || lod.levels.empty()) continue;
+        const HE::UUID base = lod.levels[0].meshId;
+        const StaticMeshAsset* m = cm.getStaticMesh(base);
+        if (!m || m->lods.empty()) { mc.meshAssetId = base; mc.dirty = true; unbind.push_back(e); continue; }
+        if (sameLevels(lod, *m) || !levelsResident(cm, *m)) continue;
+        const auto chain = chainOf(*m);
+        HE::AutoLodApply::fillLodComponent(lod, base, chain, screen, largestScale(reg, e));
+        lod.fromAsset  = true;
+        mc.meshAssetId = base;
+        mc.dirty       = true;
+    }
+    for (entt::entity e : unbind) reg.remove<LODComponent>(e);
+
+    // Bind the ones that have none.
+    std::vector<std::pair<entt::entity, HE::UUID>> bind;
+    for (auto [e, mc] : reg.view<MeshComponent>(entt::exclude<LODComponent>).each())
+    {
+        const StaticMeshAsset* m = cm.getStaticMesh(mc.meshAssetId);
+        if (m && !m->lods.empty() && levelsResident(cm, *m)) bind.emplace_back(e, mc.meshAssetId);
+    }
+    for (const auto& [e, base] : bind)
+    {
+        const StaticMeshAsset* m = cm.getStaticMesh(base);
+        if (!m) continue;
+        LODComponent lod;
+        HE::AutoLodApply::fillLodComponent(lod, base, chainOf(*m), screen, largestScale(reg, e));
+        lod.fromAsset = true;
+        reg.emplace<LODComponent>(e, std::move(lod));
     }
 }

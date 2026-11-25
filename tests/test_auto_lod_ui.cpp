@@ -2,6 +2,7 @@
 #include "ImGuiSoftwareRaster.h"
 
 #include "AutoLodDialog.h"
+#include "AutoLod.h"             // levelsInFile
 #include "EditorApplication.h"   // AppContext
 #include "EditorSelection.h"
 #include "EditorTheme.h"
@@ -268,12 +269,14 @@ TEST_CASE("Generate LODs: a foliage layer gets sorted detail levels from the cha
 	REQUIRE(r.ok);
 	CHECK(r.levels == 2u);
 	CHECK(r.lastTris < r.lod0Tris);
-	CHECK(fs::exists(proj.root / "Meshes/Ball_LOD1.hasset"));
-	CHECK(fs::exists(proj.root / "Meshes/Ball_LOD2.hasset"));
+	// Inside the mesh: no files beside it, and the levels resolve at once.
+	CHECK_FALSE(fs::exists(proj.root / "Meshes/Ball_LOD1.hasset"));
+	CHECK(AutoLod::levelsInFile(proj.root, "Meshes/Ball.hasset").size() == 2u);
 
 	const FoliageLayer& layer = world.registry().get<FoliageComponent>(land).layers[0];
 	REQUIRE(layer.lods.size() == 2u);
-	CHECK(proj.cm.pathForId(layer.lods[0].meshAssetId) == "Meshes/Ball_LOD1.hasset");
+	CHECK(proj.cm.lodBaseOf(layer.lods[0].meshAssetId) == proj.ball);
+	CHECK(proj.cm.isLoaded(layer.lods[0].meshAssetId));
 	CHECK(layer.lods[1].distance > layer.lods[0].distance);
 	CHECK(layer.drawDistance == 3000.0f);
 	CHECK(undo.canUndo());
@@ -447,12 +450,29 @@ TEST_CASE("Generate LODs: engine meshes, generated levels and missing meshes are
 	CHECK_FALSE(r.ok);
 	CHECK_FALSE(r.message.empty());
 
-	// A generated level is not a source for another chain.
+	// A generated level stands for its mesh: asked on a level, the chain is made from the
+	// original, and the level keeps its id.
 	REQUIRE(AutoLodDialog::run(ctx, AutoLodDialog::Request{ AutoLodDialog::Kind::MeshAsset, proj.ball }, AutoLodDialog::Options{}).ok);
-	const HE::UUID lod1 = proj.cm.loadAsset("Meshes/Ball_LOD1.hasset");
-	REQUIRE_FALSE(lod1 == HE::UUID{});
+	const auto levels = AutoLod::levelsInFile(proj.root, "Meshes/Ball.hasset");
+	REQUIRE_FALSE(levels.empty());
+	const HE::UUID lod1 = levels[0].id;
 	r = AutoLodDialog::run(ctx, AutoLodDialog::Request{ AutoLodDialog::Kind::MeshAsset, lod1 }, AutoLodDialog::Options{});
-	CHECK_FALSE(r.ok);
+	CHECK(r.ok);
+	REQUIRE_FALSE(AutoLod::levelsInFile(proj.root, "Meshes/Ball.hasset").empty());
+	CHECK(AutoLod::levelsInFile(proj.root, "Meshes/Ball.hasset")[0].id == lod1);
+	// An old sidecar file is still refused as a source.
+	{
+		StaticMeshAsset side = *proj.cm.getStaticMesh(proj.ball);
+		side.id = HE::UUID{};
+		side.path = "Meshes/Ball_LOD7.hasset";
+		side.lods.clear(); side.lodBlobs.clear();
+		REQUIRE(proj.cm.saveAsset(side));
+		const HE::UUID sideId = proj.cm.loadAsset(side.path);
+		REQUIRE_FALSE(sideId == HE::UUID{});
+		r = AutoLodDialog::run(ctx, AutoLodDialog::Request{ AutoLodDialog::Kind::MeshAsset, sideId }, AutoLodDialog::Options{});
+		CHECK_FALSE(r.ok);
+		CHECK(r.message.find("generated level") != std::string::npos);
+	}
 
 	// No content manager at all.
 	ctx.contentManager = nullptr;

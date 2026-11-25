@@ -112,6 +112,24 @@ inline constexpr uint32_t CHUNK_MSEC = makeChunkId('M','S','E','C'); // material
 // see k_version.
 inline constexpr uint32_t CHUNK_MBKE = makeChunkId('M','B','K','E');
 
+// Static mesh detail levels kept INSIDE the mesh's own file (docs/mesh-lods-in-asset-2026-11-25.md).
+// Before, each level was a sidecar asset `<stem>_LOD<n>.hasset` beside the mesh.
+// Two OPTIONAL chunks, both ABSENT on a mesh without levels (no version bump, see k_version):
+//   MLDI  the index, written right after META so the disk scan reads it without
+//         touching the geometry: uint32 count, then per level
+//         uint64 id.hi, uint64 id.lo, float worldError (object-space metres against
+//         LOD0), uint32 triangles.
+//   MLOD  the levels themselves, parallel to MLDI: uint32 count, then per level
+//         uint64 size + a complete StaticMesh .hasset (its own META carries the
+//         level's UUID; its MSEC carries index ranges with EMPTY material
+//         references — a level draws with its base mesh's slots, by index).
+// Every level keeps a UUID of its own and is registered as a StaticMeshAsset
+// under it when the base loads, so a LODComponent level, a foliage level or a
+// cooked row that names it resolves exactly as it did when it was a sidecar.
+// A pack splits MLOD into one entry per level (HpakWriter) and keeps MLDI.
+inline constexpr uint32_t CHUNK_MLDI = makeChunkId('M','L','D','I');
+inline constexpr uint32_t CHUNK_MLOD = makeChunkId('M','L','O','D');
+
 // Texture
 inline constexpr uint32_t CHUNK_TXMI = makeChunkId('T','X','M','I'); // texture meta
 inline constexpr uint32_t CHUNK_PIXL = makeChunkId('P','I','X','L'); // pixel data

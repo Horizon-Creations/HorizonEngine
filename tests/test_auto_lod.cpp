@@ -5,6 +5,12 @@
 #include <HorizonScene/SceneSerializer.h>
 #include <HorizonScene/Components/FoliageComponent.h>
 #include <HorizonScene/Components/LODComponent.h>
+#include <HorizonScene/Components/MeshComponent.h>
+#include <HorizonScene/Components/TransformComponent.h>
+#include <HorizonScene/LODSystem.h>
+#include <ContentManager/ContentManager.h>
+#include <Hpak/HpakWriter.h>
+#include "ImporterCommon.h"
 #include <ContentManager/DefaultAssets.h>
 #include <nlohmann/json.hpp>
 #include <cmath>
@@ -191,7 +197,7 @@ TEST_CASE("Auto-LOD: foliage mode lets leaf cards vanish, and a tiny mesh yields
 	CHECK_FALSE(AutoLod::build(cooked, settings).error.empty());
 }
 
-TEST_CASE("Auto-LOD: generate writes <name>_LOD<n> sidecars that keep their UUID when written again")
+TEST_CASE("Auto-LOD: generate keeps the levels inside the mesh, and a level keeps its UUID when generated again")
 {
 	const fs::path root = fs::temp_directory_path() / "he_test_auto_lod_generate";
 	std::error_code ec;
@@ -206,18 +212,28 @@ TEST_CASE("Auto-LOD: generate writes <name>_LOD<n> sidecars that keep their UUID
 	CHECK(AutoLod::isLodSidecarPath("Meshes/Ball_LOD2.hasset"));
 	CHECK_FALSE(AutoLod::isLodSidecarPath("Meshes/Ball.hasset"));
 	CHECK_FALSE(AutoLod::isLodSidecarPath("Meshes/Ball_LODge.hasset"));
-	CHECK(AutoLod::findLodSidecars(root, src.path).empty());
 
 	const AutoLod::Chain first = AutoLod::generate(src, root, settings);
 	REQUIRE(first.error.empty());
 	REQUIRE(first.levels.size() >= 2u);
 	for (size_t i = 1; i < first.levels.size(); ++i)
 	{
-		CHECK(first.levels[i].path == AutoLod::lodPath(src.path, static_cast<int>(i)));
+		CHECK(first.levels[i].path == src.path);
 		CHECK_FALSE(first.levels[i].id == HE::UUID{});
-		CHECK(fs::exists(root / first.levels[i].path));
 	}
-	CHECK(AutoLod::findLodSidecars(root, src.path).size() == first.levels.size() - 1);
+	// One file: no sidecars in the folder, the index in the mesh.
+	CHECK(AutoLod::findLodSidecars(root, src.path).empty());
+	size_t files = 0;
+	for (const auto& e : fs::recursive_directory_iterator(root)) files += e.is_regular_file() ? 1u : 0u;
+	CHECK(files == 1u);
+	const auto inFile = AutoLod::levelsInFile(root, src.path);
+	REQUIRE(inFile.size() == first.levels.size() - 1);
+	CHECK(AutoLod::levelCount(root, src.path) == inFile.size());
+	for (size_t i = 0; i < inFile.size(); ++i)
+	{
+		CHECK(inFile[i].id == first.levels[i + 1].id);
+		CHECK(inFile[i].triangles == first.levels[i + 1].triangles);
+	}
 
 	const AutoLod::Chain second = AutoLod::generate(src, root, settings);
 	REQUIRE(second.levels.size() == first.levels.size());
@@ -227,7 +243,93 @@ TEST_CASE("Auto-LOD: generate writes <name>_LOD<n> sidecars that keep their UUID
 	fs::remove_all(root, ec);
 }
 
-TEST_CASE("Auto-LOD: removeStaleSidecars drops the tail a shorter regeneration no longer writes")
+TEST_CASE("Auto-LOD: a level resolves on its own in a fresh ContentManager and draws with the mesh's slots")
+{
+	const fs::path root = fs::temp_directory_path() / "he_test_auto_lod_resolve";
+	std::error_code ec;
+	fs::remove_all(root, ec);
+	fs::create_directories(root, ec);
+
+	StaticMeshAsset src = makeSphere(24, 32, true);
+	AutoLod::Settings settings;
+	settings.ratios = { 0.5f, 0.2f };
+	const AutoLod::Chain chain = AutoLod::generate(src, root, settings);
+	REQUIRE(chain.error.empty());
+	REQUIRE(chain.levels.size() >= 2u);
+	const HE::UUID level = chain.levels[1].id;
+
+	ContentManager cm(root.string());
+	cm.scanContentDirectory();
+	// Asked for by itself, as a scene's LODComponent asks: the mesh's file is read.
+	REQUIRE(cm.ensureResident(level));
+	const StaticMeshAsset* lvl = cm.getStaticMesh(level);
+	REQUIRE(lvl);
+	CHECK(lvl->indices.size() / 3 == chain.levels[1].triangles);
+	REQUIRE(lvl->sections.size() == 2u);
+	CHECK(lvl->sections[0].materialPath == "Materials/A.hasset");
+	CHECK(lvl->sections[1].materialPath == "Materials/B.hasset");
+	const HE::UUID base = cm.idForPath(src.path);
+	REQUIRE_FALSE(base == HE::UUID{});
+	CHECK(cm.lodBaseOf(level) == base);
+	CHECK(cm.lodBaseOf(base) == HE::UUID{});
+	CHECK(cm.pathForId(level) == src.path);
+	const StaticMeshAsset* mesh = cm.getStaticMesh(base);
+	REQUIRE(mesh);
+	CHECK(mesh->lods.size() == chain.levels.size() - 1);
+
+	// A slot edit on the mesh reaches its levels when it is saved.
+	StaticMeshAsset* editable = cm.getStaticMeshMutable(base);
+	REQUIRE(editable);
+	editable->sections[1].materialPath = "Materials/C.hasset";
+	REQUIRE(cm.saveAsset(*editable));
+	REQUIRE(cm.getStaticMesh(level));
+	CHECK(cm.getStaticMesh(level)->sections[1].materialPath == "Materials/C.hasset");
+	// …and the levels survived the save.
+	CHECK(AutoLod::levelsInFile(root, src.path).size() == chain.levels.size() - 1);
+
+	// The levels go with their mesh.
+	REQUIRE(cm.unloadAsset(base));
+	CHECK_FALSE(cm.isLoaded(level));
+
+	fs::remove_all(root, ec);
+}
+
+TEST_CASE("Auto-LOD: a mesh with old _LOD<n> files gets them merged in, ids kept, files gone")
+{
+	const fs::path root = fs::temp_directory_path() / "he_test_auto_lod_merge";
+	std::error_code ec;
+	fs::remove_all(root, ec);
+	fs::create_directories(root, ec);
+
+	StaticMeshAsset src = makeSphere(24, 32, false);
+	REQUIRE(Importer::writeAsset(src, root));
+	// Two sidecars the way the generator used to write them.
+	std::vector<HE::UUID> oldIds;
+	for (int n = 1; n <= 2; ++n)
+	{
+		StaticMeshAsset side = makeSphere(12, 16, false);
+		side.path = AutoLod::lodPath(src.path, n);
+		side.name = "Ball_LOD" + std::to_string(n);
+		REQUIRE(Importer::writeAsset(side, root));
+		oldIds.push_back(side.id);
+	}
+	REQUIRE(AutoLod::findLodSidecars(root, src.path).size() == 2u);
+	CHECK(AutoLod::levelCount(root, src.path) == 2u);
+
+	AutoLod::Settings settings;
+	settings.ratios = AutoLod::ratiosFor(2, 0.5f, 0.1f);
+	const AutoLod::Chain chain = AutoLod::generate(src, root, settings);
+	REQUIRE(chain.error.empty());
+	REQUIRE(chain.levels.size() == 3u);
+	CHECK(chain.levels[1].id == oldIds[0]);
+	CHECK(chain.levels[2].id == oldIds[1]);
+	CHECK(AutoLod::findLodSidecars(root, src.path).empty());
+	CHECK(AutoLod::levelsInFile(root, src.path).size() == 2u);
+
+	fs::remove_all(root, ec);
+}
+
+TEST_CASE("Auto-LOD: removeStaleLevels trims the levels inside the mesh, and a rewrite of the mesh keeps them")
 {
 	const fs::path root = fs::temp_directory_path() / "he_test_auto_lod_stale";
 	std::error_code ec;
@@ -241,26 +343,159 @@ TEST_CASE("Auto-LOD: removeStaleSidecars drops the tail a shorter regeneration n
 	REQUIRE(first.error.empty());
 	const size_t before = first.levels.size() - 1;
 	REQUIRE(before >= 4u);
-	CHECK_FALSE(first.writeFailed);
 
-	// The re-import's shorter default run rewrites LOD1..2 and stops there.
-	AutoLod::Settings shorter;
-	shorter.ratios = { 0.5f, 0.2f };
-	const AutoLod::Chain second = AutoLod::generate(src, root, shorter);
-	REQUIRE(second.error.empty());
-	const int kept = static_cast<int>(second.levels.size()) - 1;
-	REQUIRE(static_cast<size_t>(kept) < before);
-	CHECK(AutoLod::findLodSidecars(root, src.path).size() == before);   // the old tail is still reported
+	// An importer writes the mesh again without levels: the file keeps them (and their ids).
+	StaticMeshAsset again = makeSphere(24, 32, false);
+	REQUIRE(Importer::writeAsset(again, root));
+	REQUIRE(AutoLod::levelsInFile(root, src.path).size() == before);
+	CHECK(AutoLod::levelsInFile(root, src.path)[0].id == first.levels[1].id);
 
-	CHECK(AutoLod::removeStaleSidecars(root, src.path, kept) == before - static_cast<size_t>(kept));
-	CHECK(AutoLod::findLodSidecars(root, src.path).size() == static_cast<size_t>(kept));
-	CHECK(fs::exists(root / AutoLod::lodPath(src.path, kept)));
-	CHECK_FALSE(fs::exists(root / AutoLod::lodPath(src.path, kept + 1)));
-	CHECK(AutoLod::removeStaleSidecars(root, src.path, kept) == 0u);
-
+	CHECK(AutoLod::removeStaleLevels(root, src.path, 2) == before - 2u);
+	const auto kept = AutoLod::levelsInFile(root, src.path);
+	REQUIRE(kept.size() == 2u);
+	CHECK(kept[1].id == first.levels[2].id);
+	CHECK(AutoLod::removeStaleLevels(root, src.path, 2) == 0u);
+	{
+		ContentManager cm(root.string());
+		const HE::UUID base = cm.loadAsset(src.path);
+		REQUIRE(cm.getStaticMesh(base));
+		CHECK(cm.getStaticMesh(base)->lods.size() == 2u);
+		CHECK(cm.isLoaded(kept[1].id));
+	}
 	// A mesh that no longer reduces has an empty chain: keep 0 clears it.
-	CHECK(AutoLod::removeStaleSidecars(root, src.path, 0) == static_cast<size_t>(kept));
-	CHECK(AutoLod::findLodSidecars(root, src.path).empty());
+	CHECK(AutoLod::removeStaleLevels(root, src.path, 0) == 2u);
+	CHECK(AutoLod::levelsInFile(root, src.path).empty());
+
+	fs::remove_all(root, ec);
+}
+
+TEST_CASE("Auto-LOD: a pack gives every level an entry of its own, with the mesh's materials")
+{
+	const fs::path root = fs::temp_directory_path() / "he_test_auto_lod_pack";
+	std::error_code ec;
+	fs::remove_all(root, ec);
+	fs::create_directories(root / "Content", ec);
+
+	StaticMeshAsset src = makeSphere(24, 32, true);
+	AutoLod::Settings settings;
+	settings.ratios = { 0.5f, 0.2f };
+	const AutoLod::Chain chain = AutoLod::generate(src, root / "Content", settings);
+	REQUIRE(chain.error.empty());
+	REQUIRE(chain.levels.size() >= 2u);
+
+	const fs::path pak = root / "game.hpak";
+	{
+		Hpak::PackSettings s;
+		HpakWriter packer;
+		packer.addDirectory(root / "Content", s);
+		// The two materials the slots name are not in this folder; nothing else may warn.
+		for (const std::string& w : packer.warnings())
+			CHECK_MESSAGE(w.find("Materials/") != std::string::npos, w);
+		REQUIRE(packer.write(pak.string()));
+	}
+	ContentManager cm;
+	REQUIRE(cm.mountPak(pak.string()));
+	const HE::UUID level = chain.levels.back().id;
+	REQUIRE(cm.ensureResident(level));   // by itself, before the mesh
+	const StaticMeshAsset* lvl = cm.getStaticMesh(level);
+	REQUIRE(lvl);
+	CHECK(lvl->cooked == false);
+	REQUIRE(lvl->sections.size() == 2u);   // the slots, by index (their materials are not in this pak)
+	// A bare pack has no path index (the exporter adds one): the mesh by its id.
+	const HE::UUID base = Importer::assetIdOf(root / "Content" / src.path);
+	REQUIRE(cm.ensureResident(base));
+	const StaticMeshAsset* mesh = cm.getStaticMesh(base);
+	REQUIRE(mesh);
+	CHECK(mesh->lods.size() == chain.levels.size() - 1);   // the index ships with the mesh
+	CHECK(mesh->lodBlobs.empty());                           // the levels are entries of their own
+
+	fs::remove_all(root, ec);
+}
+
+TEST_CASE("Auto-LOD: a pack that keeps only what the game reaches keeps a reached mesh's levels")
+{
+	const fs::path root = fs::temp_directory_path() / "he_test_auto_lod_reach";
+	std::error_code ec;
+	fs::remove_all(root, ec);
+	fs::create_directories(root / "Content", ec);
+
+	StaticMeshAsset src = makeSphere(24, 32, false);
+	AutoLod::Settings settings;
+	settings.ratios = { 0.5f, 0.2f };
+	const AutoLod::Chain chain = AutoLod::generate(src, root / "Content", settings);
+	REQUIRE(chain.error.empty());
+	const HE::UUID base = Importer::assetIdOf(root / "Content" / src.path);
+	// A second mesh with levels that nothing names: it and its levels stay out.
+	StaticMeshAsset other = makeSphere(20, 24, false);
+	other.path = "Meshes/Other.hasset";
+	const AutoLod::Chain otherChain = AutoLod::generate(other, root / "Content", settings);
+	REQUIRE(otherChain.error.empty());
+
+	// The startup scene names the mesh, the way SceneSerializer writes a UUID.
+	const std::string scene = "{\"mesh\":{\"asset\":[" + std::to_string(base.hi) + "," + std::to_string(base.lo) + "]}}";
+	Hpak::PackSettings s;
+	s.onlyReferenced = true;
+	s.referenceRoots.push_back(std::vector<uint8_t>(scene.begin(), scene.end()));
+	HpakWriter packer;
+	packer.addDirectory(root / "Content", s);
+	const fs::path pak = root / "game.hpak";
+	REQUIRE(packer.write(pak.string()));
+
+	ContentManager cm;
+	REQUIRE(cm.mountPak(pak.string()));
+	CHECK(cm.ensureResident(base));
+	for (size_t i = 1; i < chain.levels.size(); ++i) CHECK(cm.ensureResident(chain.levels[i].id));
+	for (size_t i = 1; i < otherChain.levels.size(); ++i) CHECK_FALSE(cm.ensureResident(otherChain.levels[i].id));
+
+	fs::remove_all(root, ec);
+}
+
+TEST_CASE("Auto-LOD: an entity whose mesh has levels switches them with nothing saved in the scene")
+{
+	const fs::path root = fs::temp_directory_path() / "he_test_auto_lod_bind";
+	std::error_code ec;
+	fs::remove_all(root, ec);
+	fs::create_directories(root, ec);
+
+	StaticMeshAsset src = makeSphere(24, 32, false);
+	AutoLod::Settings settings;
+	settings.ratios = { 0.5f, 0.2f };
+	const AutoLod::Chain chain = AutoLod::generate(src, root, settings);
+	REQUIRE(chain.error.empty());
+
+	ContentManager cm(root.string());
+	const HE::UUID base = cm.loadAsset(src.path);
+	REQUIRE(cm.getStaticMesh(base));
+
+	HorizonWorld world;
+	const Entity e = world.createEntity("Ball");
+	world.registry().emplace<TransformComponent>(e);
+	MeshComponent mc;
+	mc.meshAssetId = base;
+	world.registry().emplace<MeshComponent>(e, mc);
+
+	LODSystem::bindAssetLevels(world, cm);
+	const LODComponent* lod = world.registry().try_get<LODComponent>(e);
+	REQUIRE(lod);
+	CHECK(lod->fromAsset);
+	REQUIRE(lod->levels.size() == chain.levels.size());
+	CHECK(lod->levels[0].meshId == base);
+	CHECK(lod->levels.back().meshId == chain.levels.back().id);
+
+	// Far away: the last level is drawn…
+	LODSystem::update(world, glm::vec3(0.0f, 0.0f, 1.0e5f));
+	CHECK(world.registry().get<MeshComponent>(e).meshAssetId == chain.levels.back().id);
+	// …and the scene still says the mesh, with no levels of its own.
+	const json comps = json::from_cbor(SceneSerializer().serializeEntityComponents(world, e));
+	CHECK_FALSE(comps.contains("lod"));
+	REQUIRE(comps["mesh"]["asset"].is_array());   // [hi, lo], SceneSerializer's uuidToJson
+	CHECK(HE::UUID{ comps["mesh"]["asset"][0].get<uint64_t>(), comps["mesh"]["asset"][1].get<uint64_t>() } == base);
+
+	// Another mesh on the entity: the mirrored levels go, the new mesh stays.
+	world.registry().get<MeshComponent>(e).meshAssetId = HE::kDefaultCubeMeshId;
+	LODSystem::update(world, glm::vec3(0.0f));
+	CHECK_FALSE(world.registry().all_of<LODComponent>(e));
+	CHECK(world.registry().get<MeshComponent>(e).meshAssetId == HE::kDefaultCubeMeshId);
 
 	fs::remove_all(root, ec);
 }

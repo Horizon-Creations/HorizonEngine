@@ -265,6 +265,8 @@ Outcome run(AppContext& ctx, const Request& req, const Options& o)
 			lod0 = mc->meshAssetId;
 	}
 	if (lod0 == HE::UUID{}) return fail("There is no mesh to make levels from.");
+	// A level of a mesh stands for the mesh: the levels are made from the original.
+	if (const HE::UUID owner = cm.lodBaseOf(lod0); owner != HE::UUID{}) lod0 = owner;
 
 	const std::string lod0Path = cm.pathForId(lod0);
 	if (lod0Path.empty()) return fail("The mesh is not a file in the project.");
@@ -306,14 +308,12 @@ Outcome run(AppContext& ctx, const Request& req, const Options& o)
 	const AutoLod::Chain chain = AutoLod::generate(src, cm.contentRoot(), settings);
 	if (!chain.error.empty()) return fail(chain.error);
 
-	// Make the new files known (a regenerated one is picked up by the hot reload).
+	// The levels now live inside the mesh's file: register them so their ids resolve
+	// before anything draws one.
+	cm.refreshMeshLods(lod0);
 	std::vector<HE::AutoLodApply::Level> levels;
 	for (size_t i = 1; i < chain.levels.size(); ++i)
-	{
-		HE::UUID id = cm.loadAsset(chain.levels[i].path);
-		if (id == HE::UUID{}) id = chain.levels[i].id;
-		levels.push_back({ id, chain.levels[i].worldError });
-	}
+		levels.push_back({ chain.levels[i].id, chain.levels[i].worldError });
 
 	Outcome out;
 	out.ok       = true;
@@ -443,7 +443,8 @@ void draw(AppContext& ctx)
 		if (s_request.kind == Kind::MeshAsset && !path.empty())
 			ImGui::Text("%s", path.c_str());
 		ImGui::TextDisabled(
-			"Makes simpler copies of the mesh next to it (Name_LOD1, Name_LOD2 ...). "
+			"Makes simpler versions of the mesh and keeps them inside the mesh's own asset. "
+			"The Static Mesh tab switches between them; in the game the right one is drawn by distance. "
 			"Running it again replaces them and keeps their references.");
 		ImGui::Spacing();
 	}

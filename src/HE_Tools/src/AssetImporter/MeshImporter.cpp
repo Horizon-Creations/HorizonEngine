@@ -116,8 +116,8 @@ std::unique_ptr<StaticMeshAsset> finishImport(std::unique_ptr<StaticMeshAsset> m
 		 + std::to_string(mesh->sections.size()) + " section"
 		 + (mesh->sections.size() == 1 ? "" : "s") + ")").c_str());
 
-	// The chain goes beside the mesh, after it is on disk: a sidecar is named after the
-	// mesh's final path, which a re-import has just pinned onto the existing file.
+	// The chain goes into the mesh, after it is on disk: the write above kept the
+	// levels the file had (Importer::writeAsset), so the regenerated ones keep their ids.
 	if (settings.generateLods)
 	{
 		AutoLod::Settings lod;
@@ -132,7 +132,7 @@ std::unique_ptr<StaticMeshAsset> finishImport(std::unique_ptr<StaticMeshAsset> m
 		// name convention keeps handing it back as levels of the new geometry. A disk
 		// failure says nothing about the old files, so those stay.
 		if (!chain.writeFailed)
-			AutoLod::removeStaleSidecars(contentRoot, mesh->path,
+			AutoLod::removeStaleLevels(contentRoot, mesh->path,
 			                             static_cast<int>(chain.levels.size()) - 1);
 	}
 	return mesh;

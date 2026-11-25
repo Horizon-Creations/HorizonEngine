@@ -4010,7 +4010,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			}
 			ImGui::EndDisabled();
 			EditorWidgets::helpForLabel("Add Level##fol");
-			// The chain from the layer's mesh: Name_LOD1.. as assets, and the levels
+			// The chain from the layer's mesh, kept inside it, and the levels
 			// above filled in with distances worked out from their pixel error.
 			ImGui::SameLine();
 			ImGui::BeginDisabled(fol->meshAssetId == HE::UUID{});
@@ -4106,7 +4106,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 				ImGui::PopID();
 			}
 			if (ImGui::Button("+ Level")) { lod->levels.push_back({}); trackEdit(); }
-			// Simpler copies of the mesh as Name_LOD1.. assets, filled in here with the
+			// Simpler versions of the mesh (kept inside its asset), filled in here with the
 			// distance each one is good enough from. LOD 0 stays the entity's own mesh.
 			ImGui::SameLine();
 			if (EditorWidgets::button("Generate LODs##lod"))

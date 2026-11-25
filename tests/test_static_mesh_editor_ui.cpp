@@ -3,6 +3,7 @@
 #include "TestFsUtil.h"
 
 #include "StaticMeshEditorPanel.h"
+#include "AutoLod.h"             // a mesh with levels inside it
 #include "EditorApplication.h"   // AppContext
 #include "EditorSelection.h"
 #include "EditorTheme.h"
@@ -13,6 +14,7 @@
 #include <imgui.h>
 #include <imgui_internal.h>   // GImGui->Windows, GetHoveredID
 
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -255,4 +257,64 @@ TEST_CASE("static mesh editor ui: each Export bake checkbox writes its switch in
 	REQUIRE(clickCheckbox(ctx, meshPath, "Merge textures"));
 	for (int i = 0; i < 3; ++i) frame(ctx, meshPath, false);
 	CHECK(bakeOnDisk(root).mergeTextures);
+}
+
+TEST_CASE("static mesh editor ui: a mesh with levels inside it gets a LOD switch on the toolbar")
+{
+	TempDir dir("he_test_smesh_ui_lods");
+	const fs::path root = dir.path / "Content";
+	// A sphere has triangles to spare; two levels inside its asset.
+	StaticMeshAsset ball;
+	ball.type = HE::AssetType::StaticMesh; ball.name = "Ball"; ball.path = "Meshes/Ball.hasset";
+	const int lat = 24, lon = 32;
+	for (int y = 0; y <= lat; ++y)
+		for (int x = 0; x <= lon; ++x)
+		{
+			const float th = 3.14159265f * float(y) / lat, ph = 6.2831853f * float(x) / lon;
+			const float nx = std::sin(th) * std::cos(ph), ny = std::cos(th), nz = std::sin(th) * std::sin(ph);
+			ball.vertices.insert(ball.vertices.end(), { nx, ny, nz });
+			ball.normals.insert(ball.normals.end(), { nx, ny, nz });
+			ball.uvs.insert(ball.uvs.end(), { float(x) / lon, float(y) / lat });
+		}
+	for (int y = 0; y < lat; ++y)
+		for (int x = 0; x < lon; ++x)
+		{
+			const uint32_t a = uint32_t(y * (lon + 1) + x), b = a + 1, c = a + uint32_t(lon + 1), d = c + 1;
+			ball.indices.insert(ball.indices.end(), { a, c, b, b, c, d });
+		}
+	fs::create_directories(root);
+	AutoLod::Settings set;
+	set.ratios = { 0.5f, 0.2f };
+	const AutoLod::Chain chain = AutoLod::generate(ball, root, set);
+	REQUIRE(chain.error.empty());
+	REQUIRE(chain.levels.size() == 3u);
+	const std::string meshPath = (root / ball.path).string();
+
+	Harness harness;
+	ContextBits bits;
+	AppContext ctx = bits.make();
+	ContentManager cm(root.string());
+	ctx.contentManager = &cm;
+	ImGui::GetIO().AddMousePosEvent(float(W) - 2.0f, float(H) - 2.0f);
+	for (int i = 0; i < 3; ++i) frame(ctx, meshPath, false);
+
+	ImGuiWindow* host = nullptr;
+	for (ImGuiWindow* w : GImGui->Windows)
+		if (w->Active && std::string(w->Name) == "##StaticMeshEditor") host = w;   // not its children
+	REQUIRE(host);
+	const ImGuiID want = ImHashStr("##smlod2", 0, host->ID);
+	bool clicked = false;
+	for (float y = 6.0f; y < 40.0f && !clicked; y += 4.0f)
+		for (float x = float(W) * 0.4f; x < float(W) - 4.0f && !clicked; x += 6.0f)
+			if (idAt(ctx, meshPath, x, y) == want)
+			{
+				clickAt(ctx, meshPath, x, y);
+				clicked = true;
+			}
+	CHECK(clicked);   // a cell per level: LOD 0, LOD 1, LOD 2
+	ImGui::GetIO().AddMousePosEvent(float(W) - 2.0f, float(H) - 2.0f);
+	he_ui::Image img;
+	for (int i = 0; i < 3; ++i) frame(ctx, meshPath, false, i == 2 ? &img : nullptr);
+	dump(img, "static-mesh-lod-switch");
+	CHECK(cm.isLoaded(chain.levels[2].id));
 }

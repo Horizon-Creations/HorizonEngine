@@ -177,6 +177,50 @@ static void readMeshSections(const HAsset::Reader& reader, Mesh& a, const std::s
 	a.sections.push_back(std::move(whole));
 }
 
+// The geometry, material and bake chunks of a static mesh — shared by the mesh
+// itself and by each detail level inside it (CHUNK_MLOD), which is a complete
+// static-mesh file of its own.
+static void readStaticMeshChunks(const HAsset::Reader& reader, StaticMeshAsset& a, const std::string& relativePath)
+{
+	if (const auto* c = reader.findChunk(HAsset::CHUNK_MREF)) { size_t o=0; HAsset::Reader::readString(c->data,o,a.materialPath); }
+	if (const auto* c = reader.findChunk(HAsset::CHUNK_MRFU)) { size_t o=0; HAsset::Reader::readPOD(c->data,o,a.materialId.hi); HAsset::Reader::readPOD(c->data,o,a.materialId.lo); }
+	if (const auto* c = reader.findChunk(HAsset::CHUNK_INDX)) { size_t o=0; HAsset::Reader::readVec(c->data,o,a.indices); }
+	if (const auto* c = reader.findChunk(HAsset::CHUNK_MVBO))
+	{
+		// Cooked (pack-time) form: interleaved GPU-ready vertices + baked AABB.
+		size_t o = 0;
+		HAsset::Reader::readPOD(c->data, o, a.vertexCount);
+		for (int i = 0; i < 3; ++i) HAsset::Reader::readPOD(c->data, o, a.boundsMin[i]);
+		for (int i = 0; i < 3; ++i) HAsset::Reader::readPOD(c->data, o, a.boundsMax[i]);
+		HAsset::Reader::readVec(c->data, o, a.interleaved);
+		a.cooked = a.vertexCount > 0 && a.interleaved.size() == static_cast<size_t>(a.vertexCount) * 8;
+	}
+	else
+	{
+		// Raw SoA form (loose/editor assets).
+		if (const auto* c = reader.findChunk(HAsset::CHUNK_VERT)) { size_t o=0; HAsset::Reader::readVec(c->data,o,a.vertices); }
+		if (const auto* c = reader.findChunk(HAsset::CHUNK_NORM)) { size_t o=0; HAsset::Reader::readVec(c->data,o,a.normals); }
+		if (const auto* c = reader.findChunk(HAsset::CHUNK_TEXC)) { size_t o=0; HAsset::Reader::readVec(c->data,o,a.uvs); }
+		// Object-space AABB, so the extractor can cull against real bounds (the
+		// cooked path already carries a baked AABB). Cheap one-time scan on load.
+		if (!a.vertices.empty())
+		{
+			a.boundsMin[0] = a.boundsMin[1] = a.boundsMin[2] =  1e30f;
+			a.boundsMax[0] = a.boundsMax[1] = a.boundsMax[2] = -1e30f;
+			for (size_t v = 0; v + 2 < a.vertices.size(); v += 3)
+				for (int k = 0; k < 3; ++k)
+				{
+					a.boundsMin[k] = std::min(a.boundsMin[k], a.vertices[v + k]);
+					a.boundsMax[k] = std::max(a.boundsMax[k], a.vertices[v + k]);
+				}
+		}
+		ensureMeshUVs(a); // loose meshes with no TEXC chunk get box-projected UVs
+	}
+	readMeshSections(reader, a, relativePath);
+	if (const auto* c = reader.findChunk(HAsset::CHUNK_MBKE))
+		if (!c->data.empty()) a.bake = MeshBakeSettings::fromByte(c->data[0]);
+}
+
 // ─── sniffAssetTypeFromFile ───────────────────────────────────────────────────
 HE::AssetType ContentManager::sniffAssetTypeFromFile(const std::string& path) const
 {
@@ -227,43 +271,18 @@ HE::UUID ContentManager::parseAndRegisterAsset(const std::string& relativePath,
 	{
 		StaticMeshAsset a{}; a.id = id; a.type = type; a.name = assetName; a.path = relativePath;
 		a.sourcePath = assetSource;
-		if (const auto* c = reader.findChunk(HAsset::CHUNK_MREF)) { size_t o=0; HAsset::Reader::readString(c->data,o,a.materialPath); }
-		if (const auto* c = reader.findChunk(HAsset::CHUNK_MRFU)) { size_t o=0; HAsset::Reader::readPOD(c->data,o,a.materialId.hi); HAsset::Reader::readPOD(c->data,o,a.materialId.lo); }
-		if (const auto* c = reader.findChunk(HAsset::CHUNK_INDX)) { size_t o=0; HAsset::Reader::readVec(c->data,o,a.indices); }
-		if (const auto* c = reader.findChunk(HAsset::CHUNK_MVBO))
+		readStaticMeshChunks(reader, a, relativePath);
+		// The detail levels inside the file: the index, and in a loose file the levels'
+		// own bytes. They are registered under their own UUIDs once this one is (below).
+		if (const auto* c = reader.findChunk(HAsset::CHUNK_MLDI)) HE::decodeMeshLodIndex(c->data, a.lods);
+		if (const auto* c = reader.findChunk(HAsset::CHUNK_MLOD)) HE::decodeMeshLodBlobs(c->data, a.lodBlobs);
+		if (!a.lodBlobs.empty() && a.lodBlobs.size() != a.lods.size())
 		{
-			// Cooked (pack-time) form: interleaved GPU-ready vertices + baked AABB.
-			size_t o = 0;
-			HAsset::Reader::readPOD(c->data, o, a.vertexCount);
-			for (int i = 0; i < 3; ++i) HAsset::Reader::readPOD(c->data, o, a.boundsMin[i]);
-			for (int i = 0; i < 3; ++i) HAsset::Reader::readPOD(c->data, o, a.boundsMax[i]);
-			HAsset::Reader::readVec(c->data, o, a.interleaved);
-			a.cooked = a.vertexCount > 0 && a.interleaved.size() == static_cast<size_t>(a.vertexCount) * 8;
+			HE_LOG_WARN(Asset, "ContentManager: '%s' carries %zu level index entries for %zu levels — the levels are ignored",
+			            relativePath.c_str(), a.lods.size(), a.lodBlobs.size());
+			a.lods.clear();
+			a.lodBlobs.clear();
 		}
-		else
-		{
-			// Raw SoA form (loose/editor assets).
-			if (const auto* c = reader.findChunk(HAsset::CHUNK_VERT)) { size_t o=0; HAsset::Reader::readVec(c->data,o,a.vertices); }
-			if (const auto* c = reader.findChunk(HAsset::CHUNK_NORM)) { size_t o=0; HAsset::Reader::readVec(c->data,o,a.normals); }
-			if (const auto* c = reader.findChunk(HAsset::CHUNK_TEXC)) { size_t o=0; HAsset::Reader::readVec(c->data,o,a.uvs); }
-			// Object-space AABB, so the extractor can cull against real bounds (the
-			// cooked path already carries a baked AABB). Cheap one-time scan on load.
-			if (!a.vertices.empty())
-			{
-				a.boundsMin[0] = a.boundsMin[1] = a.boundsMin[2] =  1e30f;
-				a.boundsMax[0] = a.boundsMax[1] = a.boundsMax[2] = -1e30f;
-				for (size_t v = 0; v + 2 < a.vertices.size(); v += 3)
-					for (int k = 0; k < 3; ++k)
-					{
-						a.boundsMin[k] = std::min(a.boundsMin[k], a.vertices[v + k]);
-						a.boundsMax[k] = std::max(a.boundsMax[k], a.vertices[v + k]);
-					}
-			}
-			ensureMeshUVs(a); // loose meshes with no TEXC chunk get box-projected UVs
-		}
-		readMeshSections(reader, a, relativePath);
-		if (const auto* c = reader.findChunk(HAsset::CHUNK_MBKE))
-			if (!c->data.empty()) a.bake = MeshBakeSettings::fromByte(c->data[0]);
 		handle = m_staticMeshAssets.insert(std::move(a)); break;
 	}
 	case HE::AssetType::SkeletalMesh:
@@ -742,6 +761,7 @@ HE::UUID ContentManager::parseAndRegisterAsset(const std::string& relativePath,
 	m_handleToUUID[id]         = handle;
 	m_assetTypeIndex[id]       = type;
 	m_pathToUUID[relativePath] = id;
+	if (type == HE::AssetType::StaticMesh) registerMeshLods(id);
 	if (!fullPath.empty())
 	{
 		std::error_code ec;
@@ -2219,6 +2239,11 @@ static bool encodeAssetChunks(RuntimeAsset& asset, HAsset::Writer& w)
 {
 	// META chunk — common to all
 	{ auto m = buildMetaChunk(asset); w.addChunk(HAsset::CHUNK_META, m.data(), m.size()); }
+	// A mesh's level index straight after META: the disk scan reads the two and stops.
+	// Only with the levels' files beside it, so a level is never named without its geometry.
+	if (asset.type == HE::AssetType::StaticMesh)
+		if (const auto& a = static_cast<const StaticMeshAsset&>(asset); !a.lods.empty() && a.lodBlobs.size() == a.lods.size())
+		{ auto b = HE::encodeMeshLodIndex(a.lods); w.addChunk(HAsset::CHUNK_MLDI, b.data(), b.size()); }
 
 	switch (asset.type)
 	{
@@ -2253,6 +2278,8 @@ static bool encodeAssetChunks(RuntimeAsset& asset, HAsset::Writer& w)
 			{ std::vector<uint8_t> b; HAsset::Writer::appendVec(b,a.normals);  w.addChunk(HAsset::CHUNK_NORM,b.data(),b.size()); }
 			{ std::vector<uint8_t> b; HAsset::Writer::appendVec(b,a.uvs);      w.addChunk(HAsset::CHUNK_TEXC,b.data(),b.size()); }
 		}
+		if (!a.lods.empty() && a.lodBlobs.size() == a.lods.size())
+		{ auto b = HE::encodeMeshLodBlobs(a.lodBlobs); w.addChunk(HAsset::CHUNK_MLOD,b.data(),b.size()); }
 		break;
 	}
 	case HE::AssetType::SkeletalMesh:
@@ -2609,6 +2636,14 @@ static bool writeAssetFile(RuntimeAsset& asset, const std::string& fullPath)
 	return w.write(fullPath, static_cast<uint16_t>(asset.type));
 }
 
+std::vector<uint8_t> HE::encodeAssetBytes(RuntimeAsset& asset)
+{
+	if (asset.id == HE::UUID{}) asset.id = HE::UUID::generate();
+	HAsset::Writer w;
+	if (!encodeAssetChunks(asset, w)) return {};
+	return w.toBytes(static_cast<uint16_t>(asset.type));
+}
+
 bool ContentManager::writeAssetTo(RuntimeAsset& asset, const std::string& fullPath) const
 {
 	if (fullPath.empty()) return false;
@@ -2682,6 +2717,11 @@ bool ContentManager::saveAsset(RuntimeAsset& asset)
 	// successful write, so a collaboration session never publishes a save that
 	// did not happen. ContentManager itself stays unaware of who listens.
 	if (m_onAssetSaved) m_onAssetSaved(asset.path, fullPath);
+	// A mesh's detail levels follow what was saved: the slots they draw with (a slot
+	// edit on the base is a slot edit on every level). Last, because registering a
+	// level that was not yet may move the pool `asset` lives in.
+	if (asset.type == HE::AssetType::StaticMesh && getStaticMesh(asset.id) == &asset)
+		registerMeshLods(asset.id);
 	return true;
 }
 
@@ -2903,6 +2943,65 @@ bool decodeMeshSections(const std::vector<uint8_t>& bytes, std::vector<MeshSecti
 	}
 	return true;
 }
+std::vector<uint8_t> encodeMeshLodIndex(const std::vector<StaticMeshAsset::Lod>& lods)
+{
+	std::vector<uint8_t> b;
+	HAsset::Writer::appendPOD(b, static_cast<uint32_t>(lods.size()));
+	for (const StaticMeshAsset::Lod& l : lods)
+	{
+		HAsset::Writer::appendPOD(b, l.id.hi);
+		HAsset::Writer::appendPOD(b, l.id.lo);
+		HAsset::Writer::appendPOD(b, l.worldError);
+		HAsset::Writer::appendPOD(b, l.triangles);
+	}
+	return b;
+}
+
+bool decodeMeshLodIndex(const std::vector<uint8_t>& bytes, std::vector<StaticMeshAsset::Lod>& out)
+{
+	out.clear();
+	size_t   o     = 0;
+	uint32_t count = 0;
+	if (!HAsset::Reader::readPOD(bytes, o, count)) return false;
+	if (static_cast<uint64_t>(count) * 24 > bytes.size() - o) return false;
+	out.resize(count);
+	for (StaticMeshAsset::Lod& l : out)
+		if (!HAsset::Reader::readPOD(bytes, o, l.id.hi) || !HAsset::Reader::readPOD(bytes, o, l.id.lo) ||
+		    !HAsset::Reader::readPOD(bytes, o, l.worldError) || !HAsset::Reader::readPOD(bytes, o, l.triangles))
+			return false;
+	return true;
+}
+
+std::vector<uint8_t> encodeMeshLodBlobs(const std::vector<std::vector<uint8_t>>& blobs)
+{
+	std::vector<uint8_t> b;
+	HAsset::Writer::appendPOD(b, static_cast<uint32_t>(blobs.size()));
+	for (const std::vector<uint8_t>& blob : blobs)
+	{
+		HAsset::Writer::appendPOD(b, static_cast<uint64_t>(blob.size()));
+		b.insert(b.end(), blob.begin(), blob.end());
+	}
+	return b;
+}
+
+bool decodeMeshLodBlobs(const std::vector<uint8_t>& bytes, std::vector<std::vector<uint8_t>>& out)
+{
+	out.clear();
+	size_t   o     = 0;
+	uint32_t count = 0;
+	if (!HAsset::Reader::readPOD(bytes, o, count)) return false;
+	if (static_cast<uint64_t>(count) * 8 > bytes.size() - o) return false;
+	out.resize(count);
+	for (std::vector<uint8_t>& blob : out)
+	{
+		uint64_t size = 0;
+		if (!HAsset::Reader::readPOD(bytes, o, size) || size > bytes.size() - o) return false;
+		blob.assign(bytes.begin() + static_cast<std::ptrdiff_t>(o), bytes.begin() + static_cast<std::ptrdiff_t>(o + size));
+		o += static_cast<size_t>(size);
+	}
+	return true;
+}
+
 std::vector<uint8_t> encodeParticleShaderVariants(const std::vector<ParticleShaderVariant>& vars)
 { return encodeShaderVariants(vars); }
 std::vector<ParticleShaderVariant> decodeParticleShaderVariants(const std::vector<uint8_t>& bytes)
@@ -3059,6 +3158,75 @@ bool ContentManager::replaceRuntimeAsset(SlotMap<T>& map, HE::UUID id, T asset)
 	return true;
 }
 
+void ContentManager::registerMeshLods(HE::UUID baseId)
+{
+	const StaticMeshAsset* base = getStaticMesh(baseId);
+	if (!base) return;
+	for (const StaticMeshAsset::Lod& l : base->lods) m_lodBase[l.id] = baseId;
+	if (base->lodBlobs.size() != base->lods.size()) return;
+	// Copied out: inserting a level into the pool may move `base`.
+	const std::vector<MeshSection> slots = base->sections;
+	const std::string baseName = base->name, basePath = base->path, baseMaterial = base->materialPath;
+	const HE::UUID    baseMaterialId = base->materialId;
+	const size_t      count = base->lods.size();
+	for (size_t i = 0; i < count; ++i)
+	{
+		base = getStaticMesh(baseId);
+		if (!base) return;
+		HAsset::Reader r;
+		if (!r.openData(base->lodBlobs[i])) continue;
+		const auto* meta = r.findChunk(HAsset::CHUNK_META);
+		HE::UUID id; std::string name, metaPath;
+		if (!meta || !readMetaChunk(*meta, r.header().version, id, name, metaPath) || id == HE::UUID{}) continue;
+		StaticMeshAsset lvl{};
+		lvl.id   = id;
+		lvl.type = HE::AssetType::StaticMesh;
+		lvl.name = baseName + "_LOD" + std::to_string(i + 1);
+		readStaticMeshChunks(r, lvl, basePath + "#LOD" + std::to_string(i + 1));
+		// The base's slots, by index: a level is the base simplified section by section
+		// (AutoLod::buildLevel keeps one section per slot), and its file names no material.
+		lvl.materialPath = baseMaterial;
+		lvl.materialId   = baseMaterialId;
+		for (size_t k = 0; k < lvl.sections.size() && !slots.empty(); ++k)
+		{
+			const MeshSection& slot = slots[std::min(k, slots.size() - 1)];
+			lvl.sections[k].materialPath = slot.materialPath;
+			lvl.sections[k].materialId   = slot.materialId;
+		}
+		m_lodBase[id] = baseId;
+		if (isLoaded(id)) replaceRuntimeAsset(m_staticMeshAssets, id, std::move(lvl));
+		else              registerRuntimeAsset(m_staticMeshAssets, std::move(lvl), HE::AssetType::StaticMesh);
+	}
+}
+
+bool ContentManager::refreshMeshLods(HE::UUID baseId)
+{
+	StaticMeshAsset* base = getStaticMeshMutable(baseId);
+	if (!base || base->path.empty()) return false;
+	HAsset::Reader r;
+	std::vector<StaticMeshAsset::Lod> lods;
+	std::vector<std::vector<uint8_t>> blobs;
+	if (r.open(resolveAbsolutePath(base->path)))
+	{
+		if (const auto* c = r.findChunk(HAsset::CHUNK_MLDI)) HE::decodeMeshLodIndex(c->data, lods);
+		if (const auto* c = r.findChunk(HAsset::CHUNK_MLOD)) HE::decodeMeshLodBlobs(c->data, blobs);
+	}
+	if (blobs.size() != lods.size()) { lods.clear(); blobs.clear(); }
+	base->lods     = std::move(lods);
+	base->lodBlobs = std::move(blobs);
+	const bool        any  = !base->lods.empty();
+	const std::string path = base->path;   // registering the levels below may move `base`
+	registerMeshLods(baseId);
+	// The file is what memory now holds: not an outside edit for the hot reload.
+	if (auto watched = m_pathMtime.find(path); watched != m_pathMtime.end())
+	{
+		std::error_code ec;
+		const auto mtime = std::filesystem::last_write_time(resolveAbsolutePath(path), ec);
+		if (!ec) watched->second = mtime;
+	}
+	return any;
+}
+
 HE::UUID ContentManager::registerStaticMesh(StaticMeshAsset asset)       { ensureMeshUVs(asset); return registerRuntimeAsset(m_staticMeshAssets,  std::move(asset), HE::AssetType::StaticMesh);    }
 HE::UUID ContentManager::registerSkeletalMesh(SkeletalMeshAsset asset)   { return registerRuntimeAsset(m_skeletalMeshAssets, std::move(asset), HE::AssetType::SkeletalMesh); }
 HE::UUID ContentManager::registerTexture(TextureAsset asset)             { return registerRuntimeAsset(m_textureAssets,     std::move(asset), HE::AssetType::Texture);       }
@@ -3119,6 +3287,12 @@ bool ContentManager::unloadAsset(HE::UUID id)
 		return false;
 	const SlotHandle handle = it->second;
 
+	// A mesh's detail levels came with its file and go with it: a reload registers
+	// them again, and a level left behind would draw the old geometry.
+	std::vector<HE::UUID> levels;
+	if (const StaticMeshAsset* m = getStaticMesh(id); m && m->lodBlobs.size() == m->lods.size())
+		for (const StaticMeshAsset::Lod& l : m->lods) levels.push_back(l.id);
+
 	// Remove from whichever pool actually holds *this* asset. The id check guards
 	// against the same SlotHandle being valid in another pool (see lookupAsset).
 	// A pool anyPool does not visit would make unloadAsset() return false for its
@@ -3147,6 +3321,8 @@ bool ContentManager::unloadAsset(HE::UUID id)
 	// A loose-content asset keeps the old behaviour; the content walk re-sniffs it.
 	if (!m_pakResidency.count(id))
 		m_assetTypeIndex.erase(id);
+	for (const HE::UUID& l : levels)
+		if (!isPinned(l)) unloadAsset(l);
 	return true;
 }
 
@@ -3666,7 +3842,27 @@ void ContentManager::scanDirInto(const std::string& rootStr, const std::string& 
 				// Key by the file's ACTUAL location relative to its root (not the
 				// META-embedded path) so moved/renamed files still resolve.
 				const auto rel = std::filesystem::relative(p.path(), root, ec);
-				if (!ec) m_diskRegistry[id] = pathPrefix + rel.generic_string();
+				if (!ec)
+				{
+					const std::string key = pathPrefix + rel.generic_string();
+					m_diskRegistry[id] = key;
+					// A static mesh's detail levels resolve to its file: their index is
+					// the chunk right after META (encodeAssetChunks writes it there).
+					HAsset::ChunkHeader next{};
+					if (i + 1 < hdr.chunk_count && f.read(reinterpret_cast<char*>(&next), sizeof(next))
+					    && next.id == HAsset::CHUNK_MLDI && next.size < (1u << 20))
+					{
+						std::vector<uint8_t> bytes(static_cast<size_t>(next.size));
+						std::vector<StaticMeshAsset::Lod> lods;
+						if (f.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(next.size))
+						    && HE::decodeMeshLodIndex(bytes, lods))
+							for (const StaticMeshAsset::Lod& l : lods)
+							{
+								m_diskRegistry[l.id] = key;
+								m_lodBase[l.id]      = id;
+							}
+					}
+				}
 			}
 			break; // META handled — done with this file
 		}
@@ -3701,6 +3897,7 @@ void ContentManager::forgetProjectContent()
 	// outlived it was already dangling.
 	m_pinCounts.clear();
 	m_diskRegistry.clear();
+	m_lodBase.clear();
 
 	// Mounted archives belong to a build of a project, so they go too. In
 	// practice this is a no-op both ways round: the editor mounts none, and the

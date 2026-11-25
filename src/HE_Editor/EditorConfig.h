@@ -28,8 +28,8 @@ struct EditorConfig
 	bool KeepCPUAssetsInfoAcknowledged = false;
 	int  ContentBrowserRefreshRate = 60;
 
-	// Importing a static mesh also writes its Auto-LOD chain (Name_LOD1.. beside it;
-	// Importer::setAutoLodOnImport, AutoLod.h). Off: it adds files to every import.
+	// Importing a static mesh also writes its Auto-LOD chain (inside the mesh's file;
+	// Importer::setAutoLodOnImport, AutoLod.h). Off: it makes every import slower.
 	bool AutoLodOnImport = false;
 
 	// Content browser tree-panel width (-1 = auto on first frame)

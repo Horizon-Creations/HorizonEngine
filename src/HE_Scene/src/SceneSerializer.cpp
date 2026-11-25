@@ -366,8 +366,16 @@ namespace
 		if (auto* m = registry.try_get<MeshComponent>(entity);
 		    m != nullptr && !registry.all_of<TerrainComponent>(entity))
 		{
+			// The mesh the entity HAS, not the level LODSystem swapped in this frame:
+			// when the id is one of the entity's levels, LOD0 is levels[0] (navigation
+			// and physics read it there too).
+			HE::UUID asset = m->meshAssetId;
+			if (const auto* lod = registry.try_get<LODComponent>(entity); lod && !lod->levels.empty()
+			    && !(lod->levels[0].meshId == HE::UUID{}))
+				for (size_t i = 1; i < lod->levels.size(); ++i)
+					if (lod->levels[i].meshId == asset) { asset = lod->levels[0].meshId; break; }
 			comps["mesh"] = {
-				{ "asset",          uuidToJson(m->meshAssetId) },
+				{ "asset",          uuidToJson(asset) },
 				{ "lodBias",        m->lodBias },
 				{ "visible",        m->visible },
 				{ "castsShadow",    m->castsShadow },
@@ -1122,7 +1130,9 @@ namespace
 				{ "params",            std::move(params) },
 			};
 		}
-		if (auto* lod = registry.try_get<LODComponent>(entity))
+		// Levels mirrored from the mesh asset's own (LODSystem::bindAssetLevels) are not
+		// the scene's: they come back from the asset on load, and follow it when it changes.
+		if (auto* lod = registry.try_get<LODComponent>(entity); lod && !lod->fromAsset)
 		{
 			json levels = json::array();
 			for (const auto& lvl : lod->levels)

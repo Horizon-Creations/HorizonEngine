@@ -4686,16 +4686,16 @@ void render(AppContext& ctx, int& tabSelectRequest,
 				}
 
 				// ── Generate LODs (Thema 331, step 3) ─────────────────────
-				// Simpler copies of a static mesh as Name_LOD1.. beside it. Not on
+				// Simpler versions of a static mesh, kept inside its asset. Not on
 				// engine ground (read-only, and the engine meshes ship their own
-				// levels) and not on a level itself.
+				// levels) and not on an old _LOD<n> sidecar file.
 				if (!engineLocked && ext == ".hasset" && ctx.contentManager &&
 				    EditorAssetTypeCache::is(s_ctxMenuItem, HE::AssetType::StaticMesh) &&
 				    !AutoLod::isLodSidecarPath(srcPath.string()))
 				{
 					const std::string rel = ctx.contentManager->toContentRelativePath(srcPath.string());
 					// An asset outside the content root (e.g. one referenced from
-					// another project) has no path to write a _LOD<n> sidecar under;
+					// another project) is not this project's to rewrite;
 					// offering a menu item that would then silently do nothing reads
 					// as a broken editor, so it is hidden instead.
 					if (!rel.empty() && EditorWidgets::menuItem("Generate LODs..."))

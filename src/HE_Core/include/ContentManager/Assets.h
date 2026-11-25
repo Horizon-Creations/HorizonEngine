@@ -195,6 +195,21 @@ struct StaticMeshAsset : public RuntimeAsset
 	uint32_t               vertexCount = 0;
 	float                  boundsMin[3] = { 0.0f, 0.0f, 0.0f };
 	float                  boundsMax[3] = { 0.0f, 0.0f, 0.0f };
+
+	// Detail levels kept inside this file (chunks MLDI/MLOD, HAsset.h), LOD1 first.
+	// `lods` is the index. `lodBlobs` holds the level files verbatim, parallel to `lods`,
+	// so every writer that copies the asset round-trips them without decoding them.
+	// The ContentManager registers each level as a StaticMeshAsset of its own UUID
+	// when this mesh loads. A pak carries the index only: there the levels are
+	// entries of their own, and `lodBlobs` is empty.
+	struct Lod
+	{
+		HE::UUID id;
+		float    worldError = 0.0f;   // object-space metres against LOD0
+		uint32_t triangles  = 0;
+	};
+	std::vector<Lod>                  lods;
+	std::vector<std::vector<uint8_t>> lodBlobs;
 };
 
 // One joint in the skeleton hierarchy.
@@ -259,6 +274,13 @@ namespace HE
 	// that is meshSectionsCover's job, once the index count is known.
 	HE_API std::vector<uint8_t> encodeMeshSections(const std::vector<MeshSection>& sections);
 	HE_API bool decodeMeshSections(const std::vector<uint8_t>& bytes, std::vector<MeshSection>& out);
+
+	// MLDI / MLOD chunk (de)serialization (layout at HAsset::CHUNK_MLDI). decode is
+	// bounds-checked and answers false for a truncated chunk.
+	HE_API std::vector<uint8_t> encodeMeshLodIndex(const std::vector<StaticMeshAsset::Lod>& lods);
+	HE_API bool decodeMeshLodIndex(const std::vector<uint8_t>& bytes, std::vector<StaticMeshAsset::Lod>& out);
+	HE_API std::vector<uint8_t> encodeMeshLodBlobs(const std::vector<std::vector<uint8_t>>& blobs);
+	HE_API bool decodeMeshLodBlobs(const std::vector<uint8_t>& bytes, std::vector<std::vector<uint8_t>>& out);
 
 	// LOD slot mapping: which slot of the LOD0 mesh each section of a LOD-k
 	// mesh stands in for. The ENTITY's material slots are LOD0's — that is the

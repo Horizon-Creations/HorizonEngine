@@ -314,9 +314,9 @@ namespace Importer
 		// to come out linear, so an albedo PNG sampled its encoded values as
 		// linear light and looked washed out and too bright.
 		std::optional<bool> textureSrgb;
-		// Static mesh sources only: also write the Auto-LOD chain beside the mesh
+		// Static mesh sources only: also write the Auto-LOD chain into the mesh
 		// (AutoLod.h, Thema 331 step 3). reimport() sets it for a mesh that already
-		// has `<name>_LOD1.hasset`, so refreshing the mesh refreshes its levels.
+		// has levels, so refreshing the mesh refreshes its levels.
 		// Unset: the process default (autoLodOnImport(), which the editor sets from its
 		// preference and the asset compiler leaves off).
 		std::optional<bool> generateLods;
@@ -369,6 +369,8 @@ namespace Importer
 	// cannot work — which the Content Browser asks once per frame for as long as
 	// a context menu is open, so this may not read the asset's payload at all.
 	std::string sourceFileOf(const std::filesystem::path& assetFile);
+	// The UUID in the file's META, or a zero UUID when there is no readable file.
+	HE::UUID assetIdOf(const std::filesystem::path& assetFile);
 
 	// The payload of the first chunk `chunkId` in `assetFile`, STREAMED the same
 	// way (every other payload is seeked past). False for an unreadable or pre-v2

@@ -1,6 +1,8 @@
 #pragma once
 #include "Types/Defines.h"
+#include <cstdint>
 #include <string>
+#include <vector>
 
 struct RuntimeAsset;
 
@@ -21,4 +23,8 @@ namespace HE
 // mtime stamp and the onAssetSaved callback. No "Engine/" redirection either — a
 // fresh manager has no engine content root, so saveAsset would not do one.
 HE_API bool saveAssetFile(RuntimeAsset& asset, const std::string& contentRoot);
+// The bytes saveAssetFile would write, kept in memory: a whole .hasset. What a
+// mesh's detail level is stored as inside its base file (HAsset::CHUNK_MLOD).
+// An asset without a UUID gets one. Empty for a type with no encoding.
+HE_API std::vector<uint8_t> encodeAssetBytes(RuntimeAsset& asset);
 } // namespace HE
