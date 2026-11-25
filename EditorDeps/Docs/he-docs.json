@@ -14423,6 +14423,11 @@
        "k": "ol"
       },
       {
+       "alt": "Result: OnLevelLoaded, then Delay (2 seconds), then Print \"Hello from the level\"",
+       "k": "figure",
+       "src": "hc_result_first_graph.jpg"
+      },
+      {
        "blocks": [
         {
          "k": "p",
@@ -14477,7 +14482,7 @@
      ],
      "eyebrow": "Hands on",
      "id": "first-graph",
-     "text": "Print a line when the level starts, then make it wait two seconds. This uses the Level Script, which every game project has, so you need no asset to begin. Open the graph. With a scene open, choose Window » Level Script. The canvas opens in its own tab. (Application projects have no level; use Window » Game Instance and its OnInit event instead.) Add the event. Right-click the empty canvas (or press Space), type loaded and pick OnLevelLoaded from the Events section. An event is where a chain starts; if it says (added), the graph already has it. Add a Print. Hold P and click the canvas to the right of the event. A Print node appears. Wire them. Drag from the white triangle on the right of OnLevelLoaded to the white triangle on the left of Print. You can grab anywhere on a pin's row, its label included. Both triangles fill in: a pin is hollow until a wire is on it. Type the text. Click the box on Print's input and type Hello from the level. An unwired input keeps its value right on the pin. Run it. Press Play. The line appears in the Console (Window » Console); clicking it takes you back to the Print node that wrote it. Make it wait. Start a new wire from the event's exec output and, with the mouse still held over empty canvas, press D: a Delay appears there, wired to the event (an exec output has one wire, so it replaces the old one). Wire Delay's Completed to Print, set Duration to 2 and play again. Delay pauses only this chain; the rest of the game carries on. Where to go next: a graph that belongs to one object (a door, a pickup, the player) is a HorizonCode Class on an entity — see The Four Hosts. Everything you just did works the same there, with BeginPlay instead of OnLevelLoaded.",
+     "text": "Print a line when the level starts, then make it wait two seconds. This uses the Level Script, which every game project has, so you need no asset to begin. Open the graph. With a scene open, choose Window » Level Script. The canvas opens in its own tab. (Application projects have no level; use Window » Game Instance and its OnInit event instead.) Add the event. Right-click the empty canvas (or press Space), type loaded and pick OnLevelLoaded from the Events section. An event is where a chain starts; if it says (added), the graph already has it. Add a Print. Hold P and click the canvas to the right of the event. A Print node appears. Wire them. Drag from the white triangle on the right of OnLevelLoaded to the white triangle on the left of Print. You can grab anywhere on a pin's row, its label included. Both triangles fill in: a pin is hollow until a wire is on it. Type the text. Click the box on Print's input and type Hello from the level. An unwired input keeps its value right on the pin. Run it. Press Play. The line appears in the Console (Window » Console); clicking it takes you back to the Print node that wrote it. Make it wait. Start a new wire from the event's exec output and, with the mouse still held over empty canvas, press D: a Delay appears there, wired to the event (an exec output has one wire, so it replaces the old one). Wire Delay's Completed to Print, set Duration to 2 and play again. Delay pauses only this chain; the rest of the game carries on. Result: OnLevelLoaded, then Delay (2 seconds), then Print \"Hello from the level\" Where to go next: a graph that belongs to one object (a door, a pickup, the player) is a HorizonCode Class on an entity — see The Four Hosts. Everything you just did works the same there, with BeginPlay instead of OnLevelLoaded.",
      "title": "Your First Graph"
     },
     {
@@ -16133,6 +16138,11 @@
        ]
       },
       {
+       "alt": "Result: OnBeginOverlap, then Do Once, then Print",
+       "k": "figure",
+       "src": "hc_result_once.jpg"
+      },
+      {
        "k": "h3",
        "r": [
         {
@@ -16215,6 +16225,11 @@
        ]
       },
       {
+       "alt": "Result: BeginPlay into a Branch on IsOpen; True prints one line, False another",
+       "k": "figure",
+       "src": "hc_result_branch.jpg"
+      },
+      {
        "k": "h3",
        "r": [
         {
@@ -16295,6 +16310,11 @@
          "t": " if other graphs should read it."
         }
        ]
+      },
+      {
+       "alt": "Result: Set Score fed by Score plus 1",
+       "k": "figure",
+       "src": "hc_result_count.jpg"
       },
       {
        "k": "h3",
@@ -16381,7 +16401,7 @@
      ],
      "eyebrow": "Patterns",
      "id": "recipes",
-     "text": "Four patterns most gameplay is built from. Each is a few nodes; the arrows read \"wire this exec output to that exec input\". Something happens once when the player walks in An Entity class on an entity whose collider is a trigger: OnBeginOverlap -> Do Once (O) -> Print. The overlap event's output is the other entity, so you can check who walked in before acting. Do Once lets the chain through the first time only. Choose between two paths Add a Bool variable IsOpen. From any exec chain -> Branch (B); drag IsOpen onto the canvas as Get and wire it into Branch's Cond. True and False each continue their own chain. Leave Cond unwired and the checkbox on the pin decides. Count something Add a Float variable Score. In the chain where points are scored -> Set Score; feed its value from an Add (+) whose first input is Get Score and whose second you type as 1. The arithmetic nodes work on Float. Each instance of the class keeps its own Score; make it Public if other graphs should read it. React to a key Create an Input Action asset (say Jump) and map it to a key. In a Player Character or Player Controller class the add menu has an Input section with one node per action: Jump has Pressed and Released outputs (an axis action gives its value instead). Wire Pressed to whatever the key should do.",
+     "text": "Four patterns most gameplay is built from. Each is a few nodes; the arrows read \"wire this exec output to that exec input\". Something happens once when the player walks in An Entity class on an entity whose collider is a trigger: OnBeginOverlap -> Do Once (O) -> Print. The overlap event's output is the other entity, so you can check who walked in before acting. Do Once lets the chain through the first time only. Result: OnBeginOverlap, then Do Once, then Print Choose between two paths Add a Bool variable IsOpen. From any exec chain -> Branch (B); drag IsOpen onto the canvas as Get and wire it into Branch's Cond. True and False each continue their own chain. Leave Cond unwired and the checkbox on the pin decides. Result: BeginPlay into a Branch on IsOpen; True prints one line, False another Count something Add a Float variable Score. In the chain where points are scored -> Set Score; feed its value from an Add (+) whose first input is Get Score and whose second you type as 1. The arithmetic nodes work on Float. Each instance of the class keeps its own Score; make it Public if other graphs should read it. Result: Set Score fed by Score plus 1 React to a key Create an Input Action asset (say Jump) and map it to a key. In a Player Character or Player Controller class the add menu has an Input section with one node per action: Jump has Pressed and Released outputs (an axis action gives its value instead). Wire Pressed to whatever the key should do.",
      "title": "Small Recipes"
     },
     {
@@ -16427,12 +16447,12 @@
         ],
         [
          {
-          "s": "c",
-          "t": "Call Function (Ref)"
+          "s": "b",
+          "t": "Members by name"
          },
          {
           "s": "",
-          "t": " — call a "
+          "t": " — drag off a reference and its type's "
          },
          {
           "s": "i",
@@ -16440,15 +16460,31 @@
          },
          {
           "s": "",
-          "t": " function on a referenced instance; "
+          "t": " functions ("
          },
          {
           "s": "c",
-          "t": "Get/Set (Ref)"
+          "t": "Call …"
          },
          {
           "s": "",
-          "t": " reads or writes its public variables."
+          "t": ") and variables ("
+         },
+         {
+          "s": "c",
+          "t": "Get …"
+         },
+         {
+          "s": "",
+          "t": " / "
+         },
+         {
+          "s": "c",
+          "t": "Set …"
+         },
+         {
+          "s": "",
+          "t": ") are listed by name, already wired. A reference whose type is not known lists every type in the project and the engine."
          }
         ],
         [
@@ -16619,11 +16655,16 @@
          "t": " (Text, Button, …), and dragging off it lists the same properties."
         }
        ]
+      },
+      {
+       "alt": "Result: Construct sets the Text of Label1 to Hello, through the element's reference",
+       "k": "figure",
+       "src": "hc_result_element.jpg"
       }
      ],
      "eyebrow": "Composition",
      "id": "communication",
-     "text": "Because there is a single runtime, a graph can hold a reference to another running class and delegate to it, event-dispatcher style: Bind Event — subscribe to another class's event through a reference; when it fires, your matching event runs. Emit Event — broadcast an event to everyone bound to this class. Call Function (Ref) — call a public function on a referenced instance; Get/Set (Ref) reads or writes its public variables. Get Game Instance / Get Self — the references you feed into the nodes above; Is Valid guards references that may have been destroyed. Reading another object's variables Give a variable the type of a class (Type » Objects) and store a reference in it, from Create Object, a Cast or an event argument. Drag off its Get node: the menu lists that class's public variables as Get/Set and its public functions as Call, already wired to the reference. Private members are not offered. Widget elements are objects too In a widget graph every element (a label, a button, a slider) can be taken as a reference: right-click » Elements » Get Label1, or drop the element from the hierarchy and pick Reference. Drag off that reference and the menu lists the element type's properties — Get Text, Set Text, Get Visible and so on — the same way a class lists its variables. Get is pure; Set runs when the exec wire reaches it. A variable can hold such a reference: its type is under Type » Controls (Text, Button, …), and dragging off it lists the same properties.",
+     "text": "Because there is a single runtime, a graph can hold a reference to another running class and delegate to it, event-dispatcher style: Bind Event — subscribe to another class's event through a reference; when it fires, your matching event runs. Emit Event — broadcast an event to everyone bound to this class. Members by name — drag off a reference and its type's public functions (Call …) and variables (Get … / Set …) are listed by name, already wired. A reference whose type is not known lists every type in the project and the engine. Get Game Instance / Get Self — the references you feed into the nodes above; Is Valid guards references that may have been destroyed. Reading another object's variables Give a variable the type of a class (Type » Objects) and store a reference in it, from Create Object, a Cast or an event argument. Drag off its Get node: the menu lists that class's public variables as Get/Set and its public functions as Call, already wired to the reference. Private members are not offered. Widget elements are objects too In a widget graph every element (a label, a button, a slider) can be taken as a reference: right-click » Elements » Get Label1, or drop the element from the hierarchy and pick Reference. Drag off that reference and the menu lists the element type's properties — Get Text, Set Text, Get Visible and so on — the same way a class lists its variables. Get is pure; Set runs when the exec wire reaches it. A variable can hold such a reference: its type is under Type » Controls (Text, Button, …), and dragging off it lists the same properties. Result: Construct sets the Text of Label1 to Hello, through the element's reference",
      "title": "Talking Between Graphs"
     },
     {

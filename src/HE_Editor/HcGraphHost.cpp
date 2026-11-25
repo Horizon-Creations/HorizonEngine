@@ -263,6 +263,11 @@ std::vector<GraphEditor::Pin> nodePins(const HC::Node& n)
 	for (const auto& pd : s.execOuts) push(pd, false, true);
 	for (const auto& pd : s.dataIns)  push(pd, true,  false);
 	for (const auto& pd : s.dataOuts) push(pd, false, false);
+	// A Get Variable's one output says WHICH variable, not "Value": the canvas
+	// then draws it as a Blueprint getter pill ("Score ●", its title ending in
+	// the label). Display only — the signature's pin name stays "Value".
+	if (n.type == NT::GetVariable && !n.s.empty() && !out.empty())
+		out.back().label = n.s;
 	return out;
 }
 

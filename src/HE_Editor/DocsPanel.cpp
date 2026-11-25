@@ -853,7 +853,15 @@ namespace
 			const float avail = ImGui::GetContentRegionAvail().x;
 			const float w = std::min({ avail, kFigureMaxWidth, static_cast<float>(f.w) });
 			const float h = w * static_cast<float>(f.h) / static_cast<float>(f.w);
-			ImGui::Image(f.tex, ImVec2(w, h));
+			// A picture with rounded corners and a hairline frame: a screenshot
+			// dropped edge-to-edge into the text reads as a pasted rectangle.
+			const ImVec2 p = ImGui::GetCursorScreenPos();
+			ImGui::Dummy(ImVec2(w, h));
+			ImDrawList* fdl = ImGui::GetWindowDrawList();
+			fdl->AddImageRounded(f.tex, p, ImVec2(p.x + w, p.y + h), ImVec2(0, 0), ImVec2(1, 1),
+			                     IM_COL32_WHITE, 8.0f);
+			fdl->AddRect(p, ImVec2(p.x + w, p.y + h),
+			             ImGui::GetColorU32(HE::Ed::Theme::warm(0.30f)), 8.0f, 0, 1.0f);
 		}
 		if (!b.alt.empty())
 		{
@@ -884,7 +892,7 @@ namespace
 			break;
 		case docs::BlockKind::Heading:
 			ImGui::Spacing();
-			if (ctx.sub) ImGui::PushFont(ctx.sub, 0.0f);
+			if (ctx.sub) ImGui::PushFont(ctx.sub, ctx.sub->LegacySize);
 			ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::TextHeading);
 			drawRuns(ctx, b.runs);
 			ImGui::PopStyleColor();
@@ -894,17 +902,34 @@ namespace
 		case docs::BlockKind::Bullets:
 		case docs::BlockKind::Numbers:
 		{
+			// Steps get a numbered badge in the accent, bullets an accent dot —
+			// both in a gutter of their own, so the text column stays straight.
+			using namespace HE::Ed::Theme;
+			const bool  numbered = b.kind == docs::BlockKind::Numbers;
+			const float lineH    = ImGui::GetTextLineHeight();
+			const float gutter   = numbered ? lineH + 12.0f : 18.0f;
+			ImDrawList* ldl = ImGui::GetWindowDrawList();
 			int n = 1;
 			for (const docs::Cell& item : b.items)
 			{
-				ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::TextDim);
-				if (b.kind == docs::BlockKind::Numbers) ImGui::Text("%d.", n++);
-				else                                    ImGui::TextUnformatted("\xe2\x80\xa2");
-				ImGui::PopStyleColor();
-				ImGui::SameLine(0.0f, 8.0f);
+				const ImVec2 p = ImGui::GetCursorScreenPos();
+				const float  cy = p.y + lineH * 0.5f;
+				if (numbered)
+				{
+					const float r = lineH * 0.5f + 1.0f;
+					ldl->AddCircleFilled(ImVec2(p.x + r, cy), r, ImGui::GetColorU32(Accent), 20);
+					char num[8]; std::snprintf(num, sizeof num, "%d", n++);
+					const ImVec2 ts = ImGui::CalcTextSize(num);
+					ldl->AddText(ImVec2(std::round(p.x + r - ts.x * 0.5f), std::round(cy - ts.y * 0.5f)),
+					             IM_COL32(24, 20, 16, 255), num);
+				}
+				else
+					ldl->AddCircleFilled(ImVec2(p.x + 6.0f, cy), 2.6f, ImGui::GetColorU32(AccentHi), 12);
+				ImGui::SetCursorScreenPos(ImVec2(p.x + gutter, p.y));
 				ImGui::BeginGroup();
 				drawRuns(ctx, item);
 				ImGui::EndGroup();
+				if (numbered) ImGui::Dummy(ImVec2(1.0f, 4.0f));   // steps breathe
 			}
 			ImGui::Spacing();
 			break;
@@ -950,19 +975,47 @@ namespace
 		const docs::Library& lib = docs::library();
 		const docs::Page& page = lib.pages()[static_cast<std::size_t>(s_page)];
 
-		if (ctx.head) ImGui::PushFont(ctx.head, 0.0f);
-		ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::TextHeading);
-		ImGui::TextUnformatted(page.title.c_str());
-		ImGui::PopStyleColor();
-		if (ctx.head) ImGui::PopFont();
-		if (!page.summary.empty())
+		// The page opens with a header card: eyebrow, title, summary, an amber
+		// rule along its foot. A page used to start as one more line of text,
+		// which is most of why the manual read like an encyclopedia.
 		{
-			EditorWidgets::WrapText wrap;
-			ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::TextDim);
-			ImGui::TextUnformatted(page.summary.c_str());
+			using namespace HE::Ed::Theme;
+			ImDrawList* hdl = ImGui::GetWindowDrawList();
+			hdl->ChannelsSplit(2);
+			hdl->ChannelsSetCurrent(1);
+			const ImVec2 top = ImGui::GetCursorScreenPos();
+			const float  pad = 18.0f;
+			const float  cardW = ImGui::GetContentRegionAvail().x;
+			ImGui::SetCursorScreenPos(ImVec2(top.x + pad, top.y + pad));
+			ImGui::BeginGroup();
+			ImGui::PushStyleColor(ImGuiCol_Text, Accent);
+			ImGui::TextUnformatted("MANUAL");
 			ImGui::PopStyleColor();
+			// The font's OWN size: with ImGui 1.92 a 0 here keeps the body size,
+			// which is why every heading in the manual used to be body-sized.
+			if (ctx.head) ImGui::PushFont(ctx.head, ctx.head->LegacySize);
+			ImGui::PushStyleColor(ImGuiCol_Text, TextHeading);
+			ImGui::TextUnformatted(page.title.c_str());
+			ImGui::PopStyleColor();
+			if (ctx.head) ImGui::PopFont();
+			if (!page.summary.empty())
+			{
+				ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + cardW - 2.0f * pad);
+				ImGui::PushStyleColor(ImGuiCol_Text, TextDim);
+				ImGui::TextUnformatted(page.summary.c_str());
+				ImGui::PopStyleColor();
+				ImGui::PopTextWrapPos();
+			}
+			ImGui::EndGroup();
+			const float bottom = ImGui::GetItemRectMax().y + pad;
+			hdl->ChannelsSetCurrent(0);
+			hdl->AddRectFilled(top, ImVec2(top.x + cardW, bottom), ImGui::GetColorU32(warm(0.135f)), 10.0f);
+			hdl->AddRectFilled(ImVec2(top.x + 10.0f, bottom - 3.0f), ImVec2(top.x + cardW - 10.0f, bottom - 1.0f),
+			                   ImGui::GetColorU32(Accent), 1.0f);
+			hdl->ChannelsMerge();
+			ImGui::SetCursorScreenPos(ImVec2(top.x, bottom));
+			ImGui::Dummy(ImVec2(cardW, 8.0f));
 		}
-		ImGui::Spacing();
 
 		// ── Sections scrolled out of the body are not drawn (EDT-302) ────────
 		// The Node Reference is one page of some three hundred sections, and every
@@ -1025,8 +1078,9 @@ namespace
 			const float sectionTop = ImGui::GetCursorScreenPos().y;
 			++s_sectionsDrawn;
 			ImGui::PushID(i);
-			ImGui::Separator();
-			ImGui::Spacing();
+			// Air between sections, not a rule: a line under every section is a
+			// table of contents printed down the page.
+			ImGui::Dummy(ImVec2(1.0f, i == 0 ? 4.0f : 22.0f));
 
 			// The scroll lands here, on the section's first item — set while the
 			// section is being submitted, which is the only moment ImGui can turn
@@ -1035,11 +1089,15 @@ namespace
 
 			if (!sec.eyebrow.empty())
 			{
-				ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::TextDim);
-				ImGui::TextUnformatted(sec.eyebrow.c_str());
+				// The eyebrow in the accent and in capitals: a label, not a line
+				// of prose that happens to sit above the heading.
+				std::string eb = sec.eyebrow;
+				for (char& c : eb) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+				ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::Accent);
+				ImGui::TextUnformatted(eb.c_str());
 				ImGui::PopStyleColor();
 			}
-			if (ctx.sub) ImGui::PushFont(ctx.sub, 0.0f);
+			if (ctx.sub) ImGui::PushFont(ctx.sub, ctx.sub->LegacySize);
 			ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::TextHeading);
 			ImGui::TextUnformatted(sec.title.c_str());
 			ImGui::PopStyleColor();

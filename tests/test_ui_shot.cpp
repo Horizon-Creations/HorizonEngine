@@ -500,14 +500,14 @@ TEST_CASE("ui shot: the HorizonCode guide's hands-on sections are in the manual"
 	REQUIRE(lib.load(HE_DOCS_BUNDLE_PATH));
 #endif
 	REQUIRE(lib.loaded());
-	for (const char* topic : { "horizoncode#first-graph", "horizoncode#reading-nodes",
+	for (const char* topic : { "horizoncode", "horizoncode#first-graph", "horizoncode#reading-nodes",
 	                           "horizoncode#canvas", "horizoncode#recipes", "horizoncode#pitfalls" })
 	{
 		INFO(topic);
 		DocsPanel::openTopic(topic);
 		REQUIRE(DocsPanel::isOpen());
 		std::string name = std::string("docs-") + topic;
-		name[name.find('#')] = '-';
+		if (const std::size_t hash = name.find('#'); hash != std::string::npos) name[hash] = '-';
 		const he_ui::Image img = shoot(name.c_str(), W, H, 4, [&](int) { DocsPanel::draw(host); });
 		REQUIRE(img.valid());
 		CHECK(img.inkedPixels(kBgR, kBgG, kBgB) > 100000);
@@ -1093,6 +1093,119 @@ TEST_CASE("ui shot: the drag-off menu offers own functions and Set for a data wi
 	// offered with its members (here, with no project content: the controls).
 	const int co = HcGraphHost::addNode(graph, NT::CreateObject, ImVec2(0, 600), 0);
 	CHECK(topShot("drag-menu-untyped-ref", co).valid());
+}
+
+// The manual's result pictures: the finished graph of each walkthrough and
+// recipe on the HorizonCode page, drawn by the real canvas. Regenerate with
+//     HE_UI_DUMP_DIR=<dir> he_tests -tc="ui shot: the guide's result figures"
+// and copy hc_result_*.bmp (as PNG) next to Website/HorizonEngineDocs/horizoncode.html.
+TEST_CASE("ui shot: the guide's result figures")
+{
+	namespace HC = HorizonCode;
+	using NT = HC::NodeType;
+	using PT = HC::PinType;
+	struct Fig
+	{
+		HC::Graph g;
+		int node(NT t, float x, float y) { return HcGraphHost::addNode(g, t, ImVec2(x, y), 0); }
+		HC::Node& at(int id) { return *g.findNode(id); }
+		int execOut(int id, int k = 0) { return HcGraphHost::pinRanges(at(id)).execOut0 + k; }
+		int execIn(int id)             { return HcGraphHost::pinRanges(at(id)).execIn0; }
+		int dataOut(int id, int k = 0) { return HcGraphHost::pinRanges(at(id)).dataOut0 + k; }
+		int dataIn(int id, int k = 0)  { return HcGraphHost::pinRanges(at(id)).dataIn0 + k; }
+		void exec(int a, int b, int k = 0) { CHECK(g.connect(a, execOut(a, k), b, execIn(b))); }
+		void data(int a, int ak, int b, int bk) { CHECK(g.connect(a, dataOut(a, ak), b, dataIn(b, bk))); }
+		int event(const char* name, float x, float y) { const int e = node(NT::Event, x, y); at(e).s = name; return e; }
+		int print(const char* text, float x, float y)
+		{
+			const int p = node(NT::Print, x, y);
+			HC::Value v; v.type = PT::String; v.s = text;
+			at(p).pinDefaults[0] = v;
+			return p;
+		}
+	};
+	const auto render = [&](const char* name, Fig& f, int w, int h) {
+		Harness harness(w, h);
+		GraphEditor::State ge;
+		ge.pan = ImVec2(20.0f, 20.0f);
+		int selected = 0;
+		HcGraphHost::Host host;
+		host.graph = &f.g; host.ge = &ge; host.selectedNode = &selected;
+		host.title = [](const HC::Node& n) {
+			return n.type == NT::GetElement ? "Get " + n.s : HcGraphHost::defaultNodeTitle(n); };
+		host.onEdit = [](bool) {};
+		GraphEditor::Model m = HcGraphHost::buildModel(host);
+		const he_ui::Image img = shoot(name, w, h, 4, [&](int) {
+			ImGui::SetNextWindowPos(ImVec2(0, 0));
+			ImGui::SetNextWindowSize(ImVec2(float(w), float(h)));
+			ImGui::Begin("graph", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+			             ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings);
+			GraphEditor::draw("fig", m, ge, ImGui::GetContentRegionAvail());
+			ImGui::End();
+		});
+		CHECK(img.valid());
+	};
+
+	{   // Your First Graph: OnLevelLoaded → Delay 2 s → Print.
+		Fig f;
+		const int ev = f.event("OnLevelLoaded", 0, 20);
+		const int d  = f.node(NT::Delay, 200, 20);
+		HC::Value two; two.type = PT::Float; two.f = 2.0f;
+		f.at(d).pinDefaults[0] = two;
+		const int p  = f.print("Hello from the level", 480, 20);
+		f.exec(ev, d); f.exec(d, p);
+		render("hc_result_first_graph", f, 800, 170);
+	}
+	{   // Once when the player walks in: OnBeginOverlap → Do Once → Print.
+		Fig f;
+		const int ev = f.event("OnBeginOverlap", 0, 20);
+		const int o  = f.node(NT::DoOnce, 220, 20);
+		const int p  = f.print("The door opens", 400, 20);
+		f.exec(ev, o); f.exec(o, p);
+		render("hc_result_once", f, 720, 160);
+	}
+	{   // Two paths: Branch on a Bool variable.
+		Fig f;
+		HC::Variable v; v.name = "IsOpen"; v.type = PT::Bool;
+		f.g.variables.push_back(v);
+		const int ev = f.event("BeginPlay", 0, 20);
+		const int g  = f.node(NT::GetVariable, 0, 120);
+		f.at(g).s = "IsOpen"; f.at(g).propType = PT::Bool;
+		const int b  = f.node(NT::Branch, 200, 20);
+		const int t  = f.print("It is open", 420, 0);
+		const int e  = f.print("It is closed", 420, 110);
+		f.exec(ev, b); f.data(g, 0, b, 0);
+		f.exec(b, t, 0); f.exec(b, e, 1);
+		render("hc_result_branch", f, 700, 210);
+	}
+	{   // Count something: Set Score = Score + 1.
+		Fig f;
+		HC::Variable v; v.name = "Score"; v.type = PT::Float;
+		f.g.variables.push_back(v);
+		const int ev = f.event("OnBeginOverlap", 0, 20);
+		const int g  = f.node(NT::GetVariable, 0, 130);
+		f.at(g).s = "Score"; f.at(g).propType = PT::Float;
+		const int a  = f.node(NT::Add, 170, 120);
+		HC::Value one; one.type = PT::Float; one.f = 1.0f;
+		f.at(a).pinDefaults[1] = one;
+		const int s  = f.node(NT::SetVariable, 360, 20);
+		f.at(s).s = "Score"; f.at(s).propType = PT::Float;
+		f.exec(ev, s); f.data(g, 0, a, 0); f.data(a, 0, s, 0);
+		render("hc_result_count", f, 620, 210);
+	}
+	{   // A widget element as an object: Construct → Set Text on Label1.
+		Fig f;
+		const int ev = f.event("Construct", 0, 20);
+		HC::Node el; el.type = NT::GetElement; el.elem = 1; el.s = "Label1"; el.className = "ui:Text";
+		el.x = 0; el.y = 120;
+		const int r = f.g.addNode(el);
+		const int st = f.node(NT::SetExternal, 220, 20);
+		f.at(st).s = "Text"; f.at(st).propType = PT::String; f.at(st).className = "ui:Text";
+		HC::Value hi; hi.type = PT::String; hi.s = "Hello";
+		f.at(st).pinDefaults[1] = hi;
+		f.exec(ev, st); f.data(r, 0, st, 0);
+		render("hc_result_element", f, 560, 190);
+	}
 }
 
 TEST_CASE("ui shot: a HorizonCode graph's nodes, at three zooms")
