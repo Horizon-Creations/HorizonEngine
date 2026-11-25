@@ -107,6 +107,11 @@ struct AppContext
 	// Quit callback — called when the user requests exit from the UI
 	std::function<void()> quit;
 
+	// Saves the viewport as the open project's Project Hub picture
+	// (ProjectThumbnail.h). EditorUI::endProjectSession calls it, so closing
+	// and switching projects both leave one; quitting takes it in OnShutdown.
+	std::function<void()> captureProjectThumbnail;
+
 	// Toggle a profiler benchmark capture (same path as the F9 hotkey: disables
 	// vsync on start so frame times reflect true cost, dumps + restores on stop).
 	std::function<void()> toggleProfilerCapture;
@@ -1225,6 +1230,7 @@ private:
 	// levelScriptKeyForUuid(sceneUuidForPath)), so the Watch window and the
 	// trace name the level the way the export does. Empty for an unsaved
 	// scene or one outside the project — the world then falls back to
+	void captureProjectThumbnail();
 	// HorizonWorld::kUnkeyedLevelScript.
 	std::string levelScriptKeyForCurrentScene();
 	// Bring every placed prefab in the editor world up to date with its asset

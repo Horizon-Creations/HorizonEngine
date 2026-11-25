@@ -315,6 +315,7 @@ add_executable(HorizonEditor WIN32
 	EditorToolbar.cpp
 	OutlinerPanel.cpp
 	ProjectHubPanel.cpp
+	ProjectThumbnail.cpp
 	ProjectPreflight.cpp
 	SceneDiskWatch.cpp
 	TutorialPanel.cpp

@@ -155,6 +155,9 @@ add_executable(he_tests
     # row shows what, which installer each button starts, the queue. Nothing is
     # installed (every callback is a counter).
     test_tool_setup_ui.cpp
+    # The Project Hub, driven the same way: picture cards open their project,
+    # tiles pick a template, a closed project's thumbnail round-trips.
+    test_project_hub_ui.cpp
     # The texture colour-space dialog, driven the same way: Apply rewrites the
     # rows that change, a tick changed in the dialog is the flag the import writes.
     test_texture_colour_space_ui.cpp
@@ -1043,6 +1046,11 @@ add_executable(he_tests
     # The export dialog's game-compile line (topic 222), for test_tool_setup_ui.cpp:
     # same AppContext, same per-file HE_IMGUI_ENABLED; ExportSdkBuild.cpp is above.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/ExportSdkGateUi.cpp
+    # The Project Hub, for test_project_hub_ui.cpp: same AppContext, same per-file
+    # HE_IMGUI_ENABLED. The open pipeline, the clone dialog, the tutorial and the
+    # macOS menu it calls are link stubs in the test (see there).
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/ProjectHubPanel.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/ProjectThumbnail.cpp
     # The texture colour-space dialog, for test_texture_colour_space_ui.cpp: same
     # AppContext, same per-file HE_IMGUI_ENABLED. It calls the importers
     # (HorizonImporters, linked below) and CollabController (already here).
@@ -1148,6 +1156,8 @@ set_source_files_properties(
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/ToolSetupDialog.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/ExportSdkGateUi.cpp
     test_tool_setup_ui.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/ProjectHubPanel.cpp
+    test_project_hub_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/TextureColourSpaceDialog.cpp
     test_texture_colour_space_ui.cpp
     test_static_mesh_editor_ui.cpp

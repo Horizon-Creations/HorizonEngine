@@ -7,6 +7,8 @@
 #include <cstring>
 #include <Diagnostics/EngineProfiler.h> // HE_DUMP_GPUTIME turns live GPU timing on
 #include "AssetThumbnailCache.h" // renderer-owned Content-Browser tiles (freed on shutdown)
+#include "ProjectHubPanel.h"     // the Hub's card pictures (freed on shutdown)
+#include "ProjectThumbnail.h"    // the picture a project is closed on
 #include "CollabPresenceBar.h"   // ditto for the collaboration avatars
 #include "EditorUI.h"
 #include "EditorTabs.h"            // retarget / dedupe the open asset tabs
@@ -15343,6 +15345,7 @@ AppContext EditorApplication::makeContext()
 		.quit                = [this]{ m_quitConfirmed = true; Quit(); },
 		.toggleProfilerCapture = [this]{ toggleProfilerCapture(); },
 		.setVSync              = [this](bool v){ setVSync(v); m_vsync = v; },
+		.captureProjectThumbnail = [this]{ captureProjectThumbnail(); },
 		.setMaxFps             = [this](float f){ setMaxFps(f); m_editorConfig.MaxFps = f; },
 		.editorConfig        = m_editorConfig,
 		.vsync               = m_vsync,
@@ -17206,6 +17209,22 @@ void EditorApplication::warmupWorldMaterials(bool waitForBuilds)
 	                              HE::kEditorIconDirectionalLightMaterialId, HE::kEditorIconCameraMaterialId,
 	                              HE::kEditorIconAudioSourceMaterialId })
 		ids.push_back(icon);
+// The project's Project Hub card: the viewport as it was when the project was
+// closed or the editor quit (EditorUI::endProjectSession, OnShutdown). Unlike
+// the scene tile, Play counts — what the user last looked at is the point.
+void EditorApplication::captureProjectThumbnail()
+{
+	IRenderer* r = renderer();
+	const std::string& project = m_projectManager.currentProject().path;
+	// A headless dump builds its own witness scene; that is not this project's picture.
+	if (!r || project.empty() || !m_dumpPath.empty()) return;
+	std::vector<uint8_t> rgba;
+	uint32_t w = 0, h = 0;
+	if (r->CaptureViewport(rgba, w, h) && ProjectThumbnail::save(project, rgba, w, h))
+		HE_LOG_INFO(Editor, "%s", ("EditorApplication: project thumbnail saved ("
+			+ ProjectThumbnail::fileFor(project).string() + ")").c_str());
+}
+
 	renderer()->WarmupMaterials(ids);
 	// HE_SHADER_BUILD_NOWAIT=1 opens the window without waiting: the scene then fills in
 	// as its pipelines land, which is what a scene opened mid-session does.
@@ -17510,6 +17529,8 @@ void EditorApplication::OnShutdown()
 	// teardown below rather than after it.
 	m_mcp->stop();
 
+	// First, while the viewport still holds the last frame the user saw.
+	captureProjectThumbnail();
 	// A project export may still be packing on its worker thread — wait for it
 	// (destroying a joinable std::thread would terminate the process). Same rule
 	// for the game-logic compile, which is a second worker on the same window.
@@ -17727,6 +17748,7 @@ void EditorApplication::writeEditorConfig()
 	// Persist the last editor camera view so it is restored next launch. Only when the
 	// camera was actually used this session (otherwise keep any previously-saved view).
 	if (m_editorCamera.initialised())
+	ProjectHubPanel::releaseTextures(renderer());   // the recent-project cards' pictures
 	{
 		globalstate.setCustomConfigEntry("EditorCamPosX",  m_editorCamera.position().x);
 		globalstate.setCustomConfigEntry("EditorCamPosY",  m_editorCamera.position().y);

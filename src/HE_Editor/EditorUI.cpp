@@ -1293,6 +1293,9 @@ void EditorUI::endProjectSession(AppContext& ctx)
 	// Every tab that belongs to a document goes — asset tabs AND the virtual
 	// ones (Level Script, Game Instance, Settings), which are just as much the
 	// old project's. The Viewport is the session's own and stays; it is also the
+	// The Hub's picture of this project, before anything below changes the view.
+	if (ctx.captureProjectThumbnail) ctx.captureProjectThumbnail();
+
 	// tab EditorApplication::restoreOpenTabs only re-creates when it has a saved
 	// list to restore, so clearing outright would leave a project with no
 	// remembered tabs showing no tabs at all.
@@ -1607,7 +1610,8 @@ static void drawNewProjectPopup(AppContext& ctx)
         "Native GameLogic library, built with your own toolchain.",
     };
 
-    ImGui::SetNextWindowSize(ImVec2(480, 0), ImGuiCond_Always);
+    // Wide enough for the Hub's six template tiles in a row.
+    ImGui::SetNextWindowSize(ImVec2(720, 0), ImGuiCond_Always);
     EditorWidgets::pinDialogToEditorWindow();
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(16.0f, 16.0f));
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,   ImVec2(8.0f, 8.0f));
@@ -1698,11 +1702,8 @@ static void drawNewProjectPopup(AppContext& ctx)
 
         ImGui::Spacing();
         ImGui::Text("Template");
-        ImGui::SetNextItemWidth(-1);
-        // All of them, not the first five — see the Project Hub's twin.
-        ImGui::ListBox("##npPresets", &ctx.hubSelectedPreset,
-            ProjectHubPanel::kPresetNames, ProjectHubPanel::kPresetCount,
-            ProjectHubPanel::kPresetCount);
+        // The Hub's tiles, so a template looks the same in both places.
+        ProjectHubPanel::drawTemplateGrid(ctx.hubSelectedPreset, ImGui::GetContentRegionAvail().x);
         ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
         ImGui::TextWrapped("%s", ProjectHubPanel::kPresetDescs[ctx.hubSelectedPreset]);
         ImGui::PopStyleColor();

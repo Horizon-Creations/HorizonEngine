@@ -1,16 +1,39 @@
 #pragma once
 #include "ProjectManager.h"   // ProjectPreset — the enum this file's names index
 
+#include <functional>
+
 struct AppContext;
+class IRenderer;
 
 // ── Project Hub ──────────────────────────────────────────────────────────────
 // The full-window start screen shown while no project is open: the header bar,
-// the "New Project" form (template preset + script language + target folder),
-// the recent-project list and the async open-project / choose-folder dialogs.
+// "Projects" (recent-project cards with the picture each project was closed on,
+// plus Browse / Clone) and "New Project" (template tiles + script language +
+// target folder), and the async open-project / choose-folder dialogs.
 // Split out of EditorUI.cpp; all of its state is file-static in the .cpp.
 namespace ProjectHubPanel
 {
 	void render(AppContext& ctx);
+
+	// The template picker: one tile per template with a drawn picture, games
+	// and applications in two groups, `width` wide. Shared with the in-editor
+	// File ▸ New Project popup (EditorUI.cpp). Returns true when a tile was
+	// clicked this frame.
+	bool drawTemplateGrid(int& selectedPreset, float width);
+
+	// The recent-project cards' textures (ProjectThumbnail.h) go back to the
+	// renderer here, from OnShutdown while it still exists.
+	void releaseTextures(IRenderer* renderer);
+
+	// ── Test hook ────────────────────────────────────────────────────────────
+	// Where the card pictures' textures come from. Unset (the editor) it is
+	// ctx.renderer->CreateImGuiTexture / DestroyImGuiTexture; the headless shot
+	// installs the software rasterizer's registry instead (same seam as
+	// TextureViewerPanel::setTextureHooks).
+	using TextureUpload  = std::function<void*(const void* rgba8, int width, int height)>;
+	using TextureRelease = std::function<void(void*)>;
+	void setTextureHooks(TextureUpload upload, TextureRelease release);
 
 	// ── Project templates ────────────────────────────────────────────────────
 	// Offered by BOTH create forms: this panel's own and the in-editor
