@@ -759,3 +759,20 @@ TEST_CASE("Team sync: restoring a revision writes it back and uploads it as a ne
     CHECK(hist.front().rev == 3);
     CHECK(hist.front().subject.find("Restore r1") != std::string::npos);
 }
+
+TEST_CASE("Team sync: a restore saves what is not on the server yet first, so it stays in the history")
+{
+    FakeTeamServer server;
+    FakeScServer   sc(server);
+    Member anna("Anna"), bob("Bob");
+    startInSync(server, sc, anna, bob);   // r1: door "closed"
+    bob.put("Content/door.txt", "bob's draft\n");   // not synced
+    bob.sync.restoreRevision(1);
+    // r2 is Bob's draft (uploaded first), r3 the restore on top: nothing was lost.
+    REQUIRE(pumpSync(&server, { &anna, &bob }, [&] { return bob.settled(3) && anna.settled(3); }));
+    CHECK(bob.file("Content/door.txt") == "closed\n");
+    const auto hist = bob.sync.history();
+    REQUIRE(hist.size() >= 2);
+    CHECK(hist[0].subject.find("Restore r1") != std::string::npos);
+    CHECK(hist[1].rev == 2);
+}

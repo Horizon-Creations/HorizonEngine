@@ -8,6 +8,7 @@
 #include <Net/TeamClient.h>
 
 #include <cctype>
+#include <chrono>
 #include <fstream>
 
 namespace {
@@ -61,6 +62,10 @@ TeamSyncController::~TeamSyncController()
 void TeamSyncController::close()
 {
 	m_conflictsPosted.clear();
+	m_switchPending = false;
+	m_switchTo.clear();
+	m_pendingSwitch.clear();
+	m_pendingMerge.clear();
 	m_sync.stop();
 	m_key.clear();
 	m_project  = {};
@@ -99,14 +104,25 @@ std::string TeamSyncController::currentBranch(const std::filesystem::path& root,
 
 bool TeamSyncController::canSwitchBranch() const
 {
-	if (!m_sync.running() || m_collab.inSession() || m_blocker != Blocker::None) return false;
+	if (!m_sync.running() || m_collab.inSession() || m_blocker != Blocker::None || m_switchPending) return false;
 	const HE::Sc::TeamSyncService::Status s = m_sync.status();
-	return s.waiting == 0 && s.firstSyncDiffers.empty() && s.phase != HE::Sc::TeamSyncService::Phase::Working;
+	return s.firstSyncDiffers.empty() && !s.projectMissing;
 }
 
 bool TeamSyncController::switchBranch(const std::string& name)
 {
 	if (!canSwitchBranch() || caseInsensitiveEqual(name, m_branch)) return false;
+	// First what is here goes up, to the branch it was made on; the switch waits for that.
+	m_switchPending   = true;
+	m_switchTarget    = name;
+	m_switchAskedUnix = static_cast<std::int64_t>(std::chrono::duration_cast<std::chrono::seconds>(
+		std::chrono::system_clock::now().time_since_epoch()).count());
+	syncNow();
+	return true;
+}
+
+void TeamSyncController::doSwitch(const std::string& name)
+{
 	const std::filesystem::path f = branchFile(m_project.root, m_project.team, m_project.project);
 	std::error_code ec;
 	std::filesystem::create_directories(f.parent_path(), ec);
@@ -115,11 +131,14 @@ bool TeamSyncController::switchBranch(const std::string& name)
 	{
 		std::ofstream out(f, std::ios::binary | std::ios::trunc);
 		out << name << '\n';
-		if (!out) return false;
+		if (!out)
+		{
+			if (m_notes) m_notes->post(HE::Ed::NoteLevel::Important, "Could not switch branches: " + f.generic_string() + " cannot be written.");
+			return;
+		}
 	}
 	m_mirrorNext = true;
 	m_key.clear();   // the next update() restarts on the other server project
-	return true;
 }
 
 void TeamSyncController::createBranch(const std::string& name)
@@ -288,6 +307,19 @@ std::vector<std::string> TeamSyncController::update(std::uint64_t nowMs, const P
 		m_switchTo.clear();
 		m_pendingSwitch.clear();
 		switchBranch(to);
+	}
+	if (m_switchPending)
+	{
+		// Switched only once a sync asked for after the request has finished with nothing left
+		// to upload and no save pending: nothing of this branch is lost by the mirror.
+		const HE::Sc::TeamSyncService::Status st = m_sync.status();
+		if (m_collab.inSession()) m_switchPending = false;
+		else if (st.connected && st.phase == HE::Sc::TeamSyncService::Phase::Idle && st.activity.empty() && st.waiting == 0 &&
+		         m_saveAtMs == 0 && static_cast<std::int64_t>(st.lastSyncUnix) >= m_switchAskedUnix)
+		{
+			m_switchPending = false;
+			doSwitch(m_switchTarget);
+		}
 	}
 	if (!m_pendingMerge.empty() && m_branch.empty())
 	{

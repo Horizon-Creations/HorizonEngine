@@ -37,5 +37,16 @@ Follows `docs/team-server-source-control-design-2026-10-13.md` (its handoffs sti
 - **Not verified:** the real editor (clicks, the notification's Resolve opening the window); a merge
   of a branch twice after more work (it re-applies everything since the fork; harmless where main
   already has it, but a branch change main later reverted comes back); branch deletion (none yet).
+- **Safety fixes after review (this commit):** a branch switch first uploads what is here (to the
+  branch it was made on) and waits for a sync asked after the request to finish with nothing waiting
+  and no save pending, then mirrors; the mirror flag is cleared only once its writes are answered (a
+  failed pass mirrors again), files kept by unsaved tabs are named in a notice; a restore uploads local
+  changes first (they stay in the history before the restore); the conflict window re-reads the
+  project's file before writing and compares again if a newer save arrived; an empty upload counts as
+  a finished sync (the switch waits for one). Real-server branch test 5x in a row green.
+- **Known limits:** a fork copies every blob through memory on the server's one worker thread, and any
+  member may branch (no cap); on an old server the branch list stays empty and creating says the server
+  needs an update (not tried against the old binary).
 - **Next:** 1. Deploy (CollabSession `deploy/deploy.sh`). 2. Real-editor pass. 3. Delete/rename a
-  branch; move the fork marker forward after a merge.
+  branch; move the fork marker forward after a merge; an `sc_test.py` case where branch and project
+  changed the same binary file.

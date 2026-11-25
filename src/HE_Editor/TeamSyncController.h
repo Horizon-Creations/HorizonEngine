@@ -114,10 +114,12 @@ public:
 	static std::string serverProjectFor(const std::string& project, const std::string& branch)
 	{ return branch.empty() ? project : project + "--" + branch; }
 	const std::string& branch() const { return m_branch; }
-	// Only with nothing waiting to go up and no live session: the folder then becomes exactly
-	// the branch's version (files it does not have are removed). False when it may not now.
+	// Not during a live session or an open first-sync question. A switch first uploads what
+	// is here (to the branch it was made on) and waits for that to settle; only then the folder
+	// becomes exactly the other branch's version (files it does not have are removed).
 	bool canSwitchBranch() const;
 	bool switchBranch(const std::string& name);
+	bool switching() const { return m_switchPending; }
 	// Creates the branch from the head of the project shown now, then switches to it.
 	void createBranch(const std::string& name);
 	// On a branch: back to the project, then the server merges the branch into it.
@@ -154,5 +156,9 @@ private:
 	bool                     m_mirrorNext = false;   // the next restart mirrors the team's version (a switch)
 	std::string              m_pendingSwitch;     // createBranch: switch once the server made it
 	std::string              m_switchTo;          // made: switch when the service is idle
+	bool                     m_switchPending = false;   // switchBranch asked: upload first, then switch
+	std::string              m_switchTarget;
+	std::int64_t             m_switchAskedUnix = 0;
+	void                     doSwitch(const std::string& name);
 	std::string              m_pendingMerge;      // mergeIntoMain: merge once back on the project
 };

@@ -552,7 +552,9 @@ void TeamSyncService::Impl::runBranch(const BranchCmd& cmd)
 		setStatus([&](Status& s) { s.phase = Phase::Working; s.activity = "Creating branch " + cmd.name + "…"; });
 		if (!call([&](ScClient::ReplyFn fn) { return client->branchCreate(cmd.name, std::move(fn)); }, r))
 		{
-			event(BranchEvent::Kind::Failed, 0, ScClient::describeResult(r.result, r.text));
+			event(BranchEvent::Kind::Failed, 0, r.result == ScClient::Result::BadRequest && r.text.find("unknown op") != std::string::npos
+			                                        ? std::string("the team server does not know branches yet (it needs an update)")
+			                                        : ScClient::describeResult(r.result, r.text));
 			return;
 		}
 		std::uint64_t forkRev = 0;
@@ -1202,8 +1204,7 @@ bool TeamSyncService::Impl::reconcile(bool adopt)
 	{
 		std::lock_guard<std::mutex> lock(mu);
 		hold = holdIncoming;
-		mirrorNow = mirror;
-		mirror = false;   // once, at the switch
+		mirrorNow = mirror;   // cleared once this pass's writes are answered (below), not before
 	}
 
 	std::set<std::string> paths;
@@ -1284,6 +1285,16 @@ bool TeamSyncService::Impl::reconcile(bool adopt)
 		std::map<std::string, std::string> wantSha;
 		for (const Want& w : wants) wantSha[w.path] = w.sha;
 		std::size_t skipped = 0;
+		if (mirrorNow)
+		{
+			std::size_t kept = 0;
+			for (const auto& [p, ok] : got) kept += ok ? 0 : 1;
+			if (kept)
+				notice(std::to_string(kept) + (kept == 1 ? " file has" : " files have") +
+				       " unsaved edits in the editor and kept them: save or close them, they count as changes on this branch.", true);
+			std::lock_guard<std::mutex> lock(mu);
+			mirror = false;   // the switch's one exact pass is done
+		}
 		for (const auto& [p, ok] : got)
 		{
 			if (!ok) { ++skipped; continue; }   // saved meanwhile: merged at the next upload
@@ -1296,6 +1307,11 @@ bool TeamSyncService::Impl::reconcile(bool adopt)
 		           static_cast<unsigned long long>(headRev), got.size() - skipped, skipped);
 	}
 
+	if (mirrorNow && wants.empty())
+	{
+		std::lock_guard<std::mutex> lock(mu);
+		mirror = false;
+	}
 	rev = headRev;
 	if (firstSync && differs.empty())
 	{
@@ -1351,7 +1367,8 @@ bool TeamSyncService::Impl::upload(const std::string& msg)
 	}
 	if (entries.empty())
 	{
-		setStatus([&](Status& s) { s.waiting = 0; });
+		// Nothing to send is a finished sync too (a branch switch waits for one).
+		setStatus([&](Status& s) { s.waiting = 0; s.lastSyncUnix = static_cast<std::uint64_t>(unixNow()); });
 		return true;
 	}
 
@@ -1523,6 +1540,13 @@ void TeamSyncService::Impl::fetchLog()
 // what the team has: base stays the head, local becomes `rev`'s content.
 void TeamSyncService::Impl::restore(std::uint64_t target)
 {
+	// What is here and not on the server yet goes up first: the restore must not overwrite
+	// changes that exist in no revision (they stay in the history, before the restore).
+	if (!upload(std::string()))
+	{
+		notice("Not restored: your changes could not be saved to the team server first.", true);
+		return;
+	}
 	if (!reconcile(false)) return;
 	setStatus([&](Status& s) { s.phase = Phase::Working; s.activity = "Reading r" + std::to_string(target) + "…"; });
 	ScClient::Reply r;

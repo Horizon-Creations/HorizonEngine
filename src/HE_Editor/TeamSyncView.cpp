@@ -886,6 +886,22 @@ void TeamSyncView::drawConflictWindow(TeamSyncController& sync)
 
 	if (resolveWith || keepTheirs)
 	{
+		// A newer save of the file may have arrived while the window was open: then compare again
+		// instead of writing over it (the server would take ours without a conflict).
+		std::string now;
+		readAll(theirsFile, now);
+		if (now != c.theirs)
+		{
+			c.theirs = now;
+			c.wholeFile = wholeFileByName(c.lost.path) || HE::Sc::looksBinary(c.mine) || HE::Sc::looksBinary(c.theirs);
+			if (!c.wholeFile)
+			{
+				c.diff = HE::Sc::diffText(c.mine, c.theirs);
+				c.picks.assign(c.diff.changes(), HE::Sc::Pick::Theirs);
+			}
+			c.error = "The project's file changed meanwhile (a newer save arrived): compare again.";
+			return;
+		}
 		const bool same = resolveWith && result == c.theirs;   // nothing to write: the project has it already
 		if (sync.resolve(c.lost, resolveWith && !same ? &result : nullptr)) c = ConflictView{};
 		else c.error = "The project's file could not be written.";

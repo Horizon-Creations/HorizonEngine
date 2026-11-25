@@ -663,6 +663,14 @@ TEST_CASE("Team sync UI: feature branches through a real collab_server (HE_TEST_
 	REQUIRE(run([&] { return idle() && anna.sync.service().status().waiting == 0 && anna.sync.service().status().rev >= 2; }));
 	CHECK(anna.sync.service().history().front().subject.find("Save by") == 0);
 
+	// An edit not synced yet when switching: it goes up to this branch first, nothing is lost.
+	anna.put("Content/notes.txt", "draft\n");
+	REQUIRE(anna.sync.switchBranch(""));
+	CHECK(anna.sync.switching());
+	REQUIRE(run([&] { return anna.sync.branch().empty() && idle() && !fs::exists(anna.root / "Content" / "notes.txt"); }));
+	REQUIRE(anna.sync.switchBranch("lights"));
+	REQUIRE(run([&] { return anna.sync.branch() == "lights" && idle() && anna.file("Content/notes.txt") == "draft\n"; }));
+
 	// Back to the project: the folder is the project's version again (no lamp), and back to the branch.
 	REQUIRE(anna.sync.switchBranch(""));
 	REQUIRE(run([&] { return anna.sync.branch().empty() && idle() && !fs::exists(anna.root / "Content" / "lamp.txt"); }));
