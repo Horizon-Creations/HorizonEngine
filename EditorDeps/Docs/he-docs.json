@@ -16479,11 +16479,151 @@
         ]
        ],
        "k": "ul"
+      },
+      {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
+         "t": "Reading another object's variables"
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "Give a variable the type of a class ("
+        },
+        {
+         "s": "b",
+         "t": "Type » Objects"
+        },
+        {
+         "s": "",
+         "t": ") and store a reference in it, from "
+        },
+        {
+         "s": "c",
+         "t": "Create Object"
+        },
+        {
+         "s": "",
+         "t": ", a "
+        },
+        {
+         "s": "c",
+         "t": "Cast"
+        },
+        {
+         "s": "",
+         "t": " or an event argument. Drag off its Get node: the menu lists that class's "
+        },
+        {
+         "s": "i",
+         "t": "public"
+        },
+        {
+         "s": "",
+         "t": " variables as "
+        },
+        {
+         "s": "b",
+         "t": "Get"
+        },
+        {
+         "s": "",
+         "t": "/"
+        },
+        {
+         "s": "b",
+         "t": "Set"
+        },
+        {
+         "s": "",
+         "t": " and its public functions as "
+        },
+        {
+         "s": "b",
+         "t": "Call"
+        },
+        {
+         "s": "",
+         "t": ", already wired to the reference. Private members are not offered."
+        }
+       ]
+      },
+      {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
+         "t": "Widget elements are objects too"
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "In a widget graph every element (a label, a button, a slider) can be taken as a reference: right-click » "
+        },
+        {
+         "s": "b",
+         "t": "Elements » Get Label1"
+        },
+        {
+         "s": "",
+         "t": ", or drop the element from the hierarchy and pick "
+        },
+        {
+         "s": "b",
+         "t": "Reference"
+        },
+        {
+         "s": "",
+         "t": ". Drag off that reference and the menu lists the element type's properties — "
+        },
+        {
+         "s": "b",
+         "t": "Get Text"
+        },
+        {
+         "s": "",
+         "t": ", "
+        },
+        {
+         "s": "b",
+         "t": "Set Text"
+        },
+        {
+         "s": "",
+         "t": ", "
+        },
+        {
+         "s": "b",
+         "t": "Get Visible"
+        },
+        {
+         "s": "",
+         "t": " and so on — the same way a class lists its variables. Get is pure; Set runs when the exec wire reaches it. A variable can hold such a reference: its type is under "
+        },
+        {
+         "s": "b",
+         "t": "Type » Controls"
+        },
+        {
+         "s": "",
+         "t": " (Text, Button, …), and dragging off it lists the same properties."
+        }
+       ]
       }
      ],
      "eyebrow": "Composition",
      "id": "communication",
-     "text": "Because there is a single runtime, a graph can hold a reference to another running class and delegate to it, event-dispatcher style: Bind Event — subscribe to another class's event through a reference; when it fires, your matching event runs. Emit Event — broadcast an event to everyone bound to this class. Call Function (Ref) — call a public function on a referenced instance; Get/Set (Ref) reads or writes its public variables. Get Game Instance / Get Self — the references you feed into the nodes above; Is Valid guards references that may have been destroyed.",
+     "text": "Because there is a single runtime, a graph can hold a reference to another running class and delegate to it, event-dispatcher style: Bind Event — subscribe to another class's event through a reference; when it fires, your matching event runs. Emit Event — broadcast an event to everyone bound to this class. Call Function (Ref) — call a public function on a referenced instance; Get/Set (Ref) reads or writes its public variables. Get Game Instance / Get Self — the references you feed into the nodes above; Is Valid guards references that may have been destroyed. Reading another object's variables Give a variable the type of a class (Type » Objects) and store a reference in it, from Create Object, a Cast or an event argument. Drag off its Get node: the menu lists that class's public variables as Get/Set and its public functions as Call, already wired to the reference. Private members are not offered. Widget elements are objects too In a widget graph every element (a label, a button, a slider) can be taken as a reference: right-click » Elements » Get Label1, or drop the element from the hierarchy and pick Reference. Drag off that reference and the menu lists the element type's properties — Get Text, Set Text, Get Visible and so on — the same way a class lists its variables. Get is pure; Set runs when the exec wire reaches it. A variable can hold such a reference: its type is under Type » Controls (Text, Button, …), and dragging off it lists the same properties.",
      "title": "Talking Between Graphs"
     },
     {
