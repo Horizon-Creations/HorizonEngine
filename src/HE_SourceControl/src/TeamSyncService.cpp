@@ -277,6 +277,7 @@ struct TeamSyncService::Impl
 	int           resolveFirst = -1;      // -1 none, 0 take the team's, 1 keep mine
 	bool          wantCreate = false;
 	std::deque<Lost> fetches;
+	std::uint64_t restoreRev = 0;         // restoreRevision, 0: none
 
 	// ── Ticket exchange ──
 	bool        needTicket = false;    // worker: please ask
@@ -315,7 +316,8 @@ struct TeamSyncService::Impl
 	static constexpr std::uint64_t     kRetryMaxMs = 60'000;
 	std::uint64_t                      retryAtMs = 0, backoffMs = 0;
 	bool                               retrySync = false, retryReconcile = false;
-	std::set<std::string>              lostSeen;   // "rev path", toasted once
+	std::set<std::string>              lostSeen;   // "rev path", toasted once (open or resolved)
+	std::set<std::string>              lostResolved;   // "rev path", under mu
 
 	template <class F> void setStatus(F&& f)
 	{
@@ -342,6 +344,10 @@ struct TeamSyncService::Impl
 	bool upload(const std::string& msg);
 	void fetchLog();
 	void createProject();
+	void restore(std::uint64_t rev);
+	void loadConflicts();
+	void appendConflictLine(const std::string& line);
+	fs::path conflictsFile() const { fs::path p = settings.stateFile; p.replace_extension(".conflicts"); return p; }
 	void resolveFirstSync(bool keepMine);
 	void fetchLost(const Lost& l);
 	bool getBlobs(const std::set<std::string>& shas, std::map<std::string, std::vector<std::uint8_t>>& out);
@@ -466,6 +472,79 @@ void TeamSyncService::createProject()
 		m_impl->wantCreate = true;
 	}
 	m_impl->cv.notify_all();
+}
+
+fs::path TeamSyncService::lostCopyPath(const Lost& l) const
+{
+	return containedPath(m_settings.projectRoot / "Saved" / "TeamSync" / "Lost" / ("r" + std::to_string(l.rev)), l.path);
+}
+
+void TeamSyncService::resolveLost(std::uint64_t rev, const std::string& path)
+{
+	if (!m_impl) return;
+	const std::string key = std::to_string(rev) + " " + path;
+	{
+		std::lock_guard<std::mutex> lock(m_impl->mu);
+		if (!m_impl->lostResolved.insert(key).second) return;
+		m_impl->lost.erase(std::remove_if(m_impl->lost.begin(), m_impl->lost.end(),
+		                                  [&](const Lost& l) { return l.rev == rev && l.path == path; }),
+		                   m_impl->lost.end());
+	}
+	m_impl->appendConflictLine("R\t" + std::to_string(rev) + "\t" + path);
+	HE_SC_INFO("Team sync: conflict on %s (r%llu) resolved", path.c_str(), static_cast<unsigned long long>(rev));
+}
+
+void TeamSyncService::restoreRevision(std::uint64_t rev)
+{
+	if (!m_impl || rev == 0) return;
+	{
+		std::lock_guard<std::mutex> lock(m_impl->mu);
+		m_impl->restoreRev = rev;
+	}
+	m_impl->cv.notify_all();
+}
+
+void TeamSyncService::Impl::appendConflictLine(const std::string& line)
+{
+	std::error_code ec;
+	fs::create_directories(conflictsFile().parent_path(), ec);
+	std::ofstream out(conflictsFile(), std::ios::binary | std::ios::app);
+	out << line << '\n';
+}
+
+// The conflicts this editor was told about, open and resolved, from before this run.
+void TeamSyncService::Impl::loadConflicts()
+{
+	std::ifstream in(conflictsFile(), std::ios::binary);
+	if (!in) return;
+	std::vector<Lost> open;
+	std::set<std::string> resolved;
+	std::string line;
+	while (std::getline(in, line))
+	{
+		const std::vector<std::string> f = splitTabs(line);
+		if (f.size() == 6 && f[0] == "O")
+		{
+			Lost l;
+			l.rev     = std::strtoull(f[1].c_str(), nullptr, 10);
+			l.ourRev  = std::strtoull(f[2].c_str(), nullptr, 10);
+			l.winner  = f[3];
+			l.outcome = f[4];
+			l.path    = f[5];
+			open.push_back(std::move(l));
+		}
+		else if (f.size() == 3 && f[0] == "R")
+			resolved.insert(f[1] + " " + f[2]);
+	}
+	std::lock_guard<std::mutex> lock(mu);
+	lostResolved = resolved;
+	for (const std::string& k : resolved) lostSeen.insert(k);
+	for (Lost& l : open)
+	{
+		const std::string key = std::to_string(l.rev) + " " + l.path;
+		if (resolved.count(key) || !lostSeen.insert(key).second) continue;
+		lost.insert(lost.begin(), std::move(l));
+	}
 }
 
 void TeamSyncService::fetchLost(const Lost& lost)
@@ -609,12 +688,14 @@ bool TeamSyncService::takeOpened(fs::path& out)
 void TeamSyncService::Impl::run()
 {
 	firstSync = !loadState();
+	loadConflicts();
 	setStatus([&](Status& s) { s.rev = rev; });
 
 	while (!stopping)
 	{
 		bool doCreate = false, doReconcile = false, doSync = false, adopt = false;
 		int  resolve = -1;
+		std::uint64_t doRestore = 0;
 		std::string msg;
 		std::deque<Lost> todo;
 		{
@@ -625,7 +706,7 @@ void TeamSyncService::Impl::run()
 			// (it is uploaded after it), it does not wake the loop.
 			cv.wait_for(lock, std::chrono::milliseconds(500), [&] {
 				const bool work = (wantSync && status.firstSyncDiffers.empty()) || wantReconcile ||
-				                  wantCreate || resolveFirst >= 0 || !fetches.empty();
+				                  wantCreate || resolveFirst >= 0 || !fetches.empty() || restoreRev != 0;
 				return stopping || ticketReady || (!paused && work && !needTicket);
 			});
 			if (stopping) break;
@@ -653,8 +734,9 @@ void TeamSyncService::Impl::run()
 			adopt       = adoptTeam;
 			todo        = fetches;
 			msg         = message;
+			doRestore   = firstSync ? 0 : restoreRev;   // not before the first sync is settled
 		}
-		if (!doCreate && !doReconcile && !doSync && resolve < 0 && todo.empty())
+		if (!doCreate && !doReconcile && !doSync && resolve < 0 && todo.empty() && doRestore == 0)
 		{
 			// A ticket that came in with nothing to do (the work was dropped).
 			std::lock_guard<std::mutex> lock(mu);
@@ -677,6 +759,7 @@ void TeamSyncService::Impl::run()
 			wantSync = wantReconcile = false;
 			resolveFirst = -1;
 			fetches.clear();
+			restoreRev = 0;
 			status.phase = Phase::Idle;
 			continue;
 		}
@@ -698,6 +781,11 @@ void TeamSyncService::Impl::run()
 		{
 			{ std::lock_guard<std::mutex> lock(mu); wantSync = false; message.clear(); }
 			upload(msg);
+		}
+		if (doRestore != 0)
+		{
+			{ std::lock_guard<std::mutex> lock(mu); restoreRev = 0; }
+			restore(doRestore);
 		}
 		for (const Lost& l : todo) fetchLost(l);
 		if (!todo.empty())
@@ -1304,14 +1392,96 @@ void TeamSyncService::Impl::fetchLog()
 				notices.emplace_back(l.path + ": " + what + " (r" + std::to_string(l.rev) +
 				                         "). Your version is kept on the team server.", false);
 			}
+			// Kept beside the state file: the log only reaches back 100 revisions.
+			std::ofstream(conflictsFile(), std::ios::binary | std::ios::app)
+			    << "O\t" << l.rev << '\t' << l.ourRev << '\t' << l.winner << '\t' << l.outcome << '\t' << l.path << '\n';
 			lost.insert(lost.begin(), std::move(l));
 		}
 		history.push_front(v);
 	}
 	while (history.size() > TeamSyncService::kHistory) history.pop_back();
-	if (lost.size() > TeamSyncService::kHistory) lost.resize(TeamSyncService::kHistory);
 	loggedTo   = rev;
 	loggedOnce = true;
+}
+
+// The project as it was at `rev`, uploaded as a new revision. Brought to the head
+// first, so every file that differs from `rev` is a change made here, on top of
+// what the team has: base stays the head, local becomes `rev`'s content.
+void TeamSyncService::Impl::restore(std::uint64_t target)
+{
+	if (!reconcile(false)) return;
+	setStatus([&](Status& s) { s.phase = Phase::Working; s.activity = "Reading r" + std::to_string(target) + "…"; });
+	ScClient::Reply r;
+	if (!call([&](ScClient::ReplyFn fn) { return client->manifest(target, std::move(fn)); }, r))
+	{
+		failed("Reading r" + std::to_string(target), r);
+		return;
+	}
+	std::map<std::string, std::string> then;   // path → sha at `target`
+	for (const std::string& line : splitLines(r.stream))
+	{
+		const std::vector<std::string> f = splitTabs(line);
+		if (f.size() >= 2 && !f[0].empty()) then[f[0]] = f[1];
+	}
+	const std::map<std::string, std::string> local = scan();
+
+	struct Want { std::string path, sha, expect; bool remove = false; };
+	std::vector<Want> wants;
+	std::set<std::string> shas;
+	for (const auto& [p, sha] : then)
+	{
+		const auto li = local.find(p);
+		const std::string l = li == local.end() ? std::string() : li->second;
+		if (l == sha) continue;
+		wants.push_back(Want{ p, sha, l, false });
+		shas.insert(sha);
+	}
+	// Added since: only what the team has (base); a file nobody uploaded yet is left alone.
+	for (const auto& [p, b] : base)
+		if (!then.count(p) && local.count(p)) wants.push_back(Want{ p, std::string(), local.at(p), true });
+	if (wants.empty())
+	{
+		notice("The project already is what it was at r" + std::to_string(target) + ".", false);
+		return;
+	}
+	setStatus([&](Status& s) { s.activity = "Downloading " + std::to_string(shas.size()) + " file" + (shas.size() == 1 ? "" : "s") + " of r" + std::to_string(target) + "…"; });
+	std::map<std::string, std::vector<std::uint8_t>> blobs;
+	if (!getBlobs(shas, blobs)) return;
+	std::vector<Incoming> items;
+	for (const Want& w : wants)
+	{
+		Incoming in;
+		in.path   = w.path;
+		in.remove = w.remove;
+		in.sha    = w.sha;
+		in.expect = w.expect;
+		if (!w.remove) in.bytes = blobs[w.sha];
+		items.push_back(std::move(in));
+	}
+	std::vector<std::pair<std::string, bool>> got;
+	{
+		std::unique_lock<std::mutex> lock(mu);
+		incoming        = std::move(items);
+		incomingReady   = true;
+		answersReady    = false;
+		status.activity = "Writing r" + std::to_string(target) + "…";
+		cv.wait(lock, [&] { return stopping || answersReady; });
+		if (stopping) return;
+		got = std::move(answers);
+		answers.clear();
+		answersReady = false;
+	}
+	std::size_t skipped = 0;
+	for (const auto& [p, ok] : got)
+	{
+		if (!ok) ++skipped;
+		cache.erase(p);   // rehashed by the upload's scan
+	}
+	if (skipped)
+		notice(std::to_string(skipped) + " file" + (skipped == 1 ? " was" : "s were") +
+		       " not restored: unsaved changes in the editor keep them as they are.", true);
+	HE_SC_INFO("Team sync: restoring r%llu: %zu file(s) written", static_cast<unsigned long long>(target), got.size() - skipped);
+	upload("Restore r" + std::to_string(target));
 }
 
 void TeamSyncService::Impl::createProject()

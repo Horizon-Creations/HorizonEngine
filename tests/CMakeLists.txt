@@ -508,6 +508,8 @@ add_executable(he_tests
     # and the Source Control window's team-sync view (TeamSyncView), headless;
     # HE_UI_DUMP_DIR writes the screenshots.
     test_team_sync_ui.cpp
+    # The conflict window's line diff and merge (SourceControl/TextMerge.h).
+    test_text_merge.cpp
     # The gameplay transport over real localhost UDP sockets, with an injected
     # clock and the transport's own drop hook for loss under the reliability.
     test_net_udp.cpp

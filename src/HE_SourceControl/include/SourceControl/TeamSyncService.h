@@ -167,6 +167,17 @@ public:
 	// Fetch our overruled version of `lost` into
 	// Saved/TeamSync/Lost/r<rev>/<path>; the path arrives through takeOpened().
 	void fetchLost(const Lost& lost);
+	// Where fetchLost() puts our version of `lost` (it may not be there yet).
+	std::filesystem::path lostCopyPath(const Lost& lost) const;
+	// The conflict is settled (the person picked a version or merged them): it leaves
+	// lost() and stays out of it, also after a restart (kept beside the state file,
+	// with the open ones, so a conflict does not drop off with the 100-revision log).
+	void resolveLost(std::uint64_t rev, const std::string& path);
+	// Make the project what it was at revision `rev`, as a new revision on top
+	// ("Restore r<rev>"): every file that differs is written back (through pump(),
+	// so keep-local and Play apply), files added since are removed, and the result
+	// is uploaded. Nothing of the history is rewritten.
+	void restoreRevision(std::uint64_t rev);
 
 	// ── Main thread ──
 	// Delivers events, runs the ticket source when asked and writes incoming

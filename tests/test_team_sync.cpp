@@ -704,3 +704,58 @@ TEST_CASE("Team sync: two members merge one scene through a real collab_server (
     REQUIRE(pumpSync(nullptr, { &anna, &bob }, [&] { return anna.sync.takeOpened(opened); }));
     CHECK(xOf(readText(opened), "Cube") == "11");
 }
+
+TEST_CASE("Team sync: a conflict stays listed across a restart until it is resolved, and stays resolved")
+{
+    FakeTeamServer server;
+    FakeScServer   sc(server);
+    Member anna("Anna"), bob("Bob");
+    startInSync(server, sc, anna, bob);
+    anna.put("Content/door.txt", "anna's door\n");
+    bob.put("Content/door.txt", "bob's door\n");
+    anna.sync.requestSync();
+    REQUIRE(pumpSync(&server, { &anna, &bob }, [&] { return anna.settled(2) && bob.settled(2); }));
+    bob.sync.requestSync();
+    REQUIRE(pumpSync(&server, { &anna, &bob }, [&] { return !anna.sync.lost().empty(); }));
+    const TeamSyncService::Lost l = anna.sync.lost()[0];
+    CHECK(anna.sync.lostCopyPath(l) == anna.root / "Saved" / "TeamSync" / "Lost" / "r3" / "Content" / "door.txt");
+
+    // A restart: the conflict is read back from beside the state file, not only from the log.
+    anna.sync.stop();
+    anna.start(server.address(), "correct-horse");
+    REQUIRE(pumpSync(&server, { &anna, &bob }, [&] { return anna.settled(3); }));
+    REQUIRE(anna.sync.lost().size() == 1);
+    CHECK(anna.sync.lost()[0].path == "Content/door.txt");
+    CHECK(anna.sync.lost()[0].ourRev == 2);
+
+    anna.sync.resolveLost(l.rev, l.path);
+    CHECK(anna.sync.lost().empty());
+    anna.sync.stop();
+    anna.start(server.address(), "correct-horse");
+    REQUIRE(pumpSync(&server, { &anna, &bob }, [&] { return anna.settled(3); }));
+    CHECK(anna.sync.lost().empty());   // the log still has r3's trailer; the resolution wins
+}
+
+TEST_CASE("Team sync: restoring a revision writes it back and uploads it as a new revision on top")
+{
+    FakeTeamServer server;
+    FakeScServer   sc(server);
+    Member anna("Anna"), bob("Bob");
+    startInSync(server, sc, anna, bob);   // r1: door "closed", settings "{}"
+    anna.put("Content/door.txt", "open\n");
+    anna.put("Content/new.txt", "added in r2\n");
+    anna.sync.requestSync();
+    REQUIRE(pumpSync(&server, { &anna, &bob }, [&] { return anna.settled(2) && bob.settled(2); }));
+    CHECK(bob.file("Content/new.txt") == "added in r2\n");
+
+    bob.sync.restoreRevision(1);
+    REQUIRE(pumpSync(&server, { &anna, &bob }, [&] { return bob.settled(3) && anna.settled(3); }));
+    CHECK(bob.file("Content/door.txt") == "closed\n");
+    CHECK_FALSE(fs::exists(bob.root / "Content" / "new.txt"));   // added since r1: gone again
+    CHECK(anna.file("Content/door.txt") == "closed\n");          // the team gets it as r3
+    CHECK_FALSE(fs::exists(anna.root / "Content" / "new.txt"));
+    const auto hist = bob.sync.history();
+    REQUIRE_FALSE(hist.empty());
+    CHECK(hist.front().rev == 3);
+    CHECK(hist.front().subject.find("Restore r1") != std::string::npos);
+}
