@@ -2679,6 +2679,7 @@ struct CodeEdit
 	std::string synced;               // the block text the editor last took or wrote
 	bool        focused = false;
 	double      typedAt = -1.0;       // when the text last changed, while not yet written
+	int         undoAt  = 0;          // the editor's undo index then: it moves with every edit
 };
 std::unordered_map<UUID, std::unique_ptr<CodeEdit>> s_codeEdits;
 
@@ -2705,6 +2706,7 @@ void codeBlock(const Page& page, const Block& b, int index, float width, const U
 		slot->editor.SetTabSize(4);
 		slot->editor.SetText(b.text);
 		slot->synced = b.text;
+		slot->undoAt = slot->editor.GetUndoIndex();
 	}
 	CodeEdit& ce = *slot;
 	if (ce.language != b.language)
@@ -2744,7 +2746,13 @@ void codeBlock(const Page& page, const Block& b, int index, float width, const U
 		ImGuiContext& g = *ImGui::GetCurrentContext();
 		g.PlatformImeData.WantTextInput = true;
 		g.PlatformImeData.InputPos      = top;
-		if (ce.editor.GetText() != ce.synced && ce.typedAt < 0.0) ce.typedAt = ImGui::GetTime();
+		// Written once typing has paused, not every so often while it goes on: each write is a save the
+		// team sync hears about.
+		if (ce.editor.GetUndoIndex() != ce.undoAt)
+		{
+			ce.undoAt  = ce.editor.GetUndoIndex();
+			ce.typedAt = ImGui::GetTime();
+		}
 		if (ce.typedAt >= 0.0 && ImGui::GetTime() - ce.typedAt > 0.8) writeCode(pageId, blockId, ce);
 		// Up on the first line and Down on the last leave the block, as in a text block.
 		int line = 0, column = 0;
@@ -3494,7 +3502,13 @@ void exportCalendar(const UUID& dbId, const UUID& viewId, bool open)
 		else if (writeExport(file, eventsToIcs(events, name, taskNowMs()), &err))
 		{
 			HE::Ed::notify(HE::Ed::NoteLevel::Info, std::to_string(events.size()) + " events exported", file.string());
-			if (open && !SDL_OpenURL(("file://" + file.generic_string()).c_str()))
+			std::string url = "file://";
+			for (const unsigned char c : file.generic_string())
+			{
+				if (std::isalnum(c) || c == '/' || c == '-' || c == '_' || c == '.' || c == '~') url += static_cast<char>(c);
+				else { char hex[4]; std::snprintf(hex, sizeof hex, "%%%02X", c); url += hex; }
+			}
+			if (open && !SDL_OpenURL(url.c_str()))
 				err = std::string("the calendar app did not open it: ") + SDL_GetError();
 		}
 		if (!err.empty()) HE::Ed::notify(HE::Ed::NoteLevel::Important, "Calendar not exported: " + err);
@@ -3516,6 +3530,7 @@ void toolbarRight(const Database& db, const View& view)
 	if (board) w += toolWidth(groupLabel.c_str()) + sp;
 	if (dated) w += toolWidth("Settings") + sp + toolWidth("Export") + sp;
 	ImGui::SameLine();
+	if (ImGui::GetContentRegionAvail().x < w) ImGui::NewLine();   // a narrow window: the group gets a line of its own
 	alignRight(w);
 	if (board)
 	{

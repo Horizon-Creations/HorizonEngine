@@ -2949,3 +2949,58 @@ TEST_CASE("planner ui: Mine shows only the tasks assigned to the name this edito
 	settle(ctx);
 	CHECK(PlannerPanel::controlRect("card:Other").x1 > 0);
 }
+
+TEST_CASE("planner ui pages: after Enter ends a list, the paragraph it leaves still takes Enter")
+{
+	Harness harness;
+	Project proj("he_planner_ui_page_list_end");
+	ContextBits bits;
+	AppContext ctx = bits.make(proj.pm);
+	idle(ctx);
+	REQUIRE(click(ctx, "New Page"));
+	idle(ctx);
+	REQUIRE(click(ctx, "add-block"));
+	settle(ctx);
+	typeText(ctx, "- one");
+	pressEnter(ctx);
+	REQUIRE(currentPage(ctx)->blocks.size() == 2);
+	CHECK(currentPage(ctx)->blocks[1].type == BlockType::Bullet);
+	pressEnter(ctx);   // the empty item ends the list: the same block, now a paragraph
+	REQUIRE(currentPage(ctx)->blocks.size() == 2);
+	CHECK(currentPage(ctx)->blocks[1].type == BlockType::Paragraph);
+	typeText(ctx, "after");
+	pressEnter(ctx);
+	REQUIRE(currentPage(ctx)->blocks.size() == 3);
+	CHECK(currentPage(ctx)->blocks[1].text == "after");
+}
+
+TEST_CASE("planner ui: a Tasks board saved under its old name \"By status\" shows as Tasks after a reload")
+{
+	Harness harness;
+	Project proj("he_planner_ui_tasks_old_name");
+	ContextBits bits;
+	AppContext ctx = bits.make(proj.pm);
+	settle(ctx);
+	Workspace* ws = PlannerPanel::workspace(ctx);
+	REQUIRE(ws->find(tasksDatabaseId()) != nullptr);
+	const UUID board = derivedId("view", "By status");
+	// What an older editor wrote: the Tasks views file with the board under its old name.
+	{
+		Database old = *ws->find(tasksDatabaseId());
+		View* v = old.findView(board);
+		REQUIRE(v != nullptr);
+		v->name = "By status";
+		std::string err;
+		REQUIRE(saveDatabase(proj.root(), old, &err));
+		REQUIRE(readText(databasePath(proj.root(), tasksDatabaseId())).find("By status") != std::string::npos);
+	}
+
+	// A new editor session reads it.
+	PlannerPanel::reset();
+	settle(ctx, 4);
+	ws = PlannerPanel::workspace(ctx);
+	const View* v = ws->find(tasksDatabaseId())->findView(board);
+	REQUIRE(v != nullptr);
+	CHECK(v->name == "Tasks");
+	CHECK(PlannerPanel::controlRect("view:Tasks").x1 > 0);   // the tab
+}

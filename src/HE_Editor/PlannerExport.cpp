@@ -147,9 +147,12 @@ const char* const kDocxDocumentRels =
 
 std::string styleXml(const char* id, const char* name, const char* pPr, const char* rPr, bool heading, int level = 0)
 {
+	// pPr children in the schema's order (CT_PPrBase): keepNext ... pBdr, shd, spacing, ind ... outlineLvl.
 	std::string s = std::string("<w:style w:type=\"paragraph\" w:styleId=\"") + id + "\"><w:name w:val=\"" + name + "\"/>"
-	              "<w:basedOn w:val=\"Normal\"/><w:next w:val=\"Normal\"/><w:qFormat/><w:pPr>" + pPr;
-	if (heading) s += "<w:keepNext/><w:outlineLvl w:val=\"" + std::to_string(level) + "\"/>";
+	              "<w:basedOn w:val=\"Normal\"/><w:next w:val=\"Normal\"/><w:qFormat/><w:pPr>";
+	if (heading) s += "<w:keepNext/>";
+	s += pPr;
+	if (heading) s += "<w:outlineLvl w:val=\"" + std::to_string(level) + "\"/>";
 	s += std::string("</w:pPr><w:rPr>") + rPr + "</w:rPr></w:style>";
 	return s;
 }
@@ -166,7 +169,7 @@ std::string docxStyles()
 	s += styleXml("Heading1", "heading 1", "<w:spacing w:before=\"360\" w:after=\"120\"/>", "<w:b/><w:sz w:val=\"36\"/>", true, 0);
 	s += styleXml("Heading2", "heading 2", "<w:spacing w:before=\"240\" w:after=\"80\"/>", "<w:b/><w:sz w:val=\"30\"/>", true, 1);
 	s += styleXml("Heading3", "heading 3", "<w:spacing w:before=\"200\" w:after=\"60\"/>", "<w:b/><w:sz w:val=\"26\"/>", true, 2);
-	s += styleXml("Quote", "Quote", "<w:ind w:left=\"360\"/><w:pBdr><w:left w:val=\"single\" w:sz=\"18\" w:space=\"8\" w:color=\"E8A33D\"/></w:pBdr>",
+	s += styleXml("Quote", "Quote", "<w:pBdr><w:left w:val=\"single\" w:sz=\"18\" w:space=\"8\" w:color=\"E8A33D\"/></w:pBdr><w:ind w:left=\"360\"/>",
 	              "<w:i/><w:color w:val=\"555555\"/>", false);
 	s += styleXml("Callout", "Callout", "<w:shd w:val=\"clear\" w:color=\"auto\" w:fill=\"F4EEDF\"/><w:ind w:left=\"120\" w:right=\"120\"/>", "", false);
 	s += styleXml("Code", "Code", "<w:shd w:val=\"clear\" w:color=\"auto\" w:fill=\"F2F2F2\"/><w:spacing w:after=\"160\"/>",

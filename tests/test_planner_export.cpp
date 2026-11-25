@@ -81,6 +81,9 @@ TEST_CASE("planner export: a page as .docx has the parts Word needs, headings as
 	CHECK(part(files, "_rels/.rels").find("word/document.xml") != std::string::npos);
 	CHECK(part(files, "word/_rels/document.xml.rels").find("styles.xml") != std::string::npos);
 	CHECK(part(files, "word/styles.xml").find("w:styleId=\"Heading1\"") != std::string::npos);
+	// pPr children in the schema's order: Word refuses a file where they are not.
+	CHECK(part(files, "word/styles.xml").find("<w:pPr><w:keepNext/><w:spacing") != std::string::npos);
+	CHECK(part(files, "word/styles.xml").find("</w:pBdr><w:ind") != std::string::npos);
 
 	const std::string doc = part(files, "word/document.xml");
 	CHECK(doc.find("Game &amp; design") != std::string::npos);
