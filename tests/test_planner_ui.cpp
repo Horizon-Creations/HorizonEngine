@@ -1284,6 +1284,21 @@ TEST_CASE("planner ui: a calendar shows rows on their days, a drag moves one, a 
 	CHECK(v->dateProperty == when);
 	shotTo(ctx, "planner_calendar");
 
+	// Export: the dated rows as all-day events in an .ics file (Gamma has no date and is not in it).
+	REQUIRE(click(ctx, "calendar:export"));
+	REQUIRE(click(ctx, "export:ics"));
+	{
+		const std::filesystem::path ics = proj.root() / "Export" / "Planner" / (v->name + ".ics");
+		REQUIRE(std::filesystem::exists(ics));
+		const std::string text = readText(ics);
+		CHECK(text.find("SUMMARY:Alpha\r\n") != std::string::npos);
+		CHECK(text.find("SUMMARY:Beta\r\n") != std::string::npos);
+		CHECK(text.find("Gamma") == std::string::npos);
+		CHECK(text.find("DTSTART;VALUE=DATE:20261020\r\nDTEND;VALUE=DATE:20261023\r\n") != std::string::npos);
+		if (const char* d = std::getenv("HE_UI_DUMP_DIR"); d && *d)
+			std::filesystem::copy_file(ics, std::filesystem::path(d) / "planner_calendar.ics", std::filesystem::copy_options::overwrite_existing);
+	}
+
 	auto inside = [](const PlannerPanel::Rect& inner, const PlannerPanel::Rect& outer) {
 		return inner.x0 >= outer.x0 && inner.x1 <= outer.x1 && inner.y0 >= outer.y0 && inner.y1 <= outer.y1;
 	};

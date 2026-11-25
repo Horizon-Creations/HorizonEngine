@@ -3438,6 +3438,46 @@ int segmented(const char* id, const char* const* names, int n, int on, const cha
 	return hit;
 }
 
+// The dated rows a timeline or calendar shows, as all-day events in an .ics file under Export/Planner.
+// `open`: hand the file to the system as well, which on macOS is Calendar: it asks which calendar to
+// add the events to. Importing the file again updates them (the UID is the row's id).
+void exportCalendar(const UUID& dbId, const UUID& viewId, bool open)
+{
+	post([=] {
+		const Database* db = s_ws.find(dbId);
+		const View* view = db ? db->findView(viewId) : nullptr;
+		if (!view) return;
+		const Property* desc = nullptr;
+		for (const Property& p : db->properties)
+			if (p.type == PropertyType::Text && p.name == "Description") desc = &p;
+		std::vector<CalendarEvent> events;
+		for (const std::size_t i : db->query(*view))
+		{
+			const Row& r = db->rows[i];
+			std::int64_t s = 0, e = 0;
+			if (!db->date(r.id, view->dateProperty, s)) continue;
+			CalendarEvent ev;
+			ev.id = r.id;
+			ev.title = r.title;
+			ev.firstDay = ev.lastDay = dayOf(s);
+			if (!(view->endProperty == UUID{}) && db->date(r.id, view->endProperty, e)) ev.lastDay = std::max(ev.firstDay, dayOf(e));
+			if (desc) ev.description = db->text(r.id, desc->id);
+			events.push_back(std::move(ev));
+		}
+		const std::string name = view->name.empty() ? db->name : view->name;
+		const std::filesystem::path file = exportFileFor(s_ws.project(), name, "ics", "Calendar");
+		std::string err;
+		if (s_ws.project().empty()) err = "no project is open";
+		else if (writeExport(file, eventsToIcs(events, name, taskNowMs()), &err))
+		{
+			HE::Ed::notify(HE::Ed::NoteLevel::Info, std::to_string(events.size()) + " events exported", file.string());
+			if (open && !SDL_OpenURL(("file://" + file.generic_string()).c_str()))
+				err = std::string("the calendar app did not open it: ") + SDL_GetError();
+		}
+		if (!err.empty()) HE::Ed::notify(HE::Ed::NoteLevel::Important, "Calendar not exported: " + err);
+	});
+}
+
 // The right end of a view's toolbar: how its rows are grouped, filtered and shown, and the view's settings.
 // The left end makes things and finds them (New, the search, the view's own navigation).
 void toolbarRight(const Database& db, const View& view)
@@ -3451,7 +3491,7 @@ void toolbarRight(const Database& db, const View& view)
 	const float sp = ImGui::GetStyle().ItemSpacing.x;
 	float w = toolWidth(filterLabel.c_str()) + sp + toolWidth("Properties");
 	if (board) w += toolWidth(groupLabel.c_str()) + sp;
-	if (dated) w += toolWidth("Settings") + sp;
+	if (dated) w += toolWidth("Settings") + sp + toolWidth("Export") + sp;
 	ImGui::SameLine();
 	alignRight(w);
 	if (board)
@@ -3470,6 +3510,20 @@ void toolbarRight(const Database& db, const View& view)
 		ImGui::SameLine();
 		if (toolButton("Planner/Timeline Settings", "Settings", PlannerIcons::Icon::Gear, false)) ImGui::OpenPopup("##viewsettings");
 		note("timeline:settings");
+		ImGui::SameLine();
+		if (toolButton("Planner/Export Calendar", "Export", PlannerIcons::Icon::Export, false)) ImGui::OpenPopup("##calexport");
+		note("calendar:export");
+	}
+	if (beginPopup("##calexport"))
+	{
+		if (ImGui::Selectable("iCalendar file (.ics)")) exportCalendar(dbId, viewId, false);
+		note("export:ics");
+#ifdef __APPLE__
+		if (ImGui::Selectable("Add to Calendar")) exportCalendar(dbId, viewId, true);
+		note("export:calendar-app");
+#endif
+		ImGui::TextDisabled("Every dated row this view shows, as all-day events.");
+		ImGui::EndPopup();
 	}
 
 	if (beginPopup("##groupby"))
