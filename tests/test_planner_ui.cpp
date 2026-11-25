@@ -1009,6 +1009,18 @@ namespace
 		Workspace* ws = PlannerPanel::workspace(ctx);
 		return ws ? ws->findPage(PlannerPanel::selectedPage()) : nullptr;
 	}
+
+	// The language picker is a combo; the tests set the word as the picker does.
+	bool ws_edit_language(AppContext& ctx, const UUID& pageId, const UUID& blockId, const std::string& word)
+	{
+		Workspace* ws = PlannerPanel::workspace(ctx);
+		return ws && ws->editPage(pageId, [&](Page& p) {
+			Block* b = p.findBlock(blockId);
+			if (!b) return false;
+			b->language = word;
+			return true;
+		});
+	}
 }
 
 TEST_CASE("planner ui pages: New Page, a title, blocks written like a document")
@@ -2773,4 +2785,85 @@ TEST_CASE("planner ui layout: the details of a card with a long history stay ins
 	CHECK(w->Pos.x + w->Size.x <= float(W) - 10.0f + 0.5f);
 	CHECK(w->ScrollMax.y > 0.0f);   // the history scrolls inside it
 	shotTo(ctx, "planner_layout_details");
+}
+
+TEST_CASE("planner ui pages: Markdown turns into blocks while typing; Enter splits, Backspace joins; ``` is a code block")
+{
+	Harness harness;
+	Project proj("he_planner_ui_page_fluid");
+	ContextBits bits;
+	AppContext ctx = bits.make(proj.pm);
+	idle(ctx);
+	REQUIRE(click(ctx, "New Page"));
+	idle(ctx);
+	REQUIRE(click(ctx, "add-block"));
+	settle(ctx);
+	auto key = [&](ImGuiKey k) {
+		ImGui::GetIO().AddKeyEvent(k, true);
+		frame(ctx, false);
+		ImGui::GetIO().AddKeyEvent(k, false);
+		settle(ctx);
+	};
+
+	// "## " is a heading the moment the space is typed, and the writing goes on in it.
+	typeText(ctx, "## ");
+	REQUIRE(currentPage(ctx)->blocks.size() == 1);
+	CHECK(currentPage(ctx)->blocks[0].type == BlockType::Heading2);
+	typeText(ctx, "Goals");
+	pressEnter(ctx);
+	REQUIRE(currentPage(ctx)->blocks.size() == 2);
+	CHECK(currentPage(ctx)->blocks[0].text == "Goals");
+
+	// Enter in the middle of a line splits it at the cursor.
+	typeText(ctx, "HelloWorld");
+	for (int i = 0; i < 5; ++i) key(ImGuiKey_LeftArrow);
+	pressEnter(ctx);
+	REQUIRE(currentPage(ctx)->blocks.size() == 3);
+	CHECK(currentPage(ctx)->blocks[1].text == "Hello");
+	CHECK(currentPage(ctx)->blocks[2].text == "World");
+
+	// Backspace at the start of "World" (where the cursor went) joins it to the line above.
+	key(ImGuiKey_Backspace);
+	REQUIRE(currentPage(ctx)->blocks.size() == 2);
+	CHECK(currentPage(ctx)->blocks[1].text == "HelloWorld");
+	// ...and the cursor sits where they met: Enter there splits them again.
+	typeText(ctx, " ");
+	pressEnter(ctx);
+	REQUIRE(currentPage(ctx)->blocks.size() == 3);
+	CHECK(currentPage(ctx)->blocks[1].text == "Hello ");
+	CHECK(currentPage(ctx)->blocks[2].text == "World");
+
+	// "- " in front of "World" makes it a list item; Backspace at its start makes it a paragraph again, text kept.
+	typeText(ctx, "- ");
+	CHECK(currentPage(ctx)->blocks[2].type == BlockType::Bullet);
+	CHECK(currentPage(ctx)->blocks[2].text == "World");
+	key(ImGuiKey_Home);
+	key(ImGuiKey_Backspace);
+	CHECK(currentPage(ctx)->blocks[2].type == BlockType::Paragraph);
+	CHECK(currentPage(ctx)->blocks[2].text == "World");
+	key(ImGuiKey_End);
+	pressEnter(ctx);
+	REQUIRE(currentPage(ctx)->blocks.size() == 4);
+
+	// Three backticks: a code block with a language, where Enter is a new line.
+	typeText(ctx, "```");
+	settle(ctx);
+	REQUIRE(currentPage(ctx)->blocks.size() == 4);
+	CHECK(currentPage(ctx)->blocks[3].type == BlockType::Code);
+	CHECK(PlannerPanel::controlRect("code-lang:3").x1 > 0);
+	typeText(ctx, "int x = 1;");
+	key(ImGuiKey_Enter);
+	typeText(ctx, "return x;");
+	settle(ctx, 60);   // written a moment after typing stops
+	CHECK(currentPage(ctx)->blocks[3].text == "int x = 1;\nreturn x;");
+	REQUIRE(currentPage(ctx)->blocks.size() == 4);   // Enter stayed inside the code
+	REQUIRE(ws_edit_language(ctx, currentPage(ctx)->id, currentPage(ctx)->blocks[3].id, "cpp"));
+	settle(ctx);
+	shotTo(ctx, "planner_page_fluid");
+
+	Page onDisk;
+	REQUIRE(loadPage(proj.root(), currentPage(ctx)->id, onDisk).ok);
+	REQUIRE(onDisk.blocks.size() == 4);
+	CHECK(onDisk.blocks[0].type == BlockType::Heading2);
+	CHECK(onDisk.blocks[3].language == "cpp");
 }

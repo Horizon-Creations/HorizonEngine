@@ -1116,6 +1116,9 @@ add_executable(he_tests
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/vendor/imgui/imgui_widgets.cpp
     # InputText over a std::string — the editor panels compiled in here use it.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/vendor/imgui/misc/cpp/imgui_stdlib.cpp
+    # The Planner's code blocks are the script editor's syntax-colouring editor.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/vendor/ImGuiColorTextEdit/TextEditor.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/vendor/ImGuiColorTextEdit/LanguageDefinitions.cpp
 )
 
 set_source_files_properties(
@@ -1206,6 +1209,7 @@ target_include_directories(he_tests PRIVATE
     ${CMAKE_SOURCE_DIR}/src/HE_Editor
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/vendor/imgui
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/vendor/imguizmo
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/vendor/ImGuiColorTextEdit
 )
 # The HorizonRendering sources above are compiled straight into the test exe
 # instead of linking the DLL. Define HE_RENDERING_BUILD_DLL so HE_RENDERING_API

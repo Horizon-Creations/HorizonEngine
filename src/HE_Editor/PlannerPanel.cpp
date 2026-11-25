@@ -17,6 +17,8 @@
 #include "TaskBoardPanel.h"
 #include "TaskBoardTeam.h"
 
+#include "TextEditor.h"   // ImGuiColorTextEdit: code blocks with syntax highlighting
+
 #include <SDL3/SDL.h>   // the clipboard
 #include <imgui.h>
 #include <imgui_internal.h>          // the text field's cursor, for the arrow keys between blocks
@@ -25,11 +27,13 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <cctype>
 #include <cfloat>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <functional>
+#include <memory>
 #include <unordered_map>
 #include <vector>
 
@@ -94,6 +98,7 @@ bool        s_deletePageOpen = false;
 UUID        s_boardId;           // the whiteboard shown instead of a database or a page; {} = none
 UUID        s_deleteBoard;       // the board a "Delete Board" confirmation is about
 bool        s_deleteBoardOpen = false;
+int         s_cursorAt = -1;         // with s_cursorBlock: the byte the cursor goes to (a merge joins there), -1 = start/end
 UUID        s_cursorBlock;           // the block whose cursor is placed as soon as its field is active
 bool        s_cursorAtEnd = false;
 bool        s_focusAtEnd = false;   // the cursor goes to the end of the block that gets the keyboard (moving up), else to its start
@@ -2106,7 +2111,8 @@ bool isListType(BlockType t)
 }
 
 // What a paragraph turns into when it starts like Markdown: "# ", "## ", "### ",
-// "- ", "1. ", "[] ", "> ", "---" and three backticks.
+// "- ", "1. ", "[] ", "> ", "---" and three backticks. Applied the moment the text
+// matches, while typing, not only when the block is left.
 bool shortcutType(const std::string& text, BlockType& type, std::string& rest)
 {
 	struct Rule { const char* prefix; BlockType type; };
@@ -2142,7 +2148,11 @@ void flattenBlocks(const std::vector<Block>& list, int depth, std::vector<FlatBl
 
 // Everything a block edit changes, in one saved step: the text (with a Markdown
 // shortcut applied to a paragraph), and, on Enter, the block that follows.
-void commitBlockText(const UUID& pageId, const UUID& blockId, std::string text, bool enter)
+std::string s_lastCodeLang;   // a new code block starts in the language of the last one picked
+
+// Everything a block edit changes, in one saved step: the text (with a Markdown shortcut applied to a
+// paragraph), and, on Enter, the block that follows, which takes `tail` (the text after the cursor).
+void commitBlockText(const UUID& pageId, const UUID& blockId, std::string text, bool enter, std::string tail = {})
 {
 	post([=] {
 		s_ws.editPage(pageId, [&](Page& page) {
@@ -2156,23 +2166,51 @@ void commitBlockText(const UUID& pageId, const UUID& blockId, std::string text, 
 			{
 				changed |= page.setBlockType(blockId, shortcut, taskNowMs());
 				value = rest;
+				if (shortcut == BlockType::Code) b->language = s_lastCodeLang;
+				if (shortcut == BlockType::Divider && !enter)
+				{
+					// A divider takes no text: the writing goes on in a paragraph under it.
+					if (Block* made = page.addBlockAfter(blockId, BlockType::Paragraph, "", taskNowMs())) s_focusBlock = made->id;
+					return true;
+				}
 			}
 			if (b->text != value) changed |= page.setBlockText(blockId, value, taskNowMs());
 			if (enter)
 			{
 				const BlockType type = b->type;
-				if (isListType(type) && value.empty())
+				if (isListType(type) && value.empty() && tail.empty())
 				{
 					changed |= page.setBlockType(blockId, BlockType::Paragraph, taskNowMs());   // Enter on an empty item ends the list
 					s_focusBlock = blockId;                                                      // and the cursor stays
 				}
-				else if (type != BlockType::Divider)
+				else
 				{
-					Block* made = page.addBlockAfter(blockId, isListType(type) ? type : BlockType::Paragraph, "", taskNowMs());
-					if (made) { s_focusBlock = made->id; changed = true; }
+					Block* made = page.addBlockAfter(blockId, isListType(type) ? type : BlockType::Paragraph, tail, taskNowMs());
+					if (made) { s_focusBlock = made->id; s_focusAtEnd = false; changed = true; }
 				}
 			}
 			return changed;
+		});
+	});
+}
+
+// Backspace at the very start of a block: a list item, heading or quote becomes a paragraph first; a
+// paragraph joins the text block above it, the cursor where the two meet.
+void backspaceAtStart(const UUID& pageId, const UUID& blockId, const UUID& prevId, const std::string& text)
+{
+	post([=] {
+		s_ws.editPage(pageId, [&](Page& page) {
+			Block* b = page.findBlock(blockId);
+			if (!b) return false;
+			if (b->type != BlockType::Paragraph) return page.setBlockType(blockId, BlockType::Paragraph, taskNowMs());   // the field stays active
+			Block* prev = prevId == UUID{} ? nullptr : page.findBlock(prevId);
+			if (!prev || prev->type == BlockType::Code || !b->children.empty()) return false;
+			const int join = static_cast<int>(prev->text.size());
+			page.setBlockText(prevId, prev->text + text, taskNowMs());
+			page.removeBlock(blockId, taskNowMs());
+			s_focusBlock = prevId;
+			s_cursorAt = join;
+			return true;
 		});
 	});
 }
@@ -2223,9 +2261,13 @@ void blockText(const Page& page, const Block& b, int index, float width, const U
 	// Where the cursor was before this frame's keys moved it: the first or the last
 	// line of the block decides whether an arrow key leaves it.
 	bool onFirstLine = false, onLastLine = false;
+	int cursorBefore = -1;
+	bool selectionBefore = false;
 	if (ImGuiInputTextState* state = ImGui::GetInputTextState(ImGui::GetID("##text")))
 	{
 		const int cursor = std::clamp(state->GetCursorPos(), 0, static_cast<int>(text.size()));
+		cursorBefore = cursor;
+		selectionBefore = state->HasSelection();
 		const float lineH = ImGui::GetTextLineHeight();
 		const float above = ImGui::CalcTextSize((text.substr(0, static_cast<std::size_t>(cursor)) + " ").c_str(), nullptr, false, wrapW).y;
 		const float all   = ImGui::CalcTextSize((text + " ").c_str(), nullptr, false, wrapW).y;
@@ -2246,10 +2288,29 @@ void blockText(const Page& page, const Block& b, int index, float width, const U
 	if (s_cursorBlock == blockId && ImGui::IsItemActive())
 		if (ImGuiInputTextState* state = ImGui::GetInputTextState(ImGui::GetItemID()))
 		{
-			const int at = s_cursorAtEnd ? static_cast<int>(text.size()) : 0;
+			const int size = static_cast<int>(text.size());
+			const int at = s_cursorAt >= 0 ? std::min(s_cursorAt, size) : s_cursorAtEnd ? size : 0;
 			state->SetSelection(at, at);
 			s_cursorBlock = UUID{};
+			s_cursorAt = -1;
 		}
+	// Markdown as it is typed: "# " makes a heading, "- " a list, three backticks a code block, at once.
+	{
+		BlockType asType = BlockType::Paragraph;
+		std::string rest;
+		if (b.type == BlockType::Paragraph && text != before && shortcutType(text, asType, rest))
+		{
+			s_blockEdits.erase(blockId);
+			commitBlockText(pageId, blockId, text, false);
+			if (asType == BlockType::Code || asType == BlockType::Divider)
+				ImGui::ClearActiveID();   // another widget (the code editor, the paragraph under a divider) takes over
+			else if (ImGuiInputTextState* state = ImGui::GetInputTextState(ImGui::GetItemID()))
+				state->ReloadUserBufAndMoveToEnd();   // the field stays active and takes the text without the marker
+			// Not ClearActiveID + focus again: a field re-activated that way does not get Enter any more.
+			if (asType == BlockType::Code) s_focusBlock = blockId;
+			return;
+		}
+	}
 	if (text != before) s_blockEdits[blockId] = text;
 	// Left with something typed in an earlier frame. ImGui's own "deactivated after edit"
 	// is not reliable when another field takes the focus earlier in the same frame, so
@@ -2258,7 +2319,17 @@ void blockText(const Page& page, const Block& b, int index, float width, const U
 	if (entered || left)
 	{
 		s_blockEdits.erase(blockId);
-		commitBlockText(pageId, blockId, text, entered);
+		// Enter splits the block at the cursor: what follows it starts the next block.
+		std::string tail;
+		if (entered)
+			if (ImGuiInputTextState* state = ImGui::GetInputTextState(ImGui::GetItemID()))
+			{
+				const std::size_t at = static_cast<std::size_t>(std::clamp(state->GetCursorPos(), 0, static_cast<int>(text.size())));
+				tail = text.substr(at);
+				text.resize(at);
+			}
+		if (entered) ImGui::ClearActiveID();
+		commitBlockText(pageId, blockId, text, entered, tail);
 	}
 	else if (ImGui::IsItemDeactivated()) s_blockEdits.erase(blockId);
 
@@ -2277,6 +2348,14 @@ void blockText(const Page& page, const Block& b, int index, float width, const U
 		}
 	}
 
+	// Backspace at the start of a block with text in it: back to a paragraph, or joined with the block above.
+	if (ImGui::IsItemActive() && !before.empty() && text == before && cursorBefore == 0 && !selectionBefore &&
+	    ImGui::IsKeyPressed(ImGuiKey_Backspace, false))
+	{
+		if (b.type == BlockType::Paragraph && !(prevId == UUID{})) ImGui::ClearActiveID();   // the block above takes the keyboard
+		s_blockEdits.erase(blockId);
+		backspaceAtStart(pageId, blockId, prevId, text);
+	}
 	// Backspace in an empty block takes the block away and moves up one.
 	if (ImGui::IsItemActive() && before.empty() && text.empty() && b.children.empty() &&
 	    ImGui::IsKeyPressed(ImGuiKey_Backspace, false))
@@ -2541,6 +2620,160 @@ void pageLinkBlock(const Page& page, const Block& b, int index, float width)
 }
 
 // The page's blocks, one per line, children indented.
+// ── Code blocks ──────────────────────────────────────────────────────────────
+// A code block is an ImGuiColorTextEdit editor (the script editor's): syntax colours for the block's
+// language, Enter is a new line, Tab indents. One editor per block, made when the block is first drawn;
+// the block's text is written back a moment after typing stops and when the editor is left.
+
+struct CodeLang { const char* word; const char* label; TextEditor::LanguageDefinitionId id; };
+const CodeLang kCodeLangs[] = {
+	{ "", "Plain text", TextEditor::LanguageDefinitionId::None },   { "cpp", "C++", TextEditor::LanguageDefinitionId::Cpp },
+	{ "c", "C", TextEditor::LanguageDefinitionId::C },                { "cs", "C#", TextEditor::LanguageDefinitionId::Cs },
+	{ "python", "Python", TextEditor::LanguageDefinitionId::Python }, { "lua", "Lua", TextEditor::LanguageDefinitionId::Lua },
+	{ "json", "JSON", TextEditor::LanguageDefinitionId::Json },       { "sql", "SQL", TextEditor::LanguageDefinitionId::Sql },
+	{ "glsl", "GLSL", TextEditor::LanguageDefinitionId::Glsl },       { "hlsl", "HLSL", TextEditor::LanguageDefinitionId::Hlsl },
+	{ "angelscript", "AngelScript", TextEditor::LanguageDefinitionId::AngelScript },
+};
+
+// The language a block's word names; Markdown fences also say "c++", "py", "csharp", "javascript"...
+const CodeLang& codeLang(std::string word)
+{
+	for (char& c : word) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+	if (word == "c++" || word == "cxx" || word == "hpp" || word == "h") word = "cpp";
+	if (word == "py")                       word = "python";
+	if (word == "csharp" || word == "c#")   word = "cs";
+	for (const CodeLang& l : kCodeLangs)
+		if (word == l.word) return l;
+	return kCodeLangs[0];
+}
+
+struct CodeEdit
+{
+	TextEditor  editor;
+	std::string language = "\x01";   // what the editor is set up for (nothing at first)
+	std::string synced;               // the block text the editor last took or wrote
+	bool        focused = false;
+	double      typedAt = -1.0;       // when the text last changed, while not yet written
+};
+std::unordered_map<UUID, std::unique_ptr<CodeEdit>> s_codeEdits;
+
+void writeCode(const UUID& pageId, const UUID& blockId, CodeEdit& ce)
+{
+	const std::string text = ce.editor.GetText();
+	ce.typedAt = -1.0;
+	if (text == ce.synced) return;
+	ce.synced = text;
+	post([=] { s_ws.editPage(pageId, [&](Page& p) { return p.setBlockText(blockId, text, taskNowMs()); }); });
+}
+
+void codeBlock(const Page& page, const Block& b, int index, float width, const UUID& prevId, const UUID& nextId)
+{
+	const UUID pageId = page.id, blockId = b.id;
+	std::unique_ptr<CodeEdit>& slot = s_codeEdits[blockId];
+	if (!slot)
+	{
+		slot = std::make_unique<CodeEdit>();
+		slot->editor.SetShowLineNumbersEnabled(false);
+		slot->editor.SetShowWhitespacesEnabled(false);
+		slot->editor.SetScrollPastEndEnabled(false);
+		slot->editor.SetPalette(TextEditor::PaletteId::Dark);
+		slot->editor.SetTabSize(4);
+		slot->editor.SetText(b.text);
+		slot->synced = b.text;
+	}
+	CodeEdit& ce = *slot;
+	if (ce.language != b.language)
+	{
+		ce.editor.SetLanguageDefinition(codeLang(b.language).id);
+		ce.language = b.language;
+	}
+	// The text changed somewhere else (a pull, the MCP tools, undo of the page): take it, unless typing here.
+	if (!ce.focused && b.text != ce.synced)
+	{
+		ce.editor.SetText(b.text);
+		ce.synced = b.text;
+	}
+
+	if (s_ctx && s_ctx->codeFont) ImGui::PushFont(s_ctx->codeFont);
+	const float lineH = ImGui::GetTextLineHeight();   // the editor's line advance (it draws with no item spacing)
+	// As tall as its lines; a sideways scrollbar only takes room when a line is wider than the block.
+	float widest = 0.0f;
+	for (const std::string& l : ce.editor.GetTextLines()) widest = std::max(widest, ImGui::CalcTextSize(l.c_str()).x);
+	const float h = static_cast<float>(std::max(1, ce.editor.GetLineCount())) * lineH + 10.0f +
+	                (widest > width - 24.0f ? ImGui::GetStyle().ScrollbarSize : 0.0f);
+	if (s_focusBlock == blockId)
+	{
+		ImGui::SetNextWindowFocus();
+		s_focusBlock = UUID{};
+	}
+	const ImVec2 top = ImGui::GetCursorScreenPos();
+	const bool focused = ce.editor.Render("##code", false, ImVec2(width, h));
+	note("block:" + std::to_string(index));
+	const ImVec2 after = ImGui::GetCursorScreenPos();
+	if (s_ctx && s_ctx->codeFont) ImGui::PopFont();
+
+	if (focused)
+	{
+		// ImGui 1.92 starts the platform's text input from PlatformImeData, which a custom widget never sets
+		// (see ScriptEditorPanel): without this, typed characters never arrive on macOS.
+		ImGuiContext& g = *ImGui::GetCurrentContext();
+		g.PlatformImeData.WantTextInput = true;
+		g.PlatformImeData.InputPos      = top;
+		if (ce.editor.GetText() != ce.synced && ce.typedAt < 0.0) ce.typedAt = ImGui::GetTime();
+		if (ce.typedAt >= 0.0 && ImGui::GetTime() - ce.typedAt > 0.8) writeCode(pageId, blockId, ce);
+		// Up on the first line and Down on the last leave the block, as in a text block.
+		int line = 0, column = 0;
+		ce.editor.GetCursorPosition(line, column);
+		if (line == 0 && !(prevId == UUID{}) && ImGui::IsKeyPressed(ImGuiKey_UpArrow, false))
+		{
+			writeCode(pageId, blockId, ce);
+			s_focusBlock = prevId;
+			s_focusAtEnd = true;
+		}
+		else if (line >= ce.editor.GetLineCount() - 1 && !(nextId == UUID{}) && ImGui::IsKeyPressed(ImGuiKey_DownArrow, false))
+		{
+			writeCode(pageId, blockId, ce);
+			s_focusBlock = nextId;
+			s_focusAtEnd = false;
+		}
+	}
+	else if (ce.focused) writeCode(pageId, blockId, ce);   // left
+	ce.focused = focused;
+
+	// The language, small at the top right of the block.
+	{
+		const CodeLang& lang = codeLang(b.language);
+		const float comboW = ImGui::CalcTextSize(lang.label).x + ImGui::GetFrameHeight() + 14.0f;
+		ImGui::SetCursorScreenPos(ImVec2(top.x + width - comboW - 6.0f, top.y + 4.0f));
+		ImGui::SetNextItemWidth(comboW);
+		ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(6.0f, 1.0f));
+		if (ImGui::BeginCombo("##codelang", lang.label))
+		{
+			for (const CodeLang& l : kCodeLangs)
+				if (ImGui::Selectable(l.label, &l == &lang))
+				{
+					const std::string word = l.word;
+					s_lastCodeLang = word;
+					post([=] {
+						s_ws.editPage(pageId, [&](Page& p) {
+							Block* blk = p.findBlock(blockId);
+							if (!blk || blk->language == word) return false;
+							blk->language = word;
+							p.modifiedMs = taskNowMs();
+							return true;
+						});
+					});
+				}
+			ImGui::EndCombo();
+		}
+		EditorWidgets::helpForKey("Planner/Code Language");
+		note("code-lang:" + std::to_string(index));
+		ImGui::PopStyleVar();
+		ImGui::SetCursorScreenPos(after);
+		ImGui::Dummy(ImVec2(0, 0));
+	}
+}
+
 void drawBlocks(const Page& page)
 {
 	const UUID pageId = page.id;
@@ -2595,6 +2828,8 @@ void drawBlocks(const Page& page)
 		}
 		else if (b.type == BlockType::PageLink)
 			pageLinkBlock(page, b, static_cast<int>(i), avail - indent - handleW);
+		else if (b.type == BlockType::Code)
+			codeBlock(page, b, static_cast<int>(i), avail - indent - handleW - 8.0f, prevId, nextText[i]);
 		else
 		{
 			// A marker before the text for lists and to-dos.
@@ -2676,14 +2911,29 @@ void drawBlocks(const Page& page)
 	if (page.blocks.empty())
 	{
 		ImGui::SameLine();
-		ImGui::TextDisabled("Type # for a heading, - for a list, [] for a to-do, --- for a divider.");
+		ImGui::TextDisabled("Type # for a heading, - for a list, [] for a to-do, ``` for code, --- for a divider.");
 	}
 	{
 		AppContext& ctx = *s_ctx;
 		const ImVec2 at = ImGui::GetCursorScreenPos();
 		const float w = ImGui::GetContentRegionAvail().x;
-		const float h = fh * 1.5f;
-		ImGui::Dummy(ImVec2(w, h));
+		const float h = std::max(fh * 1.5f, ImGui::GetContentRegionAvail().y);
+		// A click below the last block writes on: in the last block when it is an empty paragraph, else in a new one.
+		if (ImGui::InvisibleButton("##writeon", ImVec2(w, h)))
+		{
+			const Block* last = page.blocks.empty() ? nullptr : &page.blocks.back();
+			if (last && last->type == BlockType::Paragraph && last->text.empty() && last->children.empty())
+				s_focusBlock = last->id;
+			else
+				post([=] {
+					s_ws.editPage(pageId, [&](Page& p) {
+						Block* made = p.addBlockAfter(UUID{}, BlockType::Paragraph, "", taskNowMs());
+						if (made) s_focusBlock = made->id;
+						return made != nullptr;
+					});
+				});
+		}
+		if (ImGui::IsItemHovered()) ImGui::SetMouseCursor(ImGuiMouseCursor_TextInput);
 		note("page-drop");
 		const std::vector<TaskLink> dropped = TaskBoardPanel::acceptDroppedLinks(ctx);
 		const bool dragging = ImGui::GetDragDropPayload() != nullptr;
@@ -4206,6 +4456,9 @@ void reset()
 	s_deletePageOpen = false;
 	s_focusAtEnd = false;
 	s_blockEdits.clear();
+	s_codeEdits.clear();
+	s_lastCodeLang.clear();
+	s_cursorAt = -1;
 	s_tabs.clear();
 	s_flyRow = UUID{};
 }
