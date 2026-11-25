@@ -5,6 +5,7 @@
 #include "CollabController.h"
 #include "EditorTheme.h"
 #include "EditorWidgets.h"
+#include "TaskBoardTeamLink.h"
 #include "TeamController.h"
 #include "NotificationStore.h"
 #include "TeamView.h"
@@ -1280,4 +1281,34 @@ TEST_CASE("Team UI: two editors through a real collab_server (HE_TEST_TEAM_SERVE
 	anna.collab.leave();
 	bob.team.signOut();
 	anna.team.signOut();
+}
+
+TEST_CASE("Team: the task board's link answers from the TeamController once the roster is in; notices are not carried")
+{
+	FakeTeamServer server;
+	REQUIRE(server.t);
+	CollabController collab;
+	TeamController   team(collab);
+	TeamControllerTaskLink link(team);
+	CHECK_FALSE(link.connected());
+	CHECK(link.members().empty());
+
+	std::uint64_t now = 1;
+	auto pump = [&] { server.pump(); collab.update(now); team.update(now); now += 16; };
+	REQUIRE(team.signIn("127.0.0.1:" + std::to_string(server.t->boundPort()), "studio", "Anna", "correct-horse"));
+	REQUIRE(frameUntil(pump, [&] { return link.connected(); }));
+	CHECK(team.signedIn());
+	CHECK(HE::sameTaskMember(link.self(), "Anna"));
+	bool anna = false;
+	for (const HE::TaskTeamMember& m : link.members()) anna |= HE::sameTaskMember(m.name, "Anna") && m.online;
+	CHECK(anna);
+
+	// No NOTIFY on the team server yet: a notice is dropped as sent, so the bridge's outbox
+	// never holds it, and nothing ever comes in.
+	CHECK(link.send("Bob", "{}"));
+	HE::TaskTeamLink::Incoming in;
+	CHECK_FALSE(link.poll(in));
+
+	team.signOut();
+	CHECK_FALSE(link.connected());
 }

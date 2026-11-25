@@ -86,6 +86,8 @@ namespace
 	// set — taken back when the link signs out, so edits are not recorded
 	// under a team name the editor is no longer signed in as.
 	HE::TaskBoardTeam* s_team = nullptr;
+	// After every write of the board file (setSavedHook).
+	std::function<void()> s_savedHook;
 	bool               s_teamAuthor = false;
 	// The From the Team list: notices that arrived after this were not looked at.
 	std::uint64_t      s_teamSeenMs = 0;
@@ -234,6 +236,7 @@ bool edit(AppContext& ctx, const std::function<bool(TaskBoard&)>& fn)
 	std::string err;
 	if (HE::saveTaskBoard(s_store.root, *b, &err))
 	{
+		if (s_savedHook) s_savedHook();
 		stampDisk(s_store); s_store.unsaved = false; s_store.error.clear();
 		if (tell) tellTeam(before, *b);
 		return true;
@@ -250,6 +253,7 @@ bool edit(AppContext& ctx, const std::function<bool(TaskBoard&)>& fn)
 		++s_store.generation;
 		if (HE::saveTaskBoard(s_store.root, s_store.board, &err))
 		{
+			if (s_savedHook) s_savedHook();
 			stampDisk(s_store);
 			if (tell) tellTeam(before, s_store.board);
 			return true;
@@ -264,6 +268,7 @@ const std::string& lastError() { return s_store.error; }
 
 void setAuthor(std::string name) { s_author = std::move(name); s_teamAuthor = false; }
 
+void               setSavedHook(std::function<void()> fn) { s_savedHook = std::move(fn); }
 void               setTeam(HE::TaskBoardTeam* team) { s_team = team; }
 HE::TaskBoardTeam* team() { return s_team; }
 
@@ -303,6 +308,7 @@ bool retrySave()
 	std::string err;
 	if (HE::saveTaskBoard(s_store.root, s_store.board, &err))
 	{
+		if (s_savedHook) s_savedHook();
 		stampDisk(s_store);
 		s_store.unsaved = false;
 		s_store.error.clear();

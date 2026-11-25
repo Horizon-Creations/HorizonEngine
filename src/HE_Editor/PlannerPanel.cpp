@@ -74,6 +74,7 @@ struct EditKey
 };
 EditKey     s_editKey;
 bool        s_editing = false;
+bool        s_mineOnly = false;   // "Assigned to me": only rows whose first Person property names us
 std::string s_editBuf;
 
 std::string s_newOption, s_newProperty, s_renameView;
@@ -526,6 +527,12 @@ void linksCell(const Database& db, const Row& row, const Property& p)
 	}
 }
 
+std::string lowerCase(std::string s)
+{
+	for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+	return s;
+}
+
 // ── Assignees: from the team's roster, with a team ───────────────────────────
 // Without a team server there is nobody to pick from: the Tasks cell is then a
 // text field like any Person property (a name typed by hand reaches nobody, it is
@@ -539,20 +546,36 @@ void assigneesCell(const Database& db, const Row& row, const Property& p)
 	std::string preview = joinNames(have);
 	if (preview.empty()) preview = "Nobody";
 	ImGui::SetNextItemWidth(-FLT_MIN);
+	capPopupHeight();
 	const bool open = ImGui::BeginCombo("##assignedTo", preview.c_str());
 	note("assignees:" + row.title);
 	if (!open) return;
+	// Typing narrows the team down; Enter takes the first one left.
+	static std::string s_who;
+	if (ImGui::IsWindowAppearing())
+	{
+		s_who.clear();
+		ImGui::SetKeyboardFocusHere();
+	}
+	ImGui::SetNextItemWidth(-FLT_MIN);
+	const bool enter = ImGui::InputTextWithHint("##who", "Search the team", &s_who, ImGuiInputTextFlags_EnterReturnsTrue);
+	note("assignees:search");
+	const std::string self = team->self();
 	std::string label;   // one buffer for every member row
+	bool first = true;
 	for (const HE::TaskTeamMember& m : team->members())
 	{
+		if (!s_who.empty() && lowerCase(m.name).find(lowerCase(s_who)) == std::string::npos) continue;
 		const bool on = std::any_of(have.begin(), have.end(),
 		                            [&](const std::string& a) { return HE::sameTaskMember(a, m.name); });
 		label.assign(m.name);
+		if (HE::sameTaskMember(m.name, self)) label += "  (you)";
 		if (!m.online) label += "  (offline)";
 		label += "##member";
 		ImGui::PushID(m.name.c_str());
 		// Stays open: assigning two people is two ticks, not two trips.
-		const bool picked = ImGui::Selectable(label.c_str(), on, ImGuiSelectableFlags_NoAutoClosePopups);
+		const bool picked = ImGui::Selectable(label.c_str(), on, ImGuiSelectableFlags_NoAutoClosePopups) || (enter && first);
+		first = false;
 		note("member:" + m.name);
 		if (picked)
 		{
@@ -687,9 +710,9 @@ void editCell(const Database& db, const Row& row, const Property& p)
 		}, "YYYY-MM-DD");
 		break;
 	case PropertyType::Person:
-		// Tasks with a team: pick from its roster. Without one, names are typed like
-		// in any database (kept on the board, announced to nobody).
-		if (s_ws.isExternal(dbId) && TaskBoardPanel::team() && TaskBoardPanel::team()->connected())
+		// With a team signed in: pick members from its roster. Without one, names are typed
+		// (kept on the board, announced to nobody).
+		if (TaskBoardPanel::team() && TaskBoardPanel::team()->connected())
 		{
 			assigneesCell(db, row, p);
 			break;
@@ -3673,6 +3696,18 @@ void drawDatabase(AppContext& ctx, const Database& db)
 		const ImVec2 a = ImGui::GetItemRectMin(), z = ImGui::GetItemRectMax();
 		PlannerIcons::drawIcon(ImGui::GetWindowDrawList(), PlannerIcons::Icon::Search, ImVec2(a.x + 15, (a.y + z.y) * 0.5f), Theme::u32(Theme::TextDim));
 	}
+	// "Assigned to me", where the data has people: who "me" is, is the team member we are signed in as
+	// (TaskBoardPanel::author() follows it), else the name this editor writes under.
+	const Property* people = nullptr;
+	for (const Property& p : db.properties)
+		if (p.type == PropertyType::Person) { people = &p; break; }
+	const std::string me = TaskBoardPanel::author();
+	if (people && !me.empty())
+	{
+		ImGui::SameLine();
+		if (toolButton("Planner/Assigned to me", "Mine", PlannerIcons::Icon::Person, s_mineOnly)) s_mineOnly = !s_mineOnly;
+		note("mine");
+	}
 	if (view->kind == ViewKind::Timeline || view->kind == ViewKind::Calendar)
 	{
 		// The same dated rows along a time axis or as a month: one view, shown either way.
@@ -3750,6 +3785,8 @@ void drawDatabase(AppContext& ctx, const Database& db)
 	View effective = *view;
 	if (!s_search.empty())
 		effective.filters.push_back({ UUID{}, "contains", nlohmann::json(s_search).dump() });
+	if (s_mineOnly && people && !me.empty())
+		effective.filters.push_back({ people->id, "contains", nlohmann::json(me).dump() });
 	const std::vector<std::size_t> idx = db.query(effective);
 	s_stats.rows = static_cast<int>(idx.size());
 
@@ -4544,6 +4581,7 @@ void reset()
 	s_commentFor = UUID{};
 	s_ctx = nullptr;
 	s_editing = false;
+	s_mineOnly = false;
 	s_editBuf.clear();
 	s_posted.clear();
 	s_rects.clear();

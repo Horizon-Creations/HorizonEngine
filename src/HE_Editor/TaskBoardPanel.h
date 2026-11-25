@@ -80,6 +80,9 @@ namespace TaskBoardPanel
 	std::string   projectName();
 	void               setTeam(HE::TaskBoardTeam* team);
 	HE::TaskBoardTeam* team();
+	// Called after every write of the board file: the editor tells the team server's sync,
+	// so a task edit reaches the team like a scene save.
+	void               setSavedHook(std::function<void()> fn);
 	// One frame of the team: send and receive (TaskBoardTeam::update), and keep
 	// author() on the member name while signed in. tick() calls it; a test
 	// without ImGui calls it itself.

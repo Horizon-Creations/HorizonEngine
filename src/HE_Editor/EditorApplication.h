@@ -9,6 +9,7 @@
 #include "EditorSelection.h"
 #include "EditorCamera.h"
 #include "CollabController.h"
+#include "TaskBoardTeamLink.h"
 #include "TeamController.h"
 #include "CollabDocSync.h"   // DocMirror for the two documents the editor owns
 #include "CollabUndo.h"
@@ -863,6 +864,10 @@ private:
 	// Saves through the team server when the project says so (topic 199).
 	// Over the three above, so declared after them; pumped after m_team.
 	TeamSyncController m_teamSync{ m_team, m_git, m_collab };
+	// The Planner's Tasks on the team: assignees picked from the roster, "Mine".
+	// TaskBoardPanel holds a pointer to the bridge from start-up to shutdown.
+	TeamControllerTaskLink m_taskTeamLink{ m_team };
+	HE::TaskBoardTeam      m_taskTeam;
 	// The local MCP listener. Pumped once per frame from OnRender, next to the
 	// collaboration pump and for the same reason: both apply things that came
 	// off a socket, and both have to do it on the main thread between the world

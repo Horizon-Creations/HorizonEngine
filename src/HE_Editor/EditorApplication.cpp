@@ -35,6 +35,7 @@
 #include "CinematicPanel.h"                  // …and the sequence tools this one
 #include "PlannerBoardView.h"
 #include "PlannerPanel.h"                    // ...and the Planner tools reach the tab's workspace through this one
+#include "PlannerWorkspace.h"                // its saved hook: planner edits sync like saves
 #include "TaskBoardPanel.h"                  // …and the task tools edit through this one's board
 #include "ViewportPanel.h"         // appendGroundGrid — the scene view's scale reference
 #include <HorizonScene/CellPhysics.h>  // cellHolds: the play physics world waits for unbuilt cells
@@ -595,6 +596,13 @@ void EditorApplication::OnInit()
 	m_collab.setNotifications(&m_notifications);
 	m_team.setNotifications(&m_notifications);
 	m_teamSync.setNotifications(&m_notifications);
+	m_taskTeam.setLink(&m_taskTeamLink);
+	m_taskTeam.setNotifications(&m_notifications);
+	TaskBoardPanel::setTeam(&m_taskTeam);
+	// A planner or task board edit writes its file at once: that is a save, and with the team
+	// server keeping the project it goes to the team like a scene save (debounced there).
+	TaskBoardPanel::setSavedHook([this] { m_teamSync.noteSaved(); });
+	HE::Planner::Workspace::setSavedHook([this] { m_teamSync.noteSaved(); });
 	m_teamSync.setOpenFolder([](const std::filesystem::path& dir) {
 		const std::string url = "file://" + dir.generic_string();
 		SDL_OpenURL(url.c_str());
@@ -17553,6 +17561,9 @@ void EditorApplication::OnShutdown()
 	// item in this function that outlives the process if it is skipped.
 	// Ends our announcements (the server would notice in a minute anyway). Not
 	// signOut(): quitting keeps the saved sign-in for the next start.
+	TaskBoardPanel::setTeam(nullptr);
+	TaskBoardPanel::setSavedHook({});
+	HE::Planner::Workspace::setSavedHook({});
 	m_team.disconnect();
 	m_collab.shutdown();
 

@@ -1110,6 +1110,15 @@ std::vector<std::size_t> Database::query(const View& view) const
 				if (isEq) result = result && v.is_array() && v.size() == 1;
 				break;
 			case PropertyType::Person:
+			{
+				// People compare in any case, as member names do on the team server.
+				if (!operand.is_string()) return true;
+				const std::string want = lower(operand.get<std::string>());
+				if (v.is_array())
+					for (const ojson& e : v) result = result || (e.is_string() && lower(e.get<std::string>()) == want);
+				if (isEq) result = result && v.is_array() && v.size() == 1;
+				break;
+			}
 			case PropertyType::Relation:
 				if (!operand.is_string()) return true;
 				result = arrayHas(v, operand.get<std::string>());

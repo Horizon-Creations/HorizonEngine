@@ -787,6 +787,12 @@ TEST_CASE("planner ui: Assignees only with a signed-in team; a pick assigns on d
 	REQUIRE(click(ctx, assignees));
 	REQUIRE(PlannerPanel::controlRect("member:Bob").x1 > 0);
 	shotTo(ctx, "planner_team_assignee_list");
+	// Typing narrows the team down (the search has the keyboard when the list opens).
+	ImGui::GetIO().AddInputCharactersUTF8("bo");
+	settle(ctx);
+	CHECK(PlannerPanel::controlRect("member:Anna").x1 <= 0);
+	REQUIRE(PlannerPanel::controlRect("member:Bob").x1 > 0);
+	shotTo(ctx, "planner_team_assignee_search");
 	REQUIRE(click(ctx, "member:Bob"));
 	{
 		TaskBoard disk;
@@ -2915,4 +2921,31 @@ TEST_CASE("planner ui pages: Export writes the page as Markdown and as Word into
 	CHECK(readText(docx).rfind("PK\x03\x04", 0) == 0);
 	if (const char* d = std::getenv("HE_UI_DUMP_DIR"); d && *d)
 		std::filesystem::copy_file(docx, std::filesystem::path(d) / "planner_page_export.docx", std::filesystem::copy_options::overwrite_existing);
+}
+
+TEST_CASE("planner ui: Mine shows only the tasks assigned to the name this editor writes under")
+{
+	Harness harness;
+	Project proj("he_planner_ui_mine");
+	ContextBits bits;
+	AppContext ctx = bits.make(proj.pm);
+	REQUIRE(TaskBoardPanel::edit(ctx, [&](TaskBoard& b) {
+		b.assign(b.add("Mine A", "Tester", taskNowMs())->id, { "tester" }, "Tester", taskNowMs());
+		b.assign(b.add("Other", "Tester", taskNowMs())->id, { "Zed" }, "Tester", taskNowMs());
+		b.add("Nobody's", "Tester", taskNowMs());
+		return true;
+	}));
+	idle(ctx, 3);
+	REQUIRE(click(ctx, "item:Tasks"));
+	settle(ctx);
+	CHECK(PlannerPanel::controlRect("card:Other").x1 > 0);
+	REQUIRE(click(ctx, "mine"));
+	settle(ctx);
+	CHECK(PlannerPanel::controlRect("card:Mine A").x1 > 0);   // names compare in any case, as on the team server
+	CHECK(PlannerPanel::controlRect("card:Other").x1 <= 0);
+	CHECK(PlannerPanel::controlRect("card:Nobody's").x1 <= 0);
+	shotTo(ctx, "planner_tasks_mine");
+	REQUIRE(click(ctx, "mine"));
+	settle(ctx);
+	CHECK(PlannerPanel::controlRect("card:Other").x1 > 0);
 }

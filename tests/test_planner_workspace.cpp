@@ -689,3 +689,27 @@ TEST_CASE("planner workspace: pages() and boards() sort titles case-insensitivel
 	check(ws.pages());
 	check(ws.boards());
 }
+
+TEST_CASE("planner workspace: every file written tells the saved hook (the editor's team sync), nothing else does")
+{
+	TempProject tp;
+	int saves = 0;
+	Workspace::setSavedHook([&] { ++saves; });
+	{
+		Workspace ws;
+		ws.setProject(tp.root);
+		const UUID id = ws.create("Bugs")->id;
+		const int afterCreate = saves;
+		CHECK(afterCreate >= 1);
+		REQUIRE(ws.edit(id, [&](Database& db) { db.addRow("One", "Anna", kT0); return true; }));
+		CHECK(saves == afterCreate + 1);
+		ws.edit(id, [&](Database&) { return false; });   // no change, no write
+		CHECK(saves == afterCreate + 1);
+		Page* page = ws.createPage("Notes");
+		REQUIRE(page != nullptr);
+		CHECK(saves == afterCreate + 2);
+		ws.poll(true);   // reading is not saving
+		CHECK(saves == afterCreate + 2);
+	}
+	Workspace::setSavedHook({});
+}
