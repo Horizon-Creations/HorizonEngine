@@ -139,7 +139,7 @@ AREAS: dict[str, list[str]] = {
     "export": ["ExportDialogPanel.cpp", "BuildProgressDialog.cpp", "ProfilerPanel.cpp"],
     "collab": ["CollabPanel.cpp", "CollabPresenceBar.cpp", "SourceControlPanel.cpp",
                "GitMissingDialog.cpp", "EngineContentPublishDialog.cpp",
-               "ReportIssueDialog.cpp", "GitCloneDialog.cpp",
+               "ReportIssueDialog.cpp", "GitCloneDialog.cpp", "GitCloneView.cpp",
                "GitHubSignIn.cpp", "GitHubSignInView.cpp", "TeamView.cpp", "TeamSyncView.cpp"],
 }
 

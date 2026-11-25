@@ -5,6 +5,7 @@
 #include "ProjectThumbnail.h"
 #include "ProjectPreflight.h"
 #include "GitCloneDialog.h"
+#include "GitCloneView.h"
 #include "TutorialPanel.h"
 #include "EditorApplication.h"   // AppContext
 #include "EditorSelection.h"
@@ -398,4 +399,105 @@ TEST_CASE("Project Hub: a small window keeps every template tile on screen")
 	const float tilesX = std::floor(1000 * 0.42f) + 24.0f + 12.0f;
 	const auto tiles = itemsAlong(bits, ImVec2(tilesX, 70.0f), ImVec2(0.0f, 6.0f), 90);
 	CHECK(tiles.size() >= 2);
+}
+
+TEST_CASE("Clone from GitHub: the list loads once per open and per sign-in, never in a loop")
+{
+	using GitCloneView::shouldAutoLoad;
+	GitCloneView::AutoLoad st;
+	CHECK_FALSE(shouldAutoLoad(st, false, 1, false, false));   // not signed in
+	CHECK(shouldAutoLoad(st, true, 1, false, false));          // signed in: load
+	CHECK_FALSE(shouldAutoLoad(st, true, 1, true, false));     // listing
+	CHECK_FALSE(shouldAutoLoad(st, true, 1, false, false));    // failed or done: no retry
+	CHECK(shouldAutoLoad(st, true, 2, false, false));          // signed in again: reload
+	CHECK_FALSE(shouldAutoLoad(st, true, 3, false, true));     // cloning: wait...
+	CHECK(shouldAutoLoad(st, true, 3, false, false));          // ...then load
+	GitCloneView::AutoLoad fresh;                              // a listing already under way
+	CHECK_FALSE(shouldAutoLoad(fresh, true, 3, true, false));  // counts as this sign-in's
+	CHECK_FALSE(shouldAutoLoad(fresh, true, 3, false, false));
+}
+
+TEST_CASE("Clone from GitHub: account card, repository cards, pick, target")
+{
+	Harness h(760, 640);
+	std::vector<HE::Sc::RepoListEntry> repos;
+	const auto add = [&](const char* name, bool priv, const char* updated, const char* branch = "main") {
+		HE::Sc::RepoListEntry r;
+		r.name = name; r.fullName = std::string("Horizon-Creations/") + name;
+		r.cloneUrl = "https://github.com/" + r.fullName + ".git";
+		r.isPrivate = priv; r.updatedAt = updated; r.defaultBranch = branch;
+		repos.push_back(r);
+	};
+	add("Catania", true, "2026-11-24T10:00:00Z");
+	add("HorizonEngine", true, "2026-11-23T09:00:00Z");
+	add("Schach", false, "2026-10-02T09:00:00Z");
+	add("WeatherDemo", true, "2026-09-12T09:00:00Z");
+	add("Empty-Repo", true, "2026-08-01T09:00:00Z", "");
+	add("Website", false, "2026-07-20T09:00:00Z");
+	add("ThirdPersonSample", false, "2026-06-11T09:00:00Z");
+
+	char filter[64] = "", parent[256] = "/Users/me/Projects", folder[64] = "";
+	std::string selected;
+	GitCloneView::ListState state = GitCloneView::ListState::Ready;
+	GitCloneView::ListAction lastList = GitCloneView::ListAction::None;
+
+	const auto draw = [&](he_ui::Image* shot) {
+		ImGuiIO& io = ImGui::GetIO();
+		ImGui::NewFrame();
+		ImGui::SetNextWindowPos(ImVec2(20, 20));
+		ImGui::SetNextWindowSize(ImVec2(720, 0));
+		ImGui::Begin("##CloneShot", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+		             ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_AlwaysAutoResize);
+		{
+			const float w = 720 - ImGui::GetStyle().WindowPadding.x * 2.0f;
+			EditorWidgets::WrapText wrap(w);
+			GitCloneView::drawHeader(h.sub, w);
+			GitCloneView::drawAccountCard("Horizon-Creations", false, w);
+			const auto la = GitCloneView::drawRepoList(state, repos, filter, sizeof(filter), selected, false, 268.0f);
+			if (la != GitCloneView::ListAction::None) lastList = la;
+			const HE::Sc::RepoListEntry* chosen = nullptr;
+			for (const auto& r : repos) if (r.fullName == selected) chosen = &r;
+			if (la == GitCloneView::ListAction::Picked && chosen)
+				std::snprintf(folder, sizeof(folder), "%s", chosen->name.c_str());
+			GitCloneView::drawTarget(parent, sizeof(parent), folder, sizeof(folder), chosen != nullptr, false,
+			                         chosen && chosen->defaultBranch.empty());
+		}
+		ImGui::End();
+		ImGui::Render();
+		if (shot) *shot = he_ui::rasterize(ImGui::GetDrawData(), int(io.DisplaySize.x), int(io.DisplaySize.y));
+	};
+	const auto shoot = [&](const char* name) {
+		ImGui::GetIO().AddMousePosEvent(-100.0f, -100.0f);
+		draw(nullptr);
+		he_ui::Image img;
+		draw(&img);
+		CHECK(img.inkedPixels(20, 18, 15) > 1000);
+		if (const char* d = std::getenv("HE_UI_DUMP_DIR"); d && *d)
+			he_ui::writeBmp(img, std::string(d) + "/" + name + ".bmp");
+	};
+
+	state = GitCloneView::ListState::Loading;
+	shoot("clone_dialog_loading");
+	state = GitCloneView::ListState::Ready;
+	shoot("clone_dialog_ready");
+
+	// The second row: a click picks it and names the folder after it.
+	ImGuiWindow* win = ImGui::FindWindowByName("##CloneShot");
+	REQUIRE(win != nullptr);
+	ImGuiWindow* box = nullptr;
+	for (ImGuiWindow* c : win->DC.ChildWindows)
+		if (std::string(c->Name).find("##clonerepos") != std::string::npos) box = c;
+	REQUIRE(box != nullptr);
+	const ImVec2 row2(box->Pos.x + 200.0f, box->Pos.y + 6.0f + 50.0f + 6.0f + 25.0f);
+	ImGui::GetIO().AddMousePosEvent(row2.x, row2.y);
+	draw(nullptr); draw(nullptr);
+	ImGui::GetIO().AddMouseButtonEvent(ImGuiMouseButton_Left, true);  draw(nullptr);
+	ImGui::GetIO().AddMouseButtonEvent(ImGuiMouseButton_Left, false); draw(nullptr);
+	CHECK(selected == "Horizon-Creations/HorizonEngine");
+	CHECK(std::string(folder) == "HorizonEngine");
+	CHECK(lastList == GitCloneView::ListAction::Picked);
+	shoot("clone_dialog_picked");
+
+	std::snprintf(filter, sizeof(filter), "%s", "zzz");
+	shoot("clone_dialog_no_match");
 }

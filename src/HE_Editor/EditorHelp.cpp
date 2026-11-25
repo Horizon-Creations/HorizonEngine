@@ -4856,12 +4856,12 @@ namespace
 	{ "Source Control/Try again", "Try again",
 	  "Starts the sign-in over with a fresh code.",
 	  "", "editor#github" },
-	// The clone dialog's "Load my repositories", shown once signed in. The
-	// suffix stayed from when a token field had a button of the same name.
-	{ "Source Control/Load my repositories##signin", "Load my repositories",
-	  "Asks GitHub for every repository your sign-in can see \xe2\x80\x94 yours, and "
-	  "those of organisations you belong to \xe2\x80\x94 newest first. No token to "
-	  "type: the editor reads the sign-in from git's credential helper.",
+	// The clone dialog loads the list on its own once signed in; this asks again.
+	{ "Source Control/Refresh##repos", "Refresh",
+	  "Asks GitHub again for every repository your sign-in can see \xe2\x80\x94 yours, "
+	  "and those of organisations you belong to \xe2\x80\x94 newest first. The list "
+	  "loads by itself when the dialog opens; use this after creating a repository "
+	  "on GitHub, or when loading failed.",
 	  "", "editor#github" },
 	{ "Source Control/Push automatically after each commit", "",
 	  "Send every commit to the remote as it is made. Convenient alone, and a "

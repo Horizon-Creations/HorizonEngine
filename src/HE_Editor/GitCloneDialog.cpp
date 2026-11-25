@@ -3,6 +3,8 @@
 #include "EditorApplication.h"        // AppContext, GitController
 #include "EditorHelp.h"               // "Source Control/<label>" for its controls
 #include "EditorWidgets.h"            // pinDialogToEditorWindow, WrapText, buttons
+#include "EditorTheme.h"
+#include "GitCloneView.h"             // what the dialog looks like (the Hub's cards)
 #include "GitMissingDialog.h"         // "what is missing" when git is not installed
 #include "GitHubSignIn.h"             // the account the list and the clone use
 
@@ -13,7 +15,6 @@
 
 #include <SDL3/SDL.h>
 #include <algorithm>
-#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -53,7 +54,8 @@ bool takeOpenRequest(std::string& heprojPath)
 #ifdef HE_IMGUI_ENABLED
 namespace {
 
-constexpr float kDialogWidth = 620.0f;
+constexpr float kDialogWidth = 720.0f;
+constexpr float kListHeight  = 268.0f;
 
 char s_filter[128]     = "";
 char s_parentDir[1024] = "";
@@ -67,6 +69,9 @@ std::string s_formError;         // what the form itself refused, before git ran
 bool     s_cloneStarted  = false;
 bool     s_resultHandled = false;
 fs::path s_projectFile;          // the .heproj found in the finished clone
+
+// The list loads itself once per open and once per sign-in (GitCloneView.h).
+GitCloneView::AutoLoad s_autoLoad;
 
 // The folder picker's answer. Not the AppContext dialog bridge: the Hub's
 // create form and the New Project popup drain that one every frame into their
@@ -85,18 +90,7 @@ void resetForm()
 	s_cloneStarted  = false;
 	s_resultHandled = false;
 	s_projectFile.clear();
-}
-
-bool containsNoCase(const std::string& hay, const char* needle)
-{
-	if (!needle || !*needle) return true;
-	const std::string n(needle);
-	const auto it = std::search(hay.begin(), hay.end(), n.begin(), n.end(),
-		[](char a, char b) {
-			return std::tolower(static_cast<unsigned char>(a)) ==
-			       std::tolower(static_cast<unsigned char>(b));
-		});
-	return it != hay.end();
+	s_autoLoad = {};
 }
 
 // The project file of a cloned tree: at the top level, or one folder down for a
@@ -238,7 +232,7 @@ void seedParentDir(AppContext& ctx)
 
 void errorText(const std::string& s)
 {
-	ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.55f, 0.45f, 1.0f));
+	ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::Bad);
 	ImGui::TextWrapped("%s", s.c_str());
 	ImGui::PopStyleColor();
 }
@@ -288,11 +282,8 @@ void Draw(AppContext& ctx)
 		// auto-sizes, and wrapping at its own edge would make the width its own input.
 		EditorWidgets::WrapText wrap(kDialogWidth - ImGui::GetStyle().WindowPadding.x);
 
-		if (ctx.fontSubheading) ImGui::PushFont(ctx.fontSubheading);
-		ImGui::TextUnformatted("Clone a Repository from GitHub");
-		if (ctx.fontSubheading) ImGui::PopFont();
-		ImGui::Separator();
-		ImGui::Spacing();
+		const float contentW = kDialogWidth - ImGui::GetStyle().WindowPadding.x * 2.0f;
+		GitCloneView::drawHeader(ctx.fontSubheading, contentW);
 
 		const bool gitMissing = ctx.gitProbe && !ctx.gitProbe->gitFound;
 		const bool cloning    = git && git->cloneBusy();
@@ -314,132 +305,80 @@ void Draw(AppContext& ctx)
 		}
 		else
 		{
-			ImGui::TextWrapped(
-				"Pick a repository from your GitHub account. It is cloned into a new "
-				"folder, Git LFS assets included, and opened as a project.");
-			ImGui::Spacing();
-
-			// ── 1. Sign-in → repository list ─────────────────────────────────
-			// The sign-in flow draws in place of this step while it runs: this
-			// dialog is a modal, and the sign-in's own modal would close it.
-			if (!GitHubSignIn::drawInline(ctx))
+			// ── 1. Sign-in → the account ─────────────────────────────────────
+			// The sign-in flow draws in place of everything below while it runs:
+			// this dialog is a modal, and the sign-in's own modal would close it.
+			const fs::path credRoot = GitHubSignIn::credentialRoot(ctx);
+			GitHubSignIn::ensureChecked(credRoot);
+			const bool flowShown = GitHubSignIn::drawInline(ctx);
+			const bool signedIn  = !flowShown &&
+				GitHubSignIn::account() == GitHubSignIn::Account::SignedIn;
+			if (!flowShown)
 			{
-				GitHubSignIn::drawAccountRow(ctx, /*inlineFlow=*/true);
-				if (GitHubSignIn::account() == GitHubSignIn::Account::SignedIn)
-				{
-					// The clone itself then needs no token either: git finds the
-					// sign-in in the same credential helper.
-					ImGui::BeginDisabled(cloning || git->listingRepos());
-					if (EditorWidgets::primaryButton("Load my repositories##signin",
-					                                 ImVec2(180.0f, 0.0f)))
-					{
-						git->requestListReposWithSignIn(GitHubSignIn::credentialRoot(ctx));
-						s_selected.clear();
-					}
-					ImGui::EndDisabled();
-				}
+				if (!signedIn)
+					GitHubSignIn::drawAccountRow(ctx, /*inlineFlow=*/true);
+				else if (GitCloneView::drawAccountCard(GitHubSignIn::accountLogin(), cloning, contentW))
+					GitHubSignIn::signOut(credRoot);
+			}
+
+			// Signed in is all it takes: the list loads on its own, no button to
+			// find first. The clone then needs no token either — git finds the
+			// sign-in in the same credential helper.
+			if (GitCloneView::shouldAutoLoad(s_autoLoad, signedIn, GitHubSignIn::accountGeneration(),
+			                                 git->listingRepos(), cloning))
+			{
+				git->requestListReposWithSignIn(credRoot);
+				s_selected.clear();
 			}
 
 			// Why the list could not be loaded is a notification, said once per attempt;
-			// the section only says there is no list to pick from.
+			// the list box only says there is no list to pick from.
 			static std::string s_listReported;
 			if (git->listingRepos())
-			{
 				s_listReported.clear();
-				ImGui::Spacing();
-				ImGui::TextDisabled("Loading your repositories…");
-			}
-			else if (git->repoListLoaded() && !git->repoListError().empty())
+			else if (signedIn && git->repoListLoaded() && !git->repoListError().empty() &&
+			         s_listReported != git->repoListError())
 			{
-				if (s_listReported != git->repoListError())
-				{
-					s_listReported = git->repoListError();
-					HE::Ed::notify(HE::Ed::NoteLevel::Important,
-					               "Could not list your repositories", git->repoListError());
-				}
-				ImGui::Spacing();
-				ImGui::TextDisabled("No repository list is available. Paste a clone URL below instead.");
+				s_listReported = git->repoListError();
+				HE::Ed::notify(HE::Ed::NoteLevel::Important,
+				               "Could not list your repositories", git->repoListError());
 			}
 
 			// ── 2. Pick one ──────────────────────────────────────────────────
+			// Only for the account signed in now: the list of an account that
+			// signed out is still in the controller, and must not be offered.
 			const auto& repos = git->repoList();
 			const HE::Sc::RepoListEntry* chosen = nullptr;
-			if (git->repoListLoaded() && git->repoListError().empty() && !git->listingRepos())
+			if (signedIn)
 			{
-				ImGui::Spacing();
-				ImGui::SeparatorText("Repository");
-				if (repos.empty())
+				const GitCloneView::ListState state =
+					git->listingRepos() || !git->repoListLoaded() ? GitCloneView::ListState::Loading
+					: git->repoListError().empty()                ? GitCloneView::ListState::Ready
+					                                              : GitCloneView::ListState::Failed;
+				const GitCloneView::ListAction la = GitCloneView::drawRepoList(
+					state, repos, s_filter, sizeof(s_filter), s_selected, cloning, kListHeight);
+				if (la == GitCloneView::ListAction::Refresh)
 				{
-					ImGui::TextWrapped("This account has no repositories yet.");
+					git->requestListReposWithSignIn(credRoot);
+					s_selected.clear();
 				}
-				else
+				if (state == GitCloneView::ListState::Ready)
+					for (const auto& r : repos)
+						if (r.fullName == s_selected) { chosen = &r; break; }
+				if (la == GitCloneView::ListAction::Picked && chosen)
 				{
-					// A search field only once the list stops fitting at a glance.
-					if (repos.size() > 8)
-					{
-						ImGui::SetNextItemWidth(-1.0f);
-						ImGui::InputTextWithHint("##clonefilter", "Search…",
-						                         s_filter, sizeof(s_filter));
-					}
-					ImGui::BeginDisabled(cloning);
-					ImGui::BeginChild("##clonerepos", ImVec2(0.0f, 220.0f), true);
-					int shown = 0;
-					for (std::size_t i = 0; i < repos.size(); ++i)
-					{
-						const HE::Sc::RepoListEntry& r = repos[i];
-						if (!containsNoCase(r.fullName, s_filter)) continue;
-						++shown;
-						ImGui::PushID(static_cast<int>(i));
-						const bool sel = (r.fullName == s_selected);
-						if (ImGui::Selectable(r.fullName.c_str(), sel))
-						{
-							s_selected = r.fullName;
-							std::snprintf(s_folderName, sizeof(s_folderName), "%s", r.name.c_str());
-							s_formError.clear();
-						}
-						// Visibility and last update on the right, where a long
-						// name does not push them out of sight.
-						const std::string meta = std::string(r.isPrivate ? "private  " : "public  ") +
-						                         r.updatedAt.substr(0, 10);
-						ImGui::SameLine(ImGui::GetContentRegionMax().x -
-						                ImGui::CalcTextSize(meta.c_str()).x);
-						ImGui::TextDisabled("%s", meta.c_str());
-						ImGui::PopID();
-					}
-					if (shown == 0) ImGui::TextDisabled("Nothing matches the search.");
-					ImGui::EndChild();
-					ImGui::EndDisabled();
+					std::snprintf(s_folderName, sizeof(s_folderName), "%s", chosen->name.c_str());
+					s_formError.clear();
 				}
-				for (const auto& r : repos)
-					if (r.fullName == s_selected) { chosen = &r; break; }
-			}
 
-			// ── 3. Where → clone ─────────────────────────────────────────────
-			if (chosen)
-			{
-				ImGui::Spacing();
-				ImGui::SeparatorText("Clone into");
-				if (chosen->defaultBranch.empty())
-					ImGui::TextDisabled("This repository has no commits yet, so there is no "
-					                    "project in it to open.");
-
-				ImGui::BeginDisabled(cloning);
-				ImGui::SetNextItemWidth(-80.0f);
-				ImGui::InputText("##cloneparent", s_parentDir, sizeof(s_parentDir));
-				ImGui::SameLine();
-				if (EditorWidgets::button("Browse##clone", ImVec2(72.0f, 0.0f)))
-					browseForParent(ctx);
-				ImGui::SetNextItemWidth(-80.0f);
-				ImGui::InputTextWithHint("##clonename", "Folder name",
-				                         s_folderName, sizeof(s_folderName));
-				ImGui::EndDisabled();
-
+				// ── 3. Where → clone ─────────────────────────────────────────
 				const fs::path target = fs::path(s_parentDir) / s_folderName;
-				ImGui::TextDisabled("%s", target.string().c_str());
-
-				ImGui::Spacing();
-				ImGui::BeginDisabled(cloning || s_parentDir[0] == '\0' || s_folderName[0] == '\0');
-				if (EditorWidgets::primaryButton("Clone", ImVec2(140.0f, 0.0f)))
+				const GitCloneView::TargetAction ta = GitCloneView::drawTarget(
+					s_parentDir, sizeof(s_parentDir), s_folderName, sizeof(s_folderName),
+					chosen != nullptr, cloning, chosen && chosen->defaultBranch.empty());
+				if (ta == GitCloneView::TargetAction::Browse)
+					browseForParent(ctx);
+				if (ta == GitCloneView::TargetAction::Clone && chosen)
 				{
 					s_formError.clear();
 					if (targetUsable(s_parentDir, s_folderName, s_formError))
@@ -452,7 +391,6 @@ void Draw(AppContext& ctx)
 						s_projectFile.clear();
 					}
 				}
-				ImGui::EndDisabled();
 				if (!s_formError.empty()) errorText(s_formError);
 			}
 
@@ -460,7 +398,7 @@ void Draw(AppContext& ctx)
 			if (s_cloneStarted && cloning)
 			{
 				ImGui::Spacing();
-				ImGui::TextColored(ImVec4(0.6f, 0.85f, 0.6f, 1.0f), "%s",
+				ImGui::TextColored(HE::Ed::Theme::Ok, "%s",
 				                   git->cloneInfo().empty() ? "Starting…"
 				                                            : git->cloneInfo().c_str());
 				ImGui::TextDisabled("A clone cannot be stopped once it has started. Large "
@@ -528,10 +466,9 @@ void Draw(AppContext& ctx)
 			}
 		}
 
-		ImGui::Spacing();
-		ImGui::Separator();
+		ImGui::Dummy(ImVec2(0.0f, 6.0f));
 		ImGui::BeginDisabled(git && git->cloneBusy());
-		if (ImGui::Button("Close")) close = true;
+		if (EditorWidgets::button("Close", ImVec2(100.0f, 0.0f))) close = true;
 		ImGui::EndDisabled();
 	}
 

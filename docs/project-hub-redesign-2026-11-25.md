@@ -25,6 +25,24 @@ cover-crops it to 16:9, box-filters it to 480×270 and writes
 flat frame (an application project has no world). `Saved/` is already in the `.gitignore`
 the editor writes (`RepoConfig::gitignoreText`), so the picture is not committed.
 
+## Clone from GitHub dialog
+
+Restyled in the same look (`GitCloneView.{h,cpp}`, the drawing half; `GitCloneDialog.cpp`
+keeps git, the sign-in and the result). It has a header with the amber line and the
+signed-in account as a card. The repositories are cards with an initial, owner, last
+update and a Private/Public pill. Rows have a constant height and are clipped. The list
+box has a fixed height in every state, so the dialog does not jump when the list arrives.
+The target form (folder name and location side by side) is drawn disabled until a repository
+is picked.
+
+There is no "Load my repositories" button any more. Signed in, the list loads on its own,
+once per dialog open and once per sign-in (`GitCloneView::shouldAutoLoad`, keyed on
+`GitHubSignIn::accountGeneration`). A failed load is not retried in a loop; "Refresh" asks
+again. The list is only shown while signed in, because the controller keeps the last account's
+list after a sign-out. Tests: the auto-load rule, a row click picks and names the
+folder, shots `clone_dialog_{loading,ready,picked,no_match}`. Not verified: a real
+GitHub listing in the GUI.
+
 ## Handoff
 
 - **Topic / step:** Project Hub redesign, single step (from a side session, not the Hive)

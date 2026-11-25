@@ -333,6 +333,7 @@ add_executable(HorizonEditor WIN32
 	ToolSetupDialog.cpp
 	GitMissingDialog.cpp
 	GitCloneDialog.cpp
+	GitCloneView.cpp
 	GitHubSignIn.cpp
 	GitHubSignInView.cpp
 	ProjectLaunchOpen.cpp

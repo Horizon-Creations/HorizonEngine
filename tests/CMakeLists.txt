@@ -1051,6 +1051,9 @@ add_executable(he_tests
     # macOS menu it calls are link stubs in the test (see there).
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/ProjectHubPanel.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/ProjectThumbnail.cpp
+    # The Clone from GitHub dialog's drawing half (GitCloneDialog keeps git and
+    # the sign-in), for the same file's shot. Guarded by __has_include(<imgui.h>).
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/GitCloneView.cpp
     # The texture colour-space dialog, for test_texture_colour_space_ui.cpp: same
     # AppContext, same per-file HE_IMGUI_ENABLED. It calls the importers
     # (HorizonImporters, linked below) and CollabController (already here).
