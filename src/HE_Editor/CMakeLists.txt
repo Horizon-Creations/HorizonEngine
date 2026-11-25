@@ -319,6 +319,8 @@ add_executable(HorizonEditor WIN32
 	ProjectHubPanel.cpp
 	ProjectThumbnail.cpp
 	ProjectPreflight.cpp
+	# A team project's newest version from the team server before it opens (the preflight's first step).
+	ProjectTeamGate.cpp
 	SceneDiskWatch.cpp
 	TutorialPanel.cpp
 	TutorialSteps.cpp

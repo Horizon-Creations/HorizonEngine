@@ -3778,10 +3778,17 @@ namespace
 	  "overwrites the file that came from disk with what is open here. Another "
 	  "change to the file on disk asks again.",
 	  "", "" },
+	{ "Project Hub/Try Again", "",
+	  "Asks the team server for the project's newest version again (and signs in again with the saved session if that had failed).",
+	  "", "" },
+	{ "Project Hub/Open Without Updating", "",
+	  "Opens the project as it is on this machine, without waiting for the team server. Your saves go to the team and the newest version comes once the sync gets through.",
+	  "", "" },
 	{ "Project Hub/Open Anyway", "",
-	  "Opens the project although some of the engine content it uses could not be "
-	  "downloaded. Materials and meshes that use the missing files look wrong until "
-	  "they arrive; the editor keeps trying to fetch them whenever something needs them.",
+	  "Opens the project although something could not be had first. Engine content that "
+	  "could not be downloaded: materials and meshes that use it look wrong until it "
+	  "arrives, the editor keeps trying. The team's newest version: you work on the copy "
+	  "on this machine, and it catches up once the team server is reachable.",
 	  "", "editor#project-hub" },
 	{ "Project Hub/Close Project", "",
 	  "Does not open the project and goes back to the Project Hub. Nothing was loaded, "

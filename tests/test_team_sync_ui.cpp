@@ -9,6 +9,7 @@
 #include "TeamController.h"
 #include "TeamSyncController.h"
 #include "TeamSyncView.h"
+#include "ProjectTeamGate.h"
 
 #include <HorizonScene/HorizonWorld.h>
 
@@ -407,4 +408,118 @@ TEST_CASE("Team sync UI: the switch - names for the server, Use the Team Server 
 	CHECK(TeamSyncView::controlRect("Switch to the Team Server").x1 <= 0);
 	CHECK(toTeam == 1);
 	team.signOut();
+}
+
+TEST_CASE("Team project open: the gate waits, opens once the team's version is here, and says why when it cannot")
+{
+	using ProjectTeamGate::State;
+	using TS = TeamController::Status;
+	ProjectTeamGate::Input in;
+	in.teamName = "studio";
+	in.projectName = "game";
+	in.startUnix = 1000;
+
+	in.team = TS::Connecting;
+	CHECK(ProjectTeamGate::evaluate(in).state == State::Waiting);
+	in.elapsedMs = ProjectTeamGate::kConnectTimeoutMs;
+	{
+		const auto r = ProjectTeamGate::evaluate(in);
+		CHECK(r.state == State::Failed);
+		CHECK(r.unreachable);
+		CHECK(r.headline == "The team server could not be reached.");
+	}
+	in.elapsedMs = 0;
+	in.team = TS::SignedOut;
+	CHECK(ProjectTeamGate::evaluate(in).headline == "Not signed in to team \"studio\".");
+	CHECK_FALSE(ProjectTeamGate::evaluate(in).unreachable);
+	in.team = TS::Failed;
+	in.teamError = "Could not open a connection to the team server at 10.0.0.1:7777.";
+	CHECK(ProjectTeamGate::evaluate(in).reason == in.teamError);
+
+	in.team = TS::SignedIn;
+	in.syncRunning = true;
+	in.sync.phase = HE::Sc::TeamSyncService::Phase::Connecting;
+	CHECK(ProjectTeamGate::evaluate(in).state == State::Waiting);
+	in.sync.phase = HE::Sc::TeamSyncService::Phase::Offline;
+	in.sync.error = "connection reset";
+	CHECK(ProjectTeamGate::evaluate(in).state == State::Failed);
+	CHECK(ProjectTeamGate::evaluate(in).headline == "The project could not be updated from the team server.");
+	in.sync.error.clear();
+	in.sync.phase = HE::Sc::TeamSyncService::Phase::Idle;
+	in.sync.connected = true;
+	in.sync.lastSyncUnix = 999;   // a sync from before this open does not count
+	CHECK(ProjectTeamGate::evaluate(in).state == State::Waiting);
+	in.sync.lastSyncUnix = 1000;
+	CHECK(ProjectTeamGate::evaluate(in).state == State::Ready);
+	in.sync.firstSyncDiffers = { "Content/door.txt" };
+	CHECK(ProjectTeamGate::evaluate(in).state == State::AskUser);
+	in.sync.firstSyncDiffers.clear();
+	in.sync.projectMissing = true;
+	CHECK(ProjectTeamGate::evaluate(in).state == State::Failed);   // not an admin: nobody here can create it
+	in.sync.isAdmin = true;
+	CHECK(ProjectTeamGate::evaluate(in).state == State::AskUser);
+	in.sync.projectMissing = false;
+	in.blocker = TeamSyncController::Blocker::OtherTeam;
+	CHECK(ProjectTeamGate::evaluate(in).headline == "Signed in to another team.");
+
+	// The dialogs, as the preflight shows them.
+	Harness h;
+	auto shotOf = [&](auto body, const char* file) {
+		he_ui::Image img;
+		for (int frame = 0; frame < 3; ++frame)
+		{
+			ImGui::NewFrame();
+			ImGui::SetNextWindowPos(ImVec2(20, 20));
+			ImGui::Begin("Opening", nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar);
+			body();
+			ImGui::End();
+			ImGui::Render();
+			img = he_ui::rasterize(ImGui::GetDrawData(), kW, kH);
+		}
+		dump(img, file);
+		CHECK(inkPixels(img) > 1000);
+	};
+	ProjectTeamGate::Result failed;
+	failed.state = State::Failed;
+	failed.headline = "The team server could not be reached.";
+	failed.reason = "Could not open a connection to the team server at 212.227.140.164:7777.";
+	shotOf([&] { ProjectTeamGate::drawFailed("Harbour", failed); }, "team-project-open-failed.bmp");
+	ProjectTeamGate::Result waiting;
+	waiting.stage = "Downloading 12 files";
+	shotOf([&] { ProjectTeamGate::drawWaiting("Harbour", waiting, nullptr); }, "team-project-open-waiting.bmp");
+}
+
+TEST_CASE("Team project open: a copy that is behind gets the team's newest version before it opens")
+{
+	FakeTeamServer server;
+	FakeScServer   sc(server);
+	Editor anna("Anna");
+	anna.put("Content/door.txt", "open\n");
+	REQUIRE(anna.team.signIn(addressOf(server), "studio", "Anna", "correct-horse"));
+	REQUIRE(pump(server, { &anna }, [&] { return anna.settled(0); }));
+	anna.sync.syncNow();
+	REQUIRE(pump(server, { &anna }, [&] { return anna.settled(1); }));
+
+	// Bob's machine has never had the project: the folder is empty when he opens it.
+	Editor bob("Bob");
+	const std::int64_t startUnix = static_cast<std::int64_t>(std::chrono::duration_cast<std::chrono::seconds>(
+		std::chrono::system_clock::now().time_since_epoch()).count());
+	const std::uint64_t start = steadyMs();
+	REQUIRE(bob.team.signIn(addressOf(server), "studio", "Bob", "correct-horse"));
+	ProjectTeamGate::Result r;
+	REQUIRE(pump(server, { &anna, &bob }, [&] {
+		ProjectTeamGate::Input in;
+		in.team        = bob.team.status();
+		in.teamName    = "studio";
+		in.projectName = "game";
+		in.blocker     = bob.sync.blocker();
+		in.syncRunning = bob.sync.running();
+		in.sync        = bob.sync.service().status();
+		in.elapsedMs   = steadyMs() - start;
+		in.startUnix   = startUnix;
+		r = ProjectTeamGate::evaluate(in);
+		return r.state != ProjectTeamGate::State::Waiting;
+	}));
+	CHECK(r.state == ProjectTeamGate::State::Ready);
+	CHECK(bob.file("Content/door.txt") == "open\n");   // on disk before anything loads it
 }

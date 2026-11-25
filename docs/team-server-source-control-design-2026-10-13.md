@@ -739,3 +739,28 @@ team-mode gate in `GitController` exist only there.
 - **Not verified:** the panel itself (SourceControlPanel.cpp is not in he_tests): the real switch in
   the editor, the first sync right after it with a real server.
 - **Open from the list above:** backup UI, ProjectSettings lost-update gap, encryption (#1326).
+
+## Handoff (team project: newest version before it opens, 2026-11-25)
+
+- **Done:** opening a project whose `Config/ProjectSettings.json` says `sourceControl.mode = "teamServer"`
+  (Hub, last project at start, launch argument, project switch) first gets the team's newest version,
+  before the engine-content check and before the load, the way the preflight already fetches engine
+  content.
+  - `ProjectPreflight` phase `Team`: hands the not-yet-open project to `TeamSyncController` (via
+    `ProjectPreflight::teamProject`, read in `EditorApplication` where the sync is pumped); files it
+    writes need no reload. The project stays with the sync until `openNow`, so it is not restarted.
+  - `ProjectTeamGate::evaluate` (pure, tested): Waiting (signing in, connecting, downloading),
+    AskUser (first sync that differs; admin and project missing: the team view's own buttons inside
+    the dialog), Ready (connected, idle, a sync finished since the open started), Failed (team
+    sign-in failed, not signed in, other team, project missing for a non-admin, sync offline, no link
+    within 20 s; a download under way is never cut short).
+  - Dialogs (`ProjectTeamGate::drawWaiting` / `drawFailed`): "Getting the newest version from the
+    team server" with **Open Without Updating** / **Cancel**; on failure "could not be updated" with
+    the reason and **Try Again** (re-signs in with the saved session if needed) / **Open Anyway** /
+    **Close Project**.
+- **Verified:** he_tests 345/345 (incl. gate cases, an empty copy that gets the file from the fake
+  server before anything loads, dialog shots `team-project-open-{failed,waiting}.bmp` looked at),
+  help audit rc 0, HorizonEditor builds.
+- **Not verified:** the real editor (Hub open, startup with a saved session, switching projects with
+  dirty tabs of the old one: its keep-local rule is consulted for the new project's paths during
+  the gate).

@@ -5230,8 +5230,11 @@ void EditorApplication::OnRender(float dt)
 			project.teamServer = sc.teamServer();
 			project.team       = sc.team;
 			project.project    = sc.project;
+			// A project about to open gets the team's newest version first (ProjectPreflight):
+			// the sync works on its folder, and what it writes needs no reload (nothing is open).
+			const bool preflight = ProjectPreflight::teamProject(project);
 			for (const std::string& rel : m_teamSync.update(nowMs, project, m_isPlaying))
-				applyTeamSyncFile(rel);
+				if (!preflight) applyTeamSyncFile(rel);
 		}
 
 		// ── The MCP bridge ────────────────────────────────────────────────

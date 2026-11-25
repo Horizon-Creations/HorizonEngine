@@ -1,4 +1,6 @@
 #pragma once
+#include "TeamSyncController.h"
+
 #include <string>
 
 struct AppContext;
@@ -25,6 +27,12 @@ struct AppContext;
 // The walk itself is HE::EngineDeps::resolve (HE_Core, no network of its own); this file
 // is the sign-in, the progress and the question.
 //
+// A project whose history the team server keeps (Config/ProjectSettings.json,
+// sourceControl.mode = "teamServer") gets the team's newest version first, before the
+// engine-content check and before it loads (ProjectTeamGate.h). If that cannot be had —
+// the server does not answer, not signed in, the project is not there — the user is
+// asked: Try Again, Open Anyway (the copy on this machine), Close Project.
+//
 // HE_SKIP_PROJECT_PREFLIGHT=1 opens projects the old way (CI, image tests).
 namespace ProjectPreflight
 {
@@ -45,4 +53,9 @@ namespace ProjectPreflight
 
 	// Stops a running check and joins its worker (editor shutdown).
 	void shutdown();
+
+	// While the team server is asked for a project's newest version, the project the team
+	// sync works on (not loaded yet). The editor hands this to TeamSyncController instead
+	// of the open project's; the files it writes need no reload, nothing of them is open.
+	bool teamProject(TeamSyncController::Project& out);
 }

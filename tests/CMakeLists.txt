@@ -857,6 +857,8 @@ add_executable(he_tests
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/TeamView.cpp
     # The Source Control window's team-sync view, for test_team_sync_ui.cpp.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/TeamSyncView.cpp
+    # Opening a team project: the team server's newest version first (ProjectTeamGate).
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/ProjectTeamGate.cpp
     # The console's buffer, sink and drawing — everything except the window and
     # the lookups that need the editor (ConsolePanel.cpp). ImGui plus
     # EditorWidgets, so the ui shots can draw the real panel.
