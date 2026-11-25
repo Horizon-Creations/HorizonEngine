@@ -3,12 +3,11 @@
 Zwei Editor-Fehler, eine gemeinsame Ursache: die Live-Vorschau eines App-Projekts
 (GameInstance-Runtime, ihre Widgets, Timer und Sounds) hatte kein „Ende".
 
-## Offene Entscheidung (User)
+## Entscheidung des Users (25.11.2026)
 
-Bug 2 ist eine Verhaltensfrage, die Startsitzung hat nicht geantwortet; umgesetzt ist die
-Vorgabe: Nach jeder Änderung (auch jedem Speichern eines Widgets/einer Klasse) ist die
-App-Vorschau **still**, bis man „Restart Live Preview" drückt oder die Vorschau selbst etwas
-abspielt. Alternative: Musik läuft über Edit-Neustarts weiter, nur neue Starts werden unterdrückt.
+„Musik sollte nicht im Preview abgespielt werden": Die Live-Vorschau einer App spielt **gar
+keinen** Script-Sound, weder beim ersten Start noch nach einer Änderung, auch keine kurzen
+UI-Klicks. Ob kurze UI-Sounds doch spielen sollen, ist mit dem User noch zu klären.
 
 ## Ursachen (Zeilen: Stand vor dem Fix, `639beb3f4`)
 
@@ -40,12 +39,10 @@ abspielt. Alternative: Musik läuft über Edit-Neustarts weiter, nur neue Starts
 * `uiLive` und der Vorschau-Start in `OnRender` verlangen `m_projectLoaded`: ein
   fehlgeschlagener Wechsel lässt das alte Projekt im ProjectManager stehen.
 * `HE::api::audio::setPlaybackHeld` (`EngineApi.h/.cpp`): solange gehalten, starten
-  `play`/`playAt` nichts. `restartAppPreview(keepState=true)` (jeder Edit-Neustart)
-  hält es um `fireInit`. „Restart Live Preview" (keepState=false) und alles, was die
-  laufende Vorschau später tut (Button-Klick), spielt normal. Folge: nach einem Edit
-  ist die Vorschau still, bis man sie neu startet. **Grenze:** gehalten wird nur, was
-  OnInit synchron startet; ein Play Sound hinter Delay/Timer in OnInit spielt weiter
-  bei jedem Edit (`shortcut:`-Kommentar in `restartAppPreview`).
+  `play`/`playAt` nichts. `OnRender` setzt es jeden Frame auf `uiLive && !m_isPlaying`,
+  also für die ganze App-Vorschau, vor deren Start und Neustart; im Hub, in Spielprojekten
+  und im Play-Modus ist es offen. Auditions (Audio Editor) und die Wetter-Betten gehen direkt
+  an die Engine und sind nicht betroffen, das exportierte Programm ebenso wenig.
 
 ## Verifiziert
 
@@ -56,7 +53,9 @@ abspielt. Alternative: Musik läuft über Edit-Neustarts weiter, nur neue Starts
   (arbeitet auf einer Kopie; 4× PASS, auch „OnShutdown vor dem Leeren der Welt"). Neue
   Schalter `HE_CLOSE_PROJECT_AT_FRAME` / `HE_REOPEN_PROJECT_AT_FRAME` (`docs/headless-runs.md`,
   hinter `HE_FEATURE_TEST_HOOKS`). Zeuge = `Audio engine shutting down (N active voice(s))`
-  + `Started ... sound`. Gegenprobe mit ausgeschaltetem Fix (einmal von Hand gebaut):
+  + `Started ... sound`. Gegenprobe mit ausgeschaltetem Fix (einmal von Hand gebaut, Stand
+  vor der stummen Vorschau; seitdem startet die Vorschau gar keinen Sound, und Bug 1 wird
+  über die Reihenfolge von OnShutdown und das Wiederöffnen belegt):
 
   | Lauf | ohne Fix | mit Fix |
   |---|---|---|
@@ -75,6 +74,6 @@ abspielt. Alternative: Musik läuft über Edit-Neustarts weiter, nur neue Starts
 
 Nächste Schritte: (1) Tamagochi `GameInstance.hcode` speichert `pitch` 0.0 am Play-Sound-Knoten
 (vor dem Default-Fix gespeichert); `Started ... pitch 0.00` im Log. Klären, ob Pitch 0 stumm ist
-und alte Graphen migriert werden sollen. (2) Falls gewünscht: Musik über Edit-Neustarts
-weiterlaufen lassen statt still (Variante „Zustand erhalten"), dann `stopAll` im Edit-Neustart
-durch ein Behalten der Vorschau-Stimmen ersetzen.
+und alte Graphen migriert werden sollen. (2) Mit dem User klären, ob kurze UI-Sounds (Klicks)
+in der Vorschau doch spielen sollen; dann das Tor nach Loop/Länge unterscheiden statt pauschal.
+(3) Optional ein Schalter „Vorschau-Ton" im Viewport, falls man die App doch hören will.

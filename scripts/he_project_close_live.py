@@ -2,16 +2,17 @@
 """he_project_close_live — closing a project stops what it ran; a pin edit plays no sound.
 
 Drives the deployed HorizonEditor hidden on a COPY of an application project whose
-GameInstance OnInit plays a looping sound (Tamagochi is one). Three runs, the
-witness is the Audio trace (HE_LOG=Audio=Trace) and the shutdown line
+GameInstance OnInit plays a looping sound (Tamagochi is one). The live preview
+plays no sound at all. Three runs, the witness is the Audio trace
+(HE_LOG=Audio=Trace, "Started ... sound") and the shutdown line
 "Audio engine shutting down (N active voice(s), ...)":
 
   close   HE_CLOSE_PROJECT_AT_FRAME: File > Close Project at frame 200, leave at 400.
-          The preview's OnShutdown runs before the world is cleared, 0 voices at exit.
-  reopen  ...and HE_REOPEN_PROJECT_AT_FRAME=300: the preview starts again, 1 voice.
+          The preview's OnShutdown runs before the world is cleared; no sound.
+  reopen  ...and HE_REOPEN_PROJECT_AT_FRAME=300: the preview starts again; no sound.
   pin     Remote Control (MCP) hc_set_pin_default on the GameInstance's audio.play
           node: clear the asset, then set it back. Each is a commit that rebuilds
-          the preview; neither may start a sound, 0 voices at exit.
+          the preview; no sound.
 
   he_project_close_live.py <project.heproj> [--editor-dir out/deploy/Editor] [--out DIR]
 
@@ -91,17 +92,19 @@ def check(name, cond, detail):
 
 t = run("close", {"HE_CLOSE_PROJECT_AT_FRAME": "200", "HE_EXIT_AFTER_FRAMES": "400"})
 shut, clear = t.find("GameInstance OnShutdown"), t.find("Clearing world", t.find("starting the live preview"))
-check("close: no voice survives", voices(t) == 0, "voices=%s" % voices(t))
+check("close: no voice survives", voices(t) == 0 and t.count("Started 2D") == 0,
+      "voices=%s sounds started=%d" % (voices(t), t.count("Started 2D")))
 check("close: OnShutdown before the world goes", 0 <= shut < clear, "at %d, world cleared at %d" % (shut, clear))
 
 t = run("reopen", {"HE_CLOSE_PROJECT_AT_FRAME": "200", "HE_REOPEN_PROJECT_AT_FRAME": "300",
                    "HE_EXIT_AFTER_FRAMES": "500"})
 starts = t.count("starting the live preview")
-check("reopen: the preview starts again", starts == 2 and voices(t) == 1, "starts=%d voices=%s" % (starts, voices(t)))
+check("reopen: the preview starts again, silent", starts == 2 and voices(t) == 0,
+      "starts=%d voices=%s" % (starts, voices(t)))
 
 t = run("pin", {"HE_EXIT_AFTER_FRAMES": "4000"}, during=pin_edits)
 restarts, sounds = t.count("live preview restarted"), t.count("Started 2D")
-check("pin: an edit plays nothing", restarts == 2 and sounds == 1 and voices(t) == 0,
+check("pin: an edit plays nothing", restarts == 2 and sounds == 0 and voices(t) == 0,
       "restarts=%d sounds started=%d voices=%s" % (restarts, sounds, voices(t)))
 
 print("logs in", out)

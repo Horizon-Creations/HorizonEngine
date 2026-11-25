@@ -3294,6 +3294,13 @@ void EditorApplication::OnRender(float dt)
 	// Deliberately not "simulating || app": for a game nothing changes at all,
 	// and for an app there is no second state that could disagree with this one.
 	const bool uiLive = simulating || (m_projectLoaded && m_projectManager.currentProject().appProject);
+	// The live preview of an application plays no sound (the user's decision,
+	// 25.11.2026): the preview runs without anyone asking for it, and every edit
+	// rebuilds it, so a Play Sound in OnInit would play on every keystroke. Set
+	// before the preview start and restart below, so OnInit is held too. The
+	// packaged app and a game's Play session are untouched; auditions and the
+	// weather beds go to the engine directly and are not script sounds.
+	HE::api::audio::setPlaybackHeld(uiLive && !m_isPlaying);
 
 	// ── The multiplayer session, on `m_isPlaying` and NOT on `simulating` ────
 	// Before everything that reads world state (plan §5.2), and deliberately
@@ -16470,16 +16477,8 @@ void EditorApplication::restartAppPreview(bool keepState)
 	// one: the edit that triggered this restart may BE a GameInstance edit, and
 	// setGraph is also what resets its variables to their authored defaults.
 	m_gameInstance.setGraph(HorizonCode::toJson(m_gameInstanceGraph));
-	// A rebuild an EDIT caused starts no sound: picking the clip on a Play Sound
-	// node in OnInit is a commit, and a commit is not the author asking to hear
-	// it. The toolbar's Restart Live Preview (keepState false) and anything the
-	// running preview does afterwards play as usual.
-	// shortcut: holds only what OnInit starts synchronously; a Play Sound behind a
-	// Delay or timer in OnInit still plays after an edit. Upgrade to a hold that
-	// lasts until the first input if that turns up.
-	HE::api::audio::setPlaybackHeld(keepState);
+	// Silent: OnRender holds script playback for the whole preview.
 	m_gameInstance.fireInit();
-	HE::api::audio::setPlaybackHeld(false);
 
 	// …and back on, AFTER OnInit has built the new widgets. Anything the edit
 	// removed or restructured finds no home and keeps the authored value.

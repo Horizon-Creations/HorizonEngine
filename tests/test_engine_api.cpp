@@ -2019,9 +2019,9 @@ TEST_CASE("Audio: null-tolerant without an engine; headless engine answers queri
 
 TEST_CASE("Audio: a held playback gate starts nothing; released, the same call plays")
 {
-    // The editor holds it around a live-preview rebuild an edit caused, so
-    // picking the clip on a Play Sound node does not play it (EditorApplication::
-    // restartAppPreview). A real clip, so the 0 can only come from the gate.
+    // The editor holds it while an application's live preview runs, so the
+    // preview plays no sound (EditorApplication::OnRender). A real clip, so the
+    // 0 can only come from the gate.
     ContentManager cm;
     cm.setEngineContentRoot((std::filesystem::path(HE_EDITOR_DEPS_DIR) / "EngineContent").string());
     AudioEngine engine;

@@ -1640,8 +1640,8 @@ namespace audio {
     void setBusVolume(Ctx&, const std::string& bus, float volume);
     void setSoundPosition(Ctx&, int handle, const glm::vec3& pos); // move a spatial sound
     // While held, play()/playAt() start nothing and return 0. The editor holds
-    // it around a live-preview rebuild that an EDIT caused: picking the clip on
-    // a Play Sound node re-runs OnInit, and that must not be what plays it.
+    // it for as long as an application's live preview runs: the preview plays
+    // no sound (every edit re-runs its OnInit).
     void setPlaybackHeld(bool held);
 
     // ── Per-instance transport, on the handle play()/playAt() returned ────────
