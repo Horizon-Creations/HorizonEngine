@@ -584,6 +584,20 @@ void EditorUI::flushGraphViews(AppContext& ctx, bool write)
 		ctx.globalState->writeConfig();
 }
 
+#ifdef HE_IMGUI_ENABLED
+// The close/reopen witness (HE_CLOSE_PROJECT_AT_FRAME, HE_REOPEN_PROJECT_AT_FRAME):
+// each fires once, on its UI frame. The project it closed is remembered for the
+// reopen, which goes through ProjectPreflight like the Hub's own Open.
+static std::string s_witnessClosedProject;
+static bool witnessFrameDue(const char* var)
+{
+	const char* v = std::getenv(var);
+	return v && *v && ImGui::GetFrameCount() == std::atoi(v);
+}
+static bool closeProjectWitnessDue()  { return witnessFrameDue("HE_CLOSE_PROJECT_AT_FRAME"); }
+static bool reopenProjectWitnessDue() { return witnessFrameDue("HE_REOPEN_PROJECT_AT_FRAME"); }
+#endif
+
 void EditorUI::render(AppContext& ctx, float dt)
 {
 #ifdef HE_IMGUI_ENABLED
@@ -890,6 +904,8 @@ void EditorUI::render(AppContext& ctx, float dt)
     else
     {
         ProjectHubPanel::render(ctx);
+        if (reopenProjectWitnessDue() && !s_witnessClosedProject.empty())
+            ProjectPreflight::request(ctx, s_witnessClosedProject);
         // Restart to Update with no project open: nothing unsaved to ask about,
         // so no guard. Not while a project is being opened — the request then
         // waits and is taken by renderEditor's guarded path once it is loaded.
@@ -1277,6 +1293,9 @@ void EditorUI::endProjectSession(AppContext& ctx)
 	// the peer as OUR deletion, and they would lose their level script.
 	if (ctx.collab && ctx.collab->inSession()) ctx.collab->leave();
 
+	// The Hub's picture of this project, before anything below changes the view.
+	if (ctx.captureProjectThumbnail) ctx.captureProjectThumbnail();
+
 	// Both the open tabs and the panels whose tab was already closed while
 	// dirty — the second set has no tab to walk to.
 	std::vector<std::string> paths = unsavedAssetPaths();
@@ -1293,9 +1312,6 @@ void EditorUI::endProjectSession(AppContext& ctx)
 	// Every tab that belongs to a document goes — asset tabs AND the virtual
 	// ones (Level Script, Game Instance, Settings), which are just as much the
 	// old project's. The Viewport is the session's own and stays; it is also the
-	// The Hub's picture of this project, before anything below changes the view.
-	if (ctx.captureProjectThumbnail) ctx.captureProjectThumbnail();
-
 	// tab EditorApplication::restoreOpenTabs only re-creates when it has a saved
 	// list to restore, so clearing outright would leave a project with no
 	// remembered tabs showing no tabs at all.
@@ -1306,6 +1322,10 @@ void EditorUI::endProjectSession(AppContext& ctx)
 	// The world last: it drops the scene, the selection and the undo history,
 	// and it is what a panel above might still have been reading.
 	if (ctx.newScene) ctx.newScene();
+	// …and what the project left running beyond the world (its app preview, the
+	// preview's sounds and timers, the source-control worker). After newScene,
+	// which has already ended play mode.
+	if (ctx.endProjectRuntime) ctx.endProjectRuntime();
 	ctx.contentRefreshPending = true;
 }
 
@@ -1762,6 +1782,10 @@ static void drawNewProjectPopup(AppContext& ctx)
             else
             {
                 std::filesystem::path projRoot = std::filesystem::path(dir) / name;
+                // File ▸ New Project with a project open is a switch: the old
+                // session ends first, as ProjectPreflight::openNow does for one.
+                const bool switching = ctx.projectLoaded;
+                if (switching) EditorUI::endProjectSession(ctx);
                 bool ok = ctx.projectManager->createNewProject(
                     projRoot.string(), name,
                     static_cast<ProjectPreset>(ctx.hubSelectedPreset),
@@ -1783,6 +1807,7 @@ static void drawNewProjectPopup(AppContext& ctx)
                 }
                 else
                 {
+                    if (switching) ctx.projectLoaded = false;   // the old one is gone
                     HE::Ed::notify(HE::Ed::NoteLevel::Important, "Could not create the project",
                            "Check that the folder exists and is writable.");
                 }
@@ -2711,6 +2736,15 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 	{
 		ctx.exitRequested = false;
 		requestGuarded(GuardedAction::Quit);
+	}
+
+	// HE_CLOSE_PROJECT_AT_FRAME=N: File ▸ Close Project at UI frame N, through the
+	// same guarded request, for the headless witness that a close stops what the
+	// project ran (docs/headless-runs.md). The Hub reopens it: see render().
+	if (closeProjectWitnessDue() && ctx.projectManager)
+	{
+		s_witnessClosedProject = ctx.projectManager->currentProject().path;
+		requestGuarded(GuardedAction::CloseProject);
 	}
 
 	// Help ▸ Check for Updates ▸ Restart to Update: through the same door as

@@ -286,6 +286,7 @@ struct AppContext
 	std::function<void(const std::string&)> openScene;          // load .hescene, replacing the world
 	std::function<void(const std::string&)> openSceneAdditive; // merge .hescene into the existing world
 	std::function<void()>                    newScene;        // clear to an empty scene
+	std::function<void()>                    endProjectRuntime; // EditorApplication::endProjectRuntime
 
 	// ── Crash recovery ─────────────────────────────────────────────────────
 	// A recovery snapshot an earlier session of this project left behind
@@ -1166,6 +1167,14 @@ private:
 	// application project. keepState carries what the widgets were holding across
 	// the rebuild (docs/he-apps-plan.md E4, Stufe 3).
 	void restartAppPreview(bool keepState);
+	// The down half of the above: OnShutdown, widgets, timers, and the sounds the
+	// preview started. Shared with endProjectRuntime.
+	void stopAppPreview();
+	// Everything the closed project left running beyond its world: the app preview,
+	// its sounds and timers, the source-control worker on its repository. Reached
+	// through AppContext::endProjectRuntime from EditorUI::endProjectSession, the
+	// one funnel for Close Project and every project switch.
+	void endProjectRuntime();
 	// Transport pause + single step. The pause GATES THE WORLD TICK; it must never
 	// write time::setTimeScale, because that knob belongs to the game — a title
 	// with its own pause menu sets it itself, and two owners of one variable fight
@@ -1221,6 +1230,7 @@ private:
 	// tile. A scene has nothing to render a preview FROM, so its picture is
 	// taken at save time instead of generated on demand.
 	void captureSceneThumbnail(const std::string& scenePath);
+	void captureProjectThumbnail();
 	bool openScene(const std::string& path);
 	void openSceneAdditive(const std::string& path);
 	void newScene();
@@ -1230,7 +1240,6 @@ private:
 	// levelScriptKeyForUuid(sceneUuidForPath)), so the Watch window and the
 	// trace name the level the way the export does. Empty for an unsaved
 	// scene or one outside the project — the world then falls back to
-	void captureProjectThumbnail();
 	// HorizonWorld::kUnkeyedLevelScript.
 	std::string levelScriptKeyForCurrentScene();
 	// Bring every placed prefab in the editor world up to date with its asset

@@ -3290,7 +3290,7 @@ void EditorApplication::OnRender(float dt)
 	//
 	// Deliberately not "simulating || app": for a game nothing changes at all,
 	// and for an app there is no second state that could disagree with this one.
-	const bool uiLive = simulating || m_projectManager.currentProject().appProject;
+	const bool uiLive = simulating || (m_projectLoaded && m_projectManager.currentProject().appProject);
 
 	// ── The multiplayer session, on `m_isPlaying` and NOT on `simulating` ────
 	// Before everything that reads world state (plan §5.2), and deliberately
@@ -3313,7 +3313,9 @@ void EditorApplication::OnRender(float dt)
 	// project whose UI has not been started yet fires the GameInstance's OnInit —
 	// which is what creates the root widget. Keyed by project path so opening a
 	// different project starts that one instead of assuming one ever runs.
-	if (m_editorWorld && m_projectManager.currentProject().appProject &&
+	// m_projectLoaded too: a switch whose load failed leaves the old project in
+	// the ProjectManager after endProjectSession has stopped its preview.
+	if (m_projectLoaded && m_editorWorld && m_projectManager.currentProject().appProject &&
 	    m_appUiStartedFor != m_projectManager.currentProject().path)
 	{
 		m_appUiStartedFor = m_projectManager.currentProject().path;
@@ -15343,9 +15345,9 @@ AppContext EditorApplication::makeContext()
 	return AppContext{
 		.imguiReady          = m_imguiReady,
 		.quit                = [this]{ m_quitConfirmed = true; Quit(); },
+		.captureProjectThumbnail = [this]{ captureProjectThumbnail(); },
 		.toggleProfilerCapture = [this]{ toggleProfilerCapture(); },
 		.setVSync              = [this](bool v){ setVSync(v); m_vsync = v; },
-		.captureProjectThumbnail = [this]{ captureProjectThumbnail(); },
 		.setMaxFps             = [this](float f){ setMaxFps(f); m_editorConfig.MaxFps = f; },
 		.editorConfig        = m_editorConfig,
 		.vsync               = m_vsync,
@@ -15502,6 +15504,7 @@ AppContext EditorApplication::makeContext()
 		.openScene           = [this](const std::string& p){ openScene(p); },
 		.openSceneAdditive   = [this](const std::string& p){ openSceneAdditive(p); },
 		.newScene            = [this]{ newScene(); },
+		.endProjectRuntime   = [this]{ endProjectRuntime(); },
 		.recoveryOffer       = m_recoveryOffer ? &*m_recoveryOffer : nullptr,
 		.restoreRecovery     = [this]{
 			const bool ok = restoreRecoveredScene();
@@ -16458,23 +16461,19 @@ void EditorApplication::restartAppPreview(bool keepState)
 	WidgetManager::StateSnapshot snapshot;
 	if (keepState) snapshot = m_editorWorld->widgets().captureState();
 
-	// A run stopped at a breakpoint belongs to the preview that is going down.
-	m_gameInstance.runtime().debugAbort();
-	HcExecTrace::clearPaused();
-	// Down in the reverse order it came up. fireShutdown before the widgets go,
-	// so a graph's OnShutdown still finds the things it is about to let go of.
-	m_gameInstance.fireShutdown();
-	m_editorWorld->widgets().clear();
-	// The timers the old OnInit started die with it: now that the preview
-	// dispatches them (TimerSystem in the frame), a timer.every left standing
-	// would fire into the restarted graph as a handle it never issued.
-	HE::api::timer::cancelAll();
+	stopAppPreview();
 
 	// Re-register the graph rather than assuming the host still holds the right
 	// one: the edit that triggered this restart may BE a GameInstance edit, and
 	// setGraph is also what resets its variables to their authored defaults.
 	m_gameInstance.setGraph(HorizonCode::toJson(m_gameInstanceGraph));
+	// A rebuild an EDIT caused starts no sound: picking the clip on a Play Sound
+	// node in OnInit is a commit, and a commit is not the author asking to hear
+	// it. The toolbar's Restart Live Preview (keepState false) and anything the
+	// running preview does afterwards play as usual.
+	HE::api::audio::setPlaybackHeld(keepState);
 	m_gameInstance.fireInit();
+	HE::api::audio::setPlaybackHeld(false);
 
 	// …and back on, AFTER OnInit has built the new widgets. Anything the edit
 	// removed or restructured finds no home and keeps the authored value.
@@ -16492,6 +16491,51 @@ void EditorApplication::restartAppPreview(bool keepState)
 		               "Text, scroll positions and selections are back to what the assets "
 		               "were authored with. Elements that were deleted or retyped cannot "
 		               "be matched up again.");
+}
+
+void EditorApplication::stopAppPreview()
+{
+	// A run stopped at a breakpoint belongs to the preview that is going down.
+	m_gameInstance.runtime().debugAbort();
+	HcExecTrace::clearPaused();
+	// Down in the reverse order it came up. fireShutdown before the widgets go,
+	// so a graph's OnShutdown still finds the things it is about to let go of.
+	m_gameInstance.fireShutdown();
+	if (m_editorWorld) m_editorWorld->widgets().clear();
+	// The timers the old OnInit started die with it: now that the preview
+	// dispatches them (TimerSystem in the frame), a timer.every left standing
+	// would fire into the restarted graph as a handle it never issued.
+	HE::api::timer::cancelAll();
+	// So do its sounds. A looping Play Sound in OnInit otherwise kept playing
+	// through every rebuild (one more copy each time) and through Close Project
+	// into the Hub. All of them, as leaving play mode does: the engine does not
+	// know which voice a graph started.
+	WeatherAudio::stop(m_weatherAudio, m_audioEngine);
+	m_audioEngine.stopAll();
+}
+
+void EditorApplication::endProjectRuntime()
+{
+	// Only a preview that was started is stopped: a game project's GameInstance
+	// has had no OnInit outside play (newScene, just before this, ended play),
+	// and an OnShutdown without one is a lie to the graph.
+	if (!m_appUiStartedFor.empty()) stopAppPreview();
+	// Cleared, so opening the SAME application project again starts its preview
+	// again; it stayed keyed to that path and the reopened app showed nothing.
+	m_appUiStartedFor.clear();
+	m_appPreviewRestartPending = false;
+	HE::api::timer::cancelAll();
+	// Edit-mode sounds (the weather beds, an audition) are the project's too.
+	WeatherAudio::stop(m_weatherAudio, m_audioEngine);
+	m_audioEngine.stopAll();
+	// The old graph is no longer registered as "the" GameInstance; the next
+	// project's onProjectLoaded registers its own.
+	m_gameInstanceGraph = HorizonCode::Graph{};
+	m_gameInstance.setGraph(HorizonCode::toJson(m_gameInstanceGraph));
+	// The source-control worker kept polling (and fetching) the closed project's
+	// repository behind the Hub: only a switch reached GitController::openProject,
+	// which closes the old one first. Close Project never closed it.
+	m_git.closeProject();
 }
 
 std::string EditorApplication::gameInstancePath()
@@ -17165,6 +17209,22 @@ void EditorApplication::captureSceneThumbnail(const std::string& scenePath)
 	AssetThumbnailCache::storeCapture(scenePath, rgba, w, h);
 }
 
+// The project's Project Hub card: the viewport as it was when the project was
+// closed or the editor quit (EditorUI::endProjectSession, OnShutdown). Unlike
+// the scene tile, Play counts — what the user last looked at is the point.
+void EditorApplication::captureProjectThumbnail()
+{
+	IRenderer* r = renderer();
+	const std::string& project = m_projectManager.currentProject().path;
+	// A headless dump builds its own witness scene; that is not this project's picture.
+	if (!r || project.empty() || !m_dumpPath.empty()) return;
+	std::vector<uint8_t> rgba;
+	uint32_t w = 0, h = 0;
+	if (r->CaptureViewport(rgba, w, h) && ProjectThumbnail::save(project, rgba, w, h))
+		HE_LOG_INFO(Editor, "%s", ("EditorApplication: project thumbnail saved ("
+			+ ProjectThumbnail::fileFor(project).string() + ")").c_str());
+}
+
 void EditorApplication::pushEnvironment(float dt)
 {
 	if (!renderer() || !m_editorWorld) return;
@@ -17209,22 +17269,6 @@ void EditorApplication::warmupWorldMaterials(bool waitForBuilds)
 	                              HE::kEditorIconDirectionalLightMaterialId, HE::kEditorIconCameraMaterialId,
 	                              HE::kEditorIconAudioSourceMaterialId })
 		ids.push_back(icon);
-// The project's Project Hub card: the viewport as it was when the project was
-// closed or the editor quit (EditorUI::endProjectSession, OnShutdown). Unlike
-// the scene tile, Play counts — what the user last looked at is the point.
-void EditorApplication::captureProjectThumbnail()
-{
-	IRenderer* r = renderer();
-	const std::string& project = m_projectManager.currentProject().path;
-	// A headless dump builds its own witness scene; that is not this project's picture.
-	if (!r || project.empty() || !m_dumpPath.empty()) return;
-	std::vector<uint8_t> rgba;
-	uint32_t w = 0, h = 0;
-	if (r->CaptureViewport(rgba, w, h) && ProjectThumbnail::save(project, rgba, w, h))
-		HE_LOG_INFO(Editor, "%s", ("EditorApplication: project thumbnail saved ("
-			+ ProjectThumbnail::fileFor(project).string() + ")").c_str());
-}
-
 	renderer()->WarmupMaterials(ids);
 	// HE_SHADER_BUILD_NOWAIT=1 opens the window without waiting: the scene then fills in
 	// as its pipelines land, which is what a scene opened mid-session does.
@@ -17485,6 +17529,8 @@ bool EditorApplication::reloadGameLogic()
 
 void EditorApplication::OnShutdown()
 {
+	// First, while the viewport still holds the last frame the user saw.
+	captureProjectThumbnail();
 	// The virtual texture driver gives its pool back to the renderer, so it must go while the renderer still exists: left to
 	// the destructor it would call into a renderer that has been shut down and crash on the way out.
 	m_rvtLandscape.reset();
@@ -17529,8 +17575,6 @@ void EditorApplication::OnShutdown()
 	// teardown below rather than after it.
 	m_mcp->stop();
 
-	// First, while the viewport still holds the last frame the user saw.
-	captureProjectThumbnail();
 	// A project export may still be packing on its worker thread — wait for it
 	// (destroying a joinable std::thread would terminate the process). Same rule
 	// for the game-logic compile, which is a second worker on the same window.
@@ -17704,6 +17748,7 @@ void EditorApplication::OnShutdown()
 		renderer()->DestroyImGuiTexture(reinterpret_cast<void*>(static_cast<uintptr_t>(m_logoTexture)));
 		m_logoTexture = 0;
 	}
+	ProjectHubPanel::releaseTextures(renderer());   // the recent-project cards' pictures
 	// Same for the Content Browser's rendered asset tiles — they are renderer-owned
 	// textures, so they have to go while the renderer is still alive. The
 	// collaboration avatars are uploaded the same way and go with them.
@@ -17748,7 +17793,6 @@ void EditorApplication::writeEditorConfig()
 	// Persist the last editor camera view so it is restored next launch. Only when the
 	// camera was actually used this session (otherwise keep any previously-saved view).
 	if (m_editorCamera.initialised())
-	ProjectHubPanel::releaseTextures(renderer());   // the recent-project cards' pictures
 	{
 		globalstate.setCustomConfigEntry("EditorCamPosX",  m_editorCamera.position().x);
 		globalstate.setCustomConfigEntry("EditorCamPosY",  m_editorCamera.position().y);

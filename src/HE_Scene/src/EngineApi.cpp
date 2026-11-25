@@ -2771,9 +2771,12 @@ const AudioAsset* audioAsset(Ctx& c, const std::string& path)
     const AudioAsset* a = c.content->getAudio(id);
     return (a && !a->audioData.empty()) ? a : nullptr;
 }
+bool g_playbackHeld = false;   // main thread only, like every script call
 } // namespace
+void setPlaybackHeld(bool held) { g_playbackHeld = held; }
 int play(Ctx& c, const std::string& path, float volume, float pitch, bool loop)
 {
+    if (g_playbackHeld) return 0;
     const AudioAsset* a = audioAsset(c, path);
     if (!c.audio || !c.audio->isInitialized() || !a) return 0;
     return (int)c.audio->play(*a, volume, pitch, loop);
@@ -2781,6 +2784,7 @@ int play(Ctx& c, const std::string& path, float volume, float pitch, bool loop)
 int playAt(Ctx& c, const std::string& path, const glm::vec3& pos,
            float volume, float pitch, bool loop, float minDist, float maxDist)
 {
+    if (g_playbackHeld) return 0;
     const AudioAsset* a = audioAsset(c, path);
     if (!c.audio || !c.audio->isInitialized() || !a) return 0;
     return (int)c.audio->playSpatial(*a, volume, pitch, loop,

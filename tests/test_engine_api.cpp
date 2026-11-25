@@ -2017,6 +2017,30 @@ TEST_CASE("Audio: null-tolerant without an engine; headless engine answers queri
     engine.shutdown();
 }
 
+TEST_CASE("Audio: a held playback gate starts nothing; released, the same call plays")
+{
+    // The editor holds it around a live-preview rebuild an edit caused, so
+    // picking the clip on a Play Sound node does not play it (EditorApplication::
+    // restartAppPreview). A real clip, so the 0 can only come from the gate.
+    ContentManager cm;
+    cm.setEngineContentRoot((std::filesystem::path(HE_EDITOR_DEPS_DIR) / "EngineContent").string());
+    AudioEngine engine;
+    REQUIRE(engine.init(/*noDevice=*/true));
+    Ctx c{}; c.audio = &engine; c.content = &cm;
+    const std::string clip = "Engine/Audio/Weather/Thunder.hasset";
+    REQUIRE(HE::api::audio::play(c, clip, 1.0f, 1.0f, false) != 0);
+
+    HE::api::audio::setPlaybackHeld(true);
+    CHECK(HE::api::audio::play(c, clip, 1.0f, 1.0f, true) == 0);
+    CHECK(HE::api::audio::playAt(c, clip, glm::vec3(0.0f), 1.0f, 1.0f, true, 1.0f, 20.0f) == 0);
+    HE::api::audio::setPlaybackHeld(false);
+
+    const int h = HE::api::audio::play(c, clip, 1.0f, 1.0f, false);
+    CHECK(h != 0);
+    CHECK(HE::api::audio::isPlaying(c, h));
+    engine.shutdown();
+}
+
 TEST_CASE("Audio: per-instance transport rows drive a voice the engine started")
 {
     // The rows take the handle play()/playAt() return; here the voice comes
