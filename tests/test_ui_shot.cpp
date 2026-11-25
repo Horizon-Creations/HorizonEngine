@@ -488,6 +488,32 @@ TEST_CASE("ui shot: the theme keeps text legible against its own background")
 // paragraphs, a reference table, a code listing and a callout each go through a
 // different path in the block renderer, and every one of them can come out empty
 // without anything else noticing.
+TEST_CASE("ui shot: the HorizonCode guide's hands-on sections are in the manual")
+{
+	// The walkthrough, the node anatomy and the canvas gestures are what a new
+	// author opens first; F1 and the tutorial link to them by these ids.
+	constexpr int W = 1000, H = 640;
+	Harness harness(W, H);
+	const DocsPanel::Host host = hostOf(harness);
+	HE::Ed::Docs::Library& lib = HE::Ed::Docs::library();
+#ifdef HE_DOCS_BUNDLE_PATH
+	REQUIRE(lib.load(HE_DOCS_BUNDLE_PATH));
+#endif
+	REQUIRE(lib.loaded());
+	for (const char* topic : { "horizoncode#first-graph", "horizoncode#reading-nodes",
+	                           "horizoncode#canvas", "horizoncode#recipes", "horizoncode#pitfalls" })
+	{
+		INFO(topic);
+		DocsPanel::openTopic(topic);
+		REQUIRE(DocsPanel::isOpen());
+		std::string name = std::string("docs-") + topic;
+		name[name.find('#')] = '-';
+		const he_ui::Image img = shoot(name.c_str(), W, H, 4, [&](int) { DocsPanel::draw(host); });
+		REQUIRE(img.valid());
+		CHECK(img.inkedPixels(kBgR, kBgG, kBgB) > 100000);
+	}
+}
+
 TEST_CASE("ui shot: the documentation reader lays a page out")
 {
 	constexpr int W = 1000, H = 640;
