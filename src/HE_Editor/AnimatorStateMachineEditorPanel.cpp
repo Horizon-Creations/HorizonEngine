@@ -340,7 +340,8 @@ const HcGraphHost::MenuOpts& syncMenus()
 		o.addCategories = { "Flow", "Reference", "Literals", "Math", "Logic",
 		                    "Variables", "Debug" };
 		o.addExcluded = { HorizonCode::NodeType::Sequence, HorizonCode::NodeType::Delay,
-		                  HorizonCode::NodeType::DoOnce,   HorizonCode::NodeType::FlipFlop };
+		                  HorizonCode::NodeType::DoOnce,   HorizonCode::NodeType::FlipFlop,
+		                  HorizonCode::NodeType::GetElement };   // no elements here
 		// The same list again for the drag-off menu. It walks the registry flat
 		// rather than by category, so an exclusion that lives only above is one
 		// you get back by dragging off a pin.

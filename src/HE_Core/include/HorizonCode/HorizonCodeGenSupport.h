@@ -730,6 +730,8 @@ inline bool rpcRoute(const Context& c, const char* fn, const std::vector<Value>&
                      std::uint8_t runOn, bool anyClient)
 { return c.rpcRoute ? c.rpcRoute(fn, args, runOn, anyClient) : false; }
 inline uint32_t self(const Context& c)         { return c.getSelf ? c.getSelf().ref : 0u; }
+inline uint32_t elementRef(const Context& c, int elem)
+{ return c.getElementRef ? c.getElementRef(elem).ref : 0u; }
 inline uint32_t gameInstance(const Context& c) { return c.getGameInstance ? c.getGameInstance().ref : 0u; }
 // `realTime` defaults to false so code generated before the Delay node grew its
 // Real Time pin still compiles, and still means what it meant: game seconds.

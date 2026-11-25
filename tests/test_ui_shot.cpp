@@ -1067,6 +1067,27 @@ TEST_CASE("ui shot: the drag-off menu offers own functions and Set for a data wi
 	};
 	CHECK(menuShot("drag-menu-float-out", lit, false).valid());
 	CHECK(menuShot("drag-menu-float-in", cmp, true).valid());
+
+	// An element reference (Get Element of a Text) and a variable of a control
+	// class: dragging off either lists that class's properties as Get/Set.
+	HC::Node el; el.type = NT::GetElement; el.elem = 4; el.s = "Label1"; el.className = "ui:Text";
+	const int elem = graph.addNode(el);
+	HC::Variable btn; btn.name = "Btn"; btn.type = HC::PinType::Ref; btn.className = "ui:Button";
+	graph.variables.push_back(btn);
+	const int getBtn = HcGraphHost::addNode(graph, NT::GetVariable, ImVec2(0, 400), 0);
+	graph.findNode(getBtn)->s = "Btn";
+	graph.findNode(getBtn)->propType = HC::PinType::Ref;
+	const auto topShot = [&](const char* name, int node) {
+		return shoot(name, W, H, 3, [&](int) {
+			ImGui::SetNextWindowPos(ImVec2(0, 0));
+			ImGui::SetNextWindowSize(ImVec2(float(W), float(H)));
+			ImGui::Begin("menu", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoSavedSettings);
+			m.drawPinDragMenu(node, pinOf(node, false), false, ImVec2(100, 100));
+			ImGui::End();
+		});
+	};
+	CHECK(topShot("drag-menu-element-ref", elem).valid());
+	CHECK(topShot("drag-menu-button-var", getBtn).valid());
 }
 
 TEST_CASE("ui shot: a HorizonCode graph's nodes, at three zooms")

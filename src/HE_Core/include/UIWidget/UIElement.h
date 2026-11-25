@@ -1054,6 +1054,16 @@ HE_API const std::vector<UIWidgetType>& uiWidgetTypeRegistry();
 HE_API const char* uiWidgetTypeName(UIWidgetType t);
 HE_API UIWidgetType uiWidgetTypeFromName(const std::string& s);
 
+// Control classes: an element type as the class of a HorizonCode reference
+// ("ui:Text"), so a Ref from Get Element — or a variable of that class — lists
+// the type's properties as Get/Set (Ref) members. The prefix keeps these keys
+// apart from asset paths, which is what every other class key is.
+HE_API std::string uiClassKey(UIWidgetType t);
+HE_API bool uiClassFromKey(const std::string& key, UIWidgetType& out);
+// Every property an element of the type has (its own first, then the shared
+// ones) — read off a default-constructed element, so it needs no instance.
+HE_API std::vector<UIPropDesc> uiClassProperties(UIWidgetType t);
+
 // Slot alignment ⇄ its on-disk name ("Fill", "Left", "Center", "Right" /
 // "Fill", "Top", "Center", "Bottom"). Unknown reads as Fill.
 HE_API const char*  uiSlotHAlignName(UISlotHAlign a);

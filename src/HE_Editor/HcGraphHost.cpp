@@ -14,6 +14,8 @@
 #include "EditorRewards.h"       // drag cues (EditorDragCues.h) go out through postDragCue
 #include <HorizonScene/EngineApi.h>
 #include <HorizonCode/HcClassResolve.h>   // member menus read the FLATTENED class
+#include <UIWidget/UIElement.h>           // control classes: an element's properties as members
+#include <UIWidget/UIWidgetBinding.h>     // uiPropTypeToPin
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
 #include <misc/cpp/imgui_stdlib.h>
@@ -1433,14 +1435,40 @@ int drawPinDragMenu(const Host& h, int srcNode, int srcPin, bool srcInput, const
 			HC::Node* nn = graph.findNode(newId);
 			if (nn) graph.connect(srcNode, srcPin, newId, pinRanges(*nn).dataIn0); // → Target
 		};
-		HC::Graph scratch;
-		const HC::Graph* cls = resolveClassGraph(refSrc, graph, h.giGraph, h.content, scratch);
 		// The key behind that graph, recorded on whatever this menu creates: the
 		// menu already knows which class it is offering members of, and writing it
 		// down here is what lets a rename find these nodes later without re-walking
 		// a wire that may since have been re-routed.
 		const std::string clsKey = HcRename::classOfRefSource(graph, refSrc, h.selfKey, "Game Instance");
-		if (cls)
+		// A control class ("ui:Text" — a Get Element, or a variable of that
+		// class): its PROPERTIES are the members, read and written through the
+		// same Get/Set (Ref) nodes a class's public variables use.
+		HE::UIWidgetType uiType{};
+		const bool uiClass = HE::uiClassFromKey(clsKey, uiType);
+		HC::Graph scratch;
+		const HC::Graph* cls = uiClass ? nullptr
+			: resolveClassGraph(refSrc, graph, h.giGraph, h.content, scratch);
+		if (uiClass)
+		{
+			bool ph = false;
+			const std::vector<HE::UIPropDesc> props = HE::uiClassProperties(uiType);
+			for (const HE::UIPropDesc& pd : props)
+				for (const bool get : { true, false })
+				{
+					const std::string lbl = (get ? "Get " : "Set ") + pd.name;
+					if (!matches(lbl)) continue;
+					if (!ph) { ImGui::TextDisabled("%s", HE::uiWidgetTypeName(uiType)); ph = true; }
+					if (!HcEditorUtil::searchMenuItem(lbl)) continue;
+					const int id = addNode(graph, get ? NT::GetExternal : NT::SetExternal, pos, h.currentGraph);
+					HC::Node* nn = graph.findNode(id);
+					nn->s = pd.name;
+					nn->propType = HE::uiPropTypeToPin(pd.type);
+					nn->className = clsKey;
+					wire(id); created = id; ImGui::CloseCurrentPopup();
+				}
+			if (ph) ImGui::Separator();
+		}
+		else if (cls)
 		{
 			// SNAPSHOT the offered signatures first: with a "Get Self" source,
 			// `cls` ALIASES `graph`, and a pick addNode()s into that very
@@ -1610,7 +1638,7 @@ int drawPinDragMenu(const Host& h, int srcNode, int srcPin, bool srcInput, const
 		if (gh) ImGui::Spacing();
 	}
 
-	// ── The host's own ready-made nodes (a widget's element properties) ────
+	// ── The host's own ready-made nodes (a widget's element references) ────
 	if (h.dragOffers)
 	{
 		bool ph = false;
@@ -1621,7 +1649,7 @@ int drawPinDragMenu(const Host& h, int srcNode, int srcPin, bool srcInput, const
 			if (!matches(o.label)) continue;
 			if (HcEditorUtil::dragMatchPinOn(o.proto, dragType, dragCtr, srcInput, isExecPin) < 0)
 				continue;
-			if (!ph) { ImGui::TextDisabled("Properties"); ph = true; }
+			if (!ph) { ImGui::TextDisabled("Elements"); ph = true; }
 			// Two unnamed elements of one type read the same; the index keeps
 			// their ImGui ids apart.
 			if (!HcEditorUtil::searchMenuItem(o.label + "##offer" + std::to_string(oi))) continue;

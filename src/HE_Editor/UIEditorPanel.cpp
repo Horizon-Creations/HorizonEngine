@@ -5518,6 +5518,10 @@ std::string graphNodeTitle(const State& st, const HC::Node& n)
 		// The by-reference pair names the property but NOT the element: which
 		// one it lands on is a pin, and a title that answered a question the
 		// node leaves open would be a title that lies half the time.
+		// "Get Label1": the canvas draws it as a one-row pill, because the title
+		// ends with the output's label (the element's name).
+		case NT::GetElement:
+			return "Get " + elemLabel(st, n.elem);
 		case NT::GetPropertyOn:
 			return "Get (Ref) ." + (n.s.empty() ? std::string("prop") : n.s);
 		case NT::SetPropertyOn:
@@ -5534,6 +5538,27 @@ int addGraphNode(State& st, NT type, const ImVec2& graphPos)
 	return HGH::addNode(st.graph, type, graphPos, st.currentGraph);
 }
 
+// A Get Element bound to `e`: the node as every path here makes it (add menu,
+// element drop, drag-off). Unattached — callers add it with HGH::addNode or
+// copy it as a drag offer.
+HC::Node elementRefNode(const UIElement& e)
+{
+	HC::Node n;
+	n.type      = NT::GetElement;
+	n.elem      = e.id;
+	n.s         = elementName(e);               // the output pin's label
+	n.className = HE::uiClassKey(e.type());     // what dragging off it lists
+	return n;
+}
+
+int addElementRef(State& st, const UIElement& e, const ImVec2& graphPos)
+{
+	HC::Node n = elementRefNode(e);
+	n.x = graphPos.x; n.y = graphPos.y;
+	n.subgraph = st.currentGraph;
+	return st.graph.addNode(std::move(n));
+}
+
 // Which node types this frontend offers: a widget graph has a self-widget
 // (Show/Hide Self) and element properties, so it lists the Property and Widget
 // categories the level-script editor leaves out.
@@ -5542,12 +5567,12 @@ const HGH::MenuOpts kMenus = {
 	                    "Literals", "Math", "Logic", "String",
 	                    "Widget", "UI", "Array", "Set", "Map", "Debug" },
 	/*addExcluded*/   { NT::Event, NT::FunctionEntry,
-	                    NT::GetVariable, NT::SetVariable },
+	                    NT::GetVariable, NT::SetVariable, NT::GetElement },
 	/*dragExcluded*/  { NT::Event, NT::FunctionEntry, NT::FunctionCall,
 	                    NT::FunctionReturn, NT::GetVariable, NT::SetVariable,
 	                    NT::GetProperty, NT::SetProperty, NT::EngineCall,
 	                    NT::CallExternal, NT::GetExternal, NT::SetExternal,
-	                    NT::BindEvent },
+	                    NT::BindEvent, NT::GetElement },
 };
 
 // Add or focus an Event node for `elem`/`eventName`; switch to Graph mode.
@@ -6238,26 +6263,18 @@ void drawGraphCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 	host.onEdit       = [&st, &ctx](bool committed){
 		st.dirty = true;
 		if (committed) commitEdit(st, ctx); };
-	// Every element's properties, as the Get/Set nodes the element drop menu
-	// makes, so a wire dragged off a String pin can land straight on "Set Text"
-	// of a label. Built when the drag menu opens; the menu keeps the ones whose
-	// pin fits.
+	// Every element as a reference (Get Element), for a wire that wants an
+	// object — a Target pin, a Ref variable. Its properties are then one drag
+	// further: off the reference, as Get/Set (Ref), like a class's variables.
 	host.dragOffers = [&st]{
 		std::vector<HGH::Host::DragOffer> out;
 		for (const auto& ep : st.tree.elements)
 		{
 			if (!ep) continue;
-			for (const UIPropDesc& pd : ep->allProperties())
-				for (NT t : { NT::GetProperty, NT::SetProperty })
-				{
-					HGH::Host::DragOffer o;
-					o.proto.type = t;
-					o.proto.elem = ep->id;
-					o.proto.s = pd.name;
-					o.proto.propType = HE::uiPropTypeToPin(pd.type);
-					o.label = graphNodeTitle(st, o.proto);
-					out.push_back(std::move(o));
-				}
+			HGH::Host::DragOffer o;
+			o.proto = elementRefNode(*ep);
+			o.label = graphNodeTitle(st, o.proto);
+			out.push_back(std::move(o));
 		}
 		return out; };
 	// What a widget's own graph can put in a string pin: the animations this
@@ -6383,6 +6400,23 @@ void drawGraphCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 			if (eh) ImGui::Spacing();
 		}
 
+		// This widget's elements, each as a reference ("Get Label1"): what a
+		// graph reaches an element's properties through, one drag further on.
+		{
+			bool elh = false;
+			for (std::size_t i = 0; i < st.tree.elements.size(); ++i)
+			{
+				const auto& ep = st.tree.elements[i];
+				if (!ep) continue;
+				const std::string lbl = "Get " + elementName(*ep);
+				if (!matches(lbl, "Elements")) continue;
+				if (!elh) { ImGui::TextDisabled("Elements"); elh = true; }
+				if (HcEditorUtil::searchMenuItem(lbl + "##el" + std::to_string(ep->id)))
+				{ created = addElementRef(st, *ep, st.geState.addMenuGraphPos); ImGui::CloseCurrentPopup(); }
+			}
+			if (elh) ImGui::Spacing();
+		}
+
 		if (const int c = HGH::drawAddMenuTail(host, q)) created = c;
 		HGH::endAddMenu();
 		return created;
@@ -6454,20 +6488,47 @@ void drawGraphCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 		// One list, drawn twice, with a rule between the two halves: the type's
 		// own properties first, because that is what somebody who dropped a
 		// Slider came for, then the ones every element has.
+		// Get and Set make the element's REFERENCE and the property node on it,
+		// wired — Blueprint's shape: the element is an object, the property a
+		// member read or written through it (Get/Set (Ref)), exactly as a class's
+		// public variable is. The old direct Get/Set Property nodes still load
+		// and run; they are just no longer what this menu makes.
+		auto makeRefPair = [&](NT type, const UIPropDesc& pd)
+		{
+			if (!tgt) return;
+			const ImVec2 at = st.geState.addMenuGraphPos;
+			const int ref = addElementRef(st, *tgt, ImVec2(at.x - 150.0f, at.y));
+			const int id  = addGraphNode(st, type, at);
+			HC::Node* nn = st.graph.findNode(id);
+			nn->s = pd.name;
+			nn->propType = HE::uiPropTypeToPin(pd.type);
+			nn->className = HE::uiClassKey(tgt->type());
+			st.graph.connect(ref, HGH::pinRanges(*st.graph.findNode(ref)).dataOut0,
+			                 id, HGH::pinRanges(*nn).dataIn0);   // → Target
+			st.selectedGraphNode = id;
+			commitEdit(st, ctx);
+		};
 		auto propItems = [&](NT type)
 		{
 			for (std::size_t i = 0; i < props.size(); ++i)
 			{
 				if (i == ownCount && i != 0) ImGui::Separator();
-				if (ImGui::MenuItem(props[i].name.c_str())) makePropNode(type, props[i]);
+				if (!ImGui::MenuItem(props[i].name.c_str())) continue;
+				if (type == NT::GetExternal || type == NT::SetExternal) makeRefPair(type, props[i]);
+				else makePropNode(type, props[i]);
 			}
 		};
+		if (tgt && EditorWidgets::menuItem("Reference"))
+		{
+			st.selectedGraphNode = addElementRef(st, *tgt, st.geState.addMenuGraphPos);
+			commitEdit(st, ctx);
+		}
 		const bool getOpen = ImGui::BeginMenu("Get", !props.empty());
 		if (!getOpen) EditorWidgets::helpForLabel("Get");
-		if (getOpen) { propItems(NT::GetProperty); ImGui::EndMenu(); }
+		if (getOpen) { propItems(NT::GetExternal); ImGui::EndMenu(); }
 		const bool setOpen = ImGui::BeginMenu("Set", !props.empty());
 		if (!setOpen) EditorWidgets::helpForLabel("Set");
-		if (setOpen) { propItems(NT::SetProperty); ImGui::EndMenu(); }
+		if (setOpen) { propItems(NT::SetExternal); ImGui::EndMenu(); }
 
 		// …and the same two through a reference, which is how every other class
 		// is reached. Offered only for a NAMED element: these address it by

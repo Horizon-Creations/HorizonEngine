@@ -12,6 +12,7 @@
 #include <HorizonCode/HorizonCode.h>
 #include <HorizonScene/EngineApi.h>
 #include <UIWidget/UIWidgetAnim.h>   // the easing + direction vocabularies, for their dropdowns
+#include <UIWidget/UIElement.h>      // control classes in the type picker
 #include <SDL3/SDL_gamepad.h>        // …and SDL's own spelling of the pad buttons and axes
 #include <Types/Enums.h>
 #include <filesystem>
@@ -498,7 +499,10 @@ bool drawTypePicker(const char* label, ContentManager* cm,
 {
 	using P = HorizonCode::PinType;
 	bool changed = false;
-	std::string cur = (type == P::Ref && className && !className->empty())
+	HE::UIWidgetType uiType{};
+	std::string cur = (type == P::Ref && className && HE::uiClassFromKey(*className, uiType))
+		? std::string(HE::uiWidgetTypeName(uiType))
+		: (type == P::Ref && className && !className->empty())
 		? std::filesystem::path(*className).stem().string()
 		: ((type == P::Enum || type == P::Struct) && typeName && !typeName->empty())
 		? std::filesystem::path(*typeName).stem().string()
@@ -578,6 +582,17 @@ bool drawTypePicker(const char* label, ContentManager* cm,
 			for (const ClassRef& c : s_objects)
 				if (hit(c.label) && ImGui::Selectable(c.label.c_str(), type == P::Ref && *className == c.path))
 				{ type = P::Ref; *className = c.path; if (typeName) typeName->clear(); changed = true; }
+			// Widget elements as classes: a variable of one holds a Get Element's
+			// reference, and dragging off it lists that type's properties.
+			ImGui::Separator();
+			ImGui::TextDisabled("Controls");
+			for (HE::UIWidgetType t : HE::uiWidgetTypeRegistry())
+			{
+				const std::string key = HE::uiClassKey(t);
+				const std::string lbl = std::string(HE::uiWidgetTypeName(t)) + "##ui";
+				if (hit(HE::uiWidgetTypeName(t)) && ImGui::Selectable(lbl.c_str(), type == P::Ref && *className == key))
+				{ type = P::Ref; *className = key; if (typeName) typeName->clear(); changed = true; }
+			}
 		}
 		ImGui::EndCombo();
 	}

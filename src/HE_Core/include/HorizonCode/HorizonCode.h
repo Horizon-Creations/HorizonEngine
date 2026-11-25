@@ -394,6 +394,15 @@ enum class NodeType : uint8_t
     // cache entry, which is what makes it safe to sprinkle.
     Reroute,
 
+    // ── An element of this widget, as an object ──────────────────────────────
+    // `elem` = the element (the asset's own numbering, like Get Property's),
+    // `s` = its name (the output pin's label, kept by the editor), `className`
+    // = its control class ("ui:Text", see HE::uiClassKey). Pure: outputs a Ref
+    // that Get/Set (Ref) read and write the element's PROPERTIES through, the
+    // way they reach a class's public variables. The handle is minted by the
+    // runtime per (widget instance, element) — see Runtime::elementRef.
+    GetElement,
+
     COUNT
 };
 
@@ -1280,6 +1289,9 @@ struct Context
     std::function<CompiledInstance*()> gameInstanceCompiled;
     // References resolvable from any graph.
     std::function<Value()> getSelf;         // this instance
+    // Get Element: a Ref to element `elem` of this instance (0 when the host
+    // has no elements). get/setExternal on that Ref reach its properties.
+    std::function<Value(int elem)> getElementRef;
     std::function<Value()> getGameInstance; // the app-wide GameInstance (Ref 0 if none)
 
     // Generic engine-API dispatch: the EngineCall node passes its registry id +

@@ -7462,11 +7462,19 @@ namespace
 	  "", "ui#graph" },
 	{ "UI Graph/Get", "Get",
 	  "Adds a node that READS this property or variable. Dropping something from "
-	  "the hierarchy or the variables list onto the canvas is what offers this.",
+	  "the hierarchy or the variables list onto the canvas is what offers this. "
+	  "For an element it adds two: the element's reference and a Get of the "
+	  "property on it, already wired.",
 	  "", "ui#graph" },
 	{ "UI Graph/Set", "Set",
 	  "Adds a node that WRITES it. A function-local variable can only be used "
-	  "inside its own function, which is why this is sometimes greyed out.",
+	  "inside its own function, which is why this is sometimes greyed out. For "
+	  "an element: its reference and a Set of the property on it, wired.",
+	  "", "ui#graph" },
+	{ "UI Graph/Reference", "Reference",
+	  "Adds the element as an object: a small node with the element's name and "
+	  "one output. Drag off that output for Get or Set of any of its properties, "
+	  "or store it in a variable of the element's type.",
 	  "", "ui#graph" },
 	{ "UI Graph/Get Ref", "Get Ref",
 	  "The same read, but through a REFERENCE: the node takes a widget and the "

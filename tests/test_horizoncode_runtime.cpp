@@ -2952,3 +2952,19 @@ TEST_CASE("runtime errors: a run cut short by the nesting limit says so once, as
 	rt.fireEvent(id, "Go");
 	CHECK(seen.count("limit hit", HE::LogLevel::Error) == 2);
 }
+
+TEST_CASE("runtime: element references are their own handle space, stable per element, null once the widget is gone")
+{
+	Runtime rt;
+	const InstanceId w = rt.add(Graph{});
+	REQUIRE(w != 0);
+	const InstanceId a = rt.elementRef(w, 3);
+	CHECK(Runtime::isElementRef(a));
+	CHECK_FALSE(Runtime::isElementRef(w));
+	CHECK(rt.elementRef(w, 3) == a);          // two Get Elements of one label compare equal
+	CHECK(rt.elementRef(w, 4) != a);
+	CHECK_FALSE(rt.alive(a));                 // never an instance
+	CHECK(rt.elementRef(0, 3) == 0);          // no owner, no handle
+	rt.remove(w);
+	CHECK(rt.elementRef(w, 3) == 0);          // a dead owner mints nothing new
+}

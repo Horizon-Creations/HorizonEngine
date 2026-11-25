@@ -1032,6 +1032,33 @@ inline HE::hccg::ClassSource fxWidgetProps()
     f.exec(sCopy, show);
     const int hide = f.op(NT::HideSelf);
     f.exec(show, hide);
+
+    // The same properties through an element REFERENCE (Get Element → Get/Set
+    // (Ref)): the compiled side has no fast path for a control class, so both
+    // go through the runtime's getExternal/setExternal and the same bindings.
+    f.var("viaRef", PT::String);
+    f.var("opRef", PT::Float);
+    const auto elemRef = [&](int elem) {
+        Node ge; ge.type = NT::GetElement; ge.elem = elem; ge.className = "ui:Text";
+        return f.add(ge);
+    };
+    Node sx; sx.type = NT::SetExternal; sx.s = "opacity"; sx.propType = PT::Float;
+    sx.pinDefaults[1] = Value::ofFloat(0.25f);
+    const int setRef = f.add(sx);
+    f.data(elemRef(3), 0, setRef, 0);
+    f.exec(hide, setRef);
+    Node gx; gx.type = NT::GetExternal; gx.s = "text"; gx.propType = PT::String;
+    const int getRef = f.add(gx);
+    f.data(elemRef(4), 0, getRef, 0);
+    const int sVia = f.setVar("viaRef", PT::String);
+    f.data(getRef, 0, sVia, 0);
+    f.exec(setRef, sVia);
+    Node gx2; gx2.type = NT::GetExternal; gx2.s = "opacity"; gx2.propType = PT::Float;
+    const int getOpRef = f.add(gx2);
+    f.data(elemRef(3), 0, getOpRef, 0);
+    const int sOp = f.setVar("opRef", PT::Float);
+    f.data(getOpRef, 0, sOp, 0);
+    f.exec(sVia, sOp);
     return f.done("widget_props");
 }
 

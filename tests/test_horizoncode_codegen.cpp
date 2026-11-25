@@ -1185,11 +1185,16 @@ TEST_CASE("codegen parity: widget_props")
 	p.fire("UI");
 	CHECK(p.var("got").f == 0.5f);          // set → get round-trips the host map
 	CHECK(p.var("copied").s == "hi");       // Set-property pass-through
-	CHECK(p.interp.props.at({ 3, "opacity" }).f == 0.5f);
+	// (opacity ends at 0.25: the reference step below overwrites the 0.5.)
 	CHECK(p.interp.props.at({ 4, "text" }).s == "hi");
 	// showSelf/hideSelf both recorded (order asserted by the trace comparison).
 	CHECK(std::count(p.interp.trace.begin(), p.interp.trace.end(), "showSelf") == 1);
 	CHECK(std::count(p.interp.trace.begin(), p.interp.trace.end(), "hideSelf") == 1);
+	// Through element references (Get Element → Get/Set (Ref)), both sides.
+	CHECK(p.var("viaRef").s == "hi");
+	CHECK(p.var("opRef").f == 0.25f);
+	CHECK(p.interp.props.at({ 3, "opacity" }).f == 0.25f);
+	CHECK(p.comp.props.at({ 3, "opacity" }).f == 0.25f);
 }
 
 TEST_CASE("codegen parity: limits_smoke (both sides abort cleanly, §3.6)")

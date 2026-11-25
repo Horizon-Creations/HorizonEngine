@@ -163,6 +163,26 @@ UIWidgetType uiWidgetTypeFromName(const std::string& s)
     return UIWidgetType::Panel;
 }
 
+std::string uiClassKey(UIWidgetType t)
+{
+    return std::string("ui:") + uiWidgetTypeName(t);
+}
+
+bool uiClassFromKey(const std::string& key, UIWidgetType& out)
+{
+    if (key.rfind("ui:", 0) != 0) return false;
+    const std::string name = key.substr(3);
+    for (UIWidgetType t : uiWidgetTypeRegistry())
+        if (name == uiWidgetTypeName(t)) { out = t; return true; }
+    return false;
+}
+
+std::vector<UIPropDesc> uiClassProperties(UIWidgetType t)
+{
+    const std::unique_ptr<UIElement> e = makeUIElement(t);
+    return e ? e->allProperties() : std::vector<UIPropDesc>{};
+}
+
 // ── Slot alignment names ─────────────────────────────────────────────────────
 // The on-disk spelling of UISlotHAlign/UISlotVAlign, and what the designer's
 // combos show. An unknown name reads as Fill: that is what an element that
