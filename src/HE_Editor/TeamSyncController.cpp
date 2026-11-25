@@ -46,7 +46,8 @@ TeamSyncController::TeamSyncController(TeamController& team, GitController& git,
 		return true;
 	});
 	m_team.setOnScHead([this](const std::string& project, std::uint64_t rev, const std::string&) {
-		if (m_sync.running() && caseInsensitiveEqual(project, m_project.project)) m_sync.notifyHead(rev);
+		if (m_sync.running() && caseInsensitiveEqual(project, serverProjectFor(m_project.project, m_branch)))
+			m_sync.notifyHead(rev);
 	});
 }
 
@@ -77,6 +78,63 @@ void TeamSyncController::noteSaved(std::uint64_t delayMs)
 }
 
 bool TeamSyncController::inSession() const { return m_collab.inSession(); }
+
+namespace
+{
+std::filesystem::path branchFile(const std::filesystem::path& root, const std::string& team, const std::string& project)
+{
+	return root / "Saved" / "TeamSync" / (folded(team) + "-" + folded(project) + ".branch");
+}
+} // namespace
+
+std::string TeamSyncController::currentBranch(const std::filesystem::path& root, const std::string& team,
+                                              const std::string& project)
+{
+	std::ifstream in(branchFile(root, team, project), std::ios::binary);
+	std::string name;
+	if (in) std::getline(in, name);
+	while (!name.empty() && (name.back() == '\r' || name.back() == ' ')) name.pop_back();
+	return name;
+}
+
+bool TeamSyncController::canSwitchBranch() const
+{
+	if (!m_sync.running() || m_collab.inSession() || m_blocker != Blocker::None) return false;
+	const HE::Sc::TeamSyncService::Status s = m_sync.status();
+	return s.waiting == 0 && s.firstSyncDiffers.empty() && s.phase != HE::Sc::TeamSyncService::Phase::Working;
+}
+
+bool TeamSyncController::switchBranch(const std::string& name)
+{
+	if (!canSwitchBranch() || caseInsensitiveEqual(name, m_branch)) return false;
+	const std::filesystem::path f = branchFile(m_project.root, m_project.team, m_project.project);
+	std::error_code ec;
+	std::filesystem::create_directories(f.parent_path(), ec);
+	if (name.empty()) std::filesystem::remove(f, ec);
+	else
+	{
+		std::ofstream out(f, std::ios::binary | std::ios::trunc);
+		out << name << '\n';
+		if (!out) return false;
+	}
+	m_mirrorNext = true;
+	m_key.clear();   // the next update() restarts on the other server project
+	return true;
+}
+
+void TeamSyncController::createBranch(const std::string& name)
+{
+	if (!canSwitchBranch() || !m_branch.empty()) return;   // branches are made from the project itself
+	m_pendingSwitch = name;
+	m_sync.createBranch(name);
+}
+
+void TeamSyncController::mergeIntoMain()
+{
+	if (m_branch.empty() || !canSwitchBranch()) return;
+	const std::string b = m_branch;
+	if (switchBranch("")) m_pendingMerge = b;
+}
 
 std::string TeamSyncController::conflictKey(const HE::Sc::TeamSyncService::Lost& l)
 {
@@ -127,7 +185,9 @@ void TeamSyncController::restart(const Project& project)
 	s.port        = m_team.serverAddress().port;
 	s.team        = m_team.team();
 	s.member      = m_team.member();
-	s.project     = project.project;
+	s.project     = serverProjectFor(project.project, m_branch);
+	s.mirrorOnStart = m_mirrorNext;
+	m_mirrorNext    = false;
 	TeamController* team = &m_team;
 	// The reply runs inside TeamController::update, so the controller is alive;
 	// the service's own half is behind a weak_ptr (Deliver).
@@ -170,9 +230,10 @@ std::vector<std::string> TeamSyncController::update(std::uint64_t nowMs, const P
 	}
 	m_blocker = Blocker::None;
 
+	m_branch = currentBranch(project.root, project.team, project.project);
 	const auto& at = m_team.serverAddress();
 	const std::string key = project.root.generic_string() + "\n" + folded(project.team) + "\n" +
-	                        folded(project.project) + "\n" + folded(m_team.member()) + "\n" + at.host +
+	                        folded(serverProjectFor(project.project, m_branch)) + "\n" + folded(m_team.member()) + "\n" + at.host +
 	                        ":" + std::to_string(at.port);
 	if (key != m_key || !m_sync.running())
 	{
@@ -201,6 +262,42 @@ std::vector<std::string> TeamSyncController::update(std::uint64_t nowMs, const P
 	}
 
 	std::vector<std::string> written = m_sync.pump(!playing, m_keepLocal);
+
+	// Branch requests: a branch made by us is switched to; a merge waits until we are back on the project.
+	HE::Sc::TeamSyncService::BranchEvent be;
+	while (m_sync.pollBranchEvent(be))
+	{
+		using K = HE::Sc::TeamSyncService::BranchEvent::Kind;
+		if (be.kind == K::Created && caseInsensitiveEqual(be.name, m_pendingSwitch))
+			m_switchTo = be.name;   // switched as soon as the service is idle again (below)
+		else if (be.kind == K::Merged)
+		{
+			if (m_notes) m_notes->post(HE::Ed::NoteLevel::Info, "Branch \"" + be.name + "\" merged into " + m_project.project +
+			                                                     " as r" + std::to_string(be.rev) + ".");
+		}
+		else if (be.kind == K::Failed)
+		{
+			if (caseInsensitiveEqual(be.name, m_pendingSwitch)) m_pendingSwitch.clear();
+			if (caseInsensitiveEqual(be.name, m_pendingMerge)) m_pendingMerge.clear();
+			if (m_notes) m_notes->post(HE::Ed::NoteLevel::Important, "Branch \"" + be.name + "\": " + be.error);
+		}
+	}
+	if (!m_switchTo.empty() && canSwitchBranch())
+	{
+		const std::string to = m_switchTo;
+		m_switchTo.clear();
+		m_pendingSwitch.clear();
+		switchBranch(to);
+	}
+	if (!m_pendingMerge.empty() && m_branch.empty())
+	{
+		const HE::Sc::TeamSyncService::Status st = m_sync.status();
+		if (st.connected && st.phase == HE::Sc::TeamSyncService::Phase::Idle && st.activity.empty() && st.firstSyncDiffers.empty())
+		{
+			m_sync.mergeBranch(m_pendingMerge, "Merge branch " + m_pendingMerge);
+			m_pendingMerge.clear();
+		}
+	}
 
 	// Every conflict once per run: a new one, and the open ones from before at the start.
 	if (m_notes)

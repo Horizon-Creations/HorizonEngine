@@ -106,6 +106,24 @@ public:
 	// A live collaboration session runs (restoring a revision would fork it from the peers).
 	bool inSession() const;
 
+	// ── Feature branches ──
+	// Which branch this editor works on is its own choice (Saved/TeamSync/<team>-<project>.branch),
+	// not the project's: the team does not switch with it. "" is the project itself ("main").
+	// The service then runs on the server project "<project>--<branch>".
+	static std::string currentBranch(const std::filesystem::path& root, const std::string& team, const std::string& project);
+	static std::string serverProjectFor(const std::string& project, const std::string& branch)
+	{ return branch.empty() ? project : project + "--" + branch; }
+	const std::string& branch() const { return m_branch; }
+	// Only with nothing waiting to go up and no live session: the folder then becomes exactly
+	// the branch's version (files it does not have are removed). False when it may not now.
+	bool canSwitchBranch() const;
+	bool switchBranch(const std::string& name);
+	// Creates the branch from the head of the project shown now, then switches to it.
+	void createBranch(const std::string& name);
+	// On a branch: back to the project, then the server merges the branch into it.
+	void mergeIntoMain();
+	bool merging() const { return !m_pendingMerge.empty(); }
+
 	static constexpr std::uint64_t kDebounceMs = 1000;
 	// Planner pages write their file at every Enter: their saves are grouped longer.
 	static constexpr std::uint64_t kPlannerDebounceMs = 10'000;
@@ -132,4 +150,9 @@ private:
 	std::function<void(const HE::Sc::TeamSyncService::Lost&)> m_onResolve;
 	std::set<std::string>    m_conflictsPosted;   // conflictKey: notified this run
 	std::vector<std::string> m_localWrites;       // resolve() wrote these: returned by the next update()
+	std::string              m_branch;            // current branch, "" = the project itself
+	bool                     m_mirrorNext = false;   // the next restart mirrors the team's version (a switch)
+	std::string              m_pendingSwitch;     // createBranch: switch once the server made it
+	std::string              m_switchTo;          // made: switch when the service is idle
+	std::string              m_pendingMerge;      // mergeIntoMain: merge once back on the project
 };

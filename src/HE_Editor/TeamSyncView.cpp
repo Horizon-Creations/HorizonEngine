@@ -369,6 +369,90 @@ bool TeamSyncView::resultIsValid(const std::string& mine, const std::string& the
 	return true;
 }
 
+namespace
+{
+std::string s_newBranch;
+
+// The branch this editor works on, and the way to another one, a new one, or back into the project.
+void drawBranchBar(TeamSyncController& sync)
+{
+	using namespace HE::Ed;
+	HE::Sc::TeamSyncService& svc = sync.service();
+	const std::string current = sync.branch();
+	const std::string label = current.empty() ? sync.projectName() + " (main)" : current;
+	ImDrawList* dl = ImGui::GetWindowDrawList();
+	const float fh = ImGui::GetFrameHeight();
+	const ImVec2 p = ImGui::GetCursorScreenPos();
+	T::iconBranch(dl, ImVec2(p.x + fh * 0.5f, p.y + fh * 0.5f), fh * 0.6f, Theme::u32(current.empty() ? Theme::TextDim : Theme::Accent));
+	ImGui::Dummy(ImVec2(fh, fh));
+	ImGui::SameLine(0, 4);
+	if (EditorWidgets::button(("Branch: " + label + "##branchbtn").c_str()))
+	{
+		svc.refreshBranches();
+		s_newBranch.clear();
+		ImGui::OpenPopup("##branches");
+	}
+	EditorWidgets::helpForKey("Team Sync/Branch");
+	note("Branch");
+	if (sync.merging())
+	{
+		ImGui::SameLine();
+		ImGui::TextDisabled("merging %s...", current.c_str());
+	}
+	if (!current.empty())
+	{
+		ImGui::SameLine();
+		ImGui::BeginDisabled(!sync.canSwitchBranch());
+		if (EditorWidgets::button(("Merge into " + sync.projectName() + "##merge").c_str())) sync.mergeIntoMain();
+		EditorWidgets::helpForKey("Team Sync/Merge into Project");
+		note("Merge into Project");
+		ImGui::EndDisabled();
+	}
+
+	if (!ImGui::BeginPopup("##branches")) return;
+	const bool may = sync.canSwitchBranch();
+	if (ImGui::Selectable((sync.projectName() + " (main)").c_str(), current.empty(), may ? 0 : ImGuiSelectableFlags_Disabled))
+		sync.switchBranch("");
+	note("branch:");
+	for (const HE::Sc::TeamSyncService::Branch& b : svc.branches())
+	{
+		const std::string row = b.name + "##" + b.name;
+		if (ImGui::Selectable(row.c_str(), b.name == current, may ? 0 : ImGuiSelectableFlags_Disabled))
+			sync.switchBranch(b.name);
+		note("branch:" + b.name);
+		ImGui::SameLine(220.0f);
+		ImGui::TextDisabled("from r%llu by %s", static_cast<unsigned long long>(b.forkRev), b.creator.c_str());
+	}
+	if (!may)
+	{
+		ImGui::Spacing();
+		ImGui::TextDisabled("%s", sync.inSession() ? "Not during a live session."
+		                                          : "Switching waits until your changes are on the team server.");
+	}
+	if (current.empty())
+	{
+		ImGui::Separator();
+		ImGui::TextUnformatted("New branch from the current state");
+		ImGui::SetNextItemWidth(200.0f);
+		ImGui::InputTextWithHint("##newbranch", "name", &s_newBranch);
+		note("newbranch");
+		const bool valid = TeamSyncView::validServerName(s_newBranch) && s_newBranch.find("--") == std::string::npos &&
+		                   s_newBranch.size() <= 48;
+		ImGui::SameLine();
+		ImGui::BeginDisabled(!valid || !may);
+		if (EditorWidgets::primaryButton("Create Branch"))
+		{
+			sync.createBranch(s_newBranch);
+			ImGui::CloseCurrentPopup();
+		}
+		note("Create Branch");
+		ImGui::EndDisabled();
+		ImGui::TextDisabled("Your saves then go to the branch; the others keep working on %s.", sync.projectName().c_str());
+	}
+	ImGui::EndPopup();
+}
+} // namespace
+
 void TeamSyncView::draw(TeamSyncController& sync)
 {
 	using Phase = HE::Sc::TeamSyncService::Phase;
@@ -414,6 +498,7 @@ void TeamSyncView::draw(TeamSyncController& sync)
 		ImGui::SetCursorScreenPos(ImVec2(p.x, p.y + cardH));
 		ImGui::Dummy(ImVec2(w, 4.0f));
 		if (blocked) return;
+		drawBranchBar(sync);
 		if (!s.error.empty() && s.phase != Phase::Offline)
 		{
 			EditorWidgets::WrapText wrap;

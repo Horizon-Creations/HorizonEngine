@@ -50,6 +50,26 @@ public:
 		std::string           team, member, project;
 		// Saved/TeamSync/<team>-<project>.state under the project by default.
 		std::filesystem::path stateFile;
+		// Switching to (or back from) a branch: the first reconcile makes the folder exactly
+		// the team's version of this project, files the team does not have removed, with no
+		// first-sync question. The editor only switches with nothing waiting to go up.
+		bool                  mirrorOnStart = false;
+	};
+
+	// A branch of this project on the server ("<project>--<name>").
+	struct Branch
+	{
+		std::string   name;
+		std::uint64_t forkRev = 0;   // this project's revision it was copied from
+		std::string   creator;
+	};
+	// What a branch request did, for the editor (it switches to a branch it created).
+	struct BranchEvent
+	{
+		enum class Kind : std::uint8_t { Created, Merged, Failed } kind = Kind::Failed;
+		std::string   name;
+		std::uint64_t rev = 0;   // Created: the fork revision; Merged: the new head
+		std::string   error;
 	};
 
 	enum class Phase : std::uint8_t
@@ -180,6 +200,15 @@ public:
 	// so keep-local and Play apply), files added since are removed, and the result
 	// is uploaded. Nothing of the history is rewritten.
 	void restoreRevision(std::uint64_t rev);
+
+	// ── Feature branches (on this project's connection) ──
+	void createBranch(const std::string& name);
+	void refreshBranches();
+	// Applies what changed on the branch since its fork to this project (the server merges
+	// per file, as for a save); the results arrive in lastResults(), the merge with the next reconcile.
+	void mergeBranch(const std::string& name, const std::string& message = {});
+	std::vector<Branch> branches() const;
+	bool pollBranchEvent(BranchEvent& out);
 
 	// ── Main thread ──
 	// Delivers events, runs the ticket source when asked and writes incoming

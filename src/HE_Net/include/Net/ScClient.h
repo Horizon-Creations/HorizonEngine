@@ -45,6 +45,8 @@ public:
     enum class Op : std::uint8_t {
         Head = 1, Manifest = 2, Have = 3, Get = 4, Put = 5, Commit = 6, Log = 7,
         CreateProject = 8, BackupSet = 9, BackupStatus = 10,
+        // Feature branches: "<project>--<name>", forked server-side, merged back by the server.
+        BranchCreate = 11, BranchList = 12, BranchMerge = 13,
     };
     enum class Result : std::uint8_t {
         Ok = 0, BadRequest = 1, NotAdmin = 2, MissingBlob = 3, TooLarge = 4,
@@ -129,6 +131,10 @@ public:
     std::uint32_t createProject(ReplyFn done);
     std::uint32_t backupSet(const std::string& url, const std::string& branch, ReplyFn done);
     std::uint32_t backupStatus(ReplyFn done);
+    std::uint32_t branchCreate(const std::string& name, ReplyFn done);   // body fork_rev u64
+    std::uint32_t branchList(ReplyFn done);                              // stream "name \t fork_rev \t creator \n"
+    // As commit(): stream of outcomes, body rev u64 | changed u8.
+    std::uint32_t branchMerge(const std::string& name, const std::string& message, ReplyFn done);
 
     // ── Helpers ──
     static const char* resultName(std::uint8_t result);

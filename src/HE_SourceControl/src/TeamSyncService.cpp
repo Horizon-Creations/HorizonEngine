@@ -278,6 +278,11 @@ struct TeamSyncService::Impl
 	bool          wantCreate = false;
 	std::deque<Lost> fetches;
 	std::uint64_t restoreRev = 0;         // restoreRevision, 0: none
+	struct BranchCmd { int kind = 0; std::string name, message; };   // 0 create, 1 list, 2 merge
+	std::deque<BranchCmd> branchCmds;
+	std::vector<Branch>   branchList;
+	std::deque<BranchEvent> branchEvents;
+	bool                  mirror = false;   // the first reconcile mirrors the team's version (a branch switch)
 
 	// ── Ticket exchange ──
 	bool        needTicket = false;    // worker: please ask
@@ -346,6 +351,7 @@ struct TeamSyncService::Impl
 	void fetchLog();
 	void createProject();
 	void restore(std::uint64_t rev);
+	void runBranch(const BranchCmd& cmd);
 	void loadConflicts();
 	void appendConflictLine(const std::string& line);
 	fs::path conflictsFile() const { fs::path p = settings.stateFile; p.replace_extension(".conflicts"); return p; }
@@ -372,6 +378,7 @@ void TeamSyncService::start(const Settings& settings, TicketFn tickets)
 	m_impl = std::make_shared<Impl>();
 	m_impl->settings      = m_settings;
 	m_impl->wantReconcile = true;
+	m_impl->mirror        = m_settings.mirrorOnStart;
 	m_impl->status.phase  = Phase::Idle;
 	m_running = true;
 	std::shared_ptr<Impl> impl = m_impl;
@@ -493,6 +500,106 @@ void TeamSyncService::resolveLost(std::uint64_t rev, const std::string& path)
 	}
 	m_impl->appendConflictLine("R\t" + std::to_string(rev) + "\t" + path);
 	HE_SC_INFO("Team sync: conflict on %s (r%llu) resolved", path.c_str(), static_cast<unsigned long long>(rev));
+}
+
+void TeamSyncService::createBranch(const std::string& name)
+{
+	if (!m_impl) return;
+	{ std::lock_guard<std::mutex> lock(m_impl->mu); m_impl->branchCmds.push_back({ 0, name, {} }); }
+	m_impl->cv.notify_all();
+}
+
+void TeamSyncService::refreshBranches()
+{
+	if (!m_impl) return;
+	{ std::lock_guard<std::mutex> lock(m_impl->mu); m_impl->branchCmds.push_back({ 1, {}, {} }); }
+	m_impl->cv.notify_all();
+}
+
+void TeamSyncService::mergeBranch(const std::string& name, const std::string& message)
+{
+	if (!m_impl) return;
+	{ std::lock_guard<std::mutex> lock(m_impl->mu); m_impl->branchCmds.push_back({ 2, name, message }); }
+	m_impl->cv.notify_all();
+}
+
+std::vector<TeamSyncService::Branch> TeamSyncService::branches() const
+{
+	if (!m_impl) return {};
+	std::lock_guard<std::mutex> lock(m_impl->mu);
+	return m_impl->branchList;
+}
+
+bool TeamSyncService::pollBranchEvent(BranchEvent& out)
+{
+	if (!m_impl) return false;
+	std::lock_guard<std::mutex> lock(m_impl->mu);
+	if (m_impl->branchEvents.empty()) return false;
+	out = std::move(m_impl->branchEvents.front());
+	m_impl->branchEvents.pop_front();
+	return true;
+}
+
+void TeamSyncService::Impl::runBranch(const BranchCmd& cmd)
+{
+	auto event = [&](BranchEvent::Kind k, std::uint64_t rev, std::string error) {
+		std::lock_guard<std::mutex> lock(mu);
+		branchEvents.push_back(BranchEvent{ k, cmd.name, rev, std::move(error) });
+	};
+	ScClient::Reply r;
+	if (cmd.kind == 0)
+	{
+		setStatus([&](Status& s) { s.phase = Phase::Working; s.activity = "Creating branch " + cmd.name + "…"; });
+		if (!call([&](ScClient::ReplyFn fn) { return client->branchCreate(cmd.name, std::move(fn)); }, r))
+		{
+			event(BranchEvent::Kind::Failed, 0, ScClient::describeResult(r.result, r.text));
+			return;
+		}
+		std::uint64_t forkRev = 0;
+		std::size_t pos = 0;
+		ScClient::readU64(r.body, pos, forkRev);
+		HE_SC_INFO("Team sync: branch '%s' created at r%llu", cmd.name.c_str(), static_cast<unsigned long long>(forkRev));
+		event(BranchEvent::Kind::Created, forkRev, {});
+	}
+	if (cmd.kind == 0 || cmd.kind == 1)
+	{
+		if (!call([&](ScClient::ReplyFn fn) { return client->branchList(std::move(fn)); }, r)) return;
+		std::vector<Branch> list;
+		for (const std::string& line : splitLines(r.stream))
+		{
+			const std::vector<std::string> f = splitTabs(line);
+			if (f.size() >= 3) list.push_back(Branch{ f[0], std::strtoull(f[1].c_str(), nullptr, 10), f[2] });
+		}
+		std::lock_guard<std::mutex> lock(mu);
+		branchList = std::move(list);
+		return;
+	}
+	// Merge.
+	setStatus([&](Status& s) { s.phase = Phase::Working; s.activity = "Merging branch " + cmd.name + "…"; });
+	if (!call([&](ScClient::ReplyFn fn) { return client->branchMerge(cmd.name, cmd.message, std::move(fn)); }, r))
+	{
+		event(BranchEvent::Kind::Failed, 0, ScClient::describeResult(r.result, r.text));
+		return;
+	}
+	std::uint64_t newRev = 0;
+	std::uint8_t  changed = 0;
+	std::size_t   pos = 0;
+	ScClient::readU64(r.body, pos, newRev);
+	ScClient::readU8(r.body, pos, changed);
+	std::vector<FileResult> results;
+	for (const std::string& line : splitLines(r.stream))
+	{
+		const std::vector<std::string> f = splitTabs(line);
+		if (f.size() >= 3) results.push_back(FileResult{ f[0], f[1], f.size() >= 4 ? f[3] : std::string() });
+	}
+	{
+		std::lock_guard<std::mutex> lock(mu);
+		this->results = std::move(results);
+	}
+	HE_SC_INFO("Team sync: branch '%s' merged%s", cmd.name.c_str(),
+	           changed ? (" as r" + std::to_string(newRev)).c_str() : " (nothing new)");
+	event(BranchEvent::Kind::Merged, newRev, {});
+	reconcile(false);   // the merge, into this folder
 }
 
 void TeamSyncService::restoreRevision(std::uint64_t rev)
@@ -698,6 +805,7 @@ void TeamSyncService::Impl::run()
 		bool doCreate = false, doReconcile = false, doSync = false, adopt = false;
 		int  resolve = -1;
 		std::uint64_t doRestore = 0;
+		std::deque<BranchCmd> doBranch;
 		std::string msg;
 		std::deque<Lost> todo;
 		{
@@ -708,7 +816,8 @@ void TeamSyncService::Impl::run()
 			// (it is uploaded after it), it does not wake the loop.
 			cv.wait_for(lock, std::chrono::milliseconds(500), [&] {
 				const bool work = (wantSync && status.firstSyncDiffers.empty()) || wantReconcile ||
-				                  wantCreate || resolveFirst >= 0 || !fetches.empty() || restoreRev != 0;
+				                  wantCreate || resolveFirst >= 0 || !fetches.empty() || restoreRev != 0 ||
+				                  !branchCmds.empty();
 				return stopping || ticketReady || (!paused && work && !needTicket);
 			});
 			if (stopping) break;
@@ -737,8 +846,9 @@ void TeamSyncService::Impl::run()
 			todo        = fetches;
 			msg         = message;
 			doRestore   = firstSync ? 0 : restoreRev;   // not before the first sync is settled
+			if (!firstSync) doBranch.swap(branchCmds);
 		}
-		if (!doCreate && !doReconcile && !doSync && resolve < 0 && todo.empty() && doRestore == 0)
+		if (!doCreate && !doReconcile && !doSync && resolve < 0 && todo.empty() && doRestore == 0 && doBranch.empty())
 		{
 			// A ticket that came in with nothing to do (the work was dropped).
 			std::lock_guard<std::mutex> lock(mu);
@@ -789,6 +899,7 @@ void TeamSyncService::Impl::run()
 			{ std::lock_guard<std::mutex> lock(mu); restoreRev = 0; }
 			restore(doRestore);
 		}
+		for (const BranchCmd& b : doBranch) runBranch(b);
 		for (const Lost& l : todo) fetchLost(l);
 		if (!todo.empty())
 		{
@@ -1087,10 +1198,12 @@ bool TeamSyncService::Impl::reconcile(bool adopt)
 	}
 	std::map<std::string, std::string> local = scan();
 
-	bool hold = false;
+	bool hold = false, mirrorNow = false;
 	{
 		std::lock_guard<std::mutex> lock(mu);
 		hold = holdIncoming;
+		mirrorNow = mirror;
+		mirror = false;   // once, at the switch
 	}
 
 	std::set<std::string> paths;
@@ -1114,6 +1227,12 @@ bool TeamSyncService::Impl::reconcile(bool adopt)
 			// In sync: the team's content is what is here.
 			if (m.empty()) base.erase(p);
 			else base[p] = m;
+			continue;
+		}
+		if (mirrorNow)
+		{
+			// A branch switch: exactly the team's version, whatever is here.
+			wants.push_back(Want{ p, m, l, m.empty() });
 			continue;
 		}
 		if (firstSync && b.empty() && !l.empty() && !m.empty())

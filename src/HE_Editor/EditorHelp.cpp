@@ -10108,6 +10108,20 @@ namespace
 	  "graphs and binary assets, your version wins and the team's is kept on the "
 	  "server's horizon-conflicts branch.",
 	  "", "" },
+	{ "Team Sync/Branch", "",
+	  "Which version of the project you work on: the project itself (main) or one of its branches. "
+	  "Switching makes your folder exactly that version; it waits until your changes are on the team server. "
+	  "Only you switch; the others stay where they are.",
+	  "", "" },
+	{ "Team Sync/Create Branch", "",
+	  "Makes a branch of the project as it is now on the team server and switches you to it. Your saves then "
+	  "go to the branch until you merge it back.",
+	  "", "" },
+	{ "Team Sync/Merge into Project", "",
+	  "Switches you back to the project and has the team server apply everything the branch changed since it "
+	  "was made, merged with what changed meanwhile like any save. Where both changed the same thing, the "
+	  "branch's version wins and the other is kept to resolve.",
+	  "", "" },
 	{ "Team Sync/Resolve", "",
 	  "Opens this conflict: your version and the one in the project side by side, and you pick or merge.",
 	  "", "" },

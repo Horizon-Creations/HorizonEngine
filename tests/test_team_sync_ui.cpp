@@ -621,3 +621,60 @@ TEST_CASE("Team sync UI: the view - a status card, files and the history as a ti
 	CHECK(inkPixels(shot) > 1000);
 	CHECK(TeamSyncView::controlRect("Sync Now").x1 > 0);
 }
+
+TEST_CASE("Team sync UI: feature branches through a real collab_server (HE_TEST_TEAM_SERVER=host:port)")
+{
+	const char* env = std::getenv("HE_TEST_TEAM_SERVER");
+	if (!env || !*env)
+	{
+		MESSAGE("HE_TEST_TEAM_SERVER not set — skipped (start collab_server with --data-dir and point it there)");
+		return;
+	}
+	Editor anna("Anna");
+	anna.projectTeam = "branches" + std::to_string(steadyMs() % 1000000);
+	anna.put("Content/door.txt", "closed\n");
+	REQUIRE(anna.team.createTeam(env, anna.projectTeam, "Anna", "anna-secret-1"));
+	auto idle = [&] {
+		const auto st = anna.sync.service().status();
+		return anna.sync.running() && st.connected && st.phase == HE::Sc::TeamSyncService::Phase::Idle &&
+		       st.activity.empty() && st.firstSyncDiffers.empty() && !st.projectMissing;
+	};
+	auto run = [&](auto done) {
+		const auto deadline = std::chrono::steady_clock::now() + kDeadline;
+		while (std::chrono::steady_clock::now() < deadline)
+		{
+			anna.update();
+			if (done()) return true;
+			std::this_thread::sleep_for(std::chrono::milliseconds(2));
+		}
+		return false;
+	};
+	REQUIRE(run([&] { return anna.sync.service().status().projectMissing && anna.sync.service().status().isAdmin; }));
+	anna.sync.service().createProject();
+	REQUIRE(run([&] { return idle() && anna.sync.service().status().rev >= 1; }));
+	CHECK(anna.sync.branch().empty());
+
+	// A branch: made on the server from the head, and this editor works on it from now on.
+	REQUIRE(anna.sync.canSwitchBranch());
+	anna.sync.createBranch("lights");
+	REQUIRE(run([&] { return anna.sync.branch() == "lights" && idle(); }));
+	anna.put("Content/lamp.txt", "on\n");
+	anna.sync.syncNow();
+	REQUIRE(run([&] { return idle() && anna.sync.service().status().waiting == 0 && anna.sync.service().status().rev >= 2; }));
+	CHECK(anna.sync.service().history().front().subject.find("Save by") == 0);
+
+	// Back to the project: the folder is the project's version again (no lamp), and back to the branch.
+	REQUIRE(anna.sync.switchBranch(""));
+	REQUIRE(run([&] { return anna.sync.branch().empty() && idle() && !fs::exists(anna.root / "Content" / "lamp.txt"); }));
+	CHECK(anna.file("Content/door.txt") == "closed\n");
+	REQUIRE(anna.sync.switchBranch("lights"));
+	REQUIRE(run([&] { return anna.sync.branch() == "lights" && idle() && anna.file("Content/lamp.txt") == "on\n"; }));
+
+	// Merged: back on the project, with the branch's lamp.
+	anna.sync.mergeIntoMain();
+	REQUIRE(run([&] { return anna.sync.branch().empty() && !anna.sync.merging() && idle() && anna.file("Content/lamp.txt") == "on\n"; }));
+	REQUIRE(run([&] { return !anna.sync.service().history().empty() && anna.sync.service().history().front().subject == "Merge branch lights"; }));
+	Harness h;
+	dump(h.shot(anna.sync), "team-sync-branches.bmp");
+	anna.team.signOut();
+}
