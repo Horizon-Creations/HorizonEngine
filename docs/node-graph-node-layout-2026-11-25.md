@@ -26,9 +26,31 @@ What changed, in graph units:
   them instead of re-deriving the geometry.
 - HorizonCode "Self" placeholder sits on the label baseline (`HcEditorUtil.cpp`).
 
+Second round (same day, Blueprint as the model):
+- **Hit band per pin**: the dot and its label, from just outside the node's edge through
+  the end of the label, never into the inline-editor column (`Drawn::hitX0/hitX1`,
+  `pinAt`). A node in front hides the bands of nodes behind it. The circle test stays
+  as the fallback for low zoom. A faint plate and a white label show the row under the
+  cursor.
+- **Pure node shapes** (`Shape` in `GraphEditor.cpp`):
+  - *Operator*: `Model::compactTitle` returns a symbol. There is no title strip and no
+    A/B labels, and the symbol is drawn large in the middle. The HorizonCode host maps
+    Add/Subtract/Multiply/Divide/Greater/Less/Equals/And/Or/Not.
+  - *Pill*: no inputs, one output whose label ends the title ("Get Self" → "Self"). Just
+    that row.
+  - *Compact*: any other pure node keeps its slim title strip.
+  - Compact shapes have 4 px padding and snap to 8 rather than 16.
+- **Hollow until wired**: exec triangles and scalar dots are outlines while no wire is on
+  them. Container glyphs stay filled.
+
 ## Handoff
 
-- **Branch / commit:** release/0.8.0, "Node graph: nodes fit their content…".
+- **Branch / commit:** release/0.8.0, cfbbfd2b7 (layout), then "Node graph: a pin's
+  label is part of the pin; operator chips…" (round 2).
+- **Round 2 verified:** `test_graph_editor_keys` 25/25 (new: a label press takes the pin,
+  the node's middle does not), shots looked at, full ctest 384/384, help audit.
+  Known: at zoom ≤ 0.6 the headless raster draws the hollow ring as a small square; the
+  GPU backends anti-alias lines, which was not looked at.
 - **Files:** `GraphEditor.{h,cpp}` (`measureNode`, `nodeLayout`, `pinGraphOffset`, draw
   pass), `MaterialEditorPanel.cpp` (halo uses `nodeLayout`), `HcEditorUtil.cpp`
   (Self baseline), `tests/test_graph_editor_keys.cpp` (pin helpers ask the canvas; 2

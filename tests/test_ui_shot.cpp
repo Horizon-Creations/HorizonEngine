@@ -946,6 +946,7 @@ namespace
 			add(NT::ConstColor, 760, 230);                              // a body node
 			engine("physics.setJointCollideConnected", 300, 400);       // long names
 			add(NT::ArrayGet, 760, 400);                                // container pins
+			add(NT::Not, 560, 330);                                     // one-input operator
 
 			ge.pan  = ImVec2(0.0f, 0.0f);
 			ge.zoom = 1.0f;

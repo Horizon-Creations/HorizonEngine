@@ -293,6 +293,12 @@ struct Model
     // not change the graph. Unset = any output↔input pair on another node counts.
     std::function<bool(int outNode, int outPin, int inNode, int inPin)> canConnect;
 
+    // Operator symbol for a compact pure node ("+", ">", "AND"): the node then
+    // drops its title strip and pin labels and draws the symbol large in its
+    // middle, the way Blueprint draws math nodes. Empty (or unset) = the node
+    // keeps its title. Only asked for nodes that are compact anyway.
+    std::function<std::string(int nodeId)> compactTitle;
+
     // Feature flags.
     bool multiSelect = false;
     // Render exec-less, body-less nodes (pure getters / literals) as compact

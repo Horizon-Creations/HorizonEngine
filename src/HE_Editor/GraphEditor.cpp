@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <algorithm>
 #include <unordered_set>
+#include <cctype>
 #include <cmath>
 #include <limits>
 
@@ -51,6 +52,15 @@ namespace
 // bar, a slim title, and a fit-to-content width — Unreal-style compact getters.
 constexpr float kCompactTitleH = 15.0f;
 
+// The shapes a node can take (Unreal's Blueprint vocabulary):
+//   Framed   — coloured header bar, then pin rows. Anything with exec pins.
+//   Compact  — pure node with a slim title strip on a tinted body.
+//   Operator — pure node the host gives a symbol (Model::compactTitle): no title
+//              strip, the symbol large in the middle, pins without labels.
+//   Pill     — a getter: no inputs, one labelled output whose label the title
+//              already ends with ("Get Self" → "Self"). Just the output row.
+enum class Shape : unsigned char { Framed, Compact, Operator, Pill };
+
 // One node laid out for this frame.
 struct Drawn
 {
@@ -59,8 +69,13 @@ struct Drawn
     ImVec2 size;   // screen
     float  gw = kNodeW;      // graph-space width
     float  gTitleH = kTitleH;// graph-space title-bar height
-    bool   compact = false;  // no exec pins → compact style
+    bool   compact = false;  // any of the pure shapes (no coloured header)
+    Shape  shape = Shape::Framed;
+    std::string symbol;      // Operator: what is drawn in the middle
     bool   reroute = false;  // a knot: dot instead of a box (Model::nodeIsReroute)
+    // Each pin's hit band, screen x: the dot AND its label, from the node's
+    // edge inward, parallel to pins. A row's height is the band's height.
+    std::vector<float>  hitX0, hitX1;
     // Where an inline pin editor starts, in graph units from the node's left
     // edge. ONE column for the whole node, past its longest input label: three
     // controls each starting wherever its own label happened to end is a node
@@ -108,29 +123,71 @@ float inlineEditorWidth(const Model& m, int id, int pin)
                                   : kPinEditorW;
 }
 
+// The widest inline editor a node can show (0 = none), as measureNode reserves it.
+float inlineEditorWidthMax(const Model& m, const Drawn& n)
+{
+    float w = 0.0f;
+    if (!m.pinHasInlineEditor || !m.drawPinInlineEditor) return w;
+    for (const auto& p : n.pins)
+        if (p.input && !p.isExec && m.pinHasInlineEditor(n.id, p.id))
+            w = std::max(w, inlineEditorWidth(m, n.id, p.id));
+    return w;
+}
+
+constexpr float kSymbolPx  = 20.0f;  // an operator's symbol ("+", ">")
+constexpr float kCompactPad = 4.0f;  // above and below a compact node's rows
+
 struct NodeMetrics
 {
     float w = kNodeW, h = 0.0f, titleH = kTitleH;
-    float editorX = 0.0f;   // start of the inline-editor column (0 = none)
+    float rowsTop = kTitleH; // where the first pin row starts
+    float editorX = 0.0f;    // start of the inline-editor column (0 = none)
     bool  compact = false;
+    Shape shape = Shape::Framed;
+    std::string symbol;
 };
 
-// The one place a node's size is decided (draw() and nodeGraphSize() both ask).
-// Whether a pin CAN have an inline editor is what reserves room, not whether it
-// shows one this frame: wiring a pin hides its editor, and a node that shrank
-// whenever a wire landed on it would move its own output pins under the wire.
+bool endsWithNoCase(const std::string& s, const std::string& tail)
+{
+    if (tail.empty() || tail.size() > s.size()) return false;
+    for (size_t i = 0; i < tail.size(); ++i)
+        if (std::tolower((unsigned char)s[s.size() - tail.size() + i]) != std::tolower((unsigned char)tail[i]))
+            return false;
+    return true;
+}
+
+// The one place a node's size is decided (draw(), nodeLayout() and
+// pinGraphOffset() all ask). Whether a pin CAN have an inline editor is what
+// reserves room, not whether it shows one this frame: wiring a pin hides its
+// editor, and a node that shrank whenever a wire landed on it would move its
+// own output pins under the wire.
 NodeMetrics measureNode(const Model& m, int id, const std::vector<Pin>& pins)
 {
     NodeMetrics r;
     const float body = m.nodeBodyHeight ? m.nodeBodyHeight(id) : 0.0f;
     r.compact = m.compactPureNodes && body <= 0.0f && isCompactNode(pins);
-    r.titleH  = r.compact ? kCompactTitleH : kTitleH;
+    const std::string title = m.title ? m.title(id) : std::string();
+    if (r.compact)
+    {
+        r.shape = Shape::Compact;
+        if (m.compactTitle) r.symbol = m.compactTitle(id);
+        int ins = 0, outs = 0; const Pin* out = nullptr;
+        for (const auto& p : pins) { if (p.input) ++ins; else { ++outs; out = &p; } }
+        if (!r.symbol.empty()) r.shape = Shape::Operator;
+        else if (ins == 0 && outs == 1 && endsWithNoCase(title, out->label)) r.shape = Shape::Pill;
+    }
+    r.titleH  = r.shape == Shape::Compact ? kCompactTitleH
+              : r.compact                 ? 0.0f : kTitleH;
+    r.rowsTop = r.titleH + (r.shape == Shape::Operator || r.shape == Shape::Pill ? kCompactPad : 0.0f);
+    // An operator's pins are A, B and the result: the symbol says what they are,
+    // so their labels are left out (Unreal does the same).
+    const bool labels = r.shape != Shape::Operator;
 
     float labelL = 0.0f, labelR = 0.0f, editorW = 0.0f, dataLabelL = 0.0f;
     int left = 0, right = 0;
     for (const auto& p : pins)
     {
-        const float lw = textWidth(p.label, kLabelPx);
+        const float lw = labels ? textWidth(p.label, kLabelPx) : 0.0f;
         if (p.input)
         {
             ++left;
@@ -155,18 +212,26 @@ NodeMetrics measureNode(const Model& m, int id, const std::vector<Pin>& pins)
         colL = std::max(colL, r.editorX + editorW);
     }
     const float colR = column(right, labelR);
-    const float cols = colL + colR + (left && right ? kColumnGap : 8.0f);
+    float cols;
+    if (r.shape == Shape::Operator)   // inputs | symbol | output
+        cols = colL + textWidth(r.symbol, kSymbolPx) + 2.0f * 10.0f + colR;
+    else
+        cols = colL + colR + (left && right ? kColumnGap : 8.0f);
 
-    const std::string title = m.title ? m.title(id) : std::string();
-    const float titleW = r.compact ? textWidth(title, kCompactPx) + 20.0f
-                                   : textWidth(title, kLabelPx) + 18.0f;
+    float titleW = 0.0f;
+    if (r.shape == Shape::Framed)  titleW = textWidth(title, kLabelPx) + 18.0f;
+    if (r.shape == Shape::Compact) titleW = textWidth(title, kCompactPx) + 20.0f;
 
     float w = std::max({ titleW, cols, r.compact ? kMinCompactW : kMinNodeW });
     // Host body widgets (material parameters, literals, state names) are sized
     // against kNodeW, so a node with a body never gets narrower than that.
     if (body > 0.0f) w = std::max(w, kNodeW);
-    r.w = std::ceil(w / kWidthSnap - 0.001f) * kWidthSnap;
-    r.h = r.titleH + std::max(left, right) * kRowH + body + 6.0f;
+    // Framed nodes snap to the grid; a pure chip only to 8, or it is mostly air.
+    const float snap = r.compact ? kWidthSnap * 0.5f : kWidthSnap;
+    r.w = std::ceil(w / snap - 0.001f) * snap;
+    const float rows = std::max(left, right) * kRowH;
+    r.h = r.compact ? r.rowsTop + rows + kCompactPad
+                    : r.titleH + rows + body + 6.0f;
     return r;
 }
 
@@ -205,7 +270,7 @@ ImVec2 pinGraphOffset(const Model& model, int nodeId, int pinId, bool input)
         if (p.id == pinId) break;
         ++row;
     }
-    return ImVec2(input ? kPinInset : nm.w - kPinInset, nm.titleH + (row + 0.5f) * kRowH);
+    return ImVec2(input ? kPinInset : nm.w - kPinInset, nm.rowsTop + (row + 0.5f) * kRowH);
 }
 
 bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
@@ -406,10 +471,14 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
     // wired (unwired simple inputs show an inline default editor).
     const std::vector<std::array<int,4>> links =
         model.links ? model.links() : std::vector<std::array<int,4>>{};
-    std::unordered_set<uint64_t> wiredInputs;
+    std::unordered_set<uint64_t> wiredInputs, wiredOutputs;
     wiredInputs.reserve(links.size());
+    wiredOutputs.reserve(links.size());
     for (const auto& l : links)
+    {
         wiredInputs.insert(((uint64_t)(uint32_t)l[2] << 32) | (uint32_t)l[3]);
+        wiredOutputs.insert(((uint64_t)(uint32_t)l[0] << 32) | (uint32_t)l[1]);
+    }
     auto pinInlineEditor = [&](int nid, int pin) {
         return model.pinHasInlineEditor && model.drawPinInlineEditor &&
                !wiredInputs.count(((uint64_t)(uint32_t)nid << 32) | (uint32_t)pin) &&
@@ -443,6 +512,8 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
         }
         const NodeMetrics nm = measureNode(model, nid, d.pins);
         d.compact  = nm.compact;
+        d.shape    = nm.shape;
+        d.symbol   = nm.symbol;
         d.gTitleH  = nm.titleH;
         d.gw       = nm.w;
         d.gEditorX = nm.editorX;
@@ -454,15 +525,39 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
 
         // Pin screen positions (top-to-bottom per side), inset into the node so
         // the dot, its label and its editor read as one row inside the frame.
-        const float inset = kPinInset * st.zoom, titleH = d.gTitleH * st.zoom, rowH = kRowH * st.zoom;
+        const float inset = kPinInset * st.zoom, rowsTop = nm.rowsTop * st.zoom, rowH = kRowH * st.zoom;
+        const bool labels = d.shape != Shape::Operator && st.zoom >= kLabelMinZoom;
         int leftRow = 0, rightRow = 0;
         d.pinPos.resize(d.pins.size());
+        d.hitX0.resize(d.pins.size());
+        d.hitX1.resize(d.pins.size());
         for (size_t i = 0; i < d.pins.size(); ++i)
         {
-            const bool inp = d.pins[i].input;
+            const Pin& p = d.pins[i];
+            const bool inp = p.input;
             const int  row = inp ? leftRow++ : rightRow++;
-            d.pinPos[i] = ImVec2(std::round(inp ? d.pos.x + inset : d.pos.x + d.size.x - inset),
-                                 std::round(d.pos.y + titleH + (row + 0.5f) * rowH));
+            const ImVec2 pp(std::round(inp ? d.pos.x + inset : d.pos.x + d.size.x - inset),
+                            std::round(d.pos.y + rowsTop + (row + 0.5f) * rowH));
+            d.pinPos[i] = pp;
+            // The hit band: from just outside the node's edge, over the dot,
+            // through the end of the label — the whole thing the eye reads as
+            // "the pin". Never into the inline-editor column, which is a widget
+            // of its own.
+            const float reach = labels && !p.label.empty()
+                ? (kLabelGap + textWidth(p.label, kLabelPx) + 4.0f) * st.zoom
+                : (kPinR + 4.0f) * st.zoom;
+            if (inp)
+            {
+                d.hitX0[i] = d.pos.x - kNodeHitPad;
+                d.hitX1[i] = pp.x + reach;
+                if (d.gEditorX > 0.0f && !p.isExec)
+                    d.hitX1[i] = std::min(d.hitX1[i], d.pos.x + d.gEditorX * st.zoom - 1.0f);
+            }
+            else
+            {
+                d.hitX0[i] = pp.x - reach;
+                d.hitX1[i] = d.pos.x + d.size.x + kNodeHitPad;
+            }
         }
         nodes.push_back(std::move(d));
     }
@@ -609,6 +704,12 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
         {
             remap(d.pos);
             for (ImVec2& p : d.pinPos) remap(p);
+            for (size_t i = 0; i < d.hitX0.size(); ++i)
+            {
+                ImVec2 a(d.hitX0[i], 0.0f), b(d.hitX1[i], 0.0f);
+                remap(a); remap(b);
+                d.hitX0[i] = a.x; d.hitX1[i] = b.x;
+            }
             d.size.x *= k; d.size.y *= k;
         }
     }
@@ -665,6 +766,27 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
         // leave nothing to move it by, so its pins get a circle no wider than
         // the pin itself (floored so it stays hittable at low zoom).
         const float rr = std::max(kPinR * st.zoom, 4.0f);
+        // First the bands: the whole row a pin and its label take up (see
+        // Drawn::hitX0). Front to back, and a node in front hides the bands
+        // of the nodes behind it — otherwise a label under a node could still
+        // be grabbed through it.
+        const float halfRow = kRowH * st.zoom * 0.5f;
+        for (auto it = nodes.rbegin(); it != nodes.rend(); ++it)
+        {
+            if (!it->reroute)
+                for (size_t i = 0; i < it->pins.size(); ++i)
+                {
+                    const ImVec2 pp = it->pinPos[i];
+                    if (m.y < pp.y - halfRow || m.y >= pp.y + halfRow) continue;
+                    if (m.x < it->hitX0[i] || m.x > it->hitX1[i]) continue;
+                    outNode = it->id; outPin = it->pins[i].id; outInput = it->pins[i].input;
+                    return true;
+                }
+            if (m.x >= it->pos.x && m.x <= it->pos.x + it->size.x &&
+                m.y >= it->pos.y && m.y <= it->pos.y + it->size.y) break;
+        }
+        // Then the circles, nearest centre wins: what keeps pins hittable when
+        // zoomed far out, where the rows are a few pixels tall.
         float best = std::numeric_limits<float>::max();
         bool  found = false;
         for (auto it = nodes.rbegin(); it != nodes.rend(); ++it)
@@ -730,6 +852,11 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
         }
     }
 
+    // The pin a click would take right now (drawn as a hover plate below).
+    int hoverPinNode = 0, hoverPinId = 0; bool hoverPinIn = false;
+    if (interact && st.dragNode == 0 && !st.boxSel && !pinAt(mouse, hoverPinNode, hoverPinId, hoverPinIn))
+        hoverPinNode = 0;
+
     // ── Nodes ────────────────────────────────────────────────────────────────
     int hoverNodeNow = 0; // topmost node under the cursor (nodes draw back-to-front)
     for (const Drawn& n : nodes)
@@ -781,14 +908,33 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
                 if (const ImU32 oc = model.nodeOutline(n.id))
                     dl->AddRect(ImVec2(n.pos.x - 3, n.pos.y - 3), ImVec2(br.x + 3, br.y + 3),
                                 oc, round + 2.0f, 0, 3.0f);
-            // Title scales linearly with zoom (like the node box), centred in
-            // the slim title strip both ways, using the SCALED text size.
-            const float fs = kCompactPx * st.zoom;
-            const float tw = textWidth(title, kCompactPx) * st.zoom;
-            dl->AddText(nullptr, fs,
-                        ImVec2(std::round(n.pos.x + (n.size.x - tw) * 0.5f),
-                               std::round(n.pos.y + (n.gTitleH * st.zoom - fs) * 0.5f + 1.0f * st.zoom)),
-                        IM_COL32(225, 225, 228, 255), title.c_str());
+            if (n.shape == Shape::Compact)
+            {
+                // Title scales linearly with zoom (like the node box), centred in
+                // the slim title strip both ways, using the SCALED text size.
+                const float fs = kCompactPx * st.zoom;
+                const float tw = textWidth(title, kCompactPx) * st.zoom;
+                dl->AddText(nullptr, fs,
+                            ImVec2(std::round(n.pos.x + (n.size.x - tw) * 0.5f),
+                                   std::round(n.pos.y + (n.gTitleH * st.zoom - fs) * 0.5f + 1.0f * st.zoom)),
+                            IM_COL32(225, 225, 228, 255), title.c_str());
+            }
+            else if (n.shape == Shape::Operator)
+            {
+                // The symbol, large and quiet, centred on the box: between the
+                // input column (pins + editors) and the output dot.
+                const float fs = kSymbolPx * st.zoom;
+                const float tw = textWidth(n.symbol, kSymbolPx) * st.zoom;
+                const float x0 = n.gEditorX > 0.0f
+                    ? n.pos.x + (n.gEditorX + inlineEditorWidthMax(model, n)) * st.zoom
+                    : n.pos.x + (kPinInset + kPinR) * st.zoom;
+                const float x1 = br.x - (kPinInset + kPinR) * st.zoom;
+                dl->AddText(nullptr, fs,
+                            ImVec2(std::round((x0 + x1 - tw) * 0.5f),
+                                   std::round(n.pos.y + (n.size.y - fs) * 0.5f)),
+                            IM_COL32(225, 225, 228, 170), n.symbol.c_str());
+            }
+            // A Pill has no title: its one output label is the name.
         }
         else
         {
@@ -822,11 +968,23 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
             // zoom like every other glyph here. Only the GLYPH changes: the pin's
             // position and its hit circle are untouched (see pinAt).
             const Container ck = containerOf(p);
+            // Blueprint grammar: a pin is drawn hollow until a wire is on it.
+            const uint64_t key = ((uint64_t)(uint32_t)n.id << 32) | (uint32_t)p.id;
+            const bool wired = p.input ? wiredInputs.count(key) > 0 : wiredOutputs.count(key) > 0;
+            const float ring = std::max(1.0f, 1.5f * st.zoom);
+            // The row under the cursor is the pin the click would take (pinAt's
+            // band): a faint plate over it says so before the click does.
+            const bool hot = hoverPinNode == n.id && hoverPinId == p.id && hoverPinIn == p.input;
+            if (hot && st.zoom >= kLabelMinZoom)
+                dl->AddRectFilled(ImVec2(std::max(n.hitX0[i], n.pos.x + 1.0f), pp.y - kRowH * st.zoom * 0.5f + 1.0f),
+                                  ImVec2(std::min(n.hitX1[i], br.x - 1.0f), pp.y + kRowH * st.zoom * 0.5f - 1.0f),
+                                  IM_COL32(255, 255, 255, 18), 3.0f * st.zoom);
             if (p.isExec)
             {
                 const float s = kPinR * st.zoom;
-                dl->AddTriangleFilled(ImVec2(pp.x - s, pp.y - s), ImVec2(pp.x - s, pp.y + s),
-                                      ImVec2(pp.x + s, pp.y), p.color);
+                const ImVec2 a(pp.x - s, pp.y - s), b(pp.x - s, pp.y + s), c(pp.x + s, pp.y);
+                if (wired) dl->AddTriangleFilled(a, b, c, p.color);
+                else       dl->AddTriangle(a, b, c, p.color, ring);
             }
             else if (ck == Container::Array)
             {
@@ -864,13 +1022,16 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
                                   p.keyColor ? p.keyColor : p.color);
                 dl->AddRectFilled(ImVec2(pp.x + g, pp.y - e), ImVec2(pp.x + e, pp.y + e), p.color);
             }
-            else
+            else if (wired)
                 dl->AddCircleFilled(pp, kPinR * st.zoom, p.color);
+            else
+                // 12 segments: ImGui's automatic count turns a 3 px ring into a square.
+                dl->AddCircle(pp, kPinR * st.zoom - ring * 0.5f, p.color, 12, ring);
 
             // Far out, labels and editors are left out (see kLabelMinZoom).
             if (st.zoom < kLabelMinZoom) continue;
             float labelEndX = pp.x + kLabelGap * st.zoom;   // where an inline editor may start
-            if (!p.label.empty())
+            if (!p.label.empty() && n.shape != Shape::Operator)
             {
                 // Pin labels scale with zoom like everything else on the node (they
                 // were drawn at the fixed default font size before, so they overflowed
@@ -878,10 +1039,11 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
                 const float fs = kLabelPx * st.zoom;
                 const float lw = textWidth(p.label, kLabelPx) * st.zoom;
                 const float ty = std::round(pp.y - fs * 0.5f);
+                const ImU32 lc = hot ? IM_COL32(255, 255, 255, 255) : IM_COL32(200, 200, 200, 200);
                 if (p.input) dl->AddText(nullptr, fs, ImVec2(std::round(pp.x + kLabelGap * st.zoom), ty),
-                                         IM_COL32(200,200,200,200), p.label.c_str());
+                                         lc, p.label.c_str());
                 else         dl->AddText(nullptr, fs, ImVec2(std::round(pp.x - kLabelGap * st.zoom - lw), ty),
-                                         IM_COL32(200,200,200,200), p.label.c_str());
+                                         lc, p.label.c_str());
                 if (p.input) labelEndX = pp.x + kLabelGap * st.zoom + lw + 6 * st.zoom;
             }
 

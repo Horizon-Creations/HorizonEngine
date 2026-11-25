@@ -668,6 +668,27 @@ GraphEditor::Model buildModel(const Host& h)
 	GraphEditor::Model m;
 	m.multiSelect = true;      // shift-click / box-select; drag + Delete act on all
 	m.compactPureNodes = true; // getters/literals draw as compact chips
+	// Math and logic draw as Blueprint operator chips: the symbol, no title, no
+	// A/B labels. The name stays in the hover tooltip and the node reference.
+	// × and ÷ are Latin-1, which every editor font range carries.
+	m.compactTitle = [&graph](int id) -> std::string {
+		const HC::Node* n = graph.findNode(id);
+		if (!n) return {};
+		switch (n->type)
+		{
+			case NT::Add:      return "+";
+			case NT::Subtract: return "-";
+			case NT::Multiply: return "\xC3\x97";   // ×
+			case NT::Divide:   return "\xC3\xB7";   // ÷
+			case NT::Greater:  return ">";
+			case NT::Less:     return "<";
+			case NT::Equals:   return "==";
+			case NT::And:      return "AND";
+			case NT::Or:       return "OR";
+			case NT::Not:      return "NOT";
+			default:           return {};
+		}
+	};
 	// The last compile check's error node gets a red halo; a node the
 	// interpreter just ran an amber one that fades over HcExecTrace::kFadeSeconds.
 	// The error wins where both apply — a broken node running is still broken.

@@ -880,6 +880,42 @@ TEST_CASE("GraphEditor layout: width fits the content, pins sit inside")
 	CHECK(GraphEditor::nodeLayout(h.model, 2).size.x == unwired);
 }
 
+// A pin is the dot AND its label: pressing on the label starts the wire, the
+// way a Blueprint row does. The empty middle of the node is still the node's.
+TEST_CASE("GraphEditor hit-test: a pin's label is part of the pin")
+{
+	Ctx ctx;
+	Harness h;
+	ctx.settle(h, emptySpot(ctx, h));
+
+	const TestNode* n3 = h.find(3);
+	REQUIRE(n3 != nullptr);
+	const ImVec2 pin = inputPin(ctx, h, *n3, 0);
+	// On the "In" label: past the dot's hit circle, so only the band can take it.
+	const ImVec2 onLabel(pin.x + GraphEditor::pinHitRadius(h.state.zoom) + 3.0f, pin.y);
+	ctx.mouse(onLabel);
+	ctx.frame(h);
+	ctx.button(true);
+	ctx.frame(h);
+	CHECK(h.state.linkSrcNode == 3);
+	CHECK(h.state.linkSrcPin == 0);
+	CHECK(h.state.linkSrcInput);
+	ctx.button(false);
+	ctx.frame(h);
+	ctx.frame(h);
+
+	// The middle of the node, between the input and the output label: no pin.
+	const ImVec2 size = GraphEditor::nodeLayout(h.model, 3).size;
+	const ImVec2 mid = ctx.toScreen(h, n3->x + size.x * 0.5f, n3->y + GraphEditor::kTitleH + GraphEditor::kRowH * 0.5f);
+	ctx.mouse(mid);
+	ctx.frame(h);
+	ctx.button(true);
+	ctx.frame(h);
+	CHECK(h.state.linkSrcNode == 0);
+	ctx.button(false);
+	ctx.frame(h);
+}
+
 // A host body that calls pushWidgetScale (material, particle, animator) gets
 // the zoomed style ONCE: draw() has already pushed it for the body.
 TEST_CASE("GraphEditor layout: a node body's widgets are not zoomed twice")
