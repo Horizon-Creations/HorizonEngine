@@ -10,8 +10,12 @@
 // Its own file, like TeamView, so the UI tests draw the real thing over a
 // TeamSyncController (tests/test_team_sync_ui.cpp). ImGui plus EditorWidgets;
 // call inside an open window.
+#include <SourceControl/TeamSyncService.h>
+#include <SourceControl/TextMerge.h>
+
 #include <functional>
 #include <string>
+#include <vector>
 
 class TeamController;
 class TeamSyncController;
@@ -38,6 +42,21 @@ namespace TeamSyncView
 	// The project's name as the server takes it: letters, digits, '-' and '_', at most 64.
 	std::string serverProjectName(const std::string& projectName);
 	bool        validServerName(const std::string& name);
+
+	// ── Conflicts (TeamSyncService::lost) ──
+	// Opens the conflict window on `lost` (the Resolve button, the notification's Resolve).
+	void openConflict(const HE::Sc::TeamSyncService::Lost& lost);
+	// Asked for once since the last call: the editor shows the Source Control window.
+	bool takeWindowRequest();
+	// The window itself: both versions, the changed blocks with a pick each (or the
+	// whole file for graphs and binaries), "Use This Result" / "Keep Theirs". Call
+	// every frame, after draw(), outside any text wrap.
+	void drawConflictWindow(TeamSyncController& sync);
+	bool conflictOpen();
+	// For the tests: the picks, the merged text, and the JSON check that guards "Use This Result".
+	void        setConflictPicks(const std::vector<HE::Sc::Pick>& picks);
+	std::string conflictResult();
+	bool        resultIsValid(const std::string& mine, const std::string& theirs, const std::string& result);
 
 	// Where a named control was drawn last ({0,0,0,0} when not), for the UI tests.
 	struct Rect { float x0 = 0, y0 = 0, x1 = 0, y1 = 0; };

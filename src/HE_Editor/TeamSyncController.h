@@ -23,6 +23,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -63,9 +64,10 @@ public:
 	// project-relative paths written or removed this frame.
 	std::vector<std::string> update(std::uint64_t nowMs, const Project& project, bool playing);
 
-	// A save landed on disk (scene, asset, settings): sync kDebounceMs after
-	// the last update()'s clock, so a run of saves is one revision.
-	void noteSaved();
+	// A save landed on disk (scene, asset, settings): sync `delayMs` after the
+	// last update()'s clock, so a run of saves is one revision. A shorter delay
+	// pending already stays (a scene save is not held back by a planner edit).
+	void noteSaved(std::uint64_t delayMs = kDebounceMs);
 	// "Sync now", with an optional note for the revision.
 	void syncNow(const std::string& message = {});
 	// The project closed: stop, forget.
@@ -90,7 +92,23 @@ public:
 	// One sentence for the panel header and the footer.
 	std::string stateLine() const;
 
+	// ── Conflicts (TeamSyncService::lost) ──
+	// Every one is a notification with a Resolve action (once per conflict and
+	// editor run, withdrawn when it is resolved); Resolve calls this.
+	void setOnResolve(std::function<void(const HE::Sc::TeamSyncService::Lost&)> fn) { m_onResolve = std::move(fn); }
+	// Settles a conflict: `bytes` (the version picked or merged in the conflict
+	// window) replace the project's file and go up as "Resolve <path> (r<rev>)";
+	// null keeps the project's version as it is. False when the file could not be
+	// written (the conflict stays open).
+	bool resolve(const HE::Sc::TeamSyncService::Lost& lost, const std::string* bytes);
+	static std::string conflictKey(const HE::Sc::TeamSyncService::Lost& lost);
+	const std::filesystem::path& projectRoot() const { return m_project.root; }
+	// A live collaboration session runs (restoring a revision would fork it from the peers).
+	bool inSession() const;
+
 	static constexpr std::uint64_t kDebounceMs = 1000;
+	// Planner pages write their file at every Enter: their saves are grouped longer.
+	static constexpr std::uint64_t kPlannerDebounceMs = 10'000;
 
 private:
 	void restart(const Project& project);
@@ -111,4 +129,7 @@ private:
 	bool          m_wasClient = false; // a session client last frame
 	bool          m_wasHost   = false;
 	bool          m_wasSignedIn = false;
+	std::function<void(const HE::Sc::TeamSyncService::Lost&)> m_onResolve;
+	std::set<std::string>    m_conflictsPosted;   // conflictKey: notified this run
+	std::vector<std::string> m_localWrites;       // resolve() wrote these: returned by the next update()
 };

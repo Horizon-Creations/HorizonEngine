@@ -84,6 +84,7 @@
 #include "UndoHistoryPanel.h"            // Window > Undo History window
 #include "HcWatchPanel.h"                // Window > Watch window (a stopped HorizonCode run's values)
 #include "TaskBoardPanel.h"              // Window > Task Board (the project's to-do list) + its chip jumps
+#include "TeamSyncView.h"                // a conflict's Resolve opens Source Control
 #include "TaskBoardFooter.h"             // ...and its count, next task and tick-off list in the footer
 #include "EditorAssetTypeCache.h"        // shared path → AssetType sniff (invalidated below)
 #include "EditorWidgets.h"               // dialog placement + detached-modal raise
@@ -4478,6 +4479,8 @@ void EditorUI::renderOverlays(AppContext& ctx, float dt)
     EnvironmentPanel::DrawEnvironmentWindow(ctx, s_showEnvironment);
     CollabPanel::DrawCollabWindow(ctx, s_showCollab);
     drawTeamWindow(ctx, s_showTeam);
+	// A conflict's Resolve (the team-sync view, a notification) opens the window it is shown in.
+	if (TeamSyncView::takeWindowRequest()) revealFloatingWindow(s_showSourceControl, "Source Control");
 	SourceControlPanel::DrawSourceControlWindow(ctx, s_showSourceControl);
 	// Here for the reason this whole function exists, and it earns it more than
 	// most: output is watched from INSIDE a script or a graph tab, and left

@@ -165,8 +165,10 @@ public:
 	// first revision.
 	void createProject();
 	// Fetch our overruled version of `lost` into
-	// Saved/TeamSync/Lost/r<rev>/<path>; the path arrives through takeOpened().
-	void fetchLost(const Lost& lost);
+	// Saved/TeamSync/Lost/r<rev>/<path>; with `reveal` the path arrives through
+	// takeOpened() (the editor shows the folder), without it the file is only there
+	// (the conflict window reads it at lostCopyPath()).
+	void fetchLost(const Lost& lost, bool reveal = true);
 	// Where fetchLost() puts our version of `lost` (it may not be there yet).
 	std::filesystem::path lostCopyPath(const Lost& lost) const;
 	// The conflict is settled (the person picked a version or merged them): it leaves

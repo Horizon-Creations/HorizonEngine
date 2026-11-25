@@ -8,6 +8,7 @@
 #include <Net/TeamClient.h>
 
 #include <cctype>
+#include <fstream>
 
 namespace {
 
@@ -58,6 +59,7 @@ TeamSyncController::~TeamSyncController()
 
 void TeamSyncController::close()
 {
+	m_conflictsPosted.clear();
 	m_sync.stop();
 	m_key.clear();
 	m_project  = {};
@@ -65,10 +67,47 @@ void TeamSyncController::close()
 	m_wasClient = m_wasHost = false;
 }
 
-void TeamSyncController::noteSaved()
+void TeamSyncController::noteSaved(std::uint64_t delayMs)
 {
 	if (!m_sync.running()) return;
-	m_saveAtMs = m_nowMs + kDebounceMs;
+	const std::uint64_t at = m_nowMs + delayMs;
+	// Re-armed by every save of the same kind (a run of them is one revision); a
+	// sooner one already pending is not pushed back by a later, slower kind.
+	m_saveAtMs = (m_saveAtMs != 0 && m_saveAtMs < at && delayMs > kDebounceMs) ? m_saveAtMs : at;
+}
+
+bool TeamSyncController::inSession() const { return m_collab.inSession(); }
+
+std::string TeamSyncController::conflictKey(const HE::Sc::TeamSyncService::Lost& l)
+{
+	return "teamsync.conflict." + std::to_string(l.rev) + "." + l.path;
+}
+
+bool TeamSyncController::resolve(const HE::Sc::TeamSyncService::Lost& l, const std::string* bytes)
+{
+	if (bytes)
+	{
+		// The project's own file, inside the project only: the path came from the server.
+		const std::filesystem::path root = m_project.root;
+		const std::filesystem::path full = (root / l.path).lexically_normal();
+		const std::string rel = full.lexically_relative(root).generic_string();
+		if (root.empty() || rel.empty() || rel.rfind("..", 0) == 0) return false;
+		std::error_code ec;
+		std::filesystem::create_directories(full.parent_path(), ec);
+		const std::filesystem::path tmp = full.string() + ".resolving";
+		{
+			std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
+			out.write(bytes->data(), static_cast<std::streamsize>(bytes->size()));
+			if (!out) return false;
+		}
+		std::filesystem::rename(tmp, full, ec);
+		if (ec) { std::filesystem::remove(tmp, ec); return false; }
+		m_localWrites.push_back(rel);
+		syncNow("Resolve " + l.path + " (r" + std::to_string(l.rev) + ")");
+	}
+	m_sync.resolveLost(l.rev, l.path);
+	if (m_notes) m_notes->resolve(conflictKey(l));
+	return true;
 }
 
 void TeamSyncController::syncNow(const std::string& message)
@@ -79,6 +118,7 @@ void TeamSyncController::syncNow(const std::string& message)
 
 void TeamSyncController::restart(const Project& project)
 {
+	m_conflictsPosted.clear();
 	m_sync.stop();
 	m_project = project;
 	HE::Sc::TeamSyncService::Settings s;
@@ -162,6 +202,25 @@ std::vector<std::string> TeamSyncController::update(std::uint64_t nowMs, const P
 
 	std::vector<std::string> written = m_sync.pump(!playing, m_keepLocal);
 
+	// Every conflict once per run: a new one, and the open ones from before at the start.
+	if (m_notes)
+		for (const HE::Sc::TeamSyncService::Lost& l : m_sync.lost())
+		{
+			const std::string key = conflictKey(l);
+			if (!m_conflictsPosted.insert(key).second) continue;
+			HE::Ed::NoteSpec note;
+			note.level = HE::Ed::NoteLevel::Important;
+			note.title = "Team sync: conflict in " + std::filesystem::path(l.path).filename().string();
+			note.text  = l.outcome == "replaced"
+			    ? l.winner + "'s later save (r" + std::to_string(l.rev) + ") replaced your version of " + l.path + "."
+			    : l.winner + "'s later save (r" + std::to_string(l.rev) + ") won where you both changed " + l.path + ".";
+			note.detail = "Both versions are kept on the team server. Compare them and pick or merge.";
+			note.key    = key;
+			if (m_onResolve)
+				note.actions.push_back({ "Resolve", [this, l] { if (m_onResolve) m_onResolve(l); }, true });
+			m_notes->post(std::move(note));
+		}
+
 	std::string text;
 	bool        error = false;
 	while (m_sync.pollNotice(text, error))
@@ -177,6 +236,9 @@ std::vector<std::string> TeamSyncController::update(std::uint64_t nowMs, const P
 		// in whatever app claims the extension, maybe a second editor.
 		if (m_openFolder) m_openFolder(opened.parent_path());
 	}
+	// What resolve() wrote: the editor reloads it like a file from the server.
+	written.insert(written.end(), m_localWrites.begin(), m_localWrites.end());
+	m_localWrites.clear();
 	return written;
 }
 

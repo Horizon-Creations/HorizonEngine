@@ -318,6 +318,7 @@ struct TeamSyncService::Impl
 	bool                               retrySync = false, retryReconcile = false;
 	std::set<std::string>              lostSeen;   // "rev path", toasted once (open or resolved)
 	std::set<std::string>              lostResolved;   // "rev path", under mu
+	std::set<std::string>              quietFetches;   // "rev path": fetchLost without takeOpened, under mu
 
 	template <class F> void setStatus(F&& f)
 	{
@@ -547,11 +548,12 @@ void TeamSyncService::Impl::loadConflicts()
 	}
 }
 
-void TeamSyncService::fetchLost(const Lost& lost)
+void TeamSyncService::fetchLost(const Lost& lost, bool reveal)
 {
 	if (!m_impl) return;
 	{
 		std::lock_guard<std::mutex> lock(m_impl->mu);
+		if (!reveal) m_impl->quietFetches.insert(std::to_string(lost.rev) + " " + lost.path);
 		m_impl->fetches.push_back(lost);
 	}
 	m_impl->cv.notify_all();
@@ -1383,15 +1385,8 @@ void TeamSyncService::Impl::fetchLog()
 		{
 			const std::string key = std::to_string(l.rev) + " " + l.path;
 			if (!lostSeen.insert(key).second) continue;
-			// Only what happened while this editor was running is news.
-			if (loggedOnce)
-			{
-				const std::string what = l.outcome == "replaced"
-				    ? l.winner + "'s later save replaced your version"
-				    : l.winner + "'s later save won where you both changed the same thing";
-				notices.emplace_back(l.path + ": " + what + " (r" + std::to_string(l.rev) +
-				                         "). Your version is kept on the team server.", false);
-			}
+			// No text notice: the editor posts its own, with a Resolve action, for every
+			// entry of lost() (TeamSyncController).
 			// Kept beside the state file: the log only reaches back 100 revisions.
 			std::ofstream(conflictsFile(), std::ios::binary | std::ios::app)
 			    << "O\t" << l.rev << '\t' << l.ourRev << '\t' << l.winner << '\t' << l.outcome << '\t' << l.path << '\n';
@@ -1572,6 +1567,7 @@ void TeamSyncService::Impl::fetchLost(const Lost& l)
 		return;
 	}
 	std::lock_guard<std::mutex> lock(mu);
+	if (quietFetches.erase(std::to_string(l.rev) + " " + l.path)) return;
 	opened.push_back(full);
 }
 

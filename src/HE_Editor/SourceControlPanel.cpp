@@ -1604,7 +1604,11 @@ void DrawSourceControlWindow(AppContext& ctx, bool& open)
 		// The local .git is dormant in this mode (it froze at the switch): its
 		// changes, history, branches and fetch would all describe a history
 		// nobody writes any more, so the team's view replaces them.
-		if (ctx.teamSync) TeamSyncView::draw(*ctx.teamSync);
+		if (ctx.teamSync)
+		{
+			TeamSyncView::draw(*ctx.teamSync);
+			TeamSyncView::drawConflictWindow(*ctx.teamSync);   // its own window, opened by Resolve
+		}
 		TeamSyncView::drawSwitchToGit(switchLocked, [&] { return setSourceControl(false, {}, {}); });
 		ImGui::End();
 		return;

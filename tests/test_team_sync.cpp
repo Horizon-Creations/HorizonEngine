@@ -445,13 +445,13 @@ TEST_CASE("Team sync: both change one file — the later save wins, the earlier 
     CHECK(results[0].detail.find("against r2 by Anna") == 0);
 
     // Anna is told, and gets her version back from the server.
-    REQUIRE(pumpSync(&server, { &anna, &bob }, [&] { return !anna.sync.lost().empty() && !anna.notices.empty(); }));
+    REQUIRE(pumpSync(&server, { &anna, &bob }, [&] { return !anna.sync.lost().empty(); }));
     const auto lost = anna.sync.lost();
     CHECK(lost[0].path == "Content/door.txt");
     CHECK(lost[0].rev == 3);
     CHECK(lost[0].ourRev == 2);
     CHECK(lost[0].winner == "Bob");
-    CHECK(anna.notices.back().find("Content/door.txt: Bob's later save replaced your version") == 0);
+    // The service says it through lost() only; the editor posts the note with its Resolve action.
     CHECK(bob.sync.lost().empty());
 
     anna.sync.fetchLost(lost[0]);

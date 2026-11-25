@@ -14,6 +14,7 @@
 #include "EditorTabs.h"            // retarget / dedupe the open asset tabs
 #include "AssetIdentity.h"        // an asset's identity is its UUID, not the tab's path string
 #include "ProjectPreflight.h"      // engine-content check in front of the first project open
+#include "TeamSyncView.h"          // a conflict notification opens its window
 #include "SceneDiskWatch.h"        // the open scene's file stamp: our own save is not a pull
 #include "EditorTheme.h"           // the brand palette every piece of chrome derives from
 #include "LevelScriptPanel.h"      // kTabPath — the level script is a virtual tab
@@ -596,6 +597,8 @@ void EditorApplication::OnInit()
 	m_collab.setNotifications(&m_notifications);
 	m_team.setNotifications(&m_notifications);
 	m_teamSync.setNotifications(&m_notifications);
+	// A conflict notification's Resolve opens the conflict window (in Source Control).
+	m_teamSync.setOnResolve([](const HE::Sc::TeamSyncService::Lost& l) { TeamSyncView::openConflict(l); });
 	m_taskTeam.setLink(&m_taskTeamLink);
 	m_taskTeam.setNotifications(&m_notifications);
 	TaskBoardPanel::setTeam(&m_taskTeam);
@@ -15045,7 +15048,8 @@ void EditorApplication::applyAssetBytes(const std::string& relativePath,
 
 void EditorApplication::plannerFileSaved(const std::filesystem::path& file)
 {
-	m_teamSync.noteSaved();
+	// Planner pages write at every Enter: grouped longer than a scene save into one revision.
+	m_teamSync.noteSaved(TeamSyncController::kPlannerDebounceMs);
 	if (!m_collab.inSession()) return;
 	const std::string root = projectRoot();
 	if (root.empty()) return;

@@ -6,6 +6,7 @@
 #include "EditorTheme.h"
 #include "EditorWidgets.h"
 #include "GitController.h"
+#include "NotificationStore.h"
 #include "TeamController.h"
 #include "TeamSyncController.h"
 #include "TeamSyncView.h"
@@ -522,4 +523,101 @@ TEST_CASE("Team project open: a copy that is behind gets the team's newest versi
 	}));
 	CHECK(r.state == ProjectTeamGate::State::Ready);
 	CHECK(bob.file("Content/door.txt") == "open\n");   // on disk before anything loads it
+}
+
+TEST_CASE("Team sync UI: a conflict is a notification with Resolve; the window merges per block and the team gets the result")
+{
+	FakeTeamServer server;
+	FakeScServer   sc(server);
+	Editor anna("Anna"), bob("Bob");
+	HE::Ed::NotificationStore bell;
+	anna.sync.setNotifications(&bell);
+	int resolveAsked = 0;
+	anna.sync.setOnResolve([&](const HE::Sc::TeamSyncService::Lost& l) { ++resolveAsked; TeamSyncView::openConflict(l); });
+	const std::string base = "{\n  \"a\": 1,\n  \"b\": 2,\n  \"c\": 3\n}\n";
+	anna.put("Config/level.json", base);
+	REQUIRE(anna.team.signIn(addressOf(server), "studio", "Anna", "correct-horse"));
+	REQUIRE(bob.team.signIn(addressOf(server), "studio", "Bob", "correct-horse"));
+	REQUIRE(pump(server, { &anna, &bob }, [&] { return anna.settled(0) && bob.settled(0); }));
+	anna.sync.syncNow();
+	REQUIRE(pump(server, { &anna, &bob }, [&] { return anna.settled(1) && bob.file("Config/level.json") == base; }));
+
+	// Both change the same file; Bob's save comes later and wins whole (the fake server replaces).
+	anna.put("Config/level.json", "{\n  \"a\": 100,\n  \"b\": 2,\n  \"c\": 3\n}\n");
+	bob.put("Config/level.json", "{\n  \"a\": 1,\n  \"b\": 2,\n  \"c\": 300\n}\n");
+	anna.sync.syncNow();
+	REQUIRE(pump(server, { &anna, &bob }, [&] { return anna.settled(2) && bob.settled(2); }));
+	bob.sync.syncNow();
+	REQUIRE(pump(server, { &anna, &bob }, [&] { return !anna.sync.service().lost().empty() && anna.settled(3); }));
+
+	// The bell has it, with Resolve.
+	const auto notes = bell.snapshot();
+	REQUIRE_FALSE(notes.empty());
+	CHECK(notes.back().title == "Team sync: conflict in level.json");
+	REQUIRE(notes.back().actions.size() == 1);
+	CHECK(notes.back().actions[0].label == "Resolve");
+	notes.back().actions[0].run();
+	CHECK(resolveAsked == 1);
+	CHECK(TeamSyncView::conflictOpen());
+
+	// The window fetches Anna's version, then shows the two changed blocks.
+	Harness h;
+	auto frameWith = [&](he_ui::Image* img) {
+		ImGui::NewFrame();
+		ImGui::SetNextWindowPos(ImVec2(0, 0));
+		ImGui::SetNextWindowSize(ImVec2(float(kW), float(kH)));
+		ImGui::Begin("Source Control", nullptr, ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoMove);
+		TeamSyncView::draw(anna.sync);
+		TeamSyncView::drawConflictWindow(anna.sync);
+		ImGui::End();
+		ImGui::Render();
+		if (img) *img = he_ui::rasterize(ImGui::GetDrawData(), kW, kH);
+	};
+	REQUIRE(pump(server, { &anna, &bob }, [&] {
+		frameWith(nullptr);
+		return TeamSyncView::controlRect("pick:0:Yours").x1 > 0;
+	}));
+	{
+		he_ui::Image img;
+		frameWith(nullptr);
+		frameWith(&img);
+		dump(img, "team-sync-conflict-window.bmp");
+	}
+	// Anna's "a", Bob's "c": the result keeps both.
+	TeamSyncView::setConflictPicks({ HE::Sc::Pick::Ours, HE::Sc::Pick::Theirs });
+	const std::string merged = TeamSyncView::conflictResult();
+	CHECK(merged == "{\n  \"a\": 100,\n  \"b\": 2,\n  \"c\": 300\n}\n");
+	CHECK(TeamSyncView::resultIsValid(base, base, merged));
+	CHECK_FALSE(TeamSyncView::resultIsValid(base, base, "{\n  \"a\": 100,\n"));   // a broken mix is refused
+
+	const auto lost = anna.sync.service().lost();
+	REQUIRE(anna.sync.resolve(lost[0], &merged));
+	CHECK(anna.sync.service().lost().empty());
+	REQUIRE(pump(server, { &anna, &bob }, [&] { return anna.settled(4) && bob.file("Config/level.json") == merged; }));
+	CHECK(anna.file("Config/level.json") == merged);
+	TeamSyncView::openConflict({});   // leave no window state behind for other tests
+	TeamSyncView::setConflictPicks({});
+}
+
+TEST_CASE("Team sync UI: the view - a status card, files and the history as a timeline with restore")
+{
+	FakeTeamServer server;
+	FakeScServer   sc(server);
+	Editor anna("Anna"), bob("Bob");
+	anna.put("Content/door.txt", "closed\n");
+	REQUIRE(anna.team.signIn(addressOf(server), "studio", "Anna", "correct-horse"));
+	REQUIRE(bob.team.signIn(addressOf(server), "studio", "Bob", "correct-horse"));
+	REQUIRE(pump(server, { &anna, &bob }, [&] { return anna.settled(0) && bob.settled(0); }));
+	anna.sync.syncNow();
+	REQUIRE(pump(server, { &anna, &bob }, [&] { return anna.settled(1) && bob.settled(1); }));
+	bob.put("Content/door.txt", "open\n");
+	bob.put("Content/window.txt", "glass\n");
+	bob.sync.syncNow();
+	REQUIRE(pump(server, { &anna, &bob }, [&] { return anna.settled(2) && bob.settled(2) && anna.sync.service().history().size() == 2; }));
+
+	Harness h;
+	const he_ui::Image shot = h.shot(anna.sync);
+	dump(shot, "team-sync-view.bmp");
+	CHECK(inkPixels(shot) > 1000);
+	CHECK(TeamSyncView::controlRect("Sync Now").x1 > 0);
 }
