@@ -212,7 +212,7 @@ void Draw(AppContext& ctx)
 		}
 	}
 	ImGui::SameLine();
-	if (EditorWidgets::dangerButton("Delete All", ImVec2(120, 0)) && ctx.discardAssetRecovery)
+	if (EditorWidgets::removeButton("Delete All", ImVec2(120, 0)) && ctx.discardAssetRecovery)
 	{
 		for (const HE::Ed::AssetRecoveryEntry& e : offers) ctx.discardAssetRecovery(e.key);
 		s_error.clear();

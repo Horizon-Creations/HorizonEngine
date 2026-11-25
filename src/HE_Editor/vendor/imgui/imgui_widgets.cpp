@@ -3120,8 +3120,9 @@ bool ImGui::SliderBehaviorT(const ImRect& bb, ImGuiID id, ImGuiDataType data_typ
     const float grab_padding = 2.0f; // FIXME: Should be part of style.
     const float slider_sz = (bb.Max[axis] - bb.Min[axis]) - grab_padding * 2.0f;
     float grab_sz = style.GrabMinSize;
-    if (!is_floating_point && v_range_f >= 0.0f)                         // v_range_f < 0 may happen on integer overflows
-        grab_sz = ImMax(slider_sz / (v_range_f + 1), style.GrabMinSize); // For integer sliders: if possible have the grab size represent 1 unit
+    // HE-PATCH(slider-fill): no 1-unit-wide grab for integer sliders. The editor draws
+    // a fill bar plus a thin marker (see SliderScalar), and a wide grab hid the value.
+    IM_UNUSED(is_floating_point);
     grab_sz = ImMin(grab_sz, slider_sz);
     const float slider_usable_sz = slider_sz - grab_sz;
     const float slider_usable_pos_min = bb.Min[axis] + grab_padding + grab_sz * 0.5f;
@@ -3393,9 +3394,17 @@ bool ImGui::SliderScalar(const char* label, ImGuiDataType data_type, void* p_dat
     if (value_changed)
         MarkItemEdited(id);
 
-    // Render grab
+    // HE-PATCH(slider-fill): a faint fill up to the value and a thin marker instead of a
+    // solid grab block, so the centred value text is never covered by the grab.
     if (grab_bb.Max.x > grab_bb.Min.x)
-        window->DrawList->AddRectFilled(grab_bb.Min, grab_bb.Max, GetColorU32(g.ActiveId == id ? ImGuiCol_SliderGrabActive : ImGuiCol_SliderGrab), style.GrabRounding);
+    {
+        const ImU32 grab_col = GetColorU32(g.ActiveId == id ? ImGuiCol_SliderGrabActive : ImGuiCol_SliderGrab);
+        const float mid = IM_ROUND((grab_bb.Min.x + grab_bb.Max.x) * 0.5f);
+        if (mid > frame_bb.Min.x + 1.0f)
+            window->DrawList->AddRectFilled(frame_bb.Min, ImVec2(mid, frame_bb.Max.y), GetColorU32(ImGuiCol_SliderGrab, 0.30f), style.FrameRounding, ImDrawFlags_RoundCornersLeft);
+        const float half = ImMax(1.5f, IM_TRUNC(style.GrabMinSize * 0.17f));
+        window->DrawList->AddRectFilled(ImVec2(mid - half, grab_bb.Min.y), ImVec2(mid + half, grab_bb.Max.y), grab_col, half);
+    }
 
     // Display value using user-provided display format so user can add prefix/suffix/decorations to the value.
     char value_buf[64];

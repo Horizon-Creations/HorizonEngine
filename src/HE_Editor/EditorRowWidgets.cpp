@@ -7,6 +7,7 @@
                               // + the window's WorkRect, which is what moves a
                               // SeparatorText's rule short of a trailing button
 
+#include <algorithm>
 #include <cctype>
 #include <cfloat>
 #include <cstdarg>
@@ -67,6 +68,21 @@ bool dangerButton(const char* label, const ImVec2& size)
 	                    ImVec4(0.60f, 0.20f, 0.20f, 1.0f),
 	                    ImVec4(0.72f, 0.26f, 0.26f, 1.0f),
 	                    ImVec4(0.52f, 0.16f, 0.16f, 1.0f));
+}
+
+bool removeButton(const char* label, const ImVec2& size)
+{
+	// The in-panel "take this out": the red text and wash of dangerSmallButton at
+	// full button height. Filled red stays for the confirm inside a dialog, so a
+	// row's Remove never outweighs the primary action beside it.
+	ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(0.95f, 0.48f, 0.45f, 1.0f));
+	ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.60f, 0.20f, 0.20f, 0.20f));
+	ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.66f, 0.23f, 0.23f, 0.32f));
+	ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.52f, 0.16f, 0.16f, 0.50f));
+	const bool pressed = ImGui::Button(label, size);
+	ImGui::PopStyleColor(4);
+	helpForLabel(label);
+	return pressed;
 }
 
 bool addButton(const char* id, const char* tooltip)
@@ -251,8 +267,13 @@ float inlineLabelWidth()
 // from "Speed##ab"), print only the part before "##", stretch the control to the
 // panel. `body` submits the control and is the LAST item, which is what the
 // callers' undo tracking keys off.
+// A single number reads fine in a short field; stretched across a wide page it
+// is a long empty bar with "1280" in the middle. Drags and typed numbers stop
+// here, sliders and text keep the full width.
+constexpr float kNumberMaxWidth = 200.0f;
+
 template <typename F>
-bool row(const char* label, F&& body)
+bool row(const char* label, F&& body, float maxWidth = 0.0f)
 {
 	ImGui::PushID(label);
 	const bool inlineLabel = labelCell(label);
@@ -275,7 +296,10 @@ bool row(const char* label, F&& body)
 		ImGui::SameLine();
 		ImGui::TextDisabled("(mixed)");
 	}
-	ImGui::SetNextItemWidth(-FLT_MIN);
+	if (maxWidth > 0.0f && ImGui::GetContentRegionAvail().x > maxWidth)
+		ImGui::SetNextItemWidth(maxWidth);
+	else
+		ImGui::SetNextItemWidth(-FLT_MIN);
 	const bool changed = body();
 	// After the control, so the LAST item is still the caller's — nothing here
 	// submits an item, and the tooltip itself is drawn at the end of the frame
@@ -346,7 +370,7 @@ bool sliderInt(const char* label, int* v, int min, int max, const char* fmt)
 bool dragFloat(const char* label, float* v, float speed, float min, float max, const char* fmt)
 {
 	const char* f = mixedMask(label) ? kMixedFmt : fmt;
-	return row(label, [&]{ return ImGui::DragFloat("##v", v, speed, min, max, f); });
+	return row(label, [&]{ return ImGui::DragFloat("##v", v, speed, min, max, f); }, kNumberMaxWidth);
 }
 
 bool dragFloat2(const char* label, float* v, float speed, float min, float max, const char* fmt)
@@ -370,12 +394,12 @@ bool dragFloat4(const char* label, float* v, float speed, float min, float max, 
 bool dragInt(const char* label, int* v, float speed, int min, int max)
 {
 	const char* f = mixedMask(label) ? kMixedFmt : "%d";
-	return row(label, [&]{ return ImGui::DragInt("##v", v, speed, min, max, f); });
+	return row(label, [&]{ return ImGui::DragInt("##v", v, speed, min, max, f); }, kNumberMaxWidth);
 }
 
 bool inputInt(const char* label, int* v)
 {
-	return row(label, [&]{ return ImGui::InputInt("##v", v, 0, 0); });
+	return row(label, [&]{ return ImGui::InputInt("##v", v, 0, 0); }, kNumberMaxWidth);
 }
 
 namespace
@@ -519,7 +543,10 @@ void hint(const char* fmt, ...)
 	// window width minus a fixed inset and ignores the current indent, so an
 	// indented hint still ran off the side).
 	ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
-	ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x);
+	// Capped, too: a sentence across a 900 px page is hard to follow back to
+	// the start of the next line, so a wide page wraps every hint at one width.
+	constexpr float kReadableWidth = 680.0f;
+	ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + std::min(ImGui::GetContentRegionAvail().x, kReadableWidth));
 	va_list args;
 	va_start(args, fmt);
 	ImGui::TextV(fmt, args);

@@ -428,7 +428,10 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 		// Which of the two views the right pane holds. The 3D view is the one you
 		// open a mesh to see; the unwrap is what you switch to when the question
 		// is about texturing.
-		bar.rightGroup(bar.iconGroupWidth(st.showUv ? 5 : 4));
+		// Two of the cells carry a label, so the width is measured, not counted:
+		// counting them as icon cells pushed the last one off the right edge.
+		bar.rightGroup(st.showUv ? bar.labelGroupWidth({ "3D", "UV", nullptr, nullptr, nullptr })
+		                         : bar.labelGroupWidth({ "3D", "UV", nullptr, nullptr }));
 		if (bar.item("##sm3d", T::iconLayers, "3D", !st.showUv, true,
 		             "The mesh in a lit world"))
 			st.showUv = false;

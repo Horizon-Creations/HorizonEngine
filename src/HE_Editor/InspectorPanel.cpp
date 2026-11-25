@@ -519,6 +519,62 @@ void render(AppContext& ctx)
 }
 
 #ifdef HE_IMGUI_ENABLED
+// "x = coverage (share of …), y = strength (0..1), …" → "coverage", "strength":
+// the component names a material graph's tooltip spells out, at most two words,
+// a trailing "of"/"per"/"in" dropped. Empty where the tooltip names none.
+static std::string componentName(const std::string& tip, char axis)
+{
+	const std::string key = std::string(1, axis) + " = ";
+	size_t at = 0;
+	while ((at = tip.find(key, at)) != std::string::npos)
+	{
+		if (at == 0 || tip[at - 1] == ' ' || tip[at - 1] == '(') break;
+		at += key.size();
+	}
+	if (at == std::string::npos) return {};
+	at += key.size();
+	const size_t end = tip.find_first_of("(,.:;", at);
+	std::string words[2];
+	int n = 0;
+	size_t p = at;
+	while (n < 2 && p < end && p < tip.size())
+	{
+		while (p < end && tip[p] == ' ') ++p;
+		const size_t q = std::min(end, tip.find(' ', p));
+		if (q > p) words[n++] = tip.substr(p, q - p);
+		p = q;
+	}
+	if (n == 2 && (words[1] == "of" || words[1] == "per" || words[1] == "in" || words[1] == "as"))
+		n = 1;
+	return n == 2 ? words[0] + " " + words[1] : n == 1 ? words[0] : std::string();
+}
+
+// Small captions under the fields of the vector row just drawn, one per field.
+static void componentCaptions(const std::string& tip, int count)
+{
+	std::string names[4];
+	bool any = false;
+	for (int k = 0; k < count; ++k) { names[k] = componentName(tip, "xyzw"[k]); any |= !names[k].empty(); }
+	if (!any) return;
+	const ImVec2 mn = ImGui::GetItemRectMin(), mx = ImGui::GetItemRectMax();
+	const float  inner = ImGui::GetStyle().ItemInnerSpacing.x;
+	const float  fw    = (mx.x - mn.x - inner * (count - 1)) / static_cast<float>(count);
+	const float  size  = ImGui::GetFontSize() * 0.8f;
+	const float  y     = ImGui::GetCursorScreenPos().y - ImGui::GetStyle().ItemSpacing.y * 0.5f;
+	ImDrawList*  dl    = ImGui::GetWindowDrawList();
+	const ImU32  col   = ImGui::GetColorU32(ImGuiCol_TextDisabled);
+	for (int k = 0; k < count; ++k)
+	{
+		if (names[k].empty()) continue;
+		const float  x0 = mn.x + k * (fw + inner);
+		const ImVec2 ts = ImGui::GetFont()->CalcTextSizeA(size, FLT_MAX, 0.0f, names[k].c_str());
+		dl->PushClipRect(ImVec2(x0, y), ImVec2(x0 + fw, y + size + 2.0f), true);
+		dl->AddText(ImGui::GetFont(), size, ImVec2(x0 + std::max(0.0f, (fw - ts.x) * 0.5f), y), col, names[k].c_str());
+		dl->PopClipRect();
+	}
+	ImGui::Dummy(ImVec2(0.0f, size - ImGui::GetStyle().ItemSpacing.y * 0.5f));
+}
+
 // The project's sixteen collision-channel names, as a combo's item list.
 //
 // The names come from the PROJECT (Project Settings ▸ Physics ▸ Collision Layers) and
@@ -1292,7 +1348,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 				int q = (env->cloudQuality < 0) ? 0 : (env->cloudQuality > 2 ? 2 : env->cloudQuality);
 				if (Row::combo("Quality", &q, cloudQ, 3)) { env->cloudQuality = q; trackEdit(); }
 				hint("Lower = cheaper. Clouds are a top GPU cost; Low ~halves their step count.");
-				if (EditorWidgets::checkbox("Low-res clouds (quarter-res pass)", &env->lowResClouds)) trackEdit();
+				if (EditorWidgets::checkbox("Low-res clouds", &env->lowResClouds)) trackEdit();
 				hint("Raymarch clouds at 1/4 res + upsample. Big win in open-sky views. "
 				     "Toggle + F9 to A/B the cost. (Metal first.)");
 			}
@@ -1538,7 +1594,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 						Row::sliderFloat("Wetness##wx", &wenv->wetness, 0.0f, 1.0f); trackEdit();
 					}
 					else
-						hint("No Sky in the scene — add one (Window ▸ Environment) to dial the "
+						hint("No Sky in the scene — add one (Window » Environment) to dial the "
 						     "clouds, fog, wind, rain, snow and wetness.");
 					Row::sliderFloat("Thunder", &w->thunder, 0.0f, 1.0f); trackEdit();
 				}
@@ -2419,8 +2475,9 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 						const char* label = nm.empty() ? "param" : nm.c_str();
 						switch (kind)
 						{
+							// 0..255 like Base Color above, so one panel has one colour format.
 							case HE::MatParamKind::Color:
-								edited = Row::colorEdit3(label, val, ImGuiColorEditFlags_Float); break;
+								edited = Row::colorEdit3(label, val); break;
 							case HE::MatParamKind::Vec2:
 								edited = Row::dragFloat2(label, val, 0.01f); break;
 							case HE::MatParamKind::Vec4:
@@ -2434,6 +2491,22 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 							default: // Float
 								edited = Row::dragFloat(label, val, 0.01f); break;
 						}
+						// The graph's tooltip for this parameter, and for a vector
+						// the name of each component under its field: four bare
+						// numbers called "Foam" say nothing about which is which.
+						const std::string* tip = (i < mat->graphParamTooltips.size() &&
+						                          !mat->graphParamTooltips[i].empty())
+							? &mat->graphParamTooltips[i] : nullptr;
+						if (tip && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal))
+						{
+							ImGui::BeginTooltip();
+							ImGui::PushTextWrapPos(ImGui::GetFontSize() * 22.0f);
+							ImGui::TextUnformatted(tip->c_str());
+							ImGui::PopTextWrapPos();
+							ImGui::EndTooltip();
+						}
+						if (tip && (kind == HE::MatParamKind::Vec4 || kind == HE::MatParamKind::Vec2))
+							componentCaptions(*tip, kind == HE::MatParamKind::Vec4 ? 4 : 2);
 						if (edited)
 						{
 							int w = ovi;
@@ -4029,7 +4102,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 				}
 				ImGui::SameLine();
 				ImGui::TextDisabled("UUID %llx", static_cast<unsigned long long>(lvl.meshId.hi));
-				if (EditorWidgets::dangerButton("Remove##lodlvl")) { lod->levels.erase(lod->levels.begin() + li); trackEdit(); --li; }
+				if (EditorWidgets::removeButton("Remove##lodlvl")) { lod->levels.erase(lod->levels.begin() + li); trackEdit(); --li; }
 				ImGui::PopID();
 			}
 			if (ImGui::Button("+ Level")) { lod->levels.push_back({}); trackEdit(); }

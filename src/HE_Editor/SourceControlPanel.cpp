@@ -1070,7 +1070,7 @@ void drawHistoryTab(GitController& git, const HE::Sc::RepoStatus& st, bool mayWr
 					ImGui::TextColored(colourFor(fs), "%s", letterFor(fs));
 					ImGui::SameLine();
 					if (cf.origPath.empty()) ImGui::TextUnformatted(cf.path.c_str());
-					else ImGui::Text("%s ← %s", cf.path.c_str(), cf.origPath.c_str());
+					else ImGui::Text("%s  (was %s)", cf.path.c_str(), cf.origPath.c_str());
 				}
 				if (files->size() > kShown) ImGui::TextDisabled("… and %zu more", files->size() - kShown);
 				if (files->empty()) ImGui::TextDisabled("No files.");

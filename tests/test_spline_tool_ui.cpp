@@ -611,9 +611,17 @@ namespace
 		{
 			ImGuiWindow* w = ImGui::FindWindowByName(kPanelWindow);
 			if (!w) return false;
-			const ImGuiID id = w->GetID(label);
+			// The control, wherever its row puts it: the section lays its rows out in
+			// a label column, so a checkbox or a drag sits right of its name, and a
+			// Row drag's id is "##v" under its label's id.
+			const ImGuiID id    = w->GetID(label);
+			const ImGuiID rowId = ImHashStr("##v", 0, id);
 			for (float y = 14.0f; y < float(PH) - 14.0f; y += 3.0f)
-				if (idAt(r, 80.0f, y) == id) { outX = 80.0f; outY = y; return true; }
+				for (float x = 24.0f; x < 320.0f; x += 8.0f)
+				{
+					const ImGuiID at = idAt(r, x, y);
+					if (at == id || at == rowId) { outX = x; outY = y; return true; }
+				}
 			return false;
 		}
 

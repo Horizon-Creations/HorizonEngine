@@ -510,7 +510,7 @@ void linksCell(const Database& db, const Row& row, const Property& p)
 	if (links.empty())
 	{
 		ImGui::GetWindowDrawList()->AddText(ImVec2(at.x + 4.0f, at.y + (fh - ImGui::GetTextLineHeight()) * 0.5f),
-		                                    Theme::u32(Theme::TextDim), "Drop an asset, scene or entity");
+		                                    Theme::u32(Theme::TextDim), "Drop a link here");
 		return;
 	}
 	ImGui::SetCursorScreenPos(ImVec2(at.x, at.y + (fh - h) * 0.5f));
@@ -1263,7 +1263,14 @@ void drawTable(const Database& db, const View& view, const std::vector<std::size
 
 			ImGui::TableSetColumnIndex(0);
 			const UUID dbId = db.id, rowId = row.id;
-			if (ImGui::SmallButton("Open")) s_selRow = rowId;
+			// An icon, not the word: "Open" beside the Status column's "Open"
+			// read as the row's status twice.
+			{
+				const float b = ImGui::GetFrameHeight();
+				if (PlannerIcons::iconButton("##openrow", PlannerIcons::Icon::ArrowOut, false, true,
+				                             "Planner/Open Row", false, 0, ImVec2(b, b)))
+					s_selRow = rowId;
+			}
 			note("open:" + row.title);
 			ImGui::SameLine();
 			textCell("##title", { rowId, UUID{} }, row.title, [=](const std::string& title) {
@@ -1654,10 +1661,10 @@ void drawDrawer(const Database& db, const Row& row, bool closeButton)
 	const View* openedIn = db.findView(s_viewId);
 	const ViewKind openedKind = openedIn ? openedIn->kind : ViewKind::Table;
 	bool askDelete = false;
-	if (openedKind == ViewKind::Timeline)      askDelete = EditorWidgets::dangerButton("Delete Step");
-	else if (openedKind == ViewKind::Calendar) askDelete = EditorWidgets::dangerButton("Delete Event");
-	else if (openedKind == ViewKind::Board)    askDelete = EditorWidgets::dangerButton("Delete Card");
-	else                                       askDelete = EditorWidgets::dangerButton("Delete Row");
+	if (openedKind == ViewKind::Timeline)      askDelete = EditorWidgets::removeButton("Delete Step");
+	else if (openedKind == ViewKind::Calendar) askDelete = EditorWidgets::removeButton("Delete Event");
+	else if (openedKind == ViewKind::Board)    askDelete = EditorWidgets::removeButton("Delete Card");
+	else                                       askDelete = EditorWidgets::removeButton("Delete Row");
 	note("drawer:delete");
 	if (askDelete) ImGui::OpenPopup("##confirmDeleteRow");
 	if (beginPopup("##confirmDeleteRow"))

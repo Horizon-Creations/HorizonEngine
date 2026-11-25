@@ -167,13 +167,13 @@ void drawPanel(TeamController& team, const Settings& settings, Form& form)
 	}
 
 	drawStatus(team);
-	const bool out = EditorWidgets::smallButton("Sign Out");
+	const bool out = EditorWidgets::button("Sign Out");
 	probe("Sign Out");
 	bool everywhere = false;
 	if (team.signedIn())
 	{
 		ImGui::SameLine();
-		everywhere = EditorWidgets::smallButton("Sign Out Everywhere");
+		everywhere = EditorWidgets::button("Sign Out Everywhere");
 		probe("Sign Out Everywhere");
 	}
 	if (out || everywhere)
@@ -265,7 +265,9 @@ constexpr int   kOnlineShown = 4;
 // session's faces (CollabPresenceBar.cpp has why those are not): the seam
 // here is a dark halo rather than a plug of the footer's colour, so it does
 // not care what colour the footer is.
-constexpr float kOnlineStep  = 0.6f;
+// A little more than 0.6, so the letter of each face under the stack stays
+// readable beside the dot of the one on top of it.
+constexpr float kOnlineStep  = 0.62f;
 
 // Split out so footerOnlineWidth() and drawFooterOnline() cannot disagree.
 struct OnlineLayout
@@ -283,7 +285,9 @@ OnlineLayout onlineLayout(std::size_t online)
 {
 	OnlineLayout l;
 	if (online == 0) return l;
-	l.face  = footerStatusWidth();
+	// A fifth larger than a text line: at line height a face's letter was a
+	// smudge. Still inside the footer's frame-height row.
+	l.face  = std::round(std::min(footerStatusWidth() * 1.2f, ImGui::GetFrameHeight() - 2.0f));
 	l.step  = std::round(l.face * kOnlineStep);
 	l.shown = std::min<int>(kOnlineShown, static_cast<int>(online));
 	l.extra = static_cast<int>(online) - l.shown;
@@ -1009,7 +1013,7 @@ void drawMembers(TeamController& team, Form& form)
 					}
 					else
 					{
-						if (EditorWidgets::smallButton("Remove")) form.removeArmed = m.name;
+						if (EditorWidgets::dangerSmallButton("Remove")) form.removeArmed = m.name;
 						probe("Remove", m.name);
 					}
 				}

@@ -1298,7 +1298,7 @@ namespace
 	  "Let clouds cast shadows within their own body, so a tall tower darkens what "
 	  "is behind it. Costs a second light march.",
 	  "", "rendering#sky" },
-	{ "Environment/Low-res clouds (quarter-res pass)", "",
+	{ "Environment/Low-res clouds", "",
 	  "Raymarch the clouds at quarter resolution and upscale. Much cheaper on a "
 	  "sky-filled view, slightly softer edges.",
 	  "", "rendering#performance" },
@@ -2290,7 +2290,7 @@ namespace
 	  "", "editor#project-hub" },
 	{ "File/Import Asset...", "",
 	  "Brings a file from outside into the project — meshes, textures, audio, "
-	  "fonts — converting it on the way in. The same import as Assets ▸ Import "
+	  "fonts — converting it on the way in. The same import as Assets » Import "
 	  "Asset, offered here too because File is where a newcomer looks for it.",
 	  "", "editor#content-browser" },
 	{ "File/Close Project", "",
@@ -3284,6 +3284,9 @@ namespace
 	{ "Planner/Open", "Open",
 	  "Lists everything you can open: tables, timelines, boards, calendars, pages and whiteboards. Each is open once; picking one that is open takes you to its tab. The x on a tab closes the tab, not the thing.",
 	  "", "" },
+	{ "Planner/Open Row", "Open Row",
+	  "Opens this row in the side panel: every property and the page the row carries.",
+	  "", "" },
 	{ "Planner/+ Table", "+ Table",
 	  "Adds a table view to this database: rows down, one column per property. "
 	  "Each view keeps its own filters, sorting and hidden columns.",
@@ -3617,7 +3620,7 @@ namespace
 	  "Opens the Task Board with this task's details.",
 	  "", "" },
 	{ "Task Board/Open Task Board", "Open Task Board",
-	  "Brings up the Task Board panel (Window ▸ Task Board), where tasks are "
+	  "Brings up the Task Board panel (Window » Task Board), where tasks are "
 	  "added, linked and assigned.",
 	  "", "" },
 
@@ -3765,7 +3768,7 @@ namespace
 	  "for the next time the tour starts.",
 	  "", "getting-started#first-project" },
 	{ "Project Hub/Not now", "",
-	  "Puts the offer away. It comes back through Help ▸ Interactive Tutorial "
+	  "Puts the offer away. It comes back through Help » Interactive Tutorial "
 	  "whenever you want it.",
 	  "", "getting-started#first-project" },
 	{ "Scene Changed/Reload Scene", "",
@@ -4919,7 +4922,7 @@ namespace
 	// them (Collision Layers, Permissions, Application, Fonts) write the .heproj
 	// and moved here from Preferences with their keys unchanged.
 	// ── Game ▸ General ───────────────────────────────────────────────────────
-	{ "Project General/Project", "Project",
+	{ "Project General/Project name", "Project name",
 	  "The project's name — the .heproj's file name, and what the export derives "
 	  "the bundle name from. Shown here so the page says whose settings these "
 	  "are; it is changed by renaming the project in the Project Hub, not typed "
@@ -5218,7 +5221,7 @@ namespace
 	  "the way every project has worked so far. On, the rows on this page are the "
 	  "project's answer: they are written into Config/ProjectSettings.json, go "
 	  "into the exported build's config.json and are what the viewport previews "
-	  "with, unless the user chose their own values under Preferences ▸ Viewport "
+	  "with, unless the user chose their own values under Preferences » Viewport "
 	  "Quality.\n\n"
 	  "Switching on starts from the values the editor shows right now, so nothing "
 	  "jumps. Switching off leaves the project's values in the file, unused.",
@@ -5285,7 +5288,7 @@ namespace
 	  "Which graphics API the packaged build renders through. The platform "
 	  "default is the right answer almost always; a backend the target machine "
 	  "cannot create falls back to that default at start with a line in the "
-	  "log. The names are the same ones Preferences ▸ Display offers.",
+	  "log. The names are the same ones Preferences » Display offers.",
 	  "", "rendering#backends" },
 	// ── Rendering ▸ Shadows ──────────────────────────────────────────────────
 	{ "Shadows/Shadow distance", "Shadow distance",
@@ -6957,6 +6960,10 @@ namespace
 	{ "UI Timeline/Delete Key", "",
 	  "Removes this key. The track keeps the others, and a track with one key "
 	  "left is simply a constant.",
+	  "", "ui#elements" },
+	{ "UI Timeline/Remove Track", "Remove Track",
+	  "Takes this property out of the animation, with all of its keys. The "
+	  "element keeps its own value again while the animation plays.",
 	  "", "ui#elements" },
 
 	// ── Components: what a widget offers whoever embeds it ───────────────────
@@ -10421,7 +10428,7 @@ namespace
 	  "", "collaboration#overview" },
 	{ "panel.team", "Team",
 	  "Your team on the team server: members and who is online, the sessions "
-	  "they host, invitations. Signing in is in Preferences ▸ Team or right here.",
+	  "they host, invitations. Signing in is in Preferences » Team or right here.",
 	  "", "collaboration" },
 	{ "panel.source-control", "Source Control",
 	  "Git for the whole project, large assets included: what has changed, what to "

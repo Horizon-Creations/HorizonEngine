@@ -94,6 +94,9 @@ SlotAction assetDropSlot(AppContext& ctx, const char* label, HE::UUID& target,
 bool primaryButton(const char* label, const ImVec2& size = ImVec2(0, 0));
 bool dangerButton (const char* label, const ImVec2& size = ImVec2(0, 0));
 bool cancelButton (const char* label, const ImVec2& size = ImVec2(0, 0));
+// Remove/Delete on a panel or row (not a dialog's confirm): red text on a red
+// wash, the same look as dangerSmallButton at full height.
+bool removeButton (const char* label, const ImVec2& size = ImVec2(0, 0));
 
 // The counterpart for creation: a square, frame-height "+" — big enough to be
 // a target, small enough to sit in a section header. The glyph alone carries

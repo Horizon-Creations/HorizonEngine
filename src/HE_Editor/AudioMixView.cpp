@@ -377,7 +377,7 @@ namespace
 		drag("##q", &b.q, 0.01f, HE::AudioEqBand::kMinQ, HE::AudioEqBand::kMaxQ, "Q %.2f",
 		     ImGuiSliderFlags_Logarithmic, "Audio Editor/Band Q", fs * 4.0f);
 		ImGui::SameLine();
-		if (ImGui::SmallButton("Remove")) remove = true;
+		if (EditorWidgets::dangerSmallButton("Remove")) remove = true;
 		EditorWidgets::helpForKey("Audio Editor/Remove Band");
 		ImGui::PopID();
 		return r;

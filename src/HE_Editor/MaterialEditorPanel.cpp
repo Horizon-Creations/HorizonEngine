@@ -574,6 +574,47 @@ State& stateFor(const std::string& path, AppContext& ctx)
 using GraphEditor::pushWidgetScale;
 using GraphEditor::popWidgetScale;
 
+// A parameter's NAME in the side panel: editable, but drawn as the label it is.
+// A framed box per name read as one more button beside the real ones.
+static void paramNameField(std::string& name)
+{
+	ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
+	ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0.0f, ImGui::GetStyle().FramePadding.y));
+	ImGui::InputText("##name", &name);
+	ImGui::PopStyleVar();
+	ImGui::PopStyleColor();
+}
+
+// Small square glyph buttons for a parameter row: "more" (three dots, the
+// metadata popup) and a "?" mark that only carries a tooltip. The text ".." and
+// "(?)" they replace read as stray punctuation after the value.
+static bool paramGlyph(const char* id, bool help)
+{
+	const float  h = ImGui::GetFrameHeight();
+	const ImVec2 size(h, h);
+	const bool   pressed = help ? (ImGui::Dummy(size), false) : ImGui::InvisibleButton(id, size);
+	const ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
+	const ImVec2 c((a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f);
+	const bool   hov = ImGui::IsItemHovered();
+	ImDrawList*  dl = ImGui::GetWindowDrawList();
+	const ImU32  fg = ImGui::GetColorU32(hov ? ImGuiCol_Text : ImGuiCol_TextDisabled);
+	if (help)
+	{
+		const float r = h * 0.30f;
+		dl->AddCircle(c, r, fg, 0, 1.4f);
+		const ImVec2 ts = ImGui::CalcTextSize("?");
+		const float  fs = ImGui::GetFontSize() * 0.8f;
+		dl->AddText(ImGui::GetFont(), fs, ImVec2(c.x - ts.x * 0.4f, c.y - fs * 0.5f), fg, "?");
+	}
+	else
+	{
+		if (hov) dl->AddRectFilled(a, b, ImGui::GetColorU32(ImGuiCol_ButtonHovered), ImGui::GetStyle().FrameRounding);
+		for (int k = -1; k <= 1; ++k)
+			dl->AddCircleFilled(ImVec2(c.x + k * h * 0.2f, c.y), 1.6f, fg);
+	}
+	return pressed;
+}
+
 // Inline parameter widgets for a node; returns true when an edit was COMMITTED
 // (deactivated-after-edit), so constant drags don't rebuild the pipeline every frame.
 // `scale` = canvas zoom, so the fixed widget widths track the scaled node box.
@@ -755,7 +796,7 @@ bool nodeParamWidgets(MatGraphNode& n, float scale = 1.0f, bool drawName = true,
 			ImGui::TextWrapped("%s", label.c_str());
 			ImGui::PopStyleColor();
 			if (!n.s.empty() && EditorWidgets::dangerSmallButton("Clear")) { n.s.clear(); committed = true; }
-			ImGui::TextDisabled("(drop, or right-click → Set Texture)");
+			ImGui::TextDisabled("(drop, or right-click » Set Texture)");
 			break;
 		}
 		case MatNodeType::Output:
@@ -792,7 +833,7 @@ bool nodeParamWidgets(MatGraphNode& n, float scale = 1.0f, bool drawName = true,
 		case MatNodeType::ParamFloat:
 			if (drawName) {
 				ImGui::SetNextItemWidth((kNodeW - 24.0f) * scale);
-				ImGui::InputText("##name", &n.s);
+				paramNameField(n.s);
 				committed |= ImGui::IsItemDeactivatedAfterEdit();
 			}
 			ImGui::SetNextItemWidth((kNodeW - 24.0f) * scale);
@@ -806,7 +847,7 @@ bool nodeParamWidgets(MatGraphNode& n, float scale = 1.0f, bool drawName = true,
 		case MatNodeType::ParamColor:
 			if (drawName) {
 				ImGui::SetNextItemWidth((kNodeW - 24.0f) * scale);
-				ImGui::InputText("##name", &n.s);
+				paramNameField(n.s);
 				committed |= ImGui::IsItemDeactivatedAfterEdit();
 			}
 			ImGui::SetNextItemWidth((kNodeW - 24.0f) * scale);
@@ -818,7 +859,7 @@ bool nodeParamWidgets(MatGraphNode& n, float scale = 1.0f, bool drawName = true,
 		{
 			if (drawName) {
 				ImGui::SetNextItemWidth((kNodeW - 24.0f) * scale);
-				ImGui::InputText("##name", &n.s);
+				paramNameField(n.s);
 				committed |= ImGui::IsItemDeactivatedAfterEdit();
 			}
 			static const char* kTypes[] = { "Float", "Vec2", "Vec3", "Vec4" };
@@ -837,7 +878,7 @@ bool nodeParamWidgets(MatGraphNode& n, float scale = 1.0f, bool drawName = true,
 		case MatNodeType::ParamVec2:
 			if (drawName) {
 				ImGui::SetNextItemWidth((kNodeW - 24.0f) * scale);
-				ImGui::InputText("##name", &n.s);
+				paramNameField(n.s);
 				committed |= ImGui::IsItemDeactivatedAfterEdit();
 			}
 			ImGui::SetNextItemWidth((kNodeW - 24.0f) * scale);
@@ -847,7 +888,7 @@ bool nodeParamWidgets(MatGraphNode& n, float scale = 1.0f, bool drawName = true,
 		case MatNodeType::ParamVec4:
 			if (drawName) {
 				ImGui::SetNextItemWidth((kNodeW - 24.0f) * scale);
-				ImGui::InputText("##name", &n.s);
+				paramNameField(n.s);
 				committed |= ImGui::IsItemDeactivatedAfterEdit();
 			}
 			ImGui::SetNextItemWidth((kNodeW - 24.0f) * scale);
@@ -858,7 +899,7 @@ bool nodeParamWidgets(MatGraphNode& n, float scale = 1.0f, bool drawName = true,
 		{
 			if (drawName) {
 				ImGui::SetNextItemWidth((kNodeW - 24.0f) * scale);
-				ImGui::InputText("##name", &n.s);
+				paramNameField(n.s);
 				committed |= ImGui::IsItemDeactivatedAfterEdit();
 			}
 			bool on = n.p[0] > 0.5f;
@@ -998,11 +1039,12 @@ bool drawParamConstPanel(MaterialGraph& graph)
 				// The hand-written tooltip this used to carry is now the help
 				// entry — two tooltips for one button, one drawn inline and one at
 				// the end of the frame, is what having both would mean.
-				if (EditorWidgets::smallButton("..")) ImGui::OpenPopup("##pmeta");
+				if (paramGlyph("##pmetabtn", false)) ImGui::OpenPopup("##pmeta");
+				EditorWidgets::helpForLabel("..");
 				if (!n->tooltip.empty())
 				{
-					ImGui::SameLine();
-					ImGui::TextDisabled("(?)");
+					ImGui::SameLine(0.0f, 0.0f);
+					paramGlyph("##ptip", true);
 					// The author of the material wrote this hint, so it is a sentence
 					// of unknown length, and a tooltip window sizes itself to its
 					// widest line. SetTooltip on such a string produces a strip of
@@ -2269,8 +2311,8 @@ bool drawInstanceOverridePanel(AppContext& ctx, State& st, MaterialAsset& inst)
 			ImGui::TextUnformatted(nm.empty() ? "param" : nm.c_str());
 			if (i < inst.graphParamTooltips.size() && !inst.graphParamTooltips[i].empty())
 			{
-				ImGui::SameLine();
-				ImGui::TextDisabled("(?)");
+				ImGui::SameLine(0.0f, 0.0f);
+				paramGlyph("##ptip", true);
 				// Same author-written sentence as on the master's parameter rows,
 				// the same fixed wrap column and the same asked-as-a-question
 				// BeginTooltip, so the two read alike in every respect.

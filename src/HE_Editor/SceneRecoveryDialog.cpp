@@ -116,7 +116,7 @@ void Draw(AppContext& ctx)
 		ImGui::CloseCurrentPopup();
 	}
 	ImGui::SameLine();
-	if (EditorWidgets::dangerButton("Delete Snapshot", ImVec2(140, 0)))
+	if (EditorWidgets::removeButton("Delete Snapshot", ImVec2(140, 0)))
 	{
 		if (ctx.discardRecovery) ctx.discardRecovery();
 		ImGui::CloseCurrentPopup();

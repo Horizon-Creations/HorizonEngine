@@ -423,7 +423,19 @@ bool drawTemplateGrid(int& selectedPreset, float width)
             drawTemplateArt(dl, artA, artB, i);
             dl->PopClipRect();
             const ImVec2 tp(a.x + 8, a.y + artH + 6);
-            ImGui::RenderTextEllipsis(dl, tp, ImVec2(b.x - 6, b.y), b.x - 6, kPresetNames[i], nullptr, nullptr);
+            // A name a little too long for the tile is set a little smaller
+            // rather than cut ("Tutorial Sandb…"); only a much longer one still
+            // ends in an ellipsis.
+            const float room = b.x - 6 - tp.x;
+            const float full = ImGui::CalcTextSize(kPresetNames[i]).x;
+            if (full > room && full * 0.78f <= room)
+            {
+                const float fs = ImGui::GetFontSize() * (room / full);
+                dl->AddText(ImGui::GetFont(), fs, ImVec2(tp.x, tp.y + (ImGui::GetFontSize() - fs) * 0.5f),
+                            ImGui::GetColorU32(ImGuiCol_Text), kPresetNames[i]);
+            }
+            else
+                ImGui::RenderTextEllipsis(dl, tp, ImVec2(b.x - 6, b.y), b.x - 6, kPresetNames[i], nullptr, nullptr);
             // The amber frame (drawCardFrame) already says "selected"; no second mark.
         }
         ImGui::Dummy(ImVec2(0.0f, 6.0f));
@@ -794,7 +806,7 @@ void render(AppContext& ctx)
                     ImGui::Spacing();
                     ImGui::Separator();
                     ImGui::Spacing();
-                    if (EditorWidgets::button("Remove", ImVec2(120, 0)))
+                    if (EditorWidgets::removeButton("Remove", ImVec2(120, 0)))
                     {
                         if (auto it = s_thumbs.find(known[ctx.hubRemoveIndex]); it != s_thumbs.end())
                         {

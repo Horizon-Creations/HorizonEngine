@@ -241,7 +241,7 @@ namespace
 	                 const char* fmt, const char* undoLabel, bool& live)
 	{
 		float tmp = *v;
-		const bool changed = ImGui::DragFloat(label, &tmp, speed, lo, hi, fmt);
+		const bool changed = EditorWidgets::Row::dragFloat(label, &tmp, speed, lo, hi, fmt);
 		if (changed)
 		{
 			if (!live && ctx.undoSys) ctx.undoSys->snapshotNow(undoLabel);
@@ -288,6 +288,9 @@ namespace
 	// dug again on request.
 	void lakeSection(AppContext& ctx, Entity spline)
 	{
+		// Names in a column on the left, the way the Details panel lays out its
+		// rows (ImGui's own label sat right of the field, against the scrollbar).
+		EditorWidgets::Row::InlineLabels labelColumn;
 		HorizonWorld& world = *ctx.world;
 		auto& reg = world.registry();
 		ImGui::Spacing();
@@ -314,20 +317,20 @@ namespace
 			EditorWidgets::helpForLabel("From Ground##lake");
 			if (s_lake.levelFromGround)
 			{
-				ImGui::DragFloat("Above Ground##lake", &s_lake.levelOffset, 0.05f, -20.0f, 50.0f, "%.2f m");
+				EditorWidgets::Row::dragFloat("Above Ground##lake", &s_lake.levelOffset, 0.05f, -20.0f, 50.0f, "%.2f m");
 				EditorWidgets::helpForLabel("Above Ground##lake");
 			}
 			else
 			{
-				ImGui::DragFloat("Level##lake", &s_lake.level, 0.1f, -10000.0f, 10000.0f, "%.2f m");
+				EditorWidgets::Row::dragFloat("Level##lake", &s_lake.level, 0.1f, -10000.0f, 10000.0f, "%.2f m");
 				EditorWidgets::helpForLabel("Level##lake");
 			}
 			EditorWidgets::checkbox("Dig Bed##lake", &s_lake.dig);
 			EditorWidgets::helpForLabel("Dig Bed##lake");
 			ImGui::BeginDisabled(!s_lake.dig);
-			ImGui::DragFloat("Depth##lake", &s_lake.depth, 0.05f, 0.0f, 200.0f, "%.2f m");
+			EditorWidgets::Row::dragFloat("Depth##lake", &s_lake.depth, 0.05f, 0.0f, 200.0f, "%.2f m");
 			EditorWidgets::helpForLabel("Depth##lake");
-			ImGui::DragFloat("Bank##lake", &s_lake.bank, 0.1f, 0.0f, 500.0f, "%.1f m");
+			EditorWidgets::Row::dragFloat("Bank##lake", &s_lake.bank, 0.1f, 0.0f, 500.0f, "%.1f m");
 			EditorWidgets::helpForLabel("Bank##lake");
 			ImGui::EndDisabled();
 			s_lake.levelOffset = std::clamp(s_lake.levelOffset, -20.0f, 50.0f);
@@ -372,9 +375,9 @@ namespace
 			clippingRows(ctx, terrain);
 
 			ImGui::Spacing();
-			ImGui::DragFloat("Depth##lake", &s_lake.depth, 0.05f, 0.0f, 200.0f, "%.2f m");
+			EditorWidgets::Row::dragFloat("Depth##lake", &s_lake.depth, 0.05f, 0.0f, 200.0f, "%.2f m");
 			EditorWidgets::helpForLabel("Depth##lake");
-			ImGui::DragFloat("Bank##lake", &s_lake.bank, 0.1f, 0.0f, 500.0f, "%.1f m");
+			EditorWidgets::Row::dragFloat("Bank##lake", &s_lake.bank, 0.1f, 0.0f, 500.0f, "%.1f m");
 			EditorWidgets::helpForLabel("Bank##lake");
 			s_lake.depth = std::max(0.0f, s_lake.depth);
 			s_lake.bank  = std::max(0.0f, s_lake.bank);
@@ -402,7 +405,7 @@ namespace
 				: "Moving the points reshapes the water only. Press Dig Again once and "
 				  "the bed follows the points from then on.");
 
-			if (EditorWidgets::dangerButton("Remove Lake"))
+			if (EditorWidgets::removeButton("Remove Lake"))
 			{
 				if (ctx.undoSys) ctx.undoSys->snapshotNow("Remove Lake");
 				L::remove(world, spline);
@@ -468,7 +471,7 @@ void renderPanel(AppContext& ctx)
 	if (hasPoint)
 	{
 		ImGui::TextDisabled("Point %d selected", s_tool.selectedPoint());
-		if (EditorWidgets::dangerButton("Delete Point"))
+		if (EditorWidgets::removeButton("Delete Point"))
 		{
 			s_tool.deleteSelectedPoint(world, ctx.selection, ctx.undoSys);
 			noteEdited(ctx, active);

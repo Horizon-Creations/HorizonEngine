@@ -816,8 +816,26 @@ bool isUiDomainMaterial(AppContext& ctx, const std::string& relPath)
 // draws the control next, "##"-labelled and SetNextItemWidth(-FLT_MIN).
 // scripts/editor_help_audit.py scans calls to this by name, so a label written
 // here is counted like any other.
+// Room a role button took at the right of the CONTROL's line, in the label
+// column layout: the control after it stops short of it (detailControlWidth).
+static float s_roleReserve = 0.0f;
+float detailControlWidth()
+{
+	const float r = s_roleReserve;
+	s_roleReserve = 0.0f;
+	return r > 0.0f ? -r : -FLT_MIN;
+}
+
 void detailLabel(const char* label)
 {
+	// In the label column (the Details pane opens one) the name goes left of
+	// the control, like every Row; the panel used to stack them.
+	s_roleReserve = 0.0f;
+	if (EditorWidgets::Row::labelCell(label))
+	{
+		EditorWidgets::helpForLabel(label);
+		return;
+	}
 	const char* hash = std::strstr(label, "##");
 	ImGui::TextUnformatted(label, hash);
 	EditorWidgets::helpForLabel(label);
@@ -1282,11 +1300,21 @@ void drawThemeRoleButton(UIElement& e, const std::string& prop, bool& committed,
 	// On the NAME's line, flush right — called between detailLabel and the
 	// control. The control underneath takes the whole width, so a button after
 	// it would land past the panel's edge.
-	ImGui::SameLine();
+	// In the label column the name has no line of its own: the button sits at
+	// the right end of the control's line instead, and the control after it
+	// is narrowed by its width (detailControlWidth).
+	const bool  inlineRow = EditorWidgets::Row::inlineActive();
+	const float ctrlX     = ImGui::GetCursorPosX();
+	const float btnW      = ImGui::CalcTextSize(label).x + ImGui::GetStyle().FramePadding.x * 2.0f;
+	if (!inlineRow) ImGui::SameLine();
 	{
-		const float w = ImGui::CalcTextSize(label).x + ImGui::GetStyle().FramePadding.x * 2.0f;
-		const float x = ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x - w;
+		const float x = ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x - btnW;
 		if (x > ImGui::GetCursorPosX()) ImGui::SetCursorPosX(x);
+	}
+	if (inlineRow)
+	{
+		// A SmallButton is shorter than a frame: centred on the control's line.
+		ImGui::SetCursorPosY(ImGui::GetCursorPosY() + ImGui::GetStyle().FramePadding.y);
 	}
 	ImGui::PushID((prop + "##role").c_str());
 	if (ImGui::SmallButton(label)) ImGui::OpenPopup("##rolepick");
@@ -1330,6 +1358,12 @@ void drawThemeRoleButton(UIElement& e, const std::string& prop, bool& committed,
 		ImGui::EndPopup();
 	}
 	ImGui::PopID();
+	if (inlineRow)
+	{
+		ImGui::SameLine();
+		ImGui::SetCursorPosX(ctrlX);
+		s_roleReserve = btnW + ImGui::GetStyle().ItemSpacing.x;
+	}
 }
 
 // A colour the theme may decide: the name with its role button on one line, the
@@ -1338,10 +1372,13 @@ void drawThemeRoleButton(UIElement& e, const std::string& prop, bool& committed,
 // scripts/editor_help_audit.py can read it like any other row's.
 void drawBoundColor(const char* label, UIElement& n, glm::vec4& c, bool& edit, bool& committed)
 {
+	// Stacked even in the label column: four channel fields and a swatch
+	// need the pane's whole width, which a 300 px pane has only once.
+	EditorWidgets::Row::StackedLabels stacked;
 	detailLabel(label);
 	drawThemeRoleButton(n, label, committed);
 	ImGui::BeginDisabled(themeDecides(n, label));
-	ImGui::SetNextItemWidth(-FLT_MIN);
+	ImGui::SetNextItemWidth(detailControlWidth());
 	edit |= ImGui::ColorEdit4((std::string("##") + label).c_str(), &c.r);
 	committed |= ImGui::IsItemDeactivatedAfterEdit();
 	ImGui::EndDisabled();
@@ -1387,7 +1424,7 @@ void drawSurfaceStyle(State& st, UIElement& n, bool& edit, bool& committed)
 		detailLabel("Corner Radius");
 		drawThemeRoleButton(n, "Corner Radius", committed, ThemeBindKind::SizeStep);
 		ImGui::BeginDisabled(radiusBound);
-		ImGui::SetNextItemWidth(-FLT_MIN);
+		ImGui::SetNextItemWidth(detailControlWidth());
 		if (ImGui::DragFloat("##Corner Radius", &r, 0.5f, 0.0f, 10000.0f, "%.2f"))
 		{ n.cornerRadius = glm::vec4(std::max(0.0f, r)); edit = true; }
 		committed |= ImGui::IsItemDeactivatedAfterEdit();
@@ -1506,7 +1543,7 @@ void drawPropertyWidget(UIElement& e, const UIPropDesc& pd, bool& edit, bool& co
 		// it back.
 		else if (bound) drawThemeRoleButton(e, pd.name, committed, ThemeBindKind::NoRole);
 		ImGui::BeginDisabled(bound);
-		ImGui::SetNextItemWidth(-FLT_MIN);
+		ImGui::SetNextItemWidth(detailControlWidth());
 		const bool ch = ranged
 			? ImGui::SliderFloat(id.c_str(), &v, pd.minV, pd.maxV)
 			: ImGui::DragFloat(id.c_str(), &v, 0.5f);
@@ -1555,10 +1592,11 @@ void drawPropertyWidget(UIElement& e, const UIPropDesc& pd, bool& edit, bool& co
 		// theme decides, the stored one otherwise. A field that disagrees with
 		// the picture beside it is worse than no field.
 		glm::vec4 v = themedColor(e, pd.name.c_str(), e.getProp(pd.name).col);
+		EditorWidgets::Row::StackedLabels stacked;   // as drawBoundColor: needs the width
 		detailLabel(pd.name.c_str());
 		drawThemeRoleButton(e, pd.name, committed);
 		ImGui::BeginDisabled(bound);
-		ImGui::SetNextItemWidth(-FLT_MIN);
+		ImGui::SetNextItemWidth(detailControlWidth());
 		if (ImGui::ColorEdit4(id.c_str(), &v.x))
 			{ e.setProp(pd.name, UIPropValue::ofColor(v)); edit = true; }
 		committed |= ImGui::IsItemDeactivatedAfterEdit();
@@ -1967,7 +2005,9 @@ void drawContentSection(State& st, AppContext& ctx, UIElement& n, bool& edit, bo
 			bool h = n.getProp("Flip Horizontal").b, v = n.getProp("Flip Vertical").b;
 			if (EditorWidgets::checkbox("Flip Horizontal", &h))
 			{ n.setProp("Flip Horizontal", UIPropValue::ofBool(h)); committed = true; }
-			ImGui::SameLine();
+			// Side by side only when stacked: in the label column each box
+			// has its name in the column, so a pair would run off the pane.
+			if (!EditorWidgets::Row::inlineActive()) ImGui::SameLine();
 			if (EditorWidgets::checkbox("Flip Vertical", &v))
 			{ n.setProp("Flip Vertical", UIPropValue::ofBool(v)); committed = true; }
 			continue;
@@ -2562,7 +2602,7 @@ void drawDetails(State& st, AppContext& ctx)
 	if (EditorWidgets::Row::dragInt("Layer", &layer, 1.0f)) { n->layer = layer; edit = true; }
 	committed |= ImGui::IsItemDeactivatedAfterEdit();
 	if (EditorWidgets::checkbox("Visible", &n->visible)) committed = true;
-	ImGui::SameLine();
+	if (!EditorWidgets::Row::inlineActive()) ImGui::SameLine();   // see Flip above
 	if (EditorWidgets::checkbox("Enabled", &n->enabled)) committed = true;
 	edit |= EditorWidgets::Row::dragFloat("Rotation", &n->rotation, 0.5f, -360.0f, 360.0f,
 	                                      "%.1f\xc2\xb0");
@@ -2973,6 +3013,67 @@ namespace PanelSize
 // clip open the canvas always shows it, a key is selected by clicking it, and
 // its value is typed in this strip. The details panel goes back to being what it
 // is everywhere else — the widget's authored state, seen by closing the clip.
+// SameLine only while the next item still fits: the strip's bar wraps to a
+// second row in a narrow dock instead of running off the right edge.
+static void timelineSameLine(float nextW)
+{
+	const float sp    = ImGui::GetStyle().ItemSpacing.x;
+	const float right = ImGui::GetCursorScreenPos().x + ImGui::GetContentRegionAvail().x;
+	if (ImGui::GetItemRectMax().x + sp + nextW <= right) ImGui::SameLine();
+}
+static float timelineButtonW(const char* label)
+{
+	return ImGui::CalcTextSize(label, nullptr, true).x + ImGui::GetStyle().FramePadding.x * 2.0f;
+}
+
+// The transport's glyphs, drawn rather than spelled: "|<", ">|" and "x" in the
+// body font read as text, not as the controls every timeline shows. The id
+// stays the old label, so tests and the help table still find the button.
+enum class TimelineGlyph { ToStart, ToEnd, Play, Stop, Remove };
+static float timelineGlyphW() { return std::floor(ImGui::GetFontSize() * 1.6f); }
+static bool timelineGlyphButton(const char* id, TimelineGlyph g, bool danger = false)
+{
+	const float  h  = ImGui::GetFontSize();   // a SmallButton's height
+	// On the text baseline of the line, as SmallButton places itself
+	// (ImGuiButtonFlags_AlignTextBaseLine): beside a framed field it sits lower.
+	if (const float base = ImGui::GetCurrentWindow()->DC.CurrLineTextBaseOffset; base > 0.0f)
+		ImGui::SetCursorPosY(ImGui::GetCursorPosY() + base);
+	const bool   pressed = ImGui::InvisibleButton(id, ImVec2(timelineGlyphW(), h));
+	const ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
+	const bool   hov = ImGui::IsItemHovered(), act = ImGui::IsItemActive();
+	ImDrawList*  dl = ImGui::GetWindowDrawList();
+	// dangerSmallButton's red wash, so the row's Remove reads like every other one.
+	const ImU32 bg = danger
+		? (act ? IM_COL32(133, 41, 41, 128) : hov ? IM_COL32(168, 59, 59, 82) : IM_COL32(153, 51, 51, 51))
+		: ImGui::GetColorU32(act ? ImGuiCol_ButtonActive : hov ? ImGuiCol_ButtonHovered : ImGuiCol_Button);
+	dl->AddRectFilled(a, b, bg, ImGui::GetStyle().FrameRounding);
+	const ImU32  fg = danger ? IM_COL32(242, 122, 115, 255) : ImGui::GetColorU32(ImGuiCol_Text);
+	const ImVec2 c(std::floor((a.x + b.x) * 0.5f), std::floor((a.y + b.y) * 0.5f));
+	const float  r = std::floor(h * 0.28f);
+	switch (g)
+	{
+	case TimelineGlyph::ToStart:
+		dl->AddRectFilled(ImVec2(c.x - r - 2.0f, c.y - r), ImVec2(c.x - r, c.y + r + 1.0f), fg);
+		dl->AddTriangleFilled(ImVec2(c.x + r, c.y - r), ImVec2(c.x + r, c.y + r + 1.0f), ImVec2(c.x - r + 1.0f, c.y + 0.5f), fg);
+		break;
+	case TimelineGlyph::ToEnd:
+		dl->AddRectFilled(ImVec2(c.x + r, c.y - r), ImVec2(c.x + r + 2.0f, c.y + r + 1.0f), fg);
+		dl->AddTriangleFilled(ImVec2(c.x - r, c.y - r), ImVec2(c.x + r - 1.0f, c.y + 0.5f), ImVec2(c.x - r, c.y + r + 1.0f), fg);
+		break;
+	case TimelineGlyph::Play:
+		dl->AddTriangleFilled(ImVec2(c.x - r + 1.0f, c.y - r), ImVec2(c.x + r + 1.0f, c.y + 0.5f), ImVec2(c.x - r + 1.0f, c.y + r + 1.0f), fg);
+		break;
+	case TimelineGlyph::Stop:
+		dl->AddRectFilled(ImVec2(c.x - r + 1.0f, c.y - r + 1.0f), ImVec2(c.x + r, c.y + r), fg, 1.0f);
+		break;
+	case TimelineGlyph::Remove:
+		dl->AddLine(ImVec2(c.x - r + 1.0f, c.y - r + 1.0f), ImVec2(c.x + r, c.y + r), fg, 1.6f);
+		dl->AddLine(ImVec2(c.x + r, c.y - r + 1.0f), ImVec2(c.x - r + 1.0f, c.y + r), fg, 1.6f);
+		break;
+	}
+	return pressed;
+}
+
 void drawTimeline(State& st, AppContext& ctx, float height)
 {
 	HE::Ed::Help::Scope helpScope("UI Timeline");
@@ -3048,7 +3149,7 @@ void drawTimeline(State& st, AppContext& ctx, float height)
 	// are rewritten here, and the rest of the project is ASKED about through the
 	// same dialog every other HorizonCode rename uses. Nothing is rewritten
 	// behind anyone's back, and nothing that names it is left unmentioned.
-	ImGui::SameLine();
+	timelineSameLine(timelineButtonW("Rename"));
 	if (EditorWidgets::smallButton("Rename"))
 	{
 		st.clipRenameEdit = clip.name;
@@ -3088,7 +3189,7 @@ void drawTimeline(State& st, AppContext& ctx, float height)
 	}
 	else EditorWidgets::helpForLabel("Rename");
 
-	ImGui::SameLine();
+	timelineSameLine(timelineButtonW("Delete"));
 	if (EditorWidgets::dangerSmallButton("Delete"))
 	{
 		st.tree.animations.erase(st.tree.animations.begin() + st.clipIndex);
@@ -3099,7 +3200,8 @@ void drawTimeline(State& st, AppContext& ctx, float height)
 	}
 	EditorWidgets::helpForLabel("Delete");
 
-	ImGui::SameLine(); ImGui::SetNextItemWidth(90.0f);
+	timelineSameLine(90.0f + ImGui::GetStyle().ItemInnerSpacing.x + ImGui::CalcTextSize("Length").x);
+	ImGui::SetNextItemWidth(90.0f);
 	if (ImGui::DragFloat("Length", &clip.duration, 0.05f, 0.05f, 600.0f, "%.2f s"))
 	{
 		st.dirty = true;
@@ -3108,9 +3210,8 @@ void drawTimeline(State& st, AppContext& ctx, float height)
 	if (ImGui::IsItemDeactivatedAfterEdit()) commitEdit(st, ctx);
 	EditorWidgets::helpForLabel("Length");
 
-	ImGui::SameLine();
+	timelineSameLine(ImGui::GetFrameHeight() + ImGui::GetStyle().ItemInnerSpacing.x + ImGui::CalcTextSize("Loop").x);
 	if (EditorWidgets::checkbox("Loop", &clip.loop)) commitEdit(st, ctx);
-	ImGui::SameLine();
 	// Where the animation stops having anything to say: the last key, capped by
 	// the length. The designer plays to here and the lane greys out the rest,
 	// so what you watch is what the runtime will run (see uiAnimPlayEnd).
@@ -3119,10 +3220,13 @@ void drawTimeline(State& st, AppContext& ctx, float height)
 	// the last key: it is how you get to the moment a fade should arrive at, and
 	// a playhead parked on the last key is already somewhere you can see. With
 	// it, "a key at the end" is two clicks and no aiming (Thema 107).
-	if (EditorWidgets::smallButton("|<")) { st.playhead = 0.0f; st.clipPlaying = false; }
+	// The three transport buttons move as one, so a wrap never splits them.
+	const float sp = ImGui::GetStyle().ItemSpacing.x;
+	timelineSameLine(timelineGlyphW() * 3.0f + sp * 2.0f);
+	if (timelineGlyphButton("|<", TimelineGlyph::ToStart)) { st.playhead = 0.0f; st.clipPlaying = false; }
 	EditorWidgets::helpForLabel("|<");
 	ImGui::SameLine();
-	if (EditorWidgets::smallButton(st.clipPlaying ? "Stop" : "Play"))
+	if (timelineGlyphButton(st.clipPlaying ? "Stop" : "Play", st.clipPlaying ? TimelineGlyph::Stop : TimelineGlyph::Play))
 	{
 		st.clipPlaying = !st.clipPlaying;
 		if (st.clipPlaying && st.playhead >= playEnd) st.playhead = 0.0f;
@@ -3131,7 +3235,7 @@ void drawTimeline(State& st, AppContext& ctx, float height)
 	// would do, and a label-keyed tooltip would exist for one of the two.
 	EditorWidgets::helpForKey("ui.timeline-play");
 	ImGui::SameLine();
-	if (EditorWidgets::smallButton(">|")) { st.playhead = clip.duration; st.clipPlaying = false; }
+	if (timelineGlyphButton(">|", TimelineGlyph::ToEnd)) { st.playhead = clip.duration; st.clipPlaying = false; }
 	EditorWidgets::helpForLabel(">|");
 
 	// Where we are, in the unit the clip is actually in. A 400 ms hover read as
@@ -3148,15 +3252,17 @@ void drawTimeline(State& st, AppContext& ctx, float height)
 	char nowTxt[24], endTxt[24];
 	fmtTime(nowTxt, sizeof(nowTxt), st.playhead);
 	fmtTime(endTxt, sizeof(endTxt), playEnd);
-	ImGui::SameLine();
-	ImGui::TextDisabled("%s / %s", nowTxt, endTxt);
+	char timeTxt[56];
+	std::snprintf(timeTxt, sizeof(timeTxt), "%s / %s", nowTxt, endTxt);
+	timelineSameLine(ImGui::CalcTextSize(timeTxt).x);
+	ImGui::TextDisabled("%s", timeTxt);
 	// The motion is over before the length is: offer to spread it across the
 	// whole length. One click repairs a fade keyed 0 → 50 ms in a one-second
 	// clip (Thema 107) without re-placing a key by hand, and keeps the spacing
 	// of clips with more keys than two.
 	if (playEnd > 0.0f && playEnd < clip.duration - 0.0005f)
 	{
-		ImGui::SameLine();
+		timelineSameLine(timelineButtonW("Stretch to Length"));
 		if (EditorWidgets::smallButton("Stretch to Length"))
 		{
 			const float f = clip.duration / playEnd;
@@ -3175,7 +3281,7 @@ void drawTimeline(State& st, AppContext& ctx, float height)
 	// point needs the point in pixels. So the bar records the intent.
 	int  zoomIntent = 0;
 	bool zoomFit = false;
-	ImGui::SameLine();
+	timelineSameLine(timelineButtonW("Zoom Out") + timelineButtonW("Zoom In") + timelineButtonW("Fit") + sp * 2.0f);
 	if (EditorWidgets::smallButton("Zoom Out")) zoomIntent = -1;
 	EditorWidgets::helpForLabel("Zoom Out");
 	ImGui::SameLine();
@@ -3323,14 +3429,15 @@ void drawTimeline(State& st, AppContext& ctx, float height)
 		// full ItemSpacing short because a Selectable widens its own hit rect by
 		// half of it on each side.
 		const ImGuiStyle& style = ImGui::GetStyle();
-		const float xW    = ImGui::CalcTextSize("x").x + style.FramePadding.x * 2.0f;
+		const float xW    = timelineGlyphW();
 		const float xLeft = laneL - 6.0f - 3.0f - xW;
 		ImGui::SetCursorScreenPos(ImVec2(top.x, rowY + 2.0f));
 		if (ImGui::Selectable((label + "##t").c_str(), st.trackSel == i, 0,
 		                      ImVec2(xLeft - top.x - style.ItemSpacing.x, kRowH - 4.0f)))
 			{ st.trackSel = i; st.keySel = -1; }
 		ImGui::SetCursorScreenPos(ImVec2(xLeft, rowY + 2.0f));
-		if (EditorWidgets::dangerSmallButton("x")) removeTrack = i;
+		if (timelineGlyphButton("x", TimelineGlyph::Remove, true)) removeTrack = i;
+		EditorWidgets::helpForKey("UI Timeline/Remove Track");
 
 		// The lane, and a diamond per key. Dragging one moves it in time, which
 		// is the one edit a timeline has to have.
@@ -5971,7 +6078,7 @@ void drawGraphNodeDetails(State& st, AppContext& ctx)
 
 			ImGui::Spacing();
 			ImGui::Separator();
-			if (EditorWidgets::dangerButton("Delete Variable"))
+			if (EditorWidgets::removeButton("Delete Variable"))
 			{
 				const std::string gone = v->name;
 				st.graph.variables.erase(std::remove_if(st.graph.variables.begin(), st.graph.variables.end(),
@@ -6213,7 +6320,7 @@ void drawGraphNodeDetails(State& st, AppContext& ctx)
 
 	ImGui::Spacing();
 	ImGui::Separator();
-	if (EditorWidgets::dangerButton("Delete Node"))
+	if (EditorWidgets::removeButton("Delete Node"))
 	{
 		st.graph.removeNode(n->id);
 		st.selectedGraphNode = 0;
@@ -7393,7 +7500,11 @@ void render(AppContext& ctx, const std::string& assetPath,
 		ImGui::SameLine(0.0f, 0.0f);
 
 		ImGui::BeginChild("##uiw_details", ImVec2(rightW, 0), ImGuiChildFlags_Borders);
-		drawDetails(st, ctx);
+		{
+			// Names in a column, as in the scene's Details panel.
+			EditorWidgets::Row::InlineLabels labelColumn;
+			drawDetails(st, ctx);
+		}
 		if (st.selected != 0) drawDetailsEvents(st, ctx);
 		ImGui::EndChild();
 	}

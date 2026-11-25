@@ -152,8 +152,14 @@ bool draw(ContentManager* cm, Table& table, Session& session, const SlotWidget& 
 			clearDangling = ImGui::SmallButton("Clear##missing");
 			EditorWidgets::helpForKey("Mesh Viewer/Material Slots");
 		}
+		// Onto its own line when the row is full: a narrow pane wrapped the count
+		// one syllable per line.
+		char tris[32];
+		std::snprintf(tris, sizeof(tris), "%u tris", sec.indexCount / 3);
 		ImGui::SameLine();
-		ImGui::TextDisabled("%u tris", sec.indexCount / 3);
+		if (ImGui::GetContentRegionAvail().x < ImGui::CalcTextSize(tris).x)
+			ImGui::NewLine();
+		ImGui::TextDisabled("%s", tris);
 		ImGui::PopID();
 
 		if (act != EditorWidgets::SlotAction::None && cm)

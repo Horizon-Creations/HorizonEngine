@@ -124,21 +124,21 @@ void drawPermissionsPage(AppContext& ctx)
 	bool changed = false;
 	changed |= ImGui::Checkbox("Files outside the project", &p.allowFiles);
 	EditorWidgets::helpForLabel("Files outside the project");
-	ImGui::TextDisabled("Off, a script reads and writes only inside the project's Saved folder.\n"
-	                    "A file the person using the app picks in a dialog is always allowed,\n"
+	EditorWidgets::hint("Off, a script reads and writes only inside the project's Saved folder. "
+	                    "A file the person using the app picks in a dialog is always allowed, "
 	                    "whatever this says — choosing it is the permission.");
 	ImGui::Spacing();
 
 	changed |= ImGui::Checkbox("Run other programs", &p.allowProcesses);
 	EditorWidgets::helpForLabel("Run other programs");
-	ImGui::TextDisabled("Covers Run Program and Open URL. Finding out whether a program is\n"
-	                    "installed needs no permission — that is how a script can tell\n"
+	EditorWidgets::hint("Covers Run Program and Open URL. Finding out whether a program is "
+	                    "installed needs no permission — that is how a script can tell "
 	                    "somebody what it would need.");
 	ImGui::Spacing();
 
 	changed |= ImGui::Checkbox("Network access", &p.allowNetwork);
 	EditorWidgets::helpForLabel("Network access");
-	ImGui::TextDisabled("Covers HTTP Get and HTTP Post. Off, they start nothing and\n"
+	EditorWidgets::hint("Covers HTTP Get and HTTP Post. Off, they start nothing and "
 	                    "answer ticket 0.");
 
 	if (changed)
@@ -180,7 +180,7 @@ void drawCollisionLayersPage(AppContext& ctx)
 	constexpr int kCount = HE::CollisionLayerConfig::kCount;
 
 	EditorWidgets::hint("A collision layer is a named channel. Every rigid body and every "
-	                    "character sits in one (Details ▸ Collision Layer), and the matrix "
+	                    "character sits in one (Details » Collision Layer), and the matrix "
 	                    "below decides which pairs of channels the simulation lets touch. "
 	                    "Belongs to the PROJECT: saved in its .heproj and carried into the "
 	                    "build you export.");
@@ -197,20 +197,28 @@ void drawCollisionLayersPage(AppContext& ctx)
 	                    "renaming one relabels it everywhere and remaps nothing. Leave a name "
 	                    "empty and it reads as \"Layer <n>\".");
 
-	if (ImGui::BeginTable("##collisionlayernames", 2,
+	// Two layers per row: sixteen full-width rows made a page of mostly
+	// "Layer <n>" placeholders, and a name is short anyway.
+	if (ImGui::BeginTable("##collisionlayernames", 4,
 	                      ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_RowBg))
 	{
-		ImGui::TableSetupColumn("##idx", ImGuiTableColumnFlags_WidthFixed,
-		                        ImGui::CalcTextSize("00").x + ImGui::GetStyle().CellPadding.x * 2.0f);
+		const float idxW = ImGui::CalcTextSize("00").x + ImGui::GetStyle().CellPadding.x * 2.0f;
+		ImGui::TableSetupColumn("##idx", ImGuiTableColumnFlags_WidthFixed, idxW);
 		ImGui::TableSetupColumn("##name", ImGuiTableColumnFlags_WidthStretch);
-		for (int i = 0; i < kCount; ++i)
+		ImGui::TableSetupColumn("##idx2", ImGuiTableColumnFlags_WidthFixed, idxW);
+		ImGui::TableSetupColumn("##name2", ImGuiTableColumnFlags_WidthStretch);
+		constexpr int kHalf = (kCount + 1) / 2;
+		for (int n = 0; n < kCount; ++n)
 		{
+			// Column-major, so the left column reads 0..7 and the right 8..15.
+			const int i    = (n % 2 == 0) ? n / 2 : kHalf + n / 2;
+			const int base = (n % 2) * 2;
 			ImGui::PushID(i);
-			ImGui::TableNextRow();
-			ImGui::TableSetColumnIndex(0);
+			if (n % 2 == 0) ImGui::TableNextRow();
+			ImGui::TableSetColumnIndex(base);
 			ImGui::AlignTextToFramePadding();
 			ImGui::TextDisabled("%d", i);
-			ImGui::TableSetColumnIndex(1);
+			ImGui::TableSetColumnIndex(base + 1);
 			ImGui::SetNextItemWidth(-FLT_MIN);
 			// The placeholder shows what an empty name READS BACK AS, which is
 			// not "Layer <n>" for all sixteen: the five presets answer with
@@ -412,7 +420,7 @@ void drawApplicationPage(AppContext& ctx)
 	// ── …or a picture of the project's own ───────────────────────────────────
 	// Drawn by the shared rows so the Export dialog shows the same thing.
 	commit |= AppMetadataRows::drawIconFileRow(ctx, p);
-	ImGui::TextDisabled("A PNG of yours instead of the generated icon: every size and every\n"
+	EditorWidgets::hint("A PNG of yours instead of the generated icon: every size and every "
 	                    "container is made from it. Leave it empty to keep the generated one.");
 	ImGui::Spacing();
 
@@ -431,7 +439,7 @@ void drawApplicationPage(AppContext& ctx)
 	EditorWidgets::Row::inputText("Bundle identifier##bundleid", &p.bundleId);
 	commit |= ImGui::IsItemDeactivatedAfterEdit();
 	EditorWidgets::helpForLabel("Bundle identifier");
-	ImGui::TextDisabled("Empty derives com.horizonengine.<project>, which is what every\n"
+	EditorWidgets::hint("Empty derives com.horizonengine.<project>, which is what every "
 	                    "export did before this field existed. Set it once you own a domain.");
 	ImGui::Spacing();
 	EditorWidgets::Row::inputText("Version##appversion", &p.appVersion);
@@ -469,7 +477,7 @@ void drawApplicationPage(AppContext& ctx)
 			ImGui::TextColored(ImVec4(1.0f, 0.78f, 0.35f, 1.0f),
 			                   "No built-in icon is called that — the files wear the "
 			                   "application's icon.");
-		if (EditorWidgets::button("Remove")) removeAt = static_cast<int>(i);
+		if (EditorWidgets::removeButton("Remove")) removeAt = static_cast<int>(i);
 		EditorWidgets::helpForLabel("Remove");
 		ImGui::Separator();
 		ImGui::PopID();
@@ -650,7 +658,7 @@ void drawGeneralPage(AppContext& ctx)
 	settingsFileHint(nullptr);
 
 	ImGui::SeparatorText("Name");
-	Row::labelText("Project", "%s", p.name.c_str());
+	Row::labelText("Project name", "%s", p.name.c_str());
 	ImGui::TextDisabled("The .heproj's file name. Shown here, changed in the Project Hub.");
 	ImGui::Spacing();
 
@@ -697,10 +705,14 @@ void drawGeneralPage(AppContext& ctx)
 		const char* preview = current.empty() ? "(none)" : current.c_str();
 		// Label above the control like the Row helpers draw theirs; the combo
 		// itself is unlabelled, so the help is asked for by name below.
-		ImGui::TextUnformatted("Scene");
+		// In the label column when the page has one: the name left, Rescan and
+		// the list on the control's line.
+		const bool inlineRow = Row::labelCell("Scene");
+		if (!inlineRow) ImGui::TextUnformatted("Scene");
 		ImGui::SameLine();
 		if (EditorWidgets::smallButton("Rescan")) rescanScenes(root);
 		EditorWidgets::helpForLabel("Rescan");
+		if (inlineRow) ImGui::SameLine();
 		ImGui::SetNextItemWidth(-FLT_MIN);
 		if (ImGui::BeginCombo("##startupscene", preview))
 		{
@@ -1441,6 +1453,9 @@ const char* pageTitle(Page page)
 
 void drawPage(AppContext& ctx, Page page)
 {
+	// Names in a column on the left, as in the Details panel: a stacked label
+	// over every field doubled the height of each page.
+	EditorWidgets::Row::InlineLabels labelColumn;
 	switch (page)
 	{
 	case Page::General:         drawGeneralPage(ctx);         break;

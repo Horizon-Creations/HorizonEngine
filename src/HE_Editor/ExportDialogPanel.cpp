@@ -1530,7 +1530,7 @@ void startExport(AppContext& ctx)
                 std::vector<std::string> cookLogLines;
                 if (!packCookVerdict)
                     cookLogLines.push_back(
-                        "Cooking: Project Settings ▸ General ▸ Performance ▸ "
+                        "Cooking: Project Settings » General » Performance » "
                         "\"Cook static entities\" is off — nothing packed as cooked");
                 // A scene's cooking in the log: its summary, then one line per entity.
                 const auto appendCookLines = [&cookLogLines](const std::string& scene, const HE::CookSummary& s)
@@ -2416,7 +2416,7 @@ void startExport(AppContext& ctx)
                               + " asset(s) packed ("
                               + std::to_string(res.assetsReused) + " reused), "
                               + std::to_string(res.binaryFilesCopied)
-                              + " binary file(s) → " + outDir
+                              + " binary file(s) in " + outDir
                             : "Error: " + res.errorMessage;
                         if (res.success && es.appBundle)
                             msg += " — " + projName + ".app bundle";

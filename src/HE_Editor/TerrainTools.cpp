@@ -476,6 +476,17 @@ namespace
 	float labelColumn() { return ImGui::GetFontSize() * 6.4f; }
 	void  rowLabel(const char* label)
 	{
+		// The shared label column when the panel is wide enough for one, so a
+		// row of ours and an asset slot (which lays itself out by Row's column)
+		// start their values on the same vertical line.
+		{
+			EditorWidgets::Row::InlineLabels column;
+			if (EditorWidgets::Row::labelCell(label))
+			{
+				ImGui::SetNextItemWidth(-FLT_MIN);
+				return;
+			}
+		}
 		ImGui::AlignTextToFramePadding();
 		ImGui::TextUnformatted(label);
 		ImGui::SameLine(labelColumn());
@@ -1413,7 +1424,7 @@ void renderPanel(AppContext& ctx)
         if (!s_newHeightmapFile.empty())
         {
             ImGui::TextWrapped("File: %s", s_newHeightmapFile.c_str());
-            if (EditorWidgets::smallButton("Remove File")) s_newHeightmapFile.clear();
+            if (EditorWidgets::dangerSmallButton("Remove File")) s_newHeightmapFile.clear();
         }
         else if (EditorWidgets::button("Choose File..."))
         {
@@ -1819,7 +1830,7 @@ void renderPanel(AppContext& ctx)
                     if (!firstReset && ImGui::GetContentRegionAvail().x > bw + style.ItemSpacing.x)
                         ImGui::SameLine();
                     firstReset = false;
-                    const bool pressed = EditorWidgets::dangerButton(label);
+                    const bool pressed = EditorWidgets::removeButton(label);
                     EditorWidgets::helpForLabel(label);
                     return pressed;
                 };
@@ -1959,7 +1970,7 @@ void renderPanel(AppContext& ctx)
                 }
                 EditorWidgets::helpForLabel("Fill With Layer");
                 ImGui::SameLine();
-                if (EditorWidgets::dangerButton("Clear Paint") && !tc.layerWeights.empty())
+                if (EditorWidgets::removeButton("Clear Paint") && !tc.layerWeights.empty())
                 {
                     if (ctx.undoSys) ctx.undoSys->snapshotNow();
                     tc.layerWeights.clear();   // back to "everything is layer 0"
@@ -2044,6 +2055,8 @@ void renderPanel(AppContext& ctx)
                     // What grows: the mesh and material live on the layer, and without a
                     // mesh the brush paints a mask nobody can see.
                     sectionLabel("Layer");
+                    // In the label column, like the Density row under them.
+                    EditorWidgets::Row::InlineLabels slotColumn;
                     if (EditorWidgets::assetDropSlot(ctx, "Mesh", fol->meshAssetId,
                             HE::AssetType::StaticMesh, "folmesh",
                             "(none \xe2\x80\x94 drop a mesh here)", "static mesh",
@@ -2509,7 +2522,7 @@ void renderPanel(AppContext& ctx)
                 }
 
                 ImGui::Spacing();
-                if (EditorWidgets::dangerButton("Clear All Water") &&
+                if (EditorWidgets::removeButton("Clear All Water") &&
                     (!tc.water.bodies.empty() || !tc.water.coverage.empty()))
                 {
                     if (ctx.undoSys) ctx.undoSys->snapshotNow("Clear Water");

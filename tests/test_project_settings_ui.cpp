@@ -223,6 +223,10 @@ namespace
 
 	// The page fills the window: its controls start at the window padding.
 	constexpr float kPageX = 16.0f;
+	// The project pages lay their rows out in a label column (Row::InlineLabels):
+	// on a page this wide the column is at its 190 px cap, and every control,
+	// a checkbox included, starts right of it.
+	constexpr float kControlX = kPageX + 190.0f;
 }
 
 TEST_CASE("project settings ui: every page draws over a real project, and looking writes nothing")
@@ -299,13 +303,13 @@ TEST_CASE("project settings ui: the first edit on Game Window lands in Config/Pr
 	ImGui::GetIO().AddMousePosEvent(float(W) - 2.0f, float(H) - 2.0f);
 	for (int i = 0; i < 3; ++i) frame(ctx, false);
 
-	// Down the page's left edge: the first control is "Use the editor's
-	// settings", and the checkbox square is the first thing on its row.
-	const std::vector<Item> items = itemsDown(ctx, kPageX + 8.0f, 40.0f, float(H) - 40.0f);
+	// Down the control column: the first control is "Use the editor's
+	// settings", and the checkbox square is the first thing in its cell.
+	const std::vector<Item> items = itemsDown(ctx, kControlX + 8.0f, 40.0f, float(H) - 40.0f);
 	REQUIRE_MESSAGE(!items.empty(), "no control found down the Render Defaults page");
 	REQUIRE(pm.currentProject().settings.renderDefaults.useEditorSettings);
 
-	clickAt(ctx, kPageX + 8.0f, items[0].mid);
+	clickAt(ctx, kControlX + 8.0f, items[0].mid);
 	CHECK_FALSE(pm.currentProject().settings.renderDefaults.useEditorSettings);
 	REQUIRE(std::filesystem::exists(settingsFile));
 
@@ -333,13 +337,13 @@ TEST_CASE("project settings ui: ticking Enable anti-cheat on Game > Anti-Cheat l
 	ImGui::GetIO().AddMousePosEvent(float(W) - 2.0f, float(H) - 2.0f);
 	for (int i = 0; i < 3; ++i) frame(ctx, false);
 
-	// Down the page's left edge: the first control is "Enable anti-cheat", and
-	// the checkbox square is the first thing on its row.
-	const std::vector<Item> items = itemsDown(ctx, kPageX + 8.0f, 40.0f, float(H) - 40.0f);
+	// Down the control column: the first control is "Enable anti-cheat", and
+	// the checkbox square is the first thing in its cell.
+	const std::vector<Item> items = itemsDown(ctx, kControlX + 8.0f, 40.0f, float(H) - 40.0f);
 	REQUIRE_MESSAGE(!items.empty(), "no control found down the Anti-Cheat page");
 	REQUIRE_FALSE(pm.currentProject().settings.antiCheat.enabled);
 
-	clickAt(ctx, kPageX + 8.0f, items[0].mid);
+	clickAt(ctx, kControlX + 8.0f, items[0].mid);
 	CHECK(pm.currentProject().settings.antiCheat.enabled);
 	REQUIRE(std::filesystem::exists(settingsFile));
 

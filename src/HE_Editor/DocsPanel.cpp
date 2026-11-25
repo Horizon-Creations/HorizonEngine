@@ -461,7 +461,29 @@ namespace
 			for (int c = 0; c < cols; ++c)
 			{
 				ImGui::TableSetColumnIndex(c);
-				if (c < static_cast<int>(row.size())) drawRuns(ctx, row[c]);
+				if (c >= static_cast<int>(row.size())) continue;
+				// A cell that is only a mark ("•", or a ✓ the font has no glyph
+				// for) means "supported": drawn as an amber tick, which reads as a
+				// yes where a lone bullet read as a list that never started.
+				std::string text;
+				for (const docs::Run& r : row[c]) text += r.text;
+				const auto first = text.find_first_not_of(' ');
+				const auto last  = text.find_last_not_of(' ');
+				const std::string mark = first == std::string::npos ? std::string() : text.substr(first, last - first + 1);
+				if (mark == "\xe2\x80\xa2" || mark == "\xe2\x9c\x93" || mark == "\xe2\x9c\x94")
+				{
+					const float  h = ImGui::GetTextLineHeight();
+					const ImVec2 p = ImGui::GetCursorScreenPos();
+					ImGui::Dummy(ImVec2(h, h));
+					ImDrawList* dl = ImGui::GetWindowDrawList();
+					const ImU32 col = ImGui::GetColorU32(HE::Ed::Theme::AccentHi);
+					dl->PathLineTo(ImVec2(p.x + h * 0.18f, p.y + h * 0.52f));
+					dl->PathLineTo(ImVec2(p.x + h * 0.42f, p.y + h * 0.76f));
+					dl->PathLineTo(ImVec2(p.x + h * 0.84f, p.y + h * 0.26f));
+					dl->PathStroke(col, 0, std::max(1.6f, h * 0.12f));
+				}
+				else
+					drawRuns(ctx, row[c]);
 			}
 		}
 		ImGui::EndTable();

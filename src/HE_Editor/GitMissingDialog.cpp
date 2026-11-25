@@ -94,7 +94,7 @@ void drawInstallRemedy(AppContext& ctx, bool lfs)
 		if (installing && ownInstall && launch->returnsBeforeInstalled && ctx.cancelGitInstall)
 		{
 			ImGui::SameLine();
-			if (EditorWidgets::smallButton("Cancel")) ctx.cancelGitInstall();
+			if (EditorWidgets::button("Cancel")) ctx.cancelGitInstall();
 		}
 	}
 	else if (!lfs && plan.route == HE::Sc::GitInstallRoute::DownloadInstaller)
@@ -119,9 +119,9 @@ void drawInstallRemedy(AppContext& ctx, bool lfs)
 		ImGui::TextWrapped("%s", manualCommand.c_str());
 		if (lfs)
 		{
-			if (EditorWidgets::smallButton("Copy LFS Command")) ImGui::SetClipboardText(manualCommand.c_str());
+			if (EditorWidgets::button("Copy LFS Command")) ImGui::SetClipboardText(manualCommand.c_str());
 		}
-		else if (EditorWidgets::smallButton("Copy Install Command"))
+		else if (EditorWidgets::button("Copy Install Command"))
 		{
 			ImGui::SetClipboardText(manualCommand.c_str());
 		}
@@ -129,9 +129,9 @@ void drawInstallRemedy(AppContext& ctx, bool lfs)
 	}
 	if (lfs)
 	{
-		if (EditorWidgets::smallButton("git-lfs.com")) SDL_OpenURL("https://git-lfs.com/");
+		if (EditorWidgets::button("git-lfs.com")) SDL_OpenURL("https://git-lfs.com/");
 	}
-	else if (EditorWidgets::smallButton("Download Page"))
+	else if (EditorWidgets::button("Download Page"))
 	{
 		SDL_OpenURL(HE::Sc::gitDownloadPageUrl(HE::Sc::currentPlatform()));
 	}

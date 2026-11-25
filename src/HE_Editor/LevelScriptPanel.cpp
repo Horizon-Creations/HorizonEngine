@@ -628,7 +628,7 @@ void drawEventDetails(HC::Graph& graph, ContentManager* content, bool& edited)
 	                    "runs its own Event node of this name.");
 
 	ImGui::Spacing();
-	if (EditorWidgets::dangerButton("Delete Event"))
+	if (EditorWidgets::removeButton("Delete Event"))
 	{
 		const std::string gone = e->name;
 		graph.events.erase(std::remove_if(graph.events.begin(), graph.events.end(),
@@ -925,7 +925,7 @@ void drawVariableDetails(HC::Graph& graph, const std::vector<HC::InheritedVariab
 		edited = true;
 
 	ImGui::Spacing();
-	if (EditorWidgets::dangerButton("Delete Variable"))
+	if (EditorWidgets::removeButton("Delete Variable"))
 	{
 		const std::string gone = v->name;
 		graph.variables.erase(std::remove_if(graph.variables.begin(), graph.variables.end(),
