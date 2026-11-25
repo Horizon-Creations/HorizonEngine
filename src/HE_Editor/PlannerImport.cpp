@@ -113,7 +113,10 @@ void ensureTasksSchema(Database& db)
 	const bool fresh = db.views.empty();
 	View& all = ensureView(db, "All tasks", ViewKind::Table);
 	if (fresh) all.sorts = { { status, false } };
+	// The board is what Tasks opens on, so it is called Tasks. Its id keeps the name it was first made under,
+	// and a board still called that in an older file takes the new name.
 	View& lanes = ensureView(db, "By status", ViewKind::Board);
+	if (lanes.name == "By status") lanes.name = "Tasks";
 	if (lanes.groupBy == UUID{}) lanes.groupBy = status;
 }
 

@@ -236,6 +236,17 @@ namespace
 		settle(ctx);
 	}
 
+	// A calendar is a timeline shown as a month: the + of TIMELINES & CALENDARS, the data, then Month.
+	void newCalendar(AppContext& ctx, const std::string& data)
+	{
+		REQUIRE(click(ctx, "New Timeline"));
+		settle(ctx);
+		REQUIRE(click(ctx, data));
+		settle(ctx);
+		REQUIRE(click(ctx, "mode:Month"));
+		settle(ctx);
+	}
+
 	void dragTo(AppContext& ctx, ImVec2 from, ImVec2 to)
 	{
 		ImGuiIO& io = ImGui::GetIO();
@@ -271,7 +282,7 @@ namespace
 
 	void idle(AppContext& ctx, int n = 3);
 
-	// Tasks open as the board (By status); most of these tests work in the table, so they show it.
+	// Tasks open as the board (named Tasks); most of these tests work in the table, so they show it.
 	void showTasksTable(AppContext& ctx)
 	{
 		idle(ctx, 3);
@@ -1251,9 +1262,7 @@ TEST_CASE("planner ui: a calendar shows rows on their days, a drag moves one, a 
 		return true;
 	}));
 	idle(ctx);
-	REQUIRE(click(ctx, "New Calendar"));
-	idle(ctx);
-	REQUIRE(click(ctx, "data:Untitled table"));
+	newCalendar(ctx, "data:Untitled table");
 	REQUIRE(ws->edit(dbId, [&](Database& db) { db.findView(PlannerPanel::selectedView())->endProperty = end; return true; }));
 	PlannerPanel::showCalendarMonth(2026, 10);
 	idle(ctx);
@@ -2524,15 +2533,17 @@ TEST_CASE("planner ui: tables, timelines, boards and calendars are made on their
 	// There is no kanban category: boards are the whiteboards. The data of a timeline is shown as a calendar too.
 	CHECK(PlannerPanel::controlRect("New Kanban").x1 <= 0);
 	REQUIRE(ws->edit(roadmap, [&](Database& db) { db.addRow("Ship alpha", "Tester", 1000); return true; }));
-	REQUIRE(click(ctx, "New Calendar"));
-	settle(ctx);
-	REQUIRE(click(ctx, "data:Untitled timeline"));
-	settle(ctx);
+	newCalendar(ctx, "data:Untitled timeline");
 	CHECK(PlannerPanel::selectedDatabase() == roadmap);
 	REQUIRE(ws->find(roadmap)->views.size() == 2);
 	CHECK(ws->find(roadmap)->views[1].kind == ViewKind::Calendar);
 	CHECK(ws->databases().size() == 2);   // Tasks and the one just made: no second database
-	CHECK(PlannerPanel::controlRect("item:Untitled timeline calendar").x1 > 0);
+	CHECK(PlannerPanel::controlRect("item:Untitled timeline timeline").x1 > 0);
+	// Back to the time axis: the same view, its kind switched, nothing else changed.
+	REQUIRE(click(ctx, "mode:Timeline"));
+	settle(ctx);
+	CHECK(ws->find(roadmap)->views[1].kind == ViewKind::Timeline);
+	CHECK(ws->find(roadmap)->views.size() == 2);
 }
 
 TEST_CASE("planner ui: tabs hold what is open once; New Step, New Event and New Card make something at once")
@@ -2552,9 +2563,9 @@ TEST_CASE("planner ui: tabs hold what is open once; New Step, New Event and New 
 	settle(ctx);
 	REQUIRE(click(ctx, "data:Untitled table"));
 	settle(ctx);
-	REQUIRE(click(ctx, "New Calendar"));
-	settle(ctx);
-	REQUIRE(click(ctx, "data:Untitled table"));
+	newCalendar(ctx, "data:Untitled table");
+	// Both dated views start out named after the data and "timeline"; the second is told apart by name.
+	REQUIRE(ws->edit(data, [&](Database& d) { d.findView(PlannerPanel::selectedView())->name = "Untitled table calendar"; return true; }));
 	settle(ctx);
 	CHECK(ws->databases().size() == 2);
 	CHECK(ws->find(data)->views.size() == 3);
@@ -2708,7 +2719,7 @@ TEST_CASE("planner ui board: dragging with the right button pans")
 	CHECK(f.ws->findBoard(f.id)->nodes.empty());   // and made nothing
 }
 
-TEST_CASE("planner ui: Tasks opens as By status, with no separate table entry; the table is one + away")
+TEST_CASE("planner ui: Tasks opens as its board, named Tasks, with no separate table entry; the table is one + away")
 {
 	Harness harness;
 	Project proj("he_planner_ui_tasks_board");
@@ -2721,7 +2732,8 @@ TEST_CASE("planner ui: Tasks opens as By status, with no separate table entry; t
 	const View* open = tasks->findView(PlannerPanel::selectedView());
 	REQUIRE(open != nullptr);
 	CHECK(open->kind == ViewKind::Board);
-	CHECK(open->name == "By status");
+	CHECK(open->name == "Tasks");
+	CHECK(open->id == derivedId("view", "By status"));   // the id from before the rename: no second board in old files
 	CHECK(PlannerPanel::controlRect("item:Tasks").x1 > 0);
 	CHECK(PlannerPanel::controlRect("item:All tasks").x1 <= 0);
 	CHECK(PlannerPanel::controlRect("New Row").x1 > 0);   // "New Item" on a board
@@ -2732,4 +2744,33 @@ TEST_CASE("planner ui: Tasks opens as By status, with no separate table entry; t
 	idle(ctx);
 	CHECK(tasks->findView(PlannerPanel::selectedView())->kind == ViewKind::Table);
 	CHECK(PlannerPanel::controlRect("view:All tasks").x1 > 0);
+}
+
+TEST_CASE("planner ui layout: the details of a card with a long history stay inside the planner and scroll")
+{
+	Harness harness;
+	Project proj("he_planner_ui_layout_details");
+	ContextBits bits;
+	AppContext ctx = bits.make(proj.pm);
+	REQUIRE(TaskBoardPanel::edit(ctx, [&](TaskBoard& b) {
+		Task* t = b.add("Long story", "Tester", taskNowMs());
+		for (int i = 0; i < 30; ++i) b.comment(t->id, "Tester", "comment " + std::to_string(i), taskNowMs());
+		return true;
+	}));
+	idle(ctx, 3);
+	REQUIRE(click(ctx, "item:Tasks"));
+	settle(ctx);
+	shotTo(ctx, "planner_layout_board");
+	// A click low on the card's lane: the flyover opens beside the click, which is near the bottom.
+	REQUIRE(click(ctx, "card:Long story"));
+	idle(ctx, 4);
+	const PlannerPanel::Rect fly = PlannerPanel::controlRect("flyover");
+	REQUIRE(fly.x1 > fly.x0);
+	ImGuiWindow* w = ImGui::FindWindowByName("##rowflyover");
+	REQUIRE(w != nullptr);
+	CHECK(w->Pos.y >= 10.0f);
+	CHECK(w->Pos.y + w->Size.y <= float(H) - 10.0f + 0.5f);
+	CHECK(w->Pos.x + w->Size.x <= float(W) - 10.0f + 0.5f);
+	CHECK(w->ScrollMax.y > 0.0f);   // the history scrolls inside it
+	shotTo(ctx, "planner_layout_details");
 }
