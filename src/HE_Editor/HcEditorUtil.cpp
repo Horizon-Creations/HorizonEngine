@@ -1706,12 +1706,16 @@ float pinInlineEditorWidth(const HorizonCode::Node& n, int unifiedPin)
 	HorizonCode::PinDesc pd{};
 	const int di = dataInIndexOf(n, unifiedPin, pd);
 	if (di < 0) return 0.0f;
-	// A number or a checkbox is happy in the default slot. A NAME is not: it has
+	// A number is happy in the default slot. A NAME is not: it has
 	// to be readable to be checkable, and as a dropdown it also has an arrow to
 	// put somewhere. Wide enough for "Ping Pong" and most element names, capped
 	// because a node is not a panel — the list that opens is sized to its
 	// entries, so a long path is one click from being read in full.
-	return pd.type == P::String ? 112.0f : 0.0f;
+	if (pd.type == P::String) return 112.0f;
+	// A checkbox is a square the height of the label (13 + 2 × 1 padding); a
+	// number-box slot around it only made the node wider.
+	if (pd.type == P::Bool) return 16.0f;
+	return 0.0f;
 }
 
 void drawPinDefaultEditor(HorizonCode::Node& n, int unifiedPin, bool& committed,

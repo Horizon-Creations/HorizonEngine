@@ -42,6 +42,13 @@ Second round (same day, Blueprint as the model):
   - Compact shapes have 4 px padding and snap to 8 rather than 16.
 - **Hollow until wired**: exec triangles and scalar dots are outlines while no wire is on
   them. Container glyphs stay filled.
+- Round 3:
+  - An operator's output sits level with the symbol, centred on its inputs
+    (`NodeMetrics::outRowShift`).
+  - Word operators (AND/OR/NOT) are drawn at 14 px rather than 20.
+  - `pinInlineEditorWidth` may now also ask for less than the 58 px default. HorizonCode
+    Bool pins ask for 16, a checkbox, which makes Branch, NOT and every bool parameter
+    narrower.
 
 ## Handoff
 

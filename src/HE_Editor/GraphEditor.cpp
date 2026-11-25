@@ -119,8 +119,8 @@ float textWidth(const std::string& s, float px)
 
 float inlineEditorWidth(const Model& m, int id, int pin)
 {
-    return m.pinInlineEditorWidth ? std::max(m.pinInlineEditorWidth(id, pin), kPinEditorW)
-                                  : kPinEditorW;
+    const float w = m.pinInlineEditorWidth ? m.pinInlineEditorWidth(id, pin) : 0.0f;
+    return w > 0.0f ? w : kPinEditorW;
 }
 
 // The widest inline editor a node can show (0 = none), as measureNode reserves it.
@@ -135,6 +135,9 @@ float inlineEditorWidthMax(const Model& m, const Drawn& n)
 }
 
 constexpr float kSymbolPx  = 20.0f;  // an operator's symbol ("+", ">")
+// A word (AND, NOT) at symbol size is a headline, and the widest thing on its
+// node; words get the title size. UTF-8 "×" is two bytes, hence ≤ 2.
+float symbolPx(const std::string& s) { return s.size() <= 2 ? kSymbolPx : 14.0f; }
 constexpr float kCompactPad = 4.0f;  // above and below a compact node's rows
 
 struct NodeMetrics
@@ -142,6 +145,10 @@ struct NodeMetrics
     float w = kNodeW, h = 0.0f, titleH = kTitleH;
     float rowsTop = kTitleH; // where the first pin row starts
     float editorX = 0.0f;    // start of the inline-editor column (0 = none)
+    // Rows the output column is moved down by. An operator's one output sits
+    // level with the symbol, in the middle of its inputs, not in the top row:
+    // A over B with the result beside A read as "A > result".
+    float outRowShift = 0.0f;
     bool  compact = false;
     Shape shape = Shape::Framed;
     std::string symbol;
@@ -212,9 +219,10 @@ NodeMetrics measureNode(const Model& m, int id, const std::vector<Pin>& pins)
         colL = std::max(colL, r.editorX + editorW);
     }
     const float colR = column(right, labelR);
+    if (r.shape == Shape::Operator && left > right) r.outRowShift = (left - right) * 0.5f;
     float cols;
     if (r.shape == Shape::Operator)   // inputs | symbol | output
-        cols = colL + textWidth(r.symbol, kSymbolPx) + 2.0f * 10.0f + colR;
+        cols = colL + textWidth(r.symbol, symbolPx(r.symbol)) + 2.0f * 7.0f + colR;
     else
         cols = colL + colR + (left && right ? kColumnGap : 8.0f);
 
@@ -270,7 +278,8 @@ ImVec2 pinGraphOffset(const Model& model, int nodeId, int pinId, bool input)
         if (p.id == pinId) break;
         ++row;
     }
-    return ImVec2(input ? kPinInset : nm.w - kPinInset, nm.rowsTop + (row + 0.5f) * kRowH);
+    const float r = row + (input ? 0.0f : nm.outRowShift);
+    return ImVec2(input ? kPinInset : nm.w - kPinInset, nm.rowsTop + (r + 0.5f) * kRowH);
 }
 
 bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
@@ -535,7 +544,7 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
         {
             const Pin& p = d.pins[i];
             const bool inp = p.input;
-            const int  row = inp ? leftRow++ : rightRow++;
+            const float row = inp ? float(leftRow++) : rightRow++ + nm.outRowShift;
             const ImVec2 pp(std::round(inp ? d.pos.x + inset : d.pos.x + d.size.x - inset),
                             std::round(d.pos.y + rowsTop + (row + 0.5f) * rowH));
             d.pinPos[i] = pp;
@@ -923,8 +932,8 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
             {
                 // The symbol, large and quiet, centred on the box: between the
                 // input column (pins + editors) and the output dot.
-                const float fs = kSymbolPx * st.zoom;
-                const float tw = textWidth(n.symbol, kSymbolPx) * st.zoom;
+                const float fs = symbolPx(n.symbol) * st.zoom;
+                const float tw = textWidth(n.symbol, symbolPx(n.symbol)) * st.zoom;
                 const float x0 = n.gEditorX > 0.0f
                     ? n.pos.x + (n.gEditorX + inlineEditorWidthMax(model, n)) * st.zoom
                     : n.pos.x + (kPinInset + kPinR) * st.zoom;

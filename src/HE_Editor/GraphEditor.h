@@ -229,7 +229,8 @@ struct Model
     // default). The slot is clipped to this and the node grows to hold it, so a
     // control that is wider than a number box — a dropdown, which has to show a
     // name AND its arrow — asks for the room instead of being cut off in a slot
-    // sized for "1.0".
+    // sized for "1.0". It works the other way too: a checkbox asks for its own
+    // square, so a node is not widened by a number-box slot it does not use.
     std::function<float(int node, int pin)> pinInlineEditorWidth;
     // Decorations drawn behind / in front of the nodes in the canvas transform
     // (comments, preview halos). origin/pan/zoom map graph→screen:
