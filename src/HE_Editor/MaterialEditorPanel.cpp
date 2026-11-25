@@ -1430,19 +1430,17 @@ void drawMaterialCanvas(State& st, AppContext& ctx, bool assetOk,
 	};
 
 	// ── Per-node preview highlight: cyan halo + dot on the previewed node. ──
-	m.drawFront = [&st, &ctx](ImDrawList* dl, ImVec2 origin, ImVec2 pan, float zoom)
+	// `m` is drawn below in this same function, so the reference outlives the call.
+	m.drawFront = [&st, &m](ImDrawList* dl, ImVec2 origin, ImVec2 pan, float zoom)
 	{
 		if (st.previewNodeId == 0) return;
 		const MatGraphNode* n = st.graph.findNode(st.previewNodeId);
 		if (!n) return;
-		// Match the shared canvas box height (title + pin rows + body, in graph units).
-		const std::vector<GraphEditor::Pin> pins = matNodePins(ctx, *n);
-		int left = 0, right = 0;
-		for (const auto& p : pins) (p.input ? left : right)++;
+		// The canvas' own box: nodes are as wide as their content now.
+		const ImVec2 gs = GraphEditor::nodeLayout(m, st.previewNodeId).size;
 		const ImVec2 p(origin.x + pan.x + n->x * zoom, origin.y + pan.y + n->y * zoom);
-		const float bodyH = matNodeBodyHeight(*n);
-		const float h = (GraphEditor::kTitleH + std::max(left, right) * GraphEditor::kRowH + bodyH + 6.0f) * zoom;
-		const float w = GraphEditor::kNodeW * zoom;
+		const float h = gs.y * zoom;
+		const float w = gs.x * zoom;
 		dl->AddRect(p, ImVec2(p.x + w, p.y + h), IM_COL32(80, 200, 255, 220), 5.0f, 0, 2.0f);
 		dl->AddCircleFilled(ImVec2(p.x + w - 2.0f * zoom, p.y - 2.0f * zoom), 5.0f * zoom, IM_COL32(80, 200, 255, 255));
 	};

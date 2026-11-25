@@ -9,6 +9,7 @@
 #include "EditorWidgets.h"
 #include "HcEditorUtil.h"
 #include "HcNodeReference.h"
+#include "HcGraphHost.h"
 #include "GraphEditor.h"   // the canvas under test: node draw order vs on-node widgets
 #include "EditorReference.h"
 #include "MeshMaterialSlots.h"   // the mesh tabs' slot list, over an in-memory mesh
@@ -893,6 +894,124 @@ TEST_CASE("ui shot: a node explains itself on hover")
 		}
 	INFO("saturated pixels in the pin column: " << coloured);
 	CHECK(coloured > 20);
+}
+
+namespace
+{
+	// A small but typical HorizonCode graph: an event into an exec engine call
+	// into a Branch, pure math with inline editors, a compact getter, a Print
+	// with a text box. The nodes every graph is made of, wired, at one zoom.
+	struct NodeGraphScene
+	{
+		HorizonCode::Graph graph;
+		GraphEditor::State ge;
+		int selected = 0;
+		HcGraphHost::Host host;
+
+		int pinOf(int node, const char* label, bool input) const
+		{
+			const HorizonCode::Node* n = graph.findNode(node);
+			for (const auto& p : HcGraphHost::nodePins(*n))
+				if (p.input == input && p.label == label) return p.id;
+			return -1;
+		}
+
+		NodeGraphScene()
+		{
+			namespace HC = HorizonCode;
+			using NT = HC::NodeType;
+			const auto add = [&](NT t, float x, float y) {
+				return HcGraphHost::addNode(graph, t, ImVec2(x, y), 0); };
+			const auto engine = [&](const char* id, float x, float y) {
+				const int nid = add(NT::EngineCall, x, y);
+				HC::Node* n = graph.findNode(nid);
+				n->s = id;
+				if (const HE::api::ApiFn* fn = HE::api::find(id))
+				{
+					n->hasArg = fn->isExec;
+					for (const auto& p : fn->params)  n->params.push_back({ p.name, p.type, p.isArray });
+					for (const auto& r : fn->results) n->results.push_back({ r.name, r.type, r.isArray });
+				}
+				return nid;
+			};
+			const int ev  = add(NT::Event, 30, 30);
+			graph.findNode(ev)->s = "BeginPlay";
+			const int imp = engine("physics.addImpulse", 260, 30);
+			const int br  = add(NT::Branch, 560, 30);
+			const int pos = engine("transform.getWorldPosition", 30, 230);
+			const int gt  = add(NT::Greater, 300, 250);
+			const int sum = add(NT::Add, 30, 380);
+			const int pr  = add(NT::Print, 760, 30);
+			const int self = add(NT::GetSelf, 560, 250);
+			add(NT::ConstColor, 760, 230);                              // a body node
+			engine("physics.setJointCollideConnected", 300, 400);       // long names
+			add(NT::ArrayGet, 760, 400);                                // container pins
+
+			ge.pan  = ImVec2(0.0f, 0.0f);
+			ge.zoom = 1.0f;
+			host.graph        = &graph;
+			host.ge           = &ge;
+			host.selectedNode = &selected;
+			host.title        = [](const HC::Node& n) { return HcGraphHost::defaultNodeTitle(n); };
+			host.onEdit       = [](bool) {};
+
+			GraphEditor::Model m = HcGraphHost::buildModel(host);
+			const auto wire = [&](int a, const char* ap, int b, const char* bp) {
+				const int o = pinOf(a, ap, false), i = pinOf(b, bp, true);
+				if (o >= 0 && i >= 0) m.connect(a, o, b, i);
+			};
+			const auto wireIdx = [&](int a, int b) {   // first exec out → first exec in
+				const auto pa = HcGraphHost::nodePins(*graph.findNode(a));
+				const auto pb = HcGraphHost::nodePins(*graph.findNode(b));
+				int o = -1, i = -1;
+				for (const auto& p : pa) if (!p.input && p.isExec) { o = p.id; break; }
+				for (const auto& p : pb) if (p.input && p.isExec) { i = p.id; break; }
+				if (o >= 0 && i >= 0) m.connect(a, o, b, i);
+			};
+			wireIdx(ev, imp);
+			wireIdx(imp, br);
+			wireIdx(br, pr);
+			// Data wires: first data output → a named input. A wired input
+			// next to an unwired one is the case the inline editors care about.
+			const auto wireData = [&](int a, int b, const char* in) {
+				for (const auto& p : HcGraphHost::nodePins(*graph.findNode(a)))
+					if (!p.input && !p.isExec) { const int i = pinOf(b, in, true);
+						if (i >= 0) m.connect(a, p.id, b, i); return; }
+			};
+			wireData(sum, gt, "A");
+			wireData(gt, br, "Cond");
+			wireData(self, imp, "entity");
+			(void)pos; (void)wire;
+			ge.selected = imp;
+		}
+	};
+}
+
+TEST_CASE("ui shot: a HorizonCode graph's nodes, at three zooms")
+{
+	constexpr int W = 1100, H = 560;
+	Harness harness(W, H);
+	NodeGraphScene s;
+	const auto shot = [&](const char* name, float zoom) {
+		s.ge.zoom = zoom;
+		GraphEditor::Model m = HcGraphHost::buildModel(s.host);
+		return shoot(name, W, H, 4, [&](int) {
+			ImGui::SetNextWindowPos(ImVec2(0.0f, 0.0f));
+			ImGui::SetNextWindowSize(ImVec2(float(W), float(H)));
+			ImGui::Begin("graph", nullptr,
+			             ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+			             ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings);
+			GraphEditor::draw("hcshot", m, s.ge, ImGui::GetContentRegionAvail());
+			ImGui::End();
+		});
+	};
+	const he_ui::Image z1  = shot("node-graph-z100", 1.0f);
+	const he_ui::Image z06 = shot("node-graph-z060", 0.6f);
+	const he_ui::Image z15 = shot("node-graph-z150", 1.5f);
+	REQUIRE(z1.valid());
+	CHECK(z1.inkedPixels(kBgR, kBgG, kBgB) > 20000);
+	CHECK(z06.valid());
+	CHECK(z15.valid());
 }
 
 TEST_CASE("ui shot: the generated node reference")
@@ -1948,9 +2067,9 @@ TEST_CASE("ui shot: a pin's dropdown fits inside its node")
 			});
 	};
 
-	// Where the canvas puts the editor column, measured with the same rule it
-	// uses: past the longest input label, in the size the labels are drawn at.
-	// Captured during the frame, because it needs the font.
+	// Where the canvas puts the editor column, asked of the canvas itself
+	// (past the longest input label). Captured during the frame, because the
+	// measurement needs the font.
 	float editorX = 0.0f, originX = 0.0f, originY = 0.0f;
 	const he_ui::Image img = shoot("graph-pin-dropdown", W, H, 3, [&](int)
 	{
@@ -1959,12 +2078,7 @@ TEST_CASE("ui shot: a pin's dropdown fits inside its node")
 		ImGui::Begin("##canvas", nullptr,
 			ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
 			ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings);
-		const float labelScale = 13.0f / ImGui::GetFontSize();
-		float labelW = 0.0f;
-		for (const GraphEditor::Pin& p : m.pins(1))
-			if (p.input && !p.isExec && !p.label.empty())
-				labelW = std::max(labelW, ImGui::CalcTextSize(p.label.c_str()).x * labelScale);
-		editorX = 8.0f + labelW + 6.0f;
+		editorX = GraphEditor::nodeLayout(m, 1).editorX;
 		// Where graph (0,0) lands on screen: the canvas draws from the cursor,
 		// and with no pan and zoom 1 that is the whole transform.
 		originX = ImGui::GetCursorScreenPos().x;

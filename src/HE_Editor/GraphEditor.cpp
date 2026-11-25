@@ -76,28 +76,98 @@ bool isCompactNode(const std::vector<Pin>& pins)
     return !pins.empty(); // a node with no pins at all keeps the normal frame
 }
 
-float nodeGraphHeight(const Model& m, int id, const std::vector<Pin>& pins, float titleH)
+// ── Node layout, in graph units ──────────────────────────────────────────────
+// Every node used to be kNodeW wide whatever it held: a BeginPlay with one exec
+// pin was as wide as a call with four named parameters, and a long title or
+// label simply ran out of the box. Now a node is as wide as its content —
+// title, input column (pin, label, inline editor), output column — rounded UP
+// to half a grid cell, so neighbouring nodes still line up on the canvas grid
+// and a node does not twitch by a pixel when one label changes by a letter.
+// The HEIGHT is the old formula on purpose: saved graphs and comment boxes
+// were arranged around it, and a taller row would make them overlap.
+constexpr float kPinInset  = 10.0f;  // pin centre, inside the node's edge
+constexpr float kLabelGap  = 8.0f;   // pin centre → its label
+constexpr float kColumnGap = 16.0f;  // between the input and the output column
+constexpr float kLabelPx   = 13.0f;  // pin labels and framed titles
+constexpr float kCompactPx = 12.0f;  // compact titles
+constexpr float kWidthSnap = 16.0f;  // half the canvas grid (32)
+constexpr float kMinNodeW  = 80.0f;
+constexpr float kMinCompactW = 48.0f;
+// Below this zoom a 13 px label is under 6 screen px: noise, not text. The
+// labels and inline editors are left out; the title, pins and wires stay.
+constexpr float kLabelMinZoom = 0.46f;
+
+float textWidth(const std::string& s, float px)
 {
-    int left = 0, right = 0;
-    for (const auto& p : pins) (p.input ? left : right)++;
-    const int rows = std::max(left, right);
-    float body = m.nodeBodyHeight ? m.nodeBodyHeight(id) : 0.0f;
-    return titleH + rows * kRowH + body + 6.0f;
+    return s.empty() ? 0.0f : ImGui::CalcTextSize(s.c_str()).x * (px / ImGui::GetFontSize());
 }
 
-// Fit-to-content width for a compact node (title + widest input/output labels),
-// clamped so it stays readable but never wider than a normal node.
-float compactGraphWidth(const std::string& title, const std::vector<Pin>& pins)
+float inlineEditorWidth(const Model& m, int id, int pin)
 {
-    float tw = ImGui::CalcTextSize(title.c_str()).x;
-    float maxL = 0.0f, maxR = 0.0f;
+    return m.pinInlineEditorWidth ? std::max(m.pinInlineEditorWidth(id, pin), kPinEditorW)
+                                  : kPinEditorW;
+}
+
+struct NodeMetrics
+{
+    float w = kNodeW, h = 0.0f, titleH = kTitleH;
+    float editorX = 0.0f;   // start of the inline-editor column (0 = none)
+    bool  compact = false;
+};
+
+// The one place a node's size is decided (draw() and nodeGraphSize() both ask).
+// Whether a pin CAN have an inline editor is what reserves room, not whether it
+// shows one this frame: wiring a pin hides its editor, and a node that shrank
+// whenever a wire landed on it would move its own output pins under the wire.
+NodeMetrics measureNode(const Model& m, int id, const std::vector<Pin>& pins)
+{
+    NodeMetrics r;
+    const float body = m.nodeBodyHeight ? m.nodeBodyHeight(id) : 0.0f;
+    r.compact = m.compactPureNodes && body <= 0.0f && isCompactNode(pins);
+    r.titleH  = r.compact ? kCompactTitleH : kTitleH;
+
+    float labelL = 0.0f, labelR = 0.0f, editorW = 0.0f, dataLabelL = 0.0f;
+    int left = 0, right = 0;
     for (const auto& p : pins)
     {
-        const float w = p.label.empty() ? 0.0f : ImGui::CalcTextSize(p.label.c_str()).x;
-        if (p.input) maxL = std::max(maxL, w); else maxR = std::max(maxR, w);
+        const float lw = textWidth(p.label, kLabelPx);
+        if (p.input)
+        {
+            ++left;
+            labelL = std::max(labelL, lw);
+            if (p.isExec) continue;
+            dataLabelL = std::max(dataLabelL, lw);
+            if (m.pinHasInlineEditor && m.drawPinInlineEditor && m.pinHasInlineEditor(id, p.id))
+                editorW = std::max(editorW, inlineEditorWidth(m, id, p.id));
+        }
+        else { ++right; labelR = std::max(labelR, lw); }
     }
-    const float rowW = maxL + maxR + 30.0f; // pin circles + inner gap
-    return std::clamp(std::max(tw + 18.0f, rowW), 92.0f, kNodeW);
+    // A column is the pin's inset, the gap and the widest label — or just the
+    // dot when no pin on that side has a label.
+    const auto column = [](int count, float label) {
+        if (count == 0) return 0.0f;
+        return label > 0.0f ? kPinInset + kLabelGap + label : kPinInset + kPinR + 2.0f;
+    };
+    float colL = column(left, labelL);
+    if (editorW > 0.0f)
+    {
+        r.editorX = kPinInset + kLabelGap + dataLabelL + (dataLabelL > 0.0f ? 6.0f : 0.0f);
+        colL = std::max(colL, r.editorX + editorW);
+    }
+    const float colR = column(right, labelR);
+    const float cols = colL + colR + (left && right ? kColumnGap : 8.0f);
+
+    const std::string title = m.title ? m.title(id) : std::string();
+    const float titleW = r.compact ? textWidth(title, kCompactPx) + 20.0f
+                                   : textWidth(title, kLabelPx) + 18.0f;
+
+    float w = std::max({ titleW, cols, r.compact ? kMinCompactW : kMinNodeW });
+    // Host body widgets (material parameters, literals, state names) are sized
+    // against kNodeW, so a node with a body never gets narrower than that.
+    if (body > 0.0f) w = std::max(w, kNodeW);
+    r.w = std::ceil(w / kWidthSnap - 0.001f) * kWidthSnap;
+    r.h = r.titleH + std::max(left, right) * kRowH + body + 6.0f;
+    return r;
 }
 
 void drawLink(ImDrawList* dl, const ImVec2& a, const ImVec2& b, ImU32 col, float thick)
@@ -114,6 +184,29 @@ const ImVec2* findPin(const Drawn& n, int pinId, bool input)
     return nullptr;
 }
 } // namespace
+
+NodeLayout nodeLayout(const Model& model, int nodeId)
+{
+    if (model.nodeIsReroute && model.nodeIsReroute(nodeId)) return { ImVec2(kRerouteW, kRerouteW), 0.0f };
+    const NodeMetrics nm = measureNode(model, nodeId, model.pins(nodeId));
+    return { ImVec2(nm.w, nm.h), nm.editorX };
+}
+
+ImVec2 pinGraphOffset(const Model& model, int nodeId, int pinId, bool input)
+{
+    const std::vector<Pin> pins = model.pins(nodeId);
+    if (model.nodeIsReroute && model.nodeIsReroute(nodeId))
+        return ImVec2(input ? 0.0f : kRerouteW, kRerouteW * 0.5f);
+    const NodeMetrics nm = measureNode(model, nodeId, pins);
+    int row = 0;
+    for (const auto& p : pins)
+    {
+        if (p.input != input) continue;
+        if (p.id == pinId) break;
+        ++row;
+    }
+    return ImVec2(input ? kPinInset : nm.w - kPinInset, nm.titleH + (row + 0.5f) * kRowH);
+}
 
 bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
 {
@@ -348,53 +441,28 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
             nodes.push_back(std::move(d));
             continue;
         }
-        const bool hasBody = model.nodeBodyHeight && model.nodeBodyHeight(nid) > 0.0f;
-        d.compact = model.compactPureNodes && !hasBody && isCompactNode(d.pins);
-        d.gTitleH = d.compact ? kCompactTitleH : kTitleH;
-        d.gw = d.compact ? compactGraphWidth(model.title(nid), d.pins) : kNodeW;
-        // The widest inline editor on this node decides how much room the pin
-        // column needs. A compact node has none of its own and adds the whole
-        // slot; a framed one already has a column and only grows by whatever a
-        // control asks for beyond the default. A dropdown that does not fit is
-        // a dropdown whose arrow is outside the node, which is what this is for.
-        {
-            // Pin labels are drawn at 13 graph px whatever the UI font is, so
-            // the column is measured in the same units the labels are in.
-            const float labelScale = 13.0f / ImGui::GetFontSize();
-            float widest = 0.0f, labelW = 0.0f;
-            for (const auto& p : d.pins)
-            {
-                if (!p.input || p.isExec) continue;
-                if (!p.label.empty())
-                    labelW = std::max(labelW, ImGui::CalcTextSize(p.label.c_str()).x * labelScale);
-                if (!pinInlineEditor(nid, p.id)) continue;
-                widest = std::max(widest, model.pinInlineEditorWidth
-                    ? std::max(model.pinInlineEditorWidth(nid, p.id), kPinEditorW)
-                    : kPinEditorW);
-            }
-            if (widest > 0.0f)
-            {
-                d.gEditorX = 8.0f + labelW + 6.0f;
-                d.gw += d.compact ? widest + 6.0f : widest - kPinEditorW;
-                // …and if the labels are long enough that the column would push
-                // the control out of the box, the box gives way. The alternative
-                // is a control that is cut in half, which is what this is about.
-                d.gw = std::max(d.gw, d.gEditorX + widest + 8.0f);
-            }
-        }
-        const float gh = nodeGraphHeight(model, nid, d.pins, d.gTitleH);
-        d.size = ImVec2(d.gw * st.zoom, gh * st.zoom);
+        const NodeMetrics nm = measureNode(model, nid, d.pins);
+        d.compact  = nm.compact;
+        d.gTitleH  = nm.titleH;
+        d.gw       = nm.w;
+        d.gEditorX = nm.editorX;
+        // Whole pixels: at a fractional zoom an unrounded box puts its 1 px
+        // frame and its rows on half pixels, and two equal nodes side by side
+        // come out a pixel apart in height.
+        d.pos  = ImVec2(std::round(d.pos.x), std::round(d.pos.y));
+        d.size = ImVec2(std::round(d.gw * st.zoom), std::round(nm.h * st.zoom));
 
-        // Pin screen positions (top-to-bottom per side).
-        const float w = d.gw * st.zoom, titleH = d.gTitleH * st.zoom, rowH = kRowH * st.zoom;
+        // Pin screen positions (top-to-bottom per side), inset into the node so
+        // the dot, its label and its editor read as one row inside the frame.
+        const float inset = kPinInset * st.zoom, titleH = d.gTitleH * st.zoom, rowH = kRowH * st.zoom;
         int leftRow = 0, rightRow = 0;
         d.pinPos.resize(d.pins.size());
         for (size_t i = 0; i < d.pins.size(); ++i)
         {
             const bool inp = d.pins[i].input;
             const int  row = inp ? leftRow++ : rightRow++;
-            d.pinPos[i] = ImVec2(inp ? d.pos.x : d.pos.x + w,
-                                 d.pos.y + titleH + (row + 0.5f) * rowH);
+            d.pinPos[i] = ImVec2(std::round(inp ? d.pos.x + inset : d.pos.x + d.size.x - inset),
+                                 std::round(d.pos.y + titleH + (row + 0.5f) * rowH));
         }
         nodes.push_back(std::move(d));
     }
@@ -441,7 +509,8 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
     {
         float gx = 0, gy = 0;
         model.getPos(st.focusNode, gx, gy);
-        st.pan.x = size.x * 0.5f - gx * st.zoom - (kNodeW * st.zoom) * 0.5f;
+        const float fw = measureNode(model, st.focusNode, model.pins(st.focusNode)).w;
+        st.pan.x = size.x * 0.5f - gx * st.zoom - (fw * st.zoom) * 0.5f;
         st.pan.y = size.y * 0.4f - gy * st.zoom;
         st.focusNode = 0;
     }
@@ -691,6 +760,11 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
             if (overKnot) hoverNodeNow = n.id;
             continue;
         }
+        // Corners shrink and grow with the box; at a fixed 6 px a node at zoom
+        // 0.3 (16 px tall title) was more corner than rectangle. The status
+        // halo keeps its screen-px offset and thickness: it has to stay
+        // visible on a node that is small on screen.
+        const float round = std::max(2.0f, (n.compact ? 6.0f : 5.0f) * st.zoom);
         if (n.compact)
         {
             // No colored header bar: a subtly accent-tinted rounded body + a small
@@ -700,35 +774,40 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
                 40 + ((acc >> IM_COL32_R_SHIFT) & 0xFF) / 5,
                 40 + ((acc >> IM_COL32_G_SHIFT) & 0xFF) / 5,
                 44 + ((acc >> IM_COL32_B_SHIFT) & 0xFF) / 5, 245);
-            dl->AddRectFilled(n.pos, br, bodyCol, 6.0f);
+            dl->AddRectFilled(n.pos, br, bodyCol, round);
             dl->AddRect(n.pos, br, sel ? IM_COL32(255, 170, 40, 255) : IM_COL32(20, 20, 24, 255),
-                        6.0f, 0, sel ? 2.0f : 1.0f);
+                        round, 0, sel ? 2.0f : 1.0f);
             if (model.nodeOutline)
                 if (const ImU32 oc = model.nodeOutline(n.id))
                     dl->AddRect(ImVec2(n.pos.x - 3, n.pos.y - 3), ImVec2(br.x + 3, br.y + 3),
-                                oc, 7.0f, 0, 3.0f);
-            // Title scales linearly with zoom (like the node box), and the centering
-            // uses the SCALED text width — mixing the default-size CalcTextSize with
-            // a scaled draw put the title off-center at any zoom ≠ 1.
-            const float fs = 12.0f * st.zoom;
-            const float tw = ImGui::CalcTextSize(title.c_str()).x * (fs / ImGui::GetFontSize());
+                                oc, round + 2.0f, 0, 3.0f);
+            // Title scales linearly with zoom (like the node box), centred in
+            // the slim title strip both ways, using the SCALED text size.
+            const float fs = kCompactPx * st.zoom;
+            const float tw = textWidth(title, kCompactPx) * st.zoom;
             dl->AddText(nullptr, fs,
-                        ImVec2(n.pos.x + (n.size.x - tw) * 0.5f, n.pos.y + 2 * st.zoom),
+                        ImVec2(std::round(n.pos.x + (n.size.x - tw) * 0.5f),
+                               std::round(n.pos.y + (n.gTitleH * st.zoom - fs) * 0.5f + 1.0f * st.zoom)),
                         IM_COL32(225, 225, 228, 255), title.c_str());
         }
         else
         {
-            dl->AddRectFilled(n.pos, br, IM_COL32(52, 52, 56, 245), 5.0f);
-            dl->AddRectFilled(n.pos, ImVec2(br.x, n.pos.y + n.gTitleH * st.zoom),
-                              model.headerColor(n.id), 5.0f, ImDrawFlags_RoundCornersTop);
+            const float titleH = n.gTitleH * st.zoom;
+            dl->AddRectFilled(n.pos, br, IM_COL32(52, 52, 56, 245), round);
+            dl->AddRectFilled(n.pos, ImVec2(br.x, n.pos.y + titleH),
+                              model.headerColor(n.id), round, ImDrawFlags_RoundCornersTop);
             dl->AddRect(n.pos, br, sel ? IM_COL32(255, 170, 40, 255) : IM_COL32(20, 20, 24, 255),
-                        5.0f, 0, sel ? 2.0f : 1.0f);
+                        round, 0, sel ? 2.0f : 1.0f);
             if (model.nodeOutline)
                 if (const ImU32 oc = model.nodeOutline(n.id))
                     dl->AddRect(ImVec2(n.pos.x - 3, n.pos.y - 3), ImVec2(br.x + 3, br.y + 3),
-                                oc, 7.0f, 0, 3.0f);
-            dl->AddText(nullptr, 13.0f * st.zoom,
-                        ImVec2(n.pos.x + 6 * st.zoom, n.pos.y + 4 * st.zoom), IM_COL32(240,240,240,255), title.c_str());
+                                oc, round + 2.0f, 0, 3.0f);
+            // Left-aligned with the input pins' inset and centred in the bar.
+            const float fs = kLabelPx * st.zoom;
+            dl->AddText(nullptr, fs,
+                        ImVec2(std::round(n.pos.x + 9.0f * st.zoom),
+                               std::round(n.pos.y + (titleH - fs) * 0.5f)),
+                        IM_COL32(240,240,240,255), title.c_str());
         }
 
         for (size_t i = 0; i < n.pins.size(); ++i)
@@ -788,21 +867,22 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
             else
                 dl->AddCircleFilled(pp, kPinR * st.zoom, p.color);
 
-            float labelEndX = pp.x + 8 * st.zoom;   // where an inline editor may start
+            // Far out, labels and editors are left out (see kLabelMinZoom).
+            if (st.zoom < kLabelMinZoom) continue;
+            float labelEndX = pp.x + kLabelGap * st.zoom;   // where an inline editor may start
             if (!p.label.empty())
             {
                 // Pin labels scale with zoom like everything else on the node (they
                 // were drawn at the fixed default font size before, so they overflowed
                 // the node when zoomed out and looked tiny when zoomed in).
-                const float fs = 13.0f * st.zoom;
-                const float scale = fs / ImGui::GetFontSize();
-                const ImVec2 ts0 = ImGui::CalcTextSize(p.label.c_str());
-                const float ty = pp.y - ts0.y * scale * 0.5f;
-                if (p.input) dl->AddText(nullptr, fs, ImVec2(pp.x + 8 * st.zoom, ty),
+                const float fs = kLabelPx * st.zoom;
+                const float lw = textWidth(p.label, kLabelPx) * st.zoom;
+                const float ty = std::round(pp.y - fs * 0.5f);
+                if (p.input) dl->AddText(nullptr, fs, ImVec2(std::round(pp.x + kLabelGap * st.zoom), ty),
                                          IM_COL32(200,200,200,200), p.label.c_str());
-                else         dl->AddText(nullptr, fs, ImVec2(pp.x - 8 * st.zoom - ts0.x * scale, ty),
+                else         dl->AddText(nullptr, fs, ImVec2(std::round(pp.x - kLabelGap * st.zoom - lw), ty),
                                          IM_COL32(200,200,200,200), p.label.c_str());
-                if (p.input) labelEndX = pp.x + 8 * st.zoom + ts0.x * scale + 5 * st.zoom;
+                if (p.input) labelEndX = pp.x + kLabelGap * st.zoom + lw + 6 * st.zoom;
             }
 
             // Inline default editor on an unwired simple input: a small widget
@@ -827,22 +907,24 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
                 // The clip rect replaces the child's other job, keeping a wide
                 // widget inside the node — for hit-testing too, since ItemAdd
                 // honours it.
-                const float gew = model.pinInlineEditorWidth
-                    ? std::max(model.pinInlineEditorWidth(n.id, p.id), kPinEditorW)
-                    : kPinEditorW;
-                const float ew = gew * st.zoom, eh = 17.0f * st.zoom;
+                const float ew = inlineEditorWidth(model, n.id, p.id) * st.zoom;
+                // A frame is the font plus 2 × FramePadding.y, and it is centred
+                // on the pin's row — the slot used to be 2 px taller than the
+                // frame and top-anchored, so every box sat a pixel or two high.
+                const float frameH = (kLabelPx + 2.0f) * st.zoom;
                 // The node's column, not this label's end (see Drawn::gEditorX).
-                const ImVec2 emin(n.gEditorX > 0.0f ? n.pos.x + n.gEditorX * st.zoom : labelEndX,
-                                  pp.y - eh * 0.5f);
+                const ImVec2 emin(std::round(n.gEditorX > 0.0f ? n.pos.x + n.gEditorX * st.zoom : labelEndX),
+                                  std::round(pp.y - frameH * 0.5f));
                 ImGui::PushID(n.id * 4096 + p.id);
-                ImGui::PushClipRect(emin, ImVec2(emin.x + ew, emin.y + eh), true);
+                ImGui::PushClipRect(ImVec2(emin.x, emin.y - 1.0f),
+                                    ImVec2(emin.x + ew, emin.y + frameH + 1.0f), true);
                 ImGui::SetCursorScreenPos(emin);
                 ImGui::BeginGroup();
                 // The SAME size the pin labels are drawn at, not the UI font's:
                 // an editor sitting between two labels in a bigger face reads as
                 // a foreign object stuck to the node, which is exactly what it
                 // looked like. 13 px is the number the label draw above uses.
-                ImGui::SetWindowFontScale(13.0f * st.zoom / ImGui::GetFontSize());
+                ImGui::SetWindowFontScale(kLabelPx * st.zoom / ImGui::GetFontSize());
                 ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(3.0f * st.zoom, 1.0f * st.zoom));
                 // The width the editor may use, rather than "to the window's
                 // right edge": a widget laid out to the CANVAS and then clipped
@@ -873,8 +955,8 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
             int left = 0, right = 0;
             for (const auto& p : n.pins) (p.input ? left : right)++;
             const float pinsBottom = n.pos.y + (n.gTitleH + std::max(left, right) * kRowH) * st.zoom;
-            const ImVec2 bmin(n.pos.x + 6, pinsBottom + 2);
-            const ImVec2 bmax(br.x - 6, br.y - 4);
+            const ImVec2 bmin(std::round(n.pos.x + 6 * st.zoom), std::round(pinsBottom + 2 * st.zoom));
+            const ImVec2 bmax(std::round(br.x - 6 * st.zoom), std::round(br.y - 4 * st.zoom));
             ImGui::PushID(n.id);
             // The clip rect does the other half of the child window's old job:
             // a body widget wider than the node stays inside it, and ItemAdd
@@ -892,7 +974,11 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
             ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(4.0f * st.zoom, 2.0f * st.zoom));
             ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,  ImVec2(8.0f * st.zoom, 4.0f * st.zoom));
             ImGui::PushStyleVar(ImGuiStyleVar_ItemInnerSpacing, ImVec2(4.0f * st.zoom, 4.0f * st.zoom));
+            // The style above is already zoomed; a host's own pushWidgetScale
+            // inside the body must not zoom it a second time (see the header).
+            ++widgetScaleNesting();
             model.drawNodeBody(n.id, bmin, bmax, st.zoom);
+            --widgetScaleNesting();
             ImGui::PopStyleVar(3);
             ImGui::SetWindowFontScale(1.0f);
             ImGui::EndGroup();

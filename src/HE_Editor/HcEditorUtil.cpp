@@ -1731,6 +1731,7 @@ void drawPinDefaultEditor(HorizonCode::Node& n, int unifiedPin, bool& committed,
 	if (pinDefaultsToSelf(n, di) &&
 	    (n.pinDefaults.find(di) == n.pinDefaults.end() || n.pinDefaults[di].i == 0))
 	{
+		ImGui::AlignTextToFramePadding();   // on the label's baseline, not above it
 		ImGui::TextDisabled("Self");
 		if (ImGui::IsItemHovered())
 			ImGui::SetTooltip("Empty means the entity this object sits on.\n"
