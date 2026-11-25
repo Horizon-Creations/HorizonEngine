@@ -2867,3 +2867,37 @@ TEST_CASE("planner ui pages: Markdown turns into blocks while typing; Enter spli
 	CHECK(onDisk.blocks[0].type == BlockType::Heading2);
 	CHECK(onDisk.blocks[3].language == "cpp");
 }
+
+TEST_CASE("planner ui pages: Export writes the page as Markdown and as Word into Export/Planner")
+{
+	Harness harness;
+	Project proj("he_planner_ui_page_export");
+	ContextBits bits;
+	AppContext ctx = bits.make(proj.pm);
+	idle(ctx);
+	REQUIRE(click(ctx, "New Page"));
+	idle(ctx);
+	Workspace* ws = PlannerPanel::workspace(ctx);
+	const UUID pageId = PlannerPanel::selectedPage();
+	REQUIRE(ws->editPage(pageId, [&](Page& p) {
+		p.title = "Design";
+		p.addBlock(BlockType::Heading1, "Pillars", 1);
+		p.addBlock(BlockType::Bullet, "Fast", 1);
+		return true;
+	}));
+	idle(ctx);
+
+	REQUIRE(click(ctx, "page:export"));
+	REQUIRE(click(ctx, "export:md"));
+	const std::filesystem::path md = proj.root() / "Export" / "Planner" / "Design.md";
+	REQUIRE(std::filesystem::exists(md));
+	CHECK(readText(md) == "# Design\n\n# Pillars\n- Fast\n");
+
+	REQUIRE(click(ctx, "page:export"));
+	REQUIRE(click(ctx, "export:docx"));
+	const std::filesystem::path docx = proj.root() / "Export" / "Planner" / "Design.docx";
+	REQUIRE(std::filesystem::exists(docx));
+	CHECK(readText(docx).rfind("PK\x03\x04", 0) == 0);
+	if (const char* d = std::getenv("HE_UI_DUMP_DIR"); d && *d)
+		std::filesystem::copy_file(docx, std::filesystem::path(d) / "planner_page_export.docx", std::filesystem::copy_options::overwrite_existing);
+}

@@ -429,6 +429,7 @@ add_executable(he_tests
     test_planner_workspace.cpp
     # The Planner as tools: the Markdown a page speaks, and planner_* over a real workspace.
     test_planner_markdown.cpp
+    test_planner_export.cpp
     test_planner_board.cpp
     test_mcp_tools_planner.cpp
     # Assigning, posting updates and notices between two editors over a fake
@@ -768,6 +769,7 @@ add_executable(he_tests
     # test_planner_markdown.cpp).
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/McpToolsPlanner.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/PlannerMarkdown.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/PlannerExport.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorSettingsCatalog.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/McpToolCommon.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/AssetStubWriter.cpp

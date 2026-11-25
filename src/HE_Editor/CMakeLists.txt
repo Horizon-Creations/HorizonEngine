@@ -224,6 +224,8 @@ add_executable(HorizonEditor WIN32
 	# The Planner as tools (planner_*): databases, rows and pages, through the tab's one workspace.
 	McpToolsPlanner.cpp
 	PlannerMarkdown.cpp
+	# Pages as .docx, dated rows as .ics (the Planner's exports).
+	PlannerExport.cpp
 	# The clients' cameras in the viewport: a frustum with the connection number
 	# (debug lines) and a tag over the frame (ImGui), the presence marker's split.
 	McpCameraGizmos.cpp

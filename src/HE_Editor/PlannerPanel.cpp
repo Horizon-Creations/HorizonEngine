@@ -5,9 +5,11 @@
 #include "EditorInput.h"       // the trackpad pinch on the timeline
 #include "EditorTheme.h"
 #include "EditorWidgets.h"
+#include "NotificationStore.h"
 #include "Planner.h"
 #include "PlannerBoard.h"
 #include "PlannerBoardView.h"
+#include "PlannerExport.h"
 #include "PlannerIcons.h"
 #include "PlannerImport.h"
 #include "PlannerTasks.h"
@@ -2955,6 +2957,39 @@ void drawBlocks(const Page& page)
 	}
 }
 
+// What a page's Markdown and Word export call the pages and tables it links to.
+MarkdownContext exportContext()
+{
+	MarkdownContext c;
+	c.pageTitle = [](const UUID& id) {
+		const Page* p = s_ws.findPage(id);
+		return p ? p->title : std::string{};
+	};
+	c.databaseName = [](const UUID& id) {
+		const Database* d = s_ws.find(id);
+		return d ? d->name : std::string{};
+	};
+	return c;
+}
+
+// The page as Markdown or Word under <project>/Export/Planner, and a notice saying where.
+void exportPage(const UUID& pageId, const std::string& title, bool word)
+{
+	post([=] {
+		const Page* page = s_ws.findPage(pageId);
+		if (!page) return;
+		Page named = *page;
+		named.title = title;   // a row's page carries the row's title
+		const std::filesystem::path file = exportFileFor(s_ws.project(), title, word ? "docx" : "md", "Page");
+		const std::string bytes = word ? pageToDocx(named, exportContext())
+		                               : "# " + (title.empty() ? std::string("Untitled") : title) + "\n\n" + pageToMarkdown(named, exportContext());
+		std::string err;
+		if (s_ws.project().empty()) err = "no project is open";
+		else if (writeExport(file, bytes, &err)) HE::Ed::notify(HE::Ed::NoteLevel::Info, "Page exported", file.string());
+		if (!err.empty()) HE::Ed::notify(HE::Ed::NoteLevel::Important, "Page not exported: " + err);
+	});
+}
+
 // The page of a row (with its properties) or a standalone one.
 void drawPage(AppContext& ctx)
 {
@@ -3013,6 +3048,23 @@ void drawPage(AppContext& ctx)
 		}, "Untitled", 0.0f, titleW);
 	if (ctx.fontHeading) ImGui::PopFont();
 	note("page:title");
+	{
+		// Export, at the right end of the title line.
+		const std::string title = rowPage ? row->title : page->title;
+		ImGui::SameLine();
+		alignRight(toolWidth("Export"));
+		if (toolButton("Planner/Export Page", "Export", PlannerIcons::Icon::Export, false)) ImGui::OpenPopup("##pageexport");
+		note("page:export");
+		if (beginPopup("##pageexport"))
+		{
+			if (ImGui::Selectable("Markdown (.md)")) exportPage(pageId, title, false);
+			note("export:md");
+			if (ImGui::Selectable("Word (.docx)")) exportPage(pageId, title, true);
+			note("export:docx");
+			ImGui::TextDisabled("Into the project's Export/Planner folder.");
+			ImGui::EndPopup();
+		}
+	}
 	ImGui::Spacing();
 
 	ImGui::BeginChild("##pagebody", ImVec2(0, 0), ImGuiChildFlags_None);
