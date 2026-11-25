@@ -1082,12 +1082,17 @@ TEST_CASE("ui shot: the drag-off menu offers own functions and Set for a data wi
 			ImGui::SetNextWindowPos(ImVec2(0, 0));
 			ImGui::SetNextWindowSize(ImVec2(float(W), float(H)));
 			ImGui::Begin("menu", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoSavedSettings);
+			ImGui::SetNextWindowScroll(ImVec2(0.0f, 0.0f));   // the list's top
 			m.drawPinDragMenu(node, pinOf(node, false), false, ImVec2(100, 100));
 			ImGui::End();
 		});
 	};
 	CHECK(topShot("drag-menu-element-ref", elem).valid());
 	CHECK(topShot("drag-menu-button-var", getBtn).valid());
+	// A Create Object without a class: its type is unknown, so every type is
+	// offered with its members (here, with no project content: the controls).
+	const int co = HcGraphHost::addNode(graph, NT::CreateObject, ImVec2(0, 600), 0);
+	CHECK(topShot("drag-menu-untyped-ref", co).valid());
 }
 
 TEST_CASE("ui shot: a HorizonCode graph's nodes, at three zooms")
