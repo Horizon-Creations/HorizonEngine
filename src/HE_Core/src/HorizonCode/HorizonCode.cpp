@@ -3127,6 +3127,12 @@ void inferEventDecls(Graph& g)
 bool canConvertPinType(PinType from, PinType to)
 {
     if (from == to) return true;
+    // A number into a Bool pin is not a conversion an author should get without
+    // asking: "is this 0?" belongs on the canvas as a comparison (Blueprint has
+    // the same rule). The other way, Bool into a number, stays — false is 0.
+    // Only NEW wires ask this; a saved one is restored without re-checking and
+    // still reads as "not zero" in both coerce implementations.
+    if (to == P::Bool) return false;
     auto numeric = [](PinType t)
     { return t == P::Float || t == P::Double || t == P::Int || t == P::Bool; };
     if (numeric(from) && numeric(to)) return true;

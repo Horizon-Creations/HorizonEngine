@@ -438,6 +438,18 @@ inline HE::hccg::ClassSource fxCoerce()
         // Anything else on a Vec3 pin → the null vector, like every mismatch.
         setFromDefault("v3FromFloat", PT::Vec3, Value::ofFloat(9.0f));
     }
+
+    // A number wired into a Bool pin. connect refuses that wire now (a Bool wants
+    // a comparison, as in Blueprint), but graphs saved before keep it: links are
+    // restored without re-checking, so it is pushed here the way a load does —
+    // and both sides still read it as "not zero".
+    {
+        const int evL = f.event("LegacyWire");
+        const int lit = f.constF(2.5f);
+        const int sl = f.setVar("bOut", PT::Bool);
+        f.g.links.push_back({ lit, f.pinBase(lit, 3), sl, f.pinBase(sl, 2) });
+        f.exec(evL, sl);
+    }
     return f.done("coerce_matrix");
 }
 

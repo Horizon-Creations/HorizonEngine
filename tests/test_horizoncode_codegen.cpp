@@ -478,6 +478,9 @@ TEST_CASE("codegen parity: flow_branch_sequence")
 TEST_CASE("codegen parity: coerce_matrix")
 {
 	ParityPair p("fix/coerce_matrix");
+	// A number → Bool wire from before the rule got strict: still "not zero".
+	p.fire("LegacyWire");
+	CHECK(p.var("bOut").b == true);
 	p.fire("Defaults");
 	CHECK(p.var("fOut").f == 1.0f);   // Bool(true) default on a Float pin
 	CHECK(p.var("iOut").i == 3);      // Float(3.9) truncates on an Int pin

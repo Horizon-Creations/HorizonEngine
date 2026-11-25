@@ -4508,7 +4508,8 @@ TEST_CASE("Double pin: converts like a number, and only like a number")
     CHECK(canConvertPinType(P::Float,  P::Double));
     CHECK(canConvertPinType(P::Double, P::Int));
     CHECK(canConvertPinType(P::Int,    P::Double));
-    CHECK(canConvertPinType(P::Double, P::Bool));
+    CHECK_FALSE(canConvertPinType(P::Double, P::Bool));   // a Bool wants a comparison
+    CHECK(canConvertPinType(P::Bool,   P::Double));
     CHECK(canConvertPinType(P::Double, P::Enum));
     CHECK(canConvertPinType(P::Enum,   P::Double));
     CHECK_FALSE(canConvertPinType(P::Double, P::String));

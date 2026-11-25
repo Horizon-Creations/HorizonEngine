@@ -1610,10 +1610,16 @@ TEST_CASE("the Cast node's serialized name does not depend on its target")
 
 TEST_CASE("elementary types convert on the wire")
 {
-    // What connect() accepts is exactly what coerce() performs — no more.
+    // What connect() accepts is a subset of what coerce() performs.
     CHECK(canConvertPinType(PinType::Float, PinType::Int));
-    CHECK(canConvertPinType(PinType::Int,   PinType::Bool));
     CHECK(canConvertPinType(PinType::Bool,  PinType::Float));
+    CHECK(canConvertPinType(PinType::Bool,  PinType::Int));
+    // A number into a Bool pin takes a comparison node (Blueprint's rule too);
+    // coerce still reads such a wire from an older graph as "not zero".
+    CHECK_FALSE(canConvertPinType(PinType::Int,    PinType::Bool));
+    CHECK_FALSE(canConvertPinType(PinType::Float,  PinType::Bool));
+    CHECK_FALSE(canConvertPinType(PinType::Double, PinType::Bool));
+    CHECK_FALSE(canConvertPinType(PinType::Enum,   PinType::Bool));
     CHECK(canConvertPinType(PinType::Enum,  PinType::Int));
     CHECK(canConvertPinType(PinType::Int,   PinType::Enum));
     CHECK(canConvertPinType(PinType::Vec2,  PinType::Vec2));
@@ -1640,6 +1646,10 @@ TEST_CASE("elementary types convert on the wire")
     Node cs; cs.type = NodeType::ConstString; cs.s = "x";
     const int str = g.addNode(std::move(cs));
     CHECK_FALSE(g.connect(str, 0, s, 2));
+    // …and the Float refuses a Bool pin.
+    Node sb; sb.type = NodeType::SetVariable; sb.s = "flag"; sb.propType = PinType::Bool;
+    const int setB = g.addNode(std::move(sb));
+    CHECK_FALSE(g.connect(c, 0, setB, 2));
 
     Runtime rt;
     const InstanceId id = rt.add(std::move(g));

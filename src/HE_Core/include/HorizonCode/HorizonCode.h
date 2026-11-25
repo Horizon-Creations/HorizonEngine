@@ -1062,9 +1062,11 @@ HE_API EventId            eventId(const std::string& name);
 // mutex besides.
 HE_API std::string eventName(EventId id);
 
-// May a wire carry `from` into `to`? Equal types always; beyond that exactly the
-// conversions the interpreter's `coerce` performs and no others — Float/Double/
-// Int/Bool among themselves, and Enum against Float/Double/Int (it is int-backed). Deliberately
+// May a NEW wire carry `from` into `to`? Equal types always; beyond that a subset
+// of the conversions the interpreter's `coerce` performs — Float/Double/Int among
+// themselves, Bool into any of them, and Enum against Float/Double/Int (it is
+// int-backed). Never a number into Bool: that takes a comparison node (coerce
+// still reads such a wire from an older graph as "not zero"). Deliberately
 // NOT String, whose coerce yields the zero value: allowing that at a wire would
 // look like a conversion and silently be a data loss. Arrays never convert —
 // coerce passes an array through untouched, so an element-wise reinterpretation
