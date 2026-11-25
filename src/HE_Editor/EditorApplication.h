@@ -701,6 +701,9 @@ private:
 	// The team server wrote (or removed) `projectRelPath`: what is loaded or
 	// open re-reads it. The open scene is SceneDiskWatch's (it asks).
 	void        applyTeamSyncFile(const std::string& projectRelPath);
+	// A Planner or Task Board file was written: the team-server sync hears of it, and a
+	// running collaboration session gets the file at once (CollabController::kConfigKeyPrefix).
+	void        plannerFileSaved(const std::filesystem::path& file);
 	void        saveOpenTabs();
 	void        restoreOpenTabs();
 	std::string m_lastTabSig; // change detection for the auto-save

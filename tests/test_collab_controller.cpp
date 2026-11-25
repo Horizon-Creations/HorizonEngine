@@ -4437,3 +4437,62 @@ TEST_CASE("Asset identity: an approved rename moves the bookkeeping that holds t
     CHECK(s.host.heldAssetLocks()[0] == s.b);
     CHECK(s.host.ownsAssetLock(s.b));
 }
+
+TEST_CASE("Live sync: a planner page travels both ways under the Config key, and no lock is left behind")
+{
+    // Planner files have no tab that would hold a lock: every save goes out and
+    // gives the lock back, so the other side's next save of the same page goes
+    // out too instead of being turned away.
+    CHECK(CollabController::isConfigSyncKey("::Config::Planner/Pages/0123456789abcdef.json"));
+    CHECK(CollabController::isConfigSyncKey("::Config::TaskBoard.json"));
+    CHECK_FALSE(CollabController::isConfigSyncKey("::Config::ProjectSettings.json"));   // not the project's settings
+    CHECK_FALSE(CollabController::isConfigSyncKey("::Config::Planner/../ProjectSettings.json"));
+    CHECK_FALSE(CollabController::isConfigSyncKey("::Config::Planner/Pages/x.txt"));
+    CHECK(CollabController::isSyncableAsset("::Config::Planner/Boards/0123456789abcdef.json"));
+
+    HorizonWorld hostWorld;
+    hostWorld.createEntity("Cube");
+    CollabController host;
+    host.setWorld(&hostWorld);
+    REQUIRE(host.startHosting(0, "Anna"));
+    HorizonWorld clientWorld;
+    CollabController client;
+    client.setWorld(&clientWorld);
+    client.onWorldReplaced([&] { client.seedNetIds(); });
+    REQUIRE(client.joinSession("127.0.0.1", host.port(), host.joinCode(), "Bob"));
+    REQUIRE(pumpUntil(host, client, [&] { return client.status() == CollabController::Status::Joined; }));
+
+    const std::string key = "::Config::Planner/Pages/0123456789abcdef0123456789abcdef.json";
+    std::string hostGot, clientGot;
+    host.onRemoteAsset([&](const std::string& p, const std::vector<std::uint8_t>& b) {
+        if (p == key) hostGot.assign(b.begin(), b.end());
+    });
+    client.onRemoteAsset([&](const std::string& p, const std::vector<std::uint8_t>& b) {
+        if (p == key) clientGot.assign(b.begin(), b.end());
+    });
+    const fs::path file = fs::temp_directory_path() / "he_collab_planner_page.json";
+    auto write = [&](const std::string& text) { std::ofstream f(file, std::ios::binary | std::ios::trunc); f << text; };
+
+    // The host saves: Bob gets it, and the host holds no lock afterwards.
+    write(R"({"title":"Design","v":1})");
+    host.publishAsset(key, file.string());
+    REQUIRE(pumpUntil(host, client, [&] { return !clientGot.empty(); }));
+    CHECK(clientGot == R"({"title":"Design","v":1})");
+    CHECK_FALSE(host.ownsAssetLock(key));
+
+    // Bob saves the same page right after: a client waits for the grant, sends, gives it back.
+    write(R"({"title":"Design","v":2})");
+    client.publishAsset(key, file.string());
+    REQUIRE(pumpUntil(host, client, [&] { return !hostGot.empty(); }));
+    CHECK(hostGot == R"({"title":"Design","v":2})");
+    REQUIRE(pumpUntil(host, client, [&] { return !client.ownsAssetLock(key); }));
+
+    // And Anna again: nothing is held against her.
+    clientGot.clear();
+    write(R"({"title":"Design","v":3})");
+    host.publishAsset(key, file.string());
+    REQUIRE(pumpUntil(host, client, [&] { return !clientGot.empty(); }));
+    CHECK(clientGot == R"({"title":"Design","v":3})");
+
+    he_test::removeQuiet(file);
+}

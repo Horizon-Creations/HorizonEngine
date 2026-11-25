@@ -694,7 +694,8 @@ TEST_CASE("planner workspace: every file written tells the saved hook (the edito
 {
 	TempProject tp;
 	int saves = 0;
-	Workspace::setSavedHook([&] { ++saves; });
+	fs::path last;
+	Workspace::setSavedHook([&](const fs::path& f) { ++saves; last = f; });
 	{
 		Workspace ws;
 		ws.setProject(tp.root);
@@ -703,11 +704,13 @@ TEST_CASE("planner workspace: every file written tells the saved hook (the edito
 		CHECK(afterCreate >= 1);
 		REQUIRE(ws.edit(id, [&](Database& db) { db.addRow("One", "Anna", kT0); return true; }));
 		CHECK(saves == afterCreate + 1);
+		CHECK(last == databasePath(tp.root, id));   // the file that was written
 		ws.edit(id, [&](Database&) { return false; });   // no change, no write
 		CHECK(saves == afterCreate + 1);
 		Page* page = ws.createPage("Notes");
 		REQUIRE(page != nullptr);
 		CHECK(saves == afterCreate + 2);
+		CHECK(last == pagePath(tp.root, page->id));
 		ws.poll(true);   // reading is not saving
 		CHECK(saves == afterCreate + 2);
 	}

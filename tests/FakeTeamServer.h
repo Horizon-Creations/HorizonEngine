@@ -127,6 +127,8 @@ struct FakeTeamServer {
     struct ScTicket { std::string member, project; };
     std::map<std::string, ScTicket> scTickets;
     bool noSourceControl = false;   // a server from before source control: op 20 is bad-request
+    bool noNotices = false;         // a server from before notices: op 21 is bad-request
+    int  noticesCarried = 0;        // NOTIFY requests passed on
     int  issued      = 0;
     int  logins      = 0;
     int  pings       = 0;
@@ -486,6 +488,33 @@ struct FakeTeamServer {
                 std::vector<std::uint8_t> body = { p.size };
                 body.insert(body.end(), p.rgba.begin(), p.rgba.end());
                 reply(c, id, 0, body);
+                return;
+            }
+            case 21: {  // NOTIFY: to every connection of the member but the sender, kept nowhere
+                if (noNotices) { reply(c, id, 1); return; }
+                const std::string member = readStr(f, pos);
+                REQUIRE(f.size() >= pos + 2);
+                const std::size_t len = (std::size_t(f[pos]) << 8) | f[pos + 1];
+                pos += 2;
+                REQUIRE(f.size() == pos + len);
+                const std::string payload(f.begin() + static_cast<std::ptrdiff_t>(pos), f.end());
+                if (std::none_of(roster.begin(), roster.end(), [&](const std::string& n) { return sameName(n, member); })) {
+                    reply(c, id, 5);
+                    return;
+                }
+                auto event = header(9);
+                event.push_back(10);
+                str8(event, conn.member);
+                event.push_back(static_cast<std::uint8_t>(len >> 8));
+                event.push_back(static_cast<std::uint8_t>(len & 0xFF));
+                event.insert(event.end(), payload.begin(), payload.end());
+                bool online = false;
+                for (auto& [other, oc] : conns)
+                    if (other != c && oc.loggedIn && sameName(oc.member, member)) { send(other, event); online = true; }
+                for (auto& [other, oc] : conns) online |= oc.loggedIn && sameName(oc.member, member);
+                if (!online) { reply(c, id, 11); return; }
+                ++noticesCarried;
+                reply(c, id, 0);
                 return;
             }
             case 20: {  // SC_TICKET: an existing project, or an admin about to create one

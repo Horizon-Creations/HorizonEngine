@@ -649,6 +649,16 @@ public:
 	static bool isSyncableAsset(const std::string& relativePath);
 	static bool isSyncableAssetType(HE::AssetType type);
 
+	// The Planner's files travel under their own key prefix, relative to the
+	// project's Config folder: "::Config::Planner/Pages/<id>.json",
+	// "::Config::TaskBoard.json". Only those two places, and only JSON — the key
+	// comes off the wire and Config also holds the project's settings, which a
+	// peer must not overwrite. The bytes go out on every save and the lock is
+	// given back right after: a planner file has no tab that holds it, so a kept
+	// lock would only turn the next person's edit away.
+	static constexpr const char* kConfigKeyPrefix = "::Config::";
+	static bool isConfigSyncKey(const std::string& key);
+
 	// Publish a saved asset. Claims the lock first when nobody holds it, so
 	// saving does not silently do nothing just because the user never selected
 	// the asset in a way that took a lock.

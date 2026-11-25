@@ -4,6 +4,7 @@
 #include <Types/UUID.h>
 
 #include <cstdint>
+#include <filesystem>
 #include <functional>
 #include <string>
 #include <vector>
@@ -80,9 +81,9 @@ namespace TaskBoardPanel
 	std::string   projectName();
 	void               setTeam(HE::TaskBoardTeam* team);
 	HE::TaskBoardTeam* team();
-	// Called after every write of the board file: the editor tells the team server's sync,
-	// so a task edit reaches the team like a scene save.
-	void               setSavedHook(std::function<void()> fn);
+	// Called with the board file after every write of it: the editor tells the team server's
+	// sync and a running collaboration session, so a task edit reaches the team like a save.
+	void               setSavedHook(std::function<void(const std::filesystem::path&)> fn);
 	// One frame of the team: send and receive (TaskBoardTeam::update), and keep
 	// author() on the member name while signed in. tick() calls it; a test
 	// without ImGui calls it itself.

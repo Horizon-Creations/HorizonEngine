@@ -601,8 +601,8 @@ void EditorApplication::OnInit()
 	TaskBoardPanel::setTeam(&m_taskTeam);
 	// A planner or task board edit writes its file at once: that is a save, and with the team
 	// server keeping the project it goes to the team like a scene save (debounced there).
-	TaskBoardPanel::setSavedHook([this] { m_teamSync.noteSaved(); });
-	HE::Planner::Workspace::setSavedHook([this] { m_teamSync.noteSaved(); });
+	TaskBoardPanel::setSavedHook([this](const std::filesystem::path& f) { plannerFileSaved(f); });
+	HE::Planner::Workspace::setSavedHook([this](const std::filesystem::path& f) { plannerFileSaved(f); });
 	m_teamSync.setOpenFolder([](const std::filesystem::path& dir) {
 		const std::string url = "file://" + dir.generic_string();
 		SDL_OpenURL(url.c_str());
@@ -1134,6 +1134,19 @@ void EditorApplication::OnInit()
 			if (m_projectManager.currentProject().appProject)
 				m_appPreviewRestartPending = true;
 			Logger::Log(Logger::LogLevel::Info, "Collab: applied the session's GameInstance graph");
+			return;
+		}
+		// A planner file: written where it lives; the Planner reads files that changed on disk by
+		// itself (Workspace::poll, TaskBoardPanel), as it does after a pull.
+		if (relPath.rfind(CollabController::kConfigKeyPrefix, 0) == 0)
+		{
+			const std::string full = collabLocalPath(relPath);
+			if (full.empty()) return;
+			std::error_code ec;
+			std::filesystem::create_directories(std::filesystem::path(full).parent_path(), ec);
+			std::ofstream out(full, std::ios::binary | std::ios::trunc);
+			if (!out) return;
+			out.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
 			return;
 		}
 		applyAssetBytes(relPath, bytes);
@@ -13368,6 +13381,21 @@ std::string EditorApplication::collabLocalPath(const std::string& key)
 	if (key.empty()) return {};
 	if (key == LevelScriptPanel::kTabPath) return {};   // lives in the world
 	if (key == GameInstancePanel::kTabPath) return gameInstancePath();
+	// A planner file (CollabController::kConfigKeyPrefix): only Config/Planner/*.json and
+	// Config/TaskBoard.json, whatever the key claims; never the project's settings.
+	if (key.rfind(CollabController::kConfigKeyPrefix, 0) == 0)
+	{
+		const std::string root = projectRoot();
+		const std::string rel  = key.substr(std::strlen(CollabController::kConfigKeyPrefix));
+		if (root.empty() || !CollabController::isConfigSyncKey(key) || !HE::isRelativePathContained(rel))
+		{
+			HE_LOG_WARN(Editor, "Collab: refusing a planner path: '%s'", key.c_str());
+			return {};
+		}
+		const std::string full = root + "/Config/" + rel;
+		if (!HE::isPathWithin(std::filesystem::path(root) / "Config", full)) return {};
+		return full;
+	}
 
 	// This key can come off the wire, so it is not trusted to stay where it says
 	// it is: "Materials/../../../../.ssh/authorized_keys" concatenates as
@@ -15010,6 +15038,19 @@ void EditorApplication::applyAssetBytes(const std::string& relativePath,
 		return;
 	}
 	cm.loadAsset(relativePath);
+}
+
+void EditorApplication::plannerFileSaved(const std::filesystem::path& file)
+{
+	m_teamSync.noteSaved();
+	if (!m_collab.inSession()) return;
+	const std::string root = projectRoot();
+	if (root.empty()) return;
+	std::error_code ec;
+	const std::filesystem::path rel = std::filesystem::relative(file, std::filesystem::path(root) / "Config", ec);
+	if (ec || rel.empty()) return;
+	const std::string key = std::string(CollabController::kConfigKeyPrefix) + rel.generic_string();
+	if (CollabController::isConfigSyncKey(key)) m_collab.publishAsset(key, file.string());
 }
 
 void EditorApplication::applyTeamSyncFile(const std::string& projectRelPath)

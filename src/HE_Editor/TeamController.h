@@ -150,6 +150,19 @@ public:
 	using ScHeadFn = std::function<void(const std::string& project, std::uint64_t rev,
 	                                    const std::string& member)>;
 	void setOnScHead(ScHeadFn fn) { m_onScHead = std::move(fn); }
+	// ── Notices for one member (the task board, TaskBoardTeamLink.h) ──
+	// sendNotice: false when it cannot go now (not signed in, or the server
+	// predates NOTIFY); the caller keeps it and tries again. A member who went
+	// offline meanwhile simply misses it (the server keeps nothing).
+	bool sendNotice(const std::string& member, const std::string& payload);
+	bool noticesSupported() const { return !m_client || m_client->noticesSupported(); }
+	struct IncomingNotice
+	{
+		std::string from, payload;
+	};
+	// The next notice somebody sent us, oldest first. Never shown as a toast
+	// here: the task board turns it into its own sentence.
+	bool pollNotice(IncomingNotice& out);
 	// Where the team connection goes (the sync connection goes there too).
 	const HE::Net::RelayAddress& serverAddress() const { return m_server; }
 
@@ -291,6 +304,7 @@ private:
 	std::string           m_joining;       // JOIN sent, reply pending
 
 	std::deque<Notice>    m_notices;
+	std::deque<IncomingNotice> m_incomingNotices;   // pollNotice; capped
 
 	// A colour picked but not yet sent (see setColor).
 	bool                  m_colorPending = false;

@@ -11,7 +11,8 @@ named here).
 | 2 | Sidebar sections set apart | done |
 | 3 | Popups never past the window edge (task details ran behind the dock) | done |
 | 4 | Tasks toolbar grouped, board uses the width, "By status" shows as "Tasks" | done |
-| 5 | Assignees from the team (search), "assigned to me", sharing through the team server | done, notices not carried (server) |
+| 5 | Assignees from the team (search), "assigned to me", sharing through the team server | done; notices carried since step 2 (server op 21, needs the deploy) |
+| 5b | Planner files live in a collaboration session | done (step 2, below) |
 | 6 | Calendar + timeline as one view | done (Timeline / Month toggle, one sidebar section) |
 | 7 | macOS Calendar | done as .ics + "Add to Calendar" (opens in Calendar); no EventKit |
 
@@ -77,3 +78,50 @@ named here).
   - he_tests now compiles TextEditor.cpp/LanguageDefinitions.cpp (tests/CMakeLists.txt).
 - **Next steps:** 1. Try it in the real editor (type in a page, a code block, the flyover near the
   bottom). 2. Server NOTIFY op. 3. EventKit only if a two-way calendar sync is wanted.
+
+## Handoff (step 2: task notices over the team server, planner files live in a session)
+
+- **Branch / commit:** HorizonEngine `release/0.8.0` (this commit), CollabSession
+  `claude/he-net-relay-server` @ 57774f2 (both pushed). **Server not deployed** (the human's).
+- **Done:**
+  - Server: TEAM_REQUEST **op 21 NOTIFY** (`member str8 | payload str16`, ≤ 8192 bytes) → TEAM_EVENT
+    **kind 10 NOTICE** (`from str8 | payload str16`) to every connection of that member except the
+    sender's; `no-such-member` 5, `not-online` 11, too long = bad-request; payload never logged or kept.
+    `CollabSession/src/RelayServer.cpp` (case `TeamOp::Notify`), `Protocol.{h,cpp}`, README tables.
+  - Engine: `TeamClient::notify` + `EventKind::Notice` + `noticesSupported()` (false after an old
+    server's bad-request); `TeamController::sendNotice/pollNotice` (queue capped at 256);
+    `TaskBoardTeamLink.h` sends/polls for real (old server: drops as sent). The bell / "From the
+    Team" list is the existing `TaskBoardTeam` path.
+  - Live sync: Planner/Task Board files go through the collab asset channel under the key
+    `::Config::<path under Config>` (`CollabController::kConfigKeyPrefix`, `isConfigSyncKey`: only
+    `Planner/**.json` and `TaskBoard.json`). `EditorApplication::plannerFileSaved` publishes on every
+    save (and notes the team sync); `publishAsset` gives the lock back right after (no tab holds a
+    planner file); `collabLocalPath` maps and re-checks the key; the receiver writes the file and the
+    Planner's own disk poll (Workspace::poll, TaskBoardPanel) takes it in, as after a pull.
+- **Verified:** CollabSession `ctest` 7/7 (team_test.py 25/25 incl. `test_notices`); he_tests
+  `Live sync*,Team*,planner*,*help*,*task*,*Collab*,*team*` 411/411; `Team: a task notice through a
+  real collab_server` against the freshly built server on 127.0.0.1 (Anna → Bob, payload intact, log
+  without payload); collab test: a page saved on the host, then by the client, then the host again,
+  arrives each time and no lock stays held; HorizonEditor build.
+- **Not verified:** the deployed server (old binary until deployed: notices are then dropped as sent,
+  everything else works); two real editor processes in a session editing the same page at the same
+  moment (the second save inside one round trip is turned away by the brief lock and goes out with
+  that editor's next save); a joiner does not get the host's planner files at join time (only saves
+  made during the session; the rest comes with source control).
+- **Next steps:** 1. Deploy the server (below). 2. Two-editor check with real processes. 3. If wanted:
+  send the planner folder to a joiner with the session snapshot; a rate cap on NOTIFY.
+
+### Deploying the team server
+
+From `~/VSCode/EngineCollab/CollabSession` on branch `claude/he-net-relay-server` (HEAD 57774f2):
+
+```
+ssh-add --apple-use-keychain ~/.ssh/id_ed25519
+deploy/deploy.sh horizon@212.227.140.164 7777
+```
+
+It sends the committed HEAD as `git archive`, builds on the server, swaps the binary and restarts
+the user service `collab-relay`. Teams, passwords and projects in `~/collab-relay/data` stay. Open
+collaboration sessions and team connections drop once; editors reconnect by themselves. Same port,
+so no firewall change. Check: `ssh horizon@212.227.140.164 cat collab-relay/bin/VERSION` says
+`57774f2`, and `journalctl --user -u collab-relay -n 20` shows the restart.

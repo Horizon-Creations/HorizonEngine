@@ -69,7 +69,14 @@ One JSON object, UTF-8, at most 4 KiB in practice (a title and a comment):
 is shown as "X updated …"; `type` other than `task-notice`, or missing ids, is
 refused. `from` is overwritten by the server's word for the sender.
 
-### Team server protocol (follow-up, CollabSession repo)
+### Team server protocol (built 2026-11-25, CollabSession 57774f2)
+
+**Numbers changed:** op 20 went to SC_TICKET in the meantime, so NOTIFY is **op 21** and
+NOTICE is **event kind 10** (9 is SC_HEAD). Everything else below is as built; no rate
+cap yet. Engine side: `TeamClient::notify`, `TeamController::sendNotice/pollNotice`,
+`TaskBoardTeamLink.h`; see `docs/planner-rework-2026-11-25.md`.
+
+(Original design, numbers outdated:)
 
 Minimal, same pattern as INVITE: a request from one connection, an event to
 every connection of the target member.

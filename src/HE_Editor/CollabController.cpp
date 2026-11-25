@@ -3215,8 +3215,19 @@ std::string CollabController::projectRelativeAssetPath(const std::string& absolu
 	return abs.substr(cut);
 }
 
+bool CollabController::isConfigSyncKey(const std::string& key)
+{
+	const std::string prefix = kConfigKeyPrefix;
+	if (key.rfind(prefix, 0) != 0) return false;
+	const std::string rel = key.substr(prefix.size());
+	if (rel == "TaskBoard.json") return true;
+	return rel.rfind("Planner/", 0) == 0 && rel.size() > 13 && rel.compare(rel.size() - 5, 5, ".json") == 0 &&
+	       rel.find("..") == std::string::npos && rel.find('\\') == std::string::npos;
+}
+
 bool CollabController::isSyncableAsset(const std::string& relativePath)
 {
+	if (isConfigSyncKey(relativePath)) return true;
 	// The C++ tree travels under its own reserved key prefix (see
 	// EditorApplication::collabSyncKey). Those are raw .h/.cpp text files with no
 	// HAsset header at all, so they are admitted here and skip the type sniff —
@@ -3300,7 +3311,8 @@ void CollabController::publishAsset(const std::string& relativePath,
 	// for EVERY ContentManager save, including an import, so the type gate
 	// belongs here and not only where the editor walks its open tabs. C++
 	// sources are exempt: they have no HAsset header to sniff.
-	if (relativePath.rfind("::Source::", 0) != 0 &&
+	const bool configFile = isConfigSyncKey(relativePath);
+	if (relativePath.rfind("::Source::", 0) != 0 && !configFile &&
 	    !assetTypeTravels(EditorAssetTypeCache::assetTypeOf(fullPath))) return;
 
 	const std::uint64_t subject = subjectFor(relativePath);
@@ -3337,6 +3349,10 @@ void CollabController::publishAsset(const std::string& relativePath,
 	if (m_collab->sendAsset(up))
 	{
 		noteSessionTouched(relativePath);
+		// A planner file: nobody's tab holds it, so the lock was only for this send.
+		if (configFile &&
+		    std::find(m_heldAssetLocks.begin(), m_heldAssetLocks.end(), relativePath) == m_heldAssetLocks.end())
+			m_collab->releaseLock(subject);
 		return;
 	}
 
