@@ -1173,7 +1173,8 @@ private:
 	// Everything the closed project left running beyond its world: the app preview,
 	// its sounds and timers, the source-control worker on its repository. Reached
 	// through AppContext::endProjectRuntime from EditorUI::endProjectSession, the
-	// one funnel for Close Project and every project switch.
+	// one funnel for Close Project and every project switch, and again (a no-op
+	// then) at the top of onProjectLoaded for a project created over an open one.
 	void endProjectRuntime();
 	// Transport pause + single step. The pause GATES THE WORLD TICK; it must never
 	// write time::setTimeScale, because that knob belongs to the game — a title

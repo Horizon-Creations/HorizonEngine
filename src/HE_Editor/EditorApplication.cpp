@@ -2205,6 +2205,9 @@ void EditorApplication::OnInit()
 	// the startup scene is already loaded when OnInit returns.
 	m_projectManager.setOnProjectLoaded([this](const std::string& sceneAbsPath)
 	{
+		// A no-op after endProjectSession; the one teardown for the loads that do
+		// not pass through it (a project created over an open one).
+		endProjectRuntime();
 		setWorld(m_editorWorld.get());
 
 		// The recovery snapshot changes hands with the project. The previous
@@ -16471,6 +16474,9 @@ void EditorApplication::restartAppPreview(bool keepState)
 	// node in OnInit is a commit, and a commit is not the author asking to hear
 	// it. The toolbar's Restart Live Preview (keepState false) and anything the
 	// running preview does afterwards play as usual.
+	// shortcut: holds only what OnInit starts synchronously; a Play Sound behind a
+	// Delay or timer in OnInit still plays after an edit. Upgrade to a hold that
+	// lasts until the first input if that turns up.
 	HE::api::audio::setPlaybackHeld(keepState);
 	m_gameInstance.fireInit();
 	HE::api::audio::setPlaybackHeld(false);
@@ -16516,9 +16522,14 @@ void EditorApplication::stopAppPreview()
 
 void EditorApplication::endProjectRuntime()
 {
+	// Play first: it owns a game's GameInstance run (and the graph reset below
+	// must not pull that graph out from under its OnShutdown). Idempotent, so the
+	// onProjectLoaded callback can call this again for the paths that switch
+	// without endProjectSession (File ▸ New Project, the tutorial).
+	if (m_isPlaying) setPlayMode(false);
 	// Only a preview that was started is stopped: a game project's GameInstance
-	// has had no OnInit outside play (newScene, just before this, ended play),
-	// and an OnShutdown without one is a lie to the graph.
+	// has had no OnInit outside play, and an OnShutdown without one is a lie to
+	// the graph. Before the world is cleared, which takes the widgets with it.
 	if (!m_appUiStartedFor.empty()) stopAppPreview();
 	// Cleared, so opening the SAME application project again starts its preview
 	// again; it stayed keyed to that path and the reopened app showed nothing.
