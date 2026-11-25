@@ -424,7 +424,7 @@ bool drawTemplateGrid(int& selectedPreset, float width)
             dl->PopClipRect();
             const ImVec2 tp(a.x + 8, a.y + artH + 6);
             ImGui::RenderTextEllipsis(dl, tp, ImVec2(b.x - 6, b.y), b.x - 6, kPresetNames[i], nullptr, nullptr);
-            if (sel) dl->AddRectFilled(ImVec2(a.x + 8, b.y - 4), ImVec2(a.x + 28, b.y - 2), col(Theme::Amber), 1.0f);
+            // The amber frame (drawCardFrame) already says "selected"; no second mark.
         }
         ImGui::Dummy(ImVec2(0.0f, 6.0f));
     }
