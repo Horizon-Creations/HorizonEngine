@@ -324,3 +324,87 @@ TEST_CASE("Team sync UI: a first sync that differs asks before anything moves")
 	CHECK(inkPixels(shot) > 1000);
 	CHECK(other.file("Content/door.txt") == "very old\n");
 }
+
+TEST_CASE("Team sync UI: the switch - names for the server, Use the Team Server with the project's name, and back to git")
+{
+	CHECK(TeamSyncView::serverProjectName("My Game 2") == "My-Game-2");
+	CHECK(TeamSyncView::serverProjectName("  !!") == "project");
+	CHECK(TeamSyncView::serverProjectName("Ünïcode Game") == "n-code-Game");   // what is not ASCII becomes a dash
+	CHECK(TeamSyncView::validServerName("game_01-b"));
+	CHECK_FALSE(TeamSyncView::validServerName("my game"));
+	CHECK_FALSE(TeamSyncView::validServerName(std::string(65, 'a')));
+
+	Harness h;
+	FakeTeamServer server;
+	CollabController collab;
+	TeamController   team(collab);
+	std::string gotTeam, gotProject;
+	int toTeam = 0, toGit = 0;
+	bool locked = false;
+	auto draw = [&](bool mouseDown, he_ui::Image* shot = nullptr) {
+		server.pump();
+		const std::uint64_t now = steadyMs();
+		collab.update(now);
+		team.update(now);
+		ImGui::GetIO().AddMouseButtonEvent(ImGuiMouseButton_Left, mouseDown);
+		ImGui::NewFrame();
+		ImGui::SetNextWindowPos(ImVec2(0, 0));
+		ImGui::SetNextWindowSize(ImVec2(float(kW), float(kH)));
+		ImGui::Begin("Source Control", nullptr, ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoMove);
+		TeamSyncView::drawSwitchToTeam(&team, "My Game 2", locked, [&](const std::string& t, const std::string& p) {
+			gotTeam = t;
+			gotProject = p;
+			++toTeam;
+			return true;
+		});
+		TeamSyncView::drawSwitchToGit(locked, [&] { ++toGit; return true; });
+		ImGui::End();
+		EditorWidgets::drawQueuedHelp();
+		ImGui::Render();
+		if (shot) *shot = he_ui::rasterize(ImGui::GetDrawData(), kW, kH);
+	};
+	auto click = [&](const std::string& name) {
+		const TeamSyncView::Rect r = TeamSyncView::controlRect(name);
+		if (r.x1 <= r.x0) return false;
+		ImGui::GetIO().AddMousePosEvent((r.x0 + r.x1) * 0.5f, (r.y0 + r.y1) * 0.5f);
+		draw(false); draw(false); draw(true); draw(false); draw(false);
+		return true;
+	};
+
+	// Signed out: the way in is not shown at all.
+	draw(false);
+	draw(false);
+	CHECK(TeamSyncView::controlRect("Use the Team Server...").x1 <= 0);
+
+	REQUIRE(team.signIn(addressOf(server), "studio", "Anna", "correct-horse"));
+	const auto deadline = std::chrono::steady_clock::now() + kDeadline;
+	while (!team.signedIn() && std::chrono::steady_clock::now() < deadline) draw(false);
+	REQUIRE(team.signedIn());
+	draw(false);
+	REQUIRE(click("Use the Team Server..."));
+	REQUIRE(TeamSyncView::controlRect("Switch to the Team Server").x1 > 0);
+	{
+		he_ui::Image img;
+		ImGui::GetIO().AddMousePosEvent(float(kW) - 2.0f, float(kH) - 2.0f);
+		draw(false);
+		draw(false, &img);
+		dump(img, "team-sync-switch-to-team.bmp");
+	}
+	REQUIRE(click("Switch to the Team Server"));
+	CHECK(toTeam == 1);
+	CHECK(gotTeam == "studio");
+	CHECK(gotProject == "My-Game-2");   // the project's name, made fit for the server
+	CHECK(TeamSyncView::controlRect("Switch to the Team Server").x1 <= 0);   // the popup closed
+
+	REQUIRE(click("Switch Back to Git..."));
+	REQUIRE(click("Switch to Git"));
+	CHECK(toGit == 1);
+
+	// In a collaboration session neither moves.
+	locked = true;
+	draw(false);
+	REQUIRE(click("Use the Team Server..."));
+	CHECK(TeamSyncView::controlRect("Switch to the Team Server").x1 <= 0);
+	CHECK(toTeam == 1);
+	team.signOut();
+}

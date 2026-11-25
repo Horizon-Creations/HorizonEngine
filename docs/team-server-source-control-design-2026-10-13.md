@@ -716,3 +716,26 @@ team-mode gate in `GitController` exist only there.
   unencrypted (#1326 (c)), or a step for (a)/(b). 3. The open list of step 4 (backup UI first, then the
   ProjectSettings lost-update gap). 4. A `DELETE_TEAM` or admin cleanup so E2E teams don't pile up.
 
+
+## Handoff (switch git ↔ team server in the editor, 2026-11-25)
+
+- **Done (audit 3.9):** the Source Control window offers the switch both ways; no more hand-editing
+  `Config/ProjectSettings.json`.
+  - Git mode, signed in to a team: a line and **Use the Team Server...** above the git view (also when
+    git or the repository is missing). The popup proposes the project's name in the server's alphabet
+    (`TeamSyncView::serverProjectName`: letters, digits, `-`, `_`, ≤ 64), checks it, explains what
+    happens, and **Switch to the Team Server** writes `sourceControl.{mode,team,project}` via
+    `ProjectManager::saveProjectSettings` (reverted in memory if the write fails). The next frame
+    `EditorApplication` hands it to GitController/TeamSyncController as before; a missing server
+    project is then the existing "Create Project on Team Server" (admins).
+  - Team mode: **Switch Back to Git...** under the team view, with a confirmation.
+  - Both are disabled while a collaboration session runs.
+- **Files:** `src/HE_Editor/TeamSyncView.{h,cpp}` (`drawSwitchToTeam`, `drawSwitchToGit`, names,
+  `controlRect` for tests), `SourceControlPanel.cpp` (`setSourceControl` lambda, placement),
+  `EditorHelp.cpp` (4 `Team Sync/` entries), `tests/test_team_sync_ui.cpp` (the switch case, shot
+  `team-sync-switch-to-team.bmp`).
+- **Verified:** he_tests `Team*,*team*,*Source*,*source*,*help*,planner*,*git*,*Git*` 340/340,
+  help audit rc 0, HorizonEditor builds, the popup shot looked at.
+- **Not verified:** the panel itself (SourceControlPanel.cpp is not in he_tests): the real switch in
+  the editor, the first sync right after it with a real server.
+- **Open from the list above:** backup UI, ProjectSettings lost-update gap, encryption (#1326).

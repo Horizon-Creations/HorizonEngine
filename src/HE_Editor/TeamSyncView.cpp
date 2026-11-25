@@ -3,9 +3,12 @@
 #include "EditorHelp.h"      // "Team Sync/<label>" scope for the tooltips
 #include "EditorTheme.h"
 #include "EditorWidgets.h"
+#include "TeamController.h"
 #include "TeamSyncController.h"
 
 #include <imgui.h>
+#include <misc/cpp/imgui_stdlib.h>
+#include <unordered_map>
 
 #include <algorithm>
 #include <chrono>
@@ -47,7 +50,176 @@ bool outcomeLostSomething(const std::string& outcome)
 	return outcome == "merged-arrival" || outcome == "replaced" || outcome == "delete-dropped";
 }
 
+struct Noted
+{
+	TeamSyncView::Rect rect;
+	int                frame = -1;
+};
+std::unordered_map<std::string, Noted> s_rects;
+
+void note(const std::string& name)
+{
+	const ImVec2 a = ImGui::GetItemRectMin(), z = ImGui::GetItemRectMax();
+	s_rects[name] = { { a.x, a.y, z.x, z.y }, ImGui::GetFrameCount() };
+}
+
+std::string s_projectField;   // the name typed in the switch popup
+std::string s_switchError;
+
 } // namespace
+
+TeamSyncView::Rect TeamSyncView::controlRect(const std::string& name)
+{
+	// Only what the last frame drew: a closed popup's buttons are gone.
+	const auto it = s_rects.find(name);
+	return it == s_rects.end() || it->second.frame != ImGui::GetFrameCount() ? Rect{} : it->second.rect;
+}
+
+bool TeamSyncView::validServerName(const std::string& name)
+{
+	if (name.empty() || name.size() > 64) return false;
+	for (const char c : name)
+		if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_'))
+			return false;
+	return true;
+}
+
+std::string TeamSyncView::serverProjectName(const std::string& projectName)
+{
+	std::string out;
+	for (const char c : projectName)
+	{
+		const bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_';
+		if (ok) out += c;
+		else if (!out.empty() && out.back() != '-') out += '-';   // "My Game 2" -> "My-Game-2"
+	}
+	while (!out.empty() && out.back() == '-') out.pop_back();
+	if (out.size() > 64) out.resize(64);
+	return out.empty() ? std::string("project") : out;
+}
+
+namespace
+{
+bool switchToTeamBody(const TeamController& team, const TeamSyncView::ApplyTeam& apply)
+{
+	HE::Ed::Help::Scope helpScope("Team Sync");
+	EditorWidgets::WrapText wrap(ImGui::GetCursorPosX() + 420.0f);
+	bool switched = false;
+	ImGui::TextUnformatted("Keep this project's history on the team server");
+	ImGui::Spacing();
+	ImGui::TextWrapped("Every save goes to team \"%s\", which merges it with the others' saves: scenes "
+	                   "entity by entity, settings key by key. Where two people changed the same thing, "
+	                   "the later save wins and the other version is kept on the server.",
+	                   team.team().c_str());
+	ImGui::TextWrapped("The local git repository stays as it is and is not used while this is on. "
+	                   "The setting is in Config/ProjectSettings.json, so everyone who gets the project "
+	                   "switches with it.");
+	ImGui::Spacing();
+	ImGui::TextUnformatted("Project on the server");
+	ImGui::SetNextItemWidth(260.0f);
+	ImGui::InputText("##serverproject", &s_projectField);
+	note("serverproject");
+	const bool valid = TeamSyncView::validServerName(s_projectField);
+	if (!valid)
+	{
+		ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::Warn);
+		ImGui::TextWrapped("Letters, digits, - and _ only, at most 64.");
+		ImGui::PopStyleColor();
+	}
+	ImGui::TextDisabled("%s", team.isAdmin() ? "If it does not exist there yet, you can create it with this copy next."
+	                                         : "A team admin creates the project on the server; ask one if it is not there yet.");
+	if (!s_switchError.empty())
+	{
+		ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::Warn);
+		ImGui::TextWrapped("%s", s_switchError.c_str());
+		ImGui::PopStyleColor();
+	}
+	ImGui::Spacing();
+	ImGui::BeginDisabled(!valid);
+	if (EditorWidgets::primaryButton("Switch to the Team Server"))
+	{
+		if (apply && apply(team.team(), s_projectField))
+		{
+			switched = true;
+			ImGui::CloseCurrentPopup();
+		}
+		else s_switchError = "Config/ProjectSettings.json could not be written.";
+	}
+	note("Switch to the Team Server");
+	ImGui::EndDisabled();
+	ImGui::SameLine();
+	if (EditorWidgets::cancelButton("Cancel")) ImGui::CloseCurrentPopup();
+	return switched;
+}
+
+bool switchToGitBody(const std::function<bool()>& apply)
+{
+	HE::Ed::Help::Scope helpScope("Team Sync");
+	EditorWidgets::WrapText wrap(ImGui::GetCursorPosX() + 400.0f);
+	bool switched = false;
+	ImGui::TextUnformatted("Use git for this project again?");
+	ImGui::TextWrapped("Saves stop going to the team server, and the local git repository picks up where "
+	                   "it stopped at the switch: what changed since shows as changes to commit. The team "
+	                   "server keeps its history. Everyone who gets this project's settings switches too.");
+	if (EditorWidgets::dangerButton("Switch to Git"))
+	{
+		if (apply && apply()) switched = true;
+		ImGui::CloseCurrentPopup();
+	}
+	note("Switch to Git");
+	ImGui::SameLine();
+	if (EditorWidgets::cancelButton("Cancel")) ImGui::CloseCurrentPopup();
+	return switched;
+}
+} // namespace
+
+bool TeamSyncView::drawSwitchToTeam(const TeamController* team, const std::string& projectName, bool locked,
+                                    const ApplyTeam& apply)
+{
+	if (!team || !team->signedIn() || team->team().empty()) return false;
+	HE::Ed::Help::Scope helpScope("Team Sync");
+	bool switched = false;
+	{
+		EditorWidgets::WrapText wrap;   // released before anything else is drawn
+		ImGui::TextDisabled("Team server \"%s\" can keep this project's history instead of git: it merges "
+		                    "everyone's saves as they happen.", team->team().c_str());
+	}
+	if (locked) ImGui::BeginDisabled();
+	if (EditorWidgets::button("Use the Team Server..."))
+	{
+		s_projectField = serverProjectName(projectName);
+		s_switchError.clear();
+		ImGui::OpenPopup("##toteam");
+	}
+	note("Use the Team Server...");
+	if (locked) ImGui::EndDisabled();
+	ImGui::Separator();
+
+	if (ImGui::BeginPopup("##toteam"))
+	{
+		switched = switchToTeamBody(*team, apply);   // its text wrap ends inside, before EndPopup
+		ImGui::EndPopup();
+	}
+	return switched;
+}
+
+bool TeamSyncView::drawSwitchToGit(bool locked, const std::function<bool()>& apply)
+{
+	HE::Ed::Help::Scope helpScope("Team Sync");
+	bool switched = false;
+	ImGui::Spacing();
+	ImGui::Separator();
+	if (locked) ImGui::BeginDisabled();
+	if (EditorWidgets::button("Switch Back to Git...")) ImGui::OpenPopup("##togit");
+	note("Switch Back to Git...");
+	if (locked) ImGui::EndDisabled();
+	if (ImGui::BeginPopup("##togit"))
+	{
+		switched = switchToGitBody(apply);   // its text wrap ends inside, before EndPopup
+		ImGui::EndPopup();
+	}
+	return switched;
+}
 
 void TeamSyncView::draw(TeamSyncController& sync)
 {

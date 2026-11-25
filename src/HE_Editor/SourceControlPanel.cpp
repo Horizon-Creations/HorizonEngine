@@ -9,6 +9,7 @@
 #include "GitController.h"
 #include "CollabController.h"     // who hosts the session, for the team-server notice
 #include "GitMissingDialog.h"      // the install remedy, when git is missing
+#include "ProjectManager.h"        // the project settings the history switch writes
 #include "TeamSyncView.h"          // the team-sync view, in team-server mode
 #include "ContentBrowserPanel.h"   // revealAsset: a changed file, shown in the Content Browser
 #include "EditorAssetTypeCache.h" // asset type of a .hasset, for the type icon and filter
@@ -1534,8 +1535,7 @@ static void drawTeamServerNotice(AppContext& ctx, const GitController& git)
 		ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::Warn);
 		ImGui::TextWrapped("This editor cannot reach the team server yet, so nothing is "
 		                   "uploaded from here. Direct git stays off for this project; "
-		                   "switch Source Control back to git in Config/ProjectSettings.json "
-		                   "to use it.");
+		                   "Switch Back to Git below uses it again.");
 		ImGui::PopStyleColor();
 	}
 }
@@ -1580,6 +1580,21 @@ void DrawSourceControlWindow(AppContext& ctx, bool& open)
 
 	const HE::Sc::RepoStatus& st = git->status();
 
+	// Who keeps the history is a project setting (Config/ProjectSettings.json, synced, so
+	// the team flips together). Switching it while a collaboration session runs would put
+	// this editor under a different rule than the session it is in.
+	const bool switchLocked = ctx.collab && ctx.collab->inSession();
+	auto setSourceControl = [&](bool teamServer, const std::string& team, const std::string& project) {
+		if (!ctx.projectManager) return false;
+		auto& sc = ctx.projectManager->currentProject().settings.sourceControl;
+		const auto before = sc;
+		sc.mode = teamServer ? HE::ProjectSourceControlSettings::Mode::TeamServer : HE::ProjectSourceControlSettings::Mode::Git;
+		if (teamServer) { sc.team = team; sc.project = project; }
+		if (ctx.projectManager->saveProjectSettings()) return true;
+		sc = before;   // the file is the truth; an unsaved switch would revert at the next start
+		return false;
+	};
+
 	// Before git's own state: with the team server keeping the history, a
 	// missing git or a missing repository is nothing to fix, and offering an
 	// install or a `git init` would send the user the wrong way.
@@ -1590,9 +1605,17 @@ void DrawSourceControlWindow(AppContext& ctx, bool& open)
 		// changes, history, branches and fetch would all describe a history
 		// nobody writes any more, so the team's view replaces them.
 		if (ctx.teamSync) TeamSyncView::draw(*ctx.teamSync);
+		TeamSyncView::drawSwitchToGit(switchLocked, [&] { return setSourceControl(false, {}, {}); });
 		ImGui::End();
 		return;
 	}
+
+	// Signed in to a team: the way to let its server keep this project's history. Above
+	// git's own state, because a project without git or without a repository can switch too.
+	TeamSyncView::drawSwitchToTeam(ctx.team, ctx.projectManager ? ctx.projectManager->currentProject().name : std::string(),
+	                               switchLocked, [&](const std::string& team, const std::string& project) {
+		                               return setSourceControl(true, team, project);
+	                               });
 
 	// Before "not a repository": without git there is no telling, and a project
 	// that IS a repository would otherwise be offered a fresh `git init`.

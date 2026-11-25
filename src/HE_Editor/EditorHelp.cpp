@@ -3464,6 +3464,18 @@ namespace
 	{ "Planner/Assigned to me", "Mine",
 	  "Shows only the rows assigned to you: your name in the data's people column (Assignees on Tasks). Signed in to a team server, you are your member name; otherwise the name this editor writes under.",
 	  "", "" },
+	{ "Planner/Markdown (.md)", "",
+	  "Writes this page as Markdown into the project's Export/Planner folder: headings, lists, to-dos, quotes, code and dividers as Markdown marks them.",
+	  "", "" },
+	{ "Planner/Word (.docx)", "",
+	  "Writes this page as a Word document into the project's Export/Planner folder, with Word's own heading styles.",
+	  "", "" },
+	{ "Planner/iCalendar file (.ics)", "",
+	  "Writes the dated rows this view shows as all-day events into an .ics file in the project's Export/Planner folder.",
+	  "", "" },
+	{ "Planner/Add to Calendar", "",
+	  "Writes the .ics file and opens it in Calendar, which asks which calendar to add the events to. Doing it again updates them.",
+	  "", "" },
 	{ "Planner/Group By", "Group",
 	  "Which Select property makes the lanes of this board: one lane per option. Dragging a card to another lane sets that option.",
 	  "", "" },
@@ -10088,6 +10100,24 @@ namespace
 	  "they differ in different places; where both changed the same thing, and for "
 	  "graphs and binary assets, your version wins and the team's is kept on the "
 	  "server's horizon-conflicts branch.",
+	  "", "" },
+	{ "Team Sync/Use the Team Server...", "",
+	  "Lets the team server you are signed in to keep this project's history instead of git. "
+	  "Every save then goes there and is merged with the others' saves; nothing is committed, "
+	  "pulled or pushed by hand. Asks for the project's name on the server first.",
+	  "", "" },
+	{ "Team Sync/Switch to the Team Server", "",
+	  "Writes the switch into Config/ProjectSettings.json (everyone who gets the project switches "
+	  "with it) and starts syncing. If the project does not exist on the server yet, a team admin "
+	  "creates it with this copy from the view that follows.",
+	  "", "" },
+	{ "Team Sync/Switch Back to Git...", "",
+	  "Stops sending this project's saves to the team server and uses the local git repository "
+	  "again. Not while a collaboration session is running.",
+	  "", "" },
+	{ "Team Sync/Switch to Git", "",
+	  "Writes the switch back into Config/ProjectSettings.json. The local repository picks up where "
+	  "it stopped; the team server keeps the history it has.",
 	  "", "" },
 	{ "Team Sync/Create Project on Team Server", "",
 	  "Team admins only. Creates this project on the team server and uploads the "
