@@ -1610,6 +1610,34 @@ int drawPinDragMenu(const Host& h, int srcNode, int srcPin, bool srcInput, const
 		if (gh) ImGui::Spacing();
 	}
 
+	// ── The host's own ready-made nodes (a widget's element properties) ────
+	if (h.dragOffers)
+	{
+		bool ph = false;
+		const std::vector<Host::DragOffer> offers = h.dragOffers();
+		for (size_t oi = 0; oi < offers.size(); ++oi)
+		{
+			const Host::DragOffer& o = offers[oi];
+			if (!matches(o.label)) continue;
+			if (HcEditorUtil::dragMatchPinOn(o.proto, dragType, dragCtr, srcInput, isExecPin) < 0)
+				continue;
+			if (!ph) { ImGui::TextDisabled("Properties"); ph = true; }
+			// Two unnamed elements of one type read the same; the index keeps
+			// their ImGui ids apart.
+			if (!HcEditorUtil::searchMenuItem(o.label + "##offer" + std::to_string(oi))) continue;
+			HC::Node n = o.proto;
+			n.id = 0;
+			n.x = pos.x; n.y = pos.y;
+			n.subgraph = h.currentGraph;
+			const int id = graph.addNode(std::move(n));
+			const int pin = HcEditorUtil::dragMatchPinOn(*graph.findNode(id), dragType, dragCtr,
+			                                             srcInput, isExecPin);
+			if (pin >= 0) wireAt(id, pin);
+			created = id; ImGui::CloseCurrentPopup();
+		}
+		if (ph) ImGui::Spacing();
+	}
+
 	// ── Engine API calls with a compatible pin ─────────────────────────────
 	{
 		bool eh = false;
@@ -1646,7 +1674,10 @@ int drawPinDragMenu(const Host& h, int srcNode, int srcPin, bool srcInput, const
 			const HC::Variable& v = *vp;
 			if (v.scope != 0 && v.scope != h.currentGraph) continue;
 			const bool sameShape = v.type == dragType && v.kind() == dragCtr;
-			const bool setOk = (isExecPin && !srcInput) || (!isExecPin && !srcInput && sameShape);
+			// Set has an exec pin each way and passes its value through as an
+			// output, so it fits any exec drag and a same-shape drag from either
+			// side; Get only feeds an input.
+			const bool setOk = isExecPin || sameShape;
 			const bool getOk = !isExecPin && srcInput && sameShape;
 			auto add = [&](bool get){
 				const int id = addNode(graph, get ? NT::GetVariable : NT::SetVariable, pos, h.currentGraph);
@@ -1658,7 +1689,9 @@ int drawPinDragMenu(const Host& h, int srcNode, int srcPin, bool srcInput, const
 				nn->keyTypeName = v.keyTypeName;
 				nn->typeName = v.typeName;   // Enum/Struct: WHICH definition (like the add menu)
 				const PinRanges r = pinRanges(*nn);
-				wireAt(id, get ? r.dataOut0 : (isExecPin ? r.execIn0 : r.dataIn0));
+				wireAt(id, get       ? r.dataOut0
+				         : isExecPin ? (srcInput ? r.execOut0 : r.execIn0)
+				                     : (srcInput ? r.dataOut0 : r.dataIn0));
 				created = id; ImGui::CloseCurrentPopup(); };
 			if (setOk && matches("Set " + v.name))
 			{
@@ -1674,21 +1707,27 @@ int drawPinDragMenu(const Host& h, int srcNode, int srcPin, bool srcInput, const
 		if (vh) ImGui::Spacing();
 	}
 
-	// ── Declared functions (exec drags call them) ──────────────────────────
-	if (isExecPin)
+	// ── Declared functions: exec drags call them, and so does a data wire of a
+	//    type one of their inputs (dragging an output) or outputs (dragging an
+	//    input) takes. Exec-only used to hide every function from a data drag.
 	{
 		bool fh = false;
 		for (const HC::Node& e : offerableFunctions(graph))
 		{
 			if (!matches("Call " + e.s)) continue;
+			HC::Node probe;
+			probe.type = NT::FunctionCall;
+			probe.s = e.s; probe.params = e.params; probe.results = e.results;
+			if (HcEditorUtil::dragMatchPinOn(probe, dragType, dragCtr, srcInput, isExecPin) < 0)
+				continue;
 			if (!fh) { ImGui::TextDisabled("Functions"); fh = true; }
 			if (HcEditorUtil::searchMenuItem("Call " + e.s))
 			{
 				const int id = addNode(graph, NT::FunctionCall, pos, h.currentGraph);
 				bindCallTo(graph, id, e);
-				HC::Node* nn = graph.findNode(id);
-				const PinRanges r = pinRanges(*nn);
-				wireAt(id, srcInput ? r.execOut0 : r.execIn0);
+				const int pin = HcEditorUtil::dragMatchPinOn(*graph.findNode(id), dragType, dragCtr,
+				                                             srcInput, isExecPin);
+				if (pin >= 0) wireAt(id, pin);
 				created = id; ImGui::CloseCurrentPopup();
 			}
 		}

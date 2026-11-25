@@ -1014,6 +1014,61 @@ namespace
 	};
 }
 
+TEST_CASE("ui shot: the drag-off menu offers own functions and Set for a data wire")
+{
+	// A Float output and a Float input, each dragged onto empty canvas, in a graph
+	// that has a function taking a Float and a Float variable. Both used to be
+	// missing from a DATA drag: functions were offered to exec wires only, and Set
+	// was never offered off an input although it passes its value on.
+	namespace HC = HorizonCode;
+	using NT = HC::NodeType;
+	constexpr int W = 300, H = 380;
+	Harness harness(W, H);
+
+	HC::Graph graph;
+	GraphEditor::State ge;
+	int selected = 0;
+	const int fn = HcGraphHost::addNode(graph, NT::FunctionEntry, ImVec2(0, 0), 0);
+	graph.findNode(fn)->s = "Damage";
+	graph.findNode(fn)->params = { { "Amount", HC::PinType::Float, false } };
+	HC::Variable score; score.name = "Score"; score.type = HC::PinType::Float;
+	graph.variables.push_back(score);
+	const int lit = HcGraphHost::addNode(graph, NT::ConstFloat, ImVec2(0, 200), 0);
+	const int cmp = HcGraphHost::addNode(graph, NT::Greater, ImVec2(300, 200), 0);
+
+	const HcGraphHost::MenuOpts menus{ {}, {},
+		{ NT::Event, NT::FunctionEntry, NT::FunctionCall, NT::FunctionReturn,
+		  NT::GetVariable, NT::SetVariable, NT::EngineCall }, {} };
+	HcGraphHost::Host host;
+	host.graph = &graph; host.ge = &ge; host.selectedNode = &selected;
+	host.title = [](const HC::Node& n) { return HcGraphHost::defaultNodeTitle(n); };
+	host.onEdit = [](bool) {};
+	host.menus = &menus;
+	GraphEditor::Model m = HcGraphHost::buildModel(host);
+
+	const auto pinOf = [&](int node, bool input) {
+		for (const auto& p : HcGraphHost::nodePins(*graph.findNode(node)))
+			if (p.input == input && !p.isExec) return p.id;
+		return -1;
+	};
+	const auto menuShot = [&](const char* name, int node, bool input) {
+		const std::size_t before = graph.nodes.size();
+		const he_ui::Image img = shoot(name, W, H, 3, [&](int) {
+			ImGui::SetNextWindowPos(ImVec2(0, 0));
+			ImGui::SetNextWindowSize(ImVec2(float(W), float(H)));
+			ImGui::Begin("menu", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoSavedSettings);
+			// The list's END, where the Functions and Variables sections are.
+			ImGui::SetNextWindowScroll(ImVec2(0.0f, 100000.0f));
+			m.drawPinDragMenu(node, pinOf(node, input), input, ImVec2(100, 100));
+			ImGui::End();
+		});
+		CHECK(graph.nodes.size() == before);   // drawing the menu creates nothing
+		return img;
+	};
+	CHECK(menuShot("drag-menu-float-out", lit, false).valid());
+	CHECK(menuShot("drag-menu-float-in", cmp, true).valid());
+}
+
 TEST_CASE("ui shot: a HorizonCode graph's nodes, at three zooms")
 {
 	constexpr int W = 1100, H = 560;

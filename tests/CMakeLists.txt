@@ -30,6 +30,7 @@ add_executable(he_tests
     test_hc_rename_scope.cpp
     test_hc_pull_editor.cpp
     test_hc_extract_editor.cpp
+    test_hc_drag_menu.cpp
     test_graph_editor_keys.cpp
     test_preview_pick.cpp
     test_gizmo_pick.cpp

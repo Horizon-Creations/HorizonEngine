@@ -185,6 +185,12 @@ struct Host
 	std::function<std::vector<std::string>(const HC::Node& node,
 	                                       const std::string& param)> paramChoices;
 	const MenuOpts*     menus        = nullptr;
+	// Ready-made nodes only this host knows about — a widget graph's element
+	// properties (Get/Set Property bound to an element). The drag-off menu
+	// lists every one with a pin that fits the dragged wire, under "Properties",
+	// and drops a copy where the user let go. Unset = none.
+	struct DragOffer { std::string label; HC::Node proto; };
+	std::function<std::vector<DragOffer>()> dragOffers;
 };
 
 // The fully wired canvas model. The host only adds its own add-menu

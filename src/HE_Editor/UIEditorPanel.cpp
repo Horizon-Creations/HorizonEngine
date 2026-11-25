@@ -6238,6 +6238,28 @@ void drawGraphCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 	host.onEdit       = [&st, &ctx](bool committed){
 		st.dirty = true;
 		if (committed) commitEdit(st, ctx); };
+	// Every element's properties, as the Get/Set nodes the element drop menu
+	// makes, so a wire dragged off a String pin can land straight on "Set Text"
+	// of a label. Built when the drag menu opens; the menu keeps the ones whose
+	// pin fits.
+	host.dragOffers = [&st]{
+		std::vector<HGH::Host::DragOffer> out;
+		for (const auto& ep : st.tree.elements)
+		{
+			if (!ep) continue;
+			for (const UIPropDesc& pd : ep->allProperties())
+				for (NT t : { NT::GetProperty, NT::SetProperty })
+				{
+					HGH::Host::DragOffer o;
+					o.proto.type = t;
+					o.proto.elem = ep->id;
+					o.proto.s = pd.name;
+					o.proto.propType = HE::uiPropTypeToPin(pd.type);
+					o.label = graphNodeTitle(st, o.proto);
+					out.push_back(std::move(o));
+				}
+		}
+		return out; };
 	// What a widget's own graph can put in a string pin: the animations this
 	// widget carries (its own and the ones its embedded components brought), and
 	// its elements by the names they have in the designer. Both are lists the
