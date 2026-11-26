@@ -111,8 +111,11 @@ namespace HE::landscape
         // The projection the near radius is measured against (vertical field of view, image height in pixels): the native
         // near view swaps a chunk where a mip-0 texel shrinks below a pixel. Unset = 60 degrees, 1080 px.
         void setView(float fovYRadians, float viewportHeightPx) { m_fovY = fovYRadians; m_viewportH = viewportHeightPx; }
-        // The distance from the camera beyond which the pages are sharp enough (one mip-0 texel per pixel).
-        float nativeNearRadius() const;
+        // The distance from the camera beyond which the pages are sharp enough (one mip-0 texel per pixel). For a texel of
+        // `metersPerTexel`; without one, the setting's. A volume too large for the setting has a coarser texel (attach clamps
+        // it to 2048 pages a side), and its radii must follow THAT texel: with the setting's, a 100 km landscape at the
+        // 1.6 cm preset swapped to 0.5 m pages from 15 m out, a blurred ring where the native material belonged.
+        float nativeNearRadius(float metersPerTexel = 0.0f) const;
         // Gives every landscape back to its material: the renderer stops swapping, the scratch copies and the pool go.
         void detach();
         // Draws the landscapes from their own material for a moment (a comparison) and back, without touching anything else.

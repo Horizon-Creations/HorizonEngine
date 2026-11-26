@@ -514,17 +514,16 @@ void RvtLandscape::pauseSwap(bool paused)
     }
 }
 
-float RvtLandscape::nativeNearRadius() const
+float RvtLandscape::nativeNearRadius(float metersPerTexel) const
 {
     // One mip-0 texel per pixel: a texel of t metres at distance d covers t * H / (2 d tan(fov/2)) pixels.
-    const float t = std::max(m_settings.metersPerTexel, 1e-3f);
+    const float t = std::max(metersPerTexel > 0.0f ? metersPerTexel : m_settings.metersPerTexel, 1e-3f);
     return t * std::max(m_viewportH, 1.0f) / (2.0f * std::tan(std::clamp(m_fovY, 0.05f, 3.0f) * 0.5f));
 }
 
 void RvtLandscape::updateNearChunks(HorizonWorld& live, const glm::vec3& cameraPos, FrameStats& st)
 {
     auto& reg = live.registry();
-    const float r = nativeNearRadius();
     // HE_RVT_NATIVE_NEAR=0 / 1 overrides the setting (A/B, and the witnesses whose small landscape lies inside the radius).
     static const int envNear = [] { const char* v = std::getenv("HE_RVT_NATIVE_NEAR"); return (v && *v) ? (*v == '0' ? 0 : 1) : -1; }();
     const bool nativeNear = envNear >= 0 ? envNear == 1 : m_settings.nativeNear;
@@ -532,6 +531,9 @@ void RvtLandscape::updateNearChunks(HorizonWorld& live, const glm::vec3& cameraP
     {
         Segment& seg = kv.second;
         std::unordered_set<uint32_t> next;
+        // The radius of the texel this landscape's volume really has (see nativeNearRadius).
+        const float r = seg.volumeLive ? nativeNearRadius(m_manager->layout(seg.volume).desc().finestMetersPerTexel)
+                                       : nativeNearRadius();
         if (nativeNear && seg.volumeLive && reg.valid(kv.first) && reg.all_of<TerrainComponent>(kv.first))
         {
             const TerrainComponent& tc = reg.get<TerrainComponent>(kv.first);
@@ -845,14 +847,15 @@ RvtLandscape::FrameStats RvtLandscape::tick(HorizonWorld& live, const glm::vec3&
         // The radius is set for 0.25 m texels; a finer texel shrinks it in step, so the square stays the same number of pages
         // per mip (at 0.0625 m and 64 m it would be 289 a mip, past any pool, and the volume would never count as filled).
         // The same ground is then served one mip deeper, at the same texel size as before; the feedback asks for more.
-        view.nearRadiusM = m_settings.nearRadiusM * std::min(1.0f, m_settings.metersPerTexel / 0.25f);
+        const rvt::VolumeLayout& L = m_manager->layout(kv.first);
+        const float texel = L.desc().finestMetersPerTexel;   // after attach's clamp, not the setting
+        view.nearRadiusM = m_settings.nearRadiusM * std::min(1.0f, texel / 0.25f);
         // The feedback within distance bands: a pixel may ask for mip m only within band0 * 2^m of the camera (farther it gets
         // the mip of its band, the same page's ancestor). So the finest level stays the metres around the camera where it is
         // visible at all, and a far, steep or mirrored pixel cannot fill the pool with it.
-        const rvt::VolumeLayout& L = m_manager->layout(kv.first);
         // The band of mip m reaches where its texel shrinks to a pixel (nativeNearRadius() * 2^m): a pixel never gets a page
         // finer than it can show, and every pixel up to there gets the one it can. The camera square above stays small.
-        const float band0 = std::max(view.nearRadiusM, nativeNearRadius());
+        const float band0 = std::max(view.nearRadiusM, nativeNearRadius(texel));
         for (const auto& f : m_feedback)   // rvtFeedbackKey: volume 5 | mip 5 | x 11 | y 11
         {
             if ((f.first >> 27) != kv.first) continue;

@@ -32,6 +32,12 @@ struct EditorConfig
 	// Importer::setAutoLodOnImport, AutoLod.h). Off: it makes every import slower.
 	bool AutoLodOnImport = false;
 
+	// The baked far landscape (the pictures a landscape's distant chunks draw with,
+	// LandscapeFarBake.h) in the editor: 0 Off (only the export bakes), 1 Manual (the
+	// Bake button in Landscape ▸ Setup), 2 Automatic (after a landscape was left
+	// alone for a few seconds).
+	int LandscapeFarBake = 1;
+
 	// Content browser tree-panel width (-1 = auto on first frame)
 	float CbTreeWidth = -1.0f;
 

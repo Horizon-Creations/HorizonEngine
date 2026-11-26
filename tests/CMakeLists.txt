@@ -1010,6 +1010,8 @@ add_executable(he_tests
     # per-file HE_IMGUI_ENABLED. Everything they call (TerrainPaint/FoliagePaint
     # in HorizonScene, RenderWorld, the toolbar, the widgets) is already here.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/TerrainTools.cpp
+    # Its Setup tab's Far Landscape section (the bake itself is HorizonScene's).
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/LandscapeFarBake.cpp
     # The Spline mode's tool, for test_spline_tool_ui.cpp: same AppContext, same
     # per-file HE_IMGUI_ENABLED; SplineEdit and the point gizmo are already here.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/SplineTool.cpp

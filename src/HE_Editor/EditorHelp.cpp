@@ -8001,6 +8001,20 @@ namespace
 	  "fresh shape with the same settings. Mountains already made stay as "
 	  "they are.",
 	  "", "editor#landscape-mode" },
+	{ "Landscape/Bake Far Landscape", "",
+	  "Bakes the pictures the landscape's distant chunks draw with, the same ones "
+	  "the export makes, so you see the far landscape here as the game will. They "
+	  "are kept in the project's Saved folder (not in git or team sync) and come "
+	  "back when the scene is opened again. A change to the landscape puts them "
+	  "away until the next bake. Only Auto Landscape materials are baked. "
+	  "Preferences decides whether this runs by itself.",
+	  "", "editor#landscape-mode" },
+	{ "Preferences/Content Browser/Far Landscape Bake", "",
+	  "When the editor bakes a landscape's far tiles. Off: only the export does. "
+	  "Manual: with Bake Far Landscape in Landscape Setup. Automatic: by itself, a "
+	  "few seconds after a landscape was last changed; the editor pauses for the "
+	  "length of the bake.",
+	  "", "editor#landscape-mode" },
 	{ "Landscape/Clear Paint", "",
 	  "Throws away every painted layer weight, putting the whole landscape back "
 	  "on the first layer. It is one undo step, but it removes the entire "

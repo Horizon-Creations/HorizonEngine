@@ -109,6 +109,12 @@ std::vector<SettingDesc> buildCatalog()
 	                    "Content Browser", "autolodimport", &EditorConfig::AutoLodOnImport,
 	                    "Importing a static mesh also makes simplified versions of it, "
 	                    "kept inside the mesh's asset."));
+	t.push_back(enumRow("landscape.farBake", "Far Landscape Bake", "Content Browser", "farbake",
+	                    &EditorConfig::LandscapeFarBake,
+	                    { "Off", "Manual", "Automatic" },
+	                    "When the editor bakes a landscape's far tiles: never (only the "
+	                    "export does), with the Bake button in Landscape Setup, or on its "
+	                    "own a few seconds after a landscape was last changed."));
 	t.push_back(intRow("contentBrowser.refreshRate", "Refresh Rate",
 	                   "Content Browser", "cbrefresh",
 	                   &EditorConfig::ContentBrowserRefreshRate, 1, 600,

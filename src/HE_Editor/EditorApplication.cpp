@@ -1,6 +1,7 @@
 #include "EditorApplication.h"
 #include "EditorGraphics.h"   // the project's copy of the graphics fields
 #include "ImporterCommon.h"   // Importer::setAutoLodOnImport
+#include "LandscapeFarBake.h"  // the baked far landscape in the editor
 #include <Window/Window.h>           // hiddenWindowRequested — no OS windows of ImGui's own
 #include <ContentManager/HAsset.h>   // asset type of a just-saved file
 #include <ContentManager/GpuArrayCook.h>   // texture arrays cooked for the GPU on load
@@ -1687,6 +1688,7 @@ void EditorApplication::OnInit()
 	m_editorConfig.ContentBrowserRefreshRate   = globalstate.getCustomConfigInt("ContentBrowserRefreshRate",   m_editorConfig.ContentBrowserRefreshRate);
 	m_editorConfig.KeepCPUAssets               = globalstate.getCustomConfigBool("KeepCPUAssets",               m_editorConfig.KeepCPUAssets);
 	m_editorConfig.AutoLodOnImport             = globalstate.getCustomConfigBool("AutoLodOnImport",             m_editorConfig.AutoLodOnImport);
+	m_editorConfig.LandscapeFarBake            = std::clamp(globalstate.getCustomConfigInt("LandscapeFarBake", m_editorConfig.LandscapeFarBake), 0, 2);
 	// The persisted key was misspelled "KeepCPUAssetsInfoAcknoleged" until the
 	// 2026-07 rework. Read the old spelling FIRST and hand it in as the default for
 	// the corrected key, so a user who already dismissed the info box keeps that
@@ -4210,6 +4212,13 @@ void EditorApplication::OnRender(float dt)
 			// opposite order from the shipped game.
 			const bool gpuParticles = m_editorConfig.GpuParticles &&
 			                          renderer()->GetCapabilities().supportsGpuParticles;
+			// The baked far landscape: saved tiles picked up, stale ones put away,
+			// the Automatic bake. Before the tick, which rebuilds what it marks dirty.
+			if (m_projectLoaded && !m_isPlaying)
+			{
+				AppContext fbCtx = makeContext();
+				LandscapeFarBake::tick(fbCtx, ImGui::GetCurrentContext() && ImGui::IsAnyMouseDown());
+			}
 			HE_PROFILE_SCOPE_N("SceneSystemsTick");
 			SceneSystems::tickWorld(*m_editorWorld, contentManager(), renderer(),
 			                        m_editorCamera.position(), gameDt,
@@ -17941,6 +17950,7 @@ void EditorApplication::writeEditorConfig()
 	GlobalState& globalstate = GlobalState::getInstance();
 	globalstate.setCustomConfigEntry("KeepCPUAssets",               m_editorConfig.KeepCPUAssets);
 	globalstate.setCustomConfigEntry("AutoLodOnImport",             m_editorConfig.AutoLodOnImport);
+	globalstate.setCustomConfigEntry("LandscapeFarBake",            m_editorConfig.LandscapeFarBake);
 	globalstate.setCustomConfigEntry("KeepCPUAssetsInfoAcknowledged", m_editorConfig.KeepCPUAssetsInfoAcknowledged);
 	globalstate.setCustomConfigEntry("ContentBrowserRefreshRate",   m_editorConfig.ContentBrowserRefreshRate);
 	globalstate.setCustomConfigEntry("CbTreeWidth",                 m_editorConfig.CbTreeWidth);

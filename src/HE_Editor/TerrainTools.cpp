@@ -6,6 +6,7 @@
 #include "EditorHelp.h"                  // "New Landscape/" and "Landscape/" scopes
 #include "EditorWidgets.h"               // asset drop slot + WrapText (text wraps, never runs off)
 #include "NotificationStore.h"           // failures go to the footer bell, not to red text
+#include "LandscapeFarBake.h"            // Setup ▸ Far Landscape
 #include <HorizonScene/HorizonScene.h>
 #include <HorizonScene/TerrainPaint.h>   // landscape layer brush
 #include <HorizonScene/FoliagePaint.h>   // foliage density-mask brush
@@ -1897,6 +1898,35 @@ void renderPanel(AppContext& ctx)
                         if (ctx.undoSys) ctx.undoSys->snapshotNow();
                         FoliagePaint::clearMask(*fol);   // back to a uniform scatter
                     }
+                }
+
+                // ── Far landscape ────────────────────────────────────────
+                // The pictures the distant chunks draw with, baked here instead of
+                // only on export (LandscapeFarBake.h). When it runs on its own is
+                // the Preferences setting.
+                sectionLabel("Far Landscape");
+                {
+                    using FB = LandscapeFarBake::State;
+                    const FB fb = LandscapeFarBake::state(ctx);
+                    dimText("%s", fb == FB::UpToDate ? "Baked; the far chunks draw the baked tiles."
+                                : fb == FB::Stale    ? "Changed since the last bake; the far chunks draw the live material."
+                                                     : "Not baked yet; the far chunks draw the live material.");
+                    const int mode = ctx.editorConfig.LandscapeFarBake;
+                    ImGui::BeginDisabled(mode == 0);
+                    if (EditorWidgets::button("Bake Far Landscape"))
+                    {
+                        std::string summary;
+                        const bool ok = LandscapeFarBake::bakeNow(ctx, &summary);
+                        HE::Ed::notify(ok ? HE::Ed::NoteLevel::Info : HE::Ed::NoteLevel::Important,
+                                       ok ? "Far landscape baked" : "The far landscape was not baked", summary);
+                    }
+                    EditorWidgets::helpForLabel("Bake Far Landscape");
+                    ImGui::EndDisabled();
+                    dimText("%s", mode == 0 ? "Off in Preferences: only the export bakes it."
+                                : mode == 2 ? "Automatic: it bakes again a few seconds after the last change."
+                                            : "Manual: bake again after changes (Automatic is in Preferences).");
+                    if (!LandscapeFarBake::lastSummary().empty())
+                        dimText("%s", LandscapeFarBake::lastSummary().c_str());
                 }
             }
             // ═════════════════════════ PAINT ═════════════════════════════

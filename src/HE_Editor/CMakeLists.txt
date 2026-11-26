@@ -306,6 +306,7 @@ add_executable(HorizonEditor WIN32
 	InspectorPanel.cpp
 	InspectorPrefabKeys.cpp
 	TerrainTools.cpp
+	LandscapeFarBake.cpp
 	ViewportPanel.cpp
 	ViewportActions.cpp
 	# The spline tool: what a click, a Delete and a drag do to a SplineComponent

@@ -973,6 +973,10 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const DrawOptions& o
 	row("autolodimport", "Content Browser", [&]{
 		EditorWidgets::checkbox("Generate LODs on Import", &cfg.AutoLodOnImport);
 	});
+	row("farbake", "Content Browser", [&]{
+		static const char* kFarBake[] = { "Off", "Manual", "Automatic" };
+		Row::combo("Far Landscape Bake", &cfg.LandscapeFarBake, kFarBake, IM_ARRAYSIZE(kFarBake));
+	});
 	row("cbrefresh", "Content Browser", [&]{
 		Row::inputInt("Refresh Interval (s)", &cfg.ContentBrowserRefreshRate);
 		if (cfg.ContentBrowserRefreshRate < 0) cfg.ContentBrowserRefreshRate = 0;
@@ -2472,6 +2476,7 @@ void render(AppContext& ctx, const ImVec2& pos, const ImVec2& size)
 			cfg.KeepCPUAssets     = false;
 			cfg.ContentBrowserRefreshRate = 60;
 			cfg.AutoLodOnImport   = false;
+			cfg.LandscapeFarBake  = 1;
 			cfg.AutosaveEnabled     = true;
 			cfg.AutosaveIntervalSec = 60;
 			cfg.RewardsEnabled       = true;
