@@ -1,0 +1,93 @@
+diff --git a/src/HE_Scene/src/RvtLandscape.cpp b/src/HE_Scene/src/RvtLandscape.cpp
+index f48ec3d45..d76ff081a 100644
+--- a/src/HE_Scene/src/RvtLandscape.cpp
++++ b/src/HE_Scene/src/RvtLandscape.cpp
+@@ -957,6 +957,69 @@ RvtLandscape::FrameStats RvtLandscape::tick(HorizonWorld& live, const glm::vec3&
+     }
+     updateNearChunks(live, cameraPos, st);
+     if (tiles) tileGroundTables(live, st);
++    // PROBE-TMP (topic 355 step 4, not for commit): the resident mips of the tile ground and the finest resident texel at ground points.
++    if (tiles && m_tiles.volumeLive && std::getenv("HE_RVT_TILE_PROBE") && (m_ticks % 150) == 0)
++    {
++        const uint16_t vol = m_tiles.volume;
++        const rvt::VolumeLayout& L = m_manager->layout(vol);
++        const rvt::Stats ms0 = m_manager->stats();
++        const glm::vec2 c0 = glm::vec2(camAbs - m_tiles.anchor);
++        std::string hist, prof;
++        char buf[96];
++        for (int m = 0; m < L.mipCount(); ++m)
++        {
++            const int n = L.pagesPerSide(m);
++            int cx, cy; L.pageAt(m, c0, cx, cy);
++            const int r = m < 3 ? 256 : n;   // the finest mips are scanned around the camera only
++            uint32_t cnt = 0;
++            for (int y = std::max(0, cy - r); y < std::min(n, cy + r + 1); ++y)
++                for (int x = std::max(0, cx - r); x < std::min(n, cx + r + 1); ++x)
++                    cnt += m_manager->isResident(rvt::PageKey{ vol, uint8_t(m), uint16_t(x), uint16_t(y) }) ? 1u : 0u;
++            std::snprintf(buf, sizeof buf, "m%d:%u ", m, cnt); hist += buf;
++        }
++        static const float kS[] = { 0, 2, 5, 10, 25, 50, 100, 200, 400, 800, 1500 };
++        for (int dir = 0; dir < 2; ++dir)
++            for (float s : kS)
++            {
++                const glm::vec2 p = c0 + (dir == 0 ? glm::vec2(s, 0.0f) : glm::vec2(0.0f, s));
++                if (p.x < 0 || p.y < 0 || p.x >= L.extentM() || p.y >= L.extentM()) { std::snprintf(buf, sizeof buf, "%s%.0f:out ", dir ? "z" : "x", s); prof += buf; continue; }
++                int fm = -1;
++                for (int m = 0; m < L.mipCount() && fm < 0; ++m)
++                {
++                    int x, y; L.pageAt(m, p, x, y);
++                    if (m_manager->isResident(rvt::PageKey{ vol, uint8_t(m), uint16_t(x), uint16_t(y) })) fm = m;
++                }
++                std::snprintf(buf, sizeof buf, "%s%.0f:m%d(%.3f) ", dir ? "z" : "x", s, fm, fm >= 0 ? double(L.texelMeters(fm)) : -1.0);
++                prof += buf;
++            }
++        {   // what the GPU feedback asks for, and what the distance bands make of it
++            struct B { uint32_t n = 0; float dmin = 1e30f, dmax = 0.0f; } wanted[16], served[16];
++            const float band0 = std::max(m_settings.nearRadiusM * std::min(1.0f, m_settings.metersPerTexel / 0.25f), nativeNearRadius());
++            for (const auto& f : m_feedback)
++            {
++                if ((f.first >> 27) != vol) continue;
++                int mip = int((f.first >> 22) & 31u), x = int((f.first >> 11) & 2047u), y = int(f.first & 2047u);
++                if (mip >= L.mipCount()) continue;
++                glm::vec2 mn, mx; L.pageRect(mip, x, y, mn, mx, false);
++                const glm::vec2 c = (mn + mx) * 0.5f;
++                const float d = std::max(std::abs(c.x - c0.x), std::abs(c.y - c0.y));
++                B& w = wanted[mip & 15]; ++w.n; w.dmin = std::min(w.dmin, d); w.dmax = std::max(w.dmax, d);
++                while (mip + 1 < L.mipCount() && d > band0 * float(1 << mip)) ++mip;
++                B& s = served[mip & 15]; ++s.n; s.dmin = std::min(s.dmin, d); s.dmax = std::max(s.dmax, d);
++            }
++            std::string fw, fs;
++            for (int m = 0; m < L.mipCount(); ++m)
++            {
++                if (wanted[m].n) { std::snprintf(buf, sizeof buf, "m%d:%u[%.0f-%.0f] ", m, wanted[m].n, double(wanted[m].dmin), double(wanted[m].dmax)); fw += buf; }
++                if (served[m].n) { std::snprintf(buf, sizeof buf, "m%d:%u[%.0f-%.0f] ", m, served[m].n, double(served[m].dmin), double(served[m].dmax)); fs += buf; }
++            }
++            HE_LOG_INFO(Scene, "FBPROBE tick %llu: GPU wants (mip:pages[dist m from..to]) %s| served after the bands %s", static_cast<unsigned long long>(m_ticks), fw.c_str(), fs.c_str());
++        }
++        HE_LOG_INFO(Scene, "RVTPROBE tick %llu: window %.0f m, page0 %.2f m, texel0 %.4f m, %d mips, anchor (%.0f,%.0f), cam in window (%.1f,%.1f), resident %u/%u, missing %u, starved %u, band0 %.2f m; per-mip resident [%s]; finest resident texel [%s]",
++                    static_cast<unsigned long long>(m_ticks), double(L.extentM()), double(L.pageMeters(0)), double(L.texelMeters(0)), L.mipCount(),
++                    m_tiles.anchor.x, m_tiles.anchor.y, double(c0.x), double(c0.y), ms0.resident, ms0.poolSlots, m_manager->missing(vol), ms0.starved,
++                    double(std::max(m_settings.nearRadiusM * std::min(1.0f, m_settings.metersPerTexel / 0.25f), nativeNearRadius())), hist.c_str(), prof.c_str());
++    }
+ 
+     const rvt::Stats ms = m_manager->stats();
+     // One warning per episode: a pool that is too small starves every frame, and the number alone changes the text each time.
+diff --git a/src/HE_Scene/src/RvtLandscapeTiles.cpp b/src/HE_Scene/src/RvtLandscapeTiles.cpp
+index b845158c9..1b5d5f8fa 100644
+--- a/src/HE_Scene/src/RvtLandscapeTiles.cpp
++++ b/src/HE_Scene/src/RvtLandscapeTiles.cpp
+@@ -287,9 +287,14 @@ void RvtLandscape::tileGroundTables(HorizonWorld& live, FrameStats& st)
+     const uint64_t tv = m_manager->tableVersion(t.volume) + (m_debugView ? ((m_manager->dirtyVersion() + 1) << 40) : 0ull);
+     if (tv != t.uploadedVersion)
+     {
++        const auto tp0 = std::chrono::steady_clock::now();   // PROBE-TMP
+         std::vector<std::vector<uint32_t>> mips;
+         for (int m = 0; m < m_manager->layout(t.volume).mipCount(); ++m) mips.push_back(m_manager->pageTable(t.volume, m, m_debugView));
++        const auto tp1 = std::chrono::steady_clock::now();   // PROBE-TMP
+         if (m_renderer.SetRvtPageTable(t.consumer, mips)) { t.uploadedVersion = tv; ++st.tablesUploaded; }
++        if (std::getenv("HE_RVT_TILE_PROBE"))   // PROBE-TMP
++            HE_LOG_INFO(Scene, "TABLEPROBE page table upload: copy out of the manager %.2f ms, SetRvtPageTable %.2f ms",
++                        std::chrono::duration<double, std::milli>(tp1 - tp0).count(), std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tp1).count());
+     }
+     if (!t.filled && t.updated && t.uploadedVersion == tv && m_manager->missing(t.volume) == 0) t.filled = true;
+ 
