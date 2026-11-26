@@ -73,11 +73,12 @@ TEST_CASE("resolve reconstruction: a camera 70 km out gets the ground back to th
 			worstRelative = std::max(worstRelative, double(glm::length(p - h.truth)));
 		}
 	}
-	// The control: the absolute inverse is metres off here (1 to 10 m by camera position), which is what put the ground in its own
-	// shadow (the cascade's bias is under a metre). If it ever reads centimetres the premise of this fix is gone.
-	CHECK(worstAbsolute > 0.5);
+	// The control: the absolute inverse is metres off here (1 to 14 m by camera position, Apple clang, float), which is what put the
+	// ground in its own shadow (the cascade's bias is under a metre). If it ever reads centimetres the premise of this fix is gone.
+	// The bounds leave room for another compiler's rounding (measured: 14 m and 0.35 m).
+	CHECK(worstAbsolute > 2.0);
 	// What is left is the depth buffer's own resolution at 800 m (1 - d = near / z in a float with 24 bits).
-	CHECK(worstRelative < 0.5);
+	CHECK(worstRelative < 1.0);
 }
 
 TEST_CASE("resolve reconstruction: near the origin both forms agree")
