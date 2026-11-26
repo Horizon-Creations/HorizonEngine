@@ -2612,8 +2612,11 @@ void render(AppContext& ctx, int& tabSelectRequest,
 				const bool         isLast = (ci + 1 == crumbs.size());
 				const std::string  id     = "##bc_" + std::to_string(ci);
 				// The folder you are IN is armed rather than disabled: it is where
-				// you are, not something that failed to be available.
-				if (bar.item(id.c_str(), nullptr, crumb->name.c_str(), isLast, !isLast,
+				// you are, not something that failed to be available. (It was passed
+				// as disabled too, which wins in the cell, so every folder after the
+				// root read grey.) Every crumb is a folder like the root, icon included
+				// — cellWidth already counts the icon's room.
+				if (bar.item(id.c_str(), T::iconFolder, crumb->name.c_str(), isLast, true,
 				             isLast ? nullptr : "Go up to this folder"))
 				{
 					s_gridFolder         = crumb;
