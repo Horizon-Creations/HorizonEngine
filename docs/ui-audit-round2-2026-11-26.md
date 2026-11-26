@@ -88,10 +88,18 @@ labels on the left, no duplicate hints, states that are visible.
 - The prose "\»" in the docs stays, because it names the listing notation.
 - `pinDialogToEditorWindow` now pins the Team Sync conflict window too, so it can no longer be dragged.
 
+**Follow-up (same day, second commit)**
+
+- **Material constants.** Each row shows the node's name, or its type with a number ("Color 1", "Color 2").
+- **Docs search.**
+  - While a query is active, the sidebar highlights no page.
+  - Query words are gold in the snippets (`highlightRuns`).
+- **Docs pages.** An eyebrow is drawn once per run of sections that share it.
+  - In the editor reference, "More about this" is left out when the entry before it in the same group links to the same place.
+- **ImGui wrap.** New patch `HE-PATCH(wrap-dots)` in `vendor/imgui/imgui_draw.cpp`: no break between `.`/`"` and a letter, digit, `_` or `(`, so "config.json" stays whole. Carry it on every ImGui upgrade.
+- **Website.** "((added))" was fixed in `horizoncode.html` (Website `25f7613`) and in the same sentence of `he-docs.json`.
+
 **Next steps**
 
-1. Material editor: constants all named "Color" with no node name. In nodes, an asset drop slot is drawn as bare text (`EditorWidgets::assetDropSlot` inside the node child window).
-2. Docs search: clear the nav highlight while a query is active, and highlight the term in the snippets.
-3. Editor reference: one eyebrow per group, not one per entry (`EditorReference.cpp`).
-4. Code tokens in hints still wrap after "." (`config.` / `json`). `hint()` needs a non-breaking form.
-5. Website content: "((added))" in `horizoncode.html:756`.
+1. In material graph nodes, an asset drop slot is drawn as bare text (`EditorWidgets::assetDropSlot` inside the node child window).
+2. The Windows CI job fails on `test_physics` and `test_animation_ik`, Windows only. Until it is green, there is no Windows package.

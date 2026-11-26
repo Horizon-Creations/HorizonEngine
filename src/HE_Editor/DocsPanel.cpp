@@ -1148,7 +1148,11 @@ namespace
 			// "this one" into a scroll offset.
 			if (s_scrollTo == i && s_scrollFrames > 0) ImGui::SetScrollHereY(0.0f);
 
-			if (!sec.eyebrow.empty())
+			// Once per run of sections that share it: the editor reference put
+			// the same "POST-PROCESSING" over every entry of a group.
+			const bool sameEyebrow = i > 0 &&
+				page.sections[static_cast<std::size_t>(i - 1)].eyebrow == sec.eyebrow;
+			if (!sec.eyebrow.empty() && !sameEyebrow)
 			{
 				// The eyebrow in the accent and in capitals: a label, not a line
 				// of prose that happens to sit above the heading.
@@ -1203,7 +1207,43 @@ namespace
 	}
 
 	// ── Search results ───────────────────────────────────────────────────────
-	void drawResults(const char* query)
+	// The snippet as runs, every query word (case-insensitive, two letters or
+	// more) in the heading gold and the rest dimmed — so the eye finds why a
+	// result matched without reading the sentence.
+	std::vector<docs::Run> highlightRuns(const std::string& text, const char* query)
+	{
+		auto lower = [](std::string s) {
+			for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+			return s;
+		};
+		std::vector<std::string> terms;
+		{
+			std::string q = lower(query ? query : ""), w;
+			for (char c : q + ' ')
+				if (c == ' ') { if (w.size() >= 2) terms.push_back(w); w.clear(); }
+				else w += c;
+		}
+		const std::string lt = lower(text);
+		std::vector<docs::Run> out;
+		auto add = [&](std::size_t from, std::size_t to, docs::Style s) {
+			if (to > from) out.push_back({ text.substr(from, to - from), s, {} });
+		};
+		std::size_t at = 0;
+		while (at < text.size())
+		{
+			std::size_t best = std::string::npos, len = 0;
+			for (const std::string& t : terms)
+				if (const std::size_t f = lt.find(t, at); f < best) { best = f; len = t.size(); }
+			if (best == std::string::npos) break;
+			add(at, best, docs::Style::Italic);
+			add(best, best + len, docs::Style::Bold);
+			at = best + len;
+		}
+		add(at, text.size(), docs::Style::Italic);
+		return out;
+	}
+
+	void drawResults(const Ctx& ctx, const char* query)
 	{
 		const docs::Library& lib = docs::library();
 		std::vector<docs::Hit> hits = lib.search(query);
@@ -1245,8 +1285,8 @@ namespace
 			ImGui::Text("%s \xc2\xb7 %s", p.title.c_str(), s.eyebrow.empty()
 			                                                  ? p.id.c_str()
 			                                                  : s.eyebrow.c_str());
-			ImGui::TextUnformatted(h.snippet.c_str());
 			ImGui::PopStyleColor();
+			drawRuns(ctx, highlightRuns(h.snippet, query));
 			ImGui::Spacing();
 			ImGui::PopID();
 
@@ -1420,13 +1460,16 @@ namespace
 			{
 				const docs::Page& p = lib.pages()[static_cast<std::size_t>(idx)];
 				ImGui::PushID(idx);
-				if (ImGui::Selectable(p.title.c_str(), idx == s_page)) go(idx, -1);
+				// While results are shown, no page is "the open one": the
+				// highlight on the last page read looked like where the hits were.
+				const bool current = idx == s_page && !s_query[0];
+				if (ImGui::Selectable(p.title.c_str(), current)) go(idx, -1);
 
 				// The current page's sections, indented under it — the "on this
 				// page" list, which is how a long reference page is navigated at
 				// all. Only for the open page: all of them at once would be a
 				// hundred and twelve rows.
-				if (idx == s_page) drawSectionList(p);
+				if (current) drawSectionList(p);
 				ImGui::PopID();
 			}
 			ImGui::Spacing();
@@ -1702,7 +1745,7 @@ void draw(const Host& host)
 			// WrapText — this is the BeginChild case, where the guard's own block
 			// ends before EndChild).
 			EditorWidgets::WrapText wrap;
-			if (s_query[0]) drawResults(s_query);
+			if (s_query[0]) drawResults(ctx, s_query);
 			else            drawPage(ctx);
 
 			ImGui::Spacing();

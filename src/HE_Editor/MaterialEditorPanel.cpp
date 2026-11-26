@@ -1116,10 +1116,16 @@ bool drawParamConstPanel(MaterialGraph& graph)
 		if (!params.empty()) ImGui::Spacing();
 		ImGui::TextDisabled("Constants (baked into the shader)");
 		ImGui::Separator();
+		// The node's own name, else its type numbered: two rows that both read
+		// "Color" did not say which node each one edits.
+		std::unordered_map<int, int> seen;
 		for (MatGraphNode* n : consts)
 		{
 			ImGui::PushID(n->id);
-			ImGui::TextUnformatted(HE::matNodeDesc(n->type).name);
+			const int nth = ++seen[static_cast<int>(n->type)];
+			const std::string label = !n->s.empty() ? n->s
+				: std::string(HE::matNodeDesc(n->type).name) + " " + std::to_string(nth);
+			ImGui::TextUnformatted(label.c_str());
 			ImGui::SameLine(90.0f);
 			committed |= nodeParamWidgets(*n, 1.0f, true, &graph);
 			ImGui::PopID();

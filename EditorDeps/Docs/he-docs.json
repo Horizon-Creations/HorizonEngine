@@ -17220,11 +17220,11 @@
          [
           {
            "s": "",
-           "t": "It is already in the graph ("
+           "t": "It is already in the graph (the menu marks it "
           },
           {
            "s": "i",
-           "t": "(added)"
+           "t": "added"
           },
           {
            "s": "",
@@ -17369,7 +17369,7 @@
      ],
      "eyebrow": "When it does nothing",
      "id": "pitfalls",
-     "text": "You see Usually because Nothing happens at all The chain does not start at an event, or an exec wire is missing in the middle (look for a hollow white triangle). For a class: the entity's Script component does not name it in Class, or it is a plain HorizonCode Class, which has no BeginPlay. An event is greyed out in the add menu It is already in the graph ((added)); each event exists once. Events are not offered inside a function's tab. A value is different every time it is read Pure nodes run on each read. Store the value in a variable once (Set) and read the variable. Another graph cannot see a variable or function It is Private. Set Access to Public. Calls through a reference stop working The object was destroyed. Guard the reference with Is Valid (V). A node has a red halo after Compile That node cannot be translated to C++. The graph still runs, interpreted; Show node on the Compile strip jumps to it. Labels and value boxes vanished You zoomed out below about half size. Zoom in. Backspace does not delete a node On purpose. Use Delete.",
+     "text": "You see Usually because Nothing happens at all The chain does not start at an event, or an exec wire is missing in the middle (look for a hollow white triangle). For a class: the entity's Script component does not name it in Class, or it is a plain HorizonCode Class, which has no BeginPlay. An event is greyed out in the add menu It is already in the graph (the menu marks it added); each event exists once. Events are not offered inside a function's tab. A value is different every time it is read Pure nodes run on each read. Store the value in a variable once (Set) and read the variable. Another graph cannot see a variable or function It is Private. Set Access to Public. Calls through a reference stop working The object was destroyed. Guard the reference with Is Valid (V). A node has a red halo after Compile That node cannot be translated to C++. The graph still runs, interpreted; Show node on the Compile strip jumps to it. Labels and value boxes vanished You zoomed out below about half size. Zoom in. Backspace does not delete a node On purpose. Use Delete.",
      "title": "Common Pitfalls"
     },
     {
