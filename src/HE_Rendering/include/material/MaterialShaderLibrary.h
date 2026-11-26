@@ -339,7 +339,7 @@ public:
         float clusterParams[4]  = {}; // x/y/z = grid dims, w = gridZ / log(far/near)
         float clusterCamFwd[4]  = {}; // xyz = camera forward (view-z), w = cluster near
         // xyz is added to the position the shader reconstructs (after the divide by w). 0 = invViewProj is the absolute inverse(proj *
-        // view); the camera's position = invViewProj has no translation in it (HorizonRendering/ResolveReconstruct.h). Fill both
+        // view); the camera's position = invViewProj has no translation in it (HorizonRendering/FarOriginPrecision.h). Fill both
         // or neither; a backend that has not moved over leaves it 0.
         float camOrigin[4]      = {};
     };

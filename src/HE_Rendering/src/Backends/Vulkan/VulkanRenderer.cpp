@@ -32,7 +32,7 @@
 #include <Backends/Vulkan/VulkanLandscape.h> // the world-scale landscape (Thema 326)
 #include <Diagnostics/Profiler.h>   // HE_PROFILE_SCOPE_N — GI accel split of Render()
 #include <HorizonRendering/ClipSpace.h>
-#include <HorizonRendering/ResolveReconstruct.h> // HE::setResolveCameraRelative
+#include <HorizonRendering/FarOriginPrecision.h> // HE::setResolveCameraRelative, landscapeCasterDepthBias
 #include <HorizonRendering/GiCasterRange.h>
 #include <HorizonRendering/GiHeightfield.h>
 #include <HorizonRendering/RvtTilePatches.h>   // the tile ground's patches a virtual texture's consumer serves
@@ -8845,7 +8845,11 @@ void VulkanRenderer::EncodeShadowMap(VkCommandBuffer cmd, float aspect)
         // The tile landscape's ground into the same layer, with the same bias (still set: it is dynamic state).
         const size_t vi = static_cast<size_t>(&view - m_shadowViews.data());
         if (vi < m_landscapeShadowFrames.size())
+        {
+            if (vi < static_cast<size_t>(nCascades))   // the ground's own caster bias in the sun's cascades: FarOriginPrecision.h
+                vkCmdSetDepthBias(cmd, HE::landscapeCasterDepthBias(m_shadowSettings.slopeBias, static_cast<int>(vi)), 0.0f, kShadowBiasSlope);
             landscapeDepth(cmd, m_shadowPass, size, size, m_landscapeShadowFrames[vi], clip);
+        }
     };
 
     // One depth render per cascade into its own array layer. Each cascade
@@ -11622,7 +11626,7 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                 // so its inverse maps Vulkan NDC straight back. The decal pass's
                 // convention: gl_FragCoord.y counts down and so does Vulkan's NDC
                 // y (+1), depth already 0..1 (scale 1, bias 0).
-                HE::setResolveCameraRelative(ru, viewProj, m_renderWorld.camera.position);   // see ResolveReconstruct.h
+                HE::setResolveCameraRelative(ru, viewProj, m_renderWorld.camera.position);   // see FarOriginPrecision.h
                 ru.depthParams[0] = 1.0f;
                 ru.depthParams[1] = 1.0f;
                 ru.depthParams[2] = 0.0f;

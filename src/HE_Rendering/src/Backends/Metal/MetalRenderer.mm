@@ -12,7 +12,7 @@
 #include <ContentManager/TextureArrayBuild.h> // texture-array payload layout (Thema 158)
 #include <HorizonRendering/ParticleShaderTemplates.h>
 #include <HorizonRendering/ClipSpace.h>       // HE::kMetalClipFix
-#include <HorizonRendering/ResolveReconstruct.h> // HE::setResolveCameraRelative
+#include <HorizonRendering/FarOriginPrecision.h> // HE::setResolveCameraRelative, landscapeCasterDepthBias
 #include <HorizonRendering/GiCasterRange.h>   // HE::GiCasterFilter: which casters enter the GI accel
 #include <HorizonRendering/UnderwaterCausticsShared.h> // shared wave trains for the caustic pass
 #include <HorizonRendering/GIJitter.h>       // GI: wrapped cone-jitter frame index (all backends)
@@ -8824,6 +8824,9 @@ void MetalRenderer::EncodeShadowMap(void* cmdBufPtr, float aspect)
 				}, "ShadowLoop", /*serial=*/true);
 			}
 			// The tile landscape casts into every layer: the ground shadows itself and what stands on it.
+			// The ground's caster bias in the sun's cascades, last because the meshes above keep none: HorizonRendering/FarOriginPrecision.h.
+			if (target == m_shadowDepthTex)
+				[enc setDepthBias:HE::landscapeCasterDepthBias(m_shadowSettings.slopeBias, layer) slopeScale:0.0f clamp:0.0f];
 			EncodeLandscapePass((__bridge void*)enc, HE::kMetalClipFix * sv.viewProj, /*shadow*/ 0);
 			[enc endEncoding];
 		};
@@ -17051,7 +17054,7 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 		// depth IS the GL ndc z — scale 1 / bias 0, y flipped (Metal's
 		// gl_FragCoord origin is top-left).
 		HE::MaterialShaderLibrary::ResolveUniforms ru;
-		HE::setResolveCameraRelative(ru, viewProj, m_renderWorld.camera.position);   // camera-relative: see ResolveReconstruct.h
+		HE::setResolveCameraRelative(ru, viewProj, m_renderWorld.camera.position);   // camera-relative: see FarOriginPrecision.h
 		ru.depthParams[0] = -1.0f;
 		ru.depthParams[1] = 1.0f;
 		ru.depthParams[2] = 0.0f;
@@ -17900,7 +17903,7 @@ void MetalRenderer::EncodeDeferredResolveTile(void* renderEncoder, int width, in
 	HE::MaterialShaderLibrary::ResolveUniforms ru;
 	const glm::mat4 viewProj =
 		m_renderWorld.camera.projection * m_renderWorld.camera.view;
-	HE::setResolveCameraRelative(ru, viewProj, m_renderWorld.camera.position);   // camera-relative: see ResolveReconstruct.h
+	HE::setResolveCameraRelative(ru, viewProj, m_renderWorld.camera.position);   // camera-relative: see FarOriginPrecision.h
 	ru.depthParams[0] = -1.0f; // same conventions as the two-pass resolve
 	ru.depthParams[1] = 1.0f;
 	ru.depthParams[2] = 0.0f;
@@ -18383,7 +18386,7 @@ void MetalRenderer::EncodeSSRPasses(void* cmdBufPtr, int width, int height)
 			              atIndex:HE::MaterialShaderLibrary::kMetalLightingBufferIndex];
 #endif
 			HE::MaterialShaderLibrary::ResolveUniforms ru;
-			HE::setResolveCameraRelative(ru, viewProj, m_renderWorld.camera.position);   // camera-relative: see ResolveReconstruct.h
+			HE::setResolveCameraRelative(ru, viewProj, m_renderWorld.camera.position);   // camera-relative: see FarOriginPrecision.h
 			ru.depthParams[0] = -1.0f;
 			ru.depthParams[1] = 1.0f;
 			ru.depthParams[2] = 0.0f;

@@ -5,7 +5,7 @@
 #include <cmath>
 #include <cstring>
 
-#include <HorizonRendering/ResolveReconstruct.h>
+#include <HorizonRendering/FarOriginPrecision.h>
 
 // The deferred resolve's world position with the camera far from the origin (topic 355, step 3; the black tiles of Catania view 5).
 // The shader computes invViewProj * clip in float and divides by w. Done with the full inverse, the GPU has to cancel numbers of the
