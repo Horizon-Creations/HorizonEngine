@@ -69,6 +69,11 @@ Steps 2, 4 and 6 do not wait for each other. Step 3 blocks 5 (the tools paint wh
 2. Is this one topic for 0.8.0, or does the removal (step 8) move to 0.9.0? Steps 2 to 7 are useful without it.
 3. Tile size for small worlds: stay at 512 m (a 300 m island is one tile, mostly empty), or allow smaller tiles?
 
+**Answered 26.11.** (Hive topic 355, which carries this plan out):
+1. PR 233 is merged into `release/0.8.0`, and PR 214 is merged after it (`b515d6aa4`).
+2. One topic for 0.8.0, removal included: every landscape change from now on builds on the tile world.
+3. Smaller tiles are allowed for small worlds. 512 m stays the default for large ones.
+
 ## Handoff
 
 - **Topic / step:** none yet. Proposed as its own Hive topic that builds on 326 and 335; not opened, so that no bee starts before
