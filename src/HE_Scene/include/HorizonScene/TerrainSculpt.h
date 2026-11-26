@@ -92,6 +92,15 @@ namespace TerrainSculpt
     Result apply(TerrainComponent& tc, float localX, float localZ, Op op,
                  float radius, float falloff, float amount);
 
+    // A ramp between two points: the heights in a corridor around the segment
+    // a -> b (terrain-local XZ, `radius` + `falloff` wide like a brush) move
+    // toward the straight line from `heightA` at a to `heightB` at b, by
+    // `blend` (0..1) times the brush weight. The Landscape mode's Ramp tool as
+    // one call, for a caller that is not that tool (the tile brush). ok = false
+    // as apply() says, and for a segment shorter than a millimetre.
+    Result ramp(TerrainComponent& tc, float ax, float az, float heightA, float bx, float bz, float heightB,
+                float radius, float falloff, float blend);
+
     // ── Lowering toward a floor under a brush ────────────────────────────────
     // What a water brush that digs does: ground above `floor` eases down toward
     // it, ground at or below it is left alone, so it never raises and never fills

@@ -22,6 +22,8 @@
 #include "HorizonScene/Components/JointComponent.h"
 #include "HorizonScene/Components/CharacterControllerComponent.h"
 #include "HorizonScene/Components/ScriptComponent.h"
+#include "HorizonScene/Components/LandscapeWorldComponent.h"
+#include "HorizonScene/Components/LandscapeStampComponent.h"
 #include "HorizonScene/Components/SaveStateComponent.h"
 #include "HorizonScene/Components/StreamingComponent.h"
 #include "HorizonScene/Components/EditorLockComponent.h"   // the Outliner's lock, an entity-level field
@@ -634,6 +636,34 @@ namespace
 				{ "saveTransform",  ss->saveTransform },
 				{ "saveVisibility", ss->saveVisibility },
 				{ "saveScriptVars", ss->saveScriptVars },
+			};
+		}
+		// The world-scale tile landscape (Thema 326): a pack and how far to stream it.
+		if (auto* lw = registry.try_get<LandscapeWorldComponent>(entity))
+		{
+			comps["landscapeWorld"] = {
+				{ "enabled",      lw->enabled },
+				{ "pack",         lw->pack },
+				{ "streaming",    lw->streaming },
+				{ "loadRadius",   lw->loadRadius },
+				{ "budgetMB",     lw->budgetMB },
+				{ "heightMinM",   lw->heightMinM },
+				{ "heightScaleM", lw->heightScaleM },
+				{ "textureGroup", lw->textureGroup },
+				{ "textureMeters", lw->textureMeters },
+			};
+		}
+		// A heightmap stamped onto the tile landscape (LandscapeStamps.h); its place is the entity's transform.
+		if (auto* ls = registry.try_get<LandscapeStampComponent>(entity))
+		{
+			comps["landscapeStamp"] = {
+				{ "enabled", ls->enabled },
+				{ "texture", uuidToJson(ls->textureId) },
+				{ "heightmapFile", ls->heightmapFile },
+				{ "channel", ls->channel },
+				{ "sizeM",   ls->sizeM },
+				{ "heightM", ls->heightM },
+				{ "falloff", ls->falloff },
 			};
 		}
 		// Where the entity lives in a split scene (the splitter reads it, CellSplit.cpp).
@@ -1642,6 +1672,34 @@ namespace
 			ss.saveVisibility = c.value("saveVisibility", ss.saveVisibility);
 			ss.saveScriptVars = c.value("saveScriptVars", ss.saveScriptVars);
 			registry.emplace_or_replace<SaveStateComponent>(entity, ss);
+		}
+		if (comps.contains("landscapeWorld"))
+		{
+			const json& c = comps["landscapeWorld"];
+			LandscapeWorldComponent lw;
+			lw.enabled      = c.value("enabled",      lw.enabled);
+			lw.pack         = c.value("pack",         lw.pack);
+			lw.streaming    = c.value("streaming",    lw.streaming);   // absent in a scene from before the switch: streamed, as it was
+			lw.loadRadius   = c.value("loadRadius",   lw.loadRadius);
+			lw.budgetMB     = c.value("budgetMB",     lw.budgetMB);
+			lw.heightMinM   = c.value("heightMinM",   lw.heightMinM);
+			lw.heightScaleM = c.value("heightScaleM", lw.heightScaleM);
+			lw.textureGroup = c.value("textureGroup", lw.textureGroup);
+			lw.textureMeters = c.value("textureMeters", lw.textureMeters);
+			registry.emplace_or_replace<LandscapeWorldComponent>(entity, lw);
+		}
+		if (comps.contains("landscapeStamp"))
+		{
+			const json& c = comps["landscapeStamp"];
+			LandscapeStampComponent ls;
+			ls.enabled   = c.value("enabled", ls.enabled);
+			ls.textureId = jsonToUuid(c.value("texture", json()));
+			ls.heightmapFile = c.value("heightmapFile", ls.heightmapFile);   // absent in a scene from before the file field
+			ls.channel   = c.value("channel", ls.channel);   // absent: red, what a stamp read before the choice existed
+			ls.sizeM     = c.value("sizeM",   ls.sizeM);
+			ls.heightM   = c.value("heightM", ls.heightM);
+			ls.falloff   = c.value("falloff", ls.falloff);
+			registry.emplace_or_replace<LandscapeStampComponent>(entity, ls);
 		}
 		if (comps.contains("streaming"))
 		{
@@ -3107,6 +3165,8 @@ namespace
 	X("joint",               JointComponent) \
 	X("characterController", CharacterControllerComponent) \
 	X("saveState",           SaveStateComponent) 	X("streaming",           StreamingComponent) \
+	X("landscapeWorld",      LandscapeWorldComponent) \
+	X("landscapeStamp",      LandscapeStampComponent) \
 	X("prefab",              PrefabInstanceComponent) \
 	X("script",              ScriptComponent) \
 	X("environment",         EnvironmentComponent) \
@@ -3376,6 +3436,8 @@ bool SceneSerializer::isKnownComponentKey(const std::string& key)
 		"network",
 		"decal", "environment", "foliage", "joint", "light", "lod", "material", "mesh",
 		"navagent", "navmesh", "particlesystem",
+		// The world-scale tile landscape (LandscapeWorldComponent, Thema 326).
+		"landscapeWorld", "landscapeStamp",
 		// Which prefab an entity was instantiated from (PrefabInstanceComponent).
 		"prefab",
 		"propertyanimator",

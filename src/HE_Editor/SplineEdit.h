@@ -89,6 +89,11 @@ namespace SplineEdit
 	// A new, selectable entity "Spline" at `worldPos` with one control point at
 	// its own origin. entt::null if the world is gone.
 	Entity create(HorizonWorld& world, EditorUndo* undo, const glm::vec3& worldPos);
+	// A whole open spline at once, for a tool that already has the line (the
+	// Mountain generator's paths): an entity `name` at the first point, the
+	// points relative to it. Takes NO undo snapshot: the tool that made the
+	// line took one for its whole step. entt::null with fewer than two points.
+	Entity createFromPoints(HorizonWorld& world, const std::vector<glm::vec3>& worldPoints, const char* name);
 	// Append a point at the end; returns its index, -1 if the entity has no spline.
 	int    appendPoint(HorizonWorld& world, Entity e, EditorUndo* undo, const glm::vec3& worldPos);
 	// Insert at `index` (0..count; count appends), `local` in the spline's space.

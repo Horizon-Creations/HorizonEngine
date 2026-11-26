@@ -42,6 +42,10 @@ void FillMaterialLightWindow(const RenderWorld&               rw,
                              MaterialShaderLibrary::Lighting& out,
                              bool                             localShadowsActive)
 {
+	// The floating origin, for the materials' absolute World Position. Here because every backend's every fill calls this.
+	out.worldOrigin[0] = static_cast<float>(rw.worldOrigin.x);
+	out.worldOrigin[1] = static_cast<float>(rw.worldOrigin.y);
+	out.worldOrigin[2] = static_cast<float>(rw.worldOrigin.z);
 	const int lc = std::min(static_cast<int>(rw.lights.size()), kMaxLightWindow);
 	for (int li = 0; li < lc; ++li)
 	{

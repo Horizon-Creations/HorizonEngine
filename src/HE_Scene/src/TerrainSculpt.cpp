@@ -192,6 +192,53 @@ void ensureHeights(TerrainComponent& tc)
     tc.sculptHeights = computeTerrainHeightField(tc);
 }
 
+Result ramp(TerrainComponent& tc, float ax, float az, float heightA, float bx, float bz, float heightB,
+            float radius, float falloff, float blend)
+{
+    Result r;
+    if (tc.sizeX <= 0.0f || tc.sizeZ <= 0.0f) return r;
+    radius  = std::max(0.0f, radius);
+    falloff = std::max(0.0f, falloff);
+    const float outer = radius + falloff;
+    const float abx = bx - ax, abz = bz - az, len2 = abx * abx + abz * abz;
+    if (outer <= 0.0f || len2 < 1e-6f) return r;
+
+    ensureHeights(tc);
+    const uint32_t res = tc.resolution;
+    if (tc.sculptHeights.size() != static_cast<size_t>(res) * res) return r;
+    const float halfX = tc.sizeX * 0.5f, halfZ = tc.sizeZ * 0.5f;
+    const float stepX = tc.sizeX / static_cast<float>(res - 1), stepZ = tc.sizeZ / static_cast<float>(res - 1);
+    const float mnX = std::min(ax, bx) - outer, mxX = std::max(ax, bx) + outer;
+    const float mnZ = std::min(az, bz) - outer, mxZ = std::max(az, bz) + outer;
+    const int x0 = std::max(0, static_cast<int>(std::floor((mnX + halfX) / stepX)));
+    const int x1 = std::min<int>(static_cast<int>(res) - 1, static_cast<int>(std::ceil((mxX + halfX) / stepX)));
+    const int z0 = std::max(0, static_cast<int>(std::floor((mnZ + halfZ) / stepZ)));
+    const int z1 = std::min<int>(static_cast<int>(res) - 1, static_cast<int>(std::ceil((mxZ + halfZ) / stepZ)));
+    r.ok = true;
+    blend = std::clamp(blend, 0.0f, 1.0f);
+    bool first = true;
+    for (int zi = z0; zi <= z1; ++zi)
+        for (int xi = x0; xi <= x1; ++xi)
+        {
+            const float px = -halfX + static_cast<float>(xi) * stepX, pz = -halfZ + static_cast<float>(zi) * stepZ;
+            const float t = std::clamp(((px - ax) * abx + (pz - az) * abz) / len2, 0.0f, 1.0f);
+            const float dx = px - (ax + t * abx), dz = pz - (az + t * abz);
+            const float dist = std::sqrt(dx * dx + dz * dz);   // to the segment
+            if (dist >= outer) continue;
+            const float w = dist <= radius ? 1.0f : 1.0f - (dist - radius) / falloff;
+            float& h = tc.sculptHeights[static_cast<size_t>(zi) * res + static_cast<size_t>(xi)];
+            const float before = h;
+            h += w * blend * (heightA + (heightB - heightA) * t - h);
+            if (h != before) ++r.changed;
+            r.minHeight = first ? h : std::min(r.minHeight, h);
+            r.maxHeight = first ? h : std::max(r.maxHeight, h);
+            first = false;
+        }
+    if (r.changed > 0) markRegionDirty(tc, mnX, mnZ, mxX, mxZ);
+    r.centerHeight = terrainHeightAt(tc, bx, bz);
+    return r;
+}
+
 Result apply(TerrainComponent& tc, float localX, float localZ, Op op,
              float radius, float falloff, float amount)
 {

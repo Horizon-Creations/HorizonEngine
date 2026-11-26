@@ -9,6 +9,9 @@
 #include <HorizonRendering/ParticleShaderTemplates.h>
 #include <HorizonRendering/GiCasterRange.h>
 #include <HorizonRendering/GiHeightfield.h>
+#include <HorizonRendering/RvtTilePatches.h>
+#include "Backends/Vulkan/VulkanLandscapeLayout.h"   // HE::vkls::velocityClip, shared by every backend's ground
+#include <HorizonRendering/TemporalAA.h>              // HE::taaPrevViewProjAt
 #include <HorizonRendering/SsaoKernel.h>     // shared SSAO kernel + rotation noise
 #include <HorizonRendering/GIJitter.h>       // GI: wrapped cone-jitter frame index (all backends)
 #include <HorizonRendering/GIReflectionTier.h> // GI reflections: rays / resolution / blur per tier (all backends)
@@ -2038,11 +2041,12 @@ float hfBilinear(vec2 tp)
 	return mix(mix(h00, h10, w.x), mix(h01, h11, w.x), w.y);
 }
 
-bool hfAnyHit(vec3 o, vec3 d, float tMin, float tMax)
+// Shared march: advances along the ray through the mip pyramid and stops at the FIRST (closest)
+// texel where it crosses the surface. hfAnyHit only needs the bool; hfClosestHit (the reflection
+// kernel's landscape branch, Thema 326 step 16) also wants where, which this march already knows
+// the moment it finds a crossing — it just used to throw the position away.
+bool hfMarch(vec3 oL, vec3 dL, float tMin, float tMax, out float outT, out vec2 outTp)
 {
-	if (uHfParams.w < 0.5) return false;
-	vec3 oL = (uHfWorldToLocal * vec4(o, 1.0)).xyz;
-	vec3 dL = mat3(uHfWorldToLocal) * d;
 	vec2 texPerLocal = vec2(uHfParams.x, uHfParams.y) * uHfParams.z;      // local XZ -> texels
 	vec2 tp0 = (oL.xz * vec2(uHfParams.x, uHfParams.y) + 0.5) * uHfParams.z;
 	vec2 tpd = dL.xz * texPerLocal;                                          // texels per unit t
@@ -2065,11 +2069,13 @@ bool hfAnyHit(vec3 o, vec3 d, float tMin, float tMax)
 	if (t0 >= t1) return false;
 
 	// The receiver sits on a (possibly coarser) LOD mesh that can lie a little under the exact field:
-	// lift the start so a point on the ground is not its own occluder.
+	// lift the start so a point on the ground is not its own occluder. Only as far as a LOD mesh can be
+	// off, though: a start that is metres under the field is not ON the ground but below it, and the
+	// ground is its occluder.
 	vec2  tpS  = tp0 + tpd * t0;
 	float hS   = hfBilinear(tpS);
 	float yS   = oL.y + dL.y * t0;
-	float lift = max(0.0, hS + 0.15 - yS);
+	float lift = (hS - yS) < 8.0 ? max(0.0, hS + 0.15 - yS) : 0.0;
 
 	int   topLvl = int(uHfParams2.x);
 	int   lvl    = min(2, topLvl);
@@ -2097,11 +2103,43 @@ bool hfAnyHit(vec3 o, vec3 d, float tMin, float tMax)
 		}
 		else
 		{
-			if (y < hfBilinear(tp) - 0.02) return true;
+			if (y < hfBilinear(tp) - 0.02) { outT = t; outTp = tp; return true; }
 			t += 0.5 / texLen;
 		}
 	}
 	return false;
+}
+
+bool hfAnyHit(vec3 o, vec3 d, float tMin, float tMax)
+{
+	if (uHfParams.w < 0.5) return false;
+	vec3 oL = (uHfWorldToLocal * vec4(o, 1.0)).xyz;
+	vec3 dL = mat3(uHfWorldToLocal) * d;
+	float outT; vec2 outTp;
+	return hfMarch(oL, dL, tMin, tMax, outT, outTp);
+}
+
+// Closest-hit variant for the reflection kernel (Thema 326 step 16): the same march (the first
+// crossing it finds already IS the closest one — a height field has no overhangs), plus a normal
+// from central differences of the field around the hit texel. uHfWorldToLocal here is a pure
+// translation (LandscapeGi's clipmap window — RenderExtractor::extractLandscapeGiHeightfield), so
+// the LOCAL normal already equals the WORLD normal; a rotated/scaled field would need
+// transpose(inverse(mat3(uHfWorldToLocal))) instead, and the caller would need to transform the hit
+// position back rather than using `origin + dir * outT` directly.
+bool hfClosestHit(vec3 o, vec3 d, float tMin, float tMax, out float outT, out vec3 outNormal)
+{
+	if (uHfParams.w < 0.5) return false;
+	vec3 oL = (uHfWorldToLocal * vec4(o, 1.0)).xyz;
+	vec3 dL = mat3(uHfWorldToLocal) * d;
+	vec2 tp;
+	if (!hfMarch(oL, dL, tMin, tMax, outT, tp)) return false;
+	vec2 texPerLocal = vec2(uHfParams.x, uHfParams.y) * uHfParams.z;
+	float hx1 = hfBilinear(tp + vec2(1.0, 0.0)), hx0 = hfBilinear(tp - vec2(1.0, 0.0));
+	float hz1 = hfBilinear(tp + vec2(0.0, 1.0)), hz0 = hfBilinear(tp - vec2(0.0, 1.0));
+	float dHdx = (hx1 - hx0) * 0.5 * texPerLocal.x;
+	float dHdz = (hz1 - hz0) * 0.5 * texPerLocal.y;
+	outNormal = normalize(vec3(-dHdx, 1.0, -dHdz));
+	return true;
 }
 #undef GI_OCCLUDED
 #define GI_OCCLUDED(o, d, tmin, tmax) (giSceneAnyHit(o, d, tmin, tmax) || hfAnyHit(o, d, tmin, tmax))
@@ -2723,7 +2761,19 @@ void main()
 
 	float dist; int tri;
 	int hitInst = giSceneClosestHitTri(origin, Rs, 0.02, max(uReflParams.x, 1.0), dist, tri);
-	if (hitInst < 0)
+
+	// Tile landscape (Thema 326 step 16): ray-marched against the GI height clipmap instead of a
+	// BVH/BLAS instance — LandscapeRuntime draws tile patches through SetLandscapeProvider, not
+	// RenderWorld.objects, so none exists. uHfParams.w is only set for THIS march when the active
+	// heightfield is the tile clipmap (OpenGLRenderer::RenderGIReflection gates it on
+	// m_giHfKey == kLandscapeGiHeightfieldKey), never for a single TerrainComponent's shadow-only
+	// field, so a scene with the old single terrain traces exactly as before. Capped to the BVH
+	// hit's distance (or the max ray distance on a BVH miss) so whichever candidate is nearer wins
+	// — a mesh standing in front of the landscape still occludes it correctly.
+	float hfT; vec3 hfN;
+	bool hfHit = hfClosestHit(origin, Rs, 0.02, (hitInst >= 0) ? dist : max(uReflParams.x, 1.0), hfT, hfN);
+
+	if (hitInst < 0 && !hfHit)
 	{
 		// Miss → the sky. With the bake it is a full sample (the receiver's
 		// confidence, like a hit at close range) carrying the real sky, so the
@@ -2737,45 +2787,61 @@ void main()
 		continue;
 	}
 
-	vec3 hitPos = origin + Rs * dist;
-	vec3 hitN   = giHitNormal(hitInst, tri, Rs);
-	vec3 albedo = giInsts[hitInst].baseColor.rgb;
-	// Landscape hit: the paint at THIS point instead of one flat colour for the
-	// whole terrain. A landscape is a heightfield over an axis-aligned local
-	// rect whose mesh UVs are linear in it, so the hit POSITION recovers the UV
-	// — no per-vertex UV in the BVH. Mirrors the Metal kernels (GiLandscape.h).
-	int li = giInsts[hitInst].offsets.z;
-	// Auto landscape (cfg.w < 0): no paint, its colour follows the hit's slope
-	// and height (hitN faces the ray).
-	if (li >= 0 && li < uGiLandCount && li < 4 && giLands[li].cfg.w < -0.5)
-		albedo = giAutoLandAlbedo(li, hitPos, hitN);
-	else if (li >= 0 && li < uGiLandCount && li < 4 && int(giLands[li].cfg.w) > 0)
+	vec3 hitPos, hitN, albedo, emissive;
+	if (hfHit)
 	{
-		vec3 lp = (giLands[li].worldToLocal * vec4(hitPos, 1.0)).xyz;
-		vec2 luv = (vec2(lp.x, lp.z) * giLands[li].cfg.xy + 0.5) * giLands[li].cfg.z;
-		// Dynamic indexing of a sampler array is not allowed below GL 4.0 rules
-		// for non-uniform indices, so branch on the (uniform-per-instance) index.
-		vec4 lw = (li == 0) ? texture(uLandWeights[0], luv)
-		        : (li == 1) ? texture(uLandWeights[1], luv)
-		        : (li == 2) ? texture(uLandWeights[2], luv)
-		                    : texture(uLandWeights[3], luv);
-		vec3 lsum = vec3(0.0);
-		float wsum = 0.0;
-		int layers = int(giLands[li].cfg.w);
-		for (int k = 0; k < layers && k < 4; ++k)
+		dist   = hfT;
+		hitPos = origin + Rs * hfT;
+		hitN   = hfN; // uHfWorldToLocal is translation-only here, so the local normal IS the world one
+		// shortcut: flat placeholder colour, no painted weights or auto-material slices yet (needs a
+		// weight clipmap in LandscapeGi, or resolving LandscapeWorldComponent::textureGroup's
+		// AutoLandscapeGroup array) — see docs/landscape-reflections-design-2026-11-19.md §5.
+		albedo   = vec3(0.3, 0.32, 0.26);
+		emissive = vec3(0.0);
+	}
+	else
+	{
+		hitPos = origin + Rs * dist;
+		hitN   = giHitNormal(hitInst, tri, Rs);
+		albedo = giInsts[hitInst].baseColor.rgb;
+		// Landscape hit: the paint at THIS point instead of one flat colour for the
+		// whole terrain. A landscape is a heightfield over an axis-aligned local
+		// rect whose mesh UVs are linear in it, so the hit POSITION recovers the UV
+		// — no per-vertex UV in the BVH. Mirrors the Metal kernels (GiLandscape.h).
+		int li = giInsts[hitInst].offsets.z;
+		// Auto landscape (cfg.w < 0): no paint, its colour follows the hit's slope
+		// and height (hitN faces the ray).
+		if (li >= 0 && li < uGiLandCount && li < 4 && giLands[li].cfg.w < -0.5)
+			albedo = giAutoLandAlbedo(li, hitPos, hitN);
+		else if (li >= 0 && li < uGiLandCount && li < 4 && int(giLands[li].cfg.w) > 0)
 		{
-			if (lw[k] <= 0.0) continue;
-			lsum += giLands[li].layer[k].rgb * lw[k];
-			wsum += lw[k];
+			vec3 lp = (giLands[li].worldToLocal * vec4(hitPos, 1.0)).xyz;
+			vec2 luv = (vec2(lp.x, lp.z) * giLands[li].cfg.xy + 0.5) * giLands[li].cfg.z;
+			// Dynamic indexing of a sampler array is not allowed below GL 4.0 rules
+			// for non-uniform indices, so branch on the (uniform-per-instance) index.
+			vec4 lw = (li == 0) ? texture(uLandWeights[0], luv)
+			        : (li == 1) ? texture(uLandWeights[1], luv)
+			        : (li == 2) ? texture(uLandWeights[2], luv)
+			                    : texture(uLandWeights[3], luv);
+			vec3 lsum = vec3(0.0);
+			float wsum = 0.0;
+			int layers = int(giLands[li].cfg.w);
+			for (int k = 0; k < layers && k < 4; ++k)
+			{
+				if (lw[k] <= 0.0) continue;
+				lsum += giLands[li].layer[k].rgb * lw[k];
+				wsum += lw[k];
+			}
+			albedo = (wsum > 1e-4) ? lsum / wsum : giLands[li].layer[0].rgb;
 		}
-		albedo = (wsum > 1e-4) ? lsum / wsum : giLands[li].layer[0].rgb;
+		emissive = giInsts[hitInst].emissive.rgb;
 	}
 
 	// ── Hit shading: one bounce, then the probe field ────────────────────────
 	// Emissive first (a glowing object is visible in a mirror even unlit); the
 	// probe field deliberately does NOT carry emissive, so this is the only
 	// place it enters.
-	vec3 radiance = giInsts[hitInst].emissive.rgb;
+	vec3 radiance = emissive;
 	float ndl = max(dot(hitN, uSunDir.xyz), 0.0);
 	// Skip the occlusion ray when the sun term is black anyway (night) — the
 	// visibility result would be multiplied by zero.
@@ -3505,6 +3571,7 @@ void OpenGLRenderer::Initialize(HE::Window* window)
 		// MaterialShaderLibrary::kGlFogVolumeTextureUnit).
 		GLint units = 0;
 		glGetIntegerv(GL_MAX_TEXTURE_IMAGE_UNITS, &units);
+		m_maxFragmentSamplers = units;   // also decides Capabilities::landscapeMaterial
 		m_rvtSupported = units >= 26;
 		if (!m_rvtSupported)
 			HE_LOG_INFO(RHI, "OpenGLRenderer: Runtime Virtual Textures off: %d fragment texture units, the lookup needs 26", static_cast<int>(units));
@@ -3939,6 +4006,65 @@ void OpenGLRenderer::UploadClusterLists(const HE::ClusterLightBuild& build)
 	glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
 }
 
+// A material program's uniform-block bindings and sampler units (the lambda inside GetOrBuildMaterialProgram, which is where the
+// list lives): set there, so the landscape's material program below is set up by the very same code.
+static void (*s_setupMaterialProgram)(GLuint) = nullptr;
+
+// The program that draws the tile landscape's patches with a material: the landscape's vertex stage and the material's lit fragment
+// with its layer weights from the tile atlas (MaterialShaderLibrary), GLSL 4.10. 0, remembered: no shader, or it does not build or
+// link here (a macOS fragment stage takes sixteen samplers) - the landscape then keeps its fixed blend.
+// `gbuffer`: the material's G-buffer tail (attributes, lit by the deferred resolve) instead of its lit fragment.
+unsigned int OpenGLRenderer::GetOrBuildLandscapeMaterialProgram(const HE::UUID& materialId, bool gbuffer)
+{
+#if defined(HE_HAVE_SHADERC)
+	uint64_t key = 0; std::string frag, vertBody;
+	if (!m_contentManager || !(gbuffer ? resolveMaterialShaderGB(materialId, key, frag, vertBody) : resolveMaterialShader(materialId, key, frag, vertBody)))
+		return 0;
+	const uint64_t progKey = key ^ (gbuffer ? 0x7A11E56B0FFE2000ULL : 0x7A11E51A2D5C0610ULL);
+	if (auto it = m_materialPrograms.find(progKey); it != m_materialPrograms.end()) return it->second;
+	// The material's own program first: it is what sets s_setupMaterialProgram, and a material the mesh path cannot build is not
+	// one the landscape can.
+	if (!GetOrBuildMaterialProgram(key, frag, vertBody, nullptr, gbuffer) || !s_setupMaterialProgram) { m_materialPrograms[progKey] = 0; return 0; }
+	using Backend = HE::MaterialShaderLibrary::Backend;
+	const auto& v = m_matShaderLib.landscapeVertex(Backend::GLSL410);
+	const auto& f = m_matShaderLib.landscapeFragment(progKey, frag, Backend::GLSL410, /*clustered=*/false);
+	GLuint prog = 0;
+	std::string why = v.log + f.log;
+	if (v.ok && f.ok)
+	{
+		try
+		{
+			const GLuint vs = CompileStage(GL_VERTEX_SHADER, v.source.c_str());
+			const GLuint fs = CompileStage(GL_FRAGMENT_SHADER, f.source.c_str());
+			prog = glCreateProgram();
+			glAttachShader(prog, vs);
+			glAttachShader(prog, fs);
+			glLinkProgram(prog);
+			glDeleteShader(vs);
+			glDeleteShader(fs);
+			GLint linked = 0;
+			glGetProgramiv(prog, GL_LINK_STATUS, &linked);
+			if (!linked)
+			{
+				char log[1024] = {};
+				glGetProgramInfoLog(prog, sizeof(log) - 1, nullptr, log);
+				why = log;
+				glDeleteProgram(prog);
+				prog = 0;
+			}
+		}
+		catch (const std::exception& e) { why = e.what(); prog = 0; }
+	}
+	if (prog) s_setupMaterialProgram(prog);
+	else HE_LOG_WARN(RHI, "OpenGLRenderer: the landscape keeps its fixed blend, its material's variant did not build: %s", why.c_str());
+	m_materialPrograms[progKey] = prog;
+	return prog;
+#else
+	(void)materialId;
+	return 0;
+#endif
+}
+
 unsigned int OpenGLRenderer::GetOrBuildMaterialProgram(uint64_t key, const std::string& fragGlsl,
                                                        const std::string& vertBody,
                                                        const MaterialShaderVariant* precompiled,
@@ -4114,6 +4240,7 @@ unsigned int OpenGLRenderer::GetOrBuildMaterialProgram(uint64_t key, const std::
 		if (GLint l = glGetUniformLocation(prog, "heRvtSurface"); l >= 0) glUniform1i(l, 25);
 		glUseProgram(0);
 	};
+	s_setupMaterialProgram = setupProgram;   // the landscape's material program takes the same blocks and units (GetOrBuildLandscapeMaterialProgram)
 
 	// vertSrc/fragSrc → linked program, 0 on failure (logged).
 	auto linkSources = [&]() -> unsigned int {
@@ -5089,6 +5216,12 @@ void OpenGLRenderer::RenderVelocity(int pw, int ph, const glm::mat4& viewProjCle
 	glDepthFunc(GL_LEQUAL);
 	glDepthMask(GL_FALSE);
 	glDisable(GL_BLEND);
+	// Last frame's matrix for what this frame places (the ground, a cluster's plants, a first-seen object): across a
+	// floating-origin hop it takes the origin's step (HE::taaPrevViewProjAt). A remembered model keeps m_taaPrevViewProj.
+	const glm::dvec3 originNow = m_renderWorld.worldOrigin;
+	const glm::mat4 prevHere = m_taaPrevOriginKnown ? HE::taaPrevViewProjAt(m_taaPrevViewProj, originNow, m_taaPrevOrigin) : m_taaPrevViewProj;
+	// The tile landscape's ground first: the pass writes no depth, so what stands on the ground overwrites it.
+	DrawLandscapeVelocity(viewProjJit, viewProjClean, prevHere);
 	glUseProgram(m_taaVelocityProgram);
 
 	m_taaCurTransforms.clear();
@@ -5109,7 +5242,7 @@ void OpenGLRenderer::RenderVelocity(int pw, int ph, const glm::mat4& viewProjCle
 			{
 				glUniformMatrix4fv(m_uTaaVelMvpJitter, 1, GL_FALSE, glm::value_ptr(viewProjJit * model));
 				glUniformMatrix4fv(m_uTaaVelMvpNow,    1, GL_FALSE, glm::value_ptr(viewProjClean * model));
-				glUniformMatrix4fv(m_uTaaVelMvpPrev,   1, GL_FALSE, glm::value_ptr(m_taaPrevViewProj * model));
+				glUniformMatrix4fv(m_uTaaVelMvpPrev,   1, GL_FALSE, glm::value_ptr(prevHere * model));
 				glDrawElements(GL_TRIANGLES, mesh->indexCount, GL_UNSIGNED_INT, nullptr);
 			});
 			continue;
@@ -5119,12 +5252,13 @@ void OpenGLRenderer::RenderVelocity(int pw, int ph, const glm::mat4& viewProjCle
 		// position is where it is now. Anything else invents a streak out of
 		// nowhere on the frame something spawns.
 		const auto it = m_taaPrevTransforms.find(obj.entityId);
-		const glm::mat4 prevModel = (it != m_taaPrevTransforms.end()) ? it->second : obj.transform;
+		const bool known = it != m_taaPrevTransforms.end();
 		m_taaCurTransforms[obj.entityId] = obj.transform;
 
 		glUniformMatrix4fv(m_uTaaVelMvpJitter, 1, GL_FALSE, glm::value_ptr(viewProjJit * obj.transform));
 		glUniformMatrix4fv(m_uTaaVelMvpNow,    1, GL_FALSE, glm::value_ptr(viewProjClean * obj.transform));
-		glUniformMatrix4fv(m_uTaaVelMvpPrev,   1, GL_FALSE, glm::value_ptr(m_taaPrevViewProj * prevModel));
+		glUniformMatrix4fv(m_uTaaVelMvpPrev,   1, GL_FALSE,
+		                   glm::value_ptr(known ? m_taaPrevViewProj * it->second : prevHere * obj.transform));
 		glBindVertexArray(mesh->vao);
 		glDrawElements(GL_TRIANGLES, mesh->indexCount, GL_UNSIGNED_INT, nullptr);
 	}
@@ -5133,6 +5267,8 @@ void OpenGLRenderer::RenderVelocity(int pw, int ph, const glm::mat4& viewProjCle
 	// not at some "frame end" further out, so a frame is never compared
 	// against itself.
 	m_taaPrevViewProj = viewProjClean;
+	m_taaPrevOrigin = originNow;
+	m_taaPrevOriginKnown = true;
 	m_taaPrevTransforms.swap(m_taaCurTransforms);
 
 	// Back to what the opaque pass had set, for the sky + transparent tail.
@@ -6685,7 +6821,7 @@ void OpenGLRenderer::CreateGIPipelines()
 		const std::string header = "#version 430 core\n";
 		m_giShadowCSProgram = linkCompute(header + kGiTraversalGLSL + kGiHeightfieldGLSL + kGiShadowCS);
 		m_giProbeCSProgram  = linkCompute(header + kGiTraversalGLSL + kGiProbeCS);
-		m_giReflCSProgram   = linkCompute(header + kGiTraversalGLSL + kGiReflCS);
+		m_giReflCSProgram   = linkCompute(header + kGiTraversalGLSL + kGiHeightfieldGLSL + kGiReflCS);
 		HE_LOG_INFO(RHI, "%s", "OpenGLRenderer: GI pipelines built (compute ray tracing active)");
 	}
 	catch (const std::exception& e)
@@ -7061,6 +7197,11 @@ bool OpenGLRenderer::RenderGIPrepass(const CommandBuffer& cmds, int width, int h
 				drawOne(dc.transform);
 		}
 	}
+	// The tile landscape's ground (Thema 326): its pixels get a position and a normal, so the shadow rays start from them
+	// and the ground takes the ray-traced sun shadow like a mesh.
+	DrawLandscapeGiGBuf(viewProj);
+	glBindVertexArray(0);
+	glUseProgram(0);
 	return true;
 }
 
@@ -7082,7 +7223,10 @@ unsigned int OpenGLRenderer::RenderGIShadow(int width, int height, const glm::ma
 	const bool sepOn = m_giShadowSep && m_giShadowInstanceSSBO;
 	// Test hook (scripts/he_gi_hf_check.py negative control): chunks stay out of the list but the field is not marched.
 	static const bool s_hfMute = [] { const char* v = std::getenv("HE_GI_HEIGHTFIELD_MUTE"); return v && v[0] == '1'; }();
-	const bool hfOn  = sepOn && m_giHfActive && m_giHfTex && !m_renderWorld.heightfields.empty();
+	// The tile landscape's clipmap has no chunk meshes to leave out, so its two lists are the same one and `sepOn` is false:
+	// with `sepOn` alone in this condition the clipmap never occluded anything.
+	const bool hfTile = !m_renderWorld.heightfields.empty() && m_renderWorld.heightfields[0].key == kLandscapeGiHeightfieldKey;
+	const bool hfOn  = (sepOn || hfTile) && m_giHfActive && m_giHfTex && !m_renderWorld.heightfields.empty();
 	glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, sepOn ? m_giShadowInstanceSSBO : m_giInstanceSSBO);
 	glActiveTexture(GL_TEXTURE0);
 	glBindTexture(GL_TEXTURE_2D, m_giGBufPosTex);
@@ -7342,6 +7486,24 @@ unsigned int OpenGLRenderer::RenderGIReflections(int width, int height,
 	glBindTexture(GL_TEXTURE_CUBE_MAP, m_skyReflValid ? m_skyReflCube : m_skyEnvCube);
 	glUniform1i(loc("uSkyRefl"), 9);
 	glUniform1f(loc("uSkyReflValid"), m_skyReflValid ? 1.0f : 0.0f);
+	// Tile landscape's GI height clipmap (Thema 326 step 16), unit 10 — free in this program (0-4
+	// g-buffer/DDGI, 5-8 land weightmaps, 9 sky cube). Gated on key, not just m_giHfActive: a single
+	// TerrainComponent's shadow-only field must never feed this branch (it already has a real BVH
+	// instance and the paint-table path above).
+	{
+		const bool hfOn = m_giHfActive && m_giHfTex && !m_renderWorld.heightfields.empty()
+		                  && m_giHfKey == kLandscapeGiHeightfieldKey;
+		const GiHeightfield* h0 = m_renderWorld.heightfields.empty() ? nullptr : &m_renderWorld.heightfields[0];
+		glActiveTexture(GL_TEXTURE10);
+		glBindTexture(GL_TEXTURE_2D, hfOn ? m_giHfTex : 0);
+		glUniform1i(loc("uHf"), 10);
+		glUniformMatrix4fv(loc("uHfWorldToLocal"), 1, GL_FALSE,
+		                   glm::value_ptr(h0 ? h0->worldToLocal : glm::mat4(1.0f)));
+		glUniform4f(loc("uHfParams"),
+		            h0 ? 1.0f / std::max(h0->size.x, 1e-4f) : 1.0f, h0 ? 1.0f / std::max(h0->size.y, 1e-4f) : 1.0f,
+		            h0 ? float(h0->res - 1) : 1.0f, hfOn ? 1.0f : 0.0f);
+		glUniform4f(loc("uHfParams2"), float(m_giHfTopLevel), m_giHfMaxH, 0.0f, 512.0f);
+	}
 	glActiveTexture(GL_TEXTURE0);
 	glDispatchCompute(static_cast<GLuint>((width + 7) / 8), static_cast<GLuint>((height + 7) / 8), 1);
 	glMemoryBarrier(GL_TEXTURE_FETCH_BARRIER_BIT);
@@ -7922,6 +8084,12 @@ unsigned int OpenGLRenderer::RenderSSAO(const CommandBuffer& cmds, int pw, int p
 			glDrawElements(GL_TRIANGLES, range.count, GL_UNSIGNED_INT, range.offset);
 		}
 	}
+	// The tile landscape's ground (Thema 326), into the position-only target or the three-target reflection pre-pass (its
+	// fragment writes all three; one draw buffer drops two). The mesh loop's program and vertex array are bound again by
+	// whatever draws next.
+	DrawLandscapeViewPos(viewProj, view);
+	glBindVertexArray(0);
+	glUseProgram(0);
 	// Back to a single draw buffer so nothing downstream inherits the MRT state.
 	if (reflMrt) glDrawBuffers(1, mrt);
 	}
@@ -9332,7 +9500,7 @@ bool OpenGLRenderer::EnsureDeferredPipelines()
 		glBufferData(GL_UNIFORM_BUFFER,
 			static_cast<GLsizeiptr>(sizeof(HE::MaterialShaderLibrary::ResolveUniforms)),
 			nullptr, GL_DYNAMIC_DRAW);
-		glGenBuffers(1, &m_resolveLightUBO);
+		if (!m_resolveLightUBO) glGenBuffers(1, &m_resolveLightUBO);   // the landscape's forward draw may have made it already
 		glBindBuffer(GL_UNIFORM_BUFFER, m_resolveLightUBO);
 		glBufferData(GL_UNIFORM_BUFFER,
 			static_cast<GLsizeiptr>(sizeof(HE::MaterialShaderLibrary::Lighting)),
@@ -11479,6 +11647,8 @@ void OpenGLRenderer::Shutdown()
 	DestroyRvtPool();
 	if (m_rvtPackProgram) { glDeleteProgram(m_rvtPackProgram); m_rvtPackProgram = 0; }
 
+	m_landscape.shutdown();   // its images and program, with the context current
+
 	for (auto& [id, mesh] : m_meshCache)
 	{
 		if (mesh.vao)     glDeleteVertexArrays(1, &mesh.vao);
@@ -11647,6 +11817,12 @@ void OpenGLRenderer::Shutdown()
 	if (m_blackTex)       { glDeleteTextures(1, &m_blackTex);        m_blackTex = 0; }
 	if (m_ssaoPosProgram)  { glDeleteProgram(m_ssaoPosProgram);  m_ssaoPosProgram = 0; }
 	if (m_ssaoPosInstancedProgram) { glDeleteProgram(m_ssaoPosInstancedProgram); m_ssaoPosInstancedProgram = 0; }
+	if (m_landscapePosProgram) { glDeleteProgram(m_landscapePosProgram); m_landscapePosProgram = 0; }
+	m_landscapePosTried = false;
+	if (m_landscapeGiProgram) { glDeleteProgram(m_landscapeGiProgram); m_landscapeGiProgram = 0; }
+	m_landscapeGiTried = false;
+	if (m_landscapeVelProgram) { glDeleteProgram(m_landscapeVelProgram); m_landscapeVelProgram = 0; }
+	m_landscapeVelTried = false;
 	if (m_ssaoProgram)     { glDeleteProgram(m_ssaoProgram);     m_ssaoProgram = 0; }
 	if (m_ssaoBlurProgram) { glDeleteProgram(m_ssaoBlurProgram); m_ssaoBlurProgram = 0; }
 	if (m_debugLineProgram) { glDeleteProgram(m_debugLineProgram); m_debugLineProgram = 0; }
@@ -12332,6 +12508,349 @@ void OpenGLRenderer::BindSceneLighting(const SceneLightingLocs& L, const SceneSh
 // `allowLowResClouds` is false for previews: the quarter-res pre-pass rebinds
 // its own FBO and viewport, which a small offscreen render has no business
 // doing mid-pass.
+// The ground's depth into the depth-only target that is bound (a shadow layer): the provider's patches for THAT matrix, drawn with the
+// landscape's own program. The target has no colour attachment, so only the depth is kept (the fixed blend's fragment stage runs for
+// nothing; a vertex-only program would save it). HE_LANDSCAPE_PASSES=0 leaves the ground out (the witnesses' A/B switch), the tiles
+// the provider hands over are still taken.
+void OpenGLRenderer::DrawLandscapeDepth(const glm::mat4& viewProj)
+{
+	if (!m_landscapeProvider || m_landscapeFailed) return;
+	HE::LandscapeRenderFrame frame;
+	m_landscapeProvider(glm::dmat4(viewProj), /*zeroToOne=*/false, frame);
+	if (!frame.active) return;
+	if (!m_landscape.ready())
+	{
+		std::string err;
+		if (!m_landscape.init(&err))
+		{
+			HE_LOG_WARN(RHI, "OpenGLRenderer: the world-scale landscape is off: %s", err.c_str());
+			m_landscapeFailed = true;
+			return;
+		}
+	}
+	if (const char* v = std::getenv("HE_LANDSCAPE_PASSES"); v && *v == '0') frame.patches.clear();
+	m_landscape.draw(frame, viewProj, OpenGLLandscape::Shading{});
+}
+
+// The ground into the SSAO position pre-pass (forward frames; a deferred one reads the G-buffer's depth): view-space position,
+// a = 1 marks geometry, what the mesh pre-pass writes. The program is the material library's landscape vertex stage (it hands the
+// origin-relative position on as vWorldPos) with a fragment of three lines, drawn through OpenGLLandscape's material path, which
+// finds the landscape's blocks and images by name.
+void OpenGLRenderer::DrawLandscapeViewPos(const glm::mat4& viewProj, const glm::mat4& view)
+{
+#if defined(HE_HAVE_SHADERC)
+	if (!m_landscapeProvider || m_landscapeFailed || !m_landscape.ready()) return;
+	if (!m_landscapePosTried)
+	{
+		m_landscapePosTried = true;
+		const auto& v = m_matShaderLib.landscapeVertex(HE::MaterialShaderLibrary::Backend::GLSL410);
+		static const char* const kFS =
+			"#version 410 core\n"
+			"layout(location = 3) in vec3 vWorldPos;\n"
+			"uniform mat4 uView;\n"
+			"layout(location = 0) out vec4 oViewPos;\n"
+			// Targets 1 and 2 exist in the three-target reflection pre-pass only (screen-space reflections on) and take what
+			// MaterialShaderLibrary's kReflPrepassFS writes for a mesh: the octahedral world normal and the depth. The
+			// position-only pass has one draw buffer and drops them.
+			"layout(location = 1) out vec4 oAttr;\n"
+			"layout(location = 2) out float oNdc;\n"
+			"void main() { vec3 n = normalize(cross(dFdx(vWorldPos), dFdy(vWorldPos))); if (n.y < 0.0) n = -n;\n"
+			"              vec2 p = n.xy * (1.0 / (abs(n.x) + abs(n.y) + abs(n.z)));\n"
+			"              vec2 s = vec2(p.x >= 0.0 ? 1.0 : -1.0, p.y >= 0.0 ? 1.0 : -1.0);\n"
+			"              vec2 o = (n.z <= 0.0) ? ((1.0 - abs(p.yx)) * s) : p;\n"
+			"              oViewPos = vec4((uView * vec4(vWorldPos, 1.0)).xyz, 1.0);\n"
+			"              oAttr = vec4(o * 0.5 + 0.5, 0.0, 0.0); oNdc = gl_FragCoord.z; }\n";
+		if (v.ok)
+		{
+			try
+			{
+				const GLuint vs = CompileStage(GL_VERTEX_SHADER, v.source.c_str());
+				const GLuint fs = CompileStage(GL_FRAGMENT_SHADER, kFS);
+				const GLuint prog = glCreateProgram();
+				glAttachShader(prog, vs);
+				glAttachShader(prog, fs);
+				glLinkProgram(prog);
+				glDeleteShader(vs);
+				glDeleteShader(fs);
+				GLint linked = 0;
+				glGetProgramiv(prog, GL_LINK_STATUS, &linked);
+				if (linked) m_landscapePosProgram = prog;
+				else glDeleteProgram(prog);
+			}
+			catch (const std::exception&) {}
+		}
+		if (!m_landscapePosProgram)
+			HE_LOG_WARN(RHI, "%s", "OpenGLRenderer: the landscape's view-position program did not build, the ground takes no ambient occlusion on a forward frame");
+	}
+	if (!m_landscapePosProgram) return;
+	HE::LandscapeRenderFrame frame;
+	m_landscapeProvider(glm::dmat4(viewProj), /*zeroToOne=*/false, frame);
+	if (!frame.active) return;
+	if (!HE::landscapePassesOn()) frame.patches.clear();   // the uploads are executed either way
+	glUseProgram(m_landscapePosProgram);
+	glUniformMatrix4fv(glGetUniformLocation(m_landscapePosProgram, "uView"), 1, GL_FALSE, glm::value_ptr(view));
+	OpenGLLandscape::Shading sh;
+	sh.materialProgram = m_landscapePosProgram;
+	m_landscape.draw(frame, viewProj, sh);
+#else
+	(void)viewProj; (void)view;
+#endif
+}
+
+// The ground into the GI pre-pass's three targets that are bound: what kGiGBufFS writes for a mesh, the position the shadow
+// rays start from (a = 1), the surface normal (from the position's derivatives, turned up) and a rough, non-metallic surface
+// for the reflection kernel. Built and drawn like DrawLandscapeViewPos.
+void OpenGLRenderer::DrawLandscapeGiGBuf(const glm::mat4& viewProj)
+{
+#if defined(HE_HAVE_SHADERC)
+	if (!m_landscapeProvider || m_landscapeFailed || !m_landscape.ready()) return;
+	if (!m_landscapeGiTried)
+	{
+		m_landscapeGiTried = true;
+		const auto& v = m_matShaderLib.landscapeVertex(HE::MaterialShaderLibrary::Backend::GLSL410);
+		static const char* const kFS =
+			"#version 410 core\n"
+			"layout(location = 3) in vec3 vWorldPos;\n"
+			"layout(location = 0) out vec4 oPos;\n"
+			"layout(location = 1) out vec4 oNorm;\n"
+			"layout(location = 2) out vec4 oMat;\n"
+			"void main() { vec3 n = normalize(cross(dFdx(vWorldPos), dFdy(vWorldPos))); if (n.y < 0.0) n = -n;\n"
+			"              oPos = vec4(vWorldPos, 1.0); oNorm = vec4(n, 0.0); oMat = vec4(1.0, 0.0, 0.0, 1.0); }\n";
+		if (v.ok)
+		{
+			try
+			{
+				const GLuint vs = CompileStage(GL_VERTEX_SHADER, v.source.c_str());
+				const GLuint fs = CompileStage(GL_FRAGMENT_SHADER, kFS);
+				const GLuint prog = glCreateProgram();
+				glAttachShader(prog, vs);
+				glAttachShader(prog, fs);
+				glLinkProgram(prog);
+				glDeleteShader(vs);
+				glDeleteShader(fs);
+				GLint linked = 0;
+				glGetProgramiv(prog, GL_LINK_STATUS, &linked);
+				if (linked) m_landscapeGiProgram = prog;
+				else glDeleteProgram(prog);
+			}
+			catch (const std::exception&) {}
+		}
+		if (!m_landscapeGiProgram)
+			HE_LOG_WARN(RHI, "%s", "OpenGLRenderer: the landscape's GI pre-pass program did not build, the ground takes no ray-traced shadow");
+	}
+	if (!m_landscapeGiProgram) return;
+	HE::LandscapeRenderFrame frame;
+	m_landscapeProvider(glm::dmat4(viewProj), /*zeroToOne=*/false, frame);
+	if (!frame.active) return;
+	if (!HE::landscapePassesOn()) frame.patches.clear();   // the uploads are executed either way
+	OpenGLLandscape::Shading sh;
+	sh.materialProgram = m_landscapeGiProgram;
+	m_landscape.draw(frame, viewProj, sh);
+#else
+	(void)viewProj;
+#endif
+}
+
+// The ground into the TAA velocity target that is bound (RenderVelocity): what kTaaVelocityFS writes for a mesh, uvNow - uvPrev
+// from the two unjittered view-projections. The ground stands still, so this is the camera's own motion. Rasterised with the
+// jittered matrix pulled towards the camera (vkls::velocityClip), tested against the scene's depth, which is not written.
+// Built and drawn like DrawLandscapeViewPos.
+void OpenGLRenderer::DrawLandscapeVelocity(const glm::mat4& viewProjJit, const glm::mat4& viewProjNow, const glm::mat4& viewProjPrev)
+{
+#if defined(HE_HAVE_SHADERC)
+	if (!m_landscapeProvider || m_landscapeFailed || !m_landscape.ready() || !HE::landscapePassesOn()) return;
+	if (!m_landscapeVelTried)
+	{
+		m_landscapeVelTried = true;
+		const auto& v = m_matShaderLib.landscapeVertex(HE::MaterialShaderLibrary::Backend::GLSL410);
+		static const char* const kFS =
+			"#version 410 core\n"
+			"layout(location = 3) in vec3 vWorldPos;\n"
+			"uniform mat4 uNow;\n"
+			"uniform mat4 uPrev;\n"
+			"layout(location = 0) out vec2 oVelocity;\n"
+			"void main() { vec4 p = vec4(vWorldPos, 1.0); vec4 a = uNow * p; vec4 b = uPrev * p;\n"
+			"              oVelocity = (a.xy / max(a.w, 1e-6) - b.xy / max(b.w, 1e-6)) * 0.5; }\n";
+		if (v.ok)
+		{
+			try
+			{
+				const GLuint vs = CompileStage(GL_VERTEX_SHADER, v.source.c_str());
+				const GLuint fs = CompileStage(GL_FRAGMENT_SHADER, kFS);
+				const GLuint prog = glCreateProgram();
+				glAttachShader(prog, vs);
+				glAttachShader(prog, fs);
+				glLinkProgram(prog);
+				glDeleteShader(vs);
+				glDeleteShader(fs);
+				GLint linked = 0;
+				glGetProgramiv(prog, GL_LINK_STATUS, &linked);
+				if (linked) m_landscapeVelProgram = prog;
+				else glDeleteProgram(prog);
+			}
+			catch (const std::exception&) {}
+		}
+		if (!m_landscapeVelProgram)
+			HE_LOG_WARN(RHI, "%s", "OpenGLRenderer: the landscape's velocity program did not build, TAA smears the ground under a moving camera");
+	}
+	if (!m_landscapeVelProgram) return;
+	HE::LandscapeRenderFrame frame;
+	m_landscapeProvider(glm::dmat4(viewProjJit), /*zeroToOne=*/false, frame);
+	if (!frame.active) return;
+	const GLboolean cull = glIsEnabled(GL_CULL_FACE);
+	glUseProgram(m_landscapeVelProgram);
+	glUniformMatrix4fv(glGetUniformLocation(m_landscapeVelProgram, "uNow"), 1, GL_FALSE, glm::value_ptr(viewProjNow));
+	glUniformMatrix4fv(glGetUniformLocation(m_landscapeVelProgram, "uPrev"), 1, GL_FALSE, glm::value_ptr(viewProjPrev));
+	OpenGLLandscape::Shading sh;
+	sh.materialProgram = m_landscapeVelProgram;
+	sh.depthReadOnly = true;
+	m_landscape.draw(frame, HE::vkls::velocityClip(viewProjJit), sh);
+	if (cull) glEnable(GL_CULL_FACE);
+#else
+	(void)viewProjJit; (void)viewProjNow; (void)viewProjPrev;
+#endif
+}
+
+// `gbuffer`: into the G-buffer that is bound, with the material's G-buffer tail, and only then (no fixed blend into a G-buffer).
+// Returns whether the ground was drawn by its material.
+bool OpenGLRenderer::DrawLandscape(const glm::mat4& viewProj, unsigned int csmLightUbo, bool gbuffer)
+{
+	bool csmBound = false;
+	if (!m_landscapeProvider || m_landscapeFailed) return false;
+	HE::LandscapeRenderFrame frame;
+	m_landscapeProvider(glm::dmat4(viewProj), /*zeroToOne=*/false, frame);   // viewProj is origin-relative, in GL clip space (-1..1)
+	if (!frame.active) return false;                                          // no landscape in this scene: nothing is compiled, nothing drawn
+	if (!m_landscape.ready())
+	{
+		std::string err;
+		if (!m_landscape.init(&err))
+		{
+			HE_LOG_WARN(RHI, "OpenGLRenderer: the world-scale landscape is off: %s", err.c_str());
+			m_landscapeFailed = true;
+			return false;
+		}
+	}
+
+	// The sun the lit shaders use: the scene's dominant directional light (colour x intensity), else a neutral one.
+	OpenGLLandscape::Shading sh;
+	sh.sunDir = glm::normalize(m_renderWorld.sunDirection);
+	sh.ambient = m_renderWorld.ambient;
+	for (const LightData& l : m_renderWorld.lights)
+		if (l.type == static_cast<uint8_t>(HE::LightType::Directional)) { sh.sunColor = l.color * l.intensity; break; }
+	if (frame.world && !frame.world->albedoArrayPath.empty())
+	{
+		// The texture group's albedo array (World-UV ground). A missing one resolves to the white array: flat colours then.
+		const unsigned int tex = ResolveGraphTexture(HE::UUID{}, frame.world->albedoArrayPath, /*array=*/true);
+		sh.albedoArray = (tex != 0 && tex != m_whiteArrayTex) ? tex : 0;
+		const auto optional = [&](const std::string& path) -> unsigned int {
+			if (path.empty()) return 0u;
+			const unsigned int t = ResolveGraphTexture(HE::UUID{}, path, /*array=*/true);
+			return (t != 0 && t != m_whiteArrayTex) ? t : 0u;
+		};
+		sh.normalArray = optional(frame.world->normalArrayPath);
+		sh.maskArray = optional(frame.world->maskArrayPath);
+	}
+	// The ground's material, when it has a shader and its landscape program links: bound like a forward draw of that material (its
+	// parameters, the graph's textures, the virtual texture; the frame's lighting block and shadow, sky and occlusion units are
+	// the pass's already), the landscape adds its own blocks and images. Else the fixed blend.
+	// A virtual texture page of meshes: the ground stays out of it (the frame's uploads are still executed).
+	const bool page = m_editorCamera.rvtSlot >= 0;
+	if (page && !m_editorCamera.rvtTileGround)
+	{
+		frame.patches.clear();
+		m_landscape.draw(frame, viewProj, sh);
+		return true;
+	}
+	bool any = false;
+#if defined(HE_HAVE_SHADERC)
+	if (frame.materialId != HE::UUID{} && m_contentManager && m_maxFragmentSamplers >= 24)   // see GetCapabilities: fewer samplers, no link
+	{
+		if (!frame.materialPath.empty() && frame.materialId != m_landscapeMaterialLoadTried && !m_contentManager->getMaterial(frame.materialId))
+		{
+			m_landscapeMaterialLoadTried = frame.materialId;   // the texture group's material is named by no entity: from its path, once
+			if (!m_contentManager->resolveMaterialRef(frame.materialId, frame.materialPath)) m_contentManager->loadAsset(frame.materialPath);
+		}
+		// Binds `matId`'s landscape program and its material state; false when no variant builds.
+		const auto bindMaterial = [&](const HE::UUID& matId) -> bool {
+		const unsigned int prog = GetOrBuildLandscapeMaterialProgram(matId, gbuffer);
+		if (prog)
+		{
+			float padded[HE::kMatParamFloats] = { 0 };
+			unsigned int gtex[4] = { 0, 0, 0, 0 };
+			size_t nTex = 0;
+			if (const MaterialAsset* ma = m_contentManager->getMaterial(matId))
+			{
+				std::memcpy(padded, ma->shaderParamData.data(), std::min(ma->shaderParamData.size(), size_t(HE::kMatParamFloats)) * sizeof(float));
+				// copied out before the resolves: a load invalidates the asset pointer
+				const uint32_t arrMask = HE::matGlslTextureArrayMask(ma->customShaderFragGlsl);
+				const std::vector<HE::UUID> ids = ma->graphTextureIds;
+				const std::vector<std::string> paths = ma->graphTexturePaths;
+				nTex = std::min<size_t>(4, std::max(paths.size(), ids.size()));
+				for (size_t i = 0; i < nTex; ++i)
+					gtex[i] = ResolveGraphTexture(i < ids.size() ? ids[i] : HE::UUID{}, i < paths.size() ? paths[i] : std::string{}, (arrMask >> i) & 1u);
+			}
+			glUseProgram(prog);
+			glBindBuffer(GL_UNIFORM_BUFFER, m_matParamUBO);
+			glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(padded), padded);
+			glBindBuffer(GL_UNIFORM_BUFFER, 0);
+			m_haveMatParams = false;
+			glBindBufferBase(GL_UNIFORM_BUFFER, 0, csmLightUbo ? csmLightUbo : m_matLightUBO);
+			if (csmLightUbo)
+			{
+				glActiveTexture(GL_TEXTURE11);   // heCsm: the real cascades instead of the stand-in, for this draw
+				glBindTexture(GL_TEXTURE_2D_ARRAY, m_shadowDepthTex);
+				csmBound = true;
+			}
+			glBindBufferBase(GL_UNIFORM_BUFFER, 2, m_matParamUBO);
+			for (size_t i = 0; i < nTex; ++i)
+			{
+				glActiveTexture(GL_TEXTURE1 + static_cast<GLenum>(i));
+				BindGraphTexture(gtex[i]);
+			}
+			BindRvtForDraw(matId);
+			glActiveTexture(GL_TEXTURE0);
+		}
+		sh.materialProgram = prog;
+		return prog != 0;
+		};
+		// Under a virtual texture (SetRvtTileGround) the patches inside its rectangle are drawn with the consumer, which reads
+		// the pages; when the consumer's variant does not build they go back to the ground's own material.
+		if (!page && m_tileRvtConsumer != HE::UUID{} && m_rvtPool[0] && m_rvtTables.count(m_tileRvtConsumer))
+		{
+			std::vector<HE::LandscapeRenderPatch> inside;
+			HE::splitRvtTilePatches(frame, m_tileRvtMin, m_tileRvtMax, m_tileRvtNearM, inside);
+			if (!inside.empty() && bindMaterial(m_tileRvtConsumer))
+			{
+				frame.patches.swap(inside);
+				m_landscape.draw(frame, viewProj, sh);
+				frame.patches.swap(inside);
+				frame.uploads.clear();        // executed by that draw
+				frame.tableUpdates.clear();
+				any = true;
+			}
+			else
+				frame.patches.insert(frame.patches.end(), inside.begin(), inside.end());
+		}
+		// What the rest is drawn with: on a page of the ground (rvtTileGround) the layer's view; else the extractor's derived
+		// material where the landscape's own cannot be drawn (RenderWorld::tileLandscapeMaterial), else the landscape's own.
+		bindMaterial(page ? m_editorCamera.rvtMaterial
+		             : m_renderWorld.tileLandscapeMaterial != HE::UUID{} ? m_renderWorld.tileLandscapeMaterial : frame.materialId);
+	}
+#endif
+	// The frame's uploads are executed either way (the runtime counts them as done); a G-buffer without a variant gets no ground.
+	if (gbuffer && !sh.materialProgram) frame.patches.clear();
+	m_landscape.draw(frame, viewProj, sh);
+	any = any || sh.materialProgram != 0;
+	if (csmBound)   // what the material programs drawn after this expect (as after the deferred resolve)
+	{
+		glBindBufferBase(GL_UNIFORM_BUFFER, 0, m_matLightUBO);
+		glActiveTexture(GL_TEXTURE11);
+		glBindTexture(GL_TEXTURE_2D_ARRAY, m_localShadowDepthTex ? m_localShadowDepthTex : m_shadowDepthTex);
+		glActiveTexture(GL_TEXTURE0);
+	}
+	return any;
+}
+
 void OpenGLRenderer::DrawSkyFullscreen(const glm::mat4& invViewProj, const glm::vec3& sunDir,
                                        const glm::vec3& camPos,
                                        const IRenderer::EnvironmentSettings& env,
@@ -12796,6 +13315,8 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 				// Leave the plain depth program bound: the next layer's lambda
 				// entry assumes it, like the caller's glUseProgram above.
 				if (boundProgram != m_depthProgram) glUseProgram(m_depthProgram);
+				// The tile landscape's ground casts into the same layer, with the polygon offset that is on.
+				DrawLandscapeDepth(vp);
 			};
 
 			if (shadows)
@@ -14119,6 +14640,21 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 		}
 #endif
 
+		// The tile landscape's ground into the G-buffer with its material's G-buffer tail (Thema 326), so the resolve lights it
+		// with everything else and the G-buffer's depth (SSAO, on this path) has it. Without a variant it is drawn forward
+		// after the resolve, as before.
+		m_landscapeInGBuffer = false;
+		if (deferredActive && HE::landscapePassesOn())
+		{
+			glBindFramebuffer(GL_FRAMEBUFFER, m_gbFBO);
+			glEnable(GL_DEPTH_TEST);
+			glDepthFunc(GL_LESS);
+			glDepthMask(GL_TRUE);
+			glDisable(GL_BLEND);
+			m_landscapeInGBuffer = DrawLandscape(viewProj, 0, /*gbuffer=*/true);
+			glUseProgram(0);
+		}
+
 		// ── Deferred: fullscreen lighting resolve + forward-routed replay ────
 		if (deferredActive)
 		{
@@ -14417,6 +14953,65 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 
 			glUseProgram(m_unlitProgram); // restore for the sky + transparent passes
 		}
+		// ── World-scale landscape (Thema 326): after the opaque geometry, before the sky, depth-tested into the same target ──
+		unsigned int landscapeLightUbo = 0;
+#if defined(HE_HAVE_SHADERC)
+		{
+			// The ground's material program reads the frame's lighting block, which only a graph-material mesh uploads: a
+			// frame without one left the ground black (first run on a 24-sampler driver, NN-WS03). And the ground takes the
+			// sun's cascades, which the mesh materials' fill leaves out (csmSplits.w = 0): the resolve's buffer, filled as
+			// the resolve fills it, with the cascade array on unit 11 for the draw (DrawLandscape).
+			HE::MaterialShaderLibrary::Lighting lit{};
+			fillMatLight(lit);
+			if (m_matLightUBO && !m_matLightUploadedThisFrame)
+			{
+				glBindBuffer(GL_UNIFORM_BUFFER, m_matLightUBO);
+				glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(lit), &lit);
+				m_matLightUploadedThisFrame = true;
+			}
+			if (!giShadingActive && shadowFrame.shadows && m_shadowDepthTex)
+			{
+				if (!m_resolveLightUBO)   // a forward renderer has no resolve, so nobody made its buffer
+				{
+					glGenBuffers(1, &m_resolveLightUBO);
+					glBindBuffer(GL_UNIFORM_BUFFER, m_resolveLightUBO);
+					glBufferData(GL_UNIFORM_BUFFER, static_cast<GLsizeiptr>(sizeof(lit)), nullptr, GL_DYNAMIC_DRAW);
+				}
+				glm::mat4 zRemap(1.0f);
+				zRemap[2][2] = 0.5f; zRemap[3][2] = 0.5f;
+				const int nc = std::min(nCascades, 3);
+				for (int c = 0; c < nc; ++c)
+				{
+					const glm::mat4 m = zRemap * m_renderWorld.shadow.cascadeViewProj[c];
+					std::memcpy(lit.csmVP[c], &m[0][0], 16 * sizeof(float));
+				}
+				lit.csmSplits[0] = cascadeSplits.x;
+				lit.csmSplits[1] = cascadeSplits.y;
+				lit.csmSplits[2] = cascadeSplits.z;
+				lit.csmSplits[3] = static_cast<float>(nc);
+				lit.camFwd[0] = camFwd.x; lit.camFwd[1] = camFwd.y; lit.camFwd[2] = camFwd.z;
+				lit.shadowBias[0] = m_shadowSettings.slopeBias;
+				lit.shadowBias[1] = m_shadowSettings.minBias;
+				glBindBuffer(GL_UNIFORM_BUFFER, m_resolveLightUBO);
+				glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(lit), &lit);
+				landscapeLightUbo = m_resolveLightUBO;
+			}
+			glBindBuffer(GL_UNIFORM_BUFFER, 0);
+			// The shared material inputs, which only a graph-material MESH draw binds (units 14-17: sky cube, ambient
+			// occlusion, the two probe atlases). Without them the ground read whatever was left there: no occlusion on a
+			// forward frame, and with GI on white "probes" that lit the box's ray-traced shadow away.
+			glActiveTexture(GL_TEXTURE14);
+			glBindTexture(GL_TEXTURE_CUBE_MAP, MaterialSkyCube());
+			glActiveTexture(GL_TEXTURE15);
+			glBindTexture(GL_TEXTURE_2D, aoActive ? aoTex : m_whiteTex);
+			glActiveTexture(GL_TEXTURE16);
+			glBindTexture(GL_TEXTURE_2D, giShadingActive ? m_giIrrAtlas : m_whiteTex);
+			glActiveTexture(GL_TEXTURE17);
+			glBindTexture(GL_TEXTURE_2D, giShadingActive ? m_giVisAtlas : m_whiteTex);
+			glActiveTexture(GL_TEXTURE0);
+		}
+#endif
+		if (!m_landscapeInGBuffer) DrawLandscape(viewProj, landscapeLightUbo);   // else the G-buffer pass drew it and the resolve lit it
 		GpuTimerEndPass();                 // end "Opaque"
 
 		// ── TAA velocity (A2): screen-space motion of the opaque geometry, right
@@ -15122,7 +15717,19 @@ IRenderer::Capabilities OpenGLRenderer::GetCapabilities() const
 	// enough, but the shader cross-compiler must be built in.
 	c.supportsDeferredRendering  = true;
 	c.supportsRawCapture         = true;   // RenderSceneImage's rawOutput (kTonemapFS)
+	c.landscapeCoarseRevision    = true;   // OpenGLLandscape.cpp: new coarse and far images, the atlas stays
+#if defined(HE_HAVE_SHADERC)
+	// DrawLandscape: the ground's material draws the patches (the scene pass only). Where a fragment stage holds the samplers: the
+	// landscape adds seven to a material's, and the Auto Landscape material then uses 22. macOS OpenGL 4.1 holds 16, so there
+	// the link fails and the ground keeps its fixed blend (said here, so nothing claims otherwise).
+	c.landscapeMaterial          = m_maxFragmentSamplers >= 24;
+	// DrawLandscapeDepth in every shadow layer; with the material also the G-buffer (DrawLandscape gbuffer) and the SSAO
+	// position pre-pass (DrawLandscapeViewPos).
+	c.landscapePassMask          = kLandscapePassShadow
+	                             | (c.landscapeMaterial ? (kLandscapePassGBuffer | kLandscapePassSsao | kLandscapePassGi | kLandscapePassVelocity) : 0u);
+#endif
 	c.supportsRvt                = m_rvtSupported;   // a page is that raw capture blitted into the pool (the programs come from the cross-compiler)
+	c.landscapeRvt               = c.landscapeMaterial && c.supportsRvt;   // SetRvtTileGround, rvtTileGround pages (DrawLandscape)
 	// SSR: the FORWARD variant only (docs/ssr-cross-backend-plan.md checkpoint
 	// A) — the reflection MRT pre-pass plus last frame's HDR copy, exactly
 	// Metal's Option-A path. The deferred composite (A6) is not built, so in

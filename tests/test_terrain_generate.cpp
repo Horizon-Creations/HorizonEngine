@@ -267,3 +267,179 @@ TEST_CASE("TerrainGenerate::mountain over the terrain's edge still reaches maxHe
     CHECK(at(tc, 64, 0) == doctest::Approx(10.0f));
     CHECK(at(tc, 40, 0) == 0.0f);
 }
+
+// ── The realistic half: ridges, erosion, terraces, paths ──────────────────────
+// All of it is off by default (the cases above are the proof: their exact
+// profile numbers are the old generator's). Each switch is asked the question
+// that makes it what it is, and all of them the two every formation answers:
+// the peak is maxHeight, and no vertex outside the area moved.
+
+namespace
+{
+    // Bilinear height at a terrain-local position (one grid step is one metre).
+    float sample(const TerrainComponent& tc, float x, float z)
+    {
+        const float gx = std::clamp(x + kSize / 2, 0.0f, kSize - 1.001f), gz = std::clamp(z + kSize / 2, 0.0f, kSize - 1.001f);
+        const int ix = static_cast<int>(gx), iz = static_cast<int>(gz);
+        const float fx = gx - static_cast<float>(ix), fz = gz - static_cast<float>(iz);
+        const auto h = [&](int i, int j) { return tc.sculptHeights[static_cast<size_t>(j) * kRes + i]; };
+        const float a = h(ix, iz) + (h(ix + 1, iz) - h(ix, iz)) * fx;
+        const float b = h(ix, iz + 1) + (h(ix + 1, iz + 1) - h(ix, iz + 1)) * fx;
+        return a + (b - a) * fz;
+    }
+
+    // Vertices outside a circle of `radius` round the origin that are not zero.
+    int movedOutside(const TerrainComponent& tc, float radius)
+    {
+        int n = 0;
+        for (int z = -64; z <= 64; ++z)
+            for (int x = -64; x <= 64; ++x)
+                if (static_cast<float>(x * x + z * z) >= radius * radius && at(tc, x, z) != 0.0f) ++n;
+        return n;
+    }
+
+    // The steepest step between two neighbouring vertices, metres per metre.
+    float steepest(const TerrainComponent& tc)
+    {
+        float s = 0.0f;
+        for (int z = -64; z < 64; ++z)
+            for (int x = -64; x < 64; ++x)
+                s = std::max({ s, std::fabs(at(tc, x + 1, z) - at(tc, x, z)), std::fabs(at(tc, x, z + 1) - at(tc, x, z)) });
+        return s;
+    }
+}
+
+TEST_CASE("TerrainGenerate::mountain terraces: the slope becomes level benches, from the ground up to the peak")
+{
+    TerrainComponent tc = terrain();
+    TerrainGenerate::Params p = smooth(40.0f, 50.0f);   // one slope from the rim to the centre
+    p.terraces = 4;
+    p.terraceSharpness = 1.0f;
+    const TerrainGenerate::Result r = TerrainGenerate::mountain(tc, { 0.0f, 0.0f, 50.0f, 50.0f }, p);
+    REQUIRE(r.ok);
+    CHECK(r.peakAdded == doctest::Approx(40.0f));
+    CHECK(at(tc, 0, 0) == doctest::Approx(40.0f));
+    CHECK(movedOutside(tc, 50.0f) == 0);
+
+    // Four steps of ten metres: nearly every vertex stands on a bench.
+    int inside = 0, onBench = 0;
+    for (int z = -50; z <= 50; ++z)
+        for (int x = -50; x <= 50; ++x)
+        {
+            if (x * x + z * z >= 50 * 50) continue;
+            ++inside;
+            const float h = at(tc, x, z);
+            if (std::fabs(h - std::round(h / 10.0f) * 10.0f) < 0.5f) ++onBench;
+        }
+    CHECK(onBench > inside * 8 / 10);
+    // Still never climbing on the way out, and nothing at the rim.
+    for (int x = 1; x <= 50; ++x) CHECK(at(tc, x, 0) <= at(tc, x - 1, 0));
+    CHECK(at(tc, 49, 0) < 0.5f);
+    CHECK(at(tc, 50, 0) == 0.0f);
+
+    // Sharpness 0 is no terrace at all.
+    TerrainComponent soft = terrain(), plain = terrain();
+    p.terraceSharpness = 0.0f;
+    TerrainGenerate::mountain(soft, { 0.0f, 0.0f, 50.0f, 50.0f }, p);
+    TerrainGenerate::mountain(plain, { 0.0f, 0.0f, 50.0f, 50.0f }, smooth(40.0f, 50.0f));
+    for (int x = 0; x <= 50; x += 5) CHECK(at(soft, x, 0) == doctest::Approx(at(plain, x, 0)).epsilon(0.001));
+}
+
+TEST_CASE("TerrainGenerate::mountain ridges: another relief from the same seed, the peak and the rim as promised")
+{
+    TerrainGenerate::Params p;
+    p.maxHeight = 50.0f;
+    p.falloff = 25.0f;
+    p.roughness = 1.0f;
+    TerrainComponent plain = terrain(), ridged = terrain(), again = terrain();
+    TerrainGenerate::mountain(plain, { 0.0f, 0.0f, 50.0f, 50.0f }, p);
+    p.ridges = 1.0f;
+    const TerrainGenerate::Result r = TerrainGenerate::mountain(ridged, { 0.0f, 0.0f, 50.0f, 50.0f }, p);
+    TerrainGenerate::mountain(again, { 0.0f, 0.0f, 50.0f, 50.0f }, p);
+    REQUIRE(r.ok);
+    CHECK(r.peakAdded == doctest::Approx(50.0f));
+    CHECK(r.maxHeight == doctest::Approx(50.0f));
+    CHECK(movedOutside(ridged, 50.0f) == 0);
+    CHECK(ridged.sculptHeights == again.sculptHeights);
+
+    double diff = 0.0;
+    for (size_t i = 0; i < plain.sculptHeights.size(); ++i) diff += std::fabs(plain.sculptHeights[i] - ridged.sculptHeights[i]);
+    CHECK(diff / static_cast<double>(50 * 50 * 3) > 1.0);   // metres apart on average over the area, not a rounding difference
+}
+
+TEST_CASE("TerrainGenerate::mountain erosion: the steepest flank comes down, the peak and the rim stay")
+{
+    TerrainGenerate::Params p;
+    p.maxHeight = 90.0f;
+    p.falloff = 10.0f;      // a massif with flanks far steeper than scree
+    p.roughness = 0.8f;
+    p.frequency = 4.0f;
+    TerrainComponent raw = terrain(), eroded = terrain();
+    TerrainGenerate::mountain(raw, { 0.0f, 0.0f, 50.0f, 50.0f }, p);
+    p.erosion = 1.0f;
+    const TerrainGenerate::Result r = TerrainGenerate::mountain(eroded, { 0.0f, 0.0f, 50.0f, 50.0f }, p);
+    REQUIRE(r.ok);
+    CHECK(r.peakAdded == doctest::Approx(90.0f));
+    CHECK(movedOutside(eroded, 50.0f) == 0);
+    CHECK(steepest(eroded) < steepest(raw) * 0.8f);
+}
+
+TEST_CASE("TerrainGenerate::mountain paths: from the rim to the summit, no steeper than asked, cut level into the flank")
+{
+    // A dome of 60 m over a 55 m radius: straight up is a grade of more than 1.
+    const TerrainGenerate::Area area{ 0.0f, 0.0f, 55.0f, 55.0f };
+    TerrainGenerate::Params p = smooth(60.0f, 55.0f);
+    TerrainComponent uncut = terrain();
+    TerrainGenerate::mountain(uncut, area, p);
+    CHECK(TerrainGenerate::mountain(uncut, { 900.0f, 900.0f, 5.0f, 5.0f }, p).paths.empty());
+
+    p.paths = 2;
+    p.pathWidth = 4.0f;
+    p.pathMaxGrade = 0.3f;
+    TerrainComponent tc = terrain(), again = terrain();
+    const TerrainGenerate::Result r = TerrainGenerate::mountain(tc, area, p);
+    const TerrainGenerate::Result r2 = TerrainGenerate::mountain(again, area, p);
+    REQUIRE(r.ok);
+    CHECK(r.peakAdded == doctest::Approx(60.0f));
+    CHECK(at(tc, 0, 0) == doctest::Approx(60.0f));          // the summit itself is not cut down
+    CHECK(movedOutside(tc, 55.0f) == 0);
+    CHECK(tc.sculptHeights == again.sculptHeights);
+    REQUIRE(r.paths.size() == 2);
+    REQUIRE(r2.paths.size() == 2);
+
+    for (size_t k = 0; k < r.paths.size(); ++k)
+    {
+        const std::vector<TerrainGenerate::PathPoint>& line = r.paths[k];
+        REQUIRE(line.size() >= 3);
+        REQUIRE(line.size() == r2.paths[k].size());        float length = 0.0f, climb = 0.0f;
+        for (size_t i = 0; i < line.size(); ++i)
+        {
+            CHECK(line[i].x * line[i].x + line[i].z * line[i].z < 55.0f * 55.0f);          // never outside the area
+            CHECK(line[i].y == doctest::Approx(sample(tc, line[i].x, line[i].z)));         // y is the ground under it
+            CHECK(line[i].x == r2.paths[k][i].x);
+            if (i == 0) continue;
+            length += std::hypot(line[i].x - line[i - 1].x, line[i].z - line[i - 1].z);
+            climb += std::fabs(line[i].y - line[i - 1].y);
+        }
+        // Rim first, summit last.
+        CHECK(std::hypot(line.front().x, line.front().z) > 45.0f);
+        CHECK(std::hypot(line.back().x, line.back().z) < 1.5f);
+        // It did not walk straight up: far longer than the radius, and on the whole no steeper than asked.
+        CHECK(length > 55.0f * 1.5f);
+        CHECK(climb / length < 0.3f * 1.35f);
+
+        // Halfway along, the ground is level across the path where the uncut dome slopes.
+        const size_t mid = line.size() / 2;
+        const float tx = line[mid + 1].x - line[mid - 1].x, tz = line[mid + 1].z - line[mid - 1].z;
+        const float tl = std::hypot(tx, tz);
+        REQUIRE(tl > 0.0f);
+        const float nx = -tz / tl, nz = tx / tl;
+        const auto across = [&](const TerrainComponent& t)
+        {
+            return std::fabs(sample(t, line[mid].x + nx * 1.5f, line[mid].z + nz * 1.5f) - sample(t, line[mid].x - nx * 1.5f, line[mid].z - nz * 1.5f));
+        };
+        CHECK(across(tc) < across(uncut) * 0.5f + 0.05f);
+    }
+    // The two paths start on opposite sides.
+    CHECK(std::hypot(r.paths[0].front().x - r.paths[1].front().x, r.paths[0].front().z - r.paths[1].front().z) > 55.0f);
+}

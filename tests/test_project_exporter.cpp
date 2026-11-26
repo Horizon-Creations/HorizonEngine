@@ -1153,6 +1153,60 @@ TEST_CASE("ProjectExporter ships Config/ProjectSettings.json verbatim and remove
     he_test::removeAllQuiet(outputDir);
 }
 
+// A landscape pack is too big for the pak: it ships as a loose file beside it, and the caller may finish the copy (the landscape appends its
+// proxies) without ever touching the source. A destination that would leave the data folder is refused.
+TEST_CASE("ProjectExporter ships dataFiles as copies, runs afterCopy on the copy only, and refuses a destination outside the data folder")
+{
+    auto root       = std::filesystem::temp_directory_path() / "he_test_export_datafiles_root";
+    auto contentDir = root / "Content";
+    auto outputDir  = std::filesystem::temp_directory_path() / "he_test_export_datafiles_out";
+    he_test::removeAllQuiet(root);
+    he_test::removeAllQuiet(outputDir);
+    std::filesystem::create_directories(contentDir);
+    const auto source = root / "world.pack";
+    { std::ofstream f(source, std::ios::binary); f << "PACKBYTES"; }
+
+    ExportSettings settings;
+    settings.compress = false;
+    ExportSettings::DataFile df;
+    df.source = source;
+    df.dest = "Landscape/world.pack";
+    df.afterCopy = [&](const std::filesystem::path& copied, std::string&)
+    {
+        CHECK(copied != source);
+        std::ofstream f(copied, std::ios::binary | std::ios::app);
+        f << "+HLOD";
+        return true;
+    };
+    settings.dataFiles.push_back(df);
+    auto result = ProjectExporter::exportProject(contentDir, "Dat", "", outputDir, settings);
+    REQUIRE_MESSAGE(result.success, result.errorMessage);
+    const auto shipped = outputDir / "Landscape" / "world.pack";
+    REQUIRE(std::filesystem::exists(shipped));
+    {
+        std::ifstream in(shipped, std::ios::binary);
+        std::string got((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        CHECK(got == "PACKBYTES+HLOD");
+    }
+    {
+        std::ifstream in(source, std::ios::binary);
+        std::string got((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        CHECK(got == "PACKBYTES");   // the project's file is the author's
+    }
+
+    // A failing afterCopy fails the export; a destination that escapes the data folder is never written.
+    ExportSettings failing = settings;
+    failing.dataFiles[0].afterCopy = [](const std::filesystem::path&, std::string& why) { why = "no"; return false; };
+    CHECK_FALSE(ProjectExporter::exportProject(contentDir, "Dat", "", outputDir, failing).success);
+    ExportSettings escaping = settings;
+    escaping.dataFiles[0].dest = "../escaped.pack";
+    CHECK_FALSE(ProjectExporter::exportProject(contentDir, "Dat", "", outputDir, escaping).success);
+    CHECK_FALSE(std::filesystem::exists(outputDir.parent_path() / "escaped.pack"));
+
+    he_test::removeAllQuiet(root);
+    he_test::removeAllQuiet(outputDir);
+}
+
 // The title is what a launcher SHOWS; the project name is what the files are
 // CALLED. The .desktop entry's Name= takes the title, its file name and the
 // identifier inside it stay derived from the project name — retitling a game

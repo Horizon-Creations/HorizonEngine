@@ -174,6 +174,16 @@ struct HE_API ExportSettings {
     // quietly overrule it. Empty = nothing copied and nothing removed (a tool
     // packing a bare directory).
     std::filesystem::path projectSettingsFile;
+    // Loose files that ship beside the pak in the data folder: a world-scale landscape's tile pack is read by seeking and can be gigabytes,
+    // so it is not an asset of the pak. `dest` is relative to the data folder (forward slashes, no "..", no leading slash). `afterCopy`
+    // runs on the COPY, in the export's thread, and may change it (the landscape appends its HLOD table); a false return fails the export.
+    // Not part of a profile: the editor fills it per export from the scenes it serializes.
+    struct DataFile {
+        std::filesystem::path source;
+        std::string           dest;
+        std::function<bool(const std::filesystem::path& copied, std::string& error)> afterCopy;
+    };
+    std::vector<DataFile> dataFiles;
     // Glob patterns (relative to contentDir, forward slashes) for assets to skip
     // when packing — e.g. "Debug/*", "*_test.hasset". Engine defaults are matched
     // with their "Engine/" prefix. See Hpak::PackSettings.

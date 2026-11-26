@@ -71,6 +71,13 @@ int CellManifest::cellIndex(double coord, float cellSize)
 	return static_cast<int>(std::floor(coord / static_cast<double>(cellSize)));
 }
 
+std::pair<int, int> CellManifest::regionOf(int cellX, int cellZ, float cellSize, float regionSize)
+{
+	if (!(regionSize > 0.0f) || !(cellSize > 0.0f)) return { cellX, cellZ };
+	return { static_cast<int>(std::floor(static_cast<double>(cellX) * cellSize / regionSize)),
+	         static_cast<int>(std::floor(static_cast<double>(cellZ) * cellSize / regionSize)) };
+}
+
 // ── Streamer ─────────────────────────────────────────────────────────────────
 
 namespace
@@ -304,6 +311,7 @@ void CellStreamer::reset()
 	m_failed.clear();
 	m_manifest = CellManifest{};
 	m_stats    = Stats{};
+	m_residentRegions.clear();   // m_regionConfig itself stays, like m_sliceEntities
 }
 
 void CellStreamer::clear(HorizonWorld& world)
@@ -327,6 +335,12 @@ bool CellStreamer::isBuilding(int x, int z) const
 {
 	const auto it = m_pending.find(key(x, z));
 	return it != m_pending.end() && it->second->next > 0;
+}
+
+bool CellStreamer::isRegionResident(int regionX, int regionZ) const
+{
+	if (!(m_regionConfig.regionSize > 0.0f)) return false;
+	return m_residentRegions.count(key(regionX, regionZ)) != 0;
 }
 
 bool CellStreamer::keepsIds(entt::entity root) const
@@ -432,9 +446,64 @@ void CellStreamer::update(HorizonWorld& world, const std::vector<Anchor>& anchor
 			++it;
 	}
 
+	// R) Regions (CellRegionConfig, Thema 326 step 6): the same hysteresis as the
+	//    cells above, one level coarser, computed from the same anchors, and done
+	//    before the scan below so that a region which just dropped out gates its
+	//    cells out on this very update, not a frame late. regionSize <= 0: nothing
+	//    tracked, every cell loads exactly as it always did.
+	if (m_regionConfig.regionSize > 0.0f)
+	{
+		const float rsize = m_regionConfig.regionSize;
+		const float rload = m_regionConfig.loadRadius;
+		const float rkeep = rload * std::max(m_regionConfig.keepFactor, 1.0f);
+		const auto  regionNearer = [&](int x, int z) { return nearestReach(reaches, x, z, rsize); };
+		const auto  scanRegions  = [&](const glm::dvec3& p, double scale)
+		{
+			const int r  = static_cast<int>(std::ceil(rload * scale / rsize)) + 1;
+			const int cx = CellManifest::cellIndex(p.x, rsize);
+			const int cz = CellManifest::cellIndex(p.z, rsize);
+			for (int x = cx - r; x <= cx + r; ++x)
+				for (int z = cz - r; z <= cz + r; ++z)
+				{
+					const Key rk = key(x, z);
+					if (m_residentRegions.count(rk) || regionNearer(x, z) > rload) continue;
+					m_residentRegions[rk] = { x, z };
+					if (m_hooks.regionLoaded) m_hooks.regionLoaded(x, z);
+				}
+		};
+		for (const AnchorReach& a : reaches)
+		{
+			scanRegions(a.here, a.scale);
+			if (a.ahead != a.here) scanRegions(a.ahead, a.scale);
+		}
+		for (auto it = m_residentRegions.begin(); it != m_residentRegions.end();)
+		{
+			const auto [rx, rz] = it->second;
+			if (regionNearer(rx, rz) > rkeep)
+			{
+				if (m_hooks.regionUnloaded) m_hooks.regionUnloaded(rx, rz);
+				it = m_residentRegions.erase(it);
+			}
+			else ++it;
+		}
+		m_stats.regionsResident = m_residentRegions.size();
+	}
+	else if (!m_residentRegions.empty())
+	{
+		m_residentRegions.clear();
+		m_stats.regionsResident = 0;
+	}
+	const auto regionResident = [&](int x, int z)
+	{
+		if (!(m_regionConfig.regionSize > 0.0f)) return true;
+		const auto [rx, rz] = CellManifest::regionOf(x, z, size, m_regionConfig.regionSize);
+		return m_residentRegions.count(key(rx, rz)) != 0;
+	};
+
 	// 1) Cells that should be there: within the load radius of an anchor or of where
-	//    it is heading. Only the grid squares around those are looked at, so a manifest
-	//    of a hundred thousand cells costs what a few dozen do.
+	//    it is heading, AND whose region (if the gate is on) is resident. Only the
+	//    grid squares around those are looked at, so a manifest of a hundred thousand
+	//    cells costs what a few dozen do.
 	std::vector<std::pair<double, Key>> wanted;
 	const auto scan = [&](const glm::dvec3& p, double scale)
 	{
@@ -446,6 +515,7 @@ void CellStreamer::update(HorizonWorld& world, const std::vector<Anchor>& anchor
 			{
 				const Key k = key(x, z);
 				if (!m_index.count(k) || m_loaded.count(k) || m_pending.count(k) || m_failed.count(k)) continue;
+				if (!regionResident(x, z)) continue;
 				const double d = nearer(x, z);
 				if (d <= m_manifest.loadRadius) wanted.emplace_back(d, k);
 			}
@@ -525,7 +595,7 @@ void CellStreamer::update(HorizonWorld& world, const std::vector<Anchor>& anchor
 		Pending& p = *it->second;
 		const double d = nearer(p.x, p.z);
 		const int    s = p.state.load(std::memory_order_acquire);
-		if (d > m_manifest.unloadRadius)
+		if (d > m_manifest.unloadRadius || !regionResident(p.x, p.z))
 		{
 			if (p.next > 0)
 			{
@@ -664,7 +734,7 @@ void CellStreamer::update(HorizonWorld& world, const std::vector<Anchor>& anchor
 	for (const auto& [k, root] : m_loaded)
 	{
 		const CellManifest::Cell& cell = m_manifest.cells[m_index[k]];
-		if (nearer(cell.x, cell.z) > m_manifest.unloadRadius) gone.push_back(k);
+		if (nearer(cell.x, cell.z) > m_manifest.unloadRadius || !regionResident(cell.x, cell.z)) gone.push_back(k);
 	}
 	for (Key k : gone) unloadCell(world, k);
 

@@ -4,6 +4,7 @@
 #include <Renderer/IRenderer.h>
 #include <MaterialGraph/MaterialParamLimits.h> // kMatParamFloats / kMatParamBytes
 #include "OpenGLShaderManager.h"
+#include "OpenGLLandscape.h"   // the world-scale landscape (Thema 326)
 #include <HorizonRendering/RenderWorld.h>
 #include <HorizonRendering/RenderExtractor.h>
 #include <HorizonRendering/RvtNearChunks.h>
@@ -64,6 +65,13 @@ public:
 	bool  ReadbackRvtPageTable(const HE::UUID& consumerMaterial, std::vector<std::vector<uint32_t>>& mips) override;
 	void  SetRvtLandscape(uint32_t terrainEntity, const HE::UUID& landscapeMaterial, const HE::UUID& consumerMaterial) override;
 	void  SetRvtNearChunks(uint32_t terrainEntity, const std::vector<uint32_t>& chunkEntities) override { m_rvtNear.set(terrainEntity, chunkEntities); }
+	// The tile landscape's ground under a virtual texture: the consumer and the absolute XZ rectangle its pages cover
+	// (DrawLandscape splits the frame's patches with HE::splitRvtTilePatches).
+	void  SetRvtTileGround(const HE::UUID& consumerMaterial, const glm::dvec2& minXZ, const glm::dvec2& maxXZ, float nativeNearM) override
+	{ m_tileRvtConsumer = consumerMaterial; m_tileRvtMin = minXZ; m_tileRvtMax = maxXZ; m_tileRvtNearM = nativeNearM; }
+	HE::UUID   m_tileRvtConsumer{};
+	glm::dvec2 m_tileRvtMin{ 0.0 }, m_tileRvtMax{ 0.0 };
+	float      m_tileRvtNearM = 0.0f;
 	void  ReleaseRvtConsumer(const HE::UUID& consumerMaterial) override;
 	bool  RenderSceneImage(const EditorCameraOverride& camera, uint32_t width, uint32_t height,
 	                       std::vector<uint8_t>& rgba) override;
@@ -1023,6 +1031,8 @@ private:
 	uint32_t     m_taaFrameIndex      = 0;      // drives the Halton sequence
 	glm::vec2    m_taaJitter{0.0f};             // this frame's offset, pixel units (-0.5 … 0.5)
 	glm::mat4    m_taaPrevViewProj{1.0f};       // LAST frame's UNJITTERED view-proj (velocity)
+	glm::dvec3   m_taaPrevOrigin{0.0};          // the floating origin it was built for (HE::taaPrevViewProjAt)
+	bool         m_taaPrevOriginKnown = false;
 	// Per-entity model matrices of the previous frame, so a moving OBJECT under
 	// a still camera reports motion too. Keyed by entity id; swapped per frame.
 	std::unordered_map<uint32_t, glm::mat4> m_taaPrevTransforms;
@@ -1569,4 +1579,26 @@ private:
 	struct RetiredTexture { unsigned int texture; int framesLeft; };
 	std::vector<RetiredTexture> m_retiredTextures;
 	void AgeRetiredTextures();
+
+	// ── World-scale landscape (Thema 326, step 2 part B) ────────────────────
+	// DrawLandscape asks the application's provider (IRenderer::SetLandscapeProvider) for the frame of the camera it is about to render
+	// with and draws it into the bound HDR target, in the opaque pass before the sky; with `gbuffer` into the G-buffer that is bound
+	// (the material's G-buffer tail; nothing when it has none). Returns whether the ground was drawn by its material.
+	bool DrawLandscape(const glm::mat4& viewProj, unsigned int csmLightUbo = 0, bool gbuffer = false);   // csmLightUbo: a lighting block with the sun's cascades, or 0
+	void DrawLandscapeDepth(const glm::mat4& viewProj);   // into the bound depth-only target (a shadow layer)
+	void DrawLandscapeViewPos(const glm::mat4& viewProj, const glm::mat4& view);   // into the SSAO position pre-pass that is bound
+	OpenGLLandscape m_landscape;
+	bool            m_landscapeFailed = false;   // init failed once: not tried again
+	bool            m_landscapeInGBuffer = false; // this frame's G-buffer pass drew the ground: no forward draw after the resolve
+	unsigned int    m_landscapePosProgram = 0;    // DrawLandscapeViewPos: the landscape's vertex stage with a view-position fragment
+	bool            m_landscapePosTried = false;
+	void            DrawLandscapeGiGBuf(const glm::mat4& viewProj);   // into the GI pre-pass's targets that are bound
+	unsigned int    m_landscapeGiProgram = 0;     // DrawLandscapeGiGBuf: the same vertex stage with the GI pre-pass's fragment
+	bool            m_landscapeGiTried = false;
+	void            DrawLandscapeVelocity(const glm::mat4& viewProjJit, const glm::mat4& viewProjNow, const glm::mat4& viewProjPrev);   // into the TAA velocity target that is bound
+	unsigned int    m_landscapeVelProgram = 0;    // DrawLandscapeVelocity: the same vertex stage with the velocity fragment
+	bool            m_landscapeVelTried = false;
+	unsigned int    GetOrBuildLandscapeMaterialProgram(const HE::UUID& materialId, bool gbuffer = false);
+	int             m_maxFragmentSamplers = 0;   // GL_MAX_TEXTURE_IMAGE_UNITS, read at Initialize
+	HE::UUID        m_landscapeMaterialLoadTried{};   // the texture group's material this renderer tried to load from its path
 };

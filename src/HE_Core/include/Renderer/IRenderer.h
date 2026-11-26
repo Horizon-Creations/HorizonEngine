@@ -6,6 +6,7 @@
 #include "Renderer/EnvironmentSettings.h" // IRenderer::EnvironmentSettings (aliased below)
 #include "Renderer/UIRenderObject.h"     // RenderWidgetThumbnail takes UI draw quads
 #include "Renderer/WaterRipples.h"       // SetWaterRipples: the rings the water material reads
+#include "Renderer/LandscapeRenderFrame.h" // SetLandscapeProvider: the world-scale landscape's per-frame data
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>   // worldPreviewProjection (below)
 #include <cmath>
@@ -24,6 +25,14 @@ class ContentManager;
 // the resulting view matrix here every frame; the projection is rebuilt by the
 // extractor with the backend's current aspect ratio so it always matches the
 // viewport size exactly.
+// The tile landscape's ground in the passes besides the scene's (IRenderer::Capabilities::landscapePassMask).
+constexpr uint32_t kLandscapePassShadow   = 1u << 0;   // casts into the cascades and the local shadow layers
+constexpr uint32_t kLandscapePassGi       = 1u << 1;   // GI: the pre-pass (takes ray-traced shadows) and the ray structure (casts them)
+constexpr uint32_t kLandscapePassSsao     = 1u << 2;   // ambient occlusion sees the ground
+constexpr uint32_t kLandscapePassVelocity = 1u << 3;   // TAA / motion blur velocity
+constexpr uint32_t kLandscapePassGBuffer  = 1u << 4;   // drawn into the G-buffer on a deferred frame (not forward on top of it)
+constexpr uint32_t kLandscapePassAll      = 31u;
+
 struct EditorCameraOverride
 {
     bool      active       = false;
@@ -61,6 +70,9 @@ struct EditorCameraOverride
     // world's components, the three views extract the same scene and the renderer walks it once (the extractor's
     // beginFrame reuse). It also keeps a far-LOD stand-in material (the baked far landscape) out of a page.
     HE::UUID  rvtMaterial;
+    // With rvtSlot >= 0: the page is the TILE landscape's (SetLandscapeProvider), whose ground is then drawn with rvtMaterial.
+    // False: a page of meshes, and the tile ground stays out of it.
+    bool      rvtTileGround = false;
 };
 
 // ─── WorldPreviewEnv ────────────────────────────────────────────────────────
@@ -274,6 +286,25 @@ public:
         // RenderSceneImage honours EditorCameraOverride::rawOutput / rawSrgb: the picture is the materials' own
         // colour, no tonemap, bloom, AA or other post. The far-landscape bake needs it (Thema 228).
         bool supportsRawCapture = false;
+        // The tile landscape's far data can change without the landscape being another one: the backend looks at
+        // LandscapeRenderStatic::coarseRevision and makes its coarse images (and far image) again, of whatever size they
+        // now are, while the tile atlas and the slot table stay. With it a render window that moves, and a brush stroke,
+        // never send the near ground back to the far levels. False = the application has to announce such a change as a
+        // new landscape (LandscapeRuntime::setWindowKeepsAtlas), which empties the atlas once.
+        bool landscapeCoarseRevision = false;
+        // The tile landscape is drawn with LandscapeRenderFrame::materialId (the material's fragment, weights from the tile atlas),
+        // so the ground is lit, shadowed and fogged like every other surface. false: the fixed layer blend, whatever the frame names.
+        bool landscapeMaterial = false;
+        // ... and the ground is in the backend's other geometry passes as well: it casts into the shadow maps, is in the GI
+        // pre-pass and the ray structure, in the SSAO and velocity passes, and in the G-buffer on a deferred frame. Without it
+        // the ground receives (shadows of meshes, fog, the lighting) but does not cast, occlude or report motion.
+        bool landscapePasses = false;
+        // Which of those passes the backend has, one bit each (kLandscapePass*): a backend that is part of the way there says
+        // so here and leaves landscapePasses false until it has them all. landscapePasses true means every bit.
+        uint32_t landscapePassMask = 0;
+        // SetRvtTileGround / EditorCameraOverride::rvtTileGround work: the tile landscape's ground can be painted into virtual
+        // texture pages and drawn from them. Without it the ground is computed in place.
+        bool landscapeRvt = false;
         // CreateRvtPool / EditorCameraOverride::rvtSlot work: the backend can hold the page pool of the Runtime
         // Virtual Textures and fill a slice of it from RenderSceneImage (Thema 333). False = the landscape keeps
         // running its material directly.
@@ -791,6 +822,14 @@ public:
     // to the camera the material itself is sharper than any page). Replaces the previous set; empty = every chunk swaps.
     // A backend without it swaps every chunk (the near view is then blurrier, nothing else changes).
     virtual void SetRvtNearChunks(uint32_t /*terrainEntity*/, const std::vector<uint32_t>& /*chunkEntities*/) {}
+    // The tile landscape's ground (SetLandscapeProvider): its patches that lie wholly inside the absolute XZ rectangle are drawn
+    // with `consumerMaterial` (which reads the pool through the table SetRvtPageTable gave it), the others with the ground's own
+    // material as before. Null `consumerMaterial` = off. A backend without it draws the whole ground with its own material.
+    // `nativeNearM` > 0: patches closer to the camera than this (horizontally, to the patch's square) keep the ground's own
+    // material too (the native near view: up close the material itself is sharper than any page; the driver passes the distance
+    // at which a mip-0 texel is a pixel, so the change of material is where both are equally sharp).
+    virtual void SetRvtTileGround(const HE::UUID& /*consumerMaterial*/, const glm::dvec2& /*minXZ*/, const glm::dvec2& /*maxXZ*/,
+                                  float /*nativeNearM*/ = 0.0f) {}
     // The pages the lookup's feedback reported since the last call (keys of RvtLookup.h's rvtFeedbackKey, unordered, may repeat),
     // appended to `keys`. False = the backend has no feedback (the driver then serves the camera square alone).
     virtual bool ReadRvtFeedback(std::vector<uint32_t>& /*keys*/) { return false; }
@@ -1125,6 +1164,19 @@ public:
     void SetWaterRipples(const WaterRippleBlock& w) { m_waterRipples = w; }
     const WaterRippleBlock& GetWaterRipples() const { return m_waterRipples; }
 
+    // ── World-scale landscape (Thema 326) ──────────────────────────────────
+    // The application's LandscapeRuntime, as a callback: once per main scene frame
+    // the backend calls it with the view-projection it is about to use (origin-
+    // relative world to ITS clip space) and whether its clip depth is 0..1, and
+    // gets the patches to draw plus the image uploads
+    // to execute BEFORE drawing (LandscapeRenderFrame.h). Executing a frame it
+    // asked for is the backend's duty: the runtime counts uploads as done. Empty
+    // (the default) = no landscape. Only the main scene pass asks, never a preview
+    // or a thumbnail. Plain storage, not virtual, for the reason SetWaterRipples
+    // gives; the member sits after every other one.
+    void SetLandscapeProvider(HE::LandscapeProvider p) { m_landscapeProvider = std::move(p); }
+    const HE::LandscapeProvider& GetLandscapeProvider() const { return m_landscapeProvider; }
+
 protected:
     OverlayCallback      m_overlayCallback;
     HE::RenderPath       m_renderPath           = HE::RenderPath::Forward;
@@ -1143,4 +1195,5 @@ protected:
     std::function<void*(void*, void*)> m_imguiTexRegistrar;
     // Last: appended after every older member so their offsets stay where they were.
     WaterRippleBlock     m_waterRipples;
+    HE::LandscapeProvider m_landscapeProvider;
 };

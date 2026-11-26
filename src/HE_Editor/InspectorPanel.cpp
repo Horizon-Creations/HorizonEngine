@@ -8,10 +8,13 @@
 #include "EditorMultiEdit.h"             // one edit, every selected entity
 #include "HcEditorUtil.h"                // HorizonCode class listing (Script slot)
 #include "TerrainTools.h"                // the Terrain section's Heightmap block
+#include "LandscapeWorldTools.h"         // the Tile Landscape section
 #include "AutoLodDialog.h"               // Generate LODs on a foliage layer and a LOD component
 #include "NotificationStore.h"          // the result line of Bake Impostor
 #include "AudioMixView.h"                // the Audio Editor's bus dropdown (Audio Source, weather sounds)
 #include <HorizonScene/HorizonScene.h>
+#include <HorizonScene/Components/LandscapeWorldComponent.h> // not in HorizonScene.h: the Tile Landscape section
+#include <HorizonScene/Components/LandscapeStampComponent.h>
 #include <HorizonScene/CookedStatic.h>   // an entity under edit leaves the cooked block
 #include <HorizonScene/EntityActive.h>   // the "Active" switch at the top of the panel
 #include <HorizonScene/Components/NetworkComponent.h> // not in HorizonScene.h: the Network section
@@ -3694,6 +3697,38 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 		if (removed) { if (undo) undo->snapshotNow(removeLabel.c_str()); registry.remove<TerrainComponent>(entity); }
 	}
 
+	// ── Tile Landscape (the world-scale landscape, Thema 326) ───────────────
+	if (registry.try_get<LandscapeWorldComponent>(entity))
+	{
+		if (componentHeader("Tile Landscape", true, removed))
+			LandscapeWorldTools::drawSection(ctx, entity, trackEdit);
+		if (removed) { if (undo) undo->snapshotNow(removeLabel.c_str()); registry.remove<LandscapeWorldComponent>(entity); }
+	}
+
+	// ── Landscape Stamp (a heightmap laid over the tile landscape) ──────────
+	// Nothing here has to ask for a rebuild: LandscapeStampSync compares what the stamps say with what it last handed over.
+	if (auto* ls = registry.try_get<LandscapeStampComponent>(entity))
+	{
+		if (componentHeader("Landscape Stamp", true, removed))
+		{
+			EditorWidgets::checkbox("Enabled##lstamp", &ls->enabled); trackEdit();
+			EditorWidgets::assetDropSlot(ctx, "Heightmap", ls->textureId, HE::AssetType::Texture,
+			                             "lstamptex", "(none — drop a texture here)", "texture", true);
+			// A file keeps 16 bits (65 536 height steps); the texture asset above has 8 (256). The file wins when both are set.
+			Row::inputText("Heightmap File##lstamp", &ls->heightmapFile); trackEdit();
+			if (EditorWidgets::button("Browse Heightmap...##lstamp")) LandscapeWorldTools::browseStampFile(ctx, entity);
+			static const char* const kStampChannels[] = { "Red", "Green", "Blue", "Alpha", "Luminance" };
+			ls->channel = std::clamp(ls->channel, 0, 4);
+			Row::combo("Channel##lstamp", &ls->channel, kStampChannels, 5); trackEdit();
+			Row::dragFloat("Size##lstamp", &ls->sizeM, 1.0f, 1.0f, 100000.0f, "%.0f m"); trackEdit();
+			Row::dragFloat("Height##lstamp", &ls->heightM, 0.5f, -10000.0f, 10000.0f, "%.1f m"); trackEdit();
+			Row::sliderFloat("Falloff##lstamp", &ls->falloff, 0.0f, 1.0f, "%.2f"); trackEdit();
+			hint("Move, turn and scale the entity to place the stamp. The texture's red channel is added to the ground; "
+			     "the landscape itself is not changed until an export bakes the stamps in.");
+		}
+		if (removed) { if (undo) undo->snapshotNow(removeLabel.c_str()); registry.remove<LandscapeStampComponent>(entity); }
+	}
+
 	// ── Audio Source ────────────────────────────────────────────────────────
 	if (auto* a = registry.try_get<AudioSourceComponent>(entity))
 	{
@@ -4379,6 +4414,8 @@ constexpr AddRow kRenderingRows[] = {
 	addRow<DecalComponent>("Decal"),
 	addRow<ParticleSystemComponent>("Particle System"),
 	addRow<FoliageComponent>("Foliage"),
+	addRow<LandscapeWorldComponent>("Tile Landscape"),
+	addRow<LandscapeStampComponent>("Landscape Stamp"),
 	addRow<LODComponent>("LOD"),
 	addRow<RopeComponent>("Rope"),
 	addRow<SplineComponent>("Spline"),

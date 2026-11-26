@@ -458,7 +458,8 @@ TEST_CASE("Noise Texture node emits 3D world-space fbm as a vec3 (mesh-independe
 	const std::string glsl = HE::generateFragment(g).glsl;
 	// World-space 3D noise so it varies on ANY mesh (a UV-less cube has vUV=0 everywhere,
 	// which would collapse UV noise to a single value → flat/black).
-	CHECK(glsl.find("heFbm3(vWorldPos") != std::string::npos);
+	// ... of the ABSOLUTE position (plus the floating origin), so the mottling stays on the mesh when the origin is rebased.
+	CHECK(glsl.find("heFbm3((vWorldPos + heLight.worldOrigin.xyz)") != std::string::npos);
 	CHECK(glsl.find("float heValueNoise3(vec3") != std::string::npos); // 3D helper injected
 	CHECK(glsl.find("vec3(") != std::string::npos);           // grayscale RGB for a clean multiply
 	CHECK(glsl.find("6.0") != std::string::npos);             // default Scale baked in
@@ -1993,6 +1994,135 @@ TEST_CASE("PSHD encode/decode roundtrip preserves variants")
 }
 
 #if defined(HE_TESTS_HAVE_SHADERC)
+TEST_CASE("tile landscape variant on D3D: the HLSL of the patch vertex and of the Auto Landscape fragment keeps every register inside "
+          "Shader Model 5.0 and puts the landscape's data where the header says")
+{
+	using B = HE::MaterialShaderLibrary::Backend;
+	using L = HE::MaterialShaderLibrary;
+	HE::MaterialShaderLibrary lib;
+	// Every `register(xN)` of a shader: SM 5.0 has b0..b13 and s0..s15 (t goes to 127); FXC refuses anything beyond (X4509).
+	const auto registers = [](const std::string& s) {
+		std::map<std::string, std::string> byName;   // resource name -> register
+		size_t at = 0;
+		while ((at = s.find("register(", at)) != std::string::npos)
+		{
+			const size_t close = s.find(')', at), lineStart = s.rfind('\n', at) + 1;
+			const std::string reg = s.substr(at + 9, close - at - 9);
+			std::string decl = s.substr(lineStart, at - lineStart);            // "cbuffer LsGlobals : " or "Texture2D<uint4> uSlotTable : "
+			decl.erase(decl.find_last_not_of(" :") + 1);
+			byName[decl.substr(decl.find_last_of(' ') + 1)] = reg;
+			const int n = std::atoi(reg.c_str() + 1);
+			if (reg[0] == 'b') CHECK_MESSAGE(n <= 13, decl, " ", reg);
+			if (reg[0] == 's') CHECK_MESSAGE(n <= 15, decl, " ", reg);
+			if (reg[0] == 't') CHECK_MESSAGE(n <= 127, decl, " ", reg);
+			at = close;
+		}
+		return byName;
+	};
+	const auto t = [](uint32_t n) { return "t" + std::to_string(n); };
+
+	const auto& v = lib.landscapeVertex(B::HLSL);
+	REQUIRE_MESSAGE(v.ok, "landscapeVertex (HLSL) failed: ", v.log);
+	const auto vr = registers(v.source);
+	CHECK(vr.at("LsGlobals") == "b" + std::to_string(L::kHlslLandscapeGlobalsReg));
+	CHECK(vr.at("LsPatch") == "b" + std::to_string(L::kHlslLandscapeGlobalsReg + 1));
+	CHECK(vr.at("uTileHeights") == t(L::kHlslLandscapeFirstSrv));
+	CHECK(vr.at("uSlotTable") == t(L::kHlslLandscapeFirstSrv + 1));
+	CHECK(vr.at("uCoarseHeights") == t(L::kHlslLandscapeFirstSrv + 2));
+
+	HE_TEST::RvtOffScope rvtOff;
+	const HE::MatShaderGen gen = HE::generateFragment(HE::buildAutoLandscapeGraph().graph, HE::weatherFunctionLoader());
+	for (const bool clustered : { false, true })
+	{
+		const auto& f = lib.landscapeFragment(0x327, gen.glsl, B::HLSL, clustered);
+		REQUIRE_MESSAGE(f.ok, "landscapeFragment (HLSL) failed: ", f.log);
+		const auto fr = registers(f.source);
+		CHECK(fr.at("LsGlobals") == "b" + std::to_string(L::kHlslLandscapeGlobalsReg));
+		CHECK(fr.at("heLsSlotTable") == t(L::kHlslLandscapeFirstSrv + 1));
+		for (int p = 0; p < 3; ++p)
+		{
+			CHECK(fr.at("heLsTileWeights" + std::to_string(p)) == t(L::kHlslLandscapeFirstSrv + 3 + static_cast<uint32_t>(p)));
+			CHECK(fr.at("heLsCoarseWeights" + std::to_string(p)) == t(L::kHlslLandscapeFirstSrv + 6 + static_cast<uint32_t>(p)));
+		}
+		// the landscape's images are read without a filter: no live sampler of theirs, the dead ones on s0
+		CHECK(fr.at("_heLsSlotTable_sampler") == "s0");
+		CHECK(fr.at("_heLsTileWeights0_sampler") == "s0");
+		// nothing of the landscape's lands on a register a material binds (its own rows end at t46)
+		for (const auto& [name, reg] : fr)
+			if (name.rfind("heLs", 0) == 0) CHECK_MESSAGE(std::atoi(reg.c_str() + 1) >= static_cast<int>(L::kHlslLandscapeFirstSrv), name, " ", reg);
+		if (const char* dir = std::getenv("HE_DUMP_LS_HLSL"); dir && *dir && !clustered)
+		{
+			std::ofstream(std::string(dir) + "/landscape_vs.hlsl") << v.source;
+			std::ofstream(std::string(dir) + "/landscape_ps.hlsl") << f.source;
+		}
+	}
+}
+
+TEST_CASE("tile landscape variant: the patch vertex and the Auto Landscape fragment with its weights from the tile atlas cross-compile, on Metal inside the slots that are free")
+{
+	using B = HE::MaterialShaderLibrary::Backend;
+	HE::MaterialShaderLibrary lib;
+
+	for (const B b : { B::Metal, B::SpirV })
+	{
+		const auto& v = lib.landscapeVertex(b);
+		CHECK_MESSAGE(v.ok, "landscapeVertex failed: ", v.log);
+	}
+	// the four varyings of every material fragment, written by the landscape's own position code
+	const std::string vs = HE::MaterialShaderLibrary::landscapeVertexSource();
+	for (const char* s : { "location = 0) out vec3 vNormal", "location = 1) out vec3 vColor", "location = 2) out vec2 vUV", "location = 3) out vec3 vWorldPos",
+	                       "float heightOfTile(", "uCameraRel.w * uCameraRel.w" })
+		CHECK_MESSAGE(vs.find(s) != std::string::npos, s);
+	const std::string& vmsl = lib.landscapeVertex(B::Metal).source;
+	CHECK(vmsl.find("[[buffer(20)]]") != std::string::npos);
+	CHECK(vmsl.find("[[buffer(21)]]") != std::string::npos);
+	CHECK(vmsl.find("[[texture(22)]]") != std::string::npos);
+	CHECK(vmsl.find("[[sampler(") == std::string::npos);
+
+	HE_TEST::RvtOffScope rvtOff;
+	const HE::MatShaderGen gen = HE::generateFragment(HE::buildAutoLandscapeGraph().graph, HE::weatherFunctionLoader());
+	REQUIRE(gen.glsl.find("heLandscapeWeights") != std::string::npos);
+	const std::string before = gen.glsl;
+	const std::string ls = HE::MaterialShaderLibrary::landscapeFragmentSource(gen.glsl);
+	REQUIRE(!ls.empty());
+	CHECK(gen.glsl == before);                                   // the material's own text is what it was (it is what an asset bakes)
+	CHECK(ls.find("heLandscapeWeights") == std::string::npos);   // every read goes through the atlas
+	CHECK(ls.find("heLsWeightLod(") != std::string::npos);
+	// the single-page read (its value is never used with three pages) reads nothing: it was the costliest read of the fragment
+	CHECK(ls.find("heLsWeightOnePage(") != std::string::npos);
+	CHECK(ls.find("vec4 heLsWeightOnePage(vec2 uv) { return vec4(0.0); }") != std::string::npos);
+	// no discard at the world's edge (a material fragment that can discard loses hidden-surface removal): the vertex stage clamps
+	CHECK(ls.find("discard;") == gen.glsl.find("discard;"));
+	CHECK(vs.find("clamp(xz + uOrigin.xz, vec2(0.0), uWorld.xy)") != std::string::npos);
+	// the SPIR-V form: images without a sampler, the patch as a push constant; the Metal form reads the pages filtered
+	const std::string spvFs = HE::MaterialShaderLibrary::landscapeFragmentSource(gen.glsl, /*separateImages=*/true);
+	CHECK(spvFs.find("uniform utexture2D") != std::string::npos);
+	CHECK(spvFs.find("uniform usampler2D     heLsSlotTable") == std::string::npos);
+	CHECK(spvFs.find("GL_EXT_samplerless_texture_functions") != std::string::npos);
+	CHECK(HE::MaterialShaderLibrary::landscapeVertexSource(true).find("layout(push_constant) uniform LsPatch") != std::string::npos);
+	CHECK(HE::MaterialShaderLibrary::landscapeFragmentSource(gen.glsl, false, /*filtered=*/true).find("#define HE_LS_FILTERED 1") != std::string::npos);
+	// a read in a form the rewrite does not know is refused, not passed on half rewritten
+	CHECK(HE::MaterialShaderLibrary::landscapeFragmentSource(gen.glsl + "\n// texelFetch(heLandscapeWeights, ivec2(0), 0)\n").empty());
+
+	for (const bool clustered : { false, true })
+	{
+		const auto& f = lib.landscapeFragment(0x326, gen.glsl, B::Metal, clustered);
+		REQUIRE_MESSAGE(f.ok, "landscapeFragment (Metal) failed: ", f.log);
+		CHECK(f.source.find("[[buffer(20)]]") != std::string::npos);
+		for (const int t : { 13, 25, 26, 27, 28, 29, 30 })
+			CHECK_MESSAGE(f.source.find("[[texture(" + std::to_string(t) + ")]]") != std::string::npos, t);
+		for (int s = 16; s < 31; ++s)   // Metal has sixteen samplers a stage
+			CHECK_MESSAGE(f.source.find("[[sampler(" + std::to_string(s) + ")]]") == std::string::npos, s);
+		// the plain variant of the same text is another shader with the weightmap where it was
+		const auto& plain = clustered ? lib.fragmentClustered(0x326, gen.glsl, B::Metal) : lib.fragment(0x326, gen.glsl, B::Metal);
+		REQUIRE(plain.ok);
+		CHECK(plain.source != f.source);
+		CHECK(plain.source.find("heLsWeight") == std::string::npos);
+	}
+	const auto& spv = lib.landscapeFragment(0x326, gen.glsl, B::SpirV, false);
+	CHECK_MESSAGE(spv.ok, "landscapeFragment (SPIR-V) failed: ", spv.log);
+}
+
 TEST_CASE("UI quad vertex cross-compiles for Metal and GL")
 {
 	// The screen-space vertex that pairs material fragments with in-game UI
@@ -6144,6 +6274,82 @@ TEST_CASE("D3D12: a lit graph material's PSO needs the FULL material root signat
 			const HRESULT hr = makeMaterialPso(w.device.Get(), preClusterRs.Get(), vs.Get(), ps.Get(), pso);
 			const std::string why = drainInfoQueue(w);
 			CHECK_MESSAGE(SUCCEEDED(hr), "the PLAIN PS failed against the pre-cluster signature, hr=", hr, ": ", why);
+		}
+	}
+}
+
+TEST_CASE("D3D12: a material's tile landscape variant builds against the landscape root signature, and not against the material's (WARP, Thema 326)")
+{
+	using Microsoft::WRL::ComPtr;
+	using B = HE::MaterialShaderLibrary::Backend;
+	WarpDevice w;
+	const bool haveWarp = createWarpDevice(w);
+	REQUIRE_MESSAGE(haveWarp, w.log);
+
+	HE_TEST::RvtOffScope rvtOff;
+	HE::MaterialShaderLibrary lib;
+	std::string err;
+	const HE::MatShaderGen gen = HE::generateFragment(HE::buildAutoLandscapeGraph().graph, HE::weatherFunctionLoader());
+	const auto& v = lib.landscapeVertex(B::HLSL);
+	REQUIRE_MESSAGE(v.ok, v.log);
+	ComPtr<ID3DBlob> vs = fxcBlob(v.source, "vs_5_0", err);
+	REQUIRE_MESSAGE(vs.Get() != nullptr, "landscape vertex: ", err);
+
+	// What D3D12RendererImpl::GetOrBuildLandscapeMaterialPSO describes: no input layout (the grid is SV_VertexID).
+	const auto makePso = [&](ID3D12RootSignature* rs, ID3DBlob* ps, ComPtr<ID3D12PipelineState>& out)
+	{
+		D3D12_GRAPHICS_PIPELINE_STATE_DESC pd{};
+		pd.pRootSignature        = rs;
+		pd.VS                    = { vs->GetBufferPointer(), vs->GetBufferSize() };
+		pd.PS                    = { ps->GetBufferPointer(), ps->GetBufferSize() };
+		pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+		pd.NumRenderTargets      = 1;
+		pd.RTVFormats[0]         = DXGI_FORMAT_R16G16B16A16_FLOAT;
+		pd.DSVFormat             = DXGI_FORMAT_D32_FLOAT;
+		pd.SampleDesc.Count      = 1;
+		pd.SampleMask            = UINT_MAX;
+		pd.RasterizerState.FillMode        = D3D12_FILL_MODE_SOLID;
+		pd.RasterizerState.CullMode        = D3D12_CULL_MODE_NONE;
+		pd.RasterizerState.DepthClipEnable = TRUE;
+		pd.DepthStencilState.DepthEnable    = TRUE;
+		pd.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+		pd.DepthStencilState.DepthFunc      = D3D12_COMPARISON_FUNC_LESS;
+		pd.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+		return w.device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&out));
+	};
+
+	HE::d3d12mat::LandscapeRootSignature ls;
+	HE::d3d12mat::DescribeLandscapeRootSignature(ls);
+	ComPtr<ID3D12RootSignature> lsRs;
+	{
+		const HRESULT hr = makeRootSignature(w.device.Get(), ls.desc, lsRs, err);
+		const std::string why = drainInfoQueue(w);
+		REQUIRE_MESSAGE(SUCCEEDED(hr), "landscape root signature: ", err, why);
+	}
+	// The negative control: the plain material signature has neither b12 / b13 nor t47..t55.
+	HE::d3d12mat::MaterialRootSignature mat;
+	HE::d3d12mat::DescribeMaterialRootSignature(mat);
+	ComPtr<ID3D12RootSignature> matRs;
+	REQUIRE(SUCCEEDED(makeRootSignature(w.device.Get(), mat.desc, matRs, err)));
+	drainInfoQueue(w);
+
+	for (const bool clustered : { false, true })
+	{
+		const auto& f = lib.landscapeFragment(0x32612, gen.glsl, B::HLSL, clustered);
+		REQUIRE_MESSAGE(f.ok, f.log);
+		ComPtr<ID3DBlob> ps = fxcBlob(f.source, "ps_5_0", err);
+		REQUIRE_MESSAGE(ps.Get() != nullptr, "landscape fragment (clustered ", clustered, "): ", err);
+		{
+			ComPtr<ID3D12PipelineState> pso;
+			const HRESULT hr = makePso(lsRs.Get(), ps.Get(), pso);
+			const std::string why = drainInfoQueue(w);
+			CHECK_MESSAGE(SUCCEEDED(hr), "PSO against the landscape signature failed (clustered ", clustered, "), hr=", hr, ": ", why);
+		}
+		{
+			ComPtr<ID3D12PipelineState> pso;
+			const HRESULT hr = makePso(matRs.Get(), ps.Get(), pso);
+			drainInfoQueue(w);
+			CHECK_MESSAGE(FAILED(hr), "the material signature took the landscape variant: the negative control does not hold");
 		}
 	}
 }

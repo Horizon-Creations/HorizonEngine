@@ -9,6 +9,7 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 class HorizonWorld;
@@ -105,6 +106,16 @@ struct CellManifest
 	// with scale 2 is as good as one half as far away). Infinite for no anchor.
 	double      distanceTo(const std::vector<CellAnchor>& anchors, int x, int z) const;
 
+	// The region a cell belongs to (Thema 326, step 6): landscape regions are
+	// `regionSize`-metre squares aligned at the same origin as the cell grid, coarser
+	// than a cell (`regionSize` is meant to be a whole multiple of `cellSize`, but
+	// nothing here enforces that). Pure arithmetic, nothing stored: regionSize is a
+	// policy the caller (CellStreamer::setRegionConfig) or a landscape runtime
+	// chooses, not part of the manifest format. regionSize <= 0: every cell is its
+	// own region (x, z) unchanged, so a caller that never sets one up gets back what
+	// it put in.
+	static std::pair<int, int> regionOf(int cellX, int cellZ, float cellSize, float regionSize);
+
 	// One cell as seen from a viewpoint.
 	struct View
 	{
@@ -136,6 +147,23 @@ struct CellManifest
 
 // How many entities the streamer puts in one slice unless told otherwise.
 constexpr size_t kDefaultCellSliceEntities = 128;
+
+// ── Regions (Thema 326, step 6) ──────────────────────────────────────────────
+// A coarser hysteresis ON TOP of the per-cell one above: regionSize-metre squares
+// (CellManifest::regionOf), loaded within `loadRadius` of an anchor, kept until
+// every anchor is beyond `loadRadius * keepFactor`. A cell only loads while its
+// region is resident, and a loaded cell whose region has stopped being resident is
+// unloaded with the rest of its region's cells — the whole region goes together
+// (tile textures, physics, foliage, nav and water already shed a tile this way on
+// their own radius; this is what entity cells were missing). regionSize <= 0
+// (default) disables the gate: every cell is its own region and loads exactly as
+// it always did (existing behaviour, existing tests, unchanged).
+struct CellRegionConfig
+{
+	float regionSize = 0.0f;   // m, 0 = disabled
+	float loadRadius = 8000.0f;
+	float keepFactor = 1.25f;  // unload radius = loadRadius * keepFactor (>= 1)
+};
 
 class CellStreamer
 {
@@ -183,6 +211,13 @@ public:
 		// is still in the world. The session's tombstones (CellState): a thing
 		// destroyed while its cell was there, or taken out of the cell. Empty: all.
 		std::function<bool(const HE::UUID& id)> skip;
+		// The set of resident regions changed (setRegionConfig's regionSize > 0 only):
+		// a region gained its first resident cell, or is about to lose its last one
+		// (called before that region's cells are unloaded, like `unloading`). For
+		// whoever ties region-scale state — an HLOD proxy's visibility, an external
+		// budget counter — to the same hysteresis the cells themselves use.
+		std::function<void(int regionX, int regionZ)> regionLoaded;
+		std::function<void(int regionX, int regionZ)> regionUnloaded;
 	};
 
 	struct Stats
@@ -213,6 +248,9 @@ public:
 		// Entities of the files that were not built because Hooks::skip left them out
 		// (with what hangs below them). Cumulative since begin().
 		size_t skipped = 0;
+		// Regions resident right now (setRegionConfig's regionSize > 0 only); 0 when
+		// the gate is off, which is not the same as "no region" — nothing is tracked.
+		size_t regionsResident = 0;
 	};
 
 	CellStreamer();
@@ -246,6 +284,16 @@ public:
 	// slices — for comparing, not for a game.
 	void   setSliceEntities(size_t n) { m_sliceEntities = n; }
 	size_t sliceEntities() const { return m_sliceEntities; }
+
+	// The region gate (CellRegionConfig above). Takes effect from the next update();
+	// a regionSize of 0 (the default) turns it off again, and every cell already
+	// resident stays exactly as the per-cell radii alone would have kept it.
+	void                     setRegionConfig(const CellRegionConfig& config) { m_regionConfig = config; }
+	const CellRegionConfig&  regionConfig() const { return m_regionConfig; }
+	// True while the region is resident (an anchor is within loadRadius, or was and
+	// has not yet gone beyond loadRadius * keepFactor). False, always, with the gate
+	// off — there is nothing to be resident.
+	bool                     isRegionResident(int regionX, int regionZ) const;
 
 	// True when every cell of the manifest within `radius` of `position` (absolute) is
 	// built — or has failed for good, so that nothing more is coming — and so is
@@ -304,6 +352,8 @@ private:
 	std::unordered_map<Key, std::shared_ptr<Pending>> m_pending;  // reading/parsing/ready
 	std::unordered_map<Key, bool>                     m_failed;   // not tried again this session
 	Stats        m_stats;
+	CellRegionConfig                             m_regionConfig;
+	std::unordered_map<Key, std::pair<int, int>> m_residentRegions;  // region key → (x, z), resident now (regionConfig.regionSize > 0 only)
 };
 
 } // namespace HE

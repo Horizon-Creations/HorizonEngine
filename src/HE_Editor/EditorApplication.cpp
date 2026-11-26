@@ -43,6 +43,7 @@
 #include <HorizonScene/CellPhysics.h>  // cellHolds: the play physics world waits for unbuilt cells
 #include <HorizonScene/CellSplit.h>    // the HE_DUMP_PLAYCELLS witness splits its own scene
 #include "StreamingDebugView.h"    // a split scene's streaming cells in the scene view
+#include "LandscapeWorldTools.h"   // a finished tile-landscape pack build is taken in here
 #include "CameraBookmarks.h"       // the digit-key views, persisted with the camera
 #include "EditorShortcuts.h"       // the rebound keys, persisted the same way
 #include "ShortcutsPage.h"         // …under the key the Preferences page writes them to
@@ -111,6 +112,8 @@ static void onProjectWriteRefused(const char* what);   // ProjectWriteGate handl
 #include <HorizonScene/WaterLake.h>
 #include <HorizonScene/WaterMesh.h>
 #include <HorizonScene/Components/TerrainComponent.h>
+#include <HorizonScene/Components/LandscapeWorldComponent.h>   // HE_DUMP_TILEWORLD
+#include <HorizonScene/Components/LandscapeStampComponent.h>   // HE_DUMP_STAMP
 #include <HorizonScene/Components/FoliageComponent.h>   // HE_DUMP_FOLIAGETEST witness
 #include <HorizonScene/FoliageSystem.h>
 #include <HorizonScene/LayerMeshPresets.h>   // HE_DUMP_AUTOLANDMESHES witness
@@ -619,7 +622,7 @@ void EditorApplication::OnInit()
 		const std::string root = projectRoot();
 		if (root.empty()) return false;
 		const std::filesystem::path full = (std::filesystem::path(root) / projectRelPath).lexically_normal();
-		if (!m_currentScenePath.empty() && m_undo.revision() != m_savedRevision &&
+		if (!m_currentScenePath.empty() && sceneHasUnsavedChanges() &&
 		    std::filesystem::path(m_currentScenePath).lexically_normal() == full)
 			return true;
 		return EditorUI::tabHasUnsavedEdits(full.generic_string());
@@ -3586,7 +3589,7 @@ void EditorApplication::OnRender(float dt)
 	// ── Window title ─────────────────────────────────────────────────────
 	{
 		const std::string& projName = m_projectManager.currentProject().name;
-		const bool dirty = m_undo.revision() != m_savedRevision;
+		const bool dirty = sceneHasUnsavedChanges();
 		// Only rebuild the title (string concats + filesystem path-stem parse + the
 		// SDL_SetWindowTitle syscall) when an input actually changed — this whole block
 		// ran every editor frame otherwise.
@@ -4288,6 +4291,53 @@ void EditorApplication::OnRender(float dt)
 		{
 			HE_PROFILE_SCOPE_N("CellStreaming");
 			m_playCells->update(*m_editorWorld, gameDt);
+		}
+
+		// The tile landscape of the scene, if it has one: around the play camera, or around the editor's while editing (it is not an entity).
+		if (m_editorWorld)
+		{
+			HE_PROFILE_SCOPE_N("Landscape");
+			// Every call, not just the first bind below: RenderExtractor reads this to build the GI
+			// shadow kernel's height clipmap (step 4).
+			m_editorWorld->setLandscapeRuntime(&m_landscape);
+			if (!m_landscapeToolsBound) { LandscapeWorldTools::setRuntime(&m_landscape); m_landscapeToolsBound = true; }   // the tile brush edits this runtime
+			LandscapeWorldTools::pump(*m_editorWorld);   // before the update: a rebuilt pack is opened again this frame
+			if (contentManager().contentRoot() != m_landscapeContentRoot)
+			{
+				m_landscapeContentRoot = contentManager().contentRoot();
+				m_landscape.setProjectRoot(m_landscapeContentRoot.empty() ? std::filesystem::path{}
+				                                                          : std::filesystem::path(m_landscapeContentRoot).parent_path());
+			}
+			if (!m_landscapeBound && renderer())
+			{
+				renderer()->SetLandscapeProvider([this](const glm::dmat4& vp, bool zeroToOne, HE::LandscapeRenderFrame& out) {
+					if (m_editorWorld) m_landscape.buildRenderFrame(vp, m_editorWorld->origin(), zeroToOne, out);
+				});
+				// A backend that can swap the far data alone lets a render window move without emptying the tile atlas.
+				m_landscape.setWindowKeepsAtlas(renderer()->GetCapabilities().landscapeCoarseRevision);
+				m_landscapeBound = true;
+			}
+			if (m_landscapePhysics != m_physicsWorld.get())
+			{
+				m_landscape.setPhysics(m_physicsWorld.get());   // ground for the play session's bodies; none while editing
+				m_landscapePhysics = m_physicsWorld.get();
+			}
+			if (m_isPlaying != m_landscapeNavigation)
+			{
+				// Only while playing: the runtime swaps the scene's NavMeshComponent over to its tiled mesh, which an editor
+				// that is just looking at the scene must not do to a navmesh somebody baked.
+				const HE::LandscapeNavConfig nav;
+				m_landscape.setNavigation(m_isPlaying ? &nav : nullptr);
+				m_landscapeNavigation = m_isPlaying;
+			}
+			if (m_isPlaying) m_landscape.update(*m_editorWorld, gameDt);
+			else
+			{
+				const glm::dvec3 eye = glm::dvec3(m_editorCamera.makeOverride().position) + m_editorWorld->origin();
+				m_landscape.update(*m_editorWorld, gameDt, 1.0, &eye);
+			}
+			m_landscapeStamps.sync(*m_editorWorld, m_landscape, contentManager());   // stamp entities that moved: their tiles are read again
+			m_landscapeProxies.sync(*m_editorWorld, m_landscape, contentManager(), renderer());
 		}
 
 		// Keep spatial audio sources and listener in sync each play-mode frame
@@ -8144,6 +8194,24 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 	//              between backends from the material's
 	//   =plaingraph a lit graph material that is only a constant grey: the
 	//              graph lighting path without textures or normal map
+	// HE_DUMP_TILEWORLD=<pack file>[,<texture group 0..3>]: a TILE landscape in the dump scene (LandscapeWorldComponent, Thema 326),
+	// through the editor's own runtime, provider and renderer. The pack is any landscape pack (landscape_gpu_check --write-pack
+	// writes a small painted one). The tiles are streamed in before the capture, further down.
+	if (const char* tw = std::getenv("HE_DUMP_TILEWORLD"); tw && *tw && m_editorWorld)
+	{
+		std::string packFile(tw);
+		int group = 1;
+		if (const size_t comma = packFile.rfind(','); comma != std::string::npos)
+		{
+			group = std::atoi(packFile.c_str() + comma + 1);
+			packFile.resize(comma);
+		}
+		const Entity e = m_editorWorld->createEntity("TileLandscape");
+		LandscapeWorldComponent lw;
+		lw.pack = packFile;
+		lw.textureGroup = group;
+		m_editorWorld->registry().emplace<LandscapeWorldComponent>(e, lw);
+	}
 	if (const char* al = std::getenv("HE_DUMP_AUTOLAND"); al && *al && m_editorWorld)
 	{
 		auto& reg = m_editorWorld->registry();
@@ -10965,6 +11033,144 @@ void EditorApplication::dumpFrameHeadless()
 	int settleFrames = 3;
 	if (const char* sf = std::getenv("HE_DUMP_FRAMES"); sf && *sf)
 		settleFrames = std::clamp(std::atoi(sf), 1, 240);
+	// HE_DUMP_TILEWORLD: the dump renders without scene ticks, so the tile landscape is started and streamed in here, with the same
+	// calls the frame loop makes (the runtime on the world, the provider on the renderer, update around the editor camera).
+	if (const char* tw = std::getenv("HE_DUMP_TILEWORLD"); tw && *tw && m_editorWorld && r)
+	{
+		m_editorWorld->setLandscapeRuntime(&m_landscape);
+		if (!m_landscapeBound)
+		{
+			r->SetLandscapeProvider([this](const glm::dmat4& vp, bool zeroToOne, HE::LandscapeRenderFrame& out) {
+				if (m_editorWorld) m_landscape.buildRenderFrame(vp, m_editorWorld->origin(), zeroToOne, out);
+			});
+			m_landscape.setWindowKeepsAtlas(r->GetCapabilities().landscapeCoarseRevision);
+			m_landscapeBound = true;
+		}
+		const glm::dvec3 eye = glm::dvec3(m_editorCamera.position()) + m_editorWorld->origin();
+		// HE_DUMP_STAMP=x,z,size,height: a Landscape Stamp entity at that absolute place, with a generated heightmap (a cone with
+		// two rings: a shape no ground has), laid over the tiles by the same sync the frame loop runs.
+		if (const char* st = std::getenv("HE_DUMP_STAMP"); st && *st)
+		{
+			float sx = 0.0f, sz = 0.0f, size = 300.0f, height = 100.0f;
+			if (std::sscanf(st, "%f,%f,%f,%f", &sx, &sz, &size, &height) >= 2)
+			{
+				TextureAsset tex;
+				tex.width = tex.height = 128;
+				tex.channels = 4;
+				tex.data.resize(128 * 128 * 4);
+				for (int y = 0; y < 128; ++y)
+					for (int x = 0; x < 128; ++x)
+					{
+						const float d = std::min(1.0f, std::hypot(x - 63.5f, y - 63.5f) / 63.5f);
+						const float v = (1.0f - d) * (0.75f + 0.25f * std::cos(d * 18.85f));
+						for (int c = 0; c < 4; ++c) tex.data[(static_cast<size_t>(y) * 128 + x) * 4 + c] = static_cast<uint8_t>(std::clamp(v, 0.0f, 1.0f) * 255.0f);
+					}
+				const Entity se = m_editorWorld->createEntity("Landscape Stamp");
+				TransformComponent& stf = m_editorWorld->registry().get_or_emplace<TransformComponent>(se);
+				stf.position = glm::vec3(glm::dvec3(sx, 0.0, sz) - m_editorWorld->origin());
+				stf.dirty = true;
+				LandscapeStampComponent sc;
+				sc.textureId = contentManager().registerTexture(std::move(tex));
+				sc.sizeM = size;
+				sc.heightM = height;
+				// HE_DUMP_STAMPBITS=8 / 16: a smooth cone of 1024 x 1024 instead, as a texture asset (8 bits) or written as a .r16
+				// file beside the dump and named in the component (16 bits): the same shape, to see the height steps of each.
+				if (const char* bits = std::getenv("HE_DUMP_STAMPBITS"); bits && *bits)
+				{
+					const int n = 1024;
+					std::vector<uint16_t> cone(static_cast<size_t>(n) * n);
+					for (int y = 0; y < n; ++y)
+						for (int x = 0; x < n; ++x)
+						{
+							const float d = std::min(1.0f, std::hypot(x - (n - 1) * 0.5f, y - (n - 1) * 0.5f) / ((n - 1) * 0.5f));
+							cone[static_cast<size_t>(y) * n + x] = static_cast<uint16_t>(std::lround((1.0f - d) * 65535.0f));
+						}
+					if (std::atoi(bits) == 16)
+					{
+						const char* dump = std::getenv("HE_DUMP_PATH");
+						const std::string file = std::string(dump ? dump : "stamp") + ".stamp.r16";
+						std::ofstream out(file, std::ios::binary);
+						out.write(reinterpret_cast<const char*>(cone.data()), static_cast<std::streamsize>(cone.size() * 2));
+						sc.heightmapFile = file;
+						sc.textureId = HE::UUID{};
+					}
+					else
+					{
+						TextureAsset t8;
+						t8.width = t8.height = static_cast<uint32_t>(n);
+						t8.channels = 4;
+						t8.data.resize(cone.size() * 4);
+						for (size_t i = 0; i < cone.size(); ++i)
+							for (int c = 0; c < 4; ++c) t8.data[i * 4 + static_cast<size_t>(c)] = static_cast<uint8_t>(cone[i] >> 8);
+						sc.textureId = contentManager().registerTexture(std::move(t8));
+					}
+				}
+				m_editorWorld->registry().emplace<LandscapeStampComponent>(se, sc);
+			}
+		}
+		if (std::getenv("HE_DUMP_TILEWATER")) LandscapeWorldTools::setRuntime(&m_landscape);   // editable before it begins: an overlay to paint into
+		bool settled = false;
+		size_t stampTiles = 0;
+		for (const auto t0 = std::chrono::steady_clock::now(); std::chrono::steady_clock::now() - t0 < std::chrono::seconds(60);)
+		{
+			m_landscape.update(*m_editorWorld, 0.016f, 5.0, &eye);
+			stampTiles += m_landscapeStamps.sync(*m_editorWorld, m_landscape, contentManager());
+			if (m_landscape.active() && m_landscape.store()->settled() && m_landscape.atlas()->stats().used == m_landscape.store()->residentKeys().size()
+			    && m_landscape.giHeightfield().active())
+			{ settled = true; break; }
+			std::this_thread::sleep_for(std::chrono::milliseconds(1));
+		}
+		HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_TILEWORLD %s: %zu tile(s) resident, renderer draws the ground with %s, %zu tile(s) read again for stamps",
+		            settled ? "streamed in" : "DID NOT SETTLE", m_landscape.active() ? m_landscape.store()->residentKeys().size() : size_t(0),
+		            r->GetCapabilities().landscapeMaterial ? "its material" : "the fixed blend", stampTiles);
+		// HE_DUMP_TILEWATER=x,z,radius: one stroke of the tile brush's Water tool there, then the frame loop's calls until the water
+		// sheet of the new lake is an entity (LandscapeWorldProxies).
+		if (const char* twa = std::getenv("HE_DUMP_TILEWATER"); twa && *twa && settled)
+		{
+			float wx = 0.0f, wz = 0.0f, wr = 60.0f;
+			std::sscanf(twa, "%f,%f,%f", &wx, &wz, &wr);
+			LandscapeWorldTools::setRuntime(&m_landscape);
+			const bool painted = LandscapeWorldTools::paintLake(wx, wz, wr);
+			for (int i = 0; i < 3000; ++i)
+			{
+				m_landscape.update(*m_editorWorld, 0.016f, 5.0, &eye);
+				m_landscapeProxies.sync(*m_editorWorld, m_landscape, contentManager(), r);
+				if (i > 200 && m_landscape.store()->settled() && m_landscape.atlas()->stats().used == m_landscape.store()->residentKeys().size()) break;
+				std::this_thread::sleep_for(std::chrono::milliseconds(1));
+			}
+			const HE::LandscapeWaterTable* table = m_landscape.edits() ? m_landscape.edits()->water() : nullptr;
+			HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_TILEWATER %s: %zu edited tile(s), %zu water bod(ies) in the overlay's table",
+			            painted ? "painted" : "NOT PAINTED", m_landscape.edits() ? m_landscape.edits()->editedKeys().size() : size_t(0),
+			            table ? table->bodies.size() : size_t(0));
+		}
+		// What the stamps cost a frame in which nothing moves: the sync alone, a thousand times.
+		if (std::getenv("HE_DUMP_STAMP"))
+		{
+			// The far levels take a stamp once it has rested (LandscapeStampSync): let it, so the picture has them.
+			std::this_thread::sleep_for(std::chrono::milliseconds(320));
+			m_landscapeStamps.sync(*m_editorWorld, m_landscape, contentManager());
+			const auto i0 = std::chrono::steady_clock::now();
+			size_t again = 0;
+			for (int i = 0; i < 1000; ++i) again += m_landscapeStamps.sync(*m_editorWorld, m_landscape, contentManager());
+			const double us = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - i0).count() / 1000.0;
+			HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_STAMP idle: %.3f us a frame for the sync, %zu tile(s) read again in 1000 idle frames", us, again);
+			// And what one step of a drag costs on the main thread (HE_DUMP_STAMPMOVE=1): the stamp 40 m further, the sync that takes it.
+			if (std::getenv("HE_DUMP_STAMPMOVE"))
+				for (auto [se, stf, sc] : m_editorWorld->registry().view<TransformComponent, LandscapeStampComponent>().each())
+				{
+					stf.position.x += 40.0f;
+					stf.dirty = true;
+					std::this_thread::sleep_for(std::chrono::milliseconds(120));
+					const auto m0 = std::chrono::steady_clock::now();
+					const size_t moved = m_landscapeStamps.sync(*m_editorWorld, m_landscape, contentManager());
+					const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - m0).count();
+					HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_STAMPMOVE: a %.0f m stamp moved by 40 m: %.1f ms on the main thread, %zu tile(s) read again", sc.sizeM, ms, moved);
+					stf.position.x -= 40.0f;
+					stf.dirty = true;
+					break;
+				}
+		}
+	}
 	// The dump renders without scene ticks, so the trail clipmap (HE_DUMP_TRAILTEST's footprints) is brought in
 	// line with the camera's final pose here, once.
 	if (const char* tt = std::getenv("HE_DUMP_TRAILTEST"); tt && *tt && *tt != '0' && m_editorWorld)
@@ -13806,7 +14012,7 @@ void EditorApplication::setupMcpTools()
 	hooks.scenePath   = [this] { return m_currentScenePath; };
 	// The same expression AppContext uses (see makeContext): the scene is dirty
 	// when the undo revision has moved past the one it was saved at.
-	hooks.sceneDirty  = [this] { return m_undo.revision() != m_savedRevision; };
+	hooks.sceneDirty  = [this] { return sceneHasUnsavedChanges(); };
 	hooks.isPlaying   = [this] { return m_isPlaying; };
 	hooks.inSession   = [this] { return m_collab.inSession(); };
 	hooks.entityCount = [this]() -> int {
@@ -13857,7 +14063,7 @@ void EditorApplication::setupMcpTools()
 		if (m_editorWorld)
 			out.push_back({ std::string(HE::Ed::kMcpDocLevelScript),
 			                "Level Script", "level",
-			                m_undo.revision() != m_savedRevision,
+			                sceneHasUnsavedChanges(),
 			                {}, kLevelScriptExcluded });
 		if (!m_projectManager.currentProject().name.empty())
 			out.push_back({ std::string(HE::Ed::kMcpDocGameInstance),
@@ -14132,7 +14338,7 @@ void EditorApplication::setupMcpTools()
 	// save prompt — that guard is replicated inside the tools (see McpSceneHooks).
 	HE::Ed::McpSceneHooks scene;
 	scene.currentScenePath = [this] { return m_currentScenePath; };
-	scene.sceneDirty       = [this] { return m_undo.revision() != m_savedRevision; };
+	scene.sceneDirty       = [this] { return sceneHasUnsavedChanges(); };
 	scene.isPlaying        = [this] { return m_isPlaying; };
 	scene.inSession        = [this] { return m_collab.inSession(); };
 	scene.entityCount      = [this]() -> int {
@@ -15600,7 +15806,7 @@ AppContext EditorApplication::makeContext()
 			m_uiPanelWindow = win;
 		},
 		.currentScenePath    = m_currentScenePath,
-		.sceneDirty          = m_undo.revision() != m_savedRevision,
+		.sceneDirty          = sceneHasUnsavedChanges(),
 		.exitRequested       = m_exitRequested,
 		.saveSceneToPath     = [this](const std::string& p){ return saveSceneToPath(p); },
 		.openScene           = [this](const std::string& p){ openScene(p); },
@@ -16512,6 +16718,8 @@ void EditorApplication::setPlayMode(bool play)
 		// the play world and the snapshot restored the scene as it was authored.
 		// So a play session leaves neither a body without an entity nor an entity
 		// with a body it should not have.
+		m_landscape.setPhysics(nullptr);   // its ground lives in that world: give it back first
+		m_landscapePhysics = nullptr;
 		m_physicsWorld.reset();
 		m_physicsAccum = 0.0f;
 
@@ -17171,6 +17379,14 @@ bool EditorApplication::pushToPrefab(Entity root)
 	return true;
 }
 
+// What "the scene has unsaved changes" means everywhere (title, close prompt, autosave): the undo history moved since the last save, or a
+// tile landscape has sculpted or painted tiles no file holds yet. Those are not undo steps of the scene (they live beside the pack), and
+// without this a quit after a brush stroke dropped them without a question.
+bool EditorApplication::sceneHasUnsavedChanges() const
+{
+	return m_undo.revision() != m_savedRevision || LandscapeWorldTools::editsUnsaved();
+}
+
 bool EditorApplication::saveSceneToPath(const std::string& path)
 {
 	if (!m_editorWorld || path.empty()) return false;
@@ -17179,6 +17395,10 @@ bool EditorApplication::saveSceneToPath(const std::string& path)
 	// serialisation, and without the "Could not save" dialog below: nothing is wrong,
 	// the save simply has to wait, and the gate has already said so.
 	if (HE::ProjectWriteGate::refuse("save the scene")) return false;
+
+	// Sculpted and painted tiles of a tile landscape live beside its pack, not in the scene: saving the scene saves them too.
+	if (const std::string why = LandscapeWorldTools::saveEdits(); !why.empty())
+		HE_LOG_WARN(Editor, "Tile landscape edits were not saved: %s", why.c_str());
 
 	// The file must not lag the assets it was built from — see the header.
 	// Before the write, so the sync's result IS what lands on disk; the world
@@ -17273,7 +17493,7 @@ void EditorApplication::updateAutosave(std::uint64_t nowMs)
 	info.scenePath   = m_currentScenePath;
 	info.projectPath = m_projectManager.currentProject().path;
 
-	const bool dirty = m_undo.revision() != m_savedRevision;
+	const bool dirty = sceneHasUnsavedChanges();
 	m_autosave.update(nowMs, dirty, m_undo.revision(), info,
 		[this](const std::string& path)
 		{
@@ -18405,7 +18625,7 @@ bool EditorApplication::OnEvent(const SDL_Event& event)
 		 event.window.windowID == SDL_GetWindowID(window()->GetNativeWindow()));
 	if (osCloseRequest && m_dumpPath.empty() && m_projectLoaded)
 	{
-		const bool sceneDirty = m_undo.revision() != m_savedRevision;
+		const bool sceneDirty = sceneHasUnsavedChanges();
 		// Panel-driven, not m_tabs-driven: a dirty tab the user CLOSED keeps its
 		// panel state but is gone from m_tabs, so walking m_tabs would let those
 		// edits be thrown away silently.

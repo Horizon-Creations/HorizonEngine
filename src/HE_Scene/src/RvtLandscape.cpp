@@ -496,7 +496,7 @@ void RvtLandscape::remove(entt::entity terrain, Segment& seg)
 bool RvtLandscape::active() const
 {
     for (const auto& kv : m_segments) if (kv.second.swapOn) return true;
-    return false;
+    return m_tiles.swapOn;
 }
 bool RvtLandscape::active(entt::entity e) const { const auto it = m_segments.find(e); return it != m_segments.end() && it->second.swapOn; }
 bool RvtLandscape::attached(entt::entity e) const { const auto it = m_segments.find(e); return it != m_segments.end() && it->second.attached; }
@@ -571,6 +571,7 @@ RvtLandscape::Settings RvtLandscape::settingsFromProject(const HE::ProjectRvtSet
     s.nearRadiusM       = p.nearRadiusM;
     s.activationRadiusM = p.activationRadiusM;
     s.nativeNear        = p.nativeNear;
+    s.tileNativeNear    = p.tileNativeNear;
     return s;
 }
 
@@ -624,6 +625,7 @@ void RvtLandscape::detach()
 {
     for (auto& kv : m_segments) remove(kv.first, kv.second);
     m_segments.clear();
+    removeTileGround();
     if (m_poolMade) m_renderer.DestroyRvtPool();
     m_poolMade = false;
     m_manager.reset();
@@ -664,7 +666,10 @@ RvtLandscape::FrameStats RvtLandscape::tick(HorizonWorld& live, const glm::vec3&
         ++st.detaches;
         it = m_segments.erase(it);
     }
-    if (lands.empty())
+    // The tile landscape's ground (RvtLandscapeTiles.cpp) shares the pool; its position is absolute (the floating origin added).
+    const bool tiles = tileGroundWanted(live);
+    const glm::dvec2 camAbs(double(cameraPos.x) + live.origin().x, double(cameraPos.z) + live.origin().z);
+    if (lands.empty() && !tiles)
     {
         if (m_poolMade) { m_renderer.DestroyRvtPool(); m_poolMade = false; m_manager.reset(); m_lastStarved = 0; m_starvedWarned = false; }
         note("idle: no landscape with a material in the world (" + std::to_string(terrains) + " landscape(s), 0 with a material)");
@@ -769,6 +774,8 @@ RvtLandscape::FrameStats RvtLandscape::tick(HorizonWorld& live, const glm::vec3&
     if (!m_manager)
         for (const auto& kv : m_segments)
             if (kv.second.analysis && kv.second.analysis->split.hasRvtNodes && ensurePool()) break;
+    if (!m_manager && tiles) ensurePool();
+    if (m_manager && tiles) tileGroundVolumes(live, camAbs, st);
     if (!m_manager) { note("idle: no landscape near enough (activation radius " + std::to_string(static_cast<int>(m_settings.activationRadiusM)) + " m)"); return st; }
 
     // The journals: scratch copies up to date, the pages under each change stale.
@@ -870,6 +877,7 @@ RvtLandscape::FrameStats RvtLandscape::tick(HorizonWorld& live, const glm::vec3&
         }
         views.push_back({ kv.first, std::move(view) });
     }
+    if (tiles) tileGroundViews(camAbs, views);
     m_manager->beginFrame();
     const auto paintT0 = std::chrono::steady_clock::now();
     if (!views.empty())
@@ -887,6 +895,7 @@ RvtLandscape::FrameStats RvtLandscape::tick(HorizonWorld& live, const glm::vec3&
         for (const rvt::PageRender& r : renders) perVolume[r.key.volume].push_back(r);
         for (auto& kv : perVolume)
         {
+            if (tileGroundOwns(kv.first)) { st.pagesPainted += paintTileGround(live, kv.first, kv.second); continue; }
             Segment& seg = m_segments[byVolume[kv.first]];
             seg.baker->paintBegin();
             st.pagesPainted += rvt::paintPages(*seg.baker, kv.second, m_pagePx);
@@ -947,6 +956,7 @@ RvtLandscape::FrameStats RvtLandscape::tick(HorizonWorld& live, const glm::vec3&
         if (seg.swapOn) ++st.activeSegments;
     }
     updateNearChunks(live, cameraPos, st);
+    if (tiles) tileGroundTables(live, st);
 
     const rvt::Stats ms = m_manager->stats();
     // One warning per episode: a pool that is too small starves every frame, and the number alone changes the text each time.

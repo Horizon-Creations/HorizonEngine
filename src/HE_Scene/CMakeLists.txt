@@ -16,6 +16,32 @@ add_library(HorizonScene SHARED
     src/CellRuntime.cpp
     src/CellState.cpp
     src/CellScripts.cpp
+    src/LandscapeTile.cpp
+    src/LandscapeSource.cpp
+    src/LandscapeStore.cpp
+    src/LandscapeQuadtree.cpp
+    src/LandscapePatchMesh.cpp
+    src/LandscapeAtlas.cpp
+    src/LandscapeRuntime.cpp
+    src/LandscapeGpuLayout.cpp
+    src/LandscapePhysics.cpp
+    src/LandscapeTileTerrain.cpp
+    src/LandscapeWaterData.cpp
+    src/LandscapeWater.cpp
+    src/LandscapeGi.cpp
+    src/LandscapeCellHlod.cpp
+    src/LandscapeHlodProxies.cpp
+    src/LandscapeCellHlodBake.cpp
+    src/LandscapeEdit.cpp
+    src/LandscapeStamps.cpp
+    src/LandscapeExport.cpp
+    src/LandscapeFarMap.cpp
+    src/LandscapeFarBake.cpp
+    src/LandscapeCellRegions.cpp
+    src/LandscapePackBuild.cpp
+    src/LandscapeWorldProxies.cpp
+    src/LandscapeFoliage.cpp
+    src/LandscapeNavigation.cpp
     src/GameInstanceHost.cpp
     src/PlayerHost.cpp
     src/EntityHost.cpp
@@ -36,6 +62,7 @@ add_library(HorizonScene SHARED
     src/RvtProducer.cpp
     src/RvtBaseBake.cpp
     src/RvtLandscape.cpp
+    src/RvtLandscapeTiles.cpp
     src/TrailSystem.cpp
     src/TerrainPaint.cpp
     src/TerrainSculpt.cpp
@@ -133,6 +160,17 @@ target_link_libraries(HorizonScene
             # text, so nothing above this library ever sees a sqlite3*.
             sqlite3_static
 )
+
+# Landscape tiles (LandscapeTile.cpp) are stored with LZ4 or zstd, as HorizonCore does for hpak;
+# a build without them writes and reads only the stored form.
+if(HE_HAVE_LZ4)
+    target_link_libraries(HorizonScene PRIVATE lz4::lz4)
+    target_compile_definitions(HorizonScene PRIVATE HE_HAVE_LZ4)
+endif()
+if(HE_HAVE_ZSTD)
+    target_link_libraries(HorizonScene PRIVATE zstd::zstd)
+    target_compile_definitions(HorizonScene PRIVATE HE_HAVE_ZSTD)
+endif()
 
 if(APPLE)
     target_link_libraries(HorizonScene PRIVATE

@@ -5,6 +5,8 @@
 #include <ContentManager/TextureBlockDecode.h> // CPU BC1/BC3/BC4/BC5 expand when the device cannot sample them
 #include <Renderer/UIFont.h>
 #include <HorizonRendering/RenderWorld.h>
+#include <HorizonRendering/GiHeightfield.h>   // the tile landscape's height clipmap for the GI shadow kernels
+#include <HorizonRendering/RvtTilePatches.h>  // the tile ground's patches a virtual texture's consumer serves
 #include <HorizonRendering/RvtNearChunks.h>
 #include <HorizonRendering/GiCasterRange.h>
 #include <Diagnostics/EngineProfiler.h>
@@ -64,6 +66,7 @@
 #include "Backends/D3D_Shared/D3DStartupTiming.h" // [startup] phase/compile timing (Thema 196)
 #include "Backends/D3D_Shared/DxgiAdapterLog.h"   // names the GPU in the log
 #include "Backends/D3D12/D3D12MaterialRootSignature.h" // A4: the material root signature, shared with he_tests (Thema 56)
+#include "Backends/D3D12/D3D12Landscape.h"            // the world-scale landscape (Thema 326)
 #include <SDL3/SDL.h>
 #include <d3d12.h>
 #include <d3d12sdklayers.h>
@@ -1940,6 +1943,8 @@ struct D3D12RendererImpl
     // image by a subpixel every frame with nothing to average it out.
     bool      taaFrame = false;
     glm::mat4 taaPrevViewProj{ 1.0f };
+    glm::dvec3 taaPrevOrigin{ 0.0 };     // the floating origin taaPrevViewProj was built for (HE::taaPrevViewProjAt)
+    bool       taaPrevOriginKnown = false;
     std::unordered_map<uint32_t, glm::mat4> taaPrevTransforms, taaCurTransforms;
 
     bool taaReady() const { return postFxReady && taaVelocityPSO && taaResolvePSO && taaSharpenPSO; }
@@ -2972,7 +2977,7 @@ struct D3D12RendererImpl
         for (const char* e : { "VSMain", "VSMainInstanced", "VSDepth", "VSDepthInstanced" })
             submit(sceneSource, "scene", e, "vs_5_0", flags);
         // createGiPipelines
-        submit(std::string(kGiTraversalHLSL) + kGiShadowCSHLSL, "gi", "GiShadowCS", "cs_5_0", flags);
+        submit(std::string(kGiTraversalHLSL) + kGiHeightfieldHLSL + kGiShadowCSHLSL, "gi", "GiShadowCS", "cs_5_0", flags);
         submit(std::string(kGiTraversalHLSL) + kGiProbeCSHLSL,  "gi", "GiProbeCS",  "cs_5_0", flags);
         submit(kGiGBufHLSL, "gi", "GiGBufVS", "vs_5_0", flags);
         submit(kGiGBufHLSL, "gi", "GiGBufPS", "ps_5_0", flags);
@@ -4135,6 +4140,87 @@ struct D3D12RendererImpl
                                                bool hdr, bool transparent, bool gbuffer = false,
                                                bool instanced = false);
 
+    // The tile landscape's variant of a material (Thema 326): the landscape's vertex stage (the grid from SV_VertexID, heights
+    // from the tile atlas) with the material's fragment, its layer weights read from the tile weight pages, against
+    // m_lsMatRootSig (the material signature plus b12 / b13 / t47..t55, D3D12MaterialRootSignature.h). No input layout, no
+    // tessellation stages. A miss is remembered: the ground keeps its fixed blend.
+    ComPtr<ID3D12RootSignature> m_lsMatRootSig;
+    std::unordered_map<uint64_t, ComPtr<ID3D12PipelineState>> m_lsMatPSOs;   // key = hash ^ hdr
+    HE::UUID landscapeMaterialLoadTried;                                      // the ground's material was asked for by its path, once
+    // `gbuffer`: `frag` is the material's G-buffer tail (resolveGBufferShaders), drawn into the three MRTs of the deferred pass;
+    // its own key, never clustered.
+    ID3D12PipelineState* GetOrBuildLandscapeMaterialPSO(uint64_t hash, const std::string& frag, bool hdr, bool gbuffer = false)
+    {
+        if (!m_lsMatRootSig) return nullptr;
+        if (gbuffer) { hash ^= 0x7A11E56B0FFE2000ULL; hdr = false; }
+        const uint64_t key = hash ^ (hdr ? 0x9E3779B97F4A7C15ULL : 0ULL);
+        if (auto it = m_lsMatPSOs.find(key); it != m_lsMatPSOs.end()) return it->second.Get();
+        using Backend = HE::MaterialShaderLibrary::Backend;
+        UINT cflags = 0;
+#ifdef _DEBUG
+        cflags |= D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
+#endif
+        const HE::MaterialShaderLibrary::Compiled& vc = m_matShaderLib.landscapeVertex(Backend::HLSL);
+        ComPtr<ID3DBlob> vs, ps, cerr;
+        std::string why = vc.log;
+        bool built = vc.ok && !vc.source.empty()
+            && SUCCEEDED(D3DCompile(vc.source.c_str(), vc.source.size(), "landscapeMatVS", nullptr, nullptr, "main", "vs_5_0", cflags, 0, &vs, &cerr));
+        if (!built && cerr) why += static_cast<const char*>(cerr->GetBufferPointer());
+        // Clustered first, like a mesh draw of the material; the 8-light window variant when that one does not build.
+        for (int pass = (matClustered() && !gbuffer) ? 0 : 1; built && pass < 2 && !ps; ++pass)
+        {
+            const HE::MaterialShaderLibrary::Compiled& fc = m_matShaderLib.landscapeFragment(hash, frag, Backend::HLSL, /*clustered=*/pass == 0);
+            cerr.Reset();
+            if (!fc.ok || fc.source.empty()
+                || FAILED(D3DCompile(fc.source.c_str(), fc.source.size(), "landscapeMatPS", nullptr, nullptr, "main", "ps_5_0", cflags, 0, &ps, &cerr)))
+            {
+                why += fc.log;
+                if (cerr) why += static_cast<const char*>(cerr->GetBufferPointer());
+                ps.Reset();
+            }
+        }
+        ComPtr<ID3D12PipelineState> pso;
+        if (built && ps)
+        {
+            D3D12_GRAPHICS_PIPELINE_STATE_DESC pd{};
+            pd.pRootSignature        = m_lsMatRootSig.Get();
+            pd.VS                    = { vs->GetBufferPointer(), vs->GetBufferSize() };
+            pd.PS                    = { ps->GetBufferPointer(), ps->GetBufferSize() };
+            pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+            pd.NumRenderTargets      = 1;
+            pd.RTVFormats[0]         = hdr ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_R8G8B8A8_UNORM;
+            pd.DSVFormat             = DXGI_FORMAT_D32_FLOAT;
+            pd.SampleDesc.Count      = 1;
+            pd.SampleMask            = UINT_MAX;
+            pd.RasterizerState.FillMode        = D3D12_FILL_MODE_SOLID;
+            pd.RasterizerState.CullMode        = D3D12_CULL_MODE_NONE;
+            pd.RasterizerState.DepthClipEnable = TRUE;
+            pd.DepthStencilState.DepthEnable    = TRUE;
+            pd.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+            pd.DepthStencilState.DepthFunc      = D3D12_COMPARISON_FUNC_LESS;
+            pd.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+            if (gbuffer)   // the three G-buffer targets, as GetOrBuildMaterialPSO describes them
+            {
+                pd.NumRenderTargets = 3;
+                for (UINT i = 0; i < 3; ++i)
+                {
+                    pd.RTVFormats[i] = k_gbFormats[i];
+                    pd.BlendState.RenderTarget[i].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+                }
+            }
+            if (FAILED(device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&pso))))
+            {
+                why += " CreateGraphicsPipelineState failed";
+                pso.Reset();
+            }
+        }
+        if (!pso)
+            HE_LOG_WARN(RHI, "D3D12Renderer: the landscape keeps its fixed blend, its material's variant did not build: %s", why.c_str());
+        else
+            HE_LOG_INFO(RHI, "%s", "D3D12Renderer: built a material's tile landscape variant");
+        return m_lsMatPSOs.emplace(key, pso).first->second.Get();
+    }
+
     // ── Screen-space decals (forward) ───────────────────────────────────────
     // docs/decals-cross-backend-plan.md §6c. D3D12 has no G-buffer, so a decal is
     // not composited into a base-colour attachment like on Metal/GL — it samples
@@ -4744,6 +4830,13 @@ struct D3D12RendererImpl
     // ImGui editor textures (logo + content-browser icons). Held here so the GPU
     // resources outlive ImGui's use of the SRVs the editor creates over them.
     std::vector<ComPtr<ID3D12Resource>> m_imguiTextures;
+    // ── World-scale landscape (Thema 326, step 2 part B) ──────────────────
+    // DrawScene asks the application's provider (IRenderer::SetLandscapeProvider) once per scene frame, records the frame's uploads at once
+    // and keeps the frame until the opaque pass draws it. Not in the G-buffer: no shadows, SSAO or GI.
+    D3D12Landscape               landscape;
+    bool                         landscapeFailed = false;    // init failed once: not tried again
+    bool                         landscapeFrameLive = false; // landscapeFrame belongs to the scene frame in progress
+    HE::LandscapeRenderFrame     landscapeFrame;
     bool                         skyReady   = false;
     // True when the sky PSOs run the GL sky cross-compiled through he::shaderc
     // (skyCBuf then holds a whole HE::SkyFrameParams); false on the kSkyPSHLSL12
@@ -5619,6 +5712,30 @@ struct D3D12RendererImpl
         }
         // Every slot is now safe up to this value.
         for (UINT i = 0; i < k_frameCount; ++i) fenceValues[i] = val;
+    }
+
+    // The debug layer's validation messages (gpuDebug only) to the Logger. Render() drains them every healthy frame; a frame that does not go
+    // through Render() (RenderSceneImage, the landscape check's engine run) drains them after its own wait.
+    void drainGpuDebugMessages()
+    {
+        if (!gpuDebug || !infoQueue) return;
+        const UINT64 n = infoQueue->GetNumStoredMessages();
+        for (UINT64 i = 0; i < n; ++i)
+        {
+            SIZE_T len = 0;
+            if (FAILED(infoQueue->GetMessage(i, nullptr, &len)) || len == 0) continue;
+            std::vector<char> buf(len);
+            auto* dm = reinterpret_cast<D3D12_MESSAGE*>(buf.data());
+            if (SUCCEEDED(infoQueue->GetMessage(i, dm, &len)) && dm->pDescription)
+            {
+                const bool err = dm->Severity == D3D12_MESSAGE_SEVERITY_ERROR ||
+                                 dm->Severity == D3D12_MESSAGE_SEVERITY_CORRUPTION;
+                const std::string line = std::string("D3D12 debug layer: ") + dm->pDescription;
+                Logger::LogTo(HE::Log::Cat::RHI, err ? Logger::LogLevel::Error : Logger::LogLevel::Warning,
+                            line.c_str());
+            }
+        }
+        infoQueue->ClearStoredMessages();
     }
 
     // Keep the swapchain at the window's client size. Without this the buffers
@@ -7591,7 +7708,8 @@ struct D3D12RendererImpl
                  const glm::mat4& viewProj,
                  int w, int h,
                  ContentManager* cm,
-                 bool reflMrt = false, bool aoWanted = true)
+                 bool reflMrt = false, bool aoWanted = true,
+                 const std::function<void(bool mrt)>& drawGround = {})
     {
         GpuPassScope _passTimer(this, "SSAO");
         // `reflMrt` and `aoWanted` are SEPARATE gates (plan C2, the same shape
@@ -7709,6 +7827,9 @@ struct D3D12RendererImpl
             else
                 drawPosOne(dc->transform);
         }
+        // The tile landscape's ground (Thema 326), into the position-only target or, with its three-target pipeline, into the
+        // reflection pre-pass. It leaves its own root signature, pipeline and heap set; everything after this point binds its own.
+        if (drawGround) drawGround(reflMrt);
 
         // ── Transition pos RT to SRV, bind ssaoSrvHeap ─────────────────────
         barrier12(cl, ssaoPosRT.Get(), ssaoPosRTState, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
@@ -7886,6 +8007,77 @@ struct D3D12RendererImpl
     // Per-frame CBs (persistently mapped upload buffers, one slot per frame in flight).
     ComPtr<ID3D12Resource> giShadowCB[k_frameCount];   uint8_t* giShadowCBPtr[k_frameCount]{};
     ComPtr<ID3D12Resource> giCountCB[k_frameCount];    uint8_t* giCountCBPtr[k_frameCount]{};
+    // The tile landscape's GI height clipmap for the two shadow kernels (Thema 326; kGiHeightfieldHLSL and
+    // gi_shadow_hw.hlsl: b2 + t5). An R32F texture with a max pyramid in its mips; a replaced one waits out the frames
+    // in flight in giHfRetired. The block (b2) is bound on every dispatch, with w = 0 while there is no clipmap.
+    ComPtr<ID3D12Resource> giHfCB[k_frameCount];       uint8_t* giHfCBPtr[k_frameCount]{};
+    ComPtr<ID3D12Resource> giHfTex, giHfUpload;
+    uint64_t giHfVersion = 0, giHfKey = 0;
+    int      giHfTopLevel = 0;
+    float    giHfMaxH = 0.0f;
+    struct GiHfRetired { ComPtr<ID3D12Resource> tex, upload; int frames; };
+    std::vector<GiHfRetired> giHfRetired;
+    // Uploads `hf` when it is another one than the texture holds. False: no texture (the kernel then gets w = 0).
+    bool ensureGiHeightfield(ID3D12GraphicsCommandList* cl, const GiHeightfield& hf)
+    {
+        for (auto it = giHfRetired.begin(); it != giHfRetired.end();)
+            it = --it->frames <= 0 ? giHfRetired.erase(it) : it + 1;
+        if (giHfTex && giHfVersion == hf.version && giHfKey == hf.key) return true;
+        const HE::GiHeightPyramid pyr = HE::BuildGiHeightPyramid(hf);   // GiHeightfield.h
+        if (pyr.levels.empty()) return false;
+        const UINT mips = static_cast<UINT>(pyr.levels.size());
+        D3D12_HEAP_PROPERTIES hp{}; hp.Type = D3D12_HEAP_TYPE_DEFAULT;
+        D3D12_RESOURCE_DESC rd{};
+        rd.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        rd.Width = hf.res; rd.Height = hf.res;
+        rd.DepthOrArraySize = 1;
+        rd.MipLevels = static_cast<UINT16>(mips);
+        rd.Format = DXGI_FORMAT_R32_FLOAT;
+        rd.SampleDesc.Count = 1;
+        ComPtr<ID3D12Resource> tex;
+        if (FAILED(device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&tex))))
+            return false;
+        std::vector<D3D12_PLACED_SUBRESOURCE_FOOTPRINT> fp(mips);
+        std::vector<UINT> rows(mips);
+        std::vector<UINT64> rowBytes(mips);
+        UINT64 total = 0;
+        device->GetCopyableFootprints(&rd, 0, mips, 0, fp.data(), rows.data(), rowBytes.data(), &total);
+        uint8_t* mapped = nullptr;
+        ComPtr<ID3D12Resource> upload = createUploadBuffer(total, reinterpret_cast<void**>(&mapped));
+        if (!upload || !mapped) return false;
+        for (UINT k = 0; k < mips; ++k)
+        {
+            const size_t w = static_cast<size_t>(pyr.dims[k]) * sizeof(float);
+            if (pyr.levels[k].size() != static_cast<size_t>(pyr.dims[k]) * pyr.dims[k] || rowBytes[k] < w || rows[k] != static_cast<UINT>(pyr.dims[k]))
+                return false;
+            for (UINT y = 0; y < rows[k]; ++y)
+                std::memcpy(mapped + fp[k].Offset + static_cast<size_t>(y) * fp[k].Footprint.RowPitch,
+                            pyr.levels[k].data() + static_cast<size_t>(y) * pyr.dims[k], w);
+            D3D12_TEXTURE_COPY_LOCATION to{};
+            to.pResource = tex.Get();
+            to.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+            to.SubresourceIndex = k;
+            D3D12_TEXTURE_COPY_LOCATION from{};
+            from.pResource = upload.Get();
+            from.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+            from.PlacedFootprint = fp[k];
+            cl->CopyTextureRegion(&to, 0, 0, 0, &from, nullptr);
+        }
+        barrier12(cl, tex.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        if (giHfTex) giHfRetired.push_back({ giHfTex, giHfUpload, static_cast<int>(k_frameCount) + 2 });
+        giHfTex = tex; giHfUpload = upload;
+        giHfVersion = hf.version; giHfKey = hf.key;
+        giHfTopLevel = static_cast<int>(mips) - 1;
+        giHfMaxH = pyr.maxHeight;
+        D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
+        sv.Format = DXGI_FORMAT_R32_FLOAT;
+        sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        sv.Texture2D.MipLevels = mips;
+        device->CreateShaderResourceView(giHfTex.Get(), &sv, giSrvCpu(k_giHfTable + 2));
+        HE_LOG_INFO(RHI, "D3D12Renderer: GI height field %ux%u, %u mips, max height %.2f", hf.res, hf.res, mips, giHfMaxH);
+        return true;
+    }
     ComPtr<ID3D12Resource> giTemporalCB[k_frameCount]; uint8_t* giTemporalCBPtr[k_frameCount]{};
     ComPtr<ID3D12Resource> giAtrousCB[k_frameCount];   uint8_t* giAtrousCBPtr[k_frameCount]{}; // one k_cbSlot per a-trous iteration
     ComPtr<ID3D12Resource> giProbeCB[k_frameCount];    uint8_t* giProbeCBPtr[k_frameCount]{};
@@ -8017,7 +8209,10 @@ struct D3D12RendererImpl
     //  [38..40] mix with blur:                    raw,  blur, gbufNorm
     //  [41..44] landscape weightmaps, the trace's table 2 (t8..t11; null views for an auto entry / none)
     //  [45] the GI-reflection sky cube (TextureCube, t12): the real sky a missed ray reads (renderSkyReflCube)
-    static constexpr UINT k_giSrvSlots   = 46;
+    //  [46..49] the shadow kernel's table while the tile landscape's height clipmap is in: gbufPos (t0), gbufNorm (t1),
+    //           the clipmap (t5), a null view (t6)
+    static constexpr UINT k_giSrvSlots   = 50;
+    static constexpr UINT k_giHfTable    = 46;
     static constexpr UINT k_giReflLand   = 41;
     static constexpr UINT k_giReflSky    = 45;
     static constexpr UINT k_giReflCompute = 23; // table base of the trace dispatch
@@ -8454,7 +8649,11 @@ struct D3D12RendererImpl
             landRange.BaseShaderRegister                = 8;
             landRange.OffsetInDescriptorsFromTableStart = 0;
 
-            D3D12_ROOT_PARAMETER params[10]{};
+            D3D12_ROOT_PARAMETER params[11]{};
+            // [10] CBV b2 = the height clipmap's block of the two shadow kernels (GiHfCB). The other kernels never name it.
+            params[10].ParameterType    = D3D12_ROOT_PARAMETER_TYPE_CBV;
+            params[10].Descriptor       = { 2, 0 };
+            params[10].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
             params[0].ParameterType    = D3D12_ROOT_PARAMETER_TYPE_CBV;
             params[0].Descriptor       = { 0, 0 };
             params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
@@ -8508,7 +8707,7 @@ struct D3D12RendererImpl
             linSamp.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
             linSamp.MaxLOD           = D3D12_FLOAT32_MAX;
             D3D12_ROOT_SIGNATURE_DESC rsd{};
-            rsd.NumParameters = 10; rsd.pParameters = params;
+            rsd.NumParameters = 11; rsd.pParameters = params;
             rsd.NumStaticSamplers = 1; rsd.pStaticSamplers = &linSamp;
             ComPtr<ID3DBlob> sig, e;
             ok = SUCCEEDED(D3D12SerializeRootSignature(&rsd, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &e))
@@ -8555,7 +8754,7 @@ struct D3D12RendererImpl
         ComPtr<ID3DBlob> gbufVS, gbufPS, shadowCS, probeCS, fsVS, temporalPS, atrousPS;
         ok = ok && compile(kGiGBufHLSL, "GiGBufVS", "vs_5_0", gbufVS)
                 && compile(kGiGBufHLSL, "GiGBufPS", "ps_5_0", gbufPS)
-                && compile(std::string(kGiTraversalHLSL) + kGiShadowCSHLSL, "GiShadowCS", "cs_5_0", shadowCS)
+                && compile(std::string(kGiTraversalHLSL) + kGiHeightfieldHLSL + kGiShadowCSHLSL, "GiShadowCS", "cs_5_0", shadowCS)
                 && compile(std::string(kGiTraversalHLSL) + kGiProbeCSHLSL, "GiProbeCS", "cs_5_0", probeCS)
                 && compile(kFSTriangleVS, "main", "vs_5_0", fsVS)
                 && compile(kGiTemporalHLSL, "main", "ps_5_0", temporalPS)
@@ -8640,6 +8839,8 @@ struct D3D12RendererImpl
         {
             giShadowCB[f]   = createUploadBuffer(k_cbSlot, reinterpret_cast<void**>(&giShadowCBPtr[f]));
             giCountCB[f]    = createUploadBuffer(k_cbSlot, reinterpret_cast<void**>(&giCountCBPtr[f]));
+            giHfCB[f]       = createUploadBuffer(k_cbSlot, reinterpret_cast<void**>(&giHfCBPtr[f]));
+            if (giHfCBPtr[f]) std::memset(giHfCBPtr[f], 0, k_cbSlot);   // w = 0: no height clipmap
             giTemporalCB[f] = createUploadBuffer(k_cbSlot, reinterpret_cast<void**>(&giTemporalCBPtr[f]));
             giAtrousCB[f]   = createUploadBuffer(HE::kGIShadowAtrousIterations * k_cbSlot,
                                                  reinterpret_cast<void**>(&giAtrousCBPtr[f]));
@@ -9557,7 +9758,8 @@ struct D3D12RendererImpl
     bool runGiShadow(ID3D12GraphicsCommandList* cl, UINT fi,
                      const std::vector<const DrawCall*>& opaqueDCs,
                      const glm::mat4& viewProj, int w, int h,
-                     const RenderWorld& rw, ContentManager* cm, bool maskPasses = true)
+                     const RenderWorld& rw, ContentManager* cm, bool maskPasses = true,
+                     const std::function<void()>& drawGround = {})
     {
         GpuPassScope _passTimer(this, "GIShadow");
         createGiPipelines();
@@ -9663,6 +9865,10 @@ struct D3D12RendererImpl
                 else
                     drawOne(dc->transform);
             }
+            // The tile landscape's ground (Thema 326): its pixels get a position and a normal, so the shadow rays below
+            // start from them and the ground takes the ray-traced sun shadow like any mesh. It leaves its own root
+            // signature, pipeline and heap set; the compute stage that follows binds its own.
+            if (drawGround) drawGround();
             const auto kBoth = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE
                              | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
             barrier12(cl, giGBufPosTex.Get(),  giGBufPosState,  kBoth);
@@ -9693,6 +9899,26 @@ struct D3D12RendererImpl
             if (giShadowCBPtr[fi]) std::memcpy(giShadowCBPtr[fi], &scb, sizeof(scb));
             glm::ivec4 cnt(giInstanceCount, 0, 0, 0);
             if (giCountCBPtr[fi]) std::memcpy(giCountCBPtr[fi], &cnt, sizeof(cnt));
+            // The tile landscape's height clipmap (never a TerrainComponent's field: its chunks are in the BVH and the TLAS
+            // here). On: the kernels' own table with the clipmap at t5; off: the usual one and w = 0 in the block.
+            static const bool s_hfOn = [] { const char* v = std::getenv("HE_GI_HEIGHTFIELD"); return !(v && v[0] == '0'); }();
+            const GiHeightfield* tileHf = (s_hfOn && rw.heightfields.size() == 1 && rw.heightfields[0].key == kLandscapeGiHeightfieldKey)
+                                              ? &rw.heightfields[0] : nullptr;
+            const bool hfOn = tileHf && ensureGiHeightfield(cl, *tileHf);
+            {
+                struct { glm::mat4 worldToLocal; glm::vec4 p, p2; } hcb{};
+                if (hfOn)
+                {
+                    hcb.worldToLocal = tileHf->worldToLocal;
+                    hcb.p  = glm::vec4(1.0f / std::max(tileHf->size.x, 1e-4f), 1.0f / std::max(tileHf->size.y, 1e-4f),
+                                       float(tileHf->res - 1), 1.0f);
+                    hcb.p2 = glm::vec4(float(giHfTopLevel), giHfMaxH, 0.0f, 512.0f);
+                    srvIntoHeapSlot(giGBufPosTex.Get(),  kGiGBufPosFormat,               giSrvCpu(k_giHfTable + 0));
+                    srvIntoHeapSlot(giGBufNormTex.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT, giSrvCpu(k_giHfTable + 1));
+                    srvIntoHeapSlot(nullptr,             DXGI_FORMAT_R16G16_FLOAT,       giSrvCpu(k_giHfTable + 3));
+                }
+                if (giHfCBPtr[fi]) std::memcpy(giHfCBPtr[fi], &hcb, sizeof(hcb));
+            }
 
             if (giRawState != D3D12_RESOURCE_STATE_UNORDERED_ACCESS)
             {
@@ -9715,11 +9941,12 @@ struct D3D12RendererImpl
             cl->SetPipelineState(shadowPso);
             cl->SetComputeRootConstantBufferView(0, giShadowCB[fi]->GetGPUVirtualAddress());
             cl->SetComputeRootConstantBufferView(1, giCountCB[fi]->GetGPUVirtualAddress());
-            cl->SetComputeRootDescriptorTable(2, giSrvGpu(0));
+            cl->SetComputeRootDescriptorTable(2, giSrvGpu(hfOn ? k_giHfTable : 0u));
             cl->SetComputeRootShaderResourceView(3, giNodeSB->GetGPUVirtualAddress());
             cl->SetComputeRootShaderResourceView(4, giTriSB->GetGPUVirtualAddress());
             cl->SetComputeRootShaderResourceView(5, giInstanceSB[fi]->GetGPUVirtualAddress());
             cl->SetComputeRootDescriptorTable(6, giSrvGpu(4)); // u0 = raw
+            cl->SetComputeRootConstantBufferView(10, giHfCB[fi]->GetGPUVirtualAddress()); // b2 = GiHfCB (w = 0: off)
 #if HE_D3D12_DXR
             if (giUseHwThisFrame) // t7 = the TLAS, bound as a raw GPU VA
                 cl->SetComputeRootShaderResourceView(7, giTlasBuf[fi]->GetGPUVirtualAddress());
@@ -10637,6 +10864,21 @@ void D3D12RendererImpl::createMaterialResources()
         HE_LOG_ERROR(RHI, "%s", "D3D12Renderer: A4 material root signature failed");
         m_matRootSig.Reset();
         return;
+    }
+    {
+        // The tile landscape's (GetOrBuildLandscapeMaterialPSO). Without it the ground keeps its fixed blend, nothing else changes.
+        static_assert(HE::d3d12mat::kLandscapeGlobalsReg == HE::MaterialShaderLibrary::kHlslLandscapeGlobalsReg
+                      && HE::d3d12mat::kLandscapeFirstSrv == HE::MaterialShaderLibrary::kHlslLandscapeFirstSrv,
+                      "D3D12MaterialRootSignature.h's landscape registers must be the kHlslLandscape* contract");
+        HE::d3d12mat::LandscapeRootSignature lsRs;
+        HE::d3d12mat::DescribeLandscapeRootSignature(lsRs);
+        ComPtr<ID3DBlob> lsSig, lsErr;
+        if (FAILED(D3D12SerializeRootSignature(&lsRs.desc, D3D_ROOT_SIGNATURE_VERSION_1, &lsSig, &lsErr)) ||
+            FAILED(device->CreateRootSignature(0, lsSig->GetBufferPointer(), lsSig->GetBufferSize(), IID_PPV_ARGS(&m_lsMatRootSig))))
+        {
+            HE_LOG_WARN(RHI, "%s", "D3D12Renderer: the tile landscape's material root signature failed, the ground keeps its fixed blend");
+            m_lsMatRootSig.Reset();
+        }
     }
 
     // Two heaps, kept separate from sceneSrvHeap so the material draw doesn't disturb the
@@ -11764,10 +12006,19 @@ void D3D12Renderer::Initialize(HE::Window* window)
     // Opt-in: on in _DEBUG builds, or in any build when HE_GPU_DEBUG is set. These add a
     // per-GPU-op cost (esp. DRED auto-breadcrumbs) that is fine at vsync-capped FPS but
     // tanks the editor at the uncapped FPS you get with vsync off — so keep it gated.
+    // HE_GPU_D3D12_MULTI_DEVICE opts back OUT even in a _DEBUG build: a process that creates more
+    // than one D3D12 device while the debug layer is on (landscape_gpu_check's own offscreen probe,
+    // then this renderer) crashes later inside the driver's layered-device loader
+    // (D3D12CoreCreateLayeredDevice/nvapi) — not something this renderer can fix, so a tool that
+    // knows it will create a second device in-process sets this instead of risking it.
+    // Read via the Win32 API, not the CRT's getenv: landscape_gpu_check sets this with
+    // SetEnvironmentVariableA from its own executable before this renderer (in a separate DLL,
+    // a separate CRT-cached environment) ever runs, and only the Win32 call sees that write.
+    const bool multiDevice = GetEnvironmentVariableA("HE_GPU_D3D12_MULTI_DEVICE", nullptr, 0) != 0;
 #ifdef _DEBUG
-    m_impl->gpuDebug = true;
+    m_impl->gpuDebug = !multiDevice;
 #else
-    m_impl->gpuDebug = (std::getenv("HE_GPU_DEBUG") != nullptr);
+    m_impl->gpuDebug = (std::getenv("HE_GPU_DEBUG") != nullptr) && !multiDevice;
 #endif
     if (m_impl->gpuDebug)
     {
@@ -11976,6 +12227,9 @@ void D3D12Renderer::Shutdown()
     HE_LOG_INFO(RHI, "%s", "D3D12Renderer: shutdown — waiting for GPU");
     HE::d3dprefetch::drain();   // no prefetch job may outlive the renderer
     m_impl->waitForAllFrames();
+    m_impl->landscape.shutdown();   // its images and buffers, while the fence it waits on is still usable
+    m_impl->landscapeFrame = HE::LandscapeRenderFrame{};
+    m_impl->landscapeFrameLive = false;
     if (m_impl->fenceEvent) { CloseHandle(m_impl->fenceEvent); m_impl->fenceEvent = nullptr; }
 
     m_impl->meshCache.clear();
@@ -12066,6 +12320,7 @@ void D3D12Renderer::Shutdown()
         m_impl->giReflFsCB[i].Reset();   m_impl->giReflFsCBPtr[i]   = nullptr;
         m_impl->giShadowCB[i].Reset();   m_impl->giShadowCBPtr[i]   = nullptr;
         m_impl->giCountCB[i].Reset();    m_impl->giCountCBPtr[i]    = nullptr;
+        m_impl->giHfCB[i].Reset();       m_impl->giHfCBPtr[i]       = nullptr;
         m_impl->giTemporalCB[i].Reset(); m_impl->giTemporalCBPtr[i] = nullptr;
         m_impl->giAtrousCB[i].Reset();     m_impl->giAtrousCBPtr[i]     = nullptr;
         m_impl->giProbeCB[i].Reset();    m_impl->giProbeCBPtr[i]    = nullptr;
@@ -12257,9 +12512,62 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                   p.m_renderWorld.camera.position, p.m_wallTime, p.usingHDR);
     }
 
+    // ── World-scale landscape (Thema 326): the provider is asked HERE, before the early returns below, and its uploads recorded at once.
+    // A frame the runtime built has to be executed whether or not the scene has objects: the runtime counts its uploads as done. It is
+    // drawn later (opaque pass, after the G-buffer resolve), or right here on the two paths that leave before the pass.
+    p.landscapeFrameLive = false;
+    if (m_landscapeProvider && !p.landscapeFailed)
+    {
+        p.landscapeFrame = HE::LandscapeRenderFrame{};
+        m_landscapeProvider(glm::dmat4(viewProj), /*zeroToOne=*/false, p.landscapeFrame);   // viewProj is origin-relative, GL clip (the scene pass does not fix the depth)
+        if (p.landscapeFrame.active)
+        {
+            if (!p.landscape.ready())
+            {
+                std::string err;
+                auto* impl = &p;
+                if (!p.landscape.init(p.device.Get(), [impl]() { impl->waitForAllFrames(); }, &err))
+                {
+                    HE_LOG_WARN(RHI, "D3D12Renderer: the world-scale landscape is off: %s", err.c_str());
+                    p.landscapeFailed = true;
+                }
+            }
+            if (p.landscape.ready())
+            {
+                p.landscape.upload(cl, p.landscapeFrame);
+                p.landscapeFrameLive = true;
+            }
+        }
+    }
+    // The sun the lit shaders use: the scene's dominant directional light (colour x intensity), else a neutral one.
+    auto drawLandscape = [&]()
+    {
+        if (!p.landscapeFrameLive) return;
+        D3D12Landscape::Shading sh;
+        sh.sunDir = glm::normalize(p.m_renderWorld.sunDirection);
+        sh.ambient = p.m_renderWorld.ambient;
+        for (const LightData& l : p.m_renderWorld.lights)
+            if (l.type == static_cast<uint8_t>(HE::LightType::Directional)) { sh.sunColor = l.color * l.intensity; break; }
+        if (p.landscapeFrame.world && !p.landscapeFrame.world->albedoArrayPath.empty())
+        {
+            // The texture group's albedo array (the world-UV ground), resolved and uploaded like a material's texture array; not loaded (yet) = null = flat colours.
+            sh.albedoArray = p.resolveGraphTexture(cl, HE::UUID{}, p.landscapeFrame.world->albedoArrayPath, m_contentManager, /*array=*/true);
+            // Its normal and mask arrays, the same way; only resolved once the albedo array is there, like GL/Vulkan/Metal.
+            if (sh.albedoArray && !p.landscapeFrame.world->normalArrayPath.empty())
+                sh.normalArray = p.resolveGraphTexture(cl, HE::UUID{}, p.landscapeFrame.world->normalArrayPath, m_contentManager, /*array=*/true);
+            if (sh.albedoArray && !p.landscapeFrame.world->maskArrayPath.empty())
+                sh.maskArray = p.resolveGraphTexture(cl, HE::UUID{}, p.landscapeFrame.world->maskArrayPath, m_contentManager, /*array=*/true);
+        }
+        p.landscape.draw(cl, p.landscapeFrame, viewProj, sh, p.usingHDR ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_R8G8B8A8_UNORM);
+    };
+
     // Trails live in their own per-frame band list, not in `objects`, so a scene
-    // that has nothing BUT a trail still has something to draw past here.
-    if (p.m_renderWorld.objects.empty() && p.m_renderWorld.ribbonBatches.empty()) return;
+    // that has nothing BUT a trail still has something to draw past here. So has a
+    // scene with nothing but a tile landscape that is drawn with its material: that
+    // draw needs the scene pass (its lighting block, its shadow maps).
+    const bool groundNeedsPass = p.landscapeFrameLive && p.m_matReady && p.m_lsMatRootSig && m_contentManager
+                              && p.landscapeFrame.materialId != HE::UUID{};
+    if (p.m_renderWorld.objects.empty() && p.m_renderWorld.ribbonBatches.empty() && !groundNeedsPass) { drawLandscape(); return; }
 
     const uint64_t walk = p.m_extractor.fullExtractCount();
     {
@@ -12291,7 +12599,7 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
     }
     p.statTotal   = static_cast<uint32_t>(p.m_renderWorld.objects.size());
     p.statVisible = static_cast<uint32_t>(p.m_sortedIndices.size());
-    if (p.m_sortedIndices.empty() && p.m_renderWorld.ribbonBatches.empty()) return;
+    if (p.m_sortedIndices.empty() && p.m_renderWorld.ribbonBatches.empty() && !groundNeedsPass) { drawLandscape(); return; }
 
     if (p.m_renderGraph.empty())
     {
@@ -12780,6 +13088,33 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                         ++drawIdx;
                     });
                 }
+                // The tile landscape's ground casts into the same layer (Thema 326). Written on the Mac and NOT RUN there: on by
+                // default on Windows (HE::landscapeD3dPassesOn), HE_LANDSCAPE_D3D_PASSES=0 takes it out. `landscape_gpu_check
+                // --only d3d12` judges it with the line "the ground casts (fixed blend)" (Windows handoff, section 8). The provider culls for this layer's matrix (D3D clip, depth 0..1)
+                // and hands over the tiles that arrived, which are uploaded whether or not the ground is drawn. The landscape sets
+                // its own root signature, heap and pipeline, so what the layers' mesh draws rely on is bound again afterwards:
+                // the same calls as before the graph ran.
+                if (HE::landscapeD3dPassesOn() && m_landscapeProvider && !p.landscapeFailed && p.landscape.ready())
+                {
+                    HE::LandscapeRenderFrame lf;
+                    m_landscapeProvider(glm::dmat4(clip), /*zeroToOne=*/true, lf);
+                    if (lf.active)
+                    {
+                        p.landscape.upload(cl, lf);
+                        if (HE::landscapePassesOn()) p.landscape.drawDepth(cl, lf, clip);
+                        cl->SetGraphicsRootSignature(p.rootSig.Get());
+                        p.bindClusterRoots(cl);
+                        cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+                        cl->SetGraphicsRootConstantBufferView(1, p.perFrameCB[p.frameIndex]->GetGPUVirtualAddress());
+                        if (p.sceneSrvHeap)
+                        {
+                            ID3D12DescriptorHeap* backHeaps[] = { p.sceneSrvHeap.Get() };
+                            cl->SetDescriptorHeaps(1, backHeaps);
+                            cl->SetGraphicsRootDescriptorTable(5, p.sceneSrvGpu(ssrFwdSlot));
+                        }
+                        cl->SetPipelineState(p.depthPSO.Get());
+                    }
+                }
             };
             // One barrier over ALL subresources before each array's loop and
             // one after — the slices are written back to back.
@@ -12863,7 +13198,18 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
             const bool maskOk = p.runGiShadow(cl, p.frameIndex, giPrepassDCs, viewProjClean,
                                               std::max(1, width / 2), std::max(1, height / 2),
                                               p.m_renderWorld, m_contentManager,
-                                              /*maskPasses=*/p.giEnabled);
+                                              /*maskPasses=*/p.giEnabled,
+                                              [&]()
+                                              {
+                                                  // The provider culls for THIS pass's matrix (unjittered) and hands over the
+                                                  // tiles that arrived, which are uploaded whether or not the ground is drawn.
+                                                  if (!HE::landscapeD3dPassesOn() || !m_landscapeProvider || p.landscapeFailed || !p.landscape.ready()) return;
+                                                  HE::LandscapeRenderFrame lf;
+                                                  m_landscapeProvider(glm::dmat4(viewProjClean), /*zeroToOne=*/false, lf);
+                                                  if (!lf.active) return;
+                                                  p.landscape.upload(cl, lf);
+                                                  if (HE::landscapePassesOn()) p.landscape.drawGiGBuf(cl, lf, viewProjClean);
+                                              });
             if (maskOk && p.giEnabled)
                 p.dispatchGiProbeUpdate(cl, p.frameIndex, p.m_renderWorld);
             giShadingActive = p.giEnabled && maskOk && p.giIrrTex && p.giVisTex && p.giProbeGridBuilt;
@@ -12932,7 +13278,19 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
             p.runSSAO(cl, p.frameIndex, opaqueDCs,
                       p.m_renderWorld.camera.view, p.m_renderWorld.camera.projection,
                       viewProjClean, width, height, m_contentManager,
-                      /*reflMrt=*/ssrFrameActive, aoWanted);
+                      /*reflMrt=*/ssrFrameActive, aoWanted,
+                      [&](bool mrt)
+                      {
+                          // The ground in the position pre-pass, so it takes and gives ambient occlusion like any mesh. The
+                          // provider culls for THIS pass's matrix (unjittered) and hands over the tiles that arrived, which are
+                          // uploaded whether or not the ground is drawn.
+                          if (!HE::landscapeD3dPassesOn() || !m_landscapeProvider || p.landscapeFailed || !p.landscape.ready()) return;
+                          HE::LandscapeRenderFrame lf;
+                          m_landscapeProvider(glm::dmat4(viewProjClean), /*zeroToOne=*/false, lf);
+                          if (!lf.active) return;
+                          p.landscape.upload(cl, lf);
+                          if (HE::landscapePassesOn()) p.landscape.drawViewPos(cl, lf, viewProjClean, p.m_renderWorld.camera.view, mrt);
+                      });
             if (ssrFrameActive)
             {
                 ssrResult = p.RenderForwardSSR(cl, p.frameIndex, width, height,
@@ -13061,6 +13419,11 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
         // `deferredForward`, Metal's `forwardOpaque`, D3D11's replay.
         bool gbufferPass = false;
         std::vector<const DrawCall*> deferredForwardDCs;
+        // The tile landscape drawn with its material (Thema 326) goes through drawDC12 as well, so it gets every bind and every
+        // restore a mesh draw of that material gets: with `lsDraw` set, the draw call names the landscape's material, the
+        // pipeline is that material's landscape variant on m_lsMatRootSig, and the patches are drawn instead of a mesh.
+        const HE::LandscapeRenderFrame* lsDraw = nullptr;
+        bool lsDrawn = false;
         auto drawDC12 = [&](const DrawCall& dc) {
             if (drawIdx >= k_maxDraws) { p.noteDrawRingFull(); return; }
             // A trail carries no mesh asset — its geometry sits in this frame's
@@ -13109,7 +13472,20 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                     const bool wantTwin = dc.instanceTotal() > 1 && allowInstancing && !matTransp
                                        && instArena && RenderSorter::graphInstancingEnabled();
                     ID3D12PipelineState* matInstPso = nullptr;
-                    if (gbufferPass)
+                    if (lsDraw)
+                    {
+                        if (gbufferPass)
+                        {
+                            // The material's G-buffer tail with the landscape's vertex stage: attributes, lit by the resolve.
+                            uint64_t gbHash = 0; std::string gbFrag, gbVertBody;
+                            if (p.m_matShaderLib.resolveGBufferShaders(*m_contentManager, dc.materialAssetId, gbHash, gbFrag, gbVertBody))
+                                matPso = p.GetOrBuildLandscapeMaterialPSO(gbHash, gbFrag, p.usingHDR, /*gbuffer=*/true);
+                        }
+                        else
+                            matPso = p.GetOrBuildLandscapeMaterialPSO(matHash, matFrag, p.usingHDR);
+                        if (!matPso) return;   // no variant: the caller draws the ground forward, or the fixed blend; never a mesh
+                    }
+                    else if (gbufferPass)
                     {
                         // The G-buffer tail of the same graph (same expressions,
                         // attributes instead of heLitP). No variant, or one that
@@ -13279,7 +13655,7 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                         // Switch to the material root sig + ring SRV heap + material PSO.
                         ID3D12DescriptorHeap* mheaps[] = { p.m_matSrvHeap.Get() };
                         cl->SetDescriptorHeaps(1, mheaps);
-                        cl->SetGraphicsRootSignature(p.m_matRootSig.Get());
+                        cl->SetGraphicsRootSignature(lsDraw ? p.m_lsMatRootSig.Get() : p.m_matRootSig.Get());
                         p.bindClusterRoots(cl); // t24..t26 — fragmentClustered's light lists
                         cl->SetPipelineState(matPso);
                         // A Displacement PSO (HS/DS) takes the same index buffer as patches;
@@ -13340,7 +13716,24 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                         };
                         const UINT instCount = static_cast<UINT>(dc.instanceTotal());
                         D3D12RendererImpl::InstSlice isl;
-                        if (matInstPso && p.allocInstances(p.frameIndex, instCount, isl))
+                        if (lsDraw)
+                        {
+                            // The ground: HeParams as for any draw of the material; the landscape's nine images in the NEXT
+                            // block of this frame's ring (the table of root parameter 11), then the patches with the
+                            // landscape's own blocks (D3D12Landscape::drawPatches).
+                            UINT& cur = p.m_matSrvCursor[p.frameIndex];
+                            if (cur < D3D12RendererImpl::k_matMaxDraws && bindMatSlot(viewProj, glm::mat4(1.0f)))
+                            {
+                                const UINT lsBlk = (p.frameIndex * D3D12RendererImpl::k_matMaxDraws + cur++) * D3D12RendererImpl::k_matSrvPerDraw;
+                                if (p.landscape.writeMaterialViews(p.matSrvCpu(lsBlk).ptr, p.m_matSrvInc))
+                                {
+                                    cl->SetGraphicsRootDescriptorTable(HE::d3d12mat::kRootLandscapeTable, p.matSrvGpu(lsBlk));
+                                    lsDrawn = p.landscape.drawPatches(cl, *lsDraw, viewProj, HE::d3d12mat::kRootLandscapeGlobals,
+                                                                      HE::d3d12mat::kRootLandscapePatch);
+                                }
+                            }
+                        }
+                        else if (matInstPso && p.allocInstances(p.frameIndex, instCount, isl))
                         {
                             // The batch: every model into the model half of its arena slot,
                             // ONE U slot with the batch-constant half (U.mvp = viewProj, the
@@ -13388,6 +13781,7 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                     }
                 }
             }
+            if (lsDraw) return;   // no material pipeline for the landscape: the caller draws its fixed blend, never a mesh
             // Base color: an explicit MaterialComponent override (dc.materialAssetId) wins
             // over the mesh's own baked texture; else the mesh's baked texture (A1); else flat.
             if (mesh) p.ensureMeshAlbedo(cl, m, dc.meshAssetId, m_contentManager);
@@ -13500,6 +13894,57 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                 cl->SetGraphicsRootDescriptorTable(5, p.sceneSrvGpu(ssrFwdSlot));
             }
         };
+        // The tile landscape's ground through its material (drawDC12 with lsDraw): `gbuffer` = into the G-buffer pass that is
+        // bound, with the material's G-buffer tail; else lit, forward. False when it has no material or no variant builds.
+        bool groundInGBuffer = false;
+        auto drawGroundMaterial = [&](bool gbuffer) -> bool
+        {
+            // A virtual texture page of meshes: the ground stays out of it (and so does the fixed blend).
+            const bool page = m_editorCamera.rvtSlot >= 0;
+            if (page && !m_editorCamera.rvtTileGround) return true;
+            if (!(p.landscapeFrameLive && p.m_matReady && m_contentManager && p.landscapeFrame.materialId != HE::UUID{})) return false;
+            const HE::LandscapeRenderFrame& lf = p.landscapeFrame;
+            if (!lf.materialPath.empty() && lf.materialId != p.landscapeMaterialLoadTried && !m_contentManager->getMaterial(lf.materialId))
+            {
+                p.landscapeMaterialLoadTried = lf.materialId;   // the texture group's material is named by no entity: from its path, once
+                if (!m_contentManager->resolveMaterialRef(lf.materialId, lf.materialPath)) m_contentManager->loadAsset(lf.materialPath);
+            }
+            const bool wasGBuffer = gbufferPass, wasInstancing = allowInstancing;
+            gbufferPass = gbuffer;
+            allowInstancing = false;
+            const auto drawWith = [&](const HE::UUID& material, const HE::LandscapeRenderFrame& frame) -> bool
+            {
+                if (frame.patches.empty()) return false;
+                DrawCall ground;
+                ground.materialAssetId = material;
+                lsDraw = &frame;
+                lsDrawn = false;
+                drawDC12(ground);
+                lsDraw = nullptr;
+                return lsDrawn;
+            };
+            // What is drawn: on a page of the ground (rvtTileGround) the layer's view; else the extractor's derived material
+            // where the landscape's own cannot be drawn (RenderWorld::tileLandscapeMaterial), else the landscape's own.
+            const HE::UUID own = page ? m_editorCamera.rvtMaterial
+                               : p.m_renderWorld.tileLandscapeMaterial != HE::UUID{} ? p.m_renderWorld.tileLandscapeMaterial : lf.materialId;
+            // Under a virtual texture (SetRvtTileGround) the patches inside its rectangle are drawn with the consumer, which
+            // reads the pages; when the consumer's variant does not build they go back to the ground's own material.
+            HE::LandscapeRenderFrame rest = lf, paged = lf;
+            paged.patches.clear();
+            bool any = false;
+            if (!page && m_tileRvtConsumer != HE::UUID{} && p.rvtPool[0] && p.rvtTables.count(m_tileRvtConsumer))
+            {
+                HE::splitRvtTilePatches(rest, m_tileRvtMin, m_tileRvtMax, m_tileRvtNearM, paged.patches);
+                if (drawWith(m_tileRvtConsumer, paged)) any = true;
+                else rest.patches.insert(rest.patches.end(), paged.patches.begin(), paged.patches.end());
+            }
+            if (drawWith(own, rest)) any = true;
+            gbufferPass = wasGBuffer;
+            allowInstancing = wasInstancing;
+            lsDrawn = any;
+            return any;
+        };
+
         // Decals into GB0 when this frame is deferred and the variant built;
         // otherwise the forward decal over the lit colour, as before.
         const bool gbDecals = deferredActive && !p.m_renderWorld.decals.empty()
@@ -13548,6 +13993,9 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
             gbufferPass    = true;
             cl->SetPipelineState(activeScenePso);
             for (const DrawCall* dc : opaqueDCs) drawDC12(*dc);
+            // The tile landscape's ground into the G-buffer with its material's G-buffer tail (Thema 326), so the resolve lights
+            // it with everything else; without a variant it is drawn forward after the resolve, as before.
+            if (HE::landscapeD3dPassesOn() && HE::landscapePassesOn()) groundInGBuffer = drawGroundMaterial(true);
             gbufferPass    = false;
             activeScenePso = scenePso;
 
@@ -13768,6 +14216,18 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
             cl->SetPipelineState(scenePso);
         }
 
+        // ── World-scale landscape (Thema 326): after the opaque geometry (and, on a deferred frame, the resolve), depth-tested into the same
+        // target. It brings its own root signature, pipeline and descriptor heap, so the scene state is rebuilt the way the skinned pass above does.
+        // With its material when it has one whose landscape variant builds (drawDC12 with lsDraw): lit, shadowed and fogged like
+        // any other surface of that material. Else, and on the paths that leave DrawScene before this pass, the fixed blend.
+        if (p.landscapeFrameLive)
+        {
+            // On a deferred frame the G-buffer pass has drawn it already and the resolve has lit it (groundInGBuffer).
+            if (!groundInGBuffer && !drawGroundMaterial(false)) drawLandscape();
+            restoreSceneRoot();
+            cl->SetPipelineState(scenePso);
+        }
+
         // ── TAA velocity (A2): screen-space motion of the opaque geometry, right
         // after the passes whose depth it tests against and before the decals
         // (which flip that depth to a shader resource). One draw per visible
@@ -13785,6 +14245,16 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                 auto vdsv = p.viewportDsvHeap->GetCPUDescriptorHandleForHeapStart();
                 cl->OMSetRenderTargets(1, &vrtv, FALSE, &vdsv);
             }
+            // The tile landscape's ground stands still; the camera's own motion is its velocity. Before the meshes: the pass
+            // writes no depth, so what stands on the ground overwrites it (vkls::velocityClip). It leaves its own root
+            // signature and heap set; this pass sets its own next and the scene's are rebuilt at its end.
+            // Last frame's matrix for what this frame places (the ground, a cluster's plants, a first-seen object): across a
+            // floating-origin hop it takes the origin's step (HE::taaPrevViewProjAt). A remembered model keeps taaPrevViewProj.
+            const glm::dvec3 originNow = p.m_renderWorld.worldOrigin;
+            const glm::mat4 prevHere = p.taaPrevOriginKnown ? HE::taaPrevViewProjAt(p.taaPrevViewProj, originNow, p.taaPrevOrigin)
+                                                            : p.taaPrevViewProj;
+            if (p.landscapeFrameLive && HE::landscapeD3dPassesOn() && HE::landscapePassesOn())
+                p.landscape.drawVelocity(cl, p.landscapeFrame, viewProj, viewProjClean, prevHere);
             cl->SetGraphicsRootSignature(p.taaVelocityRootSig.Get());
             cl->SetPipelineState(p.taaVelocityPSO.Get());
             cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -13830,7 +14300,7 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                         HE::TaaVelocityConstants c;
                         c.mvpJitter = viewProj * model;
                         c.mvpNow    = viewProjClean * model;
-                        c.mvpPrev   = p.taaPrevViewProj * model;
+                        c.mvpPrev   = prevHere * model;
                         std::memcpy(ringPtr + static_cast<size_t>(drawIdx) * k_cbSlot, &c, sizeof(c));
                         cl->SetGraphicsRootConstantBufferView(
                             0, ringBase + static_cast<UINT64>(drawIdx) * k_cbSlot);
@@ -13843,13 +14313,13 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                 // An object seen for the first time reports no motion — its
                 // "previous" position is where it is now.
                 const auto it = p.taaPrevTransforms.find(obj.entityId);
-                const glm::mat4 prevModel = (it != p.taaPrevTransforms.end()) ? it->second : obj.transform;
+                const bool known = it != p.taaPrevTransforms.end();
                 p.taaCurTransforms[obj.entityId] = obj.transform;
 
                 HE::TaaVelocityConstants c;
                 c.mvpJitter = viewProj * obj.transform;
                 c.mvpNow    = viewProjClean * obj.transform;
-                c.mvpPrev   = p.taaPrevViewProj * prevModel;
+                c.mvpPrev   = known ? p.taaPrevViewProj * it->second : prevHere * obj.transform;
                 std::memcpy(ringPtr + static_cast<size_t>(drawIdx) * k_cbSlot, &c, sizeof(c));
                 cl->SetGraphicsRootConstantBufferView(
                     0, ringBase + static_cast<UINT64>(drawIdx) * k_cbSlot);
@@ -13861,6 +14331,8 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
             // Advance the history HERE, at the end of the one pass that consumed
             // it, so a frame is never compared against itself.
             p.taaPrevViewProj = viewProjClean;
+            p.taaPrevOrigin = originNow;
+            p.taaPrevOriginKnown = true;
             p.taaPrevTransforms.swap(p.taaCurTransforms);
 
             // A root-signature switch wipes every root argument: the scene state
@@ -14338,26 +14810,8 @@ void D3D12Renderer::Render()
 
     // Drain validation messages every healthy frame, and once on the first device
     // removal (the message explaining the hang is often the last thing queued).
-    if (p.gpuDebug && p.infoQueue && (!FAILED(prHr) || firstRemoval))
-    {
-        const UINT64 n = p.infoQueue->GetNumStoredMessages();
-        for (UINT64 i = 0; i < n; ++i)
-        {
-            SIZE_T len = 0;
-            if (FAILED(p.infoQueue->GetMessage(i, nullptr, &len)) || len == 0) continue;
-            std::vector<char> buf(len);
-            auto* dm = reinterpret_cast<D3D12_MESSAGE*>(buf.data());
-            if (SUCCEEDED(p.infoQueue->GetMessage(i, dm, &len)) && dm->pDescription)
-            {
-                const bool err = dm->Severity == D3D12_MESSAGE_SEVERITY_ERROR ||
-                                 dm->Severity == D3D12_MESSAGE_SEVERITY_CORRUPTION;
-                const std::string line = std::string("D3D12 debug layer: ") + dm->pDescription;
-                Logger::LogTo(HE::Log::Cat::RHI, err ? Logger::LogLevel::Error : Logger::LogLevel::Warning,
-                            line.c_str());
-            }
-        }
-        p.infoQueue->ClearStoredMessages();
-    }
+    if (!FAILED(prHr) || firstRemoval)
+        p.drainGpuDebugMessages();
 
     // Signal a UNIQUE monotonic value and remember it for THIS slot. Per-slot counters
     // would collide on the shared fence (both reach 1,2,3…), letting waitForFrame return
@@ -14401,6 +14855,11 @@ IRenderer::Capabilities D3D12Renderer::GetCapabilities() const
     c.supportsDeferredRendering = m_impl->postFxReady && m_impl->deferredReady;
     c.supportsRawCapture        = m_impl->postFxReady;   // RenderSceneImage's rawOutput rides the tonemap pass
     c.supportsRvt               = m_impl->postFxReady && m_impl->m_matReady;   // a page is that raw capture copied into the pool
+    // The tile landscape's ground in the shadow layers: written, not run (see renderDepthLayer). Said only with the switch on.
+    c.landscapePassMask         = HE::landscapeD3dPassesOn() ? (kLandscapePassShadow | kLandscapePassSsao | kLandscapePassGBuffer | kLandscapePassGi | kLandscapePassVelocity) : 0u;
+    c.landscapeCoarseRevision   = true;   // D3D12Landscape.cpp: new coarse and far images, the atlas stays
+    c.landscapeMaterial         = m_impl->m_matReady && m_impl->m_lsMatRootSig;   // drawDC12 with lsDraw: the ground through its material's landscape variant
+    c.landscapeRvt              = c.landscapeMaterial && c.supportsRvt;   // SetRvtTileGround, rvtTileGround pages (drawGroundMaterial)
     // Froxel volumetric fog (Thema 225 step 9): Inject/Integrate/Apply built at Initialize. It
     // draws on the HDR viewport frame only; every other frame keeps the analytic height fog.
     c.supportsVolumetricFog     = m_impl->fogPipelinesOk;
@@ -15427,6 +15886,7 @@ void D3D12Renderer::rvtStillLeave()
     if (!st.active) return;
     // Nothing of the screenshot may still be in flight when its set goes away.
     p.waitForAllFrames();
+    p.drainGpuDebugMessages();   // this frame never reaches Render(), which is where they are otherwise logged
     p.viewportRT.Reset(); p.viewportDepth.Reset(); p.viewportReadback.Reset();
     p.viewportRtvHeap.Reset(); p.viewportDsvHeap.Reset();
     p.viewportRT         = std::move(st.liveRT);

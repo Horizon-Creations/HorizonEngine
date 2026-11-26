@@ -109,6 +109,59 @@ namespace
 	  "A generated landscape: a heightfield the size of the entity, split into "
 	  "chunks with their own level of detail, sculptable and paintable.",
 	  "", "scenes#terrain" },
+	{ "Component/Landscape Stamp", "Landscape Stamp",
+	  "A heightmap laid over the Tile Landscape: the texture's red channel is "
+	  "added to the ground under this entity. Move, turn and scale the entity "
+	  "to place it, as often as you like; the landscape is not changed until an "
+	  "export bakes the stamps into the shipped pack. A stamp that is not "
+	  "moved costs nothing while the editor runs.",
+	  "", "scenes#terrain" },
+	{ "Landscape Stamp/Enabled", "",
+	  "Off takes the stamp away without deleting the entity; the ground under "
+	  "it goes back to what it was.",
+	  "", "scenes#terrain" },
+	{ "Landscape Stamp/Heightmap File", "",
+	  "The heightmap as a picture file instead of a texture asset: PNG or PGM at 8 or 16 bits, or a headerless .r16 / .raw. "
+	  "A file is read at 16 bits, 65 536 height steps; a texture asset holds 8 bits, 256 steps, which shows as terraces on a "
+	  "tall stamp. Absolute, or relative to the project's folder. When both are set the file is used. The file is only needed "
+	  "while editing: an export bakes the stamps into the landscape.",
+	  "", "scenes#terrain" },
+	{ "Landscape Stamp/Browse Heightmap...", "",
+	  "Opens a file dialog and puts the chosen heightmap file into the field above.",
+	  "", "scenes#terrain" },
+	{ "Tile Landscape/Stamp Heightmap File", "",
+	  "The heightmap file the next stamp placed by the Stamp tool gets (16-bit PNG, PGM, .r16). Used instead of the texture when set.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Browse Heightmap...", "",
+	  "Opens a file dialog for the Stamp tool's heightmap file.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape Stamp/Channel", "",
+	  "Which channel of the texture or file is the height: red, green, blue, alpha, or the grey value of the colour "
+	  "(Luminance). One packed texture can so hold up to four different stamps. A grey picture gives its grey for red, green "
+	  "and blue; a picture without an alpha channel is white (full height) for Alpha.",
+	  "", "scenes#terrain" },
+	{ "Tile Landscape/Stamp Channel", "",
+	  "The channel of the heightmap the next stamp placed by the Stamp tool reads: red, green, blue, alpha or the grey value.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape Stamp/Size", "",
+	  "Edge length of the stamp's square footprint at scale 1. The entity's X "
+	  "and Z scale stretch it.",
+	  "", "scenes#terrain" },
+	{ "Landscape Stamp/Height", "",
+	  "How many metres a white pixel adds, at scale 1 (the entity's Y scale "
+	  "multiplies it). A negative value digs instead of raising.",
+	  "", "scenes#terrain" },
+	{ "Landscape Stamp/Falloff", "",
+	  "How far in from its edge the stamp fades out, as a share of the way to "
+	  "the centre. 0 is a hard edge, 1 fades over the whole stamp.",
+	  "", "scenes#terrain" },
+	{ "Component/Tile Landscape", "Tile Landscape",
+	  "A landscape too big to hold in memory: a grid of 512 m tiles in a pack "
+	  "file, streamed in around the camera and drawn with a quadtree of "
+	  "levels of detail, out to 100 km. It does not replace the Terrain "
+	  "component, which stays the right tool for one small landscape; use "
+	  "Migrate Terrain to Tiles to turn one into a tile landscape.",
+	  "", "editor#landscape-mode" },
 	{ "Component/Foliage", "Foliage",
 	  "Scatters a mesh across this entity's terrain — grass, rocks, trees. The "
 	  "instances are generated, not saved, so a seed reproduces the same layout.",
@@ -4350,6 +4403,14 @@ namespace
 	  "and this machine actually support — some features (ray-traced GI) exist "
 	  "on some backends and not on others.",
 	  "", "rendering#backends" },
+	{ "Preferences/Display/Renderer Capabilities", "Renderer Capabilities",
+	  "What the renderer the editor is running on can do on this platform: each line is a feature, yes or no. The answers "
+	  "come from the backend itself, for this machine: a feature can be missing because the graphics API has no way to do "
+	  "it, because the driver is short of something it needs, or because it is not built for this backend yet. A feature "
+	  "that says no is skipped without an error: the frame is drawn without it. The Tile Landscape lines say where its "
+	  "ground takes part (shadows, ambient occlusion, GI, the virtual texture); they differ most between backends. A "
+	  "backend picked in the list above only starts with the next launch, so until then the list is still the running one's.",
+	  "", "rendering#backends" },
 	{ "Preferences/Display/Render Path", "",
 	  "Forward shades each object as it is drawn. Deferred shades the whole screen "
 	  "at once, which is what lifts the light count and turns on SSAO and SSR.",
@@ -5357,6 +5418,12 @@ namespace
 	  "a high sun.",
 	  "", "rendering#shadows" },
 	// ── World ▸ Virtual Texture ──────────────────────────────────────────────
+	{ "Virtual Texture/Native near view on tile landscapes", "Native near view on tile landscapes",
+	  "The native near view for a Tile Landscape: its ground close to the camera is drawn with the material itself instead of "
+	  "from pages, which is sharper from close up. Off by default, because a tile landscape changes material a whole patch "
+	  "(128 m and more) at a time, so much more ground than the near radius is computed in place: about a fifth more frame "
+	  "time for the ground. Turn it on when the ground right at the camera looks soft and the frame time allows it.",
+	  "", "rendering#performance" },
 	{ "Virtual Texture/Native near view", "Native near view",
 	  "Keeps the landscape's own material close to the camera. A page has a fixed ground resolution (the texel size), the "
 	  "material has its textures' resolution, which is far finer: from close up the pages are blurry whatever their level. "
@@ -8015,6 +8082,46 @@ namespace
 	  "few seconds after a landscape was last changed; the editor pauses for the "
 	  "length of the bake.",
 	  "", "editor#landscape-mode" },
+	{ "Landscape/Ridges##mountain", "Mountain Ridges",
+	  "How much of the relief is ridged: sharp crests with V-shaped valleys "
+	  "between them, the ridgelines wandering instead of running straight. At 0 "
+	  "the relief is the round noise of the landscape itself. Needs Roughness "
+	  "above 0 to show.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Erosion##mountain", "Mountain Erosion",
+	  "Lets flanks that are steeper than a scree slope (about 40 degrees) shed "
+	  "material downhill, so spikes and cliffs of the noise become the debris "
+	  "fans a real mountain has. Higher values run more passes. The peak still "
+	  "reaches Max Height and the rim stays where it is.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Terraces##mountain", "Mountain Terraces",
+	  "Cuts the height into this many level steps from the ground up to the "
+	  "peak, like rice terraces or the benches of a quarry. 0 turns it off.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Terrace Sharpness##mountain", "Terrace Sharpness",
+	  "How much of each step is a level bench. At 0 the slope stays as it was, "
+	  "at 1 the mountain is a staircase with steep risers.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Paths##mountain", "Mountain Paths",
+	  "How many trails lead from the rim of the area up to the summit, spread "
+	  "evenly round the mountain. Each is cut into the ground as a level bench "
+	  "and turns back on itself where the flank is steeper than Path Max Grade. "
+	  "0 makes none.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Path Width##mountain", "Path Width",
+	  "How wide the level bench of a path is, in metres. It blends into the "
+	  "slope over another half width on either side.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Path Max Grade##mountain", "Path Max Grade",
+	  "The steepest a path should climb, as rise over run: 0.3 is 30 cm up per "
+	  "metre walked. On a steeper flank the path traverses and turns back "
+	  "instead of going straight up. A low value gives long winding trails.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Create Path Splines##mountain", "Create Path Splines",
+	  "On: every path also becomes a Spline entity named Mountain Path that "
+	  "follows the trail, so a fence, a road or a script can use the line. "
+	  "They are created in the same undo step as the mountain.",
+	  "", "editor#landscape-mode" },
 	{ "Landscape/Clear Paint", "",
 	  "Throws away every painted layer weight, putting the whole landscape back "
 	  "on the first layer. It is one undo step, but it removes the entire "
@@ -8051,6 +8158,147 @@ namespace
 	  "16-bit heightmaps the way World Machine and Unreal exchange them, and "
 	  "JPEG, BMP, TGA at 8 bits. Same rules as Apply: black is 0 m, white is "
 	  "Height Scale, the sculpt is replaced, paint and foliage stay.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Enabled", "",
+	  "Switches the whole tile landscape off without losing its settings. Turning it off releases the pack file and every tile in memory.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Pack File", "",
+	  "The pack the landscape streams from (a .hlp file). Changing it opens the new pack at once; a path that cannot be opened is reported in the log and the landscape stays empty. Use an absolute path: the game opens it as written.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Browse...", "",
+	  "Picks an existing pack file for this landscape.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Load Radius", "",
+	  "How far around the camera the tiles are kept in memory, in metres. The tiles beyond are drawn from the coarse world that is always loaded. A larger radius needs more memory; the budget below cuts it down if it does not fit.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Memory Budget", "",
+	  "The most the decoded tiles may take, in megabytes. The load radius shrinks to fit rather than the budget being passed. The Streaming tab of the Profiler shows how much is used.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Height Min", "",
+	  "The height in metres of a stored value of 0. A pack made here writes the right number in; change it only for a pack that came from elsewhere.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Height Range", "",
+	  "The height in metres from a stored value of 0 to the highest (65535). The pack's own header wins when it has one, this is the fallback for older packs.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Texture Group", "",
+	  "The ground textures the landscape is drawn with: Mountains, Forest, Grassland or Desert, tiled in world coordinates, or flat layer colours. A group whose textures are not on this machine yet is drawn flat until they arrive.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Texture Metres", "",
+	  "How many metres one repeat of the ground texture covers.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Output File", "",
+	  "Where Generate, Migrate and Import write the pack. An existing file is replaced only when the build succeeds; a cancelled or failed build leaves it alone. When the build ends, the landscape points at this file.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Choose Output...", "",
+	  "Picks the file the next build writes.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Tiles X", "",
+	  "How many 512 m tiles the generated world has from west to east. 196 tiles are 100 km.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Tiles Z", "",
+	  "How many 512 m tiles the generated world has from north to south.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Seed", "",
+	  "The same seed and size always give the same world.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Octaves", "",
+	  "How many layers of noise the relief is made of. More octaves add finer detail and cost time to generate.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Generated Height Range", "",
+	  "The height in metres between the lowest and the highest ground of the generated world.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/100 km World", "",
+	  "Sets Tiles X and Z to 196: a world a little over 100 km on a side. Generating it takes a few minutes and several gigabytes of disk.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Generate Procedural World", "",
+	  "Builds a pack from the engine's noise: mountains, valleys, and layer paint by height and slope. It runs in the background with a progress bar and can be cancelled. Good for tests and as a starting point.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Migrate Terrain to Tiles", "",
+	  "Cuts the scene's Terrain (its sculpted heights and painted layers) into tiles and writes them as a pack. The Terrain's south-west corner lands at the pack's origin. Its water is not carried over. The Terrain stays in the scene; hide or delete it once the tile landscape looks right.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Metres per Pixel", "",
+	  "How far apart the height map's pixels are on the ground. A 4097 pixel picture at 2 m covers 8 km.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Import Height Min", "",
+	  "The height in metres of a black pixel.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Import Height Range", "",
+	  "The height in metres from a black to a white pixel. A 16-bit picture keeps its full precision.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Flip File Rows", "",
+	  "For a tile set whose first row of files (y0) is the southern-most, as World Machine numbers them. The pictures themselves stay as they are.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Paint Layers from Shape", "",
+	  "Paints the ground layers from the heights: flat ground, steep rock and high ground. Off puts layer 0 everywhere. The paint can be changed afterwards.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Import Height Map File...", "",
+	  "Makes a pack from one height map picture: 16-bit PNG, PGM, or a square .r16/.raw as World Machine and Gaea export them. Pixels become height samples, Metres per Pixel apart.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Import Tiled Height Map Folder...", "",
+	  "Makes a pack from a folder of tiles named name_x0_y0.png (or .r16, .raw, .pgm), as World Machine and Gaea write a tiled build. The files are read as they are needed, so the set can be far larger than memory. A missing file is a hole at height 0; files of different sizes are refused.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Cancel Build", "",
+	  "Stops the build under way. The pack file that was being written is removed and the old one is left as it was.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Stream Tiles", "",
+	  "On: only the tiles within Load Radius of the camera are in memory, and far ground is drawn from the coarse levels. Off: every tile of the world is loaded and kept, whatever the camera does; the far levels are there all the same, so the picture does not change. Off works for worlds of up to 1024 tiles (16 km a side at 512 m tiles), because each loaded tile is a layer of the GPU atlas; a larger world says so in the log and stays unloaded until streaming is on again.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Edit Tiles", "",
+	  "Arms a brush in the Scene viewport that sculpts and paints the tiles under the cursor. Hold the left button to work; each press is one stroke. The pack itself is never changed: edits are kept in a file beside it (<pack>.edits), shown by every editor and game that opens the pack, and baked into the shipped pack by an export.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Tile Brush", "",
+	  "What the brush does: Raise and Lower move the ground (Ctrl turns one into the other), Smooth evens it out, Flatten pulls it to the height where the stroke began, Paint Layer paints one of the twelve ground layers, Roughen adds small bumps, Ramp draws a straight slope from where the stroke began to the cursor, Mountain grows one mountain in the brush's circle with each click, Stamp places a heightmap as an entity that can be moved afterwards, Foliage Mask erases the foliage of every layer under the brush (Ctrl lets it grow back), Water paints a lake at the height of the ground where the stroke began, or continues the water under it (Ctrl erases).",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Dig Water Bed", "",
+	  "On: the Water tool also lowers the ground under the water it paints, so the lake gets a bed instead of lying on the surface. The ground is edited like with the sculpt tools and is saved with the tile edits.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Water Depth", "",
+	  "How deep the Water tool digs the bed below the lake's surface at most, in metres.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Stamp Height", "",
+	  "How many metres a white pixel of the heightmap adds where the Stamp tool places it. Negative digs. The brush radius plus falloff is half the stamp's edge. Each click makes a Landscape Stamp entity: select it in the Scene mode to move, turn or scale the stamp later; an export bakes all stamps into the shipped landscape.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Mountain Height", "",
+	  "How high the Mountain tool's peak rises above the ground, in metres. Negative digs a basin. The brush radius is the mountain's foot, the falloff how softly it meets the ground; every click uses another seed, so no two mountains are alike.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Mountain Ridges", "",
+	  "How much of the mountain's relief is ridged: sharp crests with V-shaped valleys between them. At 0 it is the round noise of a plain hill.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Mountain Erosion", "",
+	  "Lets flanks steeper than a scree slope shed material downhill, so spikes of the noise become debris fans. Higher values run more passes.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Mountain Terraces", "",
+	  "Cuts the mountain's height into this many level steps from the ground up to the peak. 0 turns it off.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Mountain Paths", "",
+	  "How many trails lead from the foot of the mountain up to its summit, spread evenly round it. Each is cut into the ground as a level bench and turns back on itself where the flank is too steep. 0 makes none.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Mountain Path Width", "",
+	  "How wide the level bench of a mountain path is, in metres.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Mountain Path Splines", "",
+	  "On: every path the Mountain tool cuts also becomes a Spline entity named Mountain Path that follows the trail. The splines are scene content with their own undo step; the ground is undone with Undo Stroke.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Brush Radius", "",
+	  "The radius of full strength, in metres. Radius plus falloff can be about 950 m at most: the brush works on a block of up to 4 x 4 tiles around the cursor, and the ring turns red where no block holds it.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Brush Falloff", "",
+	  "The width outside the radius over which the brush fades to nothing, in metres.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Brush Strength", "",
+	  "How fast the brush works: metres a second times twenty for Raise and Lower, the share a second for Smooth and Paint Layer. A change smaller than half a height step (shown below the buttons) is lost, because a tile stores heights in 16 bit.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Paint Layer", "",
+	  "The ground layer the Paint Layer brush paints, 0 to 11. Layers 0 to 3 are the texture group's grass, dirt, rock and snow.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Undo Stroke", "",
+	  "Takes the last stroke back, all of its tiles at once. Up to 32 strokes are kept. This is the tile brush's own history, apart from the editor's undo.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Redo Stroke", "",
+	  "Brings back the stroke that Undo Stroke took away.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Save Tile Edits", "",
+	  "Writes the edited tiles to the file beside the pack. Saving the scene does the same.",
 	  "", "editor#landscape-mode" },
 	{ "Landscape/Flip Z", "",
 	  "Mirrors the picture top-to-bottom before laying it over the ground. "
@@ -8578,7 +8826,24 @@ namespace
 	  "editor's own renderer (Metal, OpenGL, Vulkan, D3D11 and D3D12 all hand back "
 	  "the material's colour without tonemap or post effects); a renderer that "
 	  "cannot makes the export say so and the far levels keep the real material. "
+	  "A Tile Landscape gets a far image too: one picture of the whole world, what "
+	  "its layer blend comes to, written into the shipped copy of its pack and read "
+	  "with one texture access for all ground beyond the streamed tiles. It is made "
+	  "in regions of 8 x 8 tiles and only the regions whose tiles changed since the "
+	  "last export are made again (the last result is kept under Saved/LandscapeFar); "
+	  "the export log's cook step says how many were baked and how many unchanged. "
 	  "Saved in the profile.",
+	  "", "export#overview" },
+	{ "Export/Bake streaming cell proxies", "Bake streaming cell proxies",
+	  "A scene with a Tile Landscape and streaming cells (Streaming tab, Split into Cells) ships the "
+	  "landscape's pack as a loose file in the game's data folder (Landscape/<name>.pack), and the "
+	  "exported scene names that copy. With this on, the export also merges the static meshes of every "
+	  "cell (visible, no skeleton, no animator, no moving body) into one distant proxy per cell and "
+	  "appends them to the shipped copy of the pack: while a cell is not built yet, or has been unloaded, "
+	  "its proxy stands in as a plain silhouette in the right place and size, drawn with the default "
+	  "material. A cell is capped at 20 000 triangles and 4 000 instances, the biggest first. Your "
+	  "project's own pack is never changed. Off: the pack is still shipped, without proxies. Saved in "
+	  "the profile.",
 	  "", "export#overview" },
 	{ "Export/Far landscape budget (MB)", "Far landscape budget (MB)",
 	  "What all baked far-landscape textures of this export may cost once cooked "
@@ -10747,7 +11012,7 @@ namespace
 		"Transform", "Transform 2D", "Mesh", "Skeletal Mesh", "Material", "Light",
 		"Decal", "Rope", "Spline", "Trail", "Rigid Body", "Collider", "Joint", "Character Controller", "Movement",
 		"Replication",
-		"Camera", "Camera Rig", "Script", "Terrain", "Foliage", "Nav Mesh",
+		"Camera", "Camera Rig", "Script", "Terrain", "Tile Landscape", "Landscape Stamp", "Foliage", "Nav Mesh",
 		"Nav Agent", "Audio Source", "Audio Listener", "Animator", "Animator Blend",
 		"Animator State Machine", "Root Motion", "Animation Layers",
 		"Inverse Kinematics",

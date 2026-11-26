@@ -149,6 +149,23 @@ Entity create(HorizonWorld& world, EditorUndo* undo, const glm::vec3& worldPos)
 	return e;
 }
 
+Entity createFromPoints(HorizonWorld& world, const std::vector<glm::vec3>& worldPoints, const char* name)
+{
+	if (worldPoints.size() < 2) return entt::null;
+	for (const glm::vec3& p : worldPoints)
+		if (!finite(p)) return entt::null;
+	const Entity e = world.createEntity(name);
+	auto& reg = world.registry();
+	TransformComponent t;
+	t.position = worldPoints.front();   // a child of the world root: local is world
+	reg.emplace<TransformComponent>(e, t);
+	SplineComponent s;
+	s.controlPoints.reserve(worldPoints.size());
+	for (const glm::vec3& p : worldPoints) s.controlPoints.push_back(p - worldPoints.front());
+	reg.emplace<SplineComponent>(e, std::move(s));
+	return e;
+}
+
 int appendPoint(HorizonWorld& world, Entity e, EditorUndo* undo, const glm::vec3& worldPos)
 {
 	SplineComponent* s = splineOf(world, e);

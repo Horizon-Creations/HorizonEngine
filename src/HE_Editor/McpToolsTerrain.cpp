@@ -622,6 +622,26 @@ void registerTerrainTools(McpToolRegistry& registry, EditorCommands& cmds,
 			                          "metre). Default 2.") },
 			{ "seed",      json{ { "type", "integer" },
 			                     { "description", "Which variation of the noise. Default 1." } } },
+			{ "ridges",    numberProp("How much of the relief is ridged noise (sharp crests, "
+			                          "V-shaped valleys) rather than round fBm, 0..1. Needs "
+			                          "roughness above 0. Default 0.") },
+			{ "erosion",   numberProp("Thermal erosion, 0..1: flanks steeper than a scree "
+			                          "slope shed material downhill. Default 0.") },
+			{ "terraces",  json{ { "type", "integer" }, { "minimum", 0 }, { "maximum", 256 },
+			                     { "description", "Cut the height into this many level steps "
+			                                      "from the ground to the peak. 0 is off. "
+			                                      "Default 0." } } },
+			{ "terraceSharpness", numberProp("How much of a step is level bench, 0..1: 0 leaves "
+			                                 "the slope as it is, 1 is a staircase. Default 0.7.") },
+			{ "paths",     json{ { "type", "integer" }, { "minimum", 0 }, { "maximum", 8 },
+			                     { "description", "Trails from the rim up to the summit, spread "
+			                                      "round the area and cut into the ground. Their "
+			                                      "points come back as `paths` (world x, y, z), "
+			                                      "ready for a spline. Default 0." } } },
+			{ "pathWidth", numberProp("Width of a path's level bench in world units. Default 4.") },
+			{ "pathMaxGrade", numberProp("Steepest a path should climb, rise over run. A "
+			                             "steeper flank makes it traverse and turn back. "
+			                             "Default 0.3.") },
 		}, { "uuid", "x", "z" });
 		t.mutates = true;
 		t.handler = [c, h](const json& args) -> ToolResult {
@@ -669,6 +689,26 @@ void registerTerrainTools(McpToolRegistry& registry, EditorCommands& cmds,
 			if (!(p.frequency > 0.0f))
 				return failFor(CmdError::InvalidPayload,
 				               "'frequency' must be positive.");
+			p.ridges           = static_cast<float>(numArg(args, "ridges", p.ridges));
+			p.erosion          = static_cast<float>(numArg(args, "erosion", p.erosion));
+			p.terraces         = intArg(args, "terraces", p.terraces);
+			p.terraceSharpness = static_cast<float>(numArg(args, "terraceSharpness", p.terraceSharpness));
+			p.paths            = intArg(args, "paths", p.paths);
+			p.pathWidth        = static_cast<float>(numArg(args, "pathWidth", p.pathWidth));
+			p.pathMaxGrade     = static_cast<float>(numArg(args, "pathMaxGrade", p.pathMaxGrade));
+			if (!(p.ridges >= 0.0f && p.ridges <= 1.0f) || !(p.erosion >= 0.0f && p.erosion <= 1.0f)
+			    || !(p.terraceSharpness >= 0.0f && p.terraceSharpness <= 1.0f))
+				return failFor(CmdError::InvalidPayload,
+				               "'ridges', 'erosion' and 'terraceSharpness' must be between 0 and 1.");
+			if (p.terraces < 0 || p.terraces > 256)
+				return failFor(CmdError::InvalidPayload,
+				               "'terraces' must be between 0 and 256. 0 is off.");
+			if (p.paths < 0 || p.paths > 8)
+				return failFor(CmdError::InvalidPayload,
+				               "'paths' must be between 0 and 8. 0 is off.");
+			if (!(p.pathWidth > 0.0f) || !(p.pathMaxGrade > 0.0f))
+				return failFor(CmdError::InvalidPayload,
+				               "'pathWidth' and 'pathMaxGrade' must be positive.");
 
 			// Only the XZ centre crosses into terrain-local space. maxHeight is an
 			// amount ADDED, like terrain_sculpt's raise — not a target like its
@@ -712,6 +752,19 @@ void registerTerrainTools(McpToolRegistry& registry, EditorCommands& cmds,
 				result["peakAdded"]  = gr.peakAdded;
 				result["touchedMin"] = r.worldPos.y + gr.minHeight;
 				result["touchedMax"] = r.worldPos.y + gr.maxHeight;
+			}
+			if (p.paths > 0)
+			{
+				// World points, rim first: what a client hands to a spline.
+				json paths = json::array();
+				for (const std::vector<TerrainGenerate::PathPoint>& line : gr.paths)
+				{
+					json pts = json::array();
+					for (const TerrainGenerate::PathPoint& pt : line)
+						pts.push_back(json::array({ r.worldPos.x + pt.x, r.worldPos.y + pt.y, r.worldPos.z + pt.z }));
+					paths.push_back(std::move(pts));
+				}
+				result["paths"] = std::move(paths);
 			}
 
 			// Off the landscape, or a height of zero: no undo step for a change

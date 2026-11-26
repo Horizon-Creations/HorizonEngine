@@ -52,6 +52,9 @@
 #include "DeferredHandleRetireList.h" // Vulkan viewport descriptor sets, freed behind the GPU
 #include "EditorCommands.h"
 #include "PlayCellStreaming.h"   // a split scene's cells streamed while playing
+#include <HorizonScene/LandscapeRuntime.h>   // the world-scale tile landscape (Thema 326)
+#include <HorizonScene/LandscapeWorldProxies.h>
+#include <HorizonScene/LandscapeStamps.h>
 #include <atomic>
 #include <filesystem>
 #include <functional>
@@ -792,6 +795,16 @@ private:
 	// CellRuntime with the editor as its host (PlayCellStreaming.h). Made at the
 	// first Play, ended at every Stop before the edited scene is restored.
 	std::unique_ptr<PlayCellStreaming> m_playCells;
+	// The scene's tile landscape (LandscapeWorldComponent): streamed around the play camera, or around the editor's own while editing, and
+	// drawn by the renderer through IRenderer::SetLandscapeProvider (bound at the first update).
+	HE::LandscapeRuntime m_landscape;
+	PhysicsWorld* m_landscapePhysics = nullptr;   // the physics world the landscape gives its ground to (detached BEFORE that world is destroyed)
+	bool m_landscapeNavigation = false;
+	std::string m_landscapeContentRoot;   // ContentManager::contentRoot() last given to m_landscape.setProjectRoot(), to skip repeating it
+	bool        m_landscapeToolsBound = false;   // LandscapeWorldTools::setRuntime(&m_landscape) was called
+	HE::LandscapeStampSync    m_landscapeStamps;    // LandscapeStampComponent entities -> the runtime's overlay
+	HE::LandscapeWorldProxies m_landscapeProxies;   // its foliage and water as entities the renderers draw already
+	bool m_landscapeBound = false;
 	// The headless dump's rings (HE_DUMP_WATERRIPPLE): no physics runs there, so the witness
 	// builds the block itself and pushEnvironment hands it to the renderer instead of the
 	// physics world's. Off outside the dump.
@@ -1229,6 +1242,7 @@ private:
 	// is the undo revision at that point; the scene is dirty when it differs.
 	std::string m_currentScenePath;
 	uint64_t    m_savedRevision = 0;
+	bool        sceneHasUnsavedChanges() const;   // the undo history moved, or a tile landscape has unsaved edits
 	// Both answer whether the file was actually written / read. The UI callers
 	// ignore it (the editor log and the title bar already say so); the MCP scene
 	// tools are the caller that HAS to know, because the client on the other end

@@ -9,6 +9,7 @@
 #include <SDL3/SDL_timer.h>
 #include <Renderer/IRenderer.h>
 #include <HorizonScene/HorizonWorld.h>
+#include <HorizonScene/RvtLandscape.h>            // tileGroundKey / tileGroundGraph
 #include <HorizonScene/EnvironmentPush.h>   // the ONE EnvironmentComponent → settings map
 #include <HorizonScene/Components/EnvironmentComponent.h>
 #include <HorizonScene/TransformHierarchy.h>
@@ -28,7 +29,12 @@
 #include <HorizonScene/Components/WeatherComponent.h>
 #include <HorizonScene/Components/FoliageComponent.h>
 #include <HorizonScene/Components/TerrainComponent.h>       // landscape layer weightmap
+#include <HorizonScene/Components/LandscapeWorldComponent.h> // the tile landscape's GI entry
+#include <MaterialGraph/AutoLandscapeMaterial.h>
+#include <MaterialGraph/MaterialGraph.h>
+#include <MaterialGraph/RvtSplit.h>
 #include <HorizonScene/Components/TerrainChunkComponent.h>  // chunk → parent landscape
+#include <HorizonScene/LandscapeRuntime.h>                  // GI height clipmap of a tile landscape
 #include <HorizonScene/WaterQuery.h>                         // queryUnderwaterCamera's WaterIndex
 #include <HorizonScene/Components/RopeComponent.h>
 #include <HorizonScene/Components/TrailComponent.h>
@@ -396,6 +402,39 @@ void windWaterParams(const MaterialAsset& ma, const MaterialComponent* mc,
 	// gather loop, the parallel_for must stay pure maths over `items`.
 	// `cooked` (null = off) is the static-mesh block (HorizonScene/CookedStatic.h): its settled rows
 	// are copied in phase 2, in the same slot the walk would give them, instead of being rebuilt.
+	// The material the TILE landscape's ground is drawn with (RenderWorld::tileLandscapeMaterial). The landscape's own material
+	// cannot be it in two cases, and then a derived asset is made (once, and again when what it is made from changes):
+	//   * its graph reads a Runtime Virtual Texture. The tile ground has no pages (the RVT driver paints a TerrainComponent's), and a
+	//     read without a page is a flat grey, not the material: the derived graph is the one RVT OFF draws (matInlineRvt).
+	//   * the landscape entity overrides parameters. A mesh draw carries the merged block per draw; the ground's draw has no such
+	//     thing, so the values go into the derived graph's parameter nodes (the asset's own current values first, then the entity's).
+	// Needs the graph: a packaged material (graph stripped) is returned as it is.
+	HE::UUID tileGroundMaterial(ContentManager& cm, const HE::UUID& source, const MaterialComponent* mc)
+	{
+		static struct { HE::UUID source; uint64_t key = 0; HE::UUID derived; } cache;   // a scene has one tile landscape
+		const MaterialAsset* ma = cm.getMaterial(source);
+		if (!ma) return source;
+		const bool rvt = ma->customShaderFragGlsl.find("heRvtSample(") != std::string::npos;
+		const bool overridden = mc && !mc->paramOverrides.empty();
+		if ((!rvt && !overridden) || ma->nodeGraphJson.empty()) return source;
+		const uint64_t key = HE::landscape::tileGroundKey(cm, source, mc);
+		if (cache.source == source && cache.key == key && cm.getMaterial(cache.derived)) return cache.derived;
+
+		HE::MaterialGraph g;
+		if (!HE::landscape::tileGroundGraph(cm, source, mc, g)) return source;
+		g = HE::matInlineRvt(g);
+		MaterialAsset a;
+		a.type = HE::AssetType::Material;
+		a.name = "TileLandscapeGround";
+		a.nodeGraphJson = HE::materialGraphToJson(g);
+		if (cache.derived != HE::UUID{} && cm.getMaterial(cache.derived)) cm.replaceMaterial(cache.derived, std::move(a));
+		else cache.derived = cm.registerMaterial(std::move(a));
+		cm.regenerateMaterialFromGraph(cache.derived);
+		cache.source = source;
+		cache.key = key;
+		return cache.derived;
+	}
+
 	void extractMeshes(entt::registry& reg, RenderWorld& out, ContentManager* contentManager,
 	                   std::unordered_set<std::string>& sectionMaterialMissing, HE::CookedStatic* cooked)
 	{
@@ -488,6 +527,46 @@ void windWaterParams(const MaterialAsset& ma, const MaterialComponent* mc,
 			                    static_cast<int32_t>(out.landscapes.size()));
 			out.landscapes.push_back(ls);
 		}
+
+		// The TILE landscape's entry (LandscapeWorldComponent): its ground is no mesh entity, the GI kernels reach it through the
+		// height clipmap a backend puts into its ray structure. With an Auto Landscape material (its own, else its texture group's)
+		// a hit on it is coloured like a hit on a TerrainComponent's auto landscape: grass, dirt, rock and snow by slope and height,
+		// from the means of the material's own albedo array. Another material: no entry, the backend's flat ground colour.
+		out.tileLandscapeIndex = -1;
+		out.tileLandscapeMaterial = HE::UUID{};
+		if (contentManager)
+			for (auto [le, lw] : reg.view<LandscapeWorldComponent>().each())
+			{
+				if (!lw.enabled || lw.pack.empty()) continue;
+				const auto* lmat = reg.try_get<MaterialComponent>(le);
+				HE::UUID mid = lmat ? lmat->materialAssetId : HE::UUID{};
+				if (mid == HE::UUID{} && lw.textureGroup >= 0 && lw.textureGroup < HE::kAutoLandscapeGroupCount)
+					mid = HE::autoLandscapeGroup(static_cast<HE::AutoLandscapeGroupId>(lw.textureGroup)).materialId;
+				const MaterialAsset* ma = mid != HE::UUID{} ? contentManager->getMaterial(mid) : nullptr;
+				if (!ma) break;   // not loaded yet (the renderer loads the group's on its first frame)
+				// What the ground is DRAWN with (may register an asset, which moves `ma`: fetched again below).
+				out.tileLandscapeMaterial = tileGroundMaterial(*contentManager, mid, lmat);
+				ma = contentManager->getMaterial(mid);
+				if (!ma) break;
+				HE::GiLandscape ls;
+				ls.terrainEntity = static_cast<uint32_t>(le);
+				auto ov = [lmat](const std::string& name, float& v) {
+					if (lmat)
+						for (const auto& o : lmat->paramOverrides)
+							if (o.name == name) { v = o.value[0]; return true; }
+					return false;
+				};
+				const int slot = HE::giAutoLandscapeParams(*ma, ov, ls, puddleScale);
+				if (slot < 0 || ls.layerCount != HE::kGiLandAuto) break;
+				// Copied out: resolving may loadAsset, which moves `ma`.
+				const HE::UUID texId = static_cast<size_t>(slot) < ma->graphTextureIds.size() ? ma->graphTextureIds[slot] : HE::UUID{};
+				const std::string texPath = static_cast<size_t>(slot) < ma->graphTexturePaths.size() ? ma->graphTexturePaths[slot] : std::string{};
+				const TextureAsset* arr = contentManager->resolveTextureRef(texId, texPath);
+				if (!arr || !HE::giAutoLandscapeSliceMeans(*arr, ls)) break;
+				out.tileLandscapeIndex = static_cast<int32_t>(out.landscapes.size());
+				out.landscapes.push_back(ls);
+				break;
+			}
 
 		auto meshView = reg.view<TransformComponent, MeshComponent>();
 		// The entities in the order the view hands them out, which is the order of out.objects.
@@ -786,6 +865,49 @@ void windWaterParams(const MaterialAsset& ma, const MaterialComponent* mc,
 					cooked->receivesShadow[row] = obj.receivesShadow ? 1 : 0;
 				}
 			}
+	}
+
+	// ── GI height clipmap of a tile landscape (Thema 326, step 4) ─────────────
+	// The TerrainComponent loop above pushes AT MOST one entry already (a scene is documented to carry
+	// either a TerrainComponent or a tile landscape, never both as GI casters); every GI-heightfield
+	// backend (GL, Vulkan, D3D11) turns its whole shadow-heightfield path off the moment
+	// RenderWorld::heightfields holds more than one, so this never adds a second.
+	// kLandscapeGiHeightfieldKey itself lives in RenderWorld.h, next to GiHeightfield: the GI
+	// reflection kernels' CPU-side binding code (OpenGLRenderer.cpp) needs the same sentinel to
+	// gate their tile-landscape-only ray-march branch.
+	void extractLandscapeGiHeightfield(HorizonWorld& world, RenderWorld& out)
+	{
+		// Also called for a frame that reuses its walk (extract(), the reuse branch), which keeps the list: the entry is
+		// brought up to date instead of outliving the runtime, the switch and a new version of the clipmap. Nothing is copied
+		// while it is current.
+		const HE::LandscapeRuntime* lr = world.landscapeRuntime();
+		// HE_LANDSCAPE_PASSES=0, the A/B switch of landscape_gpu_check: the ground in the scene pass alone.
+		const bool want = HE::landscapePassesOn() && lr && lr->giHeightfield().active();
+		const auto old = std::find_if(out.heightfields.begin(), out.heightfields.end(),
+		                              [](const GiHeightfield& h) { return h.key == kLandscapeGiHeightfieldKey; });
+		if (old != out.heightfields.end())
+		{
+			if (want && old->version == lr->giHeightfield().version) return;
+			out.heightfields.erase(old);
+		}
+		if (!want || !out.heightfields.empty()) return;
+		const HE::LandscapeGiHeightfield& g = lr->giHeightfield();
+		GiHeightfield hf;
+		hf.data    = g.data;
+		hf.res     = g.res;
+		hf.version = g.version;
+		hf.key     = kLandscapeGiHeightfieldKey;
+		// The clipmap's local space is centred on its window, same as a TerrainComponent's (see
+		// LandscapeTileTerrain.h): a pure translation to the window's centre, origin-relative.
+		// y: the clipmap's heights are ABSOLUTE metres, so local y = relative y + origin.y (a floating origin that is not at
+		// height 0 would otherwise put the whole field origin.y too high).
+		const glm::vec3 centreRel(static_cast<float>(g.centreAbsolute.x - world.origin().x), static_cast<float>(-world.origin().y),
+		                          static_cast<float>(g.centreAbsolute.z - world.origin().z));
+		glm::mat4 worldMatrix(1.0f);
+		worldMatrix[3] = glm::vec4(centreRel, 1.0f);
+		hf.worldToLocal = glm::inverse(worldMatrix);
+		hf.size = { g.sizeX, g.sizeZ };
+		out.heightfields.push_back(std::move(hf));
 	}
 
 	// ── ParticleGraph particles ────────────────────────────────────────────────
@@ -1799,6 +1921,7 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 			assignLocalShadowLayers(out);
 			m_frameAspect = aspectRatio;
 		}
+		extractLandscapeGiHeightfield(world, out);   // not part of the frame key: the runtime's clipmap arrives from a job
 		++m_reusedExtracts;
 		return;
 	}
@@ -1830,6 +1953,8 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 		cooked->syncContent(m_contentManager, m_sectionMaterialEpoch);
 	}
 	{ HE_PROFILE_SCOPE_N("Extract::meshes"); extractMeshes(reg, out, m_contentManager, m_sectionMaterialMissing, cooked); }
+	extractLandscapeGiHeightfield(world, out);
+	out.worldOrigin = world.origin();
 	extractParticleBatches(reg, out);
 	extractPrecipitation(reg, out);
 	if (!m_foliageLod) m_foliageLod = std::make_unique<HE::FoliageLodMemory>();

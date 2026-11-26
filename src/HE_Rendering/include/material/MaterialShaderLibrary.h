@@ -209,6 +209,11 @@ public:
         float fogVol[4]       = {};
         float fogVolGrid[4]   = {};
         float fogViewProj[16] = {};
+        // worldOrigin: xyz = the world's floating origin (HorizonWorld::origin), so that position + worldOrigin is the ABSOLUTE
+        // position. A material's World Position (and its world-space noise) is that sum: its texturing then stays on the ground
+        // when the origin is rebased, instead of moving with it. Lighting keeps the origin-relative vWorldPos. Filled for every
+        // backend by FillMaterialLightWindow (RenderWorld::worldOrigin); 0 where the world has no floating origin.
+        float worldOrigin[4]  = {};
     };
     // Metal's setFragmentBytes caps at 4 KiB; the lighting block rides it on every material draw.
     static_assert(sizeof(Lighting) <= 4096, "HeLighting outgrew Metal's setBytes limit");
@@ -495,6 +500,12 @@ public:
     // samplers are the ones the resolve leaves free (it declares neither heTex0
     // nor heTexP0..3); s7 is the one register still unused.
     static constexpr int kHlslResolveUboReg      = 4;
+    // The tile landscape's material variant on D3D (landscapeVertex / landscapeFragment, Backend::HLSL): the registers the
+    // renderer binds the landscape's data at for a material draw. b12 LsGlobals, b13 LsPatch (the layout of the GLSL blocks, which
+    // is HE::vkls::Globals / PatchPush, NOT the fixed blend's d3dls structs); t47 tile heights, t48 slot table, t49 coarse
+    // heights (vertex stage; the slot table in both), t50..t52 the tile weight pages, t53..t55 the coarse ones. No sampler.
+    static constexpr uint32_t kHlslLandscapeGlobalsReg = 12;
+    static constexpr uint32_t kHlslLandscapeFirstSrv   = 47;
     static constexpr int kHlslResolveGB0Reg      = 27;
     static constexpr int kHlslResolveGB1Reg      = 28;
     static constexpr int kHlslResolveGB2Reg      = 29;
@@ -581,6 +592,28 @@ public:
     // vNormal = +Z, vWorldPos = (screen px, 0) — sane defaults for UI shading.
     const Compiled& uiVertex(Backend backend);
 
+    // ── The tile landscape as a material's geometry (Thema 326) ──────────────────────────────────────────────────────────────
+    // landscapeVertex: the patch vertex stage of HorizonRendering/LandscapeShaderSource.h (same heights, same CDLOD morph, so the same
+    // seams) writing the four varyings every material fragment reads: vNormal from the height lattice, vUV = the position in the
+    // landscape's render window (0..1), vWorldPos origin-relative. No vertex buffer: the grid position is gl_VertexIndex.
+    // GLSL bindings (set 0): 50 LsGlobals (shared with the fragment), 58 LsPatch, 59 tile heights, 51 slot table (shared), 60 coarse
+    // heights; on Metal vertex buffers 20/21 and vertex textures 20-22, which is where MetalLandscape binds them for its own shader.
+    const Compiled& landscapeVertex(Backend backend);
+    // landscapeFragment: a material's fragment whose layer weights come from the tile atlas. The material's text reads ONE 2D
+    // heLandscapeWeights over the whole landscape; here those reads go through the slot table to a tile's weight slices, or to the
+    // coarse world's where the tile is not in the atlas (landscapeFragmentSource). The text handed in is the material's own and is
+    // not changed, so what is baked into an asset stays what it was. GLSL bindings (set 0): 50 LsGlobals, 51 slot table, 52-54 tile
+    // weight pages, 55-57 coarse weight pages; on Metal fragment buffer 20 and textures 13 (the weightmap's, which this variant does
+    // not have) and 25-30, none of them with a sampler slot.
+    const Compiled& landscapeFragment(uint64_t sourceHash, const std::string& glsl, Backend backend, bool clustered);
+    // `patchAsPushConstant`: LsPatch as a push-constant block instead of the uniform block at 58 (the SPIR-V form: Vulkan pushes it).
+    static std::string landscapeVertexSource(bool patchAsPushConstant = false);
+    // `separateImages`: the landscape's images as textures without a sampler (the SPIR-V form; the vertex source's push-constant
+    // form has them too). A Vulkan set then holds them as SAMPLED_IMAGE descriptors, which do not count as samplers.
+    // `filtered`: the weight pages are read with one linear sample where the footprint is the fragment's own tile's (the
+    // backend's samplers on bindings 52-57 are linear, clamped), instead of four fetches. Not with `separateImages`.
+    static std::string landscapeFragmentSource(const std::string& glsl, bool separateImages = false, bool filtered = false);
+
     // ── Volumetric fog kernels (Thema 225, docs/volumetric-fog-plan.md §10) ──────────────
     // GLSL-450 sources in src/material/FogVolumeShaderSource.h, cross-compiled like every
     // other pass here. Metal, GL and Vulkan (Backend::SpirV: compute + fragment, canonical
@@ -634,7 +667,7 @@ private:
     bool m_spirvFogVolume = true;
     bool m_hlslFogVolume  = false;
     const Compiled& fragmentVariant(uint64_t sourceHash, const std::string& glsl, Backend backend,
-                                    bool clustered);
+                                    bool clustered, bool landscape = false);
 
     // SetRvtColdVulkanFits above; conservative default so a renderer that never calls it (D3D11/D3D12/Metal — this flag
     // only narrows the Vulkan SpirV path) never risks compiling a shader that statically references a binding its

@@ -330,6 +330,69 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const DrawOptions& o
 #endif
 			ImGui::EndCombo();
 		}
+		// What the renderer the editor RUNS on can do, on this platform: the answers of IRenderer::GetCapabilities, which the
+		// backend gives for the machine it found (a device limit, a pipeline that did not build) and for the platform's
+		// switches. A backend picked above takes effect at the next start; until then this is still the running one.
+		static const std::string running = ctx.backendName;   // the first draw: nothing was picked yet
+#if defined(_WIN32)
+		const char* platform = "Windows";
+#elif defined(__APPLE__)
+		const char* platform = "macOS";
+#else
+		const char* platform = "Linux";
+#endif
+		if (ctx.renderer && ImGui::TreeNode("Renderer Capabilities"))
+		{
+			const IRenderer::Capabilities c = ctx.renderer->GetCapabilities();
+			ImGui::TextDisabled("%s on %s", running.c_str(), platform);
+			if (ctx.backendName != running)
+				ImGui::TextDisabled("%s is picked for the next start; this list is the running renderer's.", ctx.backendName.c_str());
+			const uint32_t mask = c.landscapePasses ? kLandscapePassAll : c.landscapePassMask;
+			const struct { const char* group; const char* name; bool on; } rows[] = {
+				{ "Rendering", "Shadows", c.supportsShadows },
+				{ nullptr, "Post processing", c.supportsPostProcessing },
+				{ nullptr, "HDR", c.supportsHDR },
+				{ nullptr, "Deferred render path", c.supportsDeferredRendering },
+				{ nullptr, "Temporal anti-aliasing", c.supportsTemporalAA },
+				{ nullptr, "MetalFX upscaling", c.supportsMetalFX },
+				{ nullptr, "Screen-space reflections", c.supportsScreenSpaceReflections },
+				{ nullptr, "Volumetric fog", c.supportsVolumetricFog },
+				{ nullptr, "GPU particles", c.supportsGpuParticles },
+				{ "Global illumination", "Ray-traced GI", c.supportsGlobalIllumination },
+				{ nullptr, "GI reflections", c.supportsGIReflections },
+				{ "Landscape", "Runtime Virtual Texture", c.supportsRvt },
+				{ nullptr, "Tile landscape: drawn with its material", c.landscapeMaterial },
+				{ nullptr, "Tile landscape: casts shadows", (mask & kLandscapePassShadow) != 0 },
+				{ nullptr, "Tile landscape: in ambient occlusion", (mask & kLandscapePassSsao) != 0 },
+				{ nullptr, "Tile landscape: in ray-traced GI", (mask & kLandscapePassGi) != 0 },
+				{ nullptr, "Tile landscape: in the G-buffer (deferred)", (mask & kLandscapePassGBuffer) != 0 },
+				{ nullptr, "Tile landscape: motion vectors", (mask & kLandscapePassVelocity) != 0 },
+				{ nullptr, "Tile landscape: Runtime Virtual Texture", c.landscapeRvt },
+				{ nullptr, "Tile landscape: far data swapped in place", c.landscapeCoarseRevision },
+				{ "Editor", "Raw capture (bakes)", c.supportsRawCapture },
+				{ nullptr, "Secondary windows", c.supportsSecondaryWindows },
+			};
+			if (ImGui::BeginTable("##rendercaps", 2, ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_RowBg))
+			{
+				for (const auto& r : rows)
+				{
+					if (r.group)
+					{
+						ImGui::TableNextRow();
+						ImGui::TableNextColumn();
+						ImGui::TextDisabled("%s", r.group);
+					}
+					ImGui::TableNextRow();
+					ImGui::TableNextColumn();
+					ImGui::TextUnformatted(r.name);
+					ImGui::TableNextColumn();
+					if (r.on) ImGui::TextUnformatted("yes");
+					else      ImGui::TextDisabled("no");
+				}
+				ImGui::EndTable();
+			}
+			ImGui::TreePop();
+		}
 	});
 	row("renderpath", "Display", [&]{
 		const bool supported = ctx.renderer && ctx.renderer->GetCapabilities().supportsDeferredRendering;

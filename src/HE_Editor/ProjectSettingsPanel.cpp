@@ -901,6 +901,9 @@ void drawVirtualTexturePage(AppContext& ctx)
 	if (EditorWidgets::checkbox("Native near view", &s.nativeNear)) commit = true;
 	hint("Close to the camera the landscape keeps its own material (as sharp as the material is); only chunks farther away "
 	     "than where a finest-level texel covers one pixel are drawn from pages. Costs the full material on the near chunks.");
+	if (EditorWidgets::checkbox("Native near view on tile landscapes", &s.tileNativeNear)) commit = true;
+	hint("The same for a Tile Landscape. Off by default: its patches are 128 m and larger, so far more ground than the near "
+	     "radius leaves the pages.");
 
 	ImGui::SeparatorText("Pool");
 	{

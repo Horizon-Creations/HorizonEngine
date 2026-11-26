@@ -42,6 +42,7 @@
 class HorizonWorld;
 class ContentManager;
 class IRenderer;
+struct MaterialComponent;
 namespace HE::landscape { class HlodBaker; }
 namespace HE { struct ProjectRvtSettings; }
 
@@ -61,6 +62,7 @@ namespace HE::landscape
             // Native near view: the chunks closer than the distance where one mip-0 texel covers one pixel keep the landscape's
             // own material (sharp at any distance), the rest is drawn from the pages. Off = every chunk from the pages.
             bool     nativeNear       = true;
+            bool     tileNativeNear   = false;   // the tile landscape's ground: off by default (it costs more there, ProjectSettings.h)
         };
         struct FrameStats
         {
@@ -258,5 +260,40 @@ namespace HE::landscape
         std::unordered_map<uint32_t, uint64_t> m_feedback;
         std::vector<uint32_t> m_feedbackScratch;
         void updateNearChunks(HorizonWorld& live, const glm::vec3& cameraPos, FrameStats& st);
+
+        // ── The tile landscape's ground (LandscapeRuntime, Thema 326; RvtLandscapeTiles.cpp) ──
+        // One more user of the same pool. No scratch copy: a page is the live ground, drawn by the renderer's landscape provider
+        // in an otherwise empty world. The volume is the whole world where the table can hold it, else a square around the camera
+        // that is replaced, once its successor is filled, when the camera leaves its inner half.
+        struct TileGround
+        {
+            uint64_t   key = 0;                  // what the views and the consumer were built from (tileGroundKey); 0 = nothing built
+            uint64_t   failedKey = 0;            // a material that cannot be split is not tried again until it changes
+            HE::UUID   view[3], consumer;        // kept for good (same ids, new graphs)
+            bool       seen[3] = { false, false, false };
+            uint16_t   volume = 0, pending = 0;
+            bool       volumeLive = false, pendingLive = false;
+            bool       updated = false, pendingUpdated = false;   // the manager has looked at it (missing() means something)
+            glm::dvec2 anchor{ 0.0 }, pendingAnchor{ 0.0 };       // absolute XZ of the min corner; the manager counts from there (floats)
+            glm::dvec2 writtenAt{ 1e300 };       // anchor - world origin the consumer's volume vector holds
+            uint16_t   writtenVolume = 0xFFFF;
+            uint64_t   uploadedVersion = ~0ull;
+            bool       filled = false, swapOn = false;
+            std::shared_ptr<HorizonWorld> scratch;   // empty: what a page camera sees besides the ground
+        };
+        TileGround m_tiles;
+        bool tileGroundWanted(HorizonWorld& live);                                  // builds the materials; false = no tile ground to serve
+        void tileGroundVolumes(HorizonWorld& live, const glm::dvec2& camAbs, FrameStats& st);
+        void tileGroundViews(const glm::dvec2& camAbs, std::vector<rvt::VolumeView>& views);
+        bool tileGroundOwns(uint16_t volume) const { return (m_tiles.volumeLive && m_tiles.volume == volume) || (m_tiles.pendingLive && m_tiles.pending == volume); }
+        uint32_t paintTileGround(HorizonWorld& live, uint16_t volume, const std::vector<rvt::PageRender>& pages);
+        void tileGroundTables(HorizonWorld& live, FrameStats& st);
+        void removeTileGround();
     };
+
+    // The tile ground's material as one graph with every parameter at the value the ground is drawn with (the asset's, then the
+    // landscape entity's overrides): what the page views, the consumer and the RVT-free stand-in are cut from. `key` changes
+    // whenever the result would; 0 = the material is not there or has no graph.
+    uint64_t tileGroundKey(ContentManager& cm, const HE::UUID& source, const MaterialComponent* mc);
+    bool     tileGroundGraph(ContentManager& cm, const HE::UUID& source, const MaterialComponent* mc, MaterialGraph& out);
 }

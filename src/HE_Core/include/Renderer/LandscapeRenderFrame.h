@@ -1,0 +1,169 @@
+#pragma once
+#include <glm/glm.hpp>
+#include <Types/UUID.h>
+
+#include <cstdint>
+#include <cstdlib>
+#include <functional>
+#include <memory>
+#include <string>
+#include <vector>
+
+namespace HE
+{
+
+// ── What a backend needs to draw the world-scale landscape (Thema 326, step 2, part B) ────────
+// The data of HE::LandscapeFrame (HorizonScene) with the images already packed into bytes, in types the backends can see: they link
+// HorizonCore only, not HorizonScene. A backend never reads a tile, a store or an atlas: it copies bytes into images and draws patches.
+// Built by HE::LandscapeRuntime::buildRenderFrame, handed over through IRenderer::SetLandscapeProvider.
+//
+// The images (all unsigned integer or RGBA8, read with integer fetches, never filtered):
+//   tile heights   R16UI array, `slotCapacity` layers of heightW x heightH (the mips of a tile in one image, see LandscapeGpuLayout.h)
+//   tile weights   RGBA8 arrays, `weightPages` of them, weightW x weightH per layer, same mip layout
+//   slot table     R16UI, tableWindow x tableWindow, toroidal, 65535 = tile not in the atlas
+//   coarse heights R16UI, coarseW x coarseH, the coarse grids stacked (coarseGrid[g] = width, height, row offset)
+//   coarse weights RGBA8 x `weightPages`, coarseWeightW x coarseWeightH
+// Everything in LandscapeRenderStatic is created again when `generation` changes (a new landscape began); the uploads and table
+// updates of a frame are applied in order on top of what is there.
+struct LandscapeRenderStatic
+{
+	uint64_t generation = 0;
+	// Counts the changes to the coarse world (and nothing else) within one generation: an edited tile changes the far levels. A backend
+	// that sees another value uploads coarseHeights and coarseWeights again and leaves the tile atlas alone; one that does not look
+	// keeps drawing the far levels as they were.
+	uint64_t coarseRevision = 0;
+
+	float    tileM = 0.0f;
+	float    heightMinM = 0.0f, heightScaleM = 0.0f;     // metres of a stored height 0 and of 65535 above it
+	float    worldMaxX = 0.0f, worldMaxZ = 0.0f;         // absolute extent
+	int      tilesX = 0, tilesZ = 0;
+	int      hCells = 0, wTexels = 0;                    // height cells / weight texels per tile at level 0
+	int      tileLevels = 0;
+	int      tableWindow = 0;
+	int      slotCapacity = 0;
+
+	int      heightW = 0, heightH = 0;                   // one layer of the tile heights
+	int      weightW = 0, weightH = 0;
+	int      weightPages = 0;
+	int      heightLevels = 0;
+	int      heightRect[8][4] = {};                      // per mip: x, y (origin in the layer), w, h
+	int      coarseW = 0, coarseH = 0;
+	int      coarseGridCount = 0;
+	int      coarseGrid[16][4] = {};                     // per coarse grid: width, height, row offset in the stacked image, 0
+	int      coarseWeightW = 0, coarseWeightH = 0;
+	std::vector<uint16_t>             coarseHeights;     // coarseW * coarseH
+	std::vector<std::vector<uint8_t>> coarseWeights;     // [page], coarseWeightW * coarseWeightH * 4
+	// The baked far image (HorizonScene/LandscapeFarMap.h): RGBA8 over the whole world, rgb = albedo (sRGB), a = AO, with its mip chain
+	// (level i is max(1, farW >> i) wide), FILTERED. Empty = the world has none; pixels outside the atlas are then shaded from the coarse
+	// weights as before. A backend that does not take it yet leaves uTexMaps.z at 0 and draws the same way.
+	int      farW = 0, farH = 0;
+	std::vector<std::vector<uint8_t>> farMips;
+
+	float    layerColor[12][4] = {};                     // the flat colour of each layer (used where the array below is missing)
+	// World-UV ground (the material with world coordinates): layers 0-3 are the first four slices of this albedo texture array (asset path,
+	// resolved by the backend like a material's texture array), repeated every `textureMeters` in absolute world metres. Empty = flat colours.
+	std::string albedoArrayPath;
+	std::string normalArrayPath;                         // the same group's normal and mask arrays (empty = not used): normals and AO of layers 0-3
+	std::string maskArrayPath;
+	float    textureMeters = 8.0f;
+
+	// The one grid every patch is drawn with: (cells + 1)^2 vertices (i, j), triangles as indices, and the index ranges of the quadrants.
+	int      patchCells = 64;
+	std::vector<uint16_t> patchIndices;
+	uint32_t quadrantFirst[4] = {};
+	uint32_t quadrantCount[4] = {};
+};
+
+struct LandscapeRenderPatch
+{
+	int      level = 0;
+	uint8_t  quadrants = 15;                             // bit q = dx + 2 * dz
+	bool     coarse = false;
+	int      gridIndex = 0;                              // coarse only
+	int      cornerX = 0, cornerZ = 0;                   // the global lattice cell of the node's corner (node index * cells)
+	float    x0 = 0.0f, z0 = 0.0f;                       // corner, origin-relative metres
+	float    size = 0.0f;
+	float    morphStart = 0.0f, morphEnd = 0.0f;
+};
+
+struct LandscapeRenderUpload
+{
+	uint16_t                          slot = 0;
+	std::vector<uint16_t>             heights;           // heightW * heightH
+	std::vector<std::vector<uint8_t>> pages;             // [page], weightW * weightH * 4
+};
+
+struct LandscapeRenderTableUpdate
+{
+	uint32_t index = 0;                                  // (z & (D - 1)) * D + (x & (D - 1))
+	uint16_t slot = 0xFFFF;
+};
+
+struct LandscapeRenderFrame
+{
+	bool active = false;
+	std::shared_ptr<const LandscapeRenderStatic> world;   // the same object as long as the landscape is the same
+	std::vector<LandscapeRenderPatch>       patches;
+	std::vector<LandscapeRenderUpload>      uploads;
+	std::vector<LandscapeRenderTableUpdate> tableUpdates;
+	// `origin` is in the coordinates the static images are laid out in: the render window's (HorizonScene/LandscapeRuntime.h), which for
+	// a world that fits the window are the absolute ones. `uvOrigin` is the floating origin in ABSOLUTE metres: use it, not `origin`, for
+	// the world-UV phase of the ground textures (uTex.zw), or the textures would jump when the window moves.
+	glm::dvec3 origin{ 0.0 };                            // image-space position = relative + origin
+	glm::dvec3 uvOrigin{ 0.0 };
+	glm::vec3  cameraRel{ 0.0f };                        // origin-relative
+	float      slabDistance = 0.0f;                      // camera to the height slab: the vertical term of every morph distance
+	// The ground's material (the landscape entity's, else its texture group's Auto Landscape material). A backend that can draws the
+	// patches with it: the material's fragment with its layer weights from the tile atlas (MaterialShaderLibrary::landscapeFragment),
+	// lit, shadowed and fogged like every other surface. Null, or a backend that cannot (yet): the fixed layer blend of
+	// LandscapeShaderSource.h.
+	HE::UUID   materialId{};
+	// Where that material's asset is when it is the texture group's (an "Engine/..." path), empty for the entity's own. A backend
+	// loads it from there once if nothing has made the id resident: the application loads what a scene's entities name, and no
+	// entity names the group's material.
+	std::string materialPath;
+};
+
+// What the application hands a renderer: called by the backend once per main scene frame with the view-projection it is about to
+// use (origin-relative world to that backend's clip space) and whether its clip depth is 0..1. The application knows the world's
+// floating origin, the backend does not (the render world carries origin-relative positions only), so the origin is the provider's.
+using LandscapeProvider = std::function<void(const glm::dmat4& viewProjRelative, bool zeroToOne, LandscapeRenderFrame& out)>;
+
+// HE_LANDSCAPE_PASSES=0: the ground in the scene pass alone, on every backend (the A/B switch of landscape_gpu_check's witnesses;
+// read per call, so a tool can flip it between two frames).
+inline bool landscapePassesOn()
+{
+	const char* v = std::getenv("HE_LANDSCAPE_PASSES");
+	return !(v && *v == '0');
+}
+// Passes of the ground that were written without a machine to run them (docs/landscape-world-scale-windows-handoff-2026-11-21.md,
+// section 8). Each is ON by default on the platform where it can run and be judged, and off where it cannot or was seen not to
+// work; the variable forces it either way (`=1` on, `=0` off), which is also the way out if one misbehaves. Read once.
+inline bool landscapeUnprovenPass(const char* variable, bool platformDefault)
+{
+	const char* v = std::getenv(variable);
+	return (v && (*v == '0' || *v == '1')) ? *v == '1' : platformDefault;
+}
+// HE_LANDSCAPE_D3D_PASSES: the ground in D3D11's and D3D12's shadow layers. D3D is Windows, so: on there.
+inline bool landscapeD3dPassesOn()
+{
+#if defined(_WIN32)
+	static const bool on = landscapeUnprovenPass("HE_LANDSCAPE_D3D_PASSES", true);
+#else
+	static const bool on = landscapeUnprovenPass("HE_LANDSCAPE_D3D_PASSES", false);
+#endif
+	return on;
+}
+// HE_LANDSCAPE_VK_SSAO: the ground in Vulkan's SSAO position pre-pass. On with a real Vulkan driver (Windows, Linux); off on macOS,
+// where Vulkan is MoltenVK and the witness read no occlusion on the ground although the patches were drawn.
+inline bool landscapeVkSsaoOn()
+{
+#if defined(__APPLE__)
+	static const bool on = landscapeUnprovenPass("HE_LANDSCAPE_VK_SSAO", false);
+#else
+	static const bool on = landscapeUnprovenPass("HE_LANDSCAPE_VK_SSAO", true);
+#endif
+	return on;
+}
+
+} // namespace HE

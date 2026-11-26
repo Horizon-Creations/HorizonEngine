@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdint>
+#include <vector>
 
 struct TerrainComponent;
 
@@ -19,8 +20,11 @@ struct TerrainComponent;
 // that was already sculpted, seeded or imported keeps every bump it had, and the
 // mountain stands on top of it. Outside the area not a single vertex moves.
 //
-// Not here, deliberately: biomes, erosion, or anything that replaces the whole
-// field (that is TerrainHeightmap's job).
+// On request (Params, all off by default) the relief is ridged, eroded, cut into
+// terraces, and trails are routed up it and cut into the ground.
+//
+// Not here, deliberately: biomes, water erosion, or anything that replaces the
+// whole field (that is TerrainHeightmap's job).
 //
 // Everything is TERRAIN-LOCAL, like TerrainSculpt::apply: x and z run over
 // [-sizeX/2, sizeX/2] × [-sizeZ/2, sizeZ/2] and heights are world-Y units. A
@@ -74,10 +78,51 @@ namespace TerrainGenerate
 
         // Same seed, same area, same params → the same heights, bit for bit.
         int   seed = 1;
+
+        // ── The realistic half. Every default below is "off": a caller that
+        // sets none of them gets the formation this function always made. ──
+
+        // How much of the relief is RIDGED noise (sharp crests, V-shaped
+        // valleys, the coordinates warped so the ridgelines wander) rather
+        // than the round fBm, 0..1. Only matters with roughness > 0.
+        float ridges = 0.0f;
+
+        // Thermal erosion, 0..1: slopes steeper than a scree slope (about 40°)
+        // shed material downhill, a pass per 1/32 of the value. Softens the
+        // noise's spikes into the debris fans a real flank has. The formation
+        // never grows past its rim blend, so the rim stays where it was.
+        float erosion = 0.0f;
+
+        // Terracing: the height is quantised into this many steps, level
+        // benches with risers between them (0 = off). `terraceSharpness` 0..1
+        // decides how much of a step is bench: 0 leaves the slope as it was,
+        // 1 is a staircase.
+        int   terraces = 0;
+        float terraceSharpness = 0.7f;
+
+        // Paths: this many trails (0..8) from the rim up to the summit, spread
+        // round the area, each routed so that it climbs no steeper than
+        // `pathMaxGrade` (rise over run) wherever the ground allows: on a steep
+        // flank that makes it traverse and turn back. Each is cut into the
+        // ground as a bench `pathWidth` world units wide, level across, blended
+        // into the slope over another half width on either side. A path never
+        // leaves the area. Their lines come back in Result::paths.
+        int   paths = 0;
+        float pathWidth = 4.0f;
+        float pathMaxGrade = 0.3f;
     };
+
+    // A point of a path: terrain-local x / z like everything here, y the height
+    // of the ground under it AFTER the call (sculptHeights' unit).
+    struct PathPoint { float x = 0.0f, y = 0.0f, z = 0.0f; };
 
     struct Result
     {
+        // The paths that were cut (Params::paths), rim first, summit last, a
+        // point every path width or so: what a caller turns into a spline.
+        // Fewer than asked for when the area is mostly off the terrain.
+        std::vector<std::vector<PathPoint>> paths;
+
         bool     ok        = false;  // false = the arguments could not be applied
         uint32_t changed   = 0;      // vertices whose height actually moved
         float    minHeight = 0.0f;   // over the changed vertices, AFTER the add

@@ -49,7 +49,96 @@ RWTexture2D<float>  uOut      : register(u0);
 RWTexture2D<float4> uOutLocal : register(u1); // per-pixel local-light visibility (1 channel per light, first 4)
 RaytracingAccelerationStructure uTlas : register(t7);
 
-// HW analogue of the SW BVH traversal: opaque first-hit query over the TLAS.
+// The TILE landscape's height clipmap (Thema 326): its ground is no mesh, so it is in no BLAS, and the TLAS alone would let
+// the sun through every mountain. Off (uHfParams.w == 0) it answers false. R32F texture, mips = conservative max pyramid
+// (GiHeightfield.h). The march is kGiHeightfieldHLSL's (HlslSources.h), kept in step with it.
+cbuffer GiHfCB : register(b2)
+{
+    float4x4 uHfWorldToLocal;
+    float4   uHfParams;   // x = 1/sizeX, y = 1/sizeZ, z = res-1 (texels per axis), w = enabled
+    float4   uHfParams2;  // x = top mip level, y = max height, z = min height, w = rays march this many steps at most
+};
+Texture2D<float> uHf : register(t5);
+
+float hfBilinear(float2 tp)
+{
+    float2 f  = clamp(tp, 0.0, uHfParams.z);
+    int2   i0 = int2(floor(f));
+    int2   i1 = min(i0 + 1, int2(uHfParams.zz));
+    float2 w  = f - float2(i0);
+    float h00 = uHf.Load(int3(i0.x, i0.y, 0));
+    float h10 = uHf.Load(int3(i1.x, i0.y, 0));
+    float h01 = uHf.Load(int3(i0.x, i1.y, 0));
+    float h11 = uHf.Load(int3(i1.x, i1.y, 0));
+    return lerp(lerp(h00, h10, w.x), lerp(h01, h11, w.x), w.y);
+}
+
+bool hfAnyHit(float3 o, float3 d, float tMin, float tMax)
+{
+    if (uHfParams.w < 0.5) return false;
+    float3 oL = mul(uHfWorldToLocal, float4(o, 1.0)).xyz;
+    float3 dL = mul((float3x3)uHfWorldToLocal, d);
+    float2 texPerLocal = float2(uHfParams.x, uHfParams.y) * uHfParams.z;      // local XZ -> texels
+    float2 tp0 = (oL.xz * float2(uHfParams.x, uHfParams.y) + 0.5) * uHfParams.z;
+    float2 tpd = dL.xz * texPerLocal;                                          // texels per unit t
+    float  texLen = max(length(tpd), 1e-6);
+
+    // t range inside the field's footprint and below its highest point.
+    float t0 = tMin, t1 = tMax;
+    float2 inv = 1.0 / (abs(tpd) + 1e-9) * sign(tpd + 1e-12);
+    float2 ta  = (0.0 - tp0) * inv, tb = (uHfParams.z - tp0) * inv;
+    float2 tlo = min(ta, tb), thi = max(ta, tb);
+    t0 = max(t0, max(tlo.x, tlo.y));
+    t1 = min(t1, min(thi.x, thi.y));
+    float maxH = uHfParams2.y;
+    if (abs(dL.y) > 1e-9)
+    {
+        float tH = (maxH - oL.y) / dL.y;
+        if (dL.y < 0.0) t0 = max(t0, tH); else t1 = min(t1, tH);
+    }
+    else if (oL.y > maxH) return false;
+    if (t0 >= t1) return false;
+
+    // Lift a start that lies a little under the field (a LOD mesh), but not one that is metres below the ground.
+    float2 tpS = tp0 + tpd * t0;
+    float  hS  = hfBilinear(tpS);
+    float  yS  = oL.y + dL.y * t0;
+    float  lift = (hS - yS) < 8.0 ? max(0.0, hS + 0.15 - yS) : 0.0;
+
+    int    topLvl = int(uHfParams2.x);
+    int    lvl    = min(2, topLvl);
+    float  t      = t0;
+    int    steps  = int(uHfParams2.w);
+    for (int it = 0; it < steps; ++it)
+    {
+        if (t >= t1) return false;
+        float2 tp = tp0 + tpd * t;
+        float  y  = oL.y + dL.y * t + lift;
+        int2   cell = int2(floor(tp)) >> lvl;
+        cell = min(cell, max(1, (int(uHfParams.z) + 1) >> lvl) - 1);   // the last texel of this mip
+        float  m  = uHf.Load(int3(cell.x, cell.y, lvl));
+        float  cellTex = float(1 << lvl);
+        float  dt = 0.5 * cellTex / texLen;
+        float  yEnd = y + dL.y * dt;
+        if (min(y, yEnd) > m + 0.02)
+        {
+            t += dt;
+            lvl = min(lvl + 1, topLvl);
+        }
+        else if (lvl > 0)
+        {
+            lvl -= 1;
+        }
+        else
+        {
+            if (y < hfBilinear(tp) - 0.02) return true;
+            t += 0.5 / texLen;
+        }
+    }
+    return false;
+}
+
+// HW analogue of the SW BVH traversal: opaque first-hit query over the TLAS, then the height clipmap.
 // FORCE_OPAQUE matches the SW kernel (no any-hit shading); the instance descs
 // additionally set TRIANGLE_CULL_DISABLE (the SW Moeller-Trumbore is two-sided).
 bool giSceneAnyHit(float3 o, float3 d, float tMin, float tMax)
@@ -64,7 +153,8 @@ bool giSceneAnyHit(float3 o, float3 d, float tMin, float tMax)
              RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q;
     q.TraceRayInline(uTlas, RAY_FLAG_NONE, 0xFF, ray);
     while (q.Proceed()) { }
-    return q.CommittedStatus() == COMMITTED_TRIANGLE_HIT;
+    if (q.CommittedStatus() == COMMITTED_TRIANGLE_HIT) return true;
+    return hfAnyHit(o, d, tMin, tMax);
 }
 
 // Cone-jitter random numbers: a per-pixel offset from a PCG3D integer hash

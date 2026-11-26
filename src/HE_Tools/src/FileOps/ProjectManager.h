@@ -248,6 +248,9 @@ struct ExportProfile
 	// (the pictures get coarser, down to 16 px a chunk, until they fit). Needs the Metal renderer for now.
 	bool bakeFarLandscape = true;
 	int  farLandscapeBudgetMB = 512;
+	// A tile landscape's pack ships beside the pak; with this on, the static meshes of the scene's streaming cells are baked into
+	// distant proxies and appended to the shipped copy (HorizonScene/LandscapeExport.h). The project's own pack is never changed.
+	bool bakeCellHlod = true;
 	// Bake the base of every landscape whose material has an RVT Write / Read pair (HorizonScene/RvtBaseBake.h): the pages the
 	// game would paint from the material's layers at run time come out of the pak as three textures instead. A game that edits
 	// the ground (sculpt, paint) leaves them for the material's own graphs. rvtBaseBudgetMB caps what they cost cooked.

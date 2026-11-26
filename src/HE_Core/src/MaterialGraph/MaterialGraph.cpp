@@ -1112,7 +1112,9 @@ HE_MG_NOINLINE bool emitLeafNode(EmitCtx& c, const Scope& sc, const MatGraphNode
                  + fmtF(std::max(n.p[0], 0.01f)) + ");"; break;
 
         case MatNodeType::WorldPos:
-            decl = "vec3 " + v + " = vWorldPos;"; break;
+            // The ABSOLUTE position: the render world's positions are relative to the floating origin, and what a graph does with
+            // this (tiling, noise, a snow line) has to stay where it is on the ground when that origin is rebased.
+            decl = "vec3 " + v + " = vWorldPos + heLight.worldOrigin.xyz;"; break;
         case MatNodeType::ViewDir:
             decl = "vec3 " + v + " = normalize(heLight.camPos.xyz - vWorldPos);"; break;
         case MatNodeType::ParamFloat:
@@ -1141,7 +1143,7 @@ HE_MG_NOINLINE bool emitLeafNode(EmitCtx& c, const Scope& sc, const MatGraphNode
             // Output as grayscale RGB (multiply against a colour → mottling) and raw Value.
             c.usesNoise3 = true;
             const float scale = n.p[0] > 0.01f ? n.p[0] : 0.01f;
-            decl = "float " + v + " = heFbm3(vWorldPos * " + fmtF(scale) + ");";
+            decl = "float " + v + " = heFbm3((vWorldPos + heLight.worldOrigin.xyz) * " + fmtF(scale) + ");";
             pinExpr = { "vec3(" + v + ")", v };
             break;
         }

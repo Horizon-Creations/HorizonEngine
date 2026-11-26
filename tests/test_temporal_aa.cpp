@@ -111,6 +111,39 @@ TEST_CASE("taaJitteredViewProj shifts NDC by exactly 2*j/size and nothing else")
 	CHECK(HE::taaJitteredViewProj(proj * view, glm::vec2(0.0f), w, h) == proj * view);
 }
 
+TEST_CASE("taaPrevViewProjAt: across a floating-origin hop a still point keeps last frame's clip position")
+{
+	// Last frame: origin O0, camera and a still point in the frame relative to O0. This frame the origin hopped to O1
+	// (shiftWorldOrigin): the camera and every remembered entity moved by -(O1 - O0), so the world did not move.
+	const glm::dvec3 o0(250000.0, 0.0, -125000.0), o1 = o0 + glm::dvec3(1000.3, -2.0, 517.7);
+	const glm::vec3 step(o1 - o0);
+	const glm::mat4 proj = glm::perspective(glm::radians(60.0f), 16.0f / 9.0f, 0.1f, 5000.0f);
+	const glm::vec3 eye0(1003.0f, 42.0f, 520.0f);
+	const glm::mat4 vpPrev = proj * glm::lookAt(eye0, eye0 + glm::vec3(1.0f, -0.4f, 0.2f), glm::vec3(0, 1, 0));
+	const glm::vec3 pointPrev(1040.0f, 30.0f, 530.0f);   // relative to o0
+	const glm::vec3 pointNow = pointPrev - step;          // the same absolute point, relative to o1
+	const glm::vec4 clipPrev = vpPrev * glm::vec4(pointPrev, 1.0f);
+
+	// What this frame places (the ground, a foliage plant, a first-seen object): its position is in o1's frame.
+	const glm::mat4 here = HE::taaPrevViewProjAt(vpPrev, o1, o0);
+	const glm::vec4 clipHere = here * glm::vec4(pointNow, 1.0f);
+	for (int c = 0; c < 4; ++c) CHECK(clipHere[c] == doctest::Approx(clipPrev[c]).epsilon(1e-4));
+	// The uncorrected matrix puts it a kilometre off: the hop shows as motion.
+	const glm::vec4 clipRaw = vpPrev * glm::vec4(pointNow, 1.0f);
+	CHECK(std::abs(clipRaw.x / clipRaw.w - clipPrev.x / clipPrev.w) > 0.1f);
+
+	// An object with a remembered model: the model is from last frame, in o0's frame like vpPrev. The raw matrix is right
+	// for it; the corrected one would move it a second time.
+	const glm::mat4 modelPrev = glm::translate(glm::mat4(1.0f), pointPrev);
+	const glm::vec4 clipRemembered = vpPrev * modelPrev * glm::vec4(0, 0, 0, 1);
+	for (int c = 0; c < 4; ++c) CHECK(clipRemembered[c] == doctest::Approx(clipPrev[c]).epsilon(1e-4));
+	const glm::vec4 clipTwice = here * modelPrev * glm::vec4(0, 0, 0, 1);
+	CHECK(std::abs(clipTwice.x / clipTwice.w - clipPrev.x / clipPrev.w) > 0.1f);
+
+	// No hop: the matrix is the same.
+	CHECK(HE::taaPrevViewProjAt(vpPrev, o0, o0) == vpPrev);
+}
+
 TEST_CASE("The TAA HLSL keeps the bindings both D3D backends set up")
 {
 	const std::string vel = HE::hlsl::kTaaVelocityHLSL;

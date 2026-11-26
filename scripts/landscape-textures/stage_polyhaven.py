@@ -7,7 +7,7 @@
 spelling are forgiving, "DIrt" works), each with the files of ONE downloaded texture set
 as they come from Poly Haven / ambientCG (docs/auto-landscape-material-textures.md §4):
 
-    Albedo     *_diff_*  *_diffuse_*  *_color_*  *_albedo_*  *_basecolor_*   jpg/png/exr
+    Albedo     *_diff_*  *_diffuse_*  *_col_*  *_color_*  *_albedo_*  *_basecolor_*   jpg/png/exr
     Normal     *_nor_gl_*  *_normalgl_*  *_normal_*                           png/exr  (NOT nor_dx / NormalDX)
     Roughness  *_rough_*  *_roughness_*                                       jpg/png/exr
     AO         *_ao_*  *_ambientocclusion_*  (or the R channel of *_arm_*)
@@ -52,7 +52,7 @@ MAPS = ["Albedo", "Normal", "Roughness", "AO", "Height"]
 # token (of the lower-cased file stem) -> map; the first hit in this order wins.
 TOKENS = [
     ("Normal",    {"nor_gl", "normalgl", "normal_gl", "nor", "normal"}),
-    ("Albedo",    {"diff", "diffuse", "color", "colour", "albedo", "basecolor", "base_color"}),
+    ("Albedo",    {"diff", "diffuse", "col", "color", "colour", "albedo", "basecolor", "base_color"}),
     ("Roughness", {"rough", "roughness"}),
     ("AO",        {"ao", "ambientocclusion", "occlusion"}),
     ("Height",    {"disp", "displacement", "height"}),
@@ -139,6 +139,8 @@ def u8(a):
 def make_map(kind, a, how, size, stretch):
     note = []
     a = to_size(a, size)
+    if a.ndim == 3 and a.shape[2] > 3:   # an RGBA EXR/PNG: the colour channels only
+        a = a[..., :3]
     if kind == "Albedo":
         rgb = a if a.ndim == 3 else np.repeat(a[..., None], 3, axis=-1)
         if how == "float":

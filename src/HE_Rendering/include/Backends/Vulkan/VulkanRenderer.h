@@ -30,6 +30,7 @@
 #include <unordered_map>
 
 struct SDL_Window;
+namespace HE { class VulkanLandscape; }
 struct TextureAsset; // ContentManager/Assets.h (full def included in the .cpp)
 
 class VulkanRenderer : public IRenderer
@@ -120,6 +121,13 @@ public:
 	bool  ReadbackRvtPageTable(const HE::UUID& consumerMaterial, std::vector<std::vector<uint32_t>>& mips) override;
 	void  SetRvtLandscape(uint32_t terrainEntity, const HE::UUID& landscapeMaterial, const HE::UUID& consumerMaterial) override;
 	void  SetRvtNearChunks(uint32_t terrainEntity, const std::vector<uint32_t>& chunkEntities) override { m_rvtNear.set(terrainEntity, chunkEntities); }
+	// The tile landscape's ground under a virtual texture: the consumer and the absolute XZ rectangle its pages cover
+	// (DrawScene's drawGroundMaterial splits the frame's patches with HE::splitRvtTilePatches).
+	void  SetRvtTileGround(const HE::UUID& consumerMaterial, const glm::dvec2& minXZ, const glm::dvec2& maxXZ, float nativeNearM) override
+	{ m_tileRvtConsumer = consumerMaterial; m_tileRvtMin = minXZ; m_tileRvtMax = maxXZ; m_tileRvtNearM = nativeNearM; }
+	HE::UUID   m_tileRvtConsumer{};
+	glm::dvec2 m_tileRvtMin{ 0.0 }, m_tileRvtMax{ 0.0 };
+	float      m_tileRvtNearM = 0.0f;
 	void  ReleaseRvtConsumer(const HE::UUID& consumerMaterial) override;
 	void  BeginRvtPages(uint32_t pagePx) override;
 	void  EndRvtPages() override;
@@ -505,6 +513,12 @@ private:
 	std::unordered_map<uint64_t, VkPipeline> m_materialPipelines; // key = hash ^ hdr-bit
 	VkDescriptorSetLayout m_matSetLayout      = VK_NULL_HANDLE;
 	VkPipelineLayout      m_matPipelineLayout = VK_NULL_HANDLE;
+	// The tile landscape drawn with a material: the material's set plus the landscape's rows 50-60, and a pipeline layout with
+	// the per-patch push constant (createMaterialResources). Null: the device's fragment stage cannot hold them.
+	VkDescriptorSetLayout m_lsMatSetLayout      = VK_NULL_HANDLE;
+	VkPipelineLayout      m_lsMatPipelineLayout = VK_NULL_HANDLE;
+	VkPipeline GetOrBuildLandscapeMaterialPipeline(uint64_t hash, const std::string& frag, bool hdr, bool gbuffer = false);
+	HE::UUID   m_landscapeMaterialLoadTried{};   // the texture group's material this renderer tried to load from its path
 	VkDescriptorPool      m_matPool[2]        = {};  // per frame; reset whole each frame
 	struct MatFrameBuf { VkBuffer buf = VK_NULL_HANDLE; VkDeviceMemory mem = VK_NULL_HANDLE; void* mapped = nullptr; };
 	MatFrameBuf m_matLightBuf[2];   // HeLighting (64 B, filled once per frame)
@@ -1234,6 +1248,8 @@ private:
 	glm::mat4 m_taaViewProjClean{ 1.0f };  // this frame's, set by DrawScene
 	glm::mat4 m_taaViewProjJit{ 1.0f };
 	glm::mat4 m_taaPrevViewProj{ 1.0f };   // last TAA frame's clean one
+	glm::dvec3 m_taaPrevOrigin{ 0.0 };     // the floating origin it was built for (HE::taaPrevViewProjAt)
+	bool       m_taaPrevOriginKnown = false;
 	std::unordered_map<uint32_t, glm::mat4> m_taaPrevTransforms, m_taaCurTransforms;
 
 	bool   m_postFxReady     = false;
@@ -2124,4 +2140,23 @@ private:
 	FrameGpuStats m_lastGpuStats;                   // newest reaped GPU time
 	// CPU-side per-frame counters (reset in Render, merged by GetFrameGpuStats).
 	uint32_t m_statDraws = 0, m_statTris = 0, m_statVisible = 0, m_statTotal = 0;
+
+	// ── World-scale landscape (Thema 326, step 2 part B) ─────────────────────
+	// DrawScene asks the application's provider (IRenderer::SetLandscapeProvider) once per scene frame, right after the sky and before its early
+	// returns, and has the frame's uploads recorded into the upload batch at once (the runtime counts them as done); the patches are drawn in the
+	// scene pass (forward: after the opaque draws; deferred: after the lighting resolve; and on the early returns).
+	std::unique_ptr<HE::VulkanLandscape> m_landscape;
+	bool                     m_landscapeFailed = false;    // init failed once: not tried again
+	bool                     m_landscapeFrameLive = false; // m_landscapeFrame belongs to the scene frame in progress
+	HE::LandscapeRenderFrame m_landscapeFrame;
+	glm::mat4                m_landscapeViewProj{ 1.0f };  // the matrix the scene rasterises with (kVulkanClipFix, TAA jitter), for the draw
+	void landscapeBegin(uint32_t width, uint32_t height);                                       // ask the provider, init on first use, run the uploads
+	// The ground in the frame's other passes. landscapePassFrame asks the provider for `clip` (Vulkan clip space) and runs the uploads:
+	// outside a render pass. landscapeDepth draws that frame's patches depth-only into the pass open on `cmd`.
+	bool landscapeEnsure();                                                                     // the VulkanLandscape exists and is ready
+	bool landscapePassFrame(const glm::mat4& clip, HE::LandscapeRenderFrame& frame);
+	void landscapeDepth(VkCommandBuffer cmd, VkRenderPass pass, uint32_t width, uint32_t height, const HE::LandscapeRenderFrame& frame,
+	                    const glm::mat4& clip);
+	std::vector<HE::LandscapeRenderFrame> m_landscapeShadowFrames;                              // one a shadow view of this frame
+	void landscapeDraw(VkCommandBuffer cmd, uint32_t width, uint32_t height, bool hdr);         // inside the scene pass
 };

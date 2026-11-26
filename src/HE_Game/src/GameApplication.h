@@ -22,6 +22,10 @@
 #include <HorizonScene/AnimationNotify.h>
 #include <HorizonScene/PhysicsWorld.h>
 #include <HorizonScene/CellRuntime.h>
+#include <HorizonScene/LandscapeRuntime.h>
+#include <HorizonScene/LandscapeHlodProxies.h>
+#include <HorizonScene/LandscapeWorldProxies.h>
+#include <HorizonScene/LandscapeStamps.h>
 #include <HorizonScene/CellScripts.h>
 #include <HorizonScene/FixedStep.h>
 #include <HorizonScene/AudioEngine.h>
@@ -401,5 +405,18 @@ private:
     }
     HE::CellScriptHosts cellScriptHosts();
     HE::CellRuntime m_cellRuntime{ *this };
+
+    // ── World-scale landscape (Thema 326) ───────────────────────────────────
+    // The scene's LandscapeWorldComponent streams tiles around the camera (HE::LandscapeRuntime); the renderer draws what it hands over
+    // (IRenderer::SetLandscapeProvider, bound once, at the first update after the renderer exists).
+    void updateLandscape(float dt);
+    HE::LandscapeRuntime m_landscape;
+    PhysicsWorld* m_landscapePhysics = nullptr;   // the physics world the landscape gives its ground to (detached BEFORE that world is destroyed)
+    std::string m_landscapeContentRoot;   // ContentManager::contentRoot() last given to m_landscape.setProjectRoot(), to skip repeating it
+    bool m_landscapeNavigation = false;
+    HE::LandscapeHlodProxies m_hlodProxies;         // the baked stand-ins of entity cells that are not built (the pack's HLOD table)
+    HE::LandscapeStampSync    m_landscapeStamps;    // LandscapeStampComponent entities -> the runtime's overlay
+    HE::LandscapeWorldProxies m_landscapeProxies;   // its foliage and water as entities the renderers draw already
+    bool m_landscapeBound = false;
 };
 

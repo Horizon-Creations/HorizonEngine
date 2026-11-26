@@ -13,6 +13,12 @@
 #include <vector>
 #include <cstdint>
 
+// Sentinel GiHeightfield::key for the tile landscape's GI clipmap (RenderExtractor::
+// extractLandscapeGiHeightfield) — never a real entt entity id, so a backend can tell "this is the
+// 100 km tile landscape's heightfield" apart from a single TerrainComponent's (whose key is its
+// entity id) without a second copy of the magic number.
+inline constexpr uint64_t kLandscapeGiHeightfieldKey = ~0ull;
+
 // The height field a landscape was built from, shared with the terrain component (no copy
 // per frame). `version` changes when it is rebuilt; the backends re-upload only then.
 struct GiHeightfield {
@@ -518,6 +524,16 @@ public:
     // first directional light, or driven by the day-night cycle when enabled.
     // Backends use it for the procedural sky + image-based ambient.
     glm::vec3 sunDirection = glm::vec3(0.45f, 0.80f, 0.55f);
+    // The world's floating origin (HorizonWorld::origin): every position in here is relative to it. For the materials' absolute
+    // World Position (MaterialShaderLibrary::Lighting::worldOrigin).
+    glm::dvec3 worldOrigin{ 0.0 };
+    // The entry of `landscapes` that is the tile landscape's ground (RenderExtractor), -1 = none: what a backend gives the
+    // instance it makes of the GI height clipmap, so a ray's hit on the ground is coloured like one on a landscape chunk.
+    int32_t tileLandscapeIndex = -1;
+    // The material a backend draws the tile landscape's ground with, when it is not the one LandscapeRenderFrame::materialId names
+    // (RenderExtractor's tileGroundMaterial: the landscape's material with its virtual-texture read evaluated in place and the
+    // entity's parameter overrides in it). Null: the frame's own.
+    HE::UUID tileLandscapeMaterial{};
 
     // Flat ambient fill added to every lit surface, set by the extractor. A weak
     // floor is always present (so the scene is never fully black); under heavy

@@ -291,8 +291,8 @@ public:
     static constexpr uint32_t kMaxBodies = 65536;
 
     // How many Jolt bodies the world owns right now: rigid bodies, the proxies of
-    // characters, landscapes, and the ones a region hold has taken out of the
-    // simulation (they still count against kMaxBodies).
+    // characters, landscapes, the ground fields of addGroundField, and the ones a
+    // region hold has taken out of the simulation (they still count against kMaxBodies).
     std::size_t bodyCount() const;
 
     // Destroy the entity's body and/or character. Silent no-op when it has
@@ -391,6 +391,23 @@ public:
     bool setPosition(uint32_t entityId, const glm::vec3& position, bool resetVelocity = false);
     bool setTransform(uint32_t entityId, const glm::vec3& position, const glm::quat& rotation,
                       bool resetVelocity = false);
+
+    // ── Ground that belongs to no entity (Thema 326) ─────────────────────────
+    // A static height field in the Terrain channel that the CALLER keys and owns: the world-scale landscape gives each
+    // loaded tile one (LandscapePhysics) and takes it away when the tile is far. `heights` is samples * samples metres,
+    // row-major z * samples + x (it is copied), `corner` the position of sample (0, 0) in this world's space (origin-relative
+    // like every body), `stepX` / `stepZ` the metres between samples. `samples` is 2^n + 1 (Jolt's rule, and the tiles'),
+    // at least 3. A hit on it reports `reportAs` as its entity: the landscape's, or kGroundOwner for ground nobody owns. NOT
+    // kNoEntity: that value is what a query passes for "ignore nothing", and a body that carries it is skipped by every default
+    // raycast. kGroundOwner is no entity either (a caller must not look it up in the registry), but it is not that value.
+    // Each key once; a key that is there is refused, remove it first. Moved by shiftOrigin like every body.
+    // Returns whether the ground now exists.
+    static constexpr uint32_t kGroundOwner = 0xFFFFFFFEu;
+    bool   addGroundField(uint64_t key, const float* heights, uint32_t samples, const glm::vec3& corner,
+                          float stepX, float stepZ, uint32_t reportAs = kGroundOwner);
+    bool   removeGroundField(uint64_t key);
+    bool   hasGroundField(uint64_t key) const;
+    size_t groundFieldCount() const;
 
     // Floating origin (HE::shiftWorldOrigin): every body, terrain included, and
     // every character moves by -shift. Velocities stay, sleeping bodies keep

@@ -202,6 +202,89 @@ add_executable(landscape_tex_gen
 target_link_libraries(landscape_tex_gen PRIVATE HorizonCore HorizonImporters)
 target_include_directories(landscape_tex_gen PRIVATE ${CMAKE_SOURCE_DIR}/src/HE_Core/include)
 
+# ─── landscape_store_bench.exe (measurement base of the world-scale landscape) ─
+# Step 0 of docs/landscape-world-scale-plan-2026-10-28.md: a procedural 100 km world as a
+# pure tile store (generate, encode with LZ4/zstd, write, read back cold and warm, decode),
+# timed per stage. Not part of the engine and not in he_tests: a run writes hundreds of MB.
+# Usage: see the header comment in main.cpp.
+add_executable(landscape_store_bench
+    src/LandscapeStoreBench/main.cpp
+)
+target_link_libraries(landscape_store_bench PRIVATE HorizonScene)
+target_include_directories(landscape_store_bench PRIVATE ${CMAKE_SOURCE_DIR}/src/HE_Core/include)
+if(HE_HAVE_LZ4)
+    target_link_libraries(landscape_store_bench PRIVATE lz4::lz4)
+    target_compile_definitions(landscape_store_bench PRIVATE HE_HAVE_LZ4)
+endif()
+if(HE_HAVE_ZSTD)
+    target_link_libraries(landscape_store_bench PRIVATE zstd::zstd)
+    target_compile_definitions(landscape_store_bench PRIVATE HE_HAVE_ZSTD)
+endif()
+if(WIN32)
+    # Same reason as hc_codegen above: no rpath, the exe must find its DLLs next to itself.
+    add_custom_command(TARGET landscape_store_bench POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:HorizonCore>  $<TARGET_FILE_DIR:landscape_store_bench>
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:HorizonScene> $<TARGET_FILE_DIR:landscape_store_bench>
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:HorizonNet>   $<TARGET_FILE_DIR:landscape_store_bench>
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:SDL3-shared>  $<TARGET_FILE_DIR:landscape_store_bench>
+        VERBATIM
+    )
+endif()
+
+# ─── landscape_gpu_check (the world-scale landscape drawn by the real backend code) ───
+# Part B of docs/landscape-world-scale-plan-2026-10-28.md, step 2: OpenGL (and, on a Mac, Metal) render a LandscapeRenderFrame offscreen
+# and the checker compares colour and depth with geometry it knows. Needs a window system and a GPU; not part of he_tests and not run in CI.
+# Usage: see the header comment in main.cpp.
+add_executable(landscape_gpu_check
+    src/LandscapeGpuCheck/main.cpp
+    src/LandscapeGpuCheck/GlBackend.cpp
+    src/LandscapeGpuCheck/EngineCheck.cpp
+)
+target_link_libraries(landscape_gpu_check PRIVATE HorizonScene HorizonRendering RendererOpenGL glad SDL3::SDL3)
+target_include_directories(landscape_gpu_check PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/HE_Core/include
+    ${CMAKE_SOURCE_DIR}/src/HE_Core/vendor
+    ${CMAKE_SOURCE_DIR}/src/HE_Rendering/include)
+if(APPLE)
+    # Metal beside OpenGL (docs/landscape-world-scale-gpu-2026-11-01.md): the same checks on the Mac's own backend.
+    target_sources(landscape_gpu_check PRIVATE src/LandscapeGpuCheck/MetalBackend.mm)
+    set_source_files_properties(src/LandscapeGpuCheck/MetalBackend.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+    target_link_libraries(landscape_gpu_check PRIVATE RendererMetal)
+    target_compile_definitions(landscape_gpu_check PRIVATE HE_CHECK_METAL)
+endif()
+if(HE_VULKAN_ENABLED)
+    # Vulkan beside OpenGL (docs/landscape-world-scale-gpu-2026-11-01.md section 9): VulkanLandscape drawn offscreen on a device of the tool's own, and
+    # the real VulkanRenderer through the engine check; compared with OpenGL's pictures. Needs a Vulkan driver (lavapipe will do) to run.
+    # RendererVulkan's public interface names Vulkan::Vulkan, an imported target that find_package makes visible per directory (HE_Editor does the same).
+    if(NOT TARGET Vulkan::Vulkan)
+        find_package(Vulkan QUIET)
+    endif()
+    target_sources(landscape_gpu_check PRIVATE src/LandscapeGpuCheck/VulkanBackend.cpp)
+    target_link_libraries(landscape_gpu_check PRIVATE RendererVulkan)
+    target_compile_definitions(landscape_gpu_check PRIVATE HE_CHECK_VULKAN)
+    # VulkanRenderer loads <exe dir>/Shaders/*.spv at runtime (see HE_Rendering/CMakeLists.txt); the editor/game
+    # deploy steps copy it from ${CMAKE_BINARY_DIR}/Shaders, this tool needs the same copy or "Vulkan engine,
+    # forward/deferred" fails with "scene shaders missing" while the offscreen VulkanLandscape check (no IRenderer) is fine.
+    add_custom_command(TARGET landscape_gpu_check POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_BINARY_DIR}/Shaders" "$<TARGET_FILE_DIR:landscape_gpu_check>/Shaders"
+        VERBATIM
+    )
+endif()
+if(WIN32)
+    # D3D11 (and D3D12) beside OpenGL: the same offscreen and engine checks on the Windows backends, compared with OpenGL's pictures.
+    target_sources(landscape_gpu_check PRIVATE src/LandscapeGpuCheck/D3D11Backend.cpp src/LandscapeGpuCheck/D3D12Backend.cpp)
+    target_link_libraries(landscape_gpu_check PRIVATE RendererD3D11 RendererD3D12 d3d11 d3d12 dxgi)
+    target_compile_definitions(landscape_gpu_check PRIVATE HE_CHECK_D3D11 HE_CHECK_D3D12)
+    add_custom_command(TARGET landscape_gpu_check POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:HorizonCore>  $<TARGET_FILE_DIR:landscape_gpu_check>
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:HorizonScene> $<TARGET_FILE_DIR:landscape_gpu_check>
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:HorizonNet>   $<TARGET_FILE_DIR:landscape_gpu_check>
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:HorizonRendering> $<TARGET_FILE_DIR:landscape_gpu_check>
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:SDL3-shared>  $<TARGET_FILE_DIR:landscape_gpu_check>
+        VERBATIM
+    )
+endif()
+
 # ─── weather_sound_gen.exe (the engine's weather sounds) ──────────────────────
 # Same bargain: weather_sound_gen <out-dir> writes Rain/Wind/Snow/Storm/Thunder
 # .hasset files (Audio, PCM16) via ContentManager, synthesised from seeded noise
