@@ -32,6 +32,7 @@
 #include <Backends/Vulkan/VulkanLandscape.h> // the world-scale landscape (Thema 326)
 #include <Diagnostics/Profiler.h>   // HE_PROFILE_SCOPE_N — GI accel split of Render()
 #include <HorizonRendering/ClipSpace.h>
+#include <HorizonRendering/ResolveReconstruct.h> // HE::setResolveCameraRelative
 #include <HorizonRendering/GiCasterRange.h>
 #include <HorizonRendering/GiHeightfield.h>
 #include <HorizonRendering/RvtTilePatches.h>   // the tile ground's patches a virtual texture's consumer serves
@@ -11621,8 +11622,7 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                 // so its inverse maps Vulkan NDC straight back. The decal pass's
                 // convention: gl_FragCoord.y counts down and so does Vulkan's NDC
                 // y (+1), depth already 0..1 (scale 1, bias 0).
-                const glm::mat4 invViewProj = glm::inverse(viewProj);
-                std::memcpy(ru.invViewProj, &invViewProj[0][0], 16 * sizeof(float));
+                HE::setResolveCameraRelative(ru, viewProj, m_renderWorld.camera.position);   // see ResolveReconstruct.h
                 ru.depthParams[0] = 1.0f;
                 ru.depthParams[1] = 1.0f;
                 ru.depthParams[2] = 0.0f;

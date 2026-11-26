@@ -12,6 +12,7 @@
 #include <ContentManager/TextureArrayBuild.h> // texture-array payload layout (Thema 158)
 #include <HorizonRendering/ParticleShaderTemplates.h>
 #include <HorizonRendering/ClipSpace.h>       // HE::kMetalClipFix
+#include <HorizonRendering/ResolveReconstruct.h> // HE::setResolveCameraRelative
 #include <HorizonRendering/GiCasterRange.h>   // HE::GiCasterFilter: which casters enter the GI accel
 #include <HorizonRendering/UnderwaterCausticsShared.h> // shared wave trains for the caustic pass
 #include <HorizonRendering/GIJitter.h>       // GI: wrapped cone-jitter frame index (all backends)
@@ -17050,8 +17051,7 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 		// depth IS the GL ndc z — scale 1 / bias 0, y flipped (Metal's
 		// gl_FragCoord origin is top-left).
 		HE::MaterialShaderLibrary::ResolveUniforms ru;
-		const glm::mat4 ivp = glm::inverse(viewProj);
-		std::memcpy(ru.invViewProj, &ivp[0][0], 16 * sizeof(float));
+		HE::setResolveCameraRelative(ru, viewProj, m_renderWorld.camera.position);   // camera-relative: see ResolveReconstruct.h
 		ru.depthParams[0] = -1.0f;
 		ru.depthParams[1] = 1.0f;
 		ru.depthParams[2] = 0.0f;
@@ -17900,8 +17900,7 @@ void MetalRenderer::EncodeDeferredResolveTile(void* renderEncoder, int width, in
 	HE::MaterialShaderLibrary::ResolveUniforms ru;
 	const glm::mat4 viewProj =
 		m_renderWorld.camera.projection * m_renderWorld.camera.view;
-	const glm::mat4 ivp = glm::inverse(viewProj);
-	std::memcpy(ru.invViewProj, &ivp[0][0], 16 * sizeof(float));
+	HE::setResolveCameraRelative(ru, viewProj, m_renderWorld.camera.position);   // camera-relative: see ResolveReconstruct.h
 	ru.depthParams[0] = -1.0f; // same conventions as the two-pass resolve
 	ru.depthParams[1] = 1.0f;
 	ru.depthParams[2] = 0.0f;
@@ -18384,8 +18383,7 @@ void MetalRenderer::EncodeSSRPasses(void* cmdBufPtr, int width, int height)
 			              atIndex:HE::MaterialShaderLibrary::kMetalLightingBufferIndex];
 #endif
 			HE::MaterialShaderLibrary::ResolveUniforms ru;
-			const glm::mat4 ivp = glm::inverse(viewProj);
-			std::memcpy(ru.invViewProj, &ivp[0][0], 16 * sizeof(float));
+			HE::setResolveCameraRelative(ru, viewProj, m_renderWorld.camera.position);   // camera-relative: see ResolveReconstruct.h
 			ru.depthParams[0] = -1.0f;
 			ru.depthParams[1] = 1.0f;
 			ru.depthParams[2] = 0.0f;

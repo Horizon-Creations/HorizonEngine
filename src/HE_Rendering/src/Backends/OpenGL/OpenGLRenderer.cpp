@@ -12,6 +12,7 @@
 #include <HorizonRendering/RvtTilePatches.h>
 #include "Backends/Vulkan/VulkanLandscapeLayout.h"   // HE::vkls::velocityClip, shared by every backend's ground
 #include <HorizonRendering/TemporalAA.h>              // HE::taaPrevViewProjAt
+#include <HorizonRendering/ResolveReconstruct.h>      // HE::setResolveCameraRelative
 #include <HorizonRendering/SsaoKernel.h>     // shared SSAO kernel + rotation noise
 #include <HorizonRendering/GIJitter.h>       // GI: wrapped cone-jitter frame index (all backends)
 #include <HorizonRendering/GIReflectionTier.h> // GI reflections: rays / resolution / blur per tier (all backends)
@@ -14746,7 +14747,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 				// [0,1] → ndc z = d*2-1) + the G-buffer view (SetViewMode /
 				// HE_DUMP_GBUFFER).
 				HE::MaterialShaderLibrary::ResolveUniforms ru;
-				std::memcpy(ru.invViewProj, glm::value_ptr(invViewProj), 16 * sizeof(float));
+				HE::setResolveCameraRelative(ru, viewProj, m_renderWorld.camera.position);   // see ResolveReconstruct.h
 				ru.depthParams[0] = 1.0f;
 				ru.depthParams[1] = 2.0f;
 				ru.depthParams[2] = -1.0f;

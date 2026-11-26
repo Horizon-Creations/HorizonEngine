@@ -74,6 +74,8 @@ add_executable(he_tests
     # TAA on D3D11/D3D12/Vulkan (Thema 78, Schritt 6): host jitter + the HLSL
     # velocity/resolve/sharpen drawn on WARP (Windows only for the latter).
     test_temporal_aa.cpp
+    # The deferred resolve's world position with the camera tens of km from the origin (topic 355, step 3).
+    test_resolve_reconstruct.cpp
     test_gi_bvh.cpp
     test_gi_blas_store.cpp
     # Rays / resolution / blur per GI-reflection tier, one table for all backends.

@@ -1921,6 +1921,7 @@ std::string buildDeferredResolveSource(bool tile, bool clustered)
     vec4 depthParams;   // x = uv→NDC y sign, y/z = NDC-z scale/bias, w = debug view
     vec4 clusterParams; // x/y/z = cluster grid dims, w = gridZ / log(far/near)
     vec4 clusterCamFwd; // xyz = camera forward (view-z), w = cluster near plane
+    vec4 camOrigin;     // xyz = added to the reconstructed position (0, or the camera when invViewProj is camera-relative)
 } heResolve;
 // Inverse of the preamble's heOctEncode (signed octahedral, Meyer et al. 2010).
 // Lives here rather than in the preamble so the drift-guarded preamble blocks
@@ -2069,7 +2070,7 @@ vec3 heClusterLighting(vec3 P, vec3 Nin, vec3 baseColor, float metallic,
                      (uv.y * 2.0 - 1.0) * heResolve.depthParams.x,
                      d * heResolve.depthParams.y + heResolve.depthParams.z, 1.0);
     vec4 wp = heResolve.invViewProj * clip;
-    vec3 P  = wp.xyz / max(wp.w, 1e-8);
+    vec3 P  = wp.xyz / max(wp.w, 1e-8) + heResolve.camOrigin.xyz;
     vec3 N  = heOctDecode(g1.rg * 2.0 - 1.0);
     int dbg = int(heResolve.depthParams.w);
     if (dbg == 1) { oColor = vec4(g0.rgb, 1.0); return; }               // BaseColor
@@ -2593,6 +2594,7 @@ layout(std140, set = 0, binding = 23) uniform HeResolve {
     vec4 depthParams;
     vec4 clusterParams;
     vec4 clusterCamFwd;
+    vec4 camOrigin;
 } heResolve;
 vec3 heOctDecode(vec2 f) {
     vec3 n = vec3(f.x, f.y, 1.0 - abs(f.x) - abs(f.y));
@@ -2615,7 +2617,7 @@ void main() {
                      (uv.y * 2.0 - 1.0) * heResolve.depthParams.x,
                      d * heResolve.depthParams.y + heResolve.depthParams.z, 1.0);
     vec4 wp = heResolve.invViewProj * clip;
-    vec3 P  = wp.xyz / max(wp.w, 1e-8);
+    vec3 P  = wp.xyz / max(wp.w, 1e-8) + heResolve.camOrigin.xyz;
     vec3 n  = heOctDecode(g1.rg * 2.0 - 1.0);
     vec3 V  = normalize(heLight.camPos.xyz - P);
     // ── SYNC: heLitP's weather/material split + ambSpec term, line-for-line —
