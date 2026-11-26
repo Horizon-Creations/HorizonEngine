@@ -1789,6 +1789,10 @@ static void drawNewProjectPopup(AppContext& ctx)
             else
             {
                 std::filesystem::path projRoot = std::filesystem::path(dir) / name;
+                // Over an open project: its session ends first, as an Open does
+                // (ProjectPreflight::openNow). Without it the old project's tabs,
+                // collab session and scene stayed, the scene under the new one.
+                if (ctx.projectLoaded) EditorUI::endProjectSession(ctx);
                 bool ok = ctx.projectManager->createNewProject(
                     projRoot.string(), name,
                     static_cast<ProjectPreset>(ctx.hubSelectedPreset),

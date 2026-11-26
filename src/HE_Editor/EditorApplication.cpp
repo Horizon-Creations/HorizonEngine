@@ -2384,6 +2384,21 @@ void EditorApplication::OnInit()
 		// Restore the editor tabs that were open the last time this project was used.
 		restoreOpenTabs();
 
+		// An empty world for the project's scene. serializer.load ADDS to a world,
+		// and File ▸ New Project over an open project gets here without
+		// endProjectSession (which clears it through newScene): the old project's
+		// entities stayed, a 100 km landscape among them, so the new project had
+		// no Landscape create grid and its own landscape drew underneath. After
+		// endProjectSession this clears an already empty world. Not newScene
+		// itself: the recovery snapshots above have already changed hands.
+		if (m_isPlaying) setPlayMode(false);
+		if (m_rvtLandscape) m_rvtLandscape->detach();   // see newScene: clear() recycles entt ids
+		m_editorWorld->clear();
+		m_selection.clear();
+		m_editorWorld->markHierarchyDirty();
+		m_undo.clearHistory();
+		m_savedRevision = m_undo.revision();
+
 		m_currentScenePath.clear();
 		if (!sceneAbsPath.empty())
 		{
