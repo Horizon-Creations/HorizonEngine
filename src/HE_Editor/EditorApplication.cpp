@@ -1839,9 +1839,6 @@ void EditorApplication::OnInit()
 			globalstate.getCustomConfigFloat("EditorCamPitch", m_editorCamera.pitch()),
 			globalstate.getCustomConfigFloat("EditorCamPivot", m_editorCamera.pivotDistance()));
 		m_editorCamera.setOrthographic(globalstate.getCustomConfigBool("EditorCamOrtho", false));
-		// That view was left in the project the last session ended in; a project
-		// without a view of its own keeps it only if it is that one.
-		m_startupCameraProject = globalstate.getLastProjectPath();
 	}
 	// The camera bookmarks (digit keys) ride next to the view, one string.
 	CameraBookmarks::editorSet() = CameraBookmarks::Set::decode(
@@ -2245,7 +2242,6 @@ void EditorApplication::OnInit()
 		// not pass through it (a project created over an open one).
 		endProjectRuntime();
 		setWorld(m_editorWorld.get());
-		loadProjectCameraView(m_projectManager.currentProject().path);
 
 		// The recovery snapshot changes hands with the project. The previous
 		// project's LIVE copy goes if its scene was clean — nothing was lost, so
@@ -2443,6 +2439,9 @@ void EditorApplication::OnInit()
 		{
 			HE_LOG_INFO(Editor, "%s", "EditorApplication: no startup scene defined for this project");
 		}
+		// After the scene, so a project without a view of its own can be framed
+		// on its landscape rather than started inside its hills.
+		loadProjectCameraView(m_projectManager.currentProject().path);
 
 		m_editorWorld->markHierarchyDirty();
 		m_undo.clearHistory();
@@ -16647,14 +16646,28 @@ void EditorApplication::loadProjectCameraView(const std::string& projectPath)
 		}
 		catch (const nlohmann::json::exception&) {}   // a hand-edited file: the default view
 	}
-	// No view of its own: the config.json one if it was left in THIS project
-	// (a project from before views were per project), else the first-run view.
-	if (!restored && projectPath != m_startupCameraProject)
+	// No view of its own: the first-run view. (Not the config.json one, even for
+	// the project it was left in: after a big world that is kilometres from a new
+	// project's origin, which is the case this exists for.)
+	if (!restored)
 	{
 		m_editorCamera.resetToDefault();
 		m_editorCamera.setOrthographic(false);
+		// A landscape in the scene: framed whole (the largest one), since the
+		// origin view stands inside any landscape with hills.
+		const TerrainComponent* best = nullptr;
+		glm::vec3 at(0.0f);
+		for (auto [e, tc] : m_editorWorld->registry().view<TerrainComponent>().each())
+			if (!best || tc.sizeX * tc.sizeZ > best->sizeX * best->sizeZ)
+			{
+				best = &tc;
+				const auto* xf = m_editorWorld->registry().try_get<TransformComponent>(e);
+				at = xf ? xf->position : glm::vec3(0.0f);
+			}
+		if (best)
+			m_editorCamera.frameArea(at + glm::vec3(0.0f, best->heightScale * 0.25f, 0.0f),
+			                         best->sizeX * 0.5f, best->sizeZ * 0.5f);
 	}
-	m_startupCameraProject.clear();
 	m_cameraViewProject = projectPath;
 }
 

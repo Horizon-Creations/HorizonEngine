@@ -124,6 +124,7 @@ static HE::UUID          s_newHeightmapTex;             // a texture asset, or .
 static std::string       s_newHeightmapFile;            // ... a file off the disk (16-bit PNG, .r16)
 static bool              s_newHmFlipZ    = false;
 static bool              s_newHmAdoptRes = false;
+static bool              s_createFormFramed = false;    // the camera was put on the create grid this visit
 // The file dialog's result slot for the form (separate from the Heightmap block's, which
 // belongs to an existing landscape). SDL calls back from the dialog, this frame or later.
 static std::string       s_newPickPath;
@@ -708,7 +709,13 @@ void sculptInViewport(AppContext& ctx, const RenderWorld& sceneSnapshot,
 							p = rayOrigin + t * rayDir;
 							if (converged) break;
 						}
-						if (t > 0.0f)
+						// Only over the landscape (and a brush radius around it, so an
+						// edge can still be worked from outside): the base plane goes on
+						// for ever, and the cursor used to draw on it wherever the mouse
+						// was, a "ground" far larger than the landscape.
+						const float lx = p.x - terrainWorldPos.x, lz = p.z - terrainWorldPos.z;
+						if (t > 0.0f && std::abs(lx) <= tcHalfX + s_brushRadius &&
+						                std::abs(lz) <= tcHalfZ + s_brushRadius)
 						{
 							hitWS  = p;
 							hasHit = true;
@@ -1564,11 +1571,28 @@ void renderPanel(AppContext& ctx)
 
             ctx.world->markHierarchyDirty();
             ctx.selection.set(e);
+            // The new landscape in view, wherever the camera was: it sits at the
+            // origin, and a camera left kilometres away showed nothing at all.
+            if (ctx.editorCamera)
+                ctx.editorCamera->frameArea(glm::vec3(0.0f, tc.heightScale * 0.25f, 0.0f),
+                                            tc.sizeX * 0.5f, tc.sizeZ * 0.5f);
             HE_LOG_INFO(Editor, "%s", "Editor: created Terrain entity");
+        }
+
+        // The create grid in view once per visit of the form, if the camera is far
+        // from it (more than four times the grid's size): the green preview at the
+        // origin is the whole point of this form.
+        if (!s_createFormFramed && ctx.editorCamera)
+        {
+            const float extent = std::max(np.sizeX, np.sizeZ);
+            if (glm::length(ctx.editorCamera->position()) > 4.0f * extent + 50.0f)
+                ctx.editorCamera->frameArea(glm::vec3(0.0f), np.sizeX * 0.5f, np.sizeZ * 0.5f);
+            s_createFormFramed = true;
         }
     }
     else
     {
+        s_createFormFramed = false;   // the next empty world frames its grid again
         // Everything below is drawn once a landscape exists. Layout, top to bottom:
         //   a card with the landscape's size and material
         //   Sculpt | Paint | Foliage | Setup, one segmented control
