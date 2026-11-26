@@ -133,6 +133,16 @@ set(ENABLE_INSTALL          OFF CACHE BOOL "" FORCE)
 # Match the engine's /MD runtime — Jolt defaults to /MT which causes LNK2038
 # "RuntimeLibrary conflict MTd_StaticDebug vs MDd_DynamicDebug" at link time.
 set(USE_STATIC_MSVC_RUNTIME_LIBRARY OFF CACHE BOOL "" FORCE)
+# Jolt builds itself with /fp:fast on MSVC, and MSVC 14.52 under /fp:fast folds -0.0f
+# to 0.0f: FlipSign and Quat::Conjugated become no-ops, every inverse rotation in the
+# solver is wrong (joint limits flip, rays hit a mirrored slope). The deterministic
+# build is Jolt's own switch to /fp:precise; a /fp:precise added on top would warn
+# (D9025) inside Jolt's /WX build. MSVC only: clang keeps FMA and its own flags.
+# Fixed upstream in Jolt v5.7.0 (jrouwe/JoltPhysics#2222); drop this once the tag
+# above is >= v5.7.0.
+if(MSVC)
+    set(CROSS_PLATFORM_DETERMINISTIC ON CACHE BOOL "" FORCE)
+endif()
 FetchContent_MakeAvailable(JoltPhysics)
 
 # ─── Recast Navigation ────────────────────────────────────────────────────────
