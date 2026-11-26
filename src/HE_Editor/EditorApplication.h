@@ -1184,6 +1184,13 @@ private:
 	// one funnel for Close Project and every project switch, and again (a no-op
 	// then) at the top of onProjectLoaded for a project created over an open one.
 	void endProjectRuntime();
+	// The editor camera per project (<project>/Saved/EditorView.json). It was one
+	// global view: a new project opened where the last one was left, 8 km from
+	// its origin, and its first landscape was nowhere to be seen.
+	void saveProjectCameraView();
+	void loadProjectCameraView(const std::string& projectPath);
+	std::string m_cameraViewProject;    // the project whose view the camera holds
+	std::string m_startupCameraProject; // the project the global (config.json) view belongs to
 	// Transport pause + single step. The pause GATES THE WORLD TICK; it must never
 	// write time::setTimeScale, because that knob belongs to the game — a title
 	// with its own pause menu sets it itself, and two owners of one variable fight

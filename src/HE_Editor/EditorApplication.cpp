@@ -1839,6 +1839,9 @@ void EditorApplication::OnInit()
 			globalstate.getCustomConfigFloat("EditorCamPitch", m_editorCamera.pitch()),
 			globalstate.getCustomConfigFloat("EditorCamPivot", m_editorCamera.pivotDistance()));
 		m_editorCamera.setOrthographic(globalstate.getCustomConfigBool("EditorCamOrtho", false));
+		// That view was left in the project the last session ended in; a project
+		// without a view of its own keeps it only if it is that one.
+		m_startupCameraProject = globalstate.getLastProjectPath();
 	}
 	// The camera bookmarks (digit keys) ride next to the view, one string.
 	CameraBookmarks::editorSet() = CameraBookmarks::Set::decode(
@@ -2242,6 +2245,7 @@ void EditorApplication::OnInit()
 		// not pass through it (a project created over an open one).
 		endProjectRuntime();
 		setWorld(m_editorWorld.get());
+		loadProjectCameraView(m_projectManager.currentProject().path);
 
 		// The recovery snapshot changes hands with the project. The previous
 		// project's LIVE copy goes if its scene was clean — nothing was lost, so
@@ -16599,8 +16603,67 @@ void EditorApplication::stopAppPreview()
 	m_audioEngine.stopAll();
 }
 
+void EditorApplication::saveProjectCameraView()
+{
+	if (m_cameraViewProject.empty() || !m_editorCamera.initialised()) return;
+	namespace fs = std::filesystem;
+	fs::path dir = fs::path(m_cameraViewProject);
+	if (fs::is_regular_file(dir)) dir = dir.parent_path();
+	dir /= "Saved";
+	std::error_code ec;
+	fs::create_directories(dir, ec);
+	const glm::vec3 p = m_editorCamera.position();
+	const nlohmann::json j = {
+		{ "position", { p.x, p.y, p.z } },
+		{ "yaw",      m_editorCamera.yaw() },
+		{ "pitch",    m_editorCamera.pitch() },
+		{ "pivot",    m_editorCamera.pivotDistance() },
+		{ "ortho",    m_editorCamera.orthographic() },
+	};
+	std::ofstream out(dir / "EditorView.json", std::ios::trunc);
+	if (out) out << j.dump(2);
+}
+
+void EditorApplication::loadProjectCameraView(const std::string& projectPath)
+{
+	namespace fs = std::filesystem;
+	fs::path dir = fs::path(projectPath);
+	if (fs::is_regular_file(dir)) dir = dir.parent_path();
+	bool restored = false;
+	if (std::ifstream in(dir / "Saved" / "EditorView.json"); in)
+	{
+		const nlohmann::json j = nlohmann::json::parse(in, nullptr, false);
+		const auto pos = j.is_object() ? j.find("position") : j.end();
+		if (pos != j.end() && pos->is_array() && pos->size() == 3 &&
+		    (*pos)[0].is_number() && (*pos)[1].is_number() && (*pos)[2].is_number())
+		try
+		{
+			m_editorCamera.restoreView(glm::vec3((*pos)[0].get<float>(), (*pos)[1].get<float>(),
+			                                     (*pos)[2].get<float>()),
+			                           j.value("yaw", 0.0f), j.value("pitch", 0.0f),
+			                           j.value("pivot", 8.7f));
+			m_editorCamera.setOrthographic(j.value("ortho", false));
+			restored = true;
+		}
+		catch (const nlohmann::json::exception&) {}   // a hand-edited file: the default view
+	}
+	// No view of its own: the config.json one if it was left in THIS project
+	// (a project from before views were per project), else the first-run view.
+	if (!restored && projectPath != m_startupCameraProject)
+	{
+		m_editorCamera.resetToDefault();
+		m_editorCamera.setOrthographic(false);
+	}
+	m_startupCameraProject.clear();
+	m_cameraViewProject = projectPath;
+}
+
 void EditorApplication::endProjectRuntime()
 {
+	// The view goes with the project it was used in. Idempotent like the rest:
+	// m_cameraViewProject still names the OLD project when the onProjectLoaded
+	// callback calls this again.
+	saveProjectCameraView();
 	// Play first: it owns a game's GameInstance run (and the graph reset below
 	// must not pull that graph out from under its OnShutdown). Idempotent, so the
 	// onProjectLoaded callback can call this again for the paths that switch
@@ -17621,6 +17684,7 @@ void EditorApplication::OnShutdown()
 {
 	// First, while the viewport still holds the last frame the user saw.
 	captureProjectThumbnail();
+	saveProjectCameraView();
 	// The virtual texture driver gives its pool back to the renderer, so it must go while the renderer still exists: left to
 	// the destructor it would call into a renderer that has been shut down and crash on the way out.
 	m_rvtLandscape.reset();

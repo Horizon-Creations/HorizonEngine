@@ -109,6 +109,15 @@ public:
 		m_initialised   = true;
 	}
 
+	// Back to the first-run view: the 3/4 look at the world origin (see the
+	// member defaults), derived again on the next update.
+	void      resetToDefault()
+	{
+		m_position      = glm::vec3(6.0f, 4.5f, 6.0f);
+		m_pivotDistance = 8.7f;
+		m_initialised   = false;
+	}
+
 	EditorCameraOverride makeOverride() const;
 
 private:
