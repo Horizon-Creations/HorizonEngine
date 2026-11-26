@@ -114,10 +114,10 @@ bool drawAccountCard(const std::string& login, bool busy, float width)
 	dl->AddText(ImVec2(a.x + 56.0f, ty), col(Theme::Text), login.c_str());
 	dl->AddText(ImVec2(a.x + 56.0f, ty + lh + 2.0f), col(Theme::Ok), "Signed in to GitHub");
 
-	const float bw = ImGui::CalcTextSize("Sign out").x + ImGui::GetStyle().FramePadding.x * 2.0f;
+	const float bw = ImGui::CalcTextSize("Sign Out").x + ImGui::GetStyle().FramePadding.x * 2.0f;
 	ImGui::SetCursorScreenPos(ImVec2(b.x - 12.0f - bw, a.y + (kH - ImGui::GetFrameHeight()) * 0.5f));
 	ImGui::BeginDisabled(busy);
-	const bool out = EditorWidgets::button("Sign out");
+	const bool out = EditorWidgets::button("Sign Out");
 	ImGui::EndDisabled();
 	ImGui::SetCursorScreenPos(ImVec2(a.x, b.y));
 	ImGui::Dummy(ImVec2(width, 10.0f));

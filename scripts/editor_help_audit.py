@@ -67,8 +67,9 @@ CHROME = {
 # things to hide.
 IGNORE = {
     # Covered by an explicit helpForKey("details.add-component") call — the scan
-    # matches labels against scopes and cannot see a key passed by hand.
-    ("UI Button", "Add Component"),
+    # matches labels against scopes and cannot see a key passed by hand. The
+    # scope is the last section drawn above it in the source, Replication.
+    ("Replication", "Add Component"),
     # The multi-selection panel's own Add Component (renderMultiSelection, drawn
     # before any section scope): covered by helpForKey("details.multi.add-component").
     (None, "Add Component"),

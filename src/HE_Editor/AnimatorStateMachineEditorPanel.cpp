@@ -282,7 +282,7 @@ static void runSyncCompileCheck(State& st)
 		for (const auto& f : res.files)
 			lines += (size_t)std::count(f.contents.begin(), f.contents.end(), '\n');
 		st.syncCompileOk  = true;
-		st.syncCompileMsg = "compiles clean — " + std::to_string(lines) + " lines of C++";
+		st.syncCompileMsg = "Compiles clean — " + std::to_string(lines) + " lines of C++";
 		if (!res.warnings.empty())
 			st.syncCompileMsg += " (" + std::to_string(res.warnings.size()) + " warning(s), see log)";
 		for (const auto& w : res.warnings)

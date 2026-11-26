@@ -391,6 +391,11 @@ bool dragFloat4(const char* label, float* v, float speed, float min, float max, 
 	return row(label, [&]{ return axisDragN("##v", v, 4, speed, min, max, fmt, m); });
 }
 
+bool axisDrag(const char* id, float* v, int n, float speed, float min, float max, const char* fmt)
+{
+	return axisDragN(id, v, n, speed, min, max, fmt);
+}
+
 bool dragInt(const char* label, int* v, float speed, int min, int max)
 {
 	const char* f = mixedMask(label) ? kMixedFmt : "%d";
@@ -449,7 +454,21 @@ bool comboZ(const char* label, int* v, const char* itemsSeparatedByZeros)
 
 bool colorEdit3(const char* label, float* rgb, ImGuiColorEditFlags flags)
 {
-	return row(label, [&]{ return ImGui::ColorEdit3("##v", rgb, flags); });
+	if (!mixedMask(label))
+		return row(label, [&]{ return ImGui::ColorEdit3("##v", rgb, flags); });
+	// Mixed: the swatch alone, marked "—" like a drag's mixed parts, rather than
+	// three numbers that read as everyone's. It is the active entity's colour
+	// underneath, so the picker still starts there and the edit lands on all.
+	return row(label, [&]{
+		const bool changed = ImGui::ColorEdit3("##v", rgb, flags | ImGuiColorEditFlags_NoInputs);
+		const ImVec2 mn = ImGui::GetItemRectMin(), mx = ImGui::GetItemRectMax();
+		const ImVec2 ts = ImGui::CalcTextSize(kMixedFmt);
+		const ImVec2 at(std::floor((mn.x + mx.x - ts.x) * 0.5f), std::floor((mn.y + mx.y - ts.y) * 0.5f));
+		ImDrawList* dl = ImGui::GetWindowDrawList();
+		dl->AddText(ImVec2(at.x + 1.0f, at.y + 1.0f), IM_COL32(0, 0, 0, 200), kMixedFmt);
+		dl->AddText(at, IM_COL32(255, 255, 255, 255), kMixedFmt);
+		return changed;
+	});
 }
 
 bool colorEdit4(const char* label, float* rgba, ImGuiColorEditFlags flags)
@@ -628,7 +647,17 @@ void helpMarker(const char* key)
 	const HE::Ed::Help::Entry* e = HE::Ed::Help::findKey(key ? key : "");
 	if (!e) return;
 	ImGui::SameLine(0.0f, 4.0f);
-	ImGui::TextDisabled("(?)");
+	// A circled "?" (as the material editor's parameter rows): the text "(?)"
+	// read as stray punctuation after a heading.
+	const float h = ImGui::GetTextLineHeight();
+	ImGui::Dummy(ImVec2(h, h));
+	const ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
+	const ImVec2 c((a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f);
+	const ImU32  fg = ImGui::GetColorU32(ImGui::IsItemHovered() ? ImGuiCol_Text : ImGuiCol_TextDisabled);
+	const float  fs = ImGui::GetFontSize() * 0.8f;
+	ImDrawList*  dl = ImGui::GetWindowDrawList();
+	dl->AddCircle(c, h * 0.40f, fg, 0, 1.4f);
+	dl->AddText(ImGui::GetFont(), fs, ImVec2(c.x - ImGui::CalcTextSize("?").x * 0.4f, c.y - fs * 0.5f), fg, "?");
 	queueIfHovered(e);
 }
 

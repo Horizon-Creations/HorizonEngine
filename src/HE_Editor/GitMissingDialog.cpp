@@ -1,6 +1,7 @@
 #include "GitMissingDialog.h"
 #include "EditorApplication.h"        // AppContext
 #include "EditorHelp.h"               // the Preferences page's "Source Control" scope, reused
+#include "EditorTheme.h"              // Theme::Bad for a failed install
 #include "EditorWidgets.h"            // pinDialogToEditorWindow
 
 #include <SourceControl/GitInstall.h>
@@ -110,31 +111,28 @@ void drawInstallRemedy(AppContext& ctx, bool lfs)
 		// The fallback says WHY, so "cannot" does not read as "broken".
 		ImGui::TextWrapped("The editor cannot install %s here by itself: %s.", lfs ? "Git LFS" : "git",
 		                   plan.reason.empty() ? "no install route was found" : plan.reason.c_str());
+		// Some reasons already say "run the command in a terminal"; the hint then only adds Recheck.
 		if (!manualCommand.empty())
-			ImGui::TextWrapped("Run this in a terminal, then press Recheck:");
+			ImGui::TextWrapped(plan.reason.find("terminal") != std::string::npos
+			                       ? "Then press Recheck:"
+			                       : "Run this in a terminal, then press Recheck:");
 	}
 
 	if (!manualCommand.empty())
 	{
+		// Framed and monospaced, so it reads as a command to copy and not as prose.
+		ImGui::BeginChild(lfs ? "##gitlfscmd" : "##gitcmd", ImVec2(0.0f, 0.0f),
+		                  ImGuiChildFlags_FrameStyle | ImGuiChildFlags_AutoResizeY);
+		if (ctx.codeFont) ImGui::PushFont(ctx.codeFont);
 		ImGui::TextWrapped("%s", manualCommand.c_str());
-		if (lfs)
-		{
-			if (EditorWidgets::button("Copy LFS Command")) ImGui::SetClipboardText(manualCommand.c_str());
-		}
-		else if (EditorWidgets::button("Copy Install Command"))
-		{
-			ImGui::SetClipboardText(manualCommand.c_str());
-		}
+		if (ctx.codeFont) ImGui::PopFont();
+		ImGui::EndChild();
+		// Same labels for git and Git LFS: the two remedies read the same way.
+		if (EditorWidgets::button("Copy Install Command")) ImGui::SetClipboardText(manualCommand.c_str());
 		ImGui::SameLine();
 	}
-	if (lfs)
-	{
-		if (EditorWidgets::button("git-lfs.com")) SDL_OpenURL("https://git-lfs.com/");
-	}
-	else if (EditorWidgets::button("Download Page"))
-	{
-		SDL_OpenURL(HE::Sc::gitDownloadPageUrl(HE::Sc::currentPlatform()));
-	}
+	if (EditorWidgets::button("Download Page"))
+		SDL_OpenURL(lfs ? "https://git-lfs.com/" : HE::Sc::gitDownloadPageUrl(HE::Sc::currentPlatform()));
 
 	// ── Live progress log ────────────────────────────────────────────────────
 	// Shown in every place that draws this, not just where the button was
@@ -154,11 +152,10 @@ void drawInstallRemedy(AppContext& ctx, bool lfs)
 			if (installing) ImGui::SetScrollHereY(1.0f);
 			ImGui::EndChild();
 		}
+		// A failure is not a footnote: in the error colour, not greyed out like a hint.
 		if (!installing && ctx.gitInstallDone && !ctx.gitInstallOk)
-			ImGui::TextDisabled(lfs ? "Git LFS was not installed. See the log above, then retry "
-			                          "or install it yourself."
-			                        : "git was not installed. See the log above, then retry "
-			                          "or install it yourself.");
+			ImGui::TextColored(HE::Ed::Theme::Bad, "%s was not installed. See the log above, then retry "
+			                                       "or install it yourself.", lfs ? "Git LFS" : "Git");
 	}
 }
 

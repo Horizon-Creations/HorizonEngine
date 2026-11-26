@@ -243,7 +243,7 @@ namespace
 		settle(ctx);
 		REQUIRE(click(ctx, data));
 		settle(ctx);
-		REQUIRE(click(ctx, "mode:Month"));
+		REQUIRE(click(ctx, "mode:Calendar"));
 		settle(ctx);
 	}
 

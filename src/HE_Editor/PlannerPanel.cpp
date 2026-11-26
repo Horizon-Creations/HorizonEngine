@@ -208,7 +208,8 @@ bool sidebarRow(const char* id, PlannerIcons::Icon icon, const std::string& labe
 
 // A section title with a "+" at its right edge. Sections are set apart by air and a hairline above the
 // title, so where one kind of thing ends and the next begins reads at a glance.
-bool sidebarSection(const char* title, const char* newName, const char* helpKey)
+// The title alone, for a section that adds nothing (TEAM); returns the width it spans.
+float sidebarTitle(const char* title)
 {
 	ImGui::Dummy(ImVec2(0, 8));
 	const ImVec2 p = ImGui::GetCursorScreenPos();
@@ -217,6 +218,12 @@ bool sidebarSection(const char* title, const char* newName, const char* helpKey)
 	ImGui::Dummy(ImVec2(0, 6));
 	ImGui::AlignTextToFramePadding();
 	ImGui::TextDisabled("%s", title);
+	return w;
+}
+
+bool sidebarSection(const char* title, const char* newName, const char* helpKey)
+{
+	const float w = sidebarTitle(title);
 	ImGui::SameLine(w - 20);
 	const bool clicked = PlannerIcons::iconButton(newName, PlannerIcons::Icon::Plus, false, true, helpKey, false, 0, ImVec2(24, 24));
 	note(newName);
@@ -1077,7 +1084,8 @@ void drawFilterPopup(const Database& db, const View& view)
 			}
 		}
 		ImGui::SameLine();
-		if (ImGui::SmallButton("x"))
+		const float rmH = ImGui::GetFrameHeight();
+		if (PlannerIcons::iconButton("##rmfilter", PlannerIcons::Icon::Close, false, true, "Planner/Remove Filter", true, 0, ImVec2(rmH, rmH)))
 			editView(dbId, viewId, [i](View& v) {
 				if (i >= v.filters.size()) return false;
 				v.filters.erase(v.filters.begin() + static_cast<std::ptrdiff_t>(i));
@@ -1381,10 +1389,14 @@ void drawBoard(const Database& db, const View& view)
 	                       ImVec2(0, 0), innerW))
 		return;
 	ImGui::TableSetupScrollFreeze(0, 1);
+	// The count goes with the lane's name ("Open · 3"); beside the + it read as one control, "+ 3".
+	// The ### keeps the column's id when the count changes.
 	for (const UUID& lane : lanes)
 	{
 		const SelectOption* o = group->findOption(lane);
-		ImGui::TableSetupColumn(o ? o->name.c_str() : "No value", ImGuiTableColumnFlags_WidthStretch);
+		const std::string head = (o ? o->name : std::string("No value")) + " \xC2\xB7 " +
+		                         std::to_string(db.column(view, lane).size()) + "###lane";
+		ImGui::TableSetupColumn(head.c_str(), ImGuiTableColumnFlags_WidthStretch);
 	}
 	ImGui::TableHeadersRow();
 	ImGui::TableNextRow();
@@ -1395,16 +1407,21 @@ void drawBoard(const Database& db, const View& view)
 		const UUID lane = lanes[c];
 		const std::vector<std::size_t> inLane = db.column(view, lane);
 
-		if (ImGui::SmallButton("+"))
+		const float addH = ImGui::GetFrameHeight();
+		if (PlannerIcons::iconButton("##addcard", PlannerIcons::Icon::Plus, false, true, "Planner/Add Card to Lane", false, 0, ImVec2(addH, addH)))
 			post([=] {
 				s_ws.edit(dbId, [&](Database& d) {
 					const Row* r = d.addRow("", s_ws.author(), taskNowMs());
 					return r && (lane == UUID{} || d.setSelect(r->id, groupId, lane, taskNowMs()));
 				});
 			});
-		ImGui::SameLine();
-		ImGui::TextDisabled("%d", static_cast<int>(inLane.size()));
 		dropOnLane(dbId, groupId, lane);
+		if (inLane.empty())
+		{
+			ImGui::SameLine();
+			ImGui::AlignTextToFramePadding();
+			ImGui::TextDisabled("Drop or add a card");
+		}
 
 		for (const std::size_t ri : inLane)
 		{
@@ -1483,7 +1500,8 @@ void linksEditor(const Database& db, const Row& row, const Property& p)
 		note("drawer-chip:" + std::to_string(i));
 		ImGui::SameLine(0, 2.0f);
 		ImGui::PushID(static_cast<int>(i));
-		if (ImGui::SmallButton("x")) removeLinkFrom(dbId, rowId, propId, links[i]);
+		if (PlannerIcons::iconButton("##rmlink", PlannerIcons::Icon::Close, false, true, "Planner/Remove Link", true, 0, ImVec2(chipH, chipH)))
+			removeLinkFrom(dbId, rowId, propId, links[i]);
 		ImGui::PopID();
 	}
 	// The drop zone, spelled out: a target that says what it takes is what makes
@@ -1528,6 +1546,16 @@ void linksEditor(const Database& db, const Row& row, const Property& p)
 
 // What happened to a task, and a box to say something about it. The history is
 // the board's: it is not part of the database.
+// A history line's time as people say it, "25 Nov, 21:45", not "2026-11-25T21:45".
+std::string historyTime(std::int64_t ms)
+{
+	const std::string iso = taskTimeToIso(ms);   // YYYY-MM-DDTHH:MM...
+	const int mon = std::clamp(std::atoi(iso.substr(5, 2).c_str()), 1, 12);
+	return std::to_string(std::atoi(iso.substr(8, 2).c_str())) + " " +
+	       std::string("JanFebMarAprMayJunJulAugSepOctNovDec").substr(static_cast<std::size_t>(mon - 1) * 3, 3) +
+	       ", " + iso.substr(11, 5);
+}
+
 void taskHistory(const UUID& rowId)
 {
 	AppContext& ctx = *s_ctx;
@@ -1537,8 +1565,27 @@ void taskHistory(const UUID& rowId)
 	if (s_commentFor != rowId) { s_commentFor = rowId; s_comment.clear(); }
 
 	EditorWidgets::subHeading("History");
+	// The comment row first: under a long history it ended below the drawer's bottom edge.
+	ImGui::SetNextItemWidth(std::max(60.0f, ImGui::GetContentRegionAvail().x - 120.0f));
+	ImGui::InputTextWithHint("##taskComment", "Write a comment", &s_comment);
+	note("comment-field");
+	ImGui::SameLine();
+	ImGui::BeginDisabled(s_comment.empty());
+	if (EditorWidgets::button("Add Comment"))
+	{
+		const std::string text = s_comment;
+		s_comment.clear();
+		post([=] {
+			TaskBoardPanel::edit(*s_ctx, [&](TaskBoard& bb) {
+				return bb.comment(rowId, TaskBoardPanel::author(), text, taskNowMs()) != nullptr;
+			});
+		});
+	}
+	note("Add Comment");
+	ImGui::EndDisabled();
+
 	ImGui::TextDisabled("Created by %s, %s", t->createdBy.empty() ? "someone" : t->createdBy.c_str(),
-	                    taskTimeToIso(t->createdMs).substr(0, 16).c_str());
+	                    historyTime(t->createdMs).c_str());
 	const std::size_t shown = std::min<std::size_t>(t->updates.size(), 6);
 	{
 		EditorWidgets::WrapText wrap;
@@ -1559,27 +1606,10 @@ void taskHistory(const UUID& rowId)
 			case TaskUpdateKind::Comment: what = "commented"; break;
 			default:                      what = u.kindOther; break;
 			}
-			ImGui::TextDisabled("%s  %s %s", taskTimeToIso(u.timeMs).substr(0, 16).c_str(), u.author.c_str(), what.c_str());
+			ImGui::TextDisabled("%s  %s %s", historyTime(u.timeMs).c_str(), u.author.c_str(), what.c_str());
 			if (!u.text.empty()) { ImGui::Indent(); ImGui::TextUnformatted(u.text.c_str()); ImGui::Unindent(); }
 		}
 	}
-	ImGui::SetNextItemWidth(std::max(60.0f, ImGui::GetContentRegionAvail().x - 120.0f));
-	ImGui::InputTextWithHint("##taskComment", "Write a comment", &s_comment);
-	note("comment-field");
-	ImGui::SameLine();
-	ImGui::BeginDisabled(s_comment.empty());
-	if (EditorWidgets::button("Add Comment"))
-	{
-		const std::string text = s_comment;
-		s_comment.clear();
-		post([=] {
-			TaskBoardPanel::edit(*s_ctx, [&](TaskBoard& bb) {
-				return bb.comment(rowId, TaskBoardPanel::author(), text, taskNowMs()) != nullptr;
-			});
-		});
-	}
-	note("Add Comment");
-	ImGui::EndDisabled();
 }
 
 // The properties of a row as a two-column list: the name, then its value. Shared by
@@ -1645,7 +1675,9 @@ void drawDrawer(const Database& db, const Row& row, bool closeButton)
 	if (closeButton)
 	{
 		ImGui::SameLine();
-		if (ImGui::SmallButton("x")) s_selRow = UUID{};
+		const float closeH = ImGui::GetFrameHeight();
+		if (PlannerIcons::iconButton("##drawerclose", PlannerIcons::Icon::Close, false, true, "Planner/Close Details", false, 0, ImVec2(closeH, closeH)))
+			s_selRow = UUID{};
 		note("drawer:close");
 	}
 	if (EditorWidgets::button("Open Page")) post([=] { openPage(rowId, dbId); });
@@ -1960,7 +1992,9 @@ void drawTimeline(const Database& db, const View& view, const std::vector<std::s
 				const int mon = std::clamp(std::atoi(iso.substr(5, 2).c_str()), 1, 12);
 				char monthLabel[16];
 				std::snprintf(monthLabel, sizeof monthLabel, "%s %.4s", kMonthsShort[mon - 1], iso.c_str());
-				dl->AddText(ImVec2(std::max(x, origin.x) + 4.0f, origin.y + 3.0f), Theme::u32(Theme::TextHeading), monthLabel);
+				// Kept inside the right edge, so the last month reads "Dec 2026", not "Dec 202".
+				const float lx = std::min(std::max(x, origin.x) + 4.0f, corner.x - ImGui::CalcTextSize(monthLabel).x - 4.0f);
+				dl->AddText(ImVec2(lx, origin.y + 3.0f), Theme::u32(Theme::TextHeading), monthLabel);
 			}
 		}
 	}
@@ -1977,7 +2011,9 @@ void drawTimeline(const Database& db, const View& view, const std::vector<std::s
 			if (mon == 1)
 			{
 				dl->AddLine(ImVec2(x, origin.y), ImVec2(x, lanesTop), tickCol);
-				dl->AddText(ImVec2(x + 4.0f, origin.y + 3.0f), Theme::u32(Theme::TextHeading), iso.substr(0, 4).c_str());
+				const std::string year = iso.substr(0, 4);
+				dl->AddText(ImVec2(std::min(x + 4.0f, corner.x - ImGui::CalcTextSize(year.c_str()).x - 4.0f), origin.y + 3.0f),
+				            Theme::u32(Theme::TextHeading), year.c_str());
 			}
 		}
 	}
@@ -2472,7 +2508,7 @@ void linkBlock(const Page& page, const Block& b, int index, float width)
 			TaskBoardPanel::jumpToLink(ctx, b.link);
 		note("link-chip:" + std::to_string(index));
 		ImGui::SameLine(0, 4.0f);
-		if (ImGui::SmallButton("x"))
+		if (PlannerIcons::iconButton("##rmblocklink", PlannerIcons::Icon::Close, false, true, "Planner/Remove Link", true, 0, ImVec2(h, h)))
 			post([=] {
 				s_ws.editPage(pageId, [&](Page& p) {
 					Block* x = p.findBlock(blockId);
@@ -2648,7 +2684,9 @@ void pageLinkBlock(const Page& page, const Block& b, int index, float width)
 		}
 	}
 	ImGui::SameLine(0, 4.0f);
-	if (ImGui::SmallButton("x")) setTarget(UUID{});
+	const float rmH = ImGui::GetTextLineHeight();   // the Selectable beside it is one text line tall
+	if (PlannerIcons::iconButton("##rmpagelink", PlannerIcons::Icon::Close, false, true, "Planner/Remove Page Link", true, 0, ImVec2(rmH, rmH)))
+		setTarget(UUID{});
 }
 
 // The page's blocks, one per line, children indented.
@@ -3046,22 +3084,24 @@ void drawPage(AppContext& ctx)
 
 	if (rowPage)
 	{
-		if (EditorWidgets::smallButton("Back"))
+		if (EditorWidgets::button("Back"))
 			post([=] { s_dbId = db ? db->id : UUID{}; s_pageId = s_pageDb = UUID{}; });
 		note("page:back");
 		ImGui::SameLine();
+		ImGui::AlignTextToFramePadding();
 		ImGui::TextDisabled("%s", db->name.c_str());
 	}
 	else if (const Page* parent = s_ws.findPage(page->parent))
 	{
 		// A sub-page: the way back is the page it hangs under.
-		if (EditorWidgets::smallButton("Back"))
+		if (EditorWidgets::button("Back"))
 		{
 			const UUID parentId = parent->id;
 			post([=] { goToPage(parentId); });
 		}
 		note("page:parent");
 		ImGui::SameLine();
+		ImGui::AlignTextToFramePadding();
 		ImGui::TextDisabled("%s", parent->title.empty() ? "Untitled" : parent->title.c_str());
 	}
 
@@ -3652,7 +3692,8 @@ void drawDatabase(AppContext& ctx, const Database& db)
 				});
 			});
 		}, "Untitled", 0.0f, 240.0f);
-		ImGui::TextDisabled("%d rows, %d views.", static_cast<int>(db.rows.size()), static_cast<int>(db.views.size()));
+		ImGui::TextDisabled("%d row%s, %d view%s.", static_cast<int>(db.rows.size()), db.rows.size() == 1 ? "" : "s",
+		                    static_cast<int>(db.views.size()), db.views.size() == 1 ? "" : "s");
 		ImGui::TextDisabled("Another table, timeline, board or calendar can show");
 		ImGui::TextDisabled("the same rows: + in its sidebar section, \"data\" choice.");
 		ImGui::EndPopup();
@@ -3734,8 +3775,9 @@ void drawDatabase(AppContext& ctx, const Database& db)
 	{
 		// The same dated rows along a time axis or as a month: one view, shown either way.
 		ImGui::SameLine(0, 10);
-		const char* const modes[] = { "Timeline", "Month" };
-		const int hit = segmented("mode", modes, 2, view->kind == ViewKind::Calendar ? 1 : 0, "Planner/Timeline or Month");
+		// "Calendar", not "Month": beside the timeline's Days | Weeks | Months a "Month" reads as a zoom step.
+		const char* const modes[] = { "Timeline", "Calendar" };
+		const int hit = segmented("mode", modes, 2, view->kind == ViewKind::Calendar ? 1 : 0, "Planner/Timeline or Calendar");
 		if (hit >= 0)
 		{
 			const ViewKind kind = hit == 1 ? ViewKind::Calendar : ViewKind::Timeline;
@@ -3886,10 +3928,10 @@ void drawTeamNotices(AppContext& ctx)
 {
 	HE::TaskBoardTeam* team = TaskBoardPanel::team();
 	if (!team || team->recent().empty()) return;
-	ImGui::Spacing();
+	sidebarTitle("TEAM");
 	int fresh = 0;
 	for (const auto& r : team->recent()) fresh += r.atMs > TaskBoardPanel::teamSeen();
-	const bool openList = EditorWidgets::smallButton("From the Team");
+	const bool openList = EditorWidgets::button("From the Team");
 	note("From the Team");
 	// Under the button, not at the mouse, where it would cover it.
 	const ImVec2 listAt(ImGui::GetItemRectMin().x, ImGui::GetItemRectMax().y + 2.0f);
@@ -4007,8 +4049,9 @@ void drawSidebar(AppContext& ctx)
 					}
 					note("item:" + label);
 					if (ImGui::IsItemHovered())
-						ImGui::SetTooltip("Data: %s (%d rows, %d views)", db->name.c_str(), static_cast<int>(db->rows.size()),
-						                  static_cast<int>(db->views.size()));
+						ImGui::SetTooltip("Data: %s (%d row%s, %d view%s)", db->name.c_str(),
+						                  static_cast<int>(db->rows.size()), db->rows.size() == 1 ? "" : "s",
+						                  static_cast<int>(db->views.size()), db->views.size() == 1 ? "" : "s");
 					if (!isTasks && beginPopupContextItem("##viewitemmenu"))
 					{
 						const UUID dbId = db->id, vid = v.id;
@@ -4044,7 +4087,7 @@ void drawSidebar(AppContext& ctx)
 				note("data:" + db->name);
 				if (noDates && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("The Task Board has no dates");
 				ImGui::SameLine();
-				ImGui::TextDisabled("%d rows", static_cast<int>(db->rows.size()));
+				ImGui::TextDisabled("%d row%s", static_cast<int>(db->rows.size()), db->rows.size() == 1 ? "" : "s");
 				ImGui::PopID();
 			}
 			ImGui::EndPopup();
@@ -4248,7 +4291,11 @@ bool tabInfo(const Tab& t, std::string& name, PlannerIcons::Icon& icon)
 	{
 		const Page* p = s_ws.findPage(t.a);
 		if (!p) return false;
-		name = p->title.empty() ? std::string("Untitled") : p->title;
+		// A row's page carries the row's title (drawPage shows that one), not its own.
+		const Database* db = s_ws.find(t.b);
+		const Row* row = db ? db->findRow(t.a) : nullptr;
+		const std::string& title = row ? row->title : p->title;
+		name = title.empty() ? std::string("Untitled") : title;
 		icon = PlannerIcons::Icon::Page;
 		return true;
 	}
@@ -4451,17 +4498,21 @@ void render(AppContext& ctx, const ImVec2& pos, const ImVec2& size)
 	}
 	if (!TaskBoardPanel::lastError().empty())
 	{
-		ImGui::PushStyleColor(ImGuiCol_Text, Theme::Warn);
+		// A failed Tasks save is also the workspace's error: say it once, keep the buttons.
+		if (TaskBoardPanel::lastError() != s_ws.lastError())
 		{
-			EditorWidgets::WrapText wrap(ImGui::GetContentRegionAvail().x);
-			ImGui::TextUnformatted(TaskBoardPanel::lastError().c_str());
+			ImGui::PushStyleColor(ImGuiCol_Text, Theme::Warn);
+			{
+				EditorWidgets::WrapText wrap(ImGui::GetContentRegionAvail().x);
+				ImGui::TextUnformatted(TaskBoardPanel::lastError().c_str());
+			}
+			ImGui::PopStyleColor();
 		}
-		ImGui::PopStyleColor();
-		if (EditorWidgets::smallButton("Reload Tasks")) post([&ctx] { TaskBoardPanel::reloadBoard(ctx); });
+		if (EditorWidgets::button("Reload Tasks")) post([&ctx] { TaskBoardPanel::reloadBoard(ctx); });
 		if (TaskBoardPanel::hasUnsavedEdit())
 		{
 			ImGui::SameLine();
-			if (EditorWidgets::smallButton("Retry Save")) post([] { TaskBoardPanel::retrySave(); });
+			if (EditorWidgets::button("Retry Save")) post([] { TaskBoardPanel::retrySave(); });
 		}
 	}
 	if (!(s_boardId == UUID{}))

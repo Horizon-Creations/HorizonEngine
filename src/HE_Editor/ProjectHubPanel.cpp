@@ -767,7 +767,23 @@ void render(AppContext& ctx)
             ImGui::RenderTextEllipsis(dl, ImVec2(tx, ty), ImVec2(tr, ty + lineH), tr, name.c_str(), nullptr, nullptr);
             ImGui::PopStyleColor();
             ty += lineH + 2.0f;
-            const std::string folder = displayFolder(known[i]);
+            // Too long for the card: cut from the LEFT at a separator, because the
+            // end of the path is the project's own folder, the part worth seeing
+            // ("…/Projects/MyGame"). The right-hand ellipsis below stays the last
+            // resort for a single folder name wider than the card.
+            std::string folder = displayFolder(known[i]);
+            if (ImGui::CalcTextSize(folder.c_str()).x > tr - tx)
+                for (size_t s = folder.find_first_of("/\\", 1); s != std::string::npos;
+                     s = folder.find_first_of("/\\", s + 1))
+                {
+                    const std::string tail = "\xe2\x80\xa6" + folder.substr(s);
+                    if (ImGui::CalcTextSize(tail.c_str()).x <= tr - tx ||
+                        folder.find_first_of("/\\", s + 1) == std::string::npos)
+                    {
+                        folder = tail;
+                        break;
+                    }
+                }
             ImGui::PushStyleColor(ImGuiCol_Text, Theme::TextDim);
             ImGui::RenderTextEllipsis(dl, ImVec2(tx, ty), ImVec2(tr, ty + lineH), tr, folder.c_str(), nullptr, nullptr);
             ImGui::PopStyleColor();

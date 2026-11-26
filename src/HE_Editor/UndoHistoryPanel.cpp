@@ -58,12 +58,13 @@ void DrawUndoHistoryWindow(AppContext& ctx, bool& open)
 		char head[96];
 		std::snprintf(head, sizeof(head), "%zu step%s to undo, %zu to redo",
 		              nUndo, nUndo == 1 ? "" : "s", nRedo);
+		ImGui::AlignTextToFramePadding();   // centred on the full-height Clear beside it
 		ImGui::TextDisabled("%s", head);
 		ImGui::SameLine();
 		const float clearW = ImGui::CalcTextSize("Clear").x + ImGui::GetStyle().FramePadding.x * 2.0f;
 		ImGui::SetCursorPosX(ImGui::GetWindowContentRegionMax().x - clearW);
 		ImGui::BeginDisabled(nUndo == 0 && nRedo == 0);
-		if (EditorWidgets::smallButton("Clear")) undo->clearHistory();
+		if (EditorWidgets::removeButton("Clear")) undo->clearHistory();
 		ImGui::EndDisabled();
 	}
 	ImGui::Separator();

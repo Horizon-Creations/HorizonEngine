@@ -1047,7 +1047,7 @@ void acceptDrops(const Services& services, const UUID& boardId, ImVec2 origin, c
 	}
 }
 
-void applyViewButtons(ViewState& view, ImVec2 size, Board* board, bool zoomIn, bool zoomOut, bool fit, bool actual)
+void applyViewButtons(ViewState& view, ImVec2 size, Board* board, bool zoomIn, bool zoomOut, bool fit, bool actual, bool mapOn)
 {
 	if (zoomIn || zoomOut)
 	{
@@ -1061,10 +1061,14 @@ void applyViewButtons(ViewState& view, ImVec2 size, Board* board, bool zoomIn, b
 		Rect2 r;
 		if (board->bounds(r))
 		{
-			const double zoom = std::clamp(std::min(size.x / (r.w + 80.0), size.y / (r.h + 80.0)), kMinZoom, kMaxZoom);
+			// The margin is in screen pixels (a world one shrinks to nothing when zoomed out), and the
+			// cards keep clear of the tool palette on the left (12 + 40 + 12) and the minimap bottom right.
+			const double left = 64.0, top = 24.0, right = 24.0, bottom = mapOn ? 140.0 : 24.0;
+			const double w = std::max(1.0, size.x - left - right), h = std::max(1.0, size.y - top - bottom);
+			const double zoom = std::clamp(std::min(w / std::max(r.w, 1.0), h / std::max(r.h, 1.0)), kMinZoom, kMaxZoom);
 			view.zoom = zoom;
-			view.x = r.x + r.w * 0.5 - size.x * 0.5 / zoom;
-			view.y = r.y + r.h * 0.5 - size.y * 0.5 / zoom;
+			view.x = r.x + r.w * 0.5 - (left + w * 0.5) / zoom;
+			view.y = r.y + r.h * 0.5 - (top + h * 0.5) / zoom;
 		}
 		else view = ViewState{};
 	}
@@ -1861,7 +1865,7 @@ void draw(const Services& services, const UUID& boardId)
 	ImDrawList* dl = ImGui::GetWindowDrawList();
 	dl->PushClipRect(origin, ImVec2(origin.x + size.x, origin.y + size.y), true);
 
-	applyViewButtons(view, size, board, toolbar.zoomIn, toolbar.zoomOut, toolbar.fit, toolbar.actual);
+	applyViewButtons(view, size, board, toolbar.zoomIn, toolbar.zoomOut, toolbar.fit, toolbar.actual, mapOn);
 	// Panning with the middle button, or Space and the left one (the press below asks for it as well).
 	const bool space = ImGui::IsKeyDown(ImGuiKey_Space) && !io.WantTextInput;
 	zoomAndPan(io, origin, view, hovered, editing, space);

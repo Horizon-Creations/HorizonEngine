@@ -126,6 +126,9 @@ public:
 	// team. `open`: members may join without an invitation. False (with
 	// lastError()) when not signed in or a collab session is already running.
 	bool hostSession(bool open);
+	// Ends the session this editor hosts. update() then withdraws the
+	// announcement, as it does for any other way a hosted session ends.
+	void stopHosting();
 	// Whether a collab session (team or not) is running on the controller next
 	// door — Host and Join are pointless then — and whether it is `session`.
 	bool sessionRunning() const;

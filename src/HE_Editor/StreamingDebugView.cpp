@@ -447,12 +447,16 @@ void drawCells(AppContext& ctx)
 		                    "decals and placed prefabs into one file per square; the game then loads "
 		                    "the squares around the camera, and so does Play in the editor.");
 		static HE::CellSplitOptions s_options;
-		EditorWidgets::Row::dragFloat("Cell size (m)##cellsplit", &s_options.cellSize, 8.0f, 16.0f, 100000.0f, "%.0f");
-		EditorWidgets::Row::dragFloat("Load radius (m), 0 = 1.5 cells##cellsplit", &s_options.loadRadius, 8.0f,
-		                              0.0f, 1.0e6f, "%.0f");
-		EditorWidgets::Row::dragFloat("Unload radius (m), 0 = 1.25 x load##cellsplit", &s_options.unloadRadius,
-		                              8.0f, 0.0f, 1.0e6f, "%.0f");
-		EditorWidgets::Row::dragFloat("Look ahead (s)##cellsplit", &s_options.lookaheadSec, 0.1f, 0.0f, 30.0f, "%.1f");
+		{
+			EditorWidgets::Row::InlineLabels inlineLabels;
+			EditorWidgets::Row::dragFloat("Cell Size##cellsplit", &s_options.cellSize, 8.0f, 16.0f, 100000.0f, "%.0f m");
+			EditorWidgets::Row::dragFloat("Load Radius##cellsplit", &s_options.loadRadius, 8.0f,
+			                              0.0f, 1.0e6f, "%.0f m");
+			EditorWidgets::Row::dragFloat("Unload Radius##cellsplit", &s_options.unloadRadius,
+			                              8.0f, 0.0f, 1.0e6f, "%.0f m");
+			EditorWidgets::Row::dragFloat("Look Ahead##cellsplit", &s_options.lookaheadSec, 0.1f, 0.0f, 30.0f, "%.1f s");
+		}
+		EditorWidgets::hint("A radius of 0 picks the default: 1.5 cells to load, 1.25 times the load radius to unload.");
 		ImGui::BeginDisabled(!editable);
 		if (EditorWidgets::button("Split into Streaming Cells")) splitOpenScene(ctx, s_options, s_message);
 		ImGui::EndDisabled();
@@ -494,7 +498,7 @@ void drawCells(AppContext& ctx)
 	// a player, a pin a script sets). The editor has one camera, so a pin here is a way
 	// to look at what two places hold together; the Scene window draws them as well.
 	std::vector<HE::CellAnchor>& pins = previewPins();
-	if (EditorWidgets::button("Pin an anchor at the editor camera"))
+	if (EditorWidgets::button("Pin an Anchor at the Editor Camera"))
 	{
 		HE::CellAnchor pin;
 		pin.position = eye;
@@ -502,7 +506,7 @@ void drawCells(AppContext& ctx)
 	}
 	ImGui::BeginDisabled(pins.empty());
 	ImGui::SameLine();
-	if (EditorWidgets::button("Clear anchors")) pins.clear();
+	if (EditorWidgets::button("Clear Anchors")) pins.clear();
 	ImGui::EndDisabled();
 	if (!pins.empty())
 		ImGui::Text("%zu preview anchor(s) besides the camera.", pins.size());
@@ -521,9 +525,9 @@ void drawCells(AppContext& ctx)
 	            pins.empty() ? "the editor camera" : "the camera and the anchors", loadCells,
 	            static_cast<unsigned long long>(loadEnts), keepCells, static_cast<unsigned long long>(keepEnts));
 	ImGui::TextDisabled("A cell is built in slices of whole objects, up to %zu entities each, as many per frame as "
-	                    "fit its budget; the largest cell in reach here takes about %u slices. It is dropped only "
+	                    "fit its budget; the largest cell in reach here takes about %u slice%s. It is dropped only "
 	                    "once every anchor is beyond the unload radius.",
-	                    HE::kDefaultCellSliceEntities, mostSlices);
+	                    HE::kDefaultCellSliceEntities, mostSlices, mostSlices == 1 ? "" : "s");
 
 	constexpr ImGuiTableFlags kFlags = ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV
 	                                 | ImGuiTableFlags_SizingStretchProp;

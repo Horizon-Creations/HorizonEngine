@@ -93,7 +93,8 @@ Answer drawWaiting(const std::string& projectName, const Result& r, TeamSyncCont
 	ImGui::Spacing();
 	if (EditorWidgets::button("Open Without Updating", ImVec2(200.0f, 0.0f))) answer = Answer::OpenAnyway;
 	ImGui::SameLine();
-	if (EditorWidgets::button("Cancel", ImVec2(110.0f, 0.0f))) answer = Answer::CloseProject;
+	// Named for what it does, and the same pair as the failed state's.
+	if (EditorWidgets::button("Close Project", ImVec2(150.0f, 0.0f))) answer = Answer::CloseProject;
 	return answer;
 }
 
@@ -111,14 +112,14 @@ Answer drawFailed(const std::string& projectName, const Result& r)
 		ImGui::PopStyleColor();
 		if (!r.reason.empty()) ImGui::TextWrapped("%s", r.reason.c_str());
 		ImGui::Spacing();
-		ImGui::TextWrapped("Opened anyway, the project is the copy on this machine, which may be behind "
+		ImGui::TextWrapped("If you open it now, you work on this machine's copy, which may be behind "
 		                   "the team's. Your saves go to the team server once it is reachable again, and "
 		                   "the newest version comes then.");
 	}
 	ImGui::Spacing();
 	if (EditorWidgets::primaryButton("Try Again", ImVec2(130.0f, 0.0f))) answer = Answer::TryAgain;
 	ImGui::SameLine();
-	if (EditorWidgets::button("Open Anyway", ImVec2(150.0f, 0.0f))) answer = Answer::OpenAnyway;
+	if (EditorWidgets::button("Open Without Updating", ImVec2(200.0f, 0.0f))) answer = Answer::OpenAnyway;
 	ImGui::SameLine();
 	if (EditorWidgets::button("Close Project", ImVec2(150.0f, 0.0f))) answer = Answer::CloseProject;
 	return answer;

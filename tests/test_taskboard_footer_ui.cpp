@@ -544,7 +544,7 @@ TEST_CASE("task board footer ui: a pull while the list is open is kept, and the 
 	CHECK(disk.tasks.size() == 4);
 }
 
-TEST_CASE("task board footer ui: Open Task Board and a task's title ask for the panel")
+TEST_CASE("task board footer ui: Open Planner and a task's title ask for the panel")
 {
 	Harness harness;
 	Project proj("he_taskboard_footer_ui_open");
@@ -565,7 +565,7 @@ TEST_CASE("task board footer ui: Open Task Board and a task's title ask for the 
 	ImGuiWindow* win = ImGui::FindWindowByName("##taskBoardFooterList");
 	REQUIRE(win != nullptr);
 	const ImVec2 at(list.x0 + 10.0f + 20.0f, list.y1 - 8.0f - ImGui::GetFrameHeight() * 0.5f);
-	REQUIRE(idAt(ctx, at) == win->GetID("Open Task Board"));
+	REQUIRE(idAt(ctx, at) == win->GetID("Open Planner"));
 	CHECK(clickAt(ctx, at));
 	CHECK_FALSE(TaskBoardFooter::isOpen());
 

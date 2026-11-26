@@ -71,9 +71,10 @@ void Draw(AppContext& ctx)
 	constexpr float kDialogWidth = 620.0f;
 	ImGui::SetNextWindowSize(ImVec2(kDialogWidth, 0.0f), ImGuiCond_Appearing);
 	EditorWidgets::pinDialogToEditorWindow();
+	// No title bar: the title is hidden ("##"), and the heading below says it.
 	if (!ImGui::BeginPopupModal(kTitle, nullptr,
 	                            ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_AlwaysAutoResize |
-	                            ImGuiWindowFlags_NoSavedSettings))
+	                            ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoTitleBar))
 		return;
 
 	HE::Ed::Help::Scope helpScope("Asset Recovery");

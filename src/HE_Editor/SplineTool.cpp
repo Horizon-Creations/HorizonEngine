@@ -346,7 +346,8 @@ namespace
 				if (c.ok)
 				{
 					char line[160];
-					std::snprintf(line, sizeof line, "Lake made: level %.2f m, %u cells of water%s", c.level, c.cells,
+					// The cell count is on the line above, live; not repeated here.
+					std::snprintf(line, sizeof line, "Lake made: level %.2f m%s", c.level,
 					              c.ground ? ", bed dug" : "");
 					say(ctx, spline, line);
 					noteEdited(ctx, terrain);
@@ -372,15 +373,16 @@ namespace
 				noteEdited(ctx, terrain);
 			}
 			EditorWidgets::helpForLabel("Level##lake");
-			clippingRows(ctx, terrain);
-
-			ImGui::Spacing();
+			// Depth and Bank before the clipping rows, in the order Create Lake showed them.
 			EditorWidgets::Row::dragFloat("Depth##lake", &s_lake.depth, 0.05f, 0.0f, 200.0f, "%.2f m");
 			EditorWidgets::helpForLabel("Depth##lake");
 			EditorWidgets::Row::dragFloat("Bank##lake", &s_lake.bank, 0.1f, 0.0f, 500.0f, "%.1f m");
 			EditorWidgets::helpForLabel("Bank##lake");
 			s_lake.depth = std::max(0.0f, s_lake.depth);
 			s_lake.bank  = std::max(0.0f, s_lake.bank);
+			clippingRows(ctx, terrain);
+
+			ImGui::Spacing();
 			if (EditorWidgets::button("Dig Again", ImVec2(-1.0f, 0.0f)))
 			{
 				// The world as it is now, kept aside: pressed on a bed that is already
@@ -457,7 +459,13 @@ void renderPanel(AppContext& ctx)
 	}
 
 	bool closed = s.closed;
-	if (EditorWidgets::checkbox("Closed", &closed))
+	bool toggled = false;
+	{
+		// Name on the left, like the lake's rows below.
+		EditorWidgets::Row::InlineLabels labelColumn;
+		toggled = EditorWidgets::checkbox("Closed", &closed);
+	}
+	if (toggled)
 	{
 		s_tool.toggleClosed(world, ctx.selection, ctx.undoSys);
 		noteEdited(ctx, active);
@@ -471,12 +479,12 @@ void renderPanel(AppContext& ctx)
 	if (hasPoint)
 	{
 		ImGui::TextDisabled("Point %d selected", s_tool.selectedPoint());
-		if (EditorWidgets::removeButton("Delete Point"))
+		if (EditorWidgets::removeButton("Remove Point"))
 		{
 			s_tool.deleteSelectedPoint(world, ctx.selection, ctx.undoSys);
 			noteEdited(ctx, active);
 		}
-		EditorWidgets::helpForLabel("Delete Point");
+		EditorWidgets::helpForLabel("Remove Point");
 	}
 	else
 		ImGui::TextDisabled("Click a point to select it");
@@ -493,14 +501,7 @@ void renderPanel(AppContext& ctx)
 	if (EditorWidgets::button("New Spline"))
 		ctx.selection.clear();   // nothing selected: the next click starts a fresh line
 	EditorWidgets::helpForLabel("New Spline");
-
-	ImGui::Spacing();
-	ImGui::SeparatorText("Controls");
-	ImGui::TextDisabled("Click: add a point");
-	ImGui::TextDisabled("Click the line: insert a point");
-	ImGui::TextDisabled("Drag the gizmo: move the point");
-	ImGui::TextDisabled("Del: delete the point");
-	ImGui::TextDisabled("Esc: let go of the point");
+	// The click/drag/Del/Esc controls are in the viewport's hint bar.
 #else
 	(void)ctx;
 #endif

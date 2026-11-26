@@ -15,7 +15,7 @@ void EngineExecCached::Roll(RunState& rs)
     v1b = rs.randomValue_value;
     rs.randomRange_value = HE::api::random::range(0.0f, 10.0f);
     v2 = rs.randomRange_value;
-    rs.saveSetNumber_ok = HE::api::save::setNumber("hc.parity", 3.5f);
+    rs.setSavedNumber_ok = HE::api::save::setNumber("hc.parity", 3.5f);
     saved = HE::api::save::getNumber("hc.parity", -1.0f);
 }
 

@@ -209,7 +209,13 @@ bool drawOptions(Options& o, Kind kind)
 #ifdef HE_IMGUI_ENABLED
 	HE::Ed::Help::Scope helpScope("Generate LODs");
 	changed |= EditorWidgets::Row::sliderInt("Levels##autolod", &o.levels, 1, 6);
-	changed |= EditorWidgets::Row::sliderFloat("Reduction Per Level##autolod", &o.step, 0.2f, 0.9f, "keeps %.2f");
+	// Shown in percent like Lowest Level below it; the option stays a fraction.
+	float keepPct = o.step * 100.0f;
+	if (EditorWidgets::Row::sliderFloat("Reduction Per Level##autolod", &keepPct, 20.0f, 90.0f, "keeps %.0f %%"))
+	{
+		o.step  = keepPct / 100.0f;
+		changed = true;
+	}
 	changed |= EditorWidgets::Row::sliderFloat("Lowest Level##autolod", &o.lowest, 1.0f, 50.0f, "%.0f %% of the triangles");
 	if (kind != Kind::MeshAsset)
 		changed |= EditorWidgets::Row::sliderFloat("Pixel Error##autolod", &o.tolerancePx, 0.5f, 8.0f, "%.1f px");

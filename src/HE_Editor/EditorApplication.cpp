@@ -1321,6 +1321,15 @@ void EditorApplication::OnInit()
 			ImFontConfig monoCfg;
 			monoCfg.SizePixels = sizeBody;
 			m_fontMono = io.Fonts->AddFontDefaultVector(&monoCfg);
+			// ProggyForever has no "…", "—" or arrows, which logs and export steps
+			// print: merged in from the body font so they stop showing as '?'.
+			// Monospace columns only use ASCII, which stays Proggy's.
+			if (std::filesystem::exists(fontPath))
+			{
+				ImFontConfig mergeCfg = cfg;
+				mergeCfg.MergeMode = true;
+				io.Fonts->AddFontFromFileTTF(fontPath.c_str(), sizeBody, &mergeCfg);
+			}
 		}
 
 		// No io.Fonts->Build() here — since ImGui 1.92 the renderer backends

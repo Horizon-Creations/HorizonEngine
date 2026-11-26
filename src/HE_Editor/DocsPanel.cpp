@@ -328,6 +328,8 @@ namespace
 		ImDrawList* dl = ImGui::GetWindowDrawList();
 
 		bool lineStart = true;
+		float prevPad = 0.0f;                     // the code pill drawn past the last word
+		const std::string* prevHref = nullptr;    // the link the last word belonged to
 		for (std::size_t i = 0; i < words.size(); ++i)
 		{
 			const Word& w = words[i];
@@ -341,18 +343,27 @@ namespace
 			const bool isCode = w.style == docs::Style::Code;
 			if (isCode && ctx.code) ImGui::PushFont(ctx.code, 0.0f);
 
-			const float gap = (lineStart || !w.spaceBefore) ? 0.0f : spaceW;
 			const ImVec2 size = ImGui::CalcTextSize(w.text.c_str());
 			const float  pad  = isCode ? 3.0f : 0.0f;
+			// A code pill reaches `pad` past its text on both sides, so a space
+			// between a pill and plain text grows by that much — or the pill
+			// swallowed it ("variableScore"). Two pills in a row keep the plain
+			// space, so "Edit » Preferences" stays one pill; punctuation glued to
+			// a word stays glued.
+			const bool pillEdge = (prevPad > 0.0f) != (pad > 0.0f);
+			const float gap = (lineStart || !w.spaceBefore) ? 0.0f
+			                : spaceW + (pillEdge ? prevPad + pad : 0.0f);
 			// Keep the word on this line only if it still fits. Otherwise simply
 			// do not call SameLine and let it fall to the next one — a single word
 			// wider than the column then overflows rather than looping forever on
-			// an impossible fit.
+			// an impossible fit. A word glued to the one before (the "." after a
+			// name) never breaks off on its own.
+			const ImVec2 prevMax = ImGui::GetItemRectMax();
 			if (!lineStart)
 			{
-				const float x = ImGui::GetItemRectMax().x + gap;
-				if (x + size.x + pad * 2.0f > rightEdge) lineStart = true;
-				else                                     ImGui::SameLine(0.0f, gap);
+				const float x = prevMax.x + gap;
+				if (w.spaceBefore && x + size.x + pad > rightEdge) lineStart = true;
+				else                                               ImGui::SameLine(0.0f, gap);
 			}
 
 			if (isCode)
@@ -367,14 +378,19 @@ namespace
 			ImGui::TextUnformatted(w.text.c_str());
 			ImGui::PopStyleColor();
 			if (isCode && ctx.code) ImGui::PopFont();
+			const bool continuesLink = !lineStart && w.href && prevHref == w.href;
 			lineStart = false;
+			prevPad   = pad;
+			prevHref  = w.href;
 
 			if (w.href)
 			{
 				const ImVec2 mn = ImGui::GetItemRectMin();
 				const ImVec2 mx = ImGui::GetItemRectMax();
 				const bool hovered = ImGui::IsItemHovered();
-				dl->AddLine(ImVec2(mn.x, mx.y - 1.0f), ImVec2(mx.x, mx.y - 1.0f),
+				// One underline under a multi-word link, through the spaces.
+				const float x0 = continuesLink ? prevMax.x : mn.x;
+				dl->AddLine(ImVec2(x0, mx.y - 1.0f), ImVec2(mx.x, mx.y - 1.0f),
 				            ImGui::GetColorU32(colorFor(docs::Style::Link)),
 				            hovered ? 1.4f : 1.0f);
 				if (hovered)
@@ -470,8 +486,10 @@ namespace
 				const auto first = text.find_first_not_of(' ');
 				const auto last  = text.find_last_not_of(' ');
 				const std::string mark = first == std::string::npos ? std::string() : text.substr(first, last - first + 1);
-				if (mark == "\xe2\x80\xa2" || mark == "\xe2\x9c\x93" || mark == "\xe2\x9c\x94")
-				{
+				auto isMark = [](const std::string& s) {
+					return s == "\xe2\x80\xa2" || s == "\xe2\x9c\x93" || s == "\xe2\x9c\x94";
+				};
+				auto drawTick = [] {
 					const float  h = ImGui::GetTextLineHeight();
 					const ImVec2 p = ImGui::GetCursorScreenPos();
 					ImGui::Dummy(ImVec2(h, h));
@@ -481,6 +499,27 @@ namespace
 					dl->PathLineTo(ImVec2(p.x + h * 0.42f, p.y + h * 0.76f));
 					dl->PathLineTo(ImVec2(p.x + h * 0.84f, p.y + h * 0.26f));
 					dl->PathStroke(col, 0, std::max(1.6f, h * 0.12f));
+				};
+				// "• (basic)": the mark plus a qualifier — the tick, then the rest.
+				const std::string& lead = row[c].empty() ? std::string() : row[c][0].text;
+				const auto leadAt = lead.find_first_not_of(' ');
+				const auto leadSp = leadAt == std::string::npos ? std::string::npos : lead.find(' ', leadAt);
+				if (isMark(mark))
+					drawTick();
+				else if (leadSp != std::string::npos && isMark(lead.substr(leadAt, leadSp - leadAt)))
+				{
+					std::vector<docs::Run> rest = row[c];
+					rest[0].text.erase(0, leadSp + 1);
+					// The first word beside the tick only if it fits there; in a
+					// narrow column it goes under it rather than being cut in two.
+					const float firstW = ImGui::CalcTextSize(
+						rest[0].text.substr(0, rest[0].text.find(' ')).c_str()).x;
+					const float avail = ImGui::GetContentRegionAvail().x;
+					drawTick();
+					const float tickW = ImGui::GetItemRectSize().x + ImGui::GetStyle().ItemSpacing.x * 0.5f;
+					if (tickW + firstW <= avail)
+						ImGui::SameLine(0, ImGui::GetStyle().ItemSpacing.x * 0.5f);
+					drawRuns(ctx, rest);
 				}
 				else
 					drawRuns(ctx, row[c]);

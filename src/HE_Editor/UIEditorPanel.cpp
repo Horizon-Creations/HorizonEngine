@@ -806,7 +806,7 @@ bool isUiDomainMaterial(AppContext& ctx, const std::string& relPath)
 // ── One label position for the whole Details panel ──────────────────────────
 // The panel used three: above the field (Name, Tab index), left of it (the
 // asset slots, the anchor grid) and ImGui's own right-hand label beside every
-// Drag/Combo, which in 300 px cut "Corner Radius" and "Hover cursor" off at the
+// Drag/Combo, which in 300 px cut "Corner Radius" and "Hover Cursor" off at the
 // edge (Thema 92 audit). Every row now goes the EditorWidgets::Row way: the name
 // on its own line, the control at full width underneath. Checkboxes keep their
 // label beside the box, which is what a checkbox looks like everywhere.
@@ -1409,7 +1409,7 @@ void drawSurfaceStyle(State& st, UIElement& n, bool& edit, bool& committed)
 	// them away.
 	const bool differ = !n.uniformCornerRadius();
 	bool perCorner = differ || st.cornerPerSide;
-	if (EditorWidgets::checkbox("Per corner", &perCorner))
+	if (EditorWidgets::checkbox("Per Corner", &perCorner))
 	{
 		st.cornerPerSide = perCorner;
 		// Folding back up keeps the top-left corner and gives it to the other
@@ -1449,7 +1449,7 @@ void drawSurfaceStyle(State& st, UIElement& n, bool& edit, bool& committed)
 			committed |= ImGui::IsItemDeactivatedAfterEdit();
 		}
 		ImGui::TextDisabled("Corners: top-left / top-right, then bottom.");
-		EditorWidgets::helpForLabel("Per corner");
+		EditorWidgets::helpForLabel("Per Corner");
 	}
 
 	if (EditorWidgets::Row::dragFloat("Border Width", &n.borderWidth, 0.25f, 0.0f, 1000.0f))
@@ -2241,8 +2241,9 @@ void drawDetails(State& st, AppContext& ctx)
 				commitEdit(st, ctx);
 			}
 			EditorWidgets::helpForLabel("Follow the Theme");
-			ImGui::SameLine();
-			ImGui::TextDisabled("%d of %d", following, total);
+			// Under the button: beside it the sentence ran off a narrow pane.
+			EditorWidgets::hint(total == 1 ? "%d of %d element follows the theme."
+			                               : "%d of %d elements follow the theme.", following, total);
 		}
 		} // end of the Theme section
 
@@ -2284,8 +2285,8 @@ void drawDetails(State& st, AppContext& ctx)
 		}
 
 		ImGui::Spacing();
-		ImGui::TextWrapped("Select an element on the canvas or in the hierarchy "
-		                   "to edit its properties.");
+		ImGui::TextWrapped("These are the canvas settings. Select an element on the canvas "
+		                   "or in the hierarchy to edit its properties.");
 		return;
 	}
 
@@ -2736,24 +2737,24 @@ void drawDetails(State& st, AppContext& ctx)
 	// like Surface: the defaults are what almost every element wants.
 	if (DetailSection interactionSection("Interaction", false); interactionSection.open)
 	{
-	if (EditorWidgets::checkbox("Hit-testable", &n->hitTestable)) committed = true;
+	if (EditorWidgets::checkbox("Hit Testable", &n->hitTestable)) committed = true;
 	// Directly under it, and deliberately not phrased as its opposite: this is
 	// the other thing a press here can mean, and the two are independent.
-	if (EditorWidgets::checkbox("Window drag", &n->windowDrag)) committed = true;
-	if (EditorWidgets::checkbox("Clip children", &n->clipChildren)) committed = true;
-	if (EditorWidgets::checkbox("Focus frame", &n->focusFrame)) committed = true;
+	if (EditorWidgets::checkbox("Window Drag", &n->windowDrag)) committed = true;
+	if (EditorWidgets::checkbox("Clip Children", &n->clipChildren)) committed = true;
+	if (EditorWidgets::checkbox("Focus Frame", &n->focusFrame)) committed = true;
 	// Beside the focus frame, because both are about the keyboard and this is
 	// the one row that says where Tab goes next. 0 = the order of the tree on
 	// the left, which is what an author reads anyway.
-	if (EditorWidgets::Row::inputInt("Tab index", &n->tabIndex)) committed = true;
-	if (EditorWidgets::checkbox("Accepts drop", &n->acceptsDrop)) committed = true;
+	if (EditorWidgets::Row::inputInt("Tab Index", &n->tabIndex)) committed = true;
+	if (EditorWidgets::checkbox("Accepts Drop", &n->acceptsDrop)) committed = true;
 	if (EditorWidgets::checkbox("Draggable", &n->draggable)) committed = true;
 	if (n->draggable)
-		if (EditorWidgets::Row::inputText("Drag payload", &n->dragPayload)) committed = true;
-	detailLabel("Hover cursor");
+		if (EditorWidgets::Row::inputText("Drag Payload", &n->dragPayload)) committed = true;
+	detailLabel("Hover Cursor");
 	ImGui::SetNextItemWidth(-FLT_MIN);
-	const bool cursorOpen = ImGui::BeginCombo("##Hover cursor", HE::uiCursorName(n->hoverCursor));
-	if (!cursorOpen) EditorWidgets::helpForLabel("Hover cursor");
+	const bool cursorOpen = ImGui::BeginCombo("##Hover Cursor", HE::uiCursorName(n->hoverCursor));
+	if (!cursorOpen) EditorWidgets::helpForLabel("Hover Cursor");
 	if (cursorOpen)
 	{
 		for (int c = 0; c < (int)HE::UICursor::COUNT; ++c)
@@ -2804,7 +2805,9 @@ void drawKeyEditor(State& st, AppContext& ctx, HE::UIAnimClip& clip)
 	if (!haveTrack || st.keySel < 0 ||
 	    st.keySel >= static_cast<int>(clip.tracks[st.trackSel].keys.size()))
 	{
-		ImGui::TextDisabled("Click a key to edit its value here.");
+		// The bar above already says to pick a track or a key; a second line
+		// saying it again only appears once a track is picked.
+		if (haveTrack) ImGui::TextDisabled("Click a key to edit its value here.");
 		return;
 	}
 	HE::UIAnimTrack& tr  = clip.tracks[st.trackSel];
@@ -3136,8 +3139,8 @@ void drawTimeline(State& st, AppContext& ctx, float height)
 
 	if (st.clipIndex < 0)
 	{
-		ImGui::TextDisabled("No animation yet. \"New\" makes one; a track is a property of an");
-		ImGui::TextDisabled("element, and a key is what that property is at a moment.");
+		EditorWidgets::hint("No animation yet. \"New\" makes one; a track is a property of an "
+		                    "element, and a key is what that property is at a moment.");
 		ImGui::EndChild();
 		return;
 	}
@@ -3708,6 +3711,8 @@ void drawTimeline(State& st, AppContext& ctx, float height)
 	ImGui::EndChild();
 }
 
+std::string spacedTypeName(const char* n);   // below, with the palette
+
 void drawDetailsEvents(State& st, AppContext& ctx)
 {
 	UIElement* n = st.tree.find(st.selected);
@@ -3719,25 +3724,30 @@ void drawDetailsEvents(State& st, AppContext& ctx)
 	// and short, and it is the way from this element into its logic.
 	DetailSection section("Events", true);
 	if (!section.open) return;
+	// The events already in the graph are listed (a click goes to the node);
+	// the rest sit in one "Add Event" menu. A button per event made a wall of
+	// a dozen full-width bars on every element.
+	auto exists = [&](const UIEventDesc& d) {
+		for (const auto& g : st.graph.nodes)
+			if (g.type == NT::Event && g.s == d.name && g.elem == n->id) return true;
+		return false;
+	};
+	bool anyMissing = false;
 	for (const UIEventDesc& d : evs)
 	{
-		const bool exists = [&]{
-			for (const auto& g : st.graph.nodes)
-				if (g.type == NT::Event && g.s == d.name && g.elem == n->id) return true;
-			return false;
-		}();
-		const std::string label = "+ " + d.name + "##ev";
-		// Room for the "added" beside it; a full-width button pushed it past
-		// the panel's edge.
-		const float room = exists
-			? ImGui::CalcTextSize("added").x + ImGui::GetStyle().ItemSpacing.x : 0.0f;
-		if (ImGui::Button(label.c_str(), ImVec2(-1.0f - room, 0)))
+		if (!exists(d)) { anyMissing = true; continue; }
+		const std::string label = spacedTypeName(d.name.c_str()) + "##ev" + d.name;
+		if (EditorWidgets::button(label.c_str(), ImVec2(-1.0f, 0)))
 			addOrFocusEvent(st, ctx, d.name, d, n->id);
-		if (exists)
-		{
-			ImGui::SameLine();
-			ImGui::TextDisabled("added");
-		}
+	}
+	if (!anyMissing) return;
+	ImGui::SetNextItemWidth(-1.0f);
+	if (ImGui::BeginCombo("##addEvent", "Add Event..."))
+	{
+		for (const UIEventDesc& d : evs)
+			if (!exists(d) && ImGui::Selectable(spacedTypeName(d.name.c_str()).c_str()))
+				addOrFocusEvent(st, ctx, d.name, d, n->id);
+		ImGui::EndCombo();
 	}
 }
 
@@ -5040,7 +5050,7 @@ void drawCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 		const ImVec2 mn = toScreen(it.r.mn), mx = toScreen(it.r.mx);
 		// A clipping ancestor cuts this element off in the designer exactly as
 		// it will at runtime (the scissor there, an ImGui clip rect here) —
-		// otherwise "Clip children" is a setting whose effect you cannot see
+		// otherwise "Clip Children" is a setting whose effect you cannot see
 		// until you press play.
 		HE::UIWidgetRect clip{};
 		const bool clipped = HE::uiElementClipRect(st.tree, *it.n, clip, layoutCanvas);
@@ -7000,6 +7010,13 @@ void render(AppContext& ctx, const std::string& assetPath,
 		if (EditorWidgets::menuItem("Pressed",  nullptr, st.previewState == 2)) st.previewState = 2;
 		if (EditorWidgets::menuItem("Focused",  nullptr, st.previewState == 3)) st.previewState = 3;
 		if (EditorWidgets::menuItem("Disabled", nullptr, st.previewState == 4)) st.previewState = 4;
+		// Focused draws exactly like Normal unless the element has a focus
+		// frame, which read as a switch that does nothing.
+		bool anyFocusFrame = false;
+		for (int sid : selectionIds(st))
+			if (const UIElement* e = st.tree.find(sid); e && e->focusFrame) anyFocusFrame = true;
+		if (!anyFocusFrame)
+			ImGui::TextDisabled("Focused looks like Normal until\nInteraction > Focus Frame is on.");
 		ImGui::EndPopup();
 	}
 	if (openThemePopup) ImGui::OpenPopup("##uithemepick");
@@ -7183,7 +7200,9 @@ void render(AppContext& ctx, const std::string& assetPath,
 				// mid-letter. A notch smaller than body text, and growing with the
 				// tile on a larger screen.
 				ImFont* font   = ImGui::GetFont();
-				const float fs = ImGui::GetFontSize() * 0.86f * tileScale;
+				// Capped near body size: scaled with the tile, the names grew past
+				// every other text in the editor on a large monitor.
+				const float fs = ImGui::GetFontSize() * std::min(0.86f * tileScale, 1.0f);
 				const auto widthOf = [&](const std::string& t)
 				{ return font->CalcTextSizeA(fs, FLT_MAX, 0.0f, t.c_str()).x; };
 				const float maxW = size.x - 4.0f * tileScale;
@@ -7618,7 +7637,7 @@ void render(AppContext& ctx, const std::string& assetPath,
 				for (const auto& f : res.files)
 					lines += (size_t)std::count(f.contents.begin(), f.contents.end(), '\n');
 				st.compileOk  = true;
-				st.compileMsg = "compiles clean — " + std::to_string(lines) + " lines of C++";
+				st.compileMsg = "Compiles clean — " + std::to_string(lines) + " lines of C++";
 				// Reward moment (EditorRewards.h): COMPILED CLEAN.
 				HE::Ed::Rewards::fire(ctx, HE::Ed::Rewards::Moment::CompiledClean);
 				for (const auto& w : res.warnings)

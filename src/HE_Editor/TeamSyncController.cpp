@@ -405,6 +405,9 @@ std::string TeamSyncController::stateLine() const
 	case Phase::Idle:
 		if (s.waiting) return plural(s.waiting, "change", "changes") + " not on the team server yet (r" +
 		                      std::to_string(s.rev) + ").";
+		// A conflict left over is not "in sync", whatever the revision says.
+		if (const std::size_t open = m_sync.lost().size())
+			return plural(open, "file", "files") + " to resolve (r" + std::to_string(s.rev) + ").";
 		return "In sync with the team at r" + std::to_string(s.rev) + ".";
 	}
 	return {};

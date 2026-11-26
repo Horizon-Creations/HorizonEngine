@@ -159,7 +159,7 @@ namespace
 		ImGuiID       replicatesBox = 0;   // and the one switch inside it
 		ImGuiID       activeBox     = 0;   // the Active checkbox's id, likewise
 		ImGuiID       splineClosed  = 0;   // the Spline section's Closed switch, likewise
-		ImGuiID       splinePlus    = 0;   // its "+ Point" button
+		ImGuiID       splinePlus    = 0;   // its "Add Point" button
 		ImGuiID       splineRemove0 = 0;   // the Remove button on its first point row
 	};
 
@@ -180,7 +180,7 @@ namespace
 		p.replicatesBox = ImGui::GetID("Replicates");
 		p.activeBox     = ImGui::GetID("##entity_active");
 		p.splineClosed  = ImGui::GetID("Closed##spline");
-		p.splinePlus    = ImGui::GetID("+ Point");
+		p.splinePlus    = ImGui::GetID("Add Point");
 		ImGui::PushID(0);
 		p.splineRemove0 = ImGui::GetID("Remove##splinept");
 		ImGui::PopID();
@@ -343,9 +343,9 @@ TEST_CASE("inspector ui: a spline's Details section closes the line, adds and re
 	CHECK(undo.canUndo());
 	CHECK(reg.get<SplineComponent>(line).controlPoints.size() == 2);   // nothing else moved
 
-	// "+ Point" carries on along the last segment (0 -> 4 on X, so the next is 8).
+	// "Add Point" carries on along the last segment (0 -> 4 on X, so the next is 8).
 	const float plusY = yOf(p, p.splinePlus, leftX);
-	REQUIRE_MESSAGE(plusY > 0.0f, "the + Point button is not on the panel");
+	REQUIRE_MESSAGE(plusY > 0.0f, "the Add Point button is not on the panel");
 	const size_t depth = undo.undoDepth();
 	clickAt(p, leftX, plusY);
 	REQUIRE(reg.get<SplineComponent>(line).controlPoints.size() == 3);
@@ -354,8 +354,10 @@ TEST_CASE("inspector ui: a spline's Details section closes the line, adds and re
 
 	// Remove on the first row takes the first point.
 	for (int i = 0; i < 3; ++i) frame(p, false);
-	const float removeX = leftX + 20.0f;   // a small button under the point's three fields
-	const float removeY = yOf(p, p.splineRemove0, removeX);
+	// Remove sits at the right end of the "Point 1" heading row.
+	float removeX = -1.0f, removeY = -1.0f;
+	for (float x = float(W) - 20.0f; x > leftX && removeY < 0.0f; x -= 8.0f)
+		if ((removeY = yOf(p, p.splineRemove0, x)) > 0.0f) removeX = x;
 	REQUIRE_MESSAGE(removeY > 0.0f, "the first point row has no Remove button");
 	clickAt(p, removeX, removeY);
 	REQUIRE(reg.get<SplineComponent>(line).controlPoints.size() == 2);

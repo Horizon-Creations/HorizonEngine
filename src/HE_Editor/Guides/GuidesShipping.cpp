@@ -135,7 +135,7 @@ std::vector<Docs::Page> shippingPages()
 				  "Health, level, coins. Named, because that is how they are read back." },
 			}),
 			para("Create Save makes one, Write Save puts it on disk, Load Save brings "
-			     "it back. Save Set Number and Save Get Number and their string, bool "
+			     "it back. Set Saved Number and Get Saved Number and their string, bool "
 			     "and struct siblings move the values. List Saves and Save Exists are "
 			     "what a load menu is built from."),
 		}));

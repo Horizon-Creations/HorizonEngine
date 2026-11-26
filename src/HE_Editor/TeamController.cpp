@@ -681,6 +681,11 @@ TeamClient::ReplyFn TeamController::reportFailure(std::string what)
 
 bool TeamController::sessionRunning() const { return m_collab.active(); }
 
+void TeamController::stopHosting()
+{
+	if (!m_hosted.empty() && m_collab.active() && m_collab.isHost()) m_collab.leave();
+}
+
 bool TeamController::inSession(const std::string& session) const
 {
 	return !session.empty() && m_collab.active() && m_collab.sessionId() == session;

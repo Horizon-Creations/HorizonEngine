@@ -1,6 +1,7 @@
 #include "TeamSyncView.h"
 
 #include "EditorHelp.h"      // "Team Sync/<label>" scope for the tooltips
+#include "EditorSettingsPanel.h"   // Open Team Settings
 #include "EditorTheme.h"
 #include "EditorWidgets.h"
 #include "TeamController.h"
@@ -468,9 +469,11 @@ void TeamSyncView::draw(TeamSyncController& sync)
 		const bool blocked = sync.blocker() != TeamSyncController::Blocker::None;
 		const bool trouble = blocked || s.phase == Phase::Offline || !s.error.empty();
 		const bool working = s.phase == Phase::Working || s.phase == Phase::Connecting || s.phase == Phase::WaitingTicket;
+		// A differing first sync or a missing project waits on a person too, so it must not read as OK.
 		const bool conflicts = !svc.lost().empty();
-		const ImVec4 tone = trouble ? Theme::Warn : conflicts ? Theme::Warn : working ? Theme::Accent : Theme::Ok;
-		Icon icon = trouble || conflicts ? T::iconWarning : working ? T::iconRefresh : T::iconCheck;
+		const bool waits = conflicts || !s.firstSyncDiffers.empty() || s.projectMissing;
+		const ImVec4 tone = trouble || waits ? Theme::Warn : working ? Theme::Accent : Theme::Ok;
+		Icon icon = trouble || waits ? T::iconWarning : working ? T::iconRefresh : T::iconCheck;
 		const ImVec2 p = ImGui::GetCursorScreenPos();
 		const float w = ImGui::GetContentRegionAvail().x;
 		const float cardH = fh * 2.6f;
@@ -497,6 +500,16 @@ void TeamSyncView::draw(TeamSyncController& sync)
 		ImGui::EndDisabled();
 		ImGui::SetCursorScreenPos(ImVec2(p.x, p.y + cardH));
 		ImGui::Dummy(ImVec2(w, 4.0f));
+		// Signed out or in the wrong team: the fix is in Preferences, so the
+		// warning offers the way there instead of only a greyed Sync Now.
+		const auto blocker = sync.blocker();
+		if (blocker == TeamSyncController::Blocker::SignedOut ||
+		    blocker == TeamSyncController::Blocker::OtherTeam)
+		{
+			if (EditorWidgets::button("Open Team Settings"))
+				EditorSettingsPanel::requestOpen(EditorSettingsPanel::Page::Team);
+			note("Open Team Settings");
+		}
 		if (blocked) return;
 		drawBranchBar(sync);
 		if (!s.error.empty() && s.phase != Phase::Offline)
@@ -602,7 +615,9 @@ void TeamSyncView::draw(TeamSyncController& sync)
 			const ImU32 lineCol = Theme::u32(Theme::warm(0.30f));
 			const float lx = p.x + 14.0f;
 			if (i > 0) dl->AddLine(ImVec2(lx, p.y), ImVec2(lx, p.y + rowH * 0.5f), lineCol, 2.0f);
-			if (i + 1 < history.size()) dl->AddLine(ImVec2(lx, p.y + rowH * 0.5f), ImVec2(lx, p.y + rowH), lineCol, 2.0f);
+			// Through the item spacing under the row too, or the line breaks between rows.
+			if (i + 1 < history.size())
+				dl->AddLine(ImVec2(lx, p.y + rowH * 0.5f), ImVec2(lx, p.y + rowH + ImGui::GetStyle().ItemSpacing.y), lineCol, 2.0f);
 			const ImVec2 dot(lx, p.y + rowH * 0.5f);
 			if (v.rev == s.rev) dl->AddCircleFilled(dot, 6.0f, Theme::u32(Theme::Accent));
 			else                dl->AddCircleFilled(dot, 4.5f, Theme::u32(special ? Theme::Warn : Theme::TextDim));
@@ -708,6 +723,8 @@ void TeamSyncView::drawConflictWindow(TeamSyncController& sync)
 	}
 
 	ImGui::SetNextWindowSize(ImVec2(860.0f, 580.0f), ImGuiCond_FirstUseEver);
+	// Capped to the editor window like the other dialogs: 860 px is wider than a small one.
+	EditorWidgets::pinDialogToEditorWindow();
 	bool open = true;
 	if (!ImGui::Begin("Resolve Conflict###teamconflict", &open, ImGuiWindowFlags_NoCollapse))
 	{

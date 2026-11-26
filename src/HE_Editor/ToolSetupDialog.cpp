@@ -63,7 +63,8 @@ bool s_tcConsumed      = false; // the re-probe after it was triggered
 bool s_ackTc           = false; // a failure was acknowledged (Retry / Recheck / Install All)
 bool s_ackGit          = false;
 bool s_logIsGit        = false; // which installer's log the "Install log" fold shows
-bool s_openLog         = false; // unfold the log next frame ("Show Log" on a failure)
+bool  s_capBody        = false; // drawn inside the capped modal (DrawToolSetupDialog), not a host window
+float s_footerH        = 0.0f;  // last frame's footer height, kept clear below the rows
 
 std::vector<Tool> s_queue;      // "Install All Missing", worked off one installer at a time
 
@@ -558,10 +559,17 @@ void drawIdentityForm(AppContext& ctx)
 
 	const bool applying = ctx.gitIdentityApplying;
 	if (applying) ImGui::BeginDisabled();
-	ImGui::SetNextItemWidth(186.0f);
+	// Labelled, not only placeholders: a placeholder is gone the moment the field has text.
+	const float fieldX = ImGui::GetCursorPosX() + ImGui::CalcTextSize("Email").x + ImGui::GetStyle().ItemSpacing.x * 2.0f;
+	ImGui::AlignTextToFramePadding();
+	ImGui::TextUnformatted("Name");
+	ImGui::SameLine(fieldX);
+	ImGui::SetNextItemWidth(260.0f);
 	ImGui::InputTextWithHint("##tsname", "Your Name", s_name, sizeof(s_name));
-	ImGui::SameLine();
-	ImGui::SetNextItemWidth(186.0f);
+	ImGui::AlignTextToFramePadding();
+	ImGui::TextUnformatted("Email");
+	ImGui::SameLine(fieldX);
+	ImGui::SetNextItemWidth(260.0f);
 	ImGui::InputTextWithHint("##tsemail", "you@example.com", s_email, sizeof(s_email));
 
 	const bool usable = s_name[0] != '\0' && s_email[0] != '\0';
@@ -569,6 +577,8 @@ void drawIdentityForm(AppContext& ctx)
 	if (EditorWidgets::primaryButton("Save Identity") && ctx.setGitIdentity)
 		ctx.setGitIdentity(s_name, s_email);
 	if (!usable) ImGui::EndDisabled();
+	// Says why the button is off instead of leaving it to be guessed.
+	if (!usable && !applying) { ImGui::SameLine(); ImGui::TextDisabled("Name and email are both needed."); }
 	if (applying) { ImGui::EndDisabled(); ImGui::SameLine(); ImGui::TextDisabled("Saving…"); }
 }
 
@@ -695,7 +705,7 @@ void drawRow(AppContext& ctx, Tool t)
 			if (ctl->cancel.load())
 				dimWrapped("Cancelling…");
 			else if (!names.empty())
-				dimWrapped(("Running: " + names + (percent >= 0 ? "  ·  " + std::to_string(percent) + " %" : std::string())).c_str());
+				dimWrapped(("Running: " + names + (percent >= 0 ? "  ·  " + std::to_string(percent) + "%" : std::string())).c_str());
 			else
 				dimWrapped("Waiting for the package manager to start…");
 			const long long last = ctl->lastActivityMs.load();
@@ -744,15 +754,15 @@ void drawRow(AppContext& ctx, Tool t)
 		break;
 
 	case RowState::Failed:
+		// Install's place and look: it is the same action again. No Show Log: the
+		// "Install log" fold-out below is that log, one click away.
 		if (busy) ImGui::BeginDisabled();
-		if (EditorWidgets::smallButton("Retry"))
+		if (EditorWidgets::primaryButton("Retry", ImVec2(kColAction - 16.0f, 0.0f)))
 		{
 			(gitSlot ? s_ackGit : s_ackTc) = true;
 			startOne(ctx, t);
 		}
 		if (busy) ImGui::EndDisabled();
-		ImGui::SameLine();
-		if (EditorWidgets::smallButton("Show Log")) s_openLog = true;
 		break;
 
 	case RowState::Installing:
@@ -791,7 +801,6 @@ void drawLog(AppContext& ctx)
 	else            { if (ctx.toolchainInstallLog) log = ctx.toolchainInstallLog(); }
 	if (log.empty()) return;
 
-	if (s_openLog) { ImGui::SetNextItemOpen(true); s_openLog = false; }
 	if (!ImGui::TreeNode("Install log")) return;
 	ImGui::BeginChild("##toolsetuplog", ImVec2(kContentW, 140.0f), true);
 	// Wrapped, not scrolled sideways: the sentence that says why an install stopped
@@ -868,7 +877,7 @@ void resetStateForTests()
 	s_git = {}; s_haveGit = s_checkingGit = false;
 	s_tcSlot = {}; s_gitSlot = {};
 	s_tcRequested = 0;
-	s_tcSeen = s_tcConsumed = s_ackTc = s_ackGit = s_logIsGit = s_openLog = false;
+	s_tcSeen = s_tcConsumed = s_ackTc = s_ackGit = s_logIsGit = false;
 	s_queue.clear();
 	s_openRequested = s_autoOpened = s_dontShowAgain = s_sawMissing = false;
 	s_flashTool = Tool::None; s_flashUntil = 0.0; s_flashArmed = false; s_flashRowH = 0.0f;
@@ -941,6 +950,21 @@ void drawToolSetup(AppContext& ctx, bool* closeRequested)
 	}
 
 	// ── The rows ─────────────────────────────────────────────────────────────
+	// In their own child that grows with them up to what the capped modal has
+	// left, so Recheck, Close and "Don't show this at startup" stay pinned below
+	// instead of scrolling away with the window. The footer's height is last
+	// frame's (the first frame only overshoots by it once).
+	float bodyMaxH = FLT_MAX;
+	if (s_capBody)
+	{
+		// pinDialogToEditorWindow's cap with its default margin (48 px a side).
+		const float capH = std::max(180.0f, ImGui::GetMainViewport()->WorkSize.y - 96.0f);
+		bodyMaxH = std::max(ImGui::GetFrameHeight() * 3.0f,
+		                    capH - ImGui::GetCursorPosY() - ImGui::GetStyle().WindowPadding.y - s_footerH);
+	}
+	ImGui::SetNextWindowSizeConstraints(ImVec2(0.0f, 0.0f), ImVec2(FLT_MAX, bodyMaxH));
+	ImGui::BeginChild("##toolsetupbody", ImVec2(kContentW + ImGui::GetStyle().ScrollbarSize, 0.0f),
+	                  ImGuiChildFlags_AutoResizeY);
 	constexpr ImGuiTableFlags kFlags = ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_BordersOuterH |
 	                                   ImGuiTableFlags_SizingFixedFit;
 	if (ImGui::BeginTable("##toolsetuprows", 3, kFlags))
@@ -955,8 +979,10 @@ void drawToolSetup(AppContext& ctx, bool* closeRequested)
 	ImGui::Spacing();
 	drawLog(ctx);
 	drawManual(ctx);
+	ImGui::EndChild();
 
 	// ── Footer ───────────────────────────────────────────────────────────────
+	const float footerTop = ImGui::GetCursorPosY();
 	ImGui::Spacing();
 	ImGui::Separator();
 	ImGui::Spacing();
@@ -1001,6 +1027,7 @@ void drawToolSetup(AppContext& ctx, bool* closeRequested)
 		}
 		if (closeRequested) *closeRequested = true;
 	}
+	s_footerH = ImGui::GetCursorPosY() - footerTop;
 
 	// Set up while this was open: close on our own, like the dialogs before did.
 	if (allOk && s_sawMissing && !busy && closeRequested) *closeRequested = true;
@@ -1045,7 +1072,9 @@ void DrawToolSetupDialog(AppContext& ctx)
 	}
 
 	bool close = false;
+	s_capBody = true;
 	drawToolSetup(ctx, &close);
+	s_capBody = false;
 	if (close) ImGui::CloseCurrentPopup();
 	else s_showing = true;
 	ImGui::EndPopup();
@@ -1067,7 +1096,7 @@ void drawMissingBanner(AppContext& ctx, Tool tool, const char* message)
 		const Slot& slot = isGitInstallTool(tool) ? s_gitSlot : s_tcSlot;
 		ImGui::TextDisabled("Installing · %s", clockText(slot).c_str());
 	}
-	else if (EditorWidgets::smallButton("Set Up…"))
+	else if (EditorWidgets::button("Set Up…"))   // a full button: it is the banner's one way out
 	{
 		requestShow(tool);
 	}

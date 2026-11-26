@@ -277,7 +277,7 @@ namespace
 		if (!w) return false;
 		const ImGuiID id = w->GetID(label);
 		for (float y = 14.0f; y < float(PH) - 14.0f; y += 3.0f)
-			for (float x = 18.0f; x < 120.0f; x += 8.0f)
+			for (float x = 18.0f; x < float(PW) - 14.0f; x += 8.0f)   // the control column, too
 				if (panelIdAt(r, x, y) == id) { outX = x; outY = y; return true; }
 		return false;
 	}
@@ -535,7 +535,7 @@ TEST_CASE("spline ui: the panel closes the line and deletes the selected point, 
 	CHECK(r.spline()->closed);
 	CHECK(r.undo.undoDepth() == depth + 1);
 
-	REQUIRE_MESSAGE(locate(r, "Delete Point", x, y), "no Delete Point button while a point is selected");
+	REQUIRE_MESSAGE(locate(r, "Remove Point", x, y), "no Remove Point button while a point is selected");
 	panelClick(r, x, y);
 	r.frame();
 	CHECK(r.points() == 2);

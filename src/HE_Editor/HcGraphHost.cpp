@@ -233,6 +233,22 @@ const char* pinTypeName(PT t)
 	}
 }
 
+// "OnBeginOverlap" -> "On Begin Overlap", "fontSize" -> "Font Size": registry and
+// property names, readable on the canvas and in menus. Display only — the name
+// stays what graphs store and the runtime matches.
+static std::string spacedName(const std::string& s)
+{
+	std::string out;
+	for (size_t i = 0; i < s.size(); ++i)
+	{
+		const unsigned char c = static_cast<unsigned char>(s[i]);
+		if (i > 0 && std::isupper(c) && std::islower(static_cast<unsigned char>(s[i - 1])))
+			out += ' ';
+		out += static_cast<char>(i == 0 ? std::toupper(c) : c);
+	}
+	return out;
+}
+
 std::vector<GraphEditor::Pin> nodePins(const HC::Node& n)
 {
 	std::vector<GraphEditor::Pin> out;
@@ -241,7 +257,7 @@ std::vector<GraphEditor::Pin> nodePins(const HC::Node& n)
 	auto push = [&](const HC::PinDesc& pd, bool input, bool isExec)
 	{
 		GraphEditor::Pin p;
-		p.id = id++; p.label = pd.name ? pd.name : "";
+		p.id = id++; p.label = pd.name ? spacedName(pd.name) : "";
 		p.color = HcEditorUtil::pinTypeColor(pd.type); p.input = input; p.isExec = isExec;
 		// The canvas draws one glyph per container KIND, so hand it the resolved
 		// kind — pd.kind(), not pd.container, or the legacy "isArray without a
@@ -390,7 +406,7 @@ std::string defaultNodeTitle(const HC::Node& n)
 	const char* base = HC::nodeDisplayName(n.type);
 	switch (n.type)
 	{
-		case NT::Event:        return n.s.empty() ? std::string(base) : n.s;
+		case NT::Event:        return n.s.empty() ? std::string(base) : spacedName(n.s);
 		case NT::GetVariable:  return "Get " + (n.s.empty() ? std::string("var") : n.s);
 		case NT::SetVariable:  return "Set " + (n.s.empty() ? std::string("var") : n.s);
 		case NT::FunctionEntry:
@@ -506,7 +522,7 @@ TypeMembers controlMembers(HE::UIWidgetType t)
 {
 	TypeMembers m;
 	m.key   = HE::uiClassKey(t);
-	m.label = std::string(HE::uiWidgetTypeName(t)) + " (Control)";
+	m.label = spacedName(HE::uiWidgetTypeName(t)) + " (Control)";
 	m.props = HE::uiClassProperties(t);
 	return m;
 }
@@ -1519,7 +1535,7 @@ int drawPinDragMenu(const Host& h, int srcNode, int srcPin, bool srcInput, const
 			for (const HE::UIPropDesc& pd : t.props)
 				for (const bool get : { true, false })
 				{
-					const std::string lbl = (get ? "Get " : "Set ") + pd.name;
+					const std::string lbl = (get ? "Get " : "Set ") + spacedName(pd.name);
 					if (!matches(lbl)) continue;
 					any = true;
 					if (!HcEditorUtil::searchMenuItem(lbl + idTag)) continue;

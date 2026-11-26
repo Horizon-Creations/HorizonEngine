@@ -922,7 +922,7 @@ namespace
 	  "What the layer is called in this list and in the Landscape panel. Empty "
 	  "shows it as \"Layer N\".",
 	  "", "scenes#foliage" },
-	{ "Foliage/Cast Shadows", "",
+	{ "Foliage/Casts Shadow", "",
 	  "Whether the layer casts shadows. Off saves a lot for short grass, whose "
 	  "shadow nobody sees.",
 	  "", "scenes#foliage" },
@@ -1048,7 +1048,7 @@ namespace
 	  "plus three, each with fewer triangles.",
 	  "", "rendering#performance" },
 	{ "Generate LODs/Reduction Per Level", "",
-	  "The share of the previous level's triangles each level keeps: 0.5 halves "
+	  "The share of the previous level's triangles each level keeps: 50 % halves "
 	  "the count every step. The last level ignores this and lands on Lowest Level.",
 	  "", "rendering#performance" },
 	{ "Generate LODs/Lowest Level", "",
@@ -1141,9 +1141,10 @@ namespace
 	{ "Audio Source/Asset ID", "", "The sound this source plays.", "", "systems#audio" },
 	{ "Audio Source/Bus", "",
 	  "Which mixer bus the sound goes through — music, sfx, voice — so a whole "
-	  "group can be turned down at once. Empty uses the bus the clip itself was "
-	  "given in the Audio Editor, or the master bus when it has none. A name the "
-	  "mixer does not have is skipped the same way, with a warning in the log.",
+	  "group can be turned down at once. The Clip's Bus uses the bus the clip "
+	  "itself was given in the Audio Editor, or the master bus when it has none. "
+	  "A bus that was removed from the mixer is shown as missing and skipped the "
+	  "same way.",
 	  "", "systems#audio-bus-eq" },
 	{ "Audio Source/Volume", "", "Playback volume. 1 is the file as recorded.",
 	  "", "systems#audio" },
@@ -1528,8 +1529,9 @@ namespace
 	  "inside that: this only turns the whole mix up or down.",
 	  "", "rendering#weather" },
 	{ "Weather/Bus", "",
-	  "The mixer bus the weather plays through (SFX by default). A name the mixer "
-	  "does not have falls back to the clip's own bus, then to master.",
+	  "The mixer bus the weather plays through (SFX by default), picked from the "
+	  "project's buses. A bus that was removed from the mixer is shown as missing "
+	  "and falls back to the clip's own bus, then to master.",
 	  "", "rendering#weather" },
 	{ "Weather/Rain Sound", "Rain Sound",
 	  "The rain bed, a loop that fades in as rain falls and out as it stops. Empty "
@@ -2007,7 +2009,7 @@ namespace
 	  "one of them; drag the handle in the Scene view (Spline mode) or type the "
 	  "numbers here.",
 	  "", "scenes#components" },
-	{ "Spline/+ Point", "",
+	{ "Spline/Add Point", "",
 	  "Adds a control point at the far end, carrying on in the direction of the "
 	  "last segment, so it lands somewhere you can see and grab.",
 	  "", "scenes#components" },
@@ -2019,7 +2021,7 @@ namespace
 	  "Joins the last point back to the first so the line becomes an outline "
 	  "(it needs three points). One undo step.",
 	  "", "editor#viewport" },
-	{ "Spline Tool/Delete Point", "",
+	{ "Spline Tool/Remove Point", "",
 	  "Removes the selected point from the line. The Delete key does the same "
 	  "while the Scene view has the focus; the neighbouring point is selected "
 	  "next, so holding the key eats the line from the end you are at.",
@@ -3470,8 +3472,8 @@ namespace
 	{ "Planner/Data", "Data",
 	  "The rows and columns behind this view. Rename them here. Tables, timelines, boards and calendars made from the same data show the same rows; change a row in one and it changes in all.",
 	  "", "" },
-	{ "Planner/Timeline or Month", "Timeline / Month",
-	  "Shows the same dated rows along a time axis (Timeline) or on the days of a month (Month). The choice is saved with the view.",
+	{ "Planner/Timeline or Calendar", "Timeline / Calendar",
+	  "Shows the same dated rows along a time axis (Timeline) or on the days of a month (Calendar). The choice is saved with the view.",
 	  "", "" },
 	{ "Planner/Code Language", "",
 	  "The language this code block is coloured as. A new code block (three backticks) starts in the language picked last.",
@@ -3508,6 +3510,18 @@ namespace
 	  "", "" },
 	{ "Planner/New Item", "New Item",
 	  "Adds a card in the first lane and opens it. The + at the top of a lane adds to that lane.",
+	  "", "" },
+	{ "Planner/Add Card to Lane", "Add Card",
+	  "Adds a card to this lane, with the lane's value already set.",
+	  "", "" },
+	{ "Planner/Remove Filter", "Remove Filter",
+	  "Removes this filter from the view.",
+	  "", "" },
+	{ "Planner/Remove Link", "Remove Link",
+	  "Removes this link. What it points at is not changed.",
+	  "", "" },
+	{ "Planner/Remove Page Link", "Remove Page Link",
+	  "Clears the page this block points to. The page itself stays.",
 	  "", "" },
 	{ "Planner/Close Details", "Close Details",
 	  "Closes the details of this row (Esc does too). The row stays as it is.",
@@ -3637,9 +3651,8 @@ namespace
 	{ "Task Board/Footer Task", "",
 	  "Opens the Task Board with this task's details.",
 	  "", "" },
-	{ "Task Board/Open Task Board", "Open Task Board",
-	  "Brings up the Task Board panel (Window » Task Board), where tasks are "
-	  "added, linked and assigned.",
+	{ "Task Board/Open Planner", "Open Planner",
+	  "Opens the Planner on Tasks, where tasks are added, linked and assigned.",
 	  "", "" },
 
 	// ── Audio Mixer ──────────────────────────────────────────────────────────
@@ -3813,7 +3826,7 @@ namespace
 	  "", "editor#project-hub" },
 	{ "Project Hub/Close Project", "",
 	  "Does not open the project and goes back to the Project Hub. Nothing was loaded, "
-	  "so nothing needs saving; open it again once the EngineContent server is reachable.",
+	  "so nothing needs saving; open it again once the server it waits for is reachable.",
 	  "", "editor#project-hub" },
 	{ "Project Hub/Close Editor", "",
 	  "Quits the editor without opening the project.",
@@ -4633,7 +4646,7 @@ namespace
 	  "rest on the green alone. It is written in a sixth of a second, or "
 	  "appears whole with reduced motion, and fades with the line. Saving "
 	  "again right after does not draw it again. The same check is written "
-	  "into a HorizonCode graph's \"compiles clean\" readout after Compile.",
+	  "into a HorizonCode graph's \"Compiles clean\" readout after Compile.",
 	  "", "editor#preferences" },
 	{ "Preferences/Feedback/Light Edge", "",
 	  "One thin line of light along the top edge of the footer that spreads "
@@ -4893,17 +4906,17 @@ namespace
 	  "git's credential helper (the system keychain), where git finds it for "
 	  "every push and pull.",
 	  "", "editor#github" },
-	{ "Source Control/Sign out", "Sign out",
+	{ "Source Control/Sign Out", "Sign Out",
 	  "Removes the GitHub token from git's credential helper, so neither the "
 	  "editor nor git on this machine uses it any more. GitHub still lists "
 	  "Horizon Engine under Settings \xe2\x96\xb8 Applications until you revoke it "
 	  "there.",
 	  "", "editor#github" },
-	{ "Source Control/Copy code & open GitHub", "Copy code & open GitHub",
+	{ "Source Control/Copy Code & Open GitHub", "Copy Code & Open GitHub",
 	  "Puts the code on the clipboard and opens GitHub's device page in your "
 	  "browser. Paste the code there and approve. The editor notices on its own.",
 	  "", "editor#github" },
-	{ "Source Control/Copy code", "Copy code",
+	{ "Source Control/Copy Code", "Copy Code",
 	  "Puts the code on the clipboard, for when the browser is on another "
 	  "machine or already open.",
 	  "", "editor#github" },
@@ -5315,8 +5328,7 @@ namespace
 	  "distance spreads the same texels thinner — 250 is what the engine has "
 	  "always used.\n\n"
 	  "Saved to Config/ProjectSettings.json and read by the renderer as you "
-	  "edit (Metal and OpenGL draw cascades; the other backends still use one "
-	  "whole-scene map and ignore this page).",
+	  "edit.",
 	  "", "rendering#shadows" },
 	{ "Shadows/Cascades", "Cascades",
 	  "How many shadow maps the distance is cut into: a sharp one near the "
@@ -5499,7 +5511,7 @@ namespace
 	  "empty and the export writes no icon at all, which is what it did before "
 	  "this existed.",
 	  "", "editor#preferences" },
-	{ "Application/Plate colour", "Plate colour",
+	{ "Application/Plate color", "Plate color",
 	  "The rounded square the icon sits on. The icon itself is white on a dark "
 	  "plate and near-black on a light one, so this is one choice and not two — "
 	  "white on yellow is not an option somebody should be able to pick by "
@@ -5647,10 +5659,6 @@ namespace
 	  "starts it again. An installer that runs with administrator rights may refuse "
 	  "to end, then the install stays listed as running until it exits.",
 	  "", "horizoncode#compiler" },
-	{ "Tool Setup/Show Log", "Show Log",
-	  "Opens the installer's output below the list, where the last lines say why "
-	  "it stopped.",
-	  "", "horizoncode#compiler" },
 	{ "Tool Setup/Copy Command", "Copy the install command",
 	  "Puts the command on the clipboard, for running it in your own terminal "
 	  "instead of letting the editor do it. Press Recheck afterwards; no restart "
@@ -5683,7 +5691,7 @@ namespace
 	  "then unsaved until you save it yourself; nothing is written to the file "
 	  "here.",
 	  "", "editor#preferences" },
-	{ "Scene Recovery/Delete Snapshot", "Delete Snapshot",
+	{ "Scene Recovery/Delete Copy", "Delete Copy",
 	  "Removes the autosaved copy for good. The scene file is not touched. "
 	  "Choose this when the copy holds nothing you want to keep, for example "
 	  "an experiment you had already decided against.",
@@ -7255,7 +7263,7 @@ namespace
 	  "and no further. Text and the layout boxes do not have it, because they have "
 	  "no surface to round.",
 	  "", "ui#elements" },
-	{ "UI Widget/Per corner", "",
+	{ "UI Widget/Per Corner", "",
 	  "Rounds each corner on its own: the four fields are laid out where the "
 	  "corners are, top row first. A tab, a chat bubble and the head of a card are "
 	  "all one rounded and one square pair. Switching back off keeps the top-left "
@@ -7432,29 +7440,29 @@ namespace
 	  "Fades this widget and everything inside it. One value on a root panel "
 	  "fades a whole menu, which is what a menu fade-in is made of.",
 	  "", "ui#widgets" },
-	{ "UI Widget/Hover cursor", "",
+	{ "UI Widget/Hover Cursor", "",
 	  "Which mouse cursor is shown while the pointer is over this widget. It "
 	  "needs the widget to be hit-testable, since a widget the pointer passes "
 	  "through is never hovered.",
 	  "", "ui#runtime" },
-	{ "UI Widget/Hit-testable", "",
+	{ "UI Widget/Hit Testable", "",
 	  "Off makes the widget transparent to the pointer: clicks pass straight "
 	  "through it to whatever is behind. For decoration that must not swallow "
 	  "input.",
 	  "", "ui#runtime" },
-	{ "UI Widget/Window drag", "",
+	{ "UI Widget/Window Drag", "",
 	  "Pressing here moves the WINDOW, the way a title bar does. For an "
 	  "application that draws its own title bar and asked the system for a "
 	  "window without one (window mode Borderless). Independent of hit-testable: "
 	  "a title bar is usually a container the pointer passes through, and "
 	  "anything clickable sitting on it — a close button — keeps its click.",
 	  "", "ui#runtime" },
-	{ "UI Widget/Clip children", "",
+	{ "UI Widget/Clip Children", "",
 	  "Cuts everything inside this widget off at its own edge. Clipped pixels are "
 	  "neither drawn nor clickable — it is what makes a list longer than its box "
 	  "look like a list in a box instead of spilling across the screen.",
 	  "", "ui#widgets" },
-	{ "UI Widget/Focus frame", "",
+	{ "UI Widget/Focus Frame", "",
 	  "While anything INSIDE this element has the keyboard focus, the focus ring "
 	  "is drawn around this element instead of around whatever holds it. A "
 	  "search field is a rounded frame with an icon and a text field inset "
@@ -7462,7 +7470,7 @@ namespace
 	  "sees as the control, and a ring around the field alone is a small "
 	  "rectangle floating inside a pill. Set it on the frame.",
 	  "", "ui#widgets" },
-	{ "UI Widget/Tab index", "",
+	{ "UI Widget/Tab Index", "",
 	  "Where Tab goes next. Left at 0 the route follows the tree on the left, "
 	  "parents before their children, which is the order you arranged and the "
 	  "only one you can predict. A number above 0 pulls the element to the front "
@@ -7471,7 +7479,7 @@ namespace
 	  "0 takes it off the route altogether, and only off the route — a click and "
 	  "the arrow keys still reach it.",
 	  "", "ui#widgets" },
-	{ "UI Widget/Accepts drop", "",
+	{ "UI Widget/Accepts Drop", "",
 	  "Makes this element a drop zone: a file dragged in from the desktop and let "
 	  "go over it fires On File Dropped, once per file, with the file's path. The "
 	  "drop travels UP from whatever the pointer met to the first element that "
@@ -7510,7 +7518,7 @@ namespace
 	  "Drop. Like Accepts drop, this bubbles: pressing the label of a draggable "
 	  "card carries the card.",
 	  "", "ui#widgets" },
-	{ "UI Widget/Drag payload", "",
+	{ "UI Widget/Drag Payload", "",
 	  "What this element calls itself when it is dropped somewhere: the string "
 	  "the target receives with On Drop. A list row writes its index in here, a "
 	  "tool button its tool. Left empty it falls back to the element's name, "
@@ -7910,8 +7918,8 @@ namespace
 	  "only — sculpting, foliage and water keep the Brush Strength.",
 	  "", "editor#landscape-mode" },
 	{ "Landscape/Weightmap", "Weightmap Resolution",
-	  "How many texels per side the layer weightmap has, from 32 to 2048 — click "
-	  "the field and type a number, 1024 for instance — "
+	  "How many texels per side the layer weightmap has, from 32 to 2048 (drag, or "
+	  "double-click and type a number), "
 	  "stretched over the whole landscape — a large terrain needs more of them "
 	  "before a painted edge stops looking blocky. It is locked as soon as "
 	  "anything has been painted, because changing it would throw the existing "
@@ -8193,8 +8201,8 @@ namespace
 	  "How many cells per side the landscape's water is stored in, from 32 to "
 	  "2048, stretched over the whole landscape. The cell size is shown under "
 	  "it: a shore can only be as fine as that, so a large landscape wants more "
-	  "cells for small ponds. Type a number and press Enter (or click away): it "
-	  "is applied then, not on every digit, keeping the shape of what is "
+	  "cells for small ponds. Drag it, or double-click and type: it "
+	  "is applied when you let go, not on every step, keeping the shape of what is "
 	  "painted; one undo step.",
 	  "", "editor#landscape-mode" },
 	{ "Landscape/To Lake", "",
@@ -9968,6 +9976,14 @@ namespace
 	  "On: every member sees the session and can join it without an invitation. "
 	  "Off: only the members you invite can join. Can be changed while hosting.",
 	  "", "collaboration" },
+	{ "Team/Stop Hosting", "",
+	  "Ends the session you host. Everyone in it is disconnected, and the team "
+	  "stops seeing it.",
+	  "", "collaboration" },
+	{ "Team/Invite Again", "",
+	  "Sends the invitation to your session again, for a member who missed or "
+	  "dismissed the first one.",
+	  "", "collaboration" },
 	{ "Team/Host Session", "",
 	  "Starts a collaboration session through the team server and announces it "
 	  "to the team. Nobody needs an address or a join code: the session is found "
@@ -10027,7 +10043,7 @@ namespace
 	  "No colour of your own: the team shows you in grey, and in a session the "
 	  "host picks a free colour for you.",
 	  "", "collaboration" },
-	{ "Team/Custom", "",
+	{ "Team/Custom", "Custom colour",
 	  "Any colour, not just the presets. The team sees it shortly after you stop "
 	  "changing it. Two members may have the same colour; in a session the host "
 	  "gives one of them another if they collide.",
@@ -10115,6 +10131,10 @@ namespace
 	  "Commit and push in one step, commit everything even though some files are "
 	  "ticked, or fold what is staged into the last commit.",
 	  "", "" },
+	{ "Team Sync/Open Team Settings", "",
+	  "Opens Preferences, Team, where you sign in to the team this project "
+	  "belongs to.",
+	  "", "collaboration" },
 	{ "Team Sync/Sync Now", "",
 	  "Sends every change in the project folder that the team server does not have "
 	  "yet, and fetches what the others saved. Every save in the editor does this "
@@ -10323,13 +10343,13 @@ namespace
 	{ "Source Control/Copy Install Command", "Copy the install command",
 	  "Puts the command shown above on the clipboard, to run in your own "
 	  "terminal. This is the way when the editor cannot install git itself, for "
-	  "example on Linux without a graphical password prompt. Press Recheck "
-	  "afterwards; no restart is needed.",
+	  "example on Linux without a graphical password prompt. For Git LFS it is "
+	  "the Git LFS command. Press Recheck afterwards; no restart is needed.",
 	  "", "editor#preferences" },
 	{ "Source Control/Download Page", "Download Page",
 	  "Opens git's download page for this system in a browser, for installing it "
 	  "by hand. On Windows without winget this is the Git for Windows installer, "
-	  "which brings Git LFS along.",
+	  "which brings Git LFS along. For Git LFS alone it opens git-lfs.com.",
 	  "", "editor#preferences" },
 	{ "Source Control/Install Git LFS", "Install Git LFS",
 	  "Installs Git LFS the same way: winget on Windows, Homebrew on macOS, the "
@@ -10338,14 +10358,6 @@ namespace
 	  "drag down every version of every asset. Where the editor cannot install it "
 	  "(Apple's Command Line Tools have no LFS), the command to run yourself is "
 	  "shown instead.",
-	  "", "editor#preferences" },
-	{ "Source Control/Copy LFS Command", "Copy the Git LFS command",
-	  "Puts the Git LFS install command on the clipboard, to run in your own "
-	  "terminal. Press Recheck afterwards rather than restarting.",
-	  "", "editor#preferences" },
-	{ "Source Control/git-lfs.com", "git-lfs.com",
-	  "Opens the Git LFS home page, where it can be downloaded and installed by "
-	  "hand.",
 	  "", "editor#preferences" },
 
 	// ── The issue reporter ───────────────────────────────────────────────────

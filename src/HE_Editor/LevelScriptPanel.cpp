@@ -272,7 +272,7 @@ void runCompileCheck(const HC::Graph& graph, const char* title,
 		HE::Ed::Rewards::post(HE::Ed::Rewards::Moment::CompiledClean);
 		// The line count covers the whole ancestry when there is one — which is
 		// honest: that is what an export builds to make THIS class native.
-		g.compileMsg = "compiles clean — " + std::to_string(lines) + " lines of C++";
+		g.compileMsg = "Compiles clean — " + std::to_string(lines) + " lines of C++";
 		if (!res.warnings.empty())
 			g.compileMsg += " (" + std::to_string(res.warnings.size()) + " warning(s), see log)";
 		for (const auto& w : res.warnings)

@@ -950,6 +950,7 @@ float nodeValueHeight(const MatGraphNode& n)
 	const MatNodeType type = n.type;
 	const HE::MatNodeDesc& d = HE::matNodeDesc(type);
 	if (type == MatNodeType::LandscapeFoliage) return 30.0f;      // the asset slot
+	if (type == MatNodeType::Output) return 52.0f;                // Lit toggle + domain combo
 	if (d.paramCount == 0 && !isTextureNode(type)) return 0.0f;
 	if (HE::matNodeIsBombing(type))                                // Rot/Blend/Seed (+Strength) + filename
 		return 44.0f + 26.0f * static_cast<float>(d.paramCount);
@@ -2487,7 +2488,8 @@ void render(AppContext& ctx, const std::string& assetPath,
 			const int bmCur = std::clamp(static_cast<int>(outN->p[1]), 0, 2);
 
 			bar.group();
-			if (bar.item("##blend", T::iconEye, kBlend[bmCur], false, true,
+			// Not the eye: in the widget designer the eye is the state preview.
+			if (bar.item("##blend", T::iconCircle, kBlend[bmCur], false, true,
 			             "Opaque: solid (no Opacity pin)\n"
 			             "Masked: OpacityMask pin — fragments below Clip discard\n"
 			             "Translucent: Opacity pin — sorted alpha-blend pass"))

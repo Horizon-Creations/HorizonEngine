@@ -960,7 +960,8 @@ TEST_CASE("Team UI: the online faces stack; hovering lists every one with Invite
 	const float faceW = face("Bob")->x1 - face("Bob")->x0;
 	CHECK(face("Bob")->x0 < face("Cleo")->x0);
 	CHECK(face("Bob")->x1 > face("Cleo")->x0);
-	CHECK(face("Eli")->x1 - face("Bob")->x0 < 3.0f * faceW);
+	// Overlapped: about 3.25 faces wide (step 0.75, rounded), well short of four side by side.
+	CHECK(face("Eli")->x1 - face("Bob")->x0 < 3.5f * faceW);
 	// No menu while the mouse is elsewhere.
 	CHECK(ui.find("Invite", "Bob") == nullptr);
 	{

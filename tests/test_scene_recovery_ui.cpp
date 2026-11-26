@@ -278,7 +278,7 @@ TEST_CASE("scene recovery ui: the three answers reach the editor as the callback
 	for (int i = 0; i < 3; ++i) frame(bits, ctx, false);
 	CHECK_FALSE(dialogShowing());
 
-	// And once more: Delete Snapshot.
+	// And once more: Delete Copy.
 	bits.answered = false;
 	ImGui::GetIO().AddMousePosEvent(float(W) - 2.0f, float(H) - 2.0f);
 	for (int i = 0; i < 4; ++i) frame(bits, ctx, false);

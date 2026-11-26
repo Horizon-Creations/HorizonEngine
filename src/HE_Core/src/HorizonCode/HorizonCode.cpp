@@ -861,7 +861,7 @@ const char* nodeTooltip(NodeType t)
         case T::GetPropertyOn:
             return "Reads a property of an element of the REFERENCED widget, by the\n"
                    "element's name. Target left unwired means this widget.\n"
-                   "Pure — evaluated whenever the output is used.";
+                   "Pure — evaluated whenever an output is used.";
         case T::SetPropertyOn:
             return "Writes a property of an element of the REFERENCED widget, by the\n"
                    "element's name, when executed. Target left unwired means this\n"
@@ -873,7 +873,7 @@ const char* nodeTooltip(NodeType t)
                    "reroute passes execution straight through. Costs nothing at run time.";
         case T::GetVariable:
             return "Reads a graph variable (persistent per running instance).\n"
-                   "Pure — evaluated whenever the output is used.";
+                   "Pure — evaluated whenever an output is used.";
         case T::SetVariable:
             return "Writes the wired value to a graph variable when executed.";
         case T::ShowSelf:

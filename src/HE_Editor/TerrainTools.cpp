@@ -492,6 +492,13 @@ namespace
 		ImGui::SameLine(labelColumn());
 		ImGui::SetNextItemWidth(-FLT_MIN);
 	}
+	// A switch in the same column: its name on the left like rowLabel's rows,
+	// not to the right of the box where ImGui puts it.
+	bool rowCheckbox(const char* label, bool* v)
+	{
+		EditorWidgets::Row::InlineLabels column;
+		return EditorWidgets::checkbox(label, v);
+	}
 
 	// A line of dim text that wraps at the panel's edge.
 	void dimText(const char* fmt, ...) IM_FMTARGS(1);
@@ -565,7 +572,8 @@ namespace
 		dl->AddConvexPolyFilled(pts, 4, (col & 0x00FFFFFFu) | 0x44000000u);
 		dl->AddPolyline(pts, 4, col, 0, 2.0f);
 		char cap[96];
-		std::snprintf(cap, sizeof(cap), "Radius %.0f m + Falloff %.0f m = %.0f m across", R, F, R + F);
+		// R + F is the outer RADIUS; "across" is the diameter.
+		std::snprintf(cap, sizeof(cap), "Radius %.0f m + Falloff %.0f m: %.0f m across", R, F, 2.0f * (R + F));
 		dl->AddText(ImVec2(p.x + 8.0f, p.y + 2.0f), ImGui::GetColorU32(ImGuiCol_TextDisabled), cap);
 	}
 #endif
@@ -1682,7 +1690,7 @@ void renderPanel(AppContext& ctx)
                 }
                 if (!builtIn && lmat)
                 {
-                    if (EditorWidgets::smallButton("Reset to Engine Default##lsmat"))
+                    if (EditorWidgets::button("Reset to Engine Default##lsmat"))
                     {
                         if (ctx.undoSys) ctx.undoSys->snapshotNow();
                         tmat->materialAssetId = HE::kDefaultTerrainMaterialId;
@@ -1739,7 +1747,7 @@ void renderPanel(AppContext& ctx)
                     {
                         bool mix = tc.groupMix;
                         ImGui::BeginDisabled(cur < 0);
-                        if (EditorWidgets::checkbox("Mix Texture Groups", &mix))
+                        if (rowCheckbox("Mix Texture Groups", &mix))
                         {
                             if (ctx.undoSys) ctx.undoSys->snapshotNow("Mix Groups");
                             if (mix) TerrainPaint::enableGroupMix(tc, cur);
@@ -1798,14 +1806,14 @@ void renderPanel(AppContext& ctx)
 
                 // ── Resolution ───────────────────────────────────────────
                 // Changing either would throw the painted data away, so they are locked once
-                // anything is painted. Typed fields: 32..2048 on a few hundred pixels of
-                // slider cannot hit 1024 exactly.
+                // anything is painted. Drags (one step per pixel, so 1024 is reachable;
+                // double-click types it), with the number centred like the other values.
                 sectionLabel("Resolution");
                 {
                     int wres = static_cast<int>(tc.weightRes);
                     rowLabel("Weightmap");
                     ImGui::BeginDisabled(!tc.layerWeights.empty());
-                    if (ImGui::InputInt("##weightmap", &wres, 0, 0, ImGuiInputTextFlags_AutoSelectAll))
+                    if (ImGui::DragInt("##weightmap", &wres, 1.0f, 32, 2048))
                         tc.weightRes = static_cast<uint32_t>(std::clamp(wres, 32, 2048));
                     EditorWidgets::helpForLabel("Weightmap##paint");
                     ImGui::EndDisabled();
@@ -1815,12 +1823,13 @@ void renderPanel(AppContext& ctx)
                     int mres = static_cast<int>(fol->maskRes);
                     rowLabel("Foliage mask");
                     ImGui::BeginDisabled(!fol->densityMask.empty());
-                    if (ImGui::InputInt("##foliagemask", &mres, 0, 0, ImGuiInputTextFlags_AutoSelectAll))
+                    if (ImGui::DragInt("##foliagemask", &mres, 1.0f, 32, 2048))
                         fol->maskRes = static_cast<uint32_t>(std::clamp(mres, 32, 2048));
                     EditorWidgets::helpForLabel("Mask##foliage");
                     ImGui::EndDisabled();
                 }
-                dimText("Each locks once something is painted into it.");
+                dimText(fol ? "Each locks once something is painted into it."
+                            : "It locks once something is painted into it.");
 
                 // ── Reset ────────────────────────────────────────────────
                 sectionLabel("Reset");
@@ -1869,10 +1878,6 @@ void renderPanel(AppContext& ctx)
             // ═════════════════════════ PAINT ═════════════════════════════
             else if (s_landscapePaint)
             {
-                sectionLabel("Layer");
-                if (const int grp = HE::autoLandscapeGroupOfMaterial(tmat->materialAssetId); grp >= 0)
-                    dimText("%s group: Auto picks by slope and height, the others paint over it.",
-                            HE::kAutoLandscapeGroups[grp].name);
                 // The list is the material's, so a group switch (or a material with fewer
                 // layers) changes its length: the index is clamped every frame, never kept.
                 s_paintLayer = std::clamp(s_paintLayer, 0, static_cast<int>(layers.size()) - 1);
@@ -1910,6 +1915,12 @@ void renderPanel(AppContext& ctx)
                     }
                 }
                 s_activeGroup = std::clamp(s_activeGroup, 0, HE::kAutoLandscapeGroupCount - 1);
+
+                // Under the group picker, so each heading sits above its own control.
+                sectionLabel("Layer");
+                if (const int grp = HE::autoLandscapeGroupOfMaterial(tmat->materialAssetId); grp >= 0)
+                    dimText("%s group: Auto picks by slope and height, the others paint over it.",
+                            HE::kAutoLandscapeGroups[grp].name);
 
                 // The group's own names for the four role layers (Forest Floor, Roots, ...); Auto
                 // and Puddles are the same in every group.
@@ -1981,8 +1992,8 @@ void renderPanel(AppContext& ctx)
                     tc.weightsDirty = true;
                 }
                 EditorWidgets::helpForLabel("Clear Paint");
-                dimText("Strength 1 takes a spot over at once; lower builds up the longer you hold. "
-                        "Ctrl+drag paints the base layer back.");
+                // What Ctrl does is the pinned brush block's footer, once for every tab.
+                dimText("Strength 1 takes a spot over at once; lower builds up the longer you hold.");
             }
             // ═════════════════════════ FOLIAGE ═══════════════════════════
             else if (s_landscapeFoliage)
@@ -2101,7 +2112,6 @@ void renderPanel(AppContext& ctx)
                     else
                         dimText("Instances: %zu (%.0f %% of the landscape)",
                                 fol->cachedInstances.size(), FoliagePaint::coverage(*fol) * 100.0f);
-                    dimText("Ctrl+drag swaps Grow and Erase.");
                 }
             }
             // ═════════════════════════ WATER ═════════════════════════════
@@ -2128,7 +2138,7 @@ void renderPanel(AppContext& ctx)
                 // water that is already there ignores both and goes on at that
                 // water's level.
                 sectionLabel("Level");
-                EditorWidgets::checkbox("From Ground##water", &s_waterFromGround);
+                rowCheckbox("From Ground##water", &s_waterFromGround);
                 EditorWidgets::helpForLabel("From Ground##water");
                 if (s_waterFromGround)
                 {
@@ -2147,7 +2157,7 @@ void renderPanel(AppContext& ctx)
                 // The bed: the ground under the brush goes down to a floor below
                 // the level while you paint, so the pond has a depth.
                 sectionLabel("Ground");
-                EditorWidgets::checkbox("Dig Bed##water", &s_waterDig);
+                rowCheckbox("Dig Bed##water", &s_waterDig);
                 EditorWidgets::helpForLabel("Dig Bed##water");
                 ImGui::BeginDisabled(!s_waterDig);
                 rowLabel("Max Depth");
@@ -2164,19 +2174,18 @@ void renderPanel(AppContext& ctx)
                 s_waterBedRough = std::clamp(s_waterBedRough, 0.0f, 1.0f);
                 dimText("Full depth %.1f m from the shore", s_waterDigDepth / s_waterBedSlope);
                 ImGui::EndDisabled();
-                EditorWidgets::checkbox("Close Bed on Erase##water", &s_waterCloseBed);
+                rowCheckbox("Close Bed on Erase##water", &s_waterCloseBed);
                 EditorWidgets::helpForLabel("Close Bed on Erase##water");
 
                 // The grid the water lives on: cells per side over the whole
-                // landscape. A typed field, like the weightmap's (32..2048 on a few
-                // hundred pixels of slider cannot hit 1024), applied when the field
-                // is left rather than per keystroke - a resample per digit would
-                // blur the shape - as one undo step.
+                // landscape. A drag like the weightmap's, applied when the field is
+                // let go rather than per step - a resample per step would blur the
+                // shape - as one undo step.
                 sectionLabel("Water Grid");
                 {
                     int wres = s_waterResEditing ? s_waterResEdit : static_cast<int>(tc.water.res);
                     rowLabel("Resolution");
-                    if (ImGui::InputInt("##water_res", &wres, 0, 0, ImGuiInputTextFlags_AutoSelectAll))
+                    if (ImGui::DragInt("##water_res", &wres, 1.0f, 32, 2048))
                     {
                         s_waterResEdit    = wres;
                         s_waterResEditing = true;
@@ -2199,18 +2208,18 @@ void renderPanel(AppContext& ctx)
                 // Static Switch "Tessellation"): a landscape-wide switch, like the shore clipping.
                 {
                     bool tess = tc.water.tessellation;
-                    if (EditorWidgets::checkbox("Tessellation##water", &tess))
+                    if (rowCheckbox("Tessellation##water", &tess))
                     {
                         if (ctx.undoSys) ctx.undoSys->snapshotNow("Water Tessellation");
                         tc.water.tessellation = tess;
                     }
                     EditorWidgets::helpForLabel("Tessellation##water");
-                    ImGui::SameLine();
-                    dimText("(per-body height and coast fade: Tessellated Waves, below)");
+                    // Its own line: beside the box it would follow the box's hidden label.
+                    dimText("Per-body height and coast fade: Tessellated Waves, below.");
                 }
 
                 ImGui::Spacing();
-                dimText("LMB drag in the viewport to paint water. Ctrl+drag does the opposite.");
+                dimText("Drag in the viewport to paint water.");
                 if (tc.water.bodies.empty())
                     dimText("No water on this landscape yet.");
                 else
@@ -2639,7 +2648,7 @@ void renderPanel(AppContext& ctx)
                     dimText("Adds fixed-noise bumps under the brush.");
                     break;
                 default:
-                    dimText("LMB drag in the viewport to sculpt. Ctrl+drag does the opposite.");
+                    dimText("Drag in the viewport to sculpt.");
                     break;
                 }
             }
@@ -2701,7 +2710,7 @@ void renderPanel(AppContext& ctx)
                 }
                 s_brushRadius   = std::max(0.5f, s_brushRadius);
                 s_falloffRadius = std::max(0.0f, s_falloffRadius);
-                dimText("[ ] radius \xc2\xb7 Shift+[ ] falloff \xc2\xb7 Ctrl+drag inverts");
+                dimText("[ ] radius \xc2\xb7 Shift+[ ] falloff \xc2\xb7 Ctrl+drag does the opposite");
                 wrap.reset();
             }
             ImGui::EndChild();
@@ -2819,7 +2828,9 @@ void drawHeightmapBlock(AppContext& ctx, Entity terrain)
 			s_hmStatus = importHeightmapFile(ctx, terrain, s_hmPickPath, s_hmStatusError);
 	}
 
-	ImGui::SeparatorText("Heightmap");
+	// The tab's own caption style, and not "Heightmap": that is the slot's name
+	// on the very next line.
+	sectionLabel("Shape from Image");
 	ImGui::PushID("hmblock");
 	// One scope for both callers: the Details panel draws this under
 	// "Terrain", and the buttons look their help up by label, so without this
@@ -2857,9 +2868,8 @@ void drawHeightmapBlock(AppContext& ctx, Entity terrain)
 			kFilters, 2, nullptr, false);
 	}
 
-	EditorWidgets::checkbox("Flip Z", &s_hmFlipZ);
-	ImGui::SameLine();
-	EditorWidgets::checkbox("Use Image Resolution", &s_hmAdoptRes);
+	rowCheckbox("Flip Z", &s_hmFlipZ);
+	rowCheckbox("Use Image Resolution", &s_hmAdoptRes);
 
 	ImGui::TextDisabled("Black = 0 m, white = Height Scale (%.1f m).", tc->heightScale);
 	ImGui::TextDisabled("Replaces the sculpt; paint and foliage stay.");

@@ -106,7 +106,7 @@ void applyImport(AppContext& ctx)
 			TextureViewerPanel::importedAssetPath(s_rows[0].path, s_root, s_rows[0].relDir));
 	HE_LOG_INFO(Editor, "%s",
 		("Editor: imported " + std::to_string(imported) + " of "
-		 + std::to_string(s_rows.size()) + " texture(s)").c_str());
+		 + std::to_string(s_rows.size()) + (s_rows.size() == 1 ? " texture" : " textures")).c_str());
 	// Reward moment (EditorRewards.h): AssetsImported — the confirmed texture
 	// batch, one moment with its count. A retag (applyRetag) is not an import.
 	if (imported > 0)
@@ -143,7 +143,7 @@ void applyRetag(AppContext& ctx)
 		++changed;
 	}
 	HE_LOG_INFO(Editor, "%s",
-		("Editor: color space changed on " + std::to_string(changed) + " texture(s)"
+		("Editor: color space changed on " + std::to_string(changed) + (changed == 1 ? " texture" : " textures")
 		 + (failed ? ", " + std::to_string(failed) + " failed" : std::string())).c_str());
 	if (changed) ctx.contentRefreshPending = true;
 }
@@ -224,8 +224,8 @@ void Draw(AppContext& ctx)
 	{
 		EditorWidgets::WrapText wrap(kDialogWidth - ImGui::GetStyle().WindowPadding.x);
 		ImGui::TextWrapped(
-			"Tick textures that hold COLOR (albedo, base color, emissive, UI art): they are "
-			"stored sRGB-encoded and the GPU decodes them. Leave DATA unticked (normal, "
+			"Tick textures that hold color (albedo, base color, emissive, UI art): they are "
+			"stored sRGB-encoded and the GPU decodes them. Leave data unticked (normal, "
 			"roughness, metalness, AO, ORM, height, masks): decoding those would bend "
 			"their values. The ticks are guessed from the file names.");
 		if (!importing)
@@ -297,7 +297,8 @@ void Draw(AppContext& ctx)
 	const size_t pending = static_cast<size_t>(
 		std::count_if(s_rows.begin(), s_rows.end(), [](const Row& r) { return changes(r); }));
 	if (!importing)
-		ImGui::TextDisabled("%zu of %zu texture(s) will change.", pending, s_rows.size());
+		ImGui::TextDisabled("%zu of %zu texture%s will change.", pending, s_rows.size(),
+		                    s_rows.size() == 1 ? "" : "s");
 	ImGui::Spacing();
 
 	const std::string go = importing

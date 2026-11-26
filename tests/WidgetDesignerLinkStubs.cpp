@@ -49,6 +49,8 @@ namespace EditorSettingsPanel
 	// show their own switch, hint and (greyed) emptiness, which is all the tests
 	// look at.
 	void DrawEngineSettings(AppContext&, SettingsMode, const DrawOptions&) {}
+	// The Team Sync view's "Open Team Settings" (test_team_sync_ui.cpp).
+	void requestOpen(Page) {}
 }
 
 namespace HcRenameDialog

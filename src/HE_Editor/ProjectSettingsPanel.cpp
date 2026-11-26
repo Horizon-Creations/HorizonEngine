@@ -84,7 +84,7 @@ void commitSettings(AppContext& ctx, ProjectData& p, const char* what)
 // less obvious than "the export" — each page says where its numbers arrive.
 void settingsFileHint(const char* reads)
 {
-	hint("Belongs to the PROJECT: saved in Config/ProjectSettings.json beside the "
+	hint("Belongs to the project: saved in Config/ProjectSettings.json beside the "
 	     ".heproj, and carried into the build you export.");
 	if (reads && *reads)
 	{
@@ -115,28 +115,28 @@ void drawPermissionsPage(AppContext& ctx)
 	}
 	ProjectData& p = ctx.projectManager->currentProject();
 
-	EditorWidgets::hint("These belong to the PROJECT, not to the editor: they are saved in "
+	EditorWidgets::hint("These belong to the project, not to the editor: they are saved in "
 	                    "its .heproj and travel into the application you export. They also "
 	                    "bind scripts you run here, so the preview can never do more than "
 	                    "the shipped app.");
 	ImGui::Spacing();
 
 	bool changed = false;
-	changed |= ImGui::Checkbox("Files outside the project", &p.allowFiles);
+	changed |= EditorWidgets::checkbox("Files outside the project", &p.allowFiles);
 	EditorWidgets::helpForLabel("Files outside the project");
 	EditorWidgets::hint("Off, a script reads and writes only inside the project's Saved folder. "
 	                    "A file the person using the app picks in a dialog is always allowed, "
 	                    "whatever this says — choosing it is the permission.");
 	ImGui::Spacing();
 
-	changed |= ImGui::Checkbox("Run other programs", &p.allowProcesses);
+	changed |= EditorWidgets::checkbox("Run other programs", &p.allowProcesses);
 	EditorWidgets::helpForLabel("Run other programs");
 	EditorWidgets::hint("Covers Run Program and Open URL. Finding out whether a program is "
 	                    "installed needs no permission — that is how a script can tell "
 	                    "somebody what it would need.");
 	ImGui::Spacing();
 
-	changed |= ImGui::Checkbox("Network access", &p.allowNetwork);
+	changed |= EditorWidgets::checkbox("Network access", &p.allowNetwork);
 	EditorWidgets::helpForLabel("Network access");
 	EditorWidgets::hint("Covers HTTP Get and HTTP Post. Off, they start nothing and "
 	                    "answer ticket 0.");
@@ -182,7 +182,7 @@ void drawCollisionLayersPage(AppContext& ctx)
 	EditorWidgets::hint("A collision layer is a named channel. Every rigid body and every "
 	                    "character sits in one (Details » Collision Layer), and the matrix "
 	                    "below decides which pairs of channels the simulation lets touch. "
-	                    "Belongs to the PROJECT: saved in its .heproj and carried into the "
+	                    "Belongs to the project: saved in its .heproj and carried into the "
 	                    "build you export.");
 	ImGui::Spacing();
 
@@ -193,7 +193,7 @@ void drawCollisionLayersPage(AppContext& ctx)
 	bool commit = false;
 
 	ImGui::SeparatorText("Names");
-	EditorWidgets::hint("A layer keeps its NUMBER for good — that is what a scene stores — so "
+	EditorWidgets::hint("A layer keeps its number for good — that is what a scene stores — so "
 	                    "renaming one relabels it everywhere and remaps nothing. Leave a name "
 	                    "empty and it reads as \"Layer <n>\".");
 
@@ -242,7 +242,7 @@ void drawCollisionLayersPage(AppContext& ctx)
 	ImGui::SeparatorText("Matrix");
 	EditorWidgets::hint("Ticked means the pair collides, which is how every project starts. "
 	                    "Clearing a box is what makes a channel pass through another one. "
-	                    "The diagonal is a layer against ITSELF.");
+	                    "The diagonal is a layer against itself.");
 
 	// 17 columns: the row's name plus one per channel. Numbers in the header
 	// rather than names — a sixteen-column grid has no room for words, and the
@@ -351,7 +351,7 @@ void drawApplicationPage(AppContext& ctx)
 	}
 	ProjectData& p = ctx.projectManager->currentProject();
 
-	EditorWidgets::hint("These belong to the PROJECT: saved in its .heproj and written into "
+	EditorWidgets::hint("These belong to the project: saved in its .heproj and written into "
 	                    "the application you export.");
 	ImGui::Spacing();
 
@@ -401,7 +401,7 @@ void drawApplicationPage(AppContext& ctx)
 		glm::vec4 col(0.12f, 0.44f, 0.78f, 1.0f);
 		HE::uiParseRichColor(p.appIconColor, col);
 		float rgb[3] = { col.r, col.g, col.b };
-		if (EditorWidgets::Row::colorEdit3("Plate colour##appiconcolor", rgb))
+		if (EditorWidgets::Row::colorEdit3("Plate color##appiconcolor", rgb))
 		{
 			char hex[8];
 			std::snprintf(hex, sizeof(hex), "#%02x%02x%02x",
@@ -412,9 +412,9 @@ void drawApplicationPage(AppContext& ctx)
 		}
 		commit |= ImGui::IsItemDeactivatedAfterEdit();
 	}
-	EditorWidgets::helpForLabel("Plate colour");
+	EditorWidgets::helpForLabel("Plate color");
 	ImGui::TextDisabled("The icon itself is white on a dark plate and near-black on a light "
-	                    "one, so there is one colour to choose and not two.");
+	                    "one, so there is one color to choose and not two.");
 	ImGui::Spacing();
 
 	// ── …or a picture of the project's own ───────────────────────────────────
@@ -705,15 +705,12 @@ void drawGeneralPage(AppContext& ctx)
 		const char* preview = current.empty() ? "(none)" : current.c_str();
 		// Label above the control like the Row helpers draw theirs; the combo
 		// itself is unlabelled, so the help is asked for by name below.
-		// In the label column when the page has one: the name left, Rescan and
-		// the list on the control's line.
+		// In the label column when the page has one: the name left, the list
+		// in the value column like every other row, Rescan after it.
 		const bool inlineRow = Row::labelCell("Scene");
 		if (!inlineRow) ImGui::TextUnformatted("Scene");
-		ImGui::SameLine();
-		if (EditorWidgets::smallButton("Rescan")) rescanScenes(root);
-		EditorWidgets::helpForLabel("Rescan");
-		if (inlineRow) ImGui::SameLine();
-		ImGui::SetNextItemWidth(-FLT_MIN);
+		const float rescanW = ImGui::CalcTextSize("Rescan").x + ImGui::GetStyle().FramePadding.x * 2.0f;
+		ImGui::SetNextItemWidth(-(rescanW + ImGui::GetStyle().ItemSpacing.x));
 		if (ImGui::BeginCombo("##startupscene", preview))
 		{
 			for (const std::string& s : s_sceneList)
@@ -731,6 +728,9 @@ void drawGeneralPage(AppContext& ctx)
 			ImGui::EndCombo();
 		}
 		EditorWidgets::helpForKey("Project General/Scene");
+		ImGui::SameLine();
+		if (EditorWidgets::button("Rescan")) rescanScenes(root);
+		EditorWidgets::helpForLabel("Rescan");
 		hint("The scene the game opens with, and the one the editor opens on "
 		                    "load. An export profile may name a different one for its build.");
 	}
@@ -756,7 +756,7 @@ void drawRenderDefaultsPage(AppContext& ctx)
 	if (EditorWidgets::checkbox("Use the editor's settings", &r.useEditorSettings))
 		commit = true;
 	hint("On, the packaged build boots with the window and backend this editor's "
-	     "Export dialog says — the way every export has worked so far.\n"
+	     "Export dialog says — the way every export has worked so far. "
 	     "Off, the rows below are the project's answer on every machine: the "
 	     "Export dialog shows them and writes them into the build's config.json. "
 	     "How the game looks (anti-aliasing, bloom, GI…) is on the Quality, "
@@ -765,9 +765,13 @@ void drawRenderDefaultsPage(AppContext& ctx)
 
 	ImGui::BeginDisabled(r.useEditorSettings);
 	ImGui::SeparatorText("Window");
-	Row::inputInt("Width##winw", &r.windowWidth);
+	// Drags, not typed fields: the number centred like every other value on the
+	// page; double-click still types one in.
+	Row::dragInt("Width##winw", &r.windowWidth, 1.0f, HE::ProjectRenderDefaults::kMinWindowEdge,
+	             HE::ProjectRenderDefaults::kMaxWindowEdge);
 	commit |= ImGui::IsItemDeactivatedAfterEdit();
-	Row::inputInt("Height##winh", &r.windowHeight);
+	Row::dragInt("Height##winh", &r.windowHeight, 1.0f, HE::ProjectRenderDefaults::kMinWindowEdge,
+	             HE::ProjectRenderDefaults::kMaxWindowEdge);
 	commit |= ImGui::IsItemDeactivatedAfterEdit();
 	{
 		static const char* const kModes[] = { "Windowed", "Fullscreen", "Borderless" };
@@ -825,8 +829,7 @@ void drawShadowsPage(AppContext& ctx)
 
 	settingsFileHint(nullptr);
 	hint("Read by the renderer as you edit: the viewport follows every change here, "
-	     "and the exported build reads the same file. Metal and OpenGL draw cascades; "
-	     "the other backends still use one whole-scene map and ignore this page.");
+	     "and the exported build reads the same file.");
 
 	bool commit = false;
 	ImGui::SeparatorText("Cascades");
@@ -1091,7 +1094,7 @@ void drawAntiCheatPage(AppContext& ctx)
 	using AC = HE::ProjectAntiCheatSettings;
 	AC& a = p.settings.antiCheat;
 
-	settingsFileHint("Read by the HOST of a session when it starts — the editor's Play as "
+	settingsFileHint("Read by the host of a session when it starts — the editor's Play as "
 	                 "host and the exported build alike. Switched off, the host behaves "
 	                 "exactly as it always has.");
 
@@ -1259,7 +1262,7 @@ void drawAntiCheatPage(AppContext& ctx)
 				EditorWidgets::helpForKey("Anti-Cheat/Rule Level");
 			}
 			ImGui::TableSetColumnIndex(5);
-			if (EditorWidgets::smallButton("\xc3\x97##removerule")) removeAt = i;
+			if (EditorWidgets::removeButton("\xc3\x97##removerule")) removeAt = i;
 			EditorWidgets::helpForKey("Anti-Cheat/Remove rule");
 			ImGui::PopID();
 		}
@@ -1305,7 +1308,7 @@ void drawMultiplayerPage(AppContext& ctx)
 	using MP = HE::ProjectMultiplayerSettings;
 	MP& m = p.settings.multiplayer;
 
-	settingsFileHint("Read when a session STARTS — Play as Host in the editor, a packaged "
+	settingsFileHint("Read when a session starts — Play as Host in the editor, a packaged "
 	                 "game's --host or --join, and the net.host row in a script. A session "
 	                 "already running keeps the numbers it began with.");
 
@@ -1342,7 +1345,7 @@ void drawMultiplayerPage(AppContext& ctx)
 	               MP::kMinWorldExtent, MP::kMaxWorldExtent, "%.0f m");
 	commit |= ImGui::IsItemDeactivatedAfterEdit();
 	hint("Half the width of the area positions are packed for, in metres from "
-	     "the origin. Anything outside it is CLAMPED on the way over the wire, "
+	     "the origin. Anything outside it is clamped on the way over the wire, "
 	     "so it has to contain the playable area comfortably. Larger costs "
 	     "precision, not bytes.");
 	Row::dragFloat("Interpolation delay##mpinterp", &m.interpolationDelaySec, 0.005f,
@@ -1361,7 +1364,7 @@ void drawMultiplayerPage(AppContext& ctx)
 	Row::dragFloat("Correction smoothing##mpsmooth", &m.reconcileSmoothing, 0.5f,
 	               0.0f, MP::kMaxSmoothing, "%.1f /s");
 	commit |= ImGui::IsItemDeactivatedAfterEdit();
-	hint("And how quickly a SMALL disagreement is eased away, as a fraction per "
+	hint("And how quickly a small disagreement is eased away, as a fraction per "
 	     "second. Higher is more accurate and more visible; 0 leaves the error "
 	     "standing until the next one replaces it.");
 	Row::dragInt("Max pending inputs##mppending", &m.maxPendingInputs, 1.0f,

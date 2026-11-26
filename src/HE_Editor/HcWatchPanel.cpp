@@ -79,7 +79,7 @@ void DrawWatchWindow(AppContext& ctx, bool& open)
 			ImGui::End();
 			return;
 		}
-		ImGui::TextDisabled("No run is stopped.");
+		ImGui::TextDisabled("Running, not paused.");
 		ImGui::TextWrapped("Right-click a node in a graph and Add Breakpoint; the run stops before "
 		                   "that node. Until then, the Game Instance's variables, live:");
 		// The pause that lands on a node: arm the runtime's one-shot, and show
@@ -90,10 +90,11 @@ void DrawWatchWindow(AppContext& ctx, bool& open)
 		if (rt->debugBreakNextArmed())
 		{
 			ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::AccentBright);
+			ImGui::AlignTextToFramePadding();   // level with the Disarm button beside it
 			ImGui::TextUnformatted("Armed: stops at the next node.");
 			ImGui::PopStyleColor();
 			ImGui::SameLine();
-			if (EditorWidgets::smallButton("Disarm")) rt->debugBreakNext(false);
+			if (EditorWidgets::button("Disarm")) rt->debugBreakNext(false);
 		}
 		else if (EditorWidgets::button("Break on Next Node"))
 			rt->debugBreakNext();
@@ -221,7 +222,7 @@ namespace
 		}
 		ImGui::EndTable();
 		if (shown == 0)
-			ImGui::TextDisabled(rows.empty() ? "  (none)" : "  (nothing matches the filter)");
+			ImGui::TextDisabled(rows.empty() ? "  (no variables)" : "  (nothing matches the filter)");
 	}
 }
 

@@ -310,7 +310,7 @@ std::string drawNodeDoc(const HorizonCode::Node& n)
 	{
 		ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::TextDim);
 		ImGui::TextUnformatted(fn->isExec ? "Runs when executed."
-		                                  : "Pure - evaluated whenever an output is used.");
+		                                  : "Pure — evaluated whenever an output is used.");
 		ImGui::PopStyleColor();
 	}
 
@@ -1928,7 +1928,7 @@ namespace
 	}
 
 	// The fields of the project's default SaveGame Template that a save.* call
-	// can carry. The accessor's TYPE decides which fields it may touch: Save Get
+	// can carry. The accessor's TYPE decides which fields it may touch: Get Saved
 	// Number offers the numbers, and offering it a string field would be
 	// offering a call that cannot work.
 	//

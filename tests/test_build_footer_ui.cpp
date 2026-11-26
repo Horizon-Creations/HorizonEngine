@@ -12,6 +12,7 @@
 #include <imgui_internal.h>
 #include <nlohmann/json.hpp>   // a mid-run state recorded from a live export
 
+#include <cstdio>
 #include <cstdlib>
 #include <fstream>
 #include <string>
@@ -44,6 +45,19 @@ namespace
 			io.LogFilename = nullptr;
 			io.BackendFlags |= ImGuiBackendFlags_RendererHasTextures;
 			io.BackendFlags |= ImGuiBackendFlags_RendererHasVtxOffset;
+			// The editor's face, as test_team_ui loads it: ImGui's built-in font has
+			// no "…", so the shots showed "?" where the dialog elides.
+#ifdef HE_EDITOR_DEPS_DIR
+			const std::string font = std::string(HE_EDITOR_DEPS_DIR) + "/Fonts/Roboto_Condensed-Bold.ttf";
+			if (std::FILE* f = std::fopen(font.c_str(), "rb"))
+			{
+				std::fclose(f);
+				ImFontConfig cfg;
+				cfg.OversampleH = 2;
+				cfg.OversampleV = 2;
+				io.FontDefault = io.Fonts->AddFontFromFileTTF(font.c_str(), 15.0f, &cfg);
+			}
+#endif
 			applyHorizonDarkTheme();
 			setGlobalNotifications(&store);
 		}
@@ -379,7 +393,7 @@ TEST_CASE("Build window: an export's rings fill in list order, Build game first"
 
 	struct Ring { std::string name, state; float progress; std::string detail; };
 	std::vector<Ring> rings = {
-		{ "Setup", "done", 1.0f, "" }, { "Build game", "running", 0.62f, "62 %" },
+		{ "Setup", "done", 1.0f, "" }, { "Build game", "running", 0.62f, "62%" },
 		{ "Build HorizonCode", "pending", 0.0f, "" }, { "Package", "pending", 0.0f, "" },
 		{ "Clean up", "pending", 0.0f, "" } };
 	std::string activity = "Compiling the game against the engine SDK\xe2\x80\xa6";

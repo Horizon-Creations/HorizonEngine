@@ -10,6 +10,7 @@
 #include "TerrainTools.h"                // the Terrain section's Heightmap block
 #include "AutoLodDialog.h"               // Generate LODs on a foliage layer and a LOD component
 #include "NotificationStore.h"          // the result line of Bake Impostor
+#include "AudioMixView.h"                // the Audio Editor's bus dropdown (Audio Source, weather sounds)
 #include <HorizonScene/HorizonScene.h>
 #include <HorizonScene/CookedStatic.h>   // an entity under edit leaves the cooked block
 #include <HorizonScene/EntityActive.h>   // the "Active" switch at the top of the panel
@@ -563,16 +564,45 @@ static void componentCaptions(const std::string& tip, int count)
 	const float  y     = ImGui::GetCursorScreenPos().y - ImGui::GetStyle().ItemSpacing.y * 0.5f;
 	ImDrawList*  dl    = ImGui::GetWindowDrawList();
 	const ImU32  col   = ImGui::GetColorU32(ImGuiCol_TextDisabled);
+	auto measure = [&](const std::string& s) { return ImGui::GetFont()->CalcTextSizeA(size, FLT_MAX, 0.0f, s.c_str()); };
 	for (int k = 0; k < count; ++k)
 	{
 		if (names[k].empty()) continue;
 		const float  x0 = mn.x + k * (fw + inner);
-		const ImVec2 ts = ImGui::GetFont()->CalcTextSizeA(size, FLT_MAX, 0.0f, names[k].c_str());
+		// A caption wider than its field ends in "..." rather than being cut
+		// mid-word ("direction offs").
+		if (measure(names[k]).x > fw)
+		{
+			while (!names[k].empty() && measure(names[k] + "...").x > fw) names[k].pop_back();
+			names[k] += "...";
+		}
+		const ImVec2 ts = measure(names[k]);
 		dl->PushClipRect(ImVec2(x0, y), ImVec2(x0 + fw, y + size + 2.0f), true);
 		dl->AddText(ImGui::GetFont(), size, ImVec2(x0 + std::max(0.0f, (fw - ts.x) * 0.5f), y), col, names[k].c_str());
 		dl->PopClipRect();
 	}
 	ImGui::Dummy(ImVec2(0.0f, size - ImGui::GetStyle().ItemSpacing.y * 0.5f));
+}
+
+// How many of a vector parameter's fields to show: trailing ones the tooltip
+// calls "reserved" are padding in the shader's layout, not something to edit.
+static int visibleComponents(const std::string* tip, int count)
+{
+	while (tip && count > 1 && componentName(*tip, "xyzw"[count - 1]) == "reserved") --count;
+	return count;
+}
+
+// A material parameter's vector: plain fields. Row::dragFloat2/4 paint the
+// X/Y/Z axis colours, which say "position" about numbers that are not one.
+static bool paramDragN(const char* label, float* v, int n)
+{
+	ImGui::PushID(label);
+	if (!EditorWidgets::Row::labelCell(label)) ImGui::TextUnformatted(label);
+	EditorWidgets::helpForLabel(label);
+	ImGui::SetNextItemWidth(-FLT_MIN);
+	const bool changed = ImGui::DragScalarN("##v", ImGuiDataType_Float, v, n, 0.01f, nullptr, nullptr, "%.2f");
+	ImGui::PopID();
+	return changed;
 }
 
 // The project's sixteen collision-channel names, as a combo's item list.
@@ -598,6 +628,27 @@ struct CollisionLayerNames
 		}
 	}
 };
+
+// The mixer bus a component plays through: the Audio Editor's dropdown (the
+// project's buses, a bus that is gone shown as missing) rather than free text,
+// where a typo was a silent route to Master. Returns true when another bus was
+// picked; the caller takes the undo snapshot, a combo pick is not something
+// trackEdit sees.
+bool busRow(AppContext& ctx, const char* label, std::string& bus)
+{
+	const HE::AudioBusConfig* buses =
+		(ctx.projectManager && !ctx.projectManager->currentProject().path.empty())
+			? &ctx.projectManager->currentProject().audioBuses : nullptr;
+	ImGui::PushID(label);
+	if (!EditorWidgets::Row::labelCell(label))
+		ImGui::TextUnformatted(label, std::strstr(label, "##"));
+	ImGui::SetNextItemWidth(-FLT_MIN);
+	const bool changed = HE::Ed::AudioMix::drawBusCombo(buses, bus, true, "The Clip's Bus");
+	// This component's entry, not the Audio Editor's the combo asked for.
+	EditorWidgets::helpForLabel(label);
+	ImGui::PopID();
+	return changed;
+}
 
 // One combo for both components that carry a channel. The value is a uint8_t
 // that nothing on the way in validates, so it is clamped FOR THE WIDGET only and
@@ -1267,9 +1318,10 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 				hint("Takes effect once Auto-Advance is on.");
 
 			if (subSection("Sun & Moon", true)) {
-			Row::colorEdit3("Sun Color",  &env->sunColor.x, ImGuiColorEditFlags_NoInputs); trackEdit();
+			// The same 0..255 fields as a light's Color: one colour format per panel.
+			Row::colorEdit3("Sun Color",  &env->sunColor.x); trackEdit();
 			Row::sliderFloat("Sun Brightness",  &env->sunIntensity,  0.0f, 10.0f); trackEdit();
-			Row::colorEdit3("Moon Color", &env->moonColor.x, ImGuiColorEditFlags_NoInputs); trackEdit();
+			Row::colorEdit3("Moon Color", &env->moonColor.x); trackEdit();
 			Row::sliderFloat("Moon Brightness", &env->moonIntensity, 0.0f, 10.0f); trackEdit();
 
 			EditorWidgets::subHeading("Moon Phase");
@@ -1349,13 +1401,14 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 				if (Row::combo("Quality", &q, cloudQ, 3)) { env->cloudQuality = q; trackEdit(); }
 				hint("Lower = cheaper. Clouds are a top GPU cost; Low ~halves their step count.");
 				if (EditorWidgets::checkbox("Low-res clouds", &env->lowResClouds)) trackEdit();
-				hint("Raymarch clouds at 1/4 res + upsample. Big win in open-sky views. "
-				     "Toggle + F9 to A/B the cost. (Metal first.)");
+				hint("Draws the clouds at a quarter of the resolution and scales them up. "
+				     "Saves the most in open-sky views; compare the frame time with it on "
+				     "and off in the Profiler (F9).");
 			}
 			// Cloud appearance: tweak the look without re-rolling the pattern.
 			Row::sliderFloat("Density", &env->cloudDensity, 0.2f, 2.5f); trackEdit();
 			Row::sliderFloat("Fluffiness", &env->cloudFluffiness, 0.0f, 1.0f); trackEdit();
-			Row::colorEdit3("Cloud Tint", &env->cloudTint.x, ImGuiColorEditFlags_NoInputs); trackEdit();
+			Row::colorEdit3("Cloud Tint", &env->cloudTint.x); trackEdit();
 			hint("Density thickens, fluffiness breaks the bodies into puffy cauliflower lumps.");
 			Row::sliderFloat("Wind Direction", &env->windDirection, 0.0f, 360.0f, "%.0f\xc2\xb0"); trackEdit();
 			Row::sliderFloat("Wind Speed", &env->windSpeed, 0.0f, 4.0f); trackEdit();
@@ -1433,7 +1486,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 				     "Clamped to the directional shadow distance, so the volume is never "
 				     "without a shadow map to sample.");
 
-				Row::colorEdit3("Albedo##fogvol", &env->fogAlbedo.x, ImGuiColorEditFlags_NoInputs); trackEdit();
+				Row::colorEdit3("Albedo##fogvol", &env->fogAlbedo.x); trackEdit();
 				hint("Scattering tint. White scatters the sky/sun colour unchanged; a tint "
 				     "colours the fog itself, like dust or smoke.");
 
@@ -1477,7 +1530,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 
 			if (subSection("Stars & Milky Way", false)) {
 			Row::sliderFloat("Star Brightness", &env->starBrightness, 0.0f, 3.0f); trackEdit();
-			Row::colorEdit3("Star Color", &env->starColor.x, ImGuiColorEditFlags_NoInputs); trackEdit();
+			Row::colorEdit3("Star Color", &env->starColor.x); trackEdit();
 			Row::sliderFloat("Star Amount", &env->starDensity, 0.0f, 1.0f); trackEdit();
 			Row::sliderFloat("Star Size", &env->starSize, 0.3f, 2.5f); trackEdit();
 			Row::sliderFloat("Size Variation", &env->starSizeVariation, 0.0f, 1.0f); trackEdit();
@@ -1507,16 +1560,16 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 					hint("Extra filament octaves + crisper lines (night sky; pricier). Metal/OpenGL.");
 			}
 			Row::sliderFloat("Seed##neb", &env->nebulaSeed, 0.0f, 50.0f, "%.1f"); trackEdit();
-			Row::colorEdit3("Nebula Color 1", &env->nebulaColor.x,  ImGuiColorEditFlags_NoInputs); trackEdit();
-			Row::colorEdit3("Nebula Color 2", &env->nebulaColor2.x, ImGuiColorEditFlags_NoInputs); trackEdit();
-			Row::colorEdit3("Nebula Color 3", &env->nebulaColor3.x, ImGuiColorEditFlags_NoInputs); trackEdit();
+			Row::colorEdit3("Nebula Color 1", &env->nebulaColor.x);  trackEdit();
+			Row::colorEdit3("Nebula Color 2", &env->nebulaColor2.x); trackEdit();
+			Row::colorEdit3("Nebula Color 3", &env->nebulaColor3.x); trackEdit();
 
 			ImGui::TreePop(); } // end Nebula
 
 			if (subSection("Aurora", false)) {
 			Row::sliderFloat("Intensity##aur", &env->auroraIntensity, 0.0f, 1.0f); trackEdit();
-			Row::colorEdit3("Color (base)", &env->auroraColor.x, ImGuiColorEditFlags_NoInputs); trackEdit();
-			Row::colorEdit3("Color (top)",  &env->auroraColorTop.x, ImGuiColorEditFlags_NoInputs); trackEdit();
+			Row::colorEdit3("Color (base)", &env->auroraColor.x);    trackEdit();
+			Row::colorEdit3("Color (top)",  &env->auroraColorTop.x); trackEdit();
 			ImGui::BeginDisabled(env->auroraIntensity <= 0.0f);
 			Row::sliderFloat("Height", &env->auroraHeight, 0.0f, 1.0f); trackEdit();
 			Row::sliderFloat("Fragmentation", &env->auroraFragmentation, 0.0f, 1.0f); trackEdit();
@@ -1634,10 +1687,8 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 				EditorWidgets::checkbox("Weather Sounds", &w->soundEnabled); trackEdit();
 				ImGui::BeginDisabled(!w->soundEnabled);
 				Row::sliderFloat("Volume##wxs", &w->soundVolume, 0.0f, 1.0f); trackEdit();
-				char wxBus[64];
-				std::strncpy(wxBus, w->soundBus.c_str(), sizeof(wxBus) - 1);
-				wxBus[sizeof(wxBus) - 1] = '\0';
-				if (Row::inputText("Bus##wxs", wxBus, sizeof(wxBus))) { w->soundBus = wxBus; trackEdit(); }
+				std::string wxBus = w->soundBus;
+				if (busRow(ctx, "Bus##wxs", wxBus)) { if (undo) undo->snapshotNow(); w->soundBus = wxBus; }
 				// An empty slot plays the engine's sound (Engine/Audio/Weather), so it says
 				// which; the entry behind each slot says how it behaves.
 				EditorWidgets::assetDropSlot(ctx, "Rain", w->rainSound,
@@ -2473,15 +2524,21 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 						ImGui::PushID(static_cast<int>(i));
 						bool edited = false;
 						const char* label = nm.empty() ? "param" : nm.c_str();
+						// The graph's tooltip for this parameter, and for a vector
+						// the name of each component under its field: four bare
+						// numbers called "Foam" say nothing about which is which.
+						const std::string* tip = (i < mat->graphParamTooltips.size() &&
+						                          !mat->graphParamTooltips[i].empty())
+							? &mat->graphParamTooltips[i] : nullptr;
+						const int fields = visibleComponents(tip, kind == HE::MatParamKind::Vec4 ? 4 : 2);
 						switch (kind)
 						{
 							// 0..255 like Base Color above, so one panel has one colour format.
 							case HE::MatParamKind::Color:
 								edited = Row::colorEdit3(label, val); break;
 							case HE::MatParamKind::Vec2:
-								edited = Row::dragFloat2(label, val, 0.01f); break;
 							case HE::MatParamKind::Vec4:
-								edited = Row::dragFloat4(label, val, 0.01f); break;
+								edited = paramDragN(label, val, fields); break;
 							case HE::MatParamKind::Bool:
 							{
 								bool b = val[0] > 0.5f;
@@ -2491,12 +2548,6 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 							default: // Float
 								edited = Row::dragFloat(label, val, 0.01f); break;
 						}
-						// The graph's tooltip for this parameter, and for a vector
-						// the name of each component under its field: four bare
-						// numbers called "Foam" say nothing about which is which.
-						const std::string* tip = (i < mat->graphParamTooltips.size() &&
-						                          !mat->graphParamTooltips[i].empty())
-							? &mat->graphParamTooltips[i] : nullptr;
 						if (tip && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal))
 						{
 							ImGui::BeginTooltip();
@@ -2506,7 +2557,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 							ImGui::EndTooltip();
 						}
 						if (tip && (kind == HE::MatParamKind::Vec4 || kind == HE::MatParamKind::Vec2))
-							componentCaptions(*tip, kind == HE::MatParamKind::Vec4 ? 4 : 2);
+							componentCaptions(*tip, fields);
 						if (edited)
 						{
 							int w = ovi;
@@ -2640,72 +2691,6 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 				ImGui::TextDisabled("%s", "No Character Controller — nothing to move.");
 		}
 		if (removed) { if (undo) undo->snapshotNow(removeLabel.c_str()); registry.remove<MovementComponent>(entity); }
-	}
-
-	// ── Replication ─────────────────────────────────────────────────────────
-	// The category EVERY entity has, and the one tick that is the whole opt-in
-	// (docs/gameplay-replication-plan.md §8.1). Before this, sharing an entity
-	// meant knowing that a component called "Network" existed and finding it in
-	// the Add Component menu; now the question "is this thing on the wire?" is
-	// answered in the same place for every entity, whether the answer is yes or
-	// no. The menu entry is gone for exactly that reason.
-	//
-	// Turning it ON emplaces a NetworkComponent with defaults. Turning it OFF
-	// KEEPS the component with replicates = false, so the radius and the limits
-	// survive and a second click restores them; Remove Component (offered only
-	// while there is one) is how you really get rid of it.
-	//
-	// In the silent modes it behaves like every other component: the class
-	// tab's tree lists what the entity HAS, not the category every entity is
-	// offered, and removeComponent removes what is there.
-	{
-		auto* nc = registry.try_get<NetworkComponent>(entity);
-		if (nc || !quiet)
-		{
-			if (componentHeader("Replication", nc != nullptr, removed))
-			{
-				bool on = nc && nc->replicates;
-				if (EditorWidgets::checkbox("Replicates", &on))
-				{
-					if (!nc)
-					{
-						nc = &registry.emplace<NetworkComponent>(entity);
-						structuralChange = true;
-					}
-					nc->replicates = on;
-				}
-				trackEdit();
-				if (nc && nc->replicates)
-				{
-					// netId and owner are deliberately not here: the server hands them
-					// out per session, and a number typed in the editor would be a
-					// stale claim the next session overrides — the same reason the
-					// serializer leaves them out.
-					Row::dragFloat("Relevance Radius", &nc->relevanceRadius, 1.0f, 0.0f, 100000.0f, "%.0f m"); trackEdit();
-					EditorWidgets::checkbox("Replicate Transform", &nc->replicateTransform); trackEdit();
-					// The two anti-cheat limits. Drawn AFTER the two levers because they
-					// only mean something once the entity is on the wire at all, and a
-					// 0 in either is the ordinary case, explained in the tooltip.
-					Row::dragFloat("Max Speed",          &nc->maxSpeed,         0.1f, 0.0f, 1000.0f, "%.1f m/s"); trackEdit();
-					Row::dragFloat("Max Vertical Speed", &nc->maxVerticalSpeed, 0.1f, 0.0f, 1000.0f, "%.1f m/s"); trackEdit();
-					if (nc->maxSpeed <= 0.0f)
-					{
-						if (const auto* mv = registry.try_get<MovementComponent>(entity))
-							ImGui::TextDisabled("Max Speed 0: checked against Movement's %.1f m/s.", mv->maxSpeed);
-						else
-							ImGui::TextDisabled("%s", "Max Speed 0 and no Movement — horizontal speed is not checked.");
-					}
-				}
-				else if (nc)
-				{
-					// The component is still there, which is the whole point of
-					// switching off rather than removing — say so, or the kept
-					// radius looks like it was lost.
-					ImGui::TextDisabled("%s", "Off. The settings below are kept and come back with it.");
-				}
-			}
-			if (removed) { if (undo) undo->snapshotNow(removeLabel.c_str()); registry.remove<NetworkComponent>(entity); }
-		}
 	}
 
 	// ── Camera Rig ──────────────────────────────────────────────────────────
@@ -3024,21 +3009,29 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			if (spline->closed && spline->controlPoints.size() < 3)
 				hint("A closed spline needs at least three points; with fewer it is drawn open.");
 
-			// One fixed label for every row, so the tooltip lookup and the help
-			// audit see a single control rather than "Point 0", "Point 1" … (the
-			// same arrangement as the rope's control points).
+			// Each row is numbered ("Point 1" …), but asks for its help by the one
+			// fixed key, so the help audit still sees a single control.
 			ImGui::Spacing();
 			EditorWidgets::subHeading("Control Points");
+			const ImGuiStyle& st = ImGui::GetStyle();
+			const float removeW = ImGui::CalcTextSize("Remove").x + st.FramePadding.x * 2.0f;
 			for (int i = 0; i < static_cast<int>(spline->controlPoints.size()); ++i)
 			{
 				ImGui::PushID(i);
-				Row::dragFloat3("Point", &spline->controlPoints[static_cast<size_t>(i)].x,
-				                0.05f, -100000.0f, 100000.0f);
+				char pointName[32];
+				std::snprintf(pointName, sizeof pointName, "Point %d", i + 1);
+				if (!Row::labelCell(pointName)) ImGui::TextUnformatted(pointName);
+				// Room left for Remove on the same line.
+				ImGui::SetNextItemWidth(-(removeW + st.ItemSpacing.x));
+				Row::axisDrag("##pt", &spline->controlPoints[static_cast<size_t>(i)].x, 3,
+				              0.05f, -100000.0f, 100000.0f);
 				trackEdit();
+				EditorWidgets::helpForKey("Spline/Point");
 				// A spline may be emptied: every state on the way to a finished
 				// line is a valid component, the viewport tool deletes down to
 				// zero too.
-				if (EditorWidgets::dangerSmallButton("Remove##splinept"))
+				ImGui::SameLine();
+				if (EditorWidgets::removeButton("Remove##splinept"))
 				{
 					if (undo) undo->snapshotNow();
 					spline->controlPoints.erase(spline->controlPoints.begin() + i);
@@ -3046,7 +3039,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 				}
 				ImGui::PopID();
 			}
-			if (ImGui::Button("+ Point"))
+			if (EditorWidgets::button("Add Point"))
 			{
 				if (undo) undo->snapshotNow();
 				// Carries on in the direction of the last segment, so the new point
@@ -3095,7 +3088,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			                             "(none — drop a material here)", "material", true);
 			{
 				EditorWidgets::WrapText wrap;
-				hint("The band carries its AGE in uv.v — 0 at the tip, 1 at the tail. "
+				hint("The band carries its age in uv.v — 0 at the tip, 1 at the tail. "
 				     "Colour, opacity and fade come from the material graph reading "
 				     "that, not from fields here.");
 			}
@@ -3225,7 +3218,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 				if (!registry.all_of<MeshComponent>(entity))
 					hint("This entity has no Mesh, so there is no geometry to collide with.");
 				if (!bodyIsStatic)
-					hint("A triangle mesh can only be a STATIC body. Set Body Type to "
+					hint("A triangle mesh can only be a static body. Set Body Type to"
 					     "Static, or pick Convex Hull for something that moves.");
 				break;
 			case ColliderShape::ConvexHull:
@@ -3241,7 +3234,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 				if (!registry.all_of<TerrainComponent>(entity))
 					hint("This entity has no Landscape, so there is no height field to use.");
 				if (!bodyIsStatic)
-					hint("A height field can only be a STATIC body. Set Body Type to Static.");
+					hint("A height field can only be a static body. Set Body Type to Static.");
 				break;
 			}
 			EditorWidgets::checkbox("Is Trigger", &col->isTrigger); trackEdit();
@@ -3348,7 +3341,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			case JointType::Point:
 				Row::dragFloat3("Anchor A", &joint->anchorA.x, 0.01f, -10000.0f, 10000.0f);
 				trackEdit();
-				hint("One shared ball socket, in THIS entity's own space. Both bodies hang "
+				hint("One shared ball socket, in this entity's own space. Both bodies hang "
 				     "from that point and turn freely about it — the link of a chain.");
 				break;
 			case JointType::Hinge:
@@ -3386,7 +3379,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			}
 			if ((shownType == JointType::Hinge || shownType == JointType::Slider ||
 			     shownType == JointType::Distance) && joint->minLimit >= joint->maxLimit)
-				hint("Min at or above Max means NO limit: the hinge turns all the way round, "
+				hint("Min at or above Max means no limit: the hinge turns all the way round, "
 				     "the slider has no stops, the rope keeps whatever length it was placed "
 				     "at.");
 
@@ -3405,7 +3398,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 				               shownType == JointType::Hinge ? "%.0f N·m" : "%.0f N");
 				trackEdit();
 				hint("Max Force is the switch: at 0 the motor is off. A target speed of 0 "
-				     "WITH force behind it is a brake that holds the joint where it is.");
+				     "with force behind it is a brake that holds the joint where it is.");
 			}
 
 			ImGui::Spacing();
@@ -3458,7 +3451,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			EditorWidgets::checkbox("Enabled", &ss->enabled); trackEdit();
 			hint("Lets scripts write this entity's state into the active save "
 			     "(entity.saveState) and re-apply it later (entity.applySavedState). "
-			     "Play mode only; the attributes below choose WHAT is captured.");
+			     "Play mode only; the attributes below choose what is captured.");
 			ImGui::BeginDisabled(!ss->enabled);
 			// Scoped ids: these read "Transform"/"Visibility", and so do the
 			// COMPONENT HEADERS further up. ImGui derives an id from the label,
@@ -3711,10 +3704,8 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			snprintf(buf, sizeof(buf), "%llu:%llu", (unsigned long long)a->assetId.hi,
 			         (unsigned long long)a->assetId.lo);
 			Row::labelText("Asset ID", "%s", buf);
-			char busBuf[64];
-			std::strncpy(busBuf, a->busName.c_str(), sizeof(busBuf) - 1);
-			busBuf[sizeof(busBuf) - 1] = '\0';
-			if (Row::inputText("Bus##as", busBuf, sizeof(busBuf))) { a->busName = busBuf; trackEdit(); }
+			std::string bus = a->busName;
+			if (busRow(ctx, "Bus##as", bus)) { if (undo) undo->snapshotNow(); a->busName = bus; }
 			Row::dragFloat("Volume##as", &a->volume, 0.01f, 0.0f, 2.0f); trackEdit();
 			Row::dragFloat("Pitch##as",  &a->pitch,  0.01f, 0.1f, 4.0f); trackEdit();
 			EditorWidgets::checkbox("Loop##as",        &a->loop);        trackEdit();
@@ -3908,7 +3899,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			Row::dragFloat("Max Scale##fol",     &fol->maxScale,     0.01f, 0.01f, 10.f);  if (ImGui::IsItemDeactivatedAfterEdit()) { fol->dirty = true; trackEdit(); }
 			Row::dragInt("Seed##fol", &fol->seed, 1);                    if (ImGui::IsItemDeactivatedAfterEdit()) { fol->dirty = true; trackEdit(); }
 			// What the renderer does with the layer, not where it grows: no re-scatter.
-			EditorWidgets::checkbox("Cast Shadows##fol", &fol->castsShadow); trackEdit();
+			EditorWidgets::checkbox("Casts Shadow##fol", &fol->castsShadow); trackEdit();
 			EditorWidgets::checkbox("Ambient Occlusion##fol", &fol->contributesAO); trackEdit();
 			Row::dragFloat("Shadow Distance##fol", &fol->shadowDistance, 1.0f, 0.0f, 2000.f,
 			               fol->shadowDistance > 0.0f ? "%.0f m" : "= Draw Distance"); trackEdit();
@@ -4218,6 +4209,74 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			if (Row::inputText("OnClick##btn", buf, sizeof(buf))) { btn->onClickFunction = buf; trackEdit(); }
 		}
 		if (removed) { if (undo) undo->snapshotNow(removeLabel.c_str()); registry.remove<UIButtonComponent>(entity); }
+	}
+
+	// ── Replication ─────────────────────────────────────────────────────────
+	// The category EVERY entity has, and the one tick that is the whole opt-in
+	// (docs/gameplay-replication-plan.md §8.1). Before this, sharing an entity
+	// meant knowing that a component called "Network" existed and finding it in
+	// the Add Component menu; now the question "is this thing on the wire?" is
+	// answered in the same place for every entity, whether the answer is yes or
+	// no. The menu entry is gone for exactly that reason. Drawn LAST, after every
+	// component the entity has, so it sits in the same place on every entity
+	// instead of between whichever components happen to be there.
+	//
+	// Turning it ON emplaces a NetworkComponent with defaults. Turning it OFF
+	// KEEPS the component with replicates = false, so the radius and the limits
+	// survive and a second click restores them; Remove Component (offered only
+	// while there is one) is how you really get rid of it.
+	//
+	// In the silent modes it behaves like every other component: the class
+	// tab's tree lists what the entity HAS, not the category every entity is
+	// offered, and removeComponent removes what is there.
+	{
+		auto* nc = registry.try_get<NetworkComponent>(entity);
+		if (nc || !quiet)
+		{
+			if (componentHeader("Replication", nc != nullptr, removed))
+			{
+				bool on = nc && nc->replicates;
+				if (EditorWidgets::checkbox("Replicates", &on))
+				{
+					if (!nc)
+					{
+						nc = &registry.emplace<NetworkComponent>(entity);
+						structuralChange = true;
+					}
+					nc->replicates = on;
+				}
+				trackEdit();
+				if (nc && nc->replicates)
+				{
+					// netId and owner are deliberately not here: the server hands them
+					// out per session, and a number typed in the editor would be a
+					// stale claim the next session overrides — the same reason the
+					// serializer leaves them out.
+					Row::dragFloat("Relevance Radius", &nc->relevanceRadius, 1.0f, 0.0f, 100000.0f, "%.0f m"); trackEdit();
+					EditorWidgets::checkbox("Replicate Transform", &nc->replicateTransform); trackEdit();
+					// The two anti-cheat limits. Drawn AFTER the two levers because they
+					// only mean something once the entity is on the wire at all, and a
+					// 0 in either is the ordinary case, explained in the tooltip.
+					Row::dragFloat("Max Speed",          &nc->maxSpeed,         0.1f, 0.0f, 1000.0f, "%.1f m/s"); trackEdit();
+					Row::dragFloat("Max Vertical Speed", &nc->maxVerticalSpeed, 0.1f, 0.0f, 1000.0f, "%.1f m/s"); trackEdit();
+					if (nc->maxSpeed <= 0.0f)
+					{
+						if (const auto* mv = registry.try_get<MovementComponent>(entity))
+							ImGui::TextDisabled("Max Speed 0: checked against Movement's %.1f m/s.", mv->maxSpeed);
+						else
+							ImGui::TextDisabled("%s", "Max Speed 0 and no Movement — horizontal speed is not checked.");
+					}
+				}
+				else if (nc)
+				{
+					// The component is still there, which is the whole point of
+					// switching off rather than removing — say so, or the kept
+					// radius looks like it was lost.
+					ImGui::TextDisabled("%s", "Off. The settings below are kept and come back with it.");
+				}
+			}
+			if (removed) { if (undo) undo->snapshotNow(removeLabel.c_str()); registry.remove<NetworkComponent>(entity); }
+		}
 	}
 
 	// ── Add Component ───────────────────────────────────────────────────────

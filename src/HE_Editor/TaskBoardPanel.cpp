@@ -137,7 +137,7 @@ namespace
 		{
 			s.unreadable = true;
 			s.error = "Config/TaskBoard.json cannot be read (" + r.error +
-			          "). Fix the file, then Reload. Nothing is saved until then.";
+			          "). Fix the file, then Reload Tasks. Nothing is saved until then.";
 			return false;
 		}
 		s.board      = std::move(fresh);

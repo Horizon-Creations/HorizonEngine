@@ -348,8 +348,8 @@ TEST_CASE("Git LFS remedy: the same routes, its own button and its own callback"
 		const auto items = itemsOnScreen(bits);
 		REQUIRE(items.count(idOf("Install Git LFS")) == 1);
 		CHECK(items.count(idOf("Install Git")) == 0);
-		CHECK(items.count(idOf("Copy LFS Command")) == 1);   // "brew install git-lfs" by hand
-		CHECK(items.count(idOf("git-lfs.com")) == 1);
+		CHECK(items.count(idOf("Copy Install Command")) == 1);   // "brew install git-lfs" by hand
+		CHECK(items.count(idOf("Download Page")) == 1);
 		dump(bits, "lfs-remedy-homebrew");
 		clickAt(bits, items.at(idOf("Install Git LFS")));
 		CHECK(bits.lfsInstalls == 1);
@@ -361,7 +361,7 @@ TEST_CASE("Git LFS remedy: the same routes, its own button and its own callback"
 		frame(bits, false);
 		const auto items = itemsOnScreen(bits);
 		CHECK(items.count(idOf("Install Git LFS")) == 0);
-		CHECK(items.count(idOf("git-lfs.com")) == 1);
+		CHECK(items.count(idOf("Download Page")) == 1);
 		CHECK(bits.lfsInstalls == 0);
 	}
 	SUBCASE("while git installs, the LFS button is off and git's log is not shown here")

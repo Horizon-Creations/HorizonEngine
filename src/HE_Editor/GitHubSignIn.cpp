@@ -454,7 +454,7 @@ void drawAccountRow(AppContext& ctx, bool inlineFlow)
 		                   login.c_str());
 		ImGui::SameLine();
 		ImGui::BeginDisabled(busy);
-		if (EditorWidgets::button("Sign out")) signOut(root);
+		if (EditorWidgets::button("Sign Out")) signOut(root);
 		ImGui::EndDisabled();
 		break;
 	}
@@ -485,7 +485,7 @@ void drawAccountRow(AppContext& ctx, bool inlineFlow)
 		if (account() == Account::Rejected)
 		{
 			ImGui::SameLine();
-			if (EditorWidgets::button("Sign out")) signOut(root);
+			if (EditorWidgets::button("Sign Out")) signOut(root);
 		}
 		ImGui::EndDisabled();
 		if (gitMissing)

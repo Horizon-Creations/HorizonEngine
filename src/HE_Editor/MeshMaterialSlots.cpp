@@ -3,6 +3,7 @@
 #if __has_include(<imgui.h>)
 
 #include "EditorWidgets.h"   // helpForKey — the row's tooltip
+#include "EditorTheme.h"     // Theme::Warn for a slot whose material is gone
 #include <ContentManager/ContentManager.h>
 #include <imgui.h>
 #include <algorithm>
@@ -139,7 +140,11 @@ bool draw(ContentManager* cm, Table& table, Session& session, const SlotWidget& 
 		ImGui::PushID(static_cast<int>(i));
 		ImGui::Text("%zu", i);
 		ImGui::SameLine();
+		// A dangling path reads as a warning, not as one more value.
+		const bool dangling = id == HE::UUID{} && !sec.materialPath.empty();
+		if (dangling) ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::Warn);
 		const EditorWidgets::SlotAction act = slot(i, id, emptyText.c_str());
+		if (dangling) ImGui::PopStyleColor();
 		// Keyed by hand: the row's label is its number, which is data.
 		EditorWidgets::helpForKey("Mesh Viewer/Material Slots");
 		// A path nothing resolves has no id, and the asset field offers
@@ -152,13 +157,17 @@ bool draw(ContentManager* cm, Table& table, Session& session, const SlotWidget& 
 			clearDangling = ImGui::SmallButton("Clear##missing");
 			EditorWidgets::helpForKey("Mesh Viewer/Material Slots");
 		}
-		// Onto its own line when the row is full: a narrow pane wrapped the count
-		// one syllable per line.
+		// Right-aligned at the pane's edge, so the counts form one column however
+		// wide each row's slot button is; onto its own line when the row is full
+		// (a narrow pane wrapped the count one syllable per line).
 		char tris[32];
 		std::snprintf(tris, sizeof(tris), "%u tris", sec.indexCount / 3);
+		const float trisX = ImGui::GetWindowContentRegionMax().x - ImGui::CalcTextSize(tris).x;
 		ImGui::SameLine();
-		if (ImGui::GetContentRegionAvail().x < ImGui::CalcTextSize(tris).x)
+		if (ImGui::GetCursorPosX() > trisX)
 			ImGui::NewLine();
+		else
+			ImGui::SameLine(trisX);
 		ImGui::TextDisabled("%s", tris);
 		ImGui::PopID();
 

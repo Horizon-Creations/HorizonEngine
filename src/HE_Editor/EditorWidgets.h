@@ -159,6 +159,10 @@ namespace Row
 	                float max = 0.0f, const char* fmt = "%.2f");
 	bool dragFloat4(const char* label, float* v, float speed, float min = 0.0f,
 	                float max = 0.0f, const char* fmt = "%.2f");
+	// The axis-coloured fields of dragFloat3/4 alone, no label cell, at the next
+	// item width: for a row that puts something else beside them.
+	bool axisDrag(const char* id, float* v, int n, float speed, float min = 0.0f,
+	              float max = 0.0f, const char* fmt = "%.2f");
 	bool dragInt(const char* label, int* v, float speed = 1.0f, int min = 0, int max = 0);
 	bool inputInt(const char* label, int* v);
 	bool combo(const char* label, int* v, const char* const items[], int count);

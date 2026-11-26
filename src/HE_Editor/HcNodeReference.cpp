@@ -193,7 +193,7 @@ void install(Docs::Library& lib)
 		// rather than repeated into sixty hand-written descriptions, where it
 		// would be right in some of them and stale in the rest.
 		std::string extra = fn.isExec ? "Runs when executed."
-		                              : "Pure - evaluated whenever an output is used.";
+		                              : "Pure — evaluated whenever an output is used.";
 		if (!fn.params.empty() && fn.params[0].selfDefault)
 			extra += " Entity left empty means the entity this object sits on, so a "
 			         "character calling this on itself wires nothing.";
