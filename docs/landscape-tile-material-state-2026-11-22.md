@@ -3,6 +3,9 @@
 Follows `docs/landscape-tile-material-design-2026-11-21.md` (design, Metal map, Vulkan / OpenGL survey). This file is the state
 after the second session; where the two disagree, this one is right.
 
+**26.11. (topic 355, step 3): the per-backend table of this file's Handoff is out of date; the current one, with the black tiles of Catania view 5 and
+the GPU / RSS explanation, is `docs/landscape-one-system-backends-2026-11-26.md`.**
+
 ## Handoff
 
 **State**: the tile landscape's ground is a surface like any other on Metal (material, shadows both ways, GI, SSAO, velocity,
