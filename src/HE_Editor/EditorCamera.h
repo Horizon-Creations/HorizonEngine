@@ -116,7 +116,7 @@ public:
 	void      frameArea(const glm::vec3& center, float halfX, float halfZ)
 	{
 		const float r    = std::max(1.0f, std::sqrt(halfX * halfX + halfZ * halfZ));
-		const float dist = std::min(r / std::tan(glm::radians(m_fov * 0.5f)) * 1.2f, m_far * 0.9f);
+		const float dist = std::min(r / std::tan(glm::radians(m_fov * 0.5f)) * 1.2f, kFrameMaxDistance);
 		const glm::vec3 dir = glm::normalize(glm::vec3(1.0f, 0.75f, 1.0f));
 		setOrientation(center + dir * dist, -dir);
 		m_pivotDistance = dist;
@@ -160,5 +160,8 @@ private:
 	// its far image beyond them, so a few kilometres here hid exactly that. Precision does not suffer: with a float depth buffer it is set
 	// by the near plane, the far one barely moves it. Shadows keep their own distance (kShadowDistance).
 	float     m_far       = 250000.0f;
+	// How far framing (focusOn, frameArea) may put the camera: a 100 km landscape framed whole would be 146 km out, a haze, so a
+	// kilometre-sized subject is shown from close enough to work on, as before the far plane was opened.
+	static constexpr float kFrameMaxDistance = 4500.0f;
 	float     m_flySpeed  = 6.0f;       // world units / second
 };

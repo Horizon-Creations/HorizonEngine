@@ -156,10 +156,11 @@ void main()
     tile = clamp(tile, ivec2(0), ivec2(int(uHeightInfo.y), int(uHeightInfo.z)) - ivec2(1));
     int mask = int(uHeightInfo.w) - 1;
     uint slot = texelFetch(uSlotTable, ivec2(tile.x & mask, tile.y & mask), 0).r;
-    // The table is toroidal: a tile a whole window away reads the entry of one near the camera. The atlas holds tiles within half a window
-    // of the camera less one (LandscapeRuntime's needWindow), so a tile farther out is not in it whatever its entry says.
+    // The table is toroidal: a tile a whole window away reads the entry of one near the camera. A streamed atlas holds tiles within half a
+    // window of the camera less one (LandscapeRuntime's needWindow), so a tile farther out is not in it whatever its entry says. A world no
+    // wider than the table (keepAll widens it to the world) has no aliases, and every tile is resident wherever the camera is.
     ivec2 away = abs(tile - ivec2(floor((uCameraRel.xz + uOrigin.xz) / uWorld.z)));
-    if (max(away.x, away.y) >= int(uHeightInfo.w) / 2) slot = 65535u;
+    if (max(uHeightInfo.y, uHeightInfo.z) > uHeightInfo.w && max(away.x, away.y) >= int(uHeightInfo.w) / 2) slot = 65535u;
 
     // Every derivative is taken here, before the branches on the slot: inside them (non-uniform control flow) an implicit one is undefined,
     // so the filtered accesses below pass theirs explicitly.
@@ -531,7 +532,7 @@ fragment float4 fragmentMain(LsVertexOut in [[stage_in]],
     int mask = int(G.heightInfo.w) - 1;
     uint slot = slots.read(uint2(uint(tile.x & mask), uint(tile.y & mask))).r;
     int2 away = abs(tile - int2(floor((G.cameraRel.xz + G.origin.xz) / G.world.z)));   // the toroidal table (see the GLSL)
-    if (max(away.x, away.y) >= int(G.heightInfo.w) / 2) slot = 65535u;
+    if (max(G.heightInfo.y, G.heightInfo.z) > G.heightInfo.w && max(away.x, away.y) >= int(G.heightInfo.w) / 2) slot = 65535u;
 
     // Every derivative before the branches on the slot, the filtered accesses below pass theirs explicitly (see the GLSL).
     constexpr sampler smp(coord::normalized, address::repeat, filter::linear, mip_filter::linear);
@@ -812,7 +813,7 @@ float4 PSMain(LsVertexOut pin) : SV_Target
     int mask = int(heightInfo.w) - 1;
     uint slot = slotTable.Load(int3(tl.x & mask, tl.y & mask, 0)).r;
     int2 away = abs(tl - int2(floor((cameraRel.xz + origin.xz) / world.z)));   // the toroidal table (see the GLSL)
-    if (max(away.x, away.y) >= int(heightInfo.w) / 2) slot = 65535u;
+    if (max(heightInfo.y, heightInfo.z) > heightInfo.w && max(away.x, away.y) >= int(heightInfo.w) / 2) slot = 65535u;
 
     float3 n = normalize(cross(dx, dy));
     if (n.y < 0.0) n = -n;

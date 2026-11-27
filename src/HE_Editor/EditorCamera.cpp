@@ -237,7 +237,7 @@ void EditorCamera::focusOn(const glm::vec3& center, float radius)
 	// landscape) otherwise parks the camera outside its own frustum, and then the
 	// subject it was asked to show is the one thing clipped away.
 	const float dist = std::min(radius / std::tan(glm::radians(m_fov * 0.5f)) * 1.5f,
-	                            m_far * 0.9f);
+	                            kFrameMaxDistance);
 	m_pivotDistance  = std::max(kMinPivot, dist);
 	m_position       = center - forward() * m_pivotDistance;
 	m_initialised    = true; // keep current orientation, don't re-derive

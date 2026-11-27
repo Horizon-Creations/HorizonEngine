@@ -1711,9 +1711,9 @@ void heLsFind()
     heLsTile = clamp(ivec2(vUV * float(heLsSide())), ivec2(0), tiles - ivec2(1));
     int mask = int(uHeightInfo.w) - 1;
     heLsSlot = texelFetch(heLsSlotTable, ivec2(heLsTile.x & mask, heLsTile.y & mask), 0).r;
-    // The table is toroidal: a tile half a window or more from the camera is not in the atlas (see kLandscapeFS).
+    // The table is toroidal: in a world wider than it, a tile half a window or more from the camera is not in the atlas (see kLandscapeFS).
     ivec2 away = abs(heLsTile - ivec2(floor((uCameraRel.xz + uOrigin.xz) / uWorld.z)));
-    if (max(away.x, away.y) >= int(uHeightInfo.w) / 2) heLsSlot = 65535u;
+    if (max(uHeightInfo.y, uHeightInfo.z) > uHeightInfo.w && max(away.x, away.y) >= int(uHeightInfo.w) / 2) heLsSlot = 65535u;
     heLsFound = true;
 }
 vec4 heLsTexel(int page, ivec2 p)
