@@ -17,10 +17,12 @@
    draws once the region's tiles are in the atlas (`askGround`/`serveGround`), 4×4 px a texel. Manual walks the streaming anchor
    (`tileAnchor`); Automatic paints only loaded regions, the rest stay stale (`stats.deferred`). The export keeps those regions
    (`farKeepPainterHash`). Witness switch `HE_LANDSCAPE_FAR_BAKE_NOW=1`.
-5. **Snow and sand in it** (`2f9a7ffec`): the bake draws the material's FINAL base colour (`TileGround::farView`: the graph with its
-   RVT pair inlined, the Output's Base Color cut through one more Write node), so snow, sand ripples, puddles and trails are baked as
-   they are at the bake (owner, 27.11.: their live changes do not show at that distance). Painter version 2. The material path's
-   `heLsFar` takes its gradient before the branch (`textureGrad`): a bright line on the atlas edge's tile steps is gone.
+5. **What stays is baked, the weather is live** (`2f9a7ffec`, `4564d8a1a`): the bake draws the material's FINAL base colour
+   (`TileGround::farView`: RVT pair inlined, the Output's Base Color cut through one more Write node) under a dry, snowless sky
+   (`renderTileGroundImage` zeroes wetness / snow / puddles of the environment for the render): painted layers incl. the Snow
+   layer and the height snow are in it, the weather's snow and wetness not. Painter version 3. The far early-out lays the
+   weather's Snow Cover on again as one colour mix (MF_WeatherSnow without height bias × Auto share, the material's Snow Color /
+   Snow Max Slope found by their `// param:` names). `heLsFar` takes its gradient before the branch (no bright atlas-edge line).
 6. **Camera flights as video** (`9a2c73f66`): `scripts/he_flythrough.py` + `src/HE_Editor/EditorFlythrough.{h,cpp}` (path JSON,
    realtime pacing, frames → MP4 via ffmpeg or `scripts/he_video_encode.swift`); `docs/headless-runs.md` has the recipe.
 
@@ -35,6 +37,8 @@
   the material in 91 s; the decoded `.far` has F and mountain in place (not mirrored/transposed); drawn beyond the atlas top-down and
   at eye level. With snow (5.): 100 regions in 47 s, the snow band continuous across the atlas edge top-down, flight video
   (`docs/landscape-one-system-far-image-2026-11-27/flight.json`: 4 keys, 24 s; 721 frames in 36 s). ctest 410/410 after 5. and 6.
+  Weather Snow Cover 0.8 in the scene: the baked image unchanged; top-down far image vs the whole material everywhere: mean
+  difference 1.43 levels, 2 302 of 1.9 M px off by > 30 (30.08 / 220 675 without the Auto-share factor).
 
 **Not verified**
 
@@ -45,8 +49,8 @@
 **Decisions taken / open**
 
 - The coarse quadtree patches are the "static mesh"; no mesh assets for the ground.
-- Snow, sand, puddles and trails are BAKED into the far image (owner, 27.11.), not run live on far fragments: the far ground
-  shows the weather of the bake. A change of snow cover does not trigger a re-bake (weather is not in the painter hash).
+- Owner, 27.11.: the far image holds the Snow layer (static), not the weather's snow or wetness; far snow is its colour only.
+  Wetness, puddles and trails are not drawn beyond the atlas at all. The far snow skips the relief height bias of MF_WeatherSnow.
 - Texture changes of the material are not in the painter hash (only the graph key): re-bake by hand after a texture edit.
 
 **Next steps**
