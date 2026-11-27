@@ -930,6 +930,11 @@ RvtLandscape::FrameStats RvtLandscape::tick(HorizonWorld& live, const glm::vec3&
         uint32_t pages = m_settings.maxPagesPerFrame;
         if (kPaintBudgetMs > 0.0 && allFilled && m_msPerPage > 0.0)
             pages = std::clamp(uint32_t(kPaintBudgetMs / m_msPerPage), 1u, std::max(1u, m_settings.maxPagesPerFrame));
+        // The time above is the CPU's; the GPU says what it has not finished. Page renders still queued from earlier ticks mean
+        // the GPU is behind: more only wait behind them, and once Metal's 64 command buffers are taken the next frame blocks
+        // (a 35-40 ms tick every few frames in flight over the tile Catania). Counted in layers: a page is up to three.
+        static const uint32_t kMaxInFlight = [] { const char* v = std::getenv("HE_RVT_MAX_IN_FLIGHT"); return (v && *v) ? uint32_t(std::max(0, std::atoi(v))) : 6u; }();
+        if (allFilled && kMaxInFlight > 0 && m_renderer.RvtPageRendersInFlight() > kMaxInFlight) pages = 0;
         m_manager->setMaxRendersPerFrame(pages);
     }
     const auto paintT0 = std::chrono::steady_clock::now();

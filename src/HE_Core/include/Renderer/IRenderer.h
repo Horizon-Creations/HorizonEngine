@@ -808,6 +808,9 @@ public:
     // More pages in the pool made by CreateRvtPool, keeping every page that is in it (slots only grow, at most 2048). The
     // driver asks for it while the view wants more pages than fit (RvtLandscape). False: the backend's pool is fixed in size.
     virtual bool GrowRvtPoolSlots(uint32_t /*slots*/) { return false; }
+    // Page renders (RenderSceneImage with rvtSlot >= 0) the GPU has not finished yet. The driver paints no new page while
+    // too many are queued: they only wait behind each other, and a full queue blocks the frame. 0 = not tracked.
+    virtual uint32_t RvtPageRendersInFlight() const { return 0; }
     // Reads one slice back (a witness or a debug view; not for per-frame use). `rgba` = pagePx * pagePx * 4 bytes,
     // row 0 first. False when there is no pool or the slice is out of range.
     virtual bool ReadbackRvtSlot(int /*layer*/, uint32_t /*slot*/, std::vector<uint8_t>& /*rgba*/) { return false; }

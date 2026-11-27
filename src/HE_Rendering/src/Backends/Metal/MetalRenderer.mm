@@ -12355,6 +12355,15 @@ kernel void rvtPack(texture2d<float, access::read> src [[texture(0)]],
 // resizes them to the request and the next real frame resizes them back. That
 // is the one cost of not having a second render context, and it is the reason
 // this is a per-request path and not a per-frame one.
+// The copy of a page into its pool slice is the page frame's last command buffer (the queue runs them in order): while it is
+// not completed, the page is still on the GPU (RvtPageRendersInFlight).
+void MetalRenderer::CountRvtPageInFlight(void* commandBuffer)
+{
+	m_rvtPagesInFlight->fetch_add(1);
+	std::shared_ptr<std::atomic<uint32_t>> inFlight = m_rvtPagesInFlight;
+	[(__bridge id<MTLCommandBuffer>)commandBuffer addCompletedHandler:^(id<MTLCommandBuffer>) { inFlight->fetch_sub(1); }];
+}
+
 bool MetalRenderer::RenderSceneImage(const EditorCameraOverride& camera, uint32_t width,
                                      uint32_t height, std::vector<uint8_t>& rgba)
 {
@@ -12457,6 +12466,7 @@ bool MetalRenderer::RenderSceneImage(const EditorCameraOverride& camera, uint32_
 					[enc setBytes:args length:sizeof(args) atIndex:0];
 					[enc dispatchThreadgroups:MTLSizeMake((width + 7) / 8, (height + 7) / 8, 1) threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
 					[enc endEncoding];
+					CountRvtPageInFlight((__bridge void*)cb);
 					[cb commit];
 				}
 			}
@@ -12469,6 +12479,7 @@ bool MetalRenderer::RenderSceneImage(const EditorCameraOverride& camera, uint32_
 				            toTexture:dst destinationSlice:NSUInteger(hotSlice) destinationLevel:0
 				    destinationOrigin:MTLOriginMake(0, 0, 0)];
 				[blit endEncoding];
+				CountRvtPageInFlight((__bridge void*)cb);
 				[cb commit];
 			}
 		}
@@ -12864,10 +12875,12 @@ void MetalRenderer::ReleaseRvtConsumer(const HE::UUID& consumerMaterial)
 // into a private texture, on the queue ahead of every frame that reads it.
 void MetalRenderer::RetireRvtTable(RvtTable& t)
 {
-	for (int i = 0; i < kRvtTableRing; ++i) { RetireTexture(t.ring[i]); t.ring[i] = nullptr; }
-	RetireTexture(t.staging);   // (any retained object: the buffer goes the same way)
-	t.staging = nullptr;
-	t.stagingDone.reset();
+	for (int i = 0; i < kRvtTableRing; ++i)
+	{
+		RetireTexture(t.ring[i]); t.ring[i] = nullptr;
+		RetireTexture(t.staging[i]); t.staging[i] = nullptr;   // (any retained object: the buffer goes the same way)
+		t.stagingDone[i].reset();
+	}
 	t.tex = nullptr;
 	t.ringNext = 0;
 }
@@ -12875,6 +12888,7 @@ void MetalRenderer::RetireRvtTable(RvtTable& t)
 void MetalRenderer::UploadRvtTable(RvtTable& t)
 {
 	if (t.src.empty() || !m_device || !m_commandQueue) return;
+	HE_PROFILE_SCOPE_N("Metal::RvtTableUpload");
 	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
 	size_t total = 0;
 	for (const auto& m : t.src) total += m.size();
@@ -12896,15 +12910,18 @@ void MetalRenderer::UploadRvtTable(RvtTable& t)
 		if (!nt) return;
 		t.ring[slot] = (void*)CFBridgingRetain(nt);
 	}
-	id<MTLBuffer> staging = (__bridge id<MTLBuffer>)t.staging;
-	if (!staging || staging.length < total * 4 || !t.stagingDone || !t.stagingDone->load())
+	// The staging buffer belongs to the ring entry: its last copy was 4 uploads ago and is done, so it is reused, not made anew.
+	// One shared buffer was still being copied from by the frame before whenever the tables changed every frame (a flight), and
+	// a fresh 21 MB buffer each upload was the most of its cost.
+	id<MTLBuffer> staging = (__bridge id<MTLBuffer>)t.staging[slot];
+	if (!staging || staging.length < total * 4 || !t.stagingDone[slot] || !t.stagingDone[slot]->load())
 	{
-		RetireTexture(t.staging);   // the GPU may still copy from it: released frames later
+		RetireTexture(t.staging[slot]);   // the GPU may still copy from it: released frames later
 		staging = [device newBufferWithLength:total * 4 options:MTLResourceStorageModeShared];
-		t.staging = staging ? (void*)CFBridgingRetain(staging) : nullptr;
+		t.staging[slot] = staging ? (void*)CFBridgingRetain(staging) : nullptr;
 	}
 	if (!staging) return;
-	t.stagingDone = std::make_shared<std::atomic<bool>>(false);
+	t.stagingDone[slot] = std::make_shared<std::atomic<bool>>(false);
 	// What a slot reads as, once per slot (not per entry): its hot slice, cold (bit 23 + slot), or nothing.
 	std::vector<uint32_t> slotMap(m_rvtSlots, 0xFFFFFFFFu);
 	for (uint32_t s = 0; s < m_rvtSlots; ++s)
@@ -12912,25 +12929,33 @@ void MetalRenderer::UploadRvtTable(RvtTable& t)
 	uint32_t* out = static_cast<uint32_t*>(staging.contents);
 	id<MTLCommandBuffer>      cb   = [(__bridge id<MTLCommandQueue>)m_commandQueue commandBuffer];
 	id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+	const uint32_t  nSlots = m_rvtSlots;
+	const uint32_t* map    = slotMap.data();
 	size_t offset = 0;
 	for (size_t m = 0; m < t.src.size(); ++m)
 	{
 		const std::vector<uint32_t>& in = t.src[m];
 		uint32_t* o = out + offset;
-		for (size_t i = 0; i < in.size(); ++i)
+		// 4 M entries in the top level of a 100 km volume: remapped in chunks on the workers.
+		constexpr size_t kChunk = size_t(1) << 16;
+		parallel_for((in.size() + kChunk - 1) / kChunk, [&](size_t c)
 		{
-			const uint32_t e = in[i];
-			const uint32_t slot = e & 0xFFFFFFu;
-			const uint32_t to = (e == 0xFFFFFFFFu || slot >= m_rvtSlots) ? 0xFFFFFFFFu : slotMap[slot];
-			o[i] = to == 0xFFFFFFFFu ? to : ((e >> 24) << 24) | to;   // never painted here: no page
-		}
+			const size_t end = std::min(in.size(), (c + 1) * kChunk);
+			for (size_t i = c * kChunk; i < end; ++i)
+			{
+				const uint32_t e = in[i];
+				const uint32_t s = e & 0xFFFFFFu;
+				const uint32_t to = (e == 0xFFFFFFFFu || s >= nSlots) ? 0xFFFFFFFFu : map[s];
+				o[i] = to == 0xFFFFFFFFu ? to : ((e >> 24) << 24) | to;   // never painted here: no page
+			}
+		}, "RvtTableRemap", 1);
 		const NSUInteger ms = t.side >> m;
 		[blit copyFromBuffer:staging sourceOffset:offset * 4 sourceBytesPerRow:ms * 4 sourceBytesPerImage:ms * ms * 4
 		          sourceSize:MTLSizeMake(ms, ms, 1) toTexture:nt destinationSlice:0 destinationLevel:m destinationOrigin:MTLOriginMake(0, 0, 0)];
 		offset += in.size();
 	}
 	[blit endEncoding];
-	std::shared_ptr<std::atomic<bool>> done = t.stagingDone;
+	std::shared_ptr<std::atomic<bool>> done = t.stagingDone[slot];
 	[cb addCompletedHandler:^(id<MTLCommandBuffer>) { done->store(true); }];
 	[cb commit];
 	t.tex = t.ring[slot];   // owned by the ring
@@ -19550,7 +19575,10 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 				AgeRetiredGIObjects();
 				EvictIdleGraphArrays();
 			}
-			UpdateRvtCold(!m_captureOnly);   // tables in step with the pages' temperature, cold pages harvested (real frames age them)
+			{
+				HE_PROFILE_SCOPE_N("Metal::RvtCold");
+				UpdateRvtCold(!m_captureOnly);   // tables in step with the pages' temperature, cold pages harvested (real frames age them)
+			}
 
 			// Project shadow resolution changed (SetShadowSettings): swap the
 			// cascade depth array here, before any pass of this frame touches

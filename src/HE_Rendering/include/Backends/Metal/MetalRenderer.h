@@ -110,6 +110,7 @@ public:
 	// a plain blit; BaseColor is read through an sRGB view), the tables one R32Uint mipmapped texture per consumer material.
 	bool  CreateRvtPool(uint32_t slots, uint32_t pagePx) override;
 	bool  GrowRvtPoolSlots(uint32_t slots) override;
+	uint32_t RvtPageRendersInFlight() const override { return m_rvtPagesInFlight->load(); }
 	void  DestroyRvtPool() override;
 	bool  ReadbackRvtSlot(int layer, uint32_t slot, std::vector<uint8_t>& rgba) override;
 	bool  SetRvtPageTable(const HE::UUID& consumerMaterial, const std::vector<std::vector<uint32_t>>& mips) override;
@@ -689,6 +690,9 @@ private:
 	// tables per consumer material, the per-landscape material swap, and the inert defaults bound while a draw has no table.
 	void*    m_rvtPool[3]        = { nullptr, nullptr, nullptr };   // id<MTLTexture> 2D array, BGRA8Unorm, PixelFormatView
 	void*    m_rvtPoolAlbedoSrgb = nullptr;                         // id<MTLTexture> view of m_rvtPool[0] as BGRA8Unorm_sRGB
+	// Page copies committed and not completed (shared: a completion handler may run after the renderer is gone).
+	std::shared_ptr<std::atomic<uint32_t>> m_rvtPagesInFlight = std::make_shared<std::atomic<uint32_t>>(0);
+	void CountRvtPageInFlight(void* commandBuffer);   // id<MTLCommandBuffer> of a page's copy, before its commit
 	uint32_t m_rvtSlots = 0, m_rvtPagePx = 0;   // the manager's slot count (the most pages that can be resident) and the page size
 	uint32_t m_rvtAllocSlots = 0;               // HOT slices the three BGRA arrays hold: they start small and grow with the pages in use
 	bool     m_rvtPack = false;              // layers 1 and 2 are RG8 (normal x and z, surface R and G): a compute copy writes the page, 8 bytes per texel instead of 12
@@ -707,7 +711,7 @@ private:
 	{
 		void* tex = nullptr; uint32_t side = 0, mips = 0; std::vector<std::vector<uint32_t>> src; uint64_t stateVer = 0; bool dirty = false;
 		void* ring[kRvtTableRing] = {}; int ringNext = 0;
-		void* staging = nullptr; std::shared_ptr<std::atomic<bool>> stagingDone;
+		void* staging[kRvtTableRing] = {}; std::shared_ptr<std::atomic<bool>> stagingDone[kRvtTableRing];   // one per ring entry
 	};
 	void RetireRvtTable(RvtTable& t);   // its textures and buffers, released once no frame in flight can use them
 	std::unordered_map<HE::UUID, RvtTable> m_rvtTables;
