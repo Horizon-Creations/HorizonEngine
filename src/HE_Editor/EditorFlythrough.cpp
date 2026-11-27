@@ -136,7 +136,13 @@ void Flythrough::tick(bool ready, EditorCamera& camera, IRenderer* renderer, con
 	if (!m_active || m_done || !ready || !renderer) return;
 	// The frame drawn last tick (the viewport target holds it now): a recorded one is written out.
 	const int64_t shown = m_frame - m_warmupFrames;
-	if (shown >= 0 && shown < m_recordFrames)
+	// Its work: from the end of the last tick's wait to now (the frame's update and render, the writing of the frame before).
+	if (shown >= 0 && shown < m_recordFrames && m_last.time_since_epoch().count() != 0)
+		m_workMs.push_back(std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - m_last).count());
+	// HE_FLYTHROUGH_STATS_ONLY=1: the flight and its frame times, no pictures (reading one back waits for the GPU every frame,
+	// which a frame in the editor never does: the times are then the editor's own).
+	static const bool statsOnly = [] { const char* e = std::getenv("HE_FLYTHROUGH_STATS_ONLY"); return e && *e == '1'; }();
+	if (shown >= 0 && shown < m_recordFrames && !statsOnly)
 	{
 		std::vector<uint8_t> rgba;
 		uint32_t w = 0, h = 0;
@@ -166,6 +172,16 @@ void Flythrough::tick(bool ready, EditorCamera& camera, IRenderer* renderer, con
 	{
 		m_done = true;
 		HE_LOG_INFO(Editor, "Flythrough: %lld frames written to %s", static_cast<long long>(m_recordFrames), m_outDir.c_str());
+		if (!m_workMs.empty())
+		{
+			std::vector<float> s = m_workMs;
+			std::sort(s.begin(), s.end());
+			const auto at = [&](double q) { return s[std::min(s.size() - 1, size_t(q * double(s.size() - 1) + 0.5))]; };
+			size_t over = 0;
+			for (const float v : s) over += v > 1000.0f / m_path.fps ? 1 : 0;
+			HE_LOG_INFO(Editor, "Flythrough: frame work p50 %.1f ms, p95 %.1f ms, p99 %.1f ms, max %.1f ms; %zu of %zu frames over the %.0f fps budget",
+			            double(at(0.5)), double(at(0.95)), double(at(0.99)), double(s.back()), over, s.size(), double(m_path.fps));
+		}
 		quit();
 		return;
 	}

@@ -65,5 +65,6 @@ namespace HE::Ed
 		int64_t     m_frame = -1;            // frames since ready; the recording starts at m_warmupFrames
 		int64_t     m_warmupFrames = 0, m_recordFrames = 0;
 		std::chrono::steady_clock::time_point m_last{};
+		std::vector<float> m_workMs;         // per recorded frame: its work, without the realtime wait (logged at the end)
 	};
 }

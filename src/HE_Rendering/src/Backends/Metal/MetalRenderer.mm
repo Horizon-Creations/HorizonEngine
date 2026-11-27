@@ -12830,39 +12830,55 @@ void MetalRenderer::ReleaseRvtConsumer(const HE::UUID& consumerMaterial)
 // The table the shader reads: the manager's entries (slot | effective mip << 24) with each slot turned into "which array, which
 // slice": a hot page is its hot slice, a cold page is bit 23 plus its slot (the cold arrays are indexed by slot). A NEW texture per
 // upload, the old one retired (kept three frames): a frame in flight may still be reading the table it was encoded with, and a
-// replaceRegion into that texture would show it half old, half new. The table is a few KB and an upload happens only when a page
-// came, went or changed temperature, so the allocation is cheap next to the tear it prevents.
+// replaceRegion into that texture would show it half old, half new. An upload happens only when a page came, went or changed
+// temperature, at most once a real frame (UpdateRvtCold, step 4). A table can be large: 2048^2 entries plus mips (21 MB) for a
+// 100 km volume. A replaceRegion of that rearranged it into the GPU's tiled layout on the CPU (most of a 50 ms frame while the
+// camera flew over the 100 km Catania, sample 27.11.): the entries are written into a shared buffer instead and the GPU copies them
+// into a private texture, on the queue ahead of every frame that reads it.
 void MetalRenderer::UploadRvtTable(RvtTable& t)
 {
-	if (t.src.empty() || !m_device) return;
+	if (t.src.empty() || !m_device || !m_commandQueue) return;
+	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
 	MTLTextureDescriptor* d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR32Uint
 	                                                                             width:t.side height:t.side mipmapped:NO];
 	d.mipmapLevelCount = t.src.size();
 	d.usage            = MTLTextureUsageShaderRead;
-	d.storageMode      = MTLStorageModeShared;   // unified memory: the CPU writes the entries in place
-	id<MTLTexture> nt = [(__bridge id<MTLDevice>)m_device newTextureWithDescriptor:d];
-	if (!nt) return;
-	std::vector<uint32_t> mapped;
+	d.storageMode      = MTLStorageModePrivate;
+	id<MTLTexture> nt = [device newTextureWithDescriptor:d];
+	size_t total = 0;
+	for (const auto& m : t.src) total += m.size();
+	id<MTLBuffer> staging = nt ? [device newBufferWithLength:total * 4 options:MTLResourceStorageModeShared] : nil;
+	if (!nt || !staging) return;
+	// What a slot reads as, once per slot (not per entry): its hot slice, cold (bit 23 + slot), or nothing.
+	std::vector<uint32_t> slotMap(m_rvtSlots, 0xFFFFFFFFu);
+	for (uint32_t s = 0; s < m_rvtSlots; ++s)
+		slotMap[s] = m_rvtSlotCold[s] ? (0x800000u | s) : m_rvtSlotHot[s] >= 0 ? uint32_t(m_rvtSlotHot[s]) : 0xFFFFFFFFu;
+	uint32_t* out = static_cast<uint32_t*>(staging.contents);
+	id<MTLCommandBuffer>      cb   = [(__bridge id<MTLCommandQueue>)m_commandQueue commandBuffer];
+	id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+	size_t offset = 0;
 	for (size_t m = 0; m < t.src.size(); ++m)
 	{
 		const std::vector<uint32_t>& in = t.src[m];
-		mapped.resize(in.size());
+		uint32_t* o = out + offset;
 		for (size_t i = 0; i < in.size(); ++i)
 		{
 			const uint32_t e = in[i];
-			if (e == 0xFFFFFFFFu) { mapped[i] = e; continue; }
-			const uint32_t slot = e & 0xFFFFFFu, eff = e >> 24;
-			if (slot >= m_rvtSlots)                  mapped[i] = 0xFFFFFFFFu;
-			else if (m_rvtSlotCold[slot])            mapped[i] = (eff << 24) | 0x800000u | slot;
-			else if (m_rvtSlotHot[slot] >= 0)        mapped[i] = (eff << 24) | uint32_t(m_rvtSlotHot[slot]);
-			else                                     mapped[i] = 0xFFFFFFFFu;   // never painted here: no page
+			const uint32_t slot = e & 0xFFFFFFu;
+			const uint32_t to = (e == 0xFFFFFFFFu || slot >= m_rvtSlots) ? 0xFFFFFFFFu : slotMap[slot];
+			o[i] = to == 0xFFFFFFFFu ? to : ((e >> 24) << 24) | to;   // never painted here: no page
 		}
 		const NSUInteger ms = t.side >> m;
-		[nt replaceRegion:MTLRegionMake2D(0, 0, ms, ms) mipmapLevel:m withBytes:mapped.data() bytesPerRow:ms * 4];
+		[blit copyFromBuffer:staging sourceOffset:offset * 4 sourceBytesPerRow:ms * 4 sourceBytesPerImage:ms * ms * 4
+		          sourceSize:MTLSizeMake(ms, ms, 1) toTexture:nt destinationSlice:0 destinationLevel:m destinationOrigin:MTLOriginMake(0, 0, 0)];
+		offset += in.size();
 	}
+	[blit endEncoding];
+	[cb commit];
 	RetireTexture(t.tex);
 	t.tex = (void*)CFBridgingRetain(nt);
 	t.stateVer = m_rvtStateVer;
+	t.dirty = false;
 }
 
 bool MetalRenderer::SetRvtPageTable(const HE::UUID& consumerMaterial, const std::vector<std::vector<uint32_t>>& mips)
@@ -12881,7 +12897,9 @@ bool MetalRenderer::SetRvtPageTable(const HE::UUID& consumerMaterial, const std:
 	t.src   = mips;
 	t.side  = side;
 	t.mips  = static_cast<uint32_t>(mips.size());
-	UploadRvtTable(t);
+	// A new or reshaped table now (the caller checks it exists); a changed one by the next real frame, once however often it is set.
+	if (reshaped) UploadRvtTable(t);
+	else          t.dirty = true;
 	if (!t.tex) { m_rvtTables.erase(consumerMaterial); return false; }
 	if (reshaped)
 		HE_LOG_INFO(RHI, "MetalRenderer: RVT page table %ux%u, %zu mips; device now holds %.0f MB",
@@ -13052,9 +13070,14 @@ void MetalRenderer::UpdateRvtCold(bool realFrame)
 		}
 	}
 
-	// 4. Tables whose entries are out of date (a page changed temperature or got a hot slice).
-	for (auto& kv : m_rvtTables)
-		if (kv.second.stateVer != m_rvtStateVer) UploadRvtTable(kv.second);
+	// 4. Tables whose entries are out of date (a page changed temperature or got a hot slice). Not in a page's own frame (an RVT
+	// page, the far image's picture): it draws a layer view, never a consumer, so no table is read there. A 100 km volume's table
+	// is 2048^2 entries plus mips (21 MB), and rebuilt for each of up to 24 page renders a frame it was most of the frame while the
+	// camera flew (sample of the editor over Catania, 27.11.). The next real frame uploads it once.
+	const bool pageFrame = !realFrame && (m_editorCamera.rvtSlot >= 0 || m_editorCamera.rvtTileGround);
+	if (!pageFrame)
+		for (auto& kv : m_rvtTables)
+			if (kv.second.stateVer != m_rvtStateVer || kv.second.dirty) UploadRvtTable(kv.second);
 
 	// 5. The hot arrays shrink when most of their slices are free: the used ones move to the front of smaller arrays.
 	if (realFrame && now >= m_rvtNextShrinkAt)
@@ -19703,6 +19726,13 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 				ExtractFrame(shadowAspect);
 				if (m_world) RefineObjectBounds();
 			}
+			// A raw capture (RenderSceneImage with rawOutput: an RVT page, the far image's picture, a far-landscape tile) is the
+			// materials' unlit colour: no light reaches it, so the passes that only feed the lighting are skipped. An RVT driver
+			// paints up to 8 pages x 3 layers a frame, and each used to render the sun's cascades of the whole landscape, the cloud
+			// shadow, the sky LUT and the fog volume again: 20 ms of a frame in flight over the 100 km Catania (profiler, 27.11.).
+			// What they leave in their textures is the last real frame's, which the raw frame does not read.
+			const bool lit = !m_rawCapture;
+			if (lit)
 			{
 				HE_PROFILE_SCOPE_N("Metal::EncodeShadowMap");
 				EncodeShadowMap((__bridge void*)cmdBuf, shadowAspect);
@@ -19710,6 +19740,7 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 			// Cloud-shadow map: rendered before the G-buffer/scene passes (both
 			// sample it at texture 16). Uses the frame's walk (ExtractFrame above:
 			// dominant light + camera).
+			if (lit)
 			{
 				HE_PROFILE_SCOPE_N("Metal::EncodeCloudShadow");
 				EncodeCloudShadow((__bridge void*)cmdBuf);
@@ -19718,6 +19749,7 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 			// the frame's walk (ExtractFrame above); a frame without a world has none
 			// and it is last frame's, and EncodeSky falls back to the per-pixel integral
 			// whenever the LUT's sun doesn't match the one it draws with.
+			if (lit)
 			{
 				HE_PROFILE_SCOPE_N("Metal::EncodeSkyViewLut");
 				EncodeSkyViewLut((__bridge void*)cmdBuf, m_renderWorld.sunDirection);
@@ -19725,6 +19757,7 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 			// Volumetric fog (Thema 225): Inject + Integrate once the shadow maps, the cloud
 			// shadow and the sky cube of this frame exist. fogMode 0 (the default) costs one
 			// bool read here and nothing else, anywhere.
+			if (lit)
 			{
 				HE_PROFILE_SCOPE_N("Metal::EncodeFogVolume");
 				EncodeFogVolume((__bridge void*)cmdBuf, shadowAspect);
@@ -19734,7 +19767,8 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 		// Step the GPU weather-particle pool once per frame (primary only), before the
 		// scene render encoder reads it. Metal tracks the compute→vertex dependency on
 		// the shared buffer within this command buffer. No-op when the path is disabled.
-		if (sceneWork)
+		// Not for a capture: a picture asked for in between (RVT pages, up to 24 a frame) would step the pool each time.
+		if (sceneWork && !m_captureOnly)
 			SimulateGpuParticles((__bridge void*)cmdBuf);
 		flushPass("GIAccel");   // detailed: commit the Shadow (+ particle sim) command buffer
 
@@ -20105,7 +20139,8 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 			// the block below). The sky pass then upsamples + composites it 1:1.
 			{
 				const IRenderer::EnvironmentSettings& cenv = GetEnvironment();
-				if (cenv.lowResClouds && cenv.cloudCoverage > 0.0f && m_cloudPipeline)
+				// (not for a raw capture: no sky in an unlit material picture, and the pre-pass would raymarch per RVT page)
+				if (cenv.lowResClouds && cenv.cloudCoverage > 0.0f && m_cloudPipeline && !m_rawCapture)
 				{
 					// Render the pre-pass with THIS frame's camera — like the GL backend. The
 					// shadow/SSAO extracts above are skippable, so extract explicitly here to make
@@ -20134,7 +20169,7 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 						m_renderWorld.sunDirection, cloudClock,
 						std::max(1, sceneW / 2), std::max(1, sceneH / 2));
 				}
-				else if (m_cloudColor) DestroyCloudTarget(); // freed when toggled off
+				else if (m_cloudColor && !m_rawCapture) DestroyCloudTarget(); // freed when toggled off (a raw capture keeps it)
 			}
 
 			id<MTLRenderCommandEncoder> sceneEncoder =
