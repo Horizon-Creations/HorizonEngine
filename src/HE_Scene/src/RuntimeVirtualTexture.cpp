@@ -96,6 +96,22 @@ void RvtManager::refreshSubtree(uint16_t volume, int mip, int x, int y)
 	if (v.table.size() != size_t(mips)) resetTable(v);
 	// The top entry walks up for its own fallback; every finer one is its own page or its parent's entry, already final.
 	v.table[size_t(mip)][size_t(y) * size_t(v.layout.pagesPerSide(mip)) + size_t(x)] = resolve(volume, mip, x, y);
+	// Under a wide page (4^mip entries at mip 0: 4 M under the top page of a 2048-page volume) the pages that exist are found
+	// once and laid over a plain copy of the parents; a lookup per entry was 25-40 ms for one page painted or evicted there.
+	const bool bulk = (size_t(1) << (2 * mip)) > 4 * m_pages.size();
+	std::vector<std::vector<std::pair<size_t, uint32_t>>> own;
+	if (bulk)
+	{
+		own.resize(size_t(mip));
+		for (const auto& kv : m_pages)
+		{
+			const int k = int((kv.first >> 32) & 0xFF);
+			if (uint16_t(kv.first >> 40) != volume || k >= mip) continue;
+			const int px = int((kv.first >> 16) & 0xFFFF), py = int(kv.first & 0xFFFF);
+			if ((px >> (mip - k)) != x || (py >> (mip - k)) != y) continue;
+			own[size_t(k)].push_back({ size_t(py) * size_t(v.layout.pagesPerSide(k)) + size_t(px), packPageTableEntry(kv.second.slot, k) });
+		}
+	}
 	for (int k = mip - 1; k >= 0; --k)
 	{
 		const int span = 1 << (mip - k), n = v.layout.pagesPerSide(k), np = v.layout.pagesPerSide(k + 1);
@@ -104,10 +120,13 @@ void RvtManager::refreshSubtree(uint16_t volume, int mip, int x, int y)
 		for (int yy = y * span; yy < (y + 1) * span; ++yy)
 			for (int xx = x * span; xx < (x + 1) * span; ++xx)
 			{
+				const uint32_t parent = up[size_t(yy >> 1) * size_t(np) + size_t(xx >> 1)];
+				if (bulk) { t[size_t(yy) * size_t(n) + size_t(xx)] = parent; continue; }
 				const auto it = m_pages.find(PageKey{ volume, uint8_t(k), uint16_t(xx), uint16_t(yy) }.pack());
-				t[size_t(yy) * size_t(n) + size_t(xx)] = it != m_pages.end() ? packPageTableEntry(it->second.slot, k)
-				                                                              : up[size_t(yy >> 1) * size_t(np) + size_t(xx >> 1)];
+				t[size_t(yy) * size_t(n) + size_t(xx)] = it != m_pages.end() ? packPageTableEntry(it->second.slot, k) : parent;
 			}
+		if (bulk)
+			for (const auto& e : own[size_t(k)]) t[e.first] = e.second;
 	}
 }
 
@@ -126,6 +145,60 @@ void RvtManager::dropVolumePages(uint16_t volume)
 		else ++it;
 	}
 	if (hasVolume(volume)) { ++m_volumes[volume].tableVersion; resetTable(m_volumes[volume]); }
+}
+
+uint16_t RvtManager::moveVolume(uint16_t volume, glm::ivec2 deltaPages)
+{
+	if (!hasVolume(volume)) return volume;
+	const VolumeLayout L = m_volumes[volume].layout;
+	const uint16_t to = addVolume(L.desc());
+	std::vector<std::pair<uint64_t, Page>> moved;
+	for (auto it = m_pages.begin(); it != m_pages.end();)
+	{
+		if (uint16_t(it->first >> 40) != volume) { ++it; continue; }
+		const int mip = int((it->first >> 32) & 0xFF), x = int((it->first >> 16) & 0xFFFF), y = int(it->first & 0xFFFF);
+		const int n = L.pagesPerSide(mip), span = 1 << mip;
+		const bool whole = deltaPages.x % span == 0 && deltaPages.y % span == 0;
+		const int nx = x - deltaPages.x / span, ny = y - deltaPages.y / span;
+		const bool edge = x == 0 || y == 0 || x == n - 1 || y == n - 1;
+		if (whole && !edge && nx >= 0 && ny >= 0 && nx < n && ny < n)
+			moved.push_back({ PageKey{ to, uint8_t(mip), uint16_t(nx), uint16_t(ny) }.pack(), it->second });
+		else
+			m_freeSlots.push_back(it->second.slot);
+		it = m_pages.erase(it);
+	}
+	for (const auto& kv : moved) m_pages.emplace(kv.first, kv.second);
+	m_volumes[volume].live = false;
+	++m_volumes[volume].tableVersion;
+	++m_volumes[to].tableVersion;
+	rebuildTable(to);
+	return to;
+}
+
+void RvtManager::rebuildTable(uint16_t volume)
+{
+	Volume& v = m_volumes[volume];
+	const int mips = v.layout.mipCount();
+	resetTable(v);
+	std::vector<std::vector<std::pair<size_t, uint32_t>>> own(static_cast<size_t>(mips));
+	for (const auto& kv : m_pages)
+	{
+		if (uint16_t(kv.first >> 40) != volume) continue;
+		const int mip = int((kv.first >> 32) & 0xFF), x = int((kv.first >> 16) & 0xFFFF), y = int(kv.first & 0xFFFF);
+		own[size_t(mip)].push_back({ size_t(y) * size_t(v.layout.pagesPerSide(mip)) + size_t(x), packPageTableEntry(kv.second.slot, mip) });
+	}
+	for (int m = mips - 1; m >= 0; --m)
+	{
+		std::vector<uint32_t>& t = v.table[size_t(m)];
+		if (m + 1 < mips)
+		{
+			const int n = v.layout.pagesPerSide(m), np = v.layout.pagesPerSide(m + 1);
+			const std::vector<uint32_t>& up = v.table[size_t(m + 1)];
+			for (int y = 0; y < n; ++y)
+				for (int x = 0; x < n; ++x) t[size_t(y) * size_t(n) + size_t(x)] = up[size_t(y >> 1) * size_t(np) + size_t(x >> 1)];
+		}
+		for (const auto& e : own[size_t(m)]) t[e.first] = e.second;
+	}
 }
 
 bool RvtManager::acquireSlot(uint32_t& slot)
@@ -227,14 +300,16 @@ std::vector<PageRender> RvtManager::updateAll(const std::vector<VolumeView>& vie
 		return std::tie(a.group, a.dist, a.key.mip, a.key.volume) < std::tie(b.group, b.dist, b.key.mip, b.key.volume); });
 
 	uint32_t budget = m_maxRenders > m_stats.renderedLastUpdate ? m_maxRenders - m_stats.renderedLastUpdate : 0;
-	uint32_t missing = 0;
+	uint32_t missing = 0, wide = 0;
 	for (const Want& w : wants)
 	{
 		Volume& v = m_volumes[w.key.volume];
 		const VolumeLayout& L = v.layout;
 		auto it = m_pages.find(w.key.pack());
 		const bool repaint = it != m_pages.end();
-		if (budget == 0) { if (!repaint) { ++missing; ++m_missing[w.key.volume]; } continue; }
+		const bool tooWide = m_wideM > 0.0f && L.pageMeters(w.key.mip) >= m_wideM && wide > 0;
+		if (budget == 0 || tooWide) { if (!repaint) { ++missing; ++m_missing[w.key.volume]; } continue; }
+		if (m_wideM > 0.0f && L.pageMeters(w.key.mip) >= m_wideM) ++wide;
 		uint32_t slot = 0;
 		uint8_t layers = kRvtAllLayers;                  // a first paint is every layer
 		if (repaint)

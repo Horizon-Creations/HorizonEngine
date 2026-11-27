@@ -398,6 +398,57 @@ TEST_CASE("RVT: a pool that grew takes the pages it starved for, and keeps every
 	CHECK(after.wantedMissing == 0);
 }
 
+TEST_CASE("RVT: a moved volume keeps the pages that land on its new grid, with their slots, and frees the rest")
+{
+	RvtManager m(1000, 100000);
+	const uint16_t v = m.addVolume(square512());
+	m.beginFrame();
+	m.update(v, viewAt(256, 256, 1024.0f));            // every page of every mip
+	REQUIRE(m.stats().resident == 16 * 16 + 8 * 8 + 4 * 4 + 2 * 2 + 1);
+	const uint32_t slot88 = m.pageTable(v, 0)[8 * 16 + 8] & 0xFFFFFFu;
+	const uint32_t slot1 = m.pageTable(v, 1)[4 * 8 + 4] & 0xFFFFFFu;
+
+	const uint16_t w = m.moveVolume(v, { 4, -2 });     // 128 m east, 64 m south
+	CHECK(w != v);
+	CHECK_FALSE(m.hasVolume(v));
+	CHECK(m.stats().resident + m.freeSlots() == m.poolSlots());   // every slot is a page or free, none twice
+	CHECK((m.pageTable(w, 0)[10 * 16 + 4] & 0xFFFFFFu) == slot88); // mip 0 (8, 8) is (4, 10) now, same picture
+	CHECK((m.pageTable(w, 1)[5 * 8 + 2] & 0xFFFFFFu) == slot1);    // mip 1 moves by (2, -1)
+	CHECK_FALSE(m.isResident(PageKey{ w, 0, 11, 9 }));             // was (15, 7): the old edge ring is dropped
+	CHECK_FALSE(m.isResident(PageKey{ w, 2, 3, 0 }));              // 2 pages south at mip 2 is half a page: mip 2 dropped
+	CHECK_FALSE(m.isResident(PageKey{ w, 0, 15, 5 }));             // east strip: nothing there before
+	// The rebuilt table is the one resolve() gives entry by entry.
+	const VolumeLayout L(square512());
+	for (int mip = 0; mip < L.mipCount(); ++mip)
+	{
+		const std::vector<uint32_t> t = m.pageTable(w, mip);
+		const int n = L.pagesPerSide(mip);
+		for (int y = 0; y < n; ++y)
+			for (int x = 0; x < n; ++x) REQUIRE(t[size_t(y) * size_t(n) + size_t(x)] == m.resolve(w, mip, x, y));
+	}
+	// The moved square fills in what it lacks and wants nothing twice.
+	m.beginFrame();
+	m.update(w, viewAt(256, 256, 1024.0f));
+	CHECK(m.stats().resident == 16 * 16 + 8 * 8 + 4 * 4 + 2 * 2 + 1);
+	CHECK(m.stats().resident + m.freeSlots() == m.poolSlots());
+}
+
+TEST_CASE("RVT: wide pages are painted one a frame")
+{
+	RvtManager m(1000, 100000);
+	m.setWidePageMeters(256.0f);                       // mip 3 (256 m, 4 pages) and mip 4 (512 m, 1 page)
+	const uint16_t v = m.addVolume(square512());
+	for (int frame = 0; frame < 5; ++frame)
+	{
+		m.beginFrame();
+		const std::vector<PageRender> r = m.update(v, viewAt(256, 256, 1024.0f));
+		CHECK(countMip(r, 3) + countMip(r, 4) == 1);
+		if (frame == 0) CHECK(countMip(r, 0) == 256);    // the rest is not held up
+	}
+	m.beginFrame();
+	CHECK(m.update(v, viewAt(256, 256, 1024.0f)).empty());   // all five there after five frames
+}
+
 TEST_CASE("RVT page table: every entry falls back to the nearest resident coarser page")
 {
 	RvtManager m(1000, 5);                            // only the 5 pinned coverage pages in frame one

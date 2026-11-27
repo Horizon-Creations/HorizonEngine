@@ -297,6 +297,8 @@ bool RvtLandscape::ensurePool()
         return false;
     }
     m_manager = std::make_unique<rvt::RvtManager>(m_settings.poolSlots, m_settings.maxPagesPerFrame, /*pinnedMips=*/1);
+    // The tile ground's top pages are 1-4 km of landscape each: three in one tick (after the volume moved) were 40 ms.
+    m_manager->setWidePageMeters(1000.0f);
     m_poolMade = true;
     HE_LOG_INFO(Scene, "RvtLandscape: pool of %u pages of %u px (%.0f MB), %u painted per frame", m_settings.poolSlots, m_pagePx,
                 double(m_settings.poolSlots) * m_pagePx * m_pagePx * 12.0 / (1024.0 * 1024.0), m_settings.maxPagesPerFrame);

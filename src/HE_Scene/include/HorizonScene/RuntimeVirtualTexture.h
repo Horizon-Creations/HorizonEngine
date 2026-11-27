@@ -158,6 +158,8 @@ public:
 	uint32_t missing(uint16_t volume) const { return volume < m_missing.size() ? m_missing[volume] : 0; }
 	void beginFrame() { ++m_frame; m_stats.renderedLastUpdate = 0; }
 	void setMaxRendersPerFrame(uint32_t n) { m_maxRenders = n; }   // the paint budget; takes effect with the next update
+	// At most one page a frame whose edge is `metres` or more (0 = no limit): such a page draws kilometres of ground at once.
+	void setWidePageMeters(float metres) { m_wideM = metres; }
 
 	// A content change in a world rect (paint stroke, sculpt, parameter): resident pages that overlap it
 	// (border included) become dirty. Returns how many. `layers` (bit k = layer k) says which of the page's layers the change
@@ -165,6 +167,12 @@ public:
 	uint32_t invalidateRect(uint16_t volume, glm::vec2 mn, glm::vec2 mx, uint8_t layers = kRvtAllLayers);
 	uint32_t invalidateVolume(uint16_t volume, uint8_t layers = kRvtAllLayers);   // material recompiled, switch/parameter changed
 	void     dropVolumePages(uint16_t volume);         // tile unloaded: pages are free again at once
+	// The volume's square moves by `deltaPages` mip-0 pages (its anchor moved; the layout stays): returns a NEW volume id that
+	// holds every page that lands on a page of the moved square at the same mip (its slot and picture kept, no repaint), the
+	// old id is gone. Dropped (slot free): pages of a mip the move is not a whole number of pages at, pages that fall outside,
+	// and the outermost ring of the old square (its border was painted against the old edge). A new id, so feedback still
+	// reporting old coordinates is ignored.
+	uint16_t moveVolume(uint16_t volume, glm::ivec2 deltaPages);
 
 	bool     isResident(const PageKey& k) const { return m_pages.count(k.pack()) != 0; }
 	bool     isDirty(const PageKey& k) const;                  // any layer stale
@@ -195,6 +203,8 @@ private:
 	void resetTable(Volume& v);
 	// Re-resolves the entries under (mip,x,y) at that mip and every finer one, top-down: a page appeared or vanished there.
 	void refreshSubtree(uint16_t volume, int mip, int x, int y);
+	// The whole table at once, coarsest mip first: each entry is its own page or its parent's entry (after a move).
+	void rebuildTable(uint16_t volume);
 	bool acquireSlot(uint32_t& slot);                 // free slot, else evict the least recently used
 	bool isPinnedMip(const Volume& v, int mip) const { return mip >= v.layout.mipCount() - m_pinnedMips; }
 
@@ -203,6 +213,7 @@ private:
 	std::vector<uint32_t>                   m_freeSlots;
 	std::vector<uint32_t>                   m_missing;           // per volume, from the last update
 	uint32_t m_poolSlots, m_maxRenders;
+	float    m_wideM = 0.0f;
 	int      m_pinnedMips;
 	uint64_t m_frame = 1;
 	uint64_t m_dirtyVersion = 0;

@@ -190,7 +190,21 @@ void RvtLandscape::tileGroundVolumes(HorizonWorld& live, const glm::dvec2& camAb
     else if (!whole && !t.pendingLive)
     {
         const glm::dvec2 d = glm::abs(camAbs - (t.anchor + glm::dvec2(extent * 0.5)));
-        if (std::max(d.x, d.y) > extent * 0.25 && add(t.pending))
+        // The square moves with the camera, its pages along (RvtManager::moveVolume): the anchors lie on a grid of a quarter of
+        // the edge, a whole number of pages. A successor volume filled from scratch next to the old one (below, the fallback)
+        // wanted ~600 pages more while the camera flew on: over the 100 km Catania it was complete 200 frames later, and the
+        // ground ahead, outside the old square, ran the whole landscape material meanwhile (G-buffer 14 -> 25 ms).
+        const glm::dvec2 next = anchorFor(camAbs);
+        const glm::dvec2 movePages = (next - t.anchor) / (extent / double(m_manager->layout(t.volume).pagesPerSide(0)));
+        const glm::dvec2 step = glm::round(movePages);
+        if (std::max(d.x, d.y) > extent * 0.25 && glm::all(glm::lessThan(glm::abs(movePages - step), glm::dvec2(1e-3))))
+        {
+            t.volume = m_manager->moveVolume(t.volume, glm::ivec2(step));
+            t.anchor = next;
+            t.uploadedVersion = ~0ull;
+            ++st.detaches;
+        }
+        else if (std::max(d.x, d.y) > extent * 0.25 && add(t.pending))
         {
             t.pendingLive = true;
             t.pendingUpdated = false;
