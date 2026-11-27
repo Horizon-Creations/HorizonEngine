@@ -7,6 +7,7 @@
 #include "FogVolumeShaderSource.h"
 #include <HorizonRendering/LandscapeShaderSource.h>
 #include <MaterialGraph/MaterialGraph.h> // matSplitDisplacement
+#include <MaterialGraph/AutoLandscapeMaterial.h> // the snow parameters the far image's weather snow reads
 
 #include <cstdio>
 #include <cstdlib>
@@ -1872,11 +1873,27 @@ std::string MaterialShaderLibrary::landscapeFragmentSource(const std::string& gl
         const size_t eol  = vpos == std::string::npos ? std::string::npos : s.find('\n', vpos);
         if ((gbuffer || forward) && mainAt != std::string::npos && eol != std::string::npos && eol < mainAt)
         {
+            // The weather's snow, colour only: the image holds the painted layers and the height snow as baked, the Snow Cover of the
+            // weather is live. MF_WeatherSnow without the relief's height bias (32 m texels have none to speak of), laid over the image
+            // like the material lays it over the ground (a + b - ab), in the material's own Snow Color and Snow Max Slope, and like
+            // there only on the automatic share of the ground (layer 0, "Auto": the R of weight page 0; a painted layer stays as
+            // painted). Only for a material that has both and reads the weather (the auto landscape); any other draws the image alone.
+            const auto paramExpr = [&s](const char* name) -> std::string {
+                const size_t at = s.find(std::string("; // param: ") + name + "\n");
+                if (at == std::string::npos) return {};
+                const size_t line = s.rfind('\n', at);
+                const size_t eq = s.find(" = ", line == std::string::npos ? 0 : line);
+                return eq == std::string::npos || eq > at ? std::string() : s.substr(eq + 3, at - eq - 3);
+            };
+            const std::string col = paramExpr(kAutoLandscapeParamSnowColor), maxSlope = paramExpr(kAutoLandscapeParamSnowMaxSlope);
+            const std::string snow = (col.empty() || maxSlope.empty() || s.find("heLight.weather") == std::string::npos) ? std::string()
+                : "heFar.rgb = mix(heFar.rgb, " + col + ", smoothstep(0.0, 0.3, clamp(heLight.weather.w, 0.0, 1.0)) * (1.0 - smoothstep("
+                  + maxSlope + ", " + maxSlope + " + 0.1, 1.0 - normalize(vNormal).y)) * heLsWeight(vec2(vUV.x / 3.0, vUV.y)).r); ";
             const std::string body = gbuffer
-                ? "    { vec4 heFar; if (heLsFar(heFar)) { oGB0 = vec4(heFar.rgb, 0.0); "
+                ? "    { vec4 heFar; if (heLsFar(heFar)) { " + snow + "oGB0 = vec4(heFar.rgb, 0.0); "
                   "oGB1 = vec4(heOctEncode(normalize(vNormal)) * 0.5 + 0.5, 0.9, 0.5); oGB2 = vec4(0.0, 0.0, 0.0, heFar.a); "
                   "oGB3 = vec4(gl_FragCoord.z, 0.0, 0.0, 0.0); return; } }\n"
-                : "    { vec4 heFar; if (heLsFar(heFar)) { oColor = vec4(heApplyFog(heLitP(heFar.rgb, normalize(vNormal), 0.0, 0.9, "
+                : "    { vec4 heFar; if (heLsFar(heFar)) { " + snow + "oColor = vec4(heApplyFog(heLitP(heFar.rgb, normalize(vNormal), 0.0, 0.9, "
                   "vWorldPos, 0.5, heFar.a), vWorldPos), 1.0); return; } }\n";
             s.insert(mainAt + mainOpen.size(), body);
             s.insert(eol + 1, "#define HE_LS_FAR 1\n");

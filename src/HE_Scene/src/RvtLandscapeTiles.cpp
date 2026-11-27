@@ -115,9 +115,10 @@ bool RvtLandscape::tileGroundWanted(HorizonWorld& live)
     };
     for (int v = 0; v < 3; ++v) { put(t.view[v], names[v], lv.view[v]); t.seen[v] = false; }
     put(t.consumer, "TileRvtConsumer", split.live);
-    // What the far image is baked from: the material's FINAL base colour, the live part after the Read node included (snow, sand,
-    // puddles, trails as they are at the bake), unlit. The graph without its RVT pair, its Output's Base Color fed into one more
-    // Write node, cut like any page; without a link there (a constant colour) the base colour view stands in.
+    // What the far image is baked from: the material's FINAL base colour, unlit, the live part after the Read node included: the
+    // painted Snow layer and the height snow lie there too. (The weather's part of it, snow cover, wetness, puddles, is zeroed for the
+    // picture: renderTileGroundImage.) The graph without its RVT pair, its Output's Base Color fed into one more Write node, cut like
+    // any page; without a link there (a constant colour) the base colour view stands in.
     {
         MaterialGraph full = matInlineRvt(g);
         int outId = 0;
@@ -328,7 +329,14 @@ bool RvtLandscape::renderTileGroundImage(HorizonWorld& live, const glm::dvec2& m
     cam.rvtMaterial   = full ? t.farView : t.view[0];
     bool& seen = full ? t.farSeen : t.seen[0];
     if (!seen) { m_renderer.InvalidateMaterial(cam.rvtMaterial); seen = true; }
+    // Only what stays: the painted layers and the height snow. The weather's snow cover, wetness and puddles are live (the far
+    // image's shader lays the snow cover on again, as a colour), so the picture is taken under a dry, snowless sky.
+    const EnvironmentSettings weather = m_renderer.GetEnvironment();
+    EnvironmentSettings dry = weather;
+    dry.wetness = dry.snowAmount = dry.snowCover = dry.puddleAmount = 0.0f;
+    m_renderer.SetEnvironmentSettings(dry);
     const bool ok = m_renderer.RenderSceneImage(cam, px, px, rgba) && rgba.size() == size_t(px) * px * 4;
+    m_renderer.SetEnvironmentSettings(weather);
     m_renderer.SetWorld(&live);
     if (!ok) rgba.clear();
     return ok;
