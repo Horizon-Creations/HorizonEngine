@@ -26,7 +26,7 @@ D3D11 `D3D11Renderer.cpp:10107`, D3D12 `D3D12Renderer.cpp:14859` (both behind `l
 | Far image, fixed blend | **V** today: 2 364 px marker | **V** today (forward, far image scene) | **B** Win §9 exit 0, line not quoted | **V** today: 2 364 px | **B** same | **B** same (HLSL branch since 22.11.) | **B** same |
 | Far image **while the material draws** | **M** | **M** | **M** | **M** | **M** | **M** | **M** |
 | Resolve position camera-relative (this step) | **V** 3 fills, views 1, 2, 4, 5 | **B** fill changed; GL 4.1 draws the ground with the fixed blend, so no witness | **B** fill changed | **V** fill changed, view 5 | **B** fill changed | **M** open: `D3D11Renderer.cpp:9386` | **M** open: `D3D12Renderer.cpp:14065` |
-| Ground caster bias, sun cascades (this step) | **V** `MetalRenderer.mm:8829` | **M** open (`DrawLandscapeDepth`, `OpenGLRenderer.cpp:12516`; the meshes use `glPolygonOffset(2, 4)`) | **M** open | **V** `VulkanRenderer.cpp:8850` | **B** same code | **M** open (`D3D11Landscape` / `D3D12Landscape::drawDepth`; D3D12 sets slope 2 at `D3D12Landscape.cpp:260`) | **M** open |
+| Ground caster bias, sun cascades (this step) | **V** `MetalRenderer.mm:8829` | **B** 27.11.: `renderDepthLayer` sets `glPolygonOffset(2, landscapeCasterDepthBias(...))` around `DrawLandscapeDepth` in the sun's cascades and restores `(2, 4)`; `landscape_gpu_check --only gl` exit 0, stripes not judged (the fixed blend on GL 4.1) | **M** open | **V** `VulkanRenderer.cpp:8850` | **B** same code | **M** open (`D3D11Landscape` / `D3D12Landscape::drawDepth`; D3D12 sets slope 2 at `D3D12Landscape.cpp:260`) | **M** open |
 
 Reading notes. (a) "Far image while the material draws" is missing everywhere by construction: the material's landscape variant has bindings
 51-57 only (slot table, three tile weight pages, three coarse pages; `MaterialShaderLibrary.cpp`, `kLandscapeMaterialFragmentHead`);
@@ -107,6 +107,29 @@ macOS GL 4.1 reports `GL_MAX_TEXTURE_IMAGE_UNITS` 16 (the run log: "16 fragment 
 material then uses 22, `OpenGLRenderer.cpp:15724`; the check asks for 24), the virtual texture lookup 26. `landscape_gpu_check --only gl` today: exit 0, fixed blend, the ground casts 150 vs 223 /255, far image OK, GI "NOT CHECKED: this OpenGL has no GI (below 4.3)".
 Closing it means merging the three tile weight pages and the three coarse pages into two arrays and trimming the material's own images by eight: a change to the material's binding model, outside this step. macOS GL is the one
 backend where the tile ground stays the fixed blend; nothing else is missing there that the hardware allows.
+
+## 4a. The gate's two findings, resolved (27.11., owner's follow-up)
+
+**macOS OpenGL 4.1, material on the ground: re-scoped, not a gap of this topic.** The limit is the driver's (16 fragment texture
+units, frozen since macOS 10.14: Apple deprecated OpenGL and ships no later version), the material variant needs 24 and the RVT lookup
+26. Fitting under 16 would mean cutting the material's own images by eight for one deprecated backend, which every other backend would
+pay for in its binding model. Decision: on macOS OpenGL the tile ground is drawn with the fixed blend (with its far image, shadows and fog,
+all verified above); the Mac's material path is Metal. The table's **M** for macOS GL in the material, RVT and pass rows means "not on
+this driver", and `landscape_gpu_check --only gl` stays the witness that the fixed blend keeps working there.
+
+**Far image while the material draws: moved into step 5 (HLOD in the editor), with the design.** It is not impossible, but it does not
+fit the current binding model, so it is not a gap this audit could close:
+* Native Metal: the material landscape variant's fragment stage has no texture slot left (`MaterialShaderLibrary.cpp`, the MSL pins:
+  tile and coarse weight pages on 25-30, "the last free ones"; all seven landscape images already use inline samplers because the
+  stage has no sampler slot either). The far image needs one more texture.
+* The way in: the three coarse weight pages (bindings 55-57) become one `sampler2DArray` with three layers. That frees two slots on every
+  backend; one takes the far image (binding 58, a constexpr linear sampler with mips on Metal). In `main`, a fragment whose tile is not in
+  the atlas (`heLsSlot == 65535u`) and lies beyond the RVT window then writes the far image's colour and AO as its base colour, with the
+  geometric normal and a fixed roughness, and returns before the graph: exactly what the fixed blend does today, and it removes the cost
+  step 4 measured (the full material evaluated over the coarse weights beyond the 4 km window from 200 m up).
+* Because the head (`kLandscapeMaterialFragmentHead`) is shared by all five backends, the change touches every backend's landscape
+  binding; Metal and MoltenVK are witnessed here, D3D11 / D3D12 / real Vulkan on NN-WS03.
+That is the far tier step 4 asked for, and step 5 bakes the far image the editor would then draw. Step 5's text names it.
 
 ## 5. Open for NN-WS03 (Windows)
 

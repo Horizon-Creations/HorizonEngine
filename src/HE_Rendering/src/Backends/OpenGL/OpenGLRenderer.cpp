@@ -13316,8 +13316,13 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 				// Leave the plain depth program bound: the next layer's lambda
 				// entry assumes it, like the caller's glUseProgram above.
 				if (boundProgram != m_depthProgram) glUseProgram(m_depthProgram);
-				// The tile landscape's ground casts into the same layer, with the polygon offset that is on.
+				// The tile landscape's ground casts into the same layer. In the sun's cascades it takes its own constant bias, as on
+				// Metal and Vulkan (FarOriginPrecision.h: the ground otherwise stripes itself with its own shadow far out); a local
+				// light's layer is a perspective depth and keeps the plain offset.
+				const bool sunCascade = target == m_shadowDepthTex;
+				if (sunCascade) glPolygonOffset(2.0f, HE::landscapeCasterDepthBias(m_shadowSettings.slopeBias, layer));
 				DrawLandscapeDepth(vp);
+				if (sunCascade) glPolygonOffset(2.0f, 4.0f);   // back to the meshes' offset for the next layer
 			};
 
 			if (shadows)
