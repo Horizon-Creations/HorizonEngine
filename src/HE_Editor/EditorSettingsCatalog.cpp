@@ -112,9 +112,10 @@ std::vector<SettingDesc> buildCatalog()
 	t.push_back(enumRow("landscape.farBake", "Far Landscape Bake", "Content Browser", "farbake",
 	                    &EditorConfig::LandscapeFarBake,
 	                    { "Off", "Manual", "Automatic" },
-	                    "When the editor bakes a landscape's far tiles: never (only the "
-	                    "export does), with the Bake button in Landscape Setup, or on its "
-	                    "own a few seconds after a landscape was last changed."));
+	                    "When the editor bakes a landscape's far tiles and the distant "
+	                    "proxies of streaming cells: never (only the export does), with "
+	                    "the Bake buttons in Landscape Setup and the Streaming tab, or on "
+	                    "its own a few seconds after something was last changed."));
 	t.push_back(intRow("contentBrowser.refreshRate", "Refresh Rate",
 	                   "Content Browser", "cbrefresh",
 	                   &EditorConfig::ContentBrowserRefreshRate, 1, 600,

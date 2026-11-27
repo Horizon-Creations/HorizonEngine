@@ -3,6 +3,7 @@
 #include "EditorApplication.h"   // AppContext, ProjectManager, EditorCamera
 #include "EditorUndo.h"
 #include "CollabController.h"    // no split or merge inside a session
+#include "CellProxyBake.h"       // the Bake Cell Proxies button
 #include "ViewportPanel.h"       // the Streaming Cells show flag
 #include <HorizonScene/CellRuntime.h>
 #include <HorizonScene/CellSplit.h>
@@ -479,6 +480,17 @@ void drawCells(AppContext& ctx)
 	if (EditorWidgets::button("Merge Cells into the Scene")) mergeOpenScene(ctx, s_message);
 	ImGui::EndDisabled();
 	postStreamingMessage(s_message);
+
+	// What Play draws for a cell it has not built: the cell's static meshes merged into one proxy, baked here on a worker (CellProxyBake.h).
+	const int proxyMode = ctx.editorConfig.LandscapeFarBake;
+	ImGui::BeginDisabled(proxyMode == 0 || CellProxyBake::baking() || ctx.isPlaying);
+	if (EditorWidgets::button("Bake Cell Proxies")) CellProxyBake::bakeNow(ctx);
+	ImGui::EndDisabled();
+	ImGui::TextDisabled("%s", proxyMode == 0 ? "Off in Preferences: only the export bakes them."
+	                        : proxyMode == 2 ? "Automatic: a cell that changed bakes again by itself."
+	                                         : "Manual: bake again after the cells changed (Automatic is in Preferences).");
+	if (CellProxyBake::baking()) ImGui::TextDisabled("Baking on a worker, %zu cell(s) left.", CellProxyBake::cellsLeft());
+	else if (!CellProxyBake::summary().empty()) ImGui::TextDisabled("%s", CellProxyBake::summary().c_str());
 
 	// While playing, what the play session streams: the game's CellRuntime, run by
 	// the editor around the play camera (PlayCellStreaming).

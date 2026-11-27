@@ -8077,10 +8077,13 @@ namespace
 	  "Preferences decides whether this runs by itself.",
 	  "", "editor#landscape-mode" },
 	{ "Preferences/Content Browser/Far Landscape Bake", "",
-	  "When the editor bakes a landscape's far tiles. Off: only the export does. "
-	  "Manual: with Bake Far Landscape in Landscape Setup. Automatic: by itself, a "
-	  "few seconds after a landscape was last changed; the editor pauses for the "
-	  "length of the bake.",
+	  "When the editor bakes a landscape's far tiles, and the distant proxies of "
+	  "the streaming cells (Streaming tab). Off: only the export does. "
+	  "Manual: with Bake Far Landscape in Landscape Setup, Bake Far Image in Tile "
+	  "Landscape and Bake Cell Proxies in the Streaming tab. Automatic: by itself, a "
+	  "few seconds after a landscape was last changed, and for the cell proxies "
+	  "every few seconds a cell's file changed; the editor pauses for the "
+	  "length of a far landscape bake.",
 	  "", "editor#landscape-mode" },
 	{ "Landscape/Ridges##mountain", "Mountain Ridges",
 	  "How much of the relief is ridged: sharp crests with V-shaped valleys "
@@ -9017,6 +9020,16 @@ namespace
 	  "Loads every cell of a split scene back into it as ordinary entities and "
 	  "drops the cell list, so the scene is one piece again and everything in it "
 	  "can be edited. Split again when done. One undo step; save to keep it.",
+	  "", "editor#profiler" },
+	{ "Profiler/Bake Cell Proxies", "",
+	  "Bakes what Play and the game draw for a streaming cell that is not built: "
+	  "the static meshes of the cell merged into one simple mesh, coloured like "
+	  "the materials, drawn out to a few kilometres while the real objects stay "
+	  "unloaded. The file reading and the merge run on worker threads, the "
+	  "editor goes on. Only cells whose file changed are baked again; the result "
+	  "is kept in the project's Saved folder. A changed mesh or material is not "
+	  "seen: split again to bake those cells. Preferences > Far Landscape Bake "
+	  "decides whether this runs by itself.",
 	  "", "editor#profiler" },
 	{ "Profiler/Fit", "",
 	  "Resets the timeline's zoom and pan so the whole capture fits the view "

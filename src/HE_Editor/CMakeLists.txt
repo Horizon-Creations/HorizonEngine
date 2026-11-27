@@ -307,6 +307,8 @@ add_executable(HorizonEditor WIN32
 	InspectorPrefabKeys.cpp
 	TerrainTools.cpp
 	LandscapeFarBake.cpp
+	# ...and the distant proxies of a split scene's streaming cells, baked the same way (Thema 355 step 6).
+	CellProxyBake.cpp
 	EditorFlythrough.cpp
 	LandscapeWorldTools.cpp
 	ViewportPanel.cpp

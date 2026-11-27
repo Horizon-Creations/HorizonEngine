@@ -2,6 +2,7 @@
 #include "EditorGraphics.h"   // the project's copy of the graphics fields
 #include "ImporterCommon.h"   // Importer::setAutoLodOnImport
 #include "LandscapeFarBake.h"  // the baked far landscape in the editor
+#include "CellProxyBake.h"     // the distant proxies of the streaming cells, baked in the editor
 #include <Window/Window.h>           // hiddenWindowRequested — no OS windows of ImGui's own
 #include <ContentManager/HAsset.h>   // asset type of a just-saved file
 #include <ContentManager/GpuArrayCook.h>   // texture arrays cooked for the GPU on load
@@ -90,6 +91,7 @@ static void onProjectWriteRefused(const char* what);   // ProjectWriteGate handl
 #include <HorizonScene/Components/TransformComponent.h>
 #include <HorizonScene/TransformHierarchy.h>  // world pose composed from the parent chain
 #include <HorizonScene/Components/LightComponent.h>
+#include <HorizonScene/Components/LandscapeProxyComponent.h>
 #include <HorizonScene/Components/MeshComponent.h>
 #include <HorizonScene/Components/MaterialComponent.h>
 #include <ContentManager/DefaultAssets.h>
@@ -4226,7 +4228,9 @@ void EditorApplication::OnRender(float dt)
 			if (m_projectLoaded && !m_isPlaying)
 			{
 				AppContext fbCtx = makeContext();
-				LandscapeFarBake::tick(fbCtx, ImGui::GetCurrentContext() && ImGui::IsAnyMouseDown());
+				const bool mouseDown = ImGui::GetCurrentContext() && ImGui::IsAnyMouseDown();
+				LandscapeFarBake::tick(fbCtx, mouseDown);
+				CellProxyBake::tick(fbCtx, mouseDown);   // the streaming cells' proxies: the same setting, the same quiet rules
 			}
 			HE_PROFILE_SCOPE_N("SceneSystemsTick");
 			SceneSystems::tickWorld(*m_editorWorld, contentManager(), renderer(),
@@ -4358,6 +4362,7 @@ void EditorApplication::OnRender(float dt)
 			}
 			m_landscapeStamps.sync(*m_editorWorld, m_landscape, contentManager());   // stamp entities that moved: their tiles are read again
 			m_landscapeProxies.sync(*m_editorWorld, m_landscape, contentManager(), renderer());
+			syncCellProxies();
 		}
 
 		// Keep spatial audio sources and listener in sync each play-mode frame
@@ -11430,7 +11435,7 @@ void EditorApplication::dumpFrameHeadless()
 				reg.emplace<TransformComponent>(e, tc);
 				reg.emplace<MeshComponent>(e, MeshComponent{ HE::kDefaultCubeMeshId });
 			}
-		auto countCubes = [&] { size_t n = 0; for (auto e : reg.view<MeshComponent>()) { (void)e; ++n; } return n; };
+		auto countCubes = [&] { size_t n = 0; for (auto e : reg.view<MeshComponent>(entt::exclude<LandscapeProxyComponent>)) { (void)e; ++n; } return n; };   // a cell's proxy is no cube
 		const size_t authored = countCubes();
 		const std::filesystem::path cellRoot = std::filesystem::temp_directory_path() / "he_dump_playcells";
 		std::error_code ec;
@@ -11457,12 +11462,59 @@ void EditorApplication::dumpFrameHeadless()
 		const bool editOk = r->CaptureViewport(editRgba, ew, eh) && ew > 0 && eh > 0 &&
 		                    writeBMP(editPath, editRgba, ew, eh);
 
+		// HE_DUMP_PLAYCELLS_HLOD=1 (Thema 355 step 6): the editor's own bake of the cells' distant proxies (CellProxyBake, the module the
+		// Streaming tab's button and the Automatic setting drive) over those cell files, before Play starts. Play then draws every cell it
+		// does not build as its proxy (syncCellProxies), and the log counts the proxy entities against the cells built.
+		// HE_DUMP_PLAYCELLS_CAM=x,y,z[,pitch,yaw] puts the play camera elsewhere: a far shot past the load radius shows nothing but proxies.
+		const bool hlodWitness = [] { const char* h = std::getenv("HE_DUMP_PLAYCELLS_HLOD"); return h && *h == '1'; }();
+		size_t hlodCells = 0;
+		double hlodMs = 0.0;
+		if (hlodWitness)
+		{
+			AppContext wctx = makeContext();
+			CellProxyBake::setWitnessRoot(cellRoot);
+			const auto h0 = std::chrono::steady_clock::now();
+			bool started = false;
+			while (std::chrono::steady_clock::now() - h0 < std::chrono::seconds(20))
+			{
+				CellProxyBake::tick(wctx, false);   // reads the (absent) cache, then the pass below bakes
+				if (!started) started = CellProxyBake::bakeNow(wctx);
+				else if (!CellProxyBake::baking()) break;
+				std::this_thread::sleep_for(std::chrono::milliseconds(2));
+			}
+			hlodMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - h0).count();
+			if (const HE::LandscapeHlodTable* t = CellProxyBake::table(m_editorConfig.LandscapeFarBake)) hlodCells = t->cellCount();
+			HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_PLAYCELLS_HLOD %s", CellProxyBake::summary().c_str());
+		}
+
 		setPlayMode(true);
 		const bool played = m_isPlaying && m_playCells;
 		size_t built = 0, wanted = 0;
 		double ms = 0.0;
 		if (played)
 		{
+			if (const char* cam = std::getenv("HE_DUMP_PLAYCELLS_CAM"); cam && *cam)
+			{
+				glm::vec3 p(0.0f);
+				float pitch = -89.0f, yaw = 0.0f;
+				if (std::sscanf(cam, "%f,%f,%f,%f,%f", &p.x, &p.y, &p.z, &pitch, &yaw) >= 3)
+				{
+					auto& reg2 = m_editorWorld->registry();
+					entt::entity camEnt = entt::null;
+					for (const auto e : reg2.view<CameraComponent, TransformComponent>()) { camEnt = e; break; }
+					if (camEnt == entt::null)
+					{
+						camEnt = m_editorWorld->createEntity("PlayCellsCamera");
+						CameraComponent cc; cc.isMain = true; cc.farPlane = 5000.0f;
+						reg2.emplace<CameraComponent>(camEnt, cc);
+						reg2.emplace_or_replace<TransformComponent>(camEnt);
+					}
+					auto& tf = reg2.get<TransformComponent>(camEnt);
+					tf.position = p;
+					tf.rotation = glm::vec3(pitch, yaw, 0.0f);
+					tf.dirty = true;
+				}
+			}
 			// The same session, its cells read from the witness folder instead of a project.
 			m_playCells->begin([this] { return m_physicsWorld.get(); }, cellRoot);
 			glm::dvec3 eye(0.0);
@@ -11472,6 +11524,7 @@ void EditorApplication::dumpFrameHeadless()
 			while (std::chrono::steady_clock::now() < until)
 			{
 				m_playCells->update(*m_editorWorld, 1.0f / 60.0f);
+				syncCellProxies();
 				contentManager().pollAsyncResults(16, 2.0);
 				const HE::CellStreamer& cs = m_playCells->runtime().streamer();
 				wanted = 0;
@@ -11483,6 +11536,23 @@ void EditorApplication::dumpFrameHeadless()
 			}
 			ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
 			built = m_playCells->runtime().streamer().stats().loaded;
+			// The proxies' table pass runs every few frames: a few more, so what is not built stands as its proxy before the capture.
+			for (int i = 0; hlodWitness && i < 12; ++i)
+			{
+				m_playCells->update(*m_editorWorld, 1.0f / 60.0f);
+				syncCellProxies();
+				contentManager().pollAsyncResults(16, 2.0);
+				std::this_thread::sleep_for(std::chrono::milliseconds(2));
+			}
+			if (hlodWitness)
+			{
+				const HE::CellStreamer& cs = m_playCells->runtime().streamer();
+				HE_LOG_INFO(Editor, "%s",
+					("EditorApplication: HE_DUMP_PLAYCELLS_HLOD " + std::to_string(hlodCells) + " proxies baked in " + std::to_string(int(hlodMs))
+					 + " ms; play holds " + std::to_string(cs.stats().loaded) + " of " + std::to_string(cs.manifest().cells.size())
+					 + " cells (their real cubes) and draws " + std::to_string(m_hlodProxies.stats().entities) + " proxy entities for the rest ("
+					 + std::to_string(m_hlodProxies.stats().created) + " made, " + std::to_string(m_hlodProxies.stats().destroyed) + " dropped)").c_str());
+			}
 		}
 		playCellsWitness = played;
 		char line[512];
@@ -17942,12 +18012,28 @@ bool EditorApplication::reloadGameLogic()
 	return true;
 }
 
+void EditorApplication::syncCellProxies()
+{
+	// A streaming cell the play session has not built stands in as its baked proxy (the editor's bake, else the pack's table): only while
+	// Play streams; the edit world holds every cell's content itself.
+	glm::dvec3 eye(0.0);
+	const HE::LandscapeHlodTable* hlod = nullptr;
+	if (m_isPlaying && m_playCells && m_playCells->runtime().active() && HE::CellRuntime::cameraAnchor(*m_editorWorld, eye))
+	{
+		hlod = CellProxyBake::table(m_editorConfig.LandscapeFarBake);
+		if (!hlod && m_landscape.active()) hlod = m_landscape.hlod();
+	}
+	if (hlod) m_hlodProxies.sync(*m_editorWorld, *hlod, m_playCells->runtime().streamer(), eye, contentManager(), renderer());
+	else m_hlodProxies.clear(*m_editorWorld, contentManager(), renderer());
+}
+
 void EditorApplication::OnShutdown()
 {
 	// First, while the viewport still holds the last frame the user saw.
 	captureProjectThumbnail();
 	saveProjectCameraView();
 	LandscapeFarBake::reset();   // cancels and joins a far-image bake still running on its worker
+	CellProxyBake::reset();      // the same for the cell proxies' (its writes are over when it returns)
 	// The virtual texture driver gives its pool back to the renderer, so it must go while the renderer still exists: left to
 	// the destructor it would call into a renderer that has been shut down and crash on the way out.
 	m_rvtLandscape.reset();

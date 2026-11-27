@@ -1143,8 +1143,10 @@ add_executable(he_tests
     # The profiler's Streaming tab and the editor's split/merge of streaming
     # cells, for test_streaming_view.cpp (Thema 153, Schritt 6). Its one
     # outside symbol, the Scene window's show flags, is stubbed in
-    # WidgetDesignerLinkStubs.cpp.
+    # WidgetDesignerLinkStubs.cpp. Its Bake Cell Proxies button calls CellProxyBake
+    # (the editor's bake of the cells' distant proxies, which needs AppContext only as a type).
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/StreamingDebugView.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/CellProxyBake.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/vendor/imgui/imgui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/vendor/imgui/imgui_draw.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/vendor/imgui/imgui_tables.cpp
