@@ -239,7 +239,7 @@ namespace
 	};
 	// Supersampling of the ground image: the far image's texel is the mean of 4 x 4 pixels of it (a texel of 32 m from 8 m pixels).
 	constexpr uint32_t kGroundSupersample = 4;
-	constexpr uint64_t kGroundPainterVersion = 1;
+	constexpr uint64_t kGroundPainterVersion = 2;   // 2: the final base colour, live part (snow, sand) included
 	constexpr double   kGroundWaitSeconds = 30.0;   // a region whose tiles never all arrive (an atlas that refused one) keeps its old image
 	LandscapeFarBake::GroundImage               s_groundImage;
 	std::function<uint64_t()>                   s_groundKey;

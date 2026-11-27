@@ -1787,9 +1787,13 @@ layout(set = 0, binding = 62) uniform sampler2D heLsFarImage;
 bool heLsFar(out vec4 c)
 {
     c = vec4(0.0);
+    // The gradients before the branch on the slot: the quads along the atlas's edge diverge there, and an implicit one inside it is
+    // undefined (it showed as a bright line on the tile steps of that edge).
+    vec2 fuv = vUV * float(heLsSide()) / vec2(uHeightInfo.y, uHeightInfo.z);
+    vec2 fdx = dFdx(fuv), fdy = dFdy(fuv);
     heLsFind();
     if (heLsSlot != 65535u || uTile.w == 0) return false;
-    c = texture(heLsFarImage, vUV * float(heLsSide()) / vec2(uHeightInfo.y, uHeightInfo.z));
+    c = textureGrad(heLsFarImage, fuv, fdx, fdy);
     return true;
 }
 #endif

@@ -56,6 +56,8 @@ bool tileGroundGraph(ContentManager& cm, const HE::UUID& source, const MaterialC
 
 namespace
 {
+    // The RVT name of the far-image cut (RvtLandscape::renderTileGroundImage): one no material uses.
+    constexpr const char* kFarBakeRvtName = "__HE_FarImageBake";
     const MaterialComponent* tileGroundEntityMaterial(HorizonWorld& live)
     {
         for (auto [e, lw] : live.registry().view<LandscapeWorldComponent>().each())
@@ -113,6 +115,28 @@ bool RvtLandscape::tileGroundWanted(HorizonWorld& live)
     };
     for (int v = 0; v < 3; ++v) { put(t.view[v], names[v], lv.view[v]); t.seen[v] = false; }
     put(t.consumer, "TileRvtConsumer", split.live);
+    // What the far image is baked from: the material's FINAL base colour, the live part after the Read node included (snow, sand,
+    // puddles, trails as they are at the bake), unlit. The graph without its RVT pair, its Output's Base Color fed into one more
+    // Write node, cut like any page; without a link there (a constant colour) the base colour view stands in.
+    {
+        MaterialGraph full = matInlineRvt(g);
+        int outId = 0;
+        for (const MatGraphNode& n : full.nodes)
+            if (n.type == MatNodeType::Output) { outId = n.id; break; }
+        const auto link = std::find_if(full.links.begin(), full.links.end(),
+                                       [&](const MatGraphLink& l) { return l.dstNode == outId && l.dstPin == 0; });
+        MatRvtLayerViews fv;
+        if (outId != 0 && link != full.links.end())
+        {
+            const MatGraphLink src = *link;
+            const int w = full.addNode(MatNodeType::RvtWrite);
+            full.findNode(w)->s = kFarBakeRvtName;
+            full.connect(src.srcNode, src.srcPin, w, kRvtWriteBaseColorPin);
+            fv = matRvtLayerViews(matSplitRvt(full), kFarBakeRvtName);
+        }
+        if (fv.ok) { put(t.farView, "TileFarBakeBaseColor", fv.view[0]); t.farSeen = false; }
+        else t.farView = HE::UUID{};
+    }
     t.key = key;
     t.failedKey = 0;
     t.writtenVolume = 0xFFFF;   // the new consumer asset has the graph's defaults in its volume vectors
@@ -299,8 +323,11 @@ bool RvtLandscape::renderTileGroundImage(HorizonWorld& live, const glm::dvec2& m
     cam.rvtSlot       = -1;
     cam.rvtTileGround = true;
     cam.rvtLayer      = 0;
-    cam.rvtMaterial   = t.view[0];
-    if (!t.seen[0]) { m_renderer.InvalidateMaterial(t.view[0]); t.seen[0] = true; }
+    // The final base colour (live part included), else the page's.
+    const bool full = t.farView != HE::UUID{};
+    cam.rvtMaterial   = full ? t.farView : t.view[0];
+    bool& seen = full ? t.farSeen : t.seen[0];
+    if (!seen) { m_renderer.InvalidateMaterial(cam.rvtMaterial); seen = true; }
     const bool ok = m_renderer.RenderSceneImage(cam, px, px, rgba) && rgba.size() == size_t(px) * px * 4;
     m_renderer.SetWorld(&live);
     if (!ok) rgba.clear();

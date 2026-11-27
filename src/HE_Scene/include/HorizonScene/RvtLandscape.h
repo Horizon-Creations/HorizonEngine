@@ -278,6 +278,8 @@ namespace HE::landscape
             uint64_t   failedKey = 0;            // a material that cannot be split is not tried again until it changes
             HE::UUID   view[3], consumer;        // kept for good (same ids, new graphs)
             bool       seen[3] = { false, false, false };
+            HE::UUID   farView;                  // the final base colour, live part included: what the far image is baked from
+            bool       farSeen = false;
             uint16_t   volume = 0, pending = 0;
             bool       volumeLive = false, pendingLive = false;
             bool       updated = false, pendingUpdated = false;   // the manager has looked at it (missing() means something)
