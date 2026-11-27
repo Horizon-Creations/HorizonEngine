@@ -1708,6 +1708,7 @@ struct D3D11RendererImpl
         uint32_t                         side = 0, mips = 0;
         std::vector<std::vector<uint32_t>> src;
         uint64_t                            stateVer = 0;
+        std::vector<uint32_t>               mapped;   // uploadRvtTable's rewrite of the largest mip, kept: a 100 km table's is 16 MB
     };
     std::unordered_map<HE::UUID, RvtTable> rvtTables;
     // ── Cold pages (Thema 333 step 9, counterpart of Metal 6j): a page not repainted for HE_RVT_COLD_AFTER real frames is
@@ -10464,23 +10465,25 @@ static uint32_t rvtHotFor(D3D11RendererImpl& p, uint32_t slot)
 // by slot). D3D11's single immediate context orders a CPU UpdateSubresource against later draws in the same context
 // correctly by itself (unlike Metal's parallel command buffers), so — unlike MetalRenderer::UploadRvtTable — this
 // updates the EXISTING texture in place; no new texture/no tear to guard against here.
+// The manager sets its table once a frame while pages arrive, and a 100 km volume's is 2048^2 entries plus mips: the rewrite
+// looks each slot up once (not a branch chain per entry) into a buffer the table keeps, not a fresh 16 MB one per call (6.5 ->
+// 5.2 ms a frame in a flight over the 100 km test world, 27.11.; the rewrite itself is ~3 ms of it, the copy ~1).
 static void uploadRvtTable(D3D11RendererImpl& p, D3D11RendererImpl::RvtTable& t)
 {
     if (t.src.empty() || !t.tex) return;
-    std::vector<uint32_t> mapped;
+    std::vector<uint32_t> slotMap(p.rvtSlots);
+    for (uint32_t s = 0; s < p.rvtSlots; ++s)
+        slotMap[s] = p.rvtSlotCold[s] ? (0x800000u | s) : p.rvtSlotHot[s] >= 0 ? uint32_t(p.rvtSlotHot[s]) : 0xFFFFFFFFu;
+    std::vector<uint32_t>& mapped = t.mapped;
     for (size_t m = 0; m < t.src.size(); ++m)
     {
         const std::vector<uint32_t>& in = t.src[m];
         mapped.resize(in.size());
         for (size_t i = 0; i < in.size(); ++i)
         {
-            const uint32_t e = in[i];
-            if (e == 0xFFFFFFFFu) { mapped[i] = e; continue; }
-            const uint32_t slot = e & 0xFFFFFFu, eff = e >> 24;
-            if (slot >= p.rvtSlots)               mapped[i] = 0xFFFFFFFFu;
-            else if (p.rvtSlotCold[slot])         mapped[i] = (eff << 24) | 0x800000u | slot;
-            else if (p.rvtSlotHot[slot] >= 0)     mapped[i] = (eff << 24) | uint32_t(p.rvtSlotHot[slot]);
-            else                                   mapped[i] = 0xFFFFFFFFu;   // never painted here: no page
+            const uint32_t e = in[i], slot = e & 0xFFFFFFu;
+            const uint32_t to = (e == 0xFFFFFFFFu || slot >= p.rvtSlots) ? 0xFFFFFFFFu : slotMap[slot];
+            mapped[i] = to == 0xFFFFFFFFu ? to : (e & 0xFF000000u) | to;   // never painted here: no page
         }
         const uint32_t ms = t.side >> m;
         p.context->UpdateSubresource(t.tex.Get(), static_cast<UINT>(m), nullptr, mapped.data(), ms * sizeof(uint32_t), 0);

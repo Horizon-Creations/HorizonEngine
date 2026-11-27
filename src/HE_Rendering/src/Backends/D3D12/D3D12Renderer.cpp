@@ -15287,46 +15287,48 @@ static uint32_t rvtHotFor12(D3D12RendererImpl& p, uint32_t slot)
 // The table the shader reads: the manager's entries with each slot rewritten to hot slice or bit 23 + slot (same
 // contract as D3D11/Metal). Unlike D3D11, D3D12's existing RVT path is entirely synchronous (rvtBegin/rvtEnd wait for
 // every frame already, for ANY table/pool admin op on this backend) — an upload here pays that same cost, not a new one.
+// The manager sets its table once a frame while pages arrive, and a 100 km volume's is 2048^2 entries plus mips (22 MB): the
+// entries go straight into the upload buffer, each slot looked up once instead of a branch chain per entry plus a copy
+// (10.5 -> 6.7 ms a frame in a flight over the 100 km test world, 27.11.). The buffer stays one per call: a kept, mapped one
+// (or three, recorded into the frames' own lists without the waits) made the RVT driver's page renders two to three times
+// slower in about half the runs on NN-WS03 (RTX 4070), 31 instead of 9.5 ms a frame.
 static void uploadRvtTable12(D3D12RendererImpl& p, D3D12RendererImpl::RvtTable& t)
 {
     if (t.src.empty() || !t.tex) return;
     const D3D12_RESOURCE_DESC rd = t.tex->GetDesc();
-    std::vector<D3D12_PLACED_SUBRESOURCE_FOOTPRINT> fp(t.src.size());
-    std::vector<UINT> rows(t.src.size());
-    std::vector<UINT64> rowBytes(t.src.size());
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp[12];
     UINT64 total = 0;
-    p.device->GetCopyableFootprints(&rd, 0, static_cast<UINT>(t.src.size()), 0, fp.data(), rows.data(), rowBytes.data(), &total);
-    void* mapped = nullptr;
-    ComPtr<ID3D12Resource> up = p.createUploadBuffer(total, &mapped);
-    if (!up || !mapped) return;
-    std::vector<uint32_t> row;
-    for (size_t m = 0; m < t.src.size(); ++m)
+    const UINT n = static_cast<UINT>(t.src.size());
+    p.device->GetCopyableFootprints(&rd, 0, n, 0, fp, nullptr, nullptr, &total);
+    void* upPtr = nullptr;
+    ComPtr<ID3D12Resource> up = p.createUploadBuffer(total, &upPtr);
+    if (!up || !upPtr) return;
+    std::vector<uint32_t> slotMap(p.rvtSlots);
+    for (uint32_t s = 0; s < p.rvtSlots; ++s)
+        slotMap[s] = p.rvtSlotCold[s] ? (0x800000u | s) : p.rvtSlotHot[s] >= 0 ? uint32_t(p.rvtSlotHot[s]) : 0xFFFFFFFFu;
+    for (UINT m = 0; m < n; ++m)
     {
-        const std::vector<uint32_t>& in = t.src[m];
-        row.resize(in.size());
-        for (size_t i = 0; i < in.size(); ++i)
-        {
-            const uint32_t e = in[i];
-            if (e == 0xFFFFFFFFu) { row[i] = e; continue; }
-            const uint32_t slot = e & 0xFFFFFFu, eff = e >> 24;
-            if (slot >= p.rvtSlots)           row[i] = 0xFFFFFFFFu;
-            else if (p.rvtSlotCold[slot])     row[i] = (eff << 24) | 0x800000u | slot;
-            else if (p.rvtSlotHot[slot] >= 0) row[i] = (eff << 24) | uint32_t(p.rvtSlotHot[slot]);
-            else                               row[i] = 0xFFFFFFFFu;
-        }
         const uint32_t ms = t.side >> m;
+        const uint32_t* in = t.src[m].data();
         for (uint32_t y = 0; y < ms; ++y)
-            std::memcpy(static_cast<uint8_t*>(mapped) + fp[m].Offset + size_t(y) * fp[m].Footprint.RowPitch,
-                        &row[size_t(y) * ms], size_t(ms) * sizeof(uint32_t));
+        {
+            uint32_t* o = reinterpret_cast<uint32_t*>(static_cast<uint8_t*>(upPtr) + fp[m].Offset + size_t(y) * fp[m].Footprint.RowPitch);
+            for (uint32_t x = 0; x < ms; ++x)
+            {
+                const uint32_t e = in[size_t(y) * ms + x], slot = e & 0xFFFFFFu;
+                const uint32_t to = (e == 0xFFFFFFFFu || slot >= p.rvtSlots) ? 0xFFFFFFFFu : slotMap[slot];
+                o[x] = to == 0xFFFFFFFFu ? to : (e & 0xFF000000u) | to;   // never painted here: no page
+            }
+        }
     }
     up->Unmap(0, nullptr);
     ID3D12GraphicsCommandList* cl = p.rvtBegin();
     p.barrier12(cl, t.tex.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
-    for (size_t m = 0; m < t.src.size(); ++m)
+    for (UINT m = 0; m < n; ++m)
     {
         D3D12_TEXTURE_COPY_LOCATION src{}, dst{};
         src.pResource = up.Get();    src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT; src.PlacedFootprint = fp[m];
-        dst.pResource = t.tex.Get(); dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; dst.SubresourceIndex = static_cast<UINT>(m);
+        dst.pResource = t.tex.Get(); dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; dst.SubresourceIndex = m;
         cl->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
     }
     p.barrier12(cl, t.tex.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);

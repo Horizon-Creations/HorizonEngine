@@ -1,0 +1,10 @@
+{
+  "fps": 30,
+  "warmupSeconds": 25,
+  "realtime": true,
+  "keys": [
+    { "t": 0, "pos": [75000, 3500, 25000], "yaw": -90, "pitch": -4 },
+    { "t": 1, "pos": [75000, 3500, 25000], "yaw": -90, "pitch": -4 }
+  ]
+}
+
