@@ -79,6 +79,9 @@ struct MslOptions
     // Frees a sampler slot when the fragment stage sits at Metal's 16-sampler
     // cap — the texture still needs (and gets) its [[texture(n)]] pin.
     std::vector<std::pair<uint32_t, uint32_t>> constexprLinearSamplers;
+    // The same, with a linear mip filter too: for an image read with its mip
+    // chain (the landscape's far image, seen from kilometres away).
+    std::vector<std::pair<uint32_t, uint32_t>> constexprMipLinearSamplers;
 };
 
 // Compile canonical GLSL to MSL with explicit buffer-slot assignments (Target::Msl).

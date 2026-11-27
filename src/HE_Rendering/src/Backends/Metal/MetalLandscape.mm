@@ -288,6 +288,7 @@ void MetalLandscape::encode(void* renderEncoder, const LandscapeRenderFrame& f, 
 		g.heightInfo[0] = w.heightMinM; g.heightInfo[1] = static_cast<float>(w.tilesX); g.heightInfo[2] = static_cast<float>(w.tilesZ); g.heightInfo[3] = static_cast<float>(w.tableWindow);
 		g.origin[0] = static_cast<float>(f.origin.x); g.origin[1] = static_cast<float>(f.origin.y); g.origin[2] = static_cast<float>(f.origin.z);
 		g.tile[0] = w.hCells; g.tile[1] = w.wTexels; g.tile[2] = w.tileLevels;
+		g.tile[3] = m.farAlbedo ? 1 : 0;   // the material variant's heLsFar (uTile.w): the far image on texture 31 is bound
 		for (int l = 0; l < w.heightLevels && l < 8; ++l)
 			for (int c = 0; c < 4; ++c) g.heightRect[l][c] = w.heightRect[l][c];
 		for (int gi = 0; gi < w.coarseGridCount && gi < 16; ++gi)
@@ -332,6 +333,9 @@ void MetalLandscape::encode(void* renderEncoder, const LandscapeRenderFrame& f, 
 				[enc setFragmentTexture:m.weights[p] atIndex:25 + static_cast<NSUInteger>(p)];
 				[enc setFragmentTexture:m.coarseWeights[p] atIndex:28 + static_cast<NSUInteger>(p)];
 			}
+			// The far image where the material variant reads it (MaterialShaderLibrary's MSL pin: binding 62 -> texture 31,
+			// HE_LS_FAR); uTile.w says whether it is there. Without one any 2D texture, the shader does not read it.
+			[enc setFragmentTexture:m.farAlbedo ? m.farAlbedo : m.coarseWeights[0] atIndex:31];
 		}
 		else
 		{

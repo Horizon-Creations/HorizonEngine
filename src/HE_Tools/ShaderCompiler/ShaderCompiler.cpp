@@ -274,6 +274,14 @@ Result compileMslPinned(const std::string& glsl, Stage stage,
                 s.mag_filter = spirv_cross::MSL_SAMPLER_FILTER_LINEAR;
                 c.remap_constexpr_sampler_by_binding(set, binding, s);
             }
+            for (const auto& [set, binding] : opts.constexprMipLinearSamplers)
+            {
+                spirv_cross::MSLConstexprSampler s;
+                s.min_filter = spirv_cross::MSL_SAMPLER_FILTER_LINEAR;
+                s.mag_filter = spirv_cross::MSL_SAMPLER_FILTER_LINEAR;
+                s.mip_filter = spirv_cross::MSL_SAMPLER_MIP_FILTER_LINEAR;
+                c.remap_constexpr_sampler_by_binding(set, binding, s);
+            }
             for (const MslPin& p : pins)
             {
                 spirv_cross::MSLResourceBinding b{};

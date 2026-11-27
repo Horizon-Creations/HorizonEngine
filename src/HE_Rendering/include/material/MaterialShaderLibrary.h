@@ -616,7 +616,10 @@ public:
     // form has them too). A Vulkan set then holds them as SAMPLED_IMAGE descriptors, which do not count as samplers.
     // `filtered`: the weight pages are read with one linear sample where the footprint is the fragment's own tile's (the
     // backend's samplers on bindings 52-57 are linear, clamped), instead of four fetches. Not with `separateImages`.
-    static std::string landscapeFragmentSource(const std::string& glsl, bool separateImages = false, bool filtered = false);
+    // `farImage`: a fragment whose tile is not in the atlas draws the baked far image (binding 62, uTile.w = 1 when bound) and
+    // returns before the graph (HE_LS_FAR); the backend binds it. Metal only for now.
+    static std::string landscapeFragmentSource(const std::string& glsl, bool separateImages = false, bool filtered = false,
+                                               bool farImage = false);
 
     // ── Volumetric fog kernels (Thema 225, docs/volumetric-fog-plan.md §10) ──────────────
     // GLSL-450 sources in src/material/FogVolumeShaderSource.h, cross-compiled like every

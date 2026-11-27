@@ -1775,6 +1775,21 @@ vec4 heLsWeightLod(vec2 uv, float lod) { return heLsWeight(uv); }
 // that only where the image has one page. Here it always has three, so the value is never used: nothing is read for it. (Read
 // like the others it was the most expensive read of the fragment: its uv, taken as one over three pages, lands in another tile.)
 vec4 heLsWeightOnePage(vec2 uv) { return vec4(0.0); }
+#ifdef HE_LS_FAR
+// The baked far image (HorizonScene/LandscapeFarMap.h), over the render window: rgb = what the layer blend comes to, a = AO. A tile
+// that is not in the atlas (beyond it, or still streaming) is drawn from it alone, as the fixed blend does: without it such a fragment
+// evaluated the whole material over the coarse weights, the cost of the far ground from high up (topic 355, step 4). uTile.w = 1: the
+// world has one (MetalLandscape sets it with the image). Metal only for now (the slot: MaterialShaderLibrary's MSL pins).
+layout(set = 0, binding = 62) uniform sampler2D heLsFarImage;
+bool heLsFar(out vec4 c)
+{
+    c = vec4(0.0);
+    heLsFind();
+    if (heLsSlot != 65535u || uTile.w == 0) return false;
+    c = texture(heLsFarImage, vUV * float(heLsSide()) / vec2(uHeightInfo.y, uHeightInfo.z));
+    return true;
+}
+#endif
 )";
 
 void replaceAll(std::string& s, std::string_view from, std::string_view to)
@@ -1811,7 +1826,7 @@ std::string MaterialShaderLibrary::landscapeVertexSource(bool patchAsPushConstan
          + std::string(vs.substr(at + marker.size(), mainAt - at - marker.size())) + kLandscapeMaterialVertexMain;
 }
 
-std::string MaterialShaderLibrary::landscapeFragmentSource(const std::string& glsl, bool separateImages, bool filtered)
+std::string MaterialShaderLibrary::landscapeFragmentSource(const std::string& glsl, bool separateImages, bool filtered, bool farImage)
 {
     std::string s = glsl;
     // The block goes behind the varyings (the first use of the weights is in main); a material that reads no weights gets the block
@@ -1835,6 +1850,30 @@ std::string MaterialShaderLibrary::landscapeFragmentSource(const std::string& gl
         // texelFetch on a texture without a sampler; or the weight pages read with a linear sampler (HE_LS_FILTERED, never both:
         // a texture without a sampler cannot be filtered)
         s.insert(eol + 1, separateImages ? "#extension GL_EXT_samplerless_texture_functions : require\n" : "#define HE_LS_FILTERED 1\n");
+    }
+    // The far image (HE_LS_FAR, heLsFar): a fragment whose tile is not in the atlas writes the image's colour, lit like the ground
+    // (the geometric normal, rough, not metallic), and returns before the graph. Only into the two variants the ground is drawn with:
+    // the lit forward one and the G-buffer one; anything else (a page of the virtual texture) keeps the material whole.
+    if (farImage)
+    {
+        const bool gbuffer = s.find("oGB0 =") != std::string::npos && s.find("heOctEncode(") != std::string::npos;
+        const bool forward = !gbuffer && s.find("oColor =") != std::string::npos && s.find("heLitP(") != std::string::npos
+                          && s.find("heApplyFog(") != std::string::npos;
+        const std::string_view mainOpen = "void main() {\n";
+        const size_t mainAt = s.find(mainOpen);
+        const size_t vpos = s.find("#version");
+        const size_t eol  = vpos == std::string::npos ? std::string::npos : s.find('\n', vpos);
+        if ((gbuffer || forward) && mainAt != std::string::npos && eol != std::string::npos && eol < mainAt)
+        {
+            const std::string body = gbuffer
+                ? "    { vec4 heFar; if (heLsFar(heFar)) { oGB0 = vec4(heFar.rgb, 0.0); "
+                  "oGB1 = vec4(heOctEncode(normalize(vNormal)) * 0.5 + 0.5, 0.9, 0.5); oGB2 = vec4(0.0, 0.0, 0.0, heFar.a); "
+                  "oGB3 = vec4(gl_FragCoord.z, 0.0, 0.0, 0.0); return; } }\n"
+                : "    { vec4 heFar; if (heLsFar(heFar)) { oColor = vec4(heApplyFog(heLitP(heFar.rgb, normalize(vNormal), 0.0, 0.9, "
+                  "vWorldPos, 0.5, heFar.a), vWorldPos), 1.0); return; } }\n";
+            s.insert(mainAt + mainOpen.size(), body);
+            s.insert(eol + 1, "#define HE_LS_FAR 1\n");
+        }
     }
     return s;
 }
@@ -3376,8 +3415,11 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fragmentVariant(
     // The landscape variant: the same text with its weights read from the tile atlas (landscapeFragmentSource).
     // Metal reads the weight pages FILTERED: its inline samplers are linear and cost no sampler slot. Vulkan's images have no
     // sampler at all (see landscapeSeparateImages), and an OpenGL landscape's weight textures are made nearest.
+    // HE_LS_FAR=0 leaves the far image out of the Metal variant (the A/B of landscape_gpu_check and the witnesses).
+    static const bool lsFar = [] { const char* e = std::getenv("HE_LS_FAR"); return !(e && *e == '0'); }();
     const std::string landscapeText = landscape ? landscapeFragmentSource(glslIn, /*separateImages=*/backend == Backend::SpirV,
-                                                                          /*filtered=*/backend == Backend::Metal) : std::string();
+                                                                          /*filtered=*/backend == Backend::Metal,
+                                                                          /*farImage=*/backend == Backend::Metal && lsFar) : std::string();
     const std::string& glsl = landscape ? landscapeText : glslIn;
     if (landscape && landscapeText.empty())
     {
@@ -3561,6 +3603,10 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fragmentVariant(
             pins.push_back({ Stage::Fragment, 0, 51, 13 });
             for (uint32_t i = 0; i < 6; ++i) pins.push_back({ Stage::Fragment, 0, 52 + i, 25 + i });
             for (uint32_t b = 51; b <= 57; ++b) mslOpts.constexprLinearSamplers.push_back({ 0u, b });
+            // The far image (HE_LS_FAR) on texture 31, read filtered through its mips by an inline sampler. Apple GPUs and the Mac
+            // family take 128 textures a stage (31 was the old argument table's end, which "25-30, the last free ones" above meant).
+            pins.push_back({ Stage::Fragment, 0, 62, 31 });
+            mslOpts.constexprMipLinearSamplers.push_back({ 0u, 62u });
         }
         // The RVT lookup may read cold (block-compressed) pages on Metal: HE_RVT_COLD declares the three cold arrays and the branch
         // (RvtLookup.h). HE_RVT_COLD=0 leaves it out of the shader (the hot-only A/B, and a Mac without ASTC sampling).
