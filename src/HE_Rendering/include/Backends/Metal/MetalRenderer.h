@@ -697,9 +697,18 @@ private:
 	// A page's slot (what the manager hands out) is NOT its slice any more (step 6j): a page that has not been painted for a
 	// while is block-compressed (ASTC 4x4) into the COLD arrays, slice = slot, and its hot slice goes back to a small free list;
 	// the table the shader reads is the manager's table with every entry rewritten to say which array and which slice.
-	// tex: id<MTLTexture> R32Uint with mips; src: the manager's table as given; dirty: src changed since tex was made (uploaded by the
-	// next real frame, UpdateRvtCold step 4, so a table set several times a frame is written once).
-	struct RvtTable { void* tex = nullptr; uint32_t side = 0, mips = 0; std::vector<std::vector<uint32_t>> src; uint64_t stateVer = 0; bool dirty = false; };
+	// tex: id<MTLTexture> R32Uint with mips, the ring entry written last; src: the manager's table as given; dirty: src changed since
+	// tex was made (uploaded by the next real frame, UpdateRvtCold step 4, so a table set several times a frame is written once).
+	// ring: kRvtTableRing private textures written in turn; staging: the shared buffer the entries are copied from, reused once the GPU
+	// has done its last copy (stagingDone), else replaced (UploadRvtTable).
+	static constexpr int kRvtTableRing = 4;
+	struct RvtTable
+	{
+		void* tex = nullptr; uint32_t side = 0, mips = 0; std::vector<std::vector<uint32_t>> src; uint64_t stateVer = 0; bool dirty = false;
+		void* ring[kRvtTableRing] = {}; int ringNext = 0;
+		void* staging = nullptr; std::shared_ptr<std::atomic<bool>> stagingDone;
+	};
+	void RetireRvtTable(RvtTable& t);   // its textures and buffers, released once no frame in flight can use them
 	std::unordered_map<HE::UUID, RvtTable> m_rvtTables;
 	bool     m_rvtColdOn = false;                  // ASTC cold pool in use (Apple GPU, encoder present, HE_RVT_COLD != 0)
 	void*    m_rvtCold[3] = { nullptr, nullptr, nullptr };   // id<MTLTexture> ASTC_4x4 arrays (albedo sRGB), Shared storage, slice = slot

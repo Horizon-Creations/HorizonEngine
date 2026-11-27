@@ -12717,7 +12717,7 @@ void MetalRenderer::DestroyRvtPool()
 	StopRvtColdWork();
 	m_rvtSwaps.clear();   // the pool the consumers read is gone: draw the landscapes themselves again
 	// The GPU may still be reading these in a frame in flight: retire, do not release.
-	for (auto& kv : m_rvtTables) RetireTexture(kv.second.tex);
+	for (auto& kv : m_rvtTables) RetireRvtTable(kv.second);
 	m_rvtTables.clear();
 	RetireTexture(m_rvtPoolAlbedoSrgb); m_rvtPoolAlbedoSrgb = nullptr;
 	for (void*& t : m_rvtPool) { RetireTexture(t); t = nullptr; }
@@ -12821,7 +12821,7 @@ void MetalRenderer::ReleaseRvtConsumer(const HE::UUID& consumerMaterial)
 		it = it->second.consumerMat == consumerMaterial ? m_rvtSwaps.erase(it) : std::next(it);
 	const auto t = m_rvtTables.find(consumerMaterial);
 	if (t == m_rvtTables.end()) return;
-	RetireTexture(t->second.tex);
+	RetireRvtTable(t->second);
 	m_rvtTables.erase(t);
 	HE_LOG_INFO(RHI, "MetalRenderer: RVT consumer released; device now holds %.0f MB",
 	            double(((__bridge id<MTLDevice>)m_device).currentAllocatedSize) / (1024.0 * 1024.0));
@@ -12835,20 +12835,49 @@ void MetalRenderer::ReleaseRvtConsumer(const HE::UUID& consumerMaterial)
 // 100 km volume. A replaceRegion of that rearranged it into the GPU's tiled layout on the CPU (most of a 50 ms frame while the
 // camera flew over the 100 km Catania, sample 27.11.): the entries are written into a shared buffer instead and the GPU copies them
 // into a private texture, on the queue ahead of every frame that reads it.
+void MetalRenderer::RetireRvtTable(RvtTable& t)
+{
+	for (int i = 0; i < kRvtTableRing; ++i) { RetireTexture(t.ring[i]); t.ring[i] = nullptr; }
+	RetireTexture(t.staging);   // (any retained object: the buffer goes the same way)
+	t.staging = nullptr;
+	t.stagingDone.reset();
+	t.tex = nullptr;
+	t.ringNext = 0;
+}
+
 void MetalRenderer::UploadRvtTable(RvtTable& t)
 {
 	if (t.src.empty() || !m_device || !m_commandQueue) return;
 	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
-	MTLTextureDescriptor* d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR32Uint
-	                                                                             width:t.side height:t.side mipmapped:NO];
-	d.mipmapLevelCount = t.src.size();
-	d.usage            = MTLTextureUsageShaderRead;
-	d.storageMode      = MTLStorageModePrivate;
-	id<MTLTexture> nt = [device newTextureWithDescriptor:d];
 	size_t total = 0;
 	for (const auto& m : t.src) total += m.size();
-	id<MTLBuffer> staging = nt ? [device newBufferWithLength:total * 4 options:MTLResourceStorageModeShared] : nil;
-	if (!nt || !staging) return;
+	// The next ring entry: written 4 uploads after it was last current. Uploads come at most once a real frame and a texture is
+	// released 3 real frames after it is retired (AgeRetiredTextures), so no frame in flight reads it, nor its buffer's last copy.
+	// A table of another shape starts a new ring. Allocating 21 MB twice an upload cost as much as the upload (kernel calls, sample).
+	const int slot = t.ringNext;
+	t.ringNext = (t.ringNext + 1) % kRvtTableRing;
+	id<MTLTexture> nt = (__bridge id<MTLTexture>)t.ring[slot];
+	if (nt && (nt.width != t.side || nt.mipmapLevelCount != t.src.size())) { RetireRvtTable(t); return UploadRvtTable(t); }
+	if (!nt)
+	{
+		MTLTextureDescriptor* d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR32Uint
+		                                                                             width:t.side height:t.side mipmapped:NO];
+		d.mipmapLevelCount = t.src.size();
+		d.usage            = MTLTextureUsageShaderRead;
+		d.storageMode      = MTLStorageModePrivate;
+		nt = [device newTextureWithDescriptor:d];
+		if (!nt) return;
+		t.ring[slot] = (void*)CFBridgingRetain(nt);
+	}
+	id<MTLBuffer> staging = (__bridge id<MTLBuffer>)t.staging;
+	if (!staging || staging.length < total * 4 || !t.stagingDone || !t.stagingDone->load())
+	{
+		RetireTexture(t.staging);   // the GPU may still copy from it: released frames later
+		staging = [device newBufferWithLength:total * 4 options:MTLResourceStorageModeShared];
+		t.staging = staging ? (void*)CFBridgingRetain(staging) : nullptr;
+	}
+	if (!staging) return;
+	t.stagingDone = std::make_shared<std::atomic<bool>>(false);
 	// What a slot reads as, once per slot (not per entry): its hot slice, cold (bit 23 + slot), or nothing.
 	std::vector<uint32_t> slotMap(m_rvtSlots, 0xFFFFFFFFu);
 	for (uint32_t s = 0; s < m_rvtSlots; ++s)
@@ -12874,9 +12903,10 @@ void MetalRenderer::UploadRvtTable(RvtTable& t)
 		offset += in.size();
 	}
 	[blit endEncoding];
+	std::shared_ptr<std::atomic<bool>> done = t.stagingDone;
+	[cb addCompletedHandler:^(id<MTLCommandBuffer>) { done->store(true); }];
 	[cb commit];
-	RetireTexture(t.tex);
-	t.tex = (void*)CFBridgingRetain(nt);
+	t.tex = t.ring[slot];   // owned by the ring
 	t.stateVer = m_rvtStateVer;
 	t.dirty = false;
 }
@@ -12900,7 +12930,7 @@ bool MetalRenderer::SetRvtPageTable(const HE::UUID& consumerMaterial, const std:
 	// A new or reshaped table now (the caller checks it exists); a changed one by the next real frame, once however often it is set.
 	if (reshaped) UploadRvtTable(t);
 	else          t.dirty = true;
-	if (!t.tex) { m_rvtTables.erase(consumerMaterial); return false; }
+	if (!t.tex) { RetireRvtTable(t); m_rvtTables.erase(consumerMaterial); return false; }
 	if (reshaped)
 		HE_LOG_INFO(RHI, "MetalRenderer: RVT page table %ux%u, %zu mips; device now holds %.0f MB",
 		            side, side, mips.size(), double(((__bridge id<MTLDevice>)m_device).currentAllocatedSize) / (1024.0 * 1024.0));
@@ -13114,7 +13144,8 @@ void MetalRenderer::UpdateRvtCold(bool realFrame)
 				HE_LOG_INFO(RHI, "MetalRenderer: RVT hot pool shrank %u -> %u slices (%u in use)", m_rvtAllocSlots, want, next);
 				m_rvtAllocSlots = want;
 				++m_rvtStateVer;
-				for (auto& kv : m_rvtTables) UploadRvtTable(kv.second);
+				// A second upload this frame: a fresh ring (the old textures retire), so the ring's once-a-frame turn still holds.
+				for (auto& kv : m_rvtTables) { RetireRvtTable(kv.second); UploadRvtTable(kv.second); }
 			}
 		}
 	}
