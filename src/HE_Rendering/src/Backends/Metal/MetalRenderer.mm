@@ -12406,6 +12406,9 @@ bool MetalRenderer::RenderSceneImage(const EditorCameraOverride& camera, uint32_
 	// targets, so the resize rule alone does not cover it), and the viewport
 	// must not blend against the screenshot's afterwards. Both frames take the
 	// current image only — an unconverged edge for one frame, no ghost.
+	// A raw capture runs no temporal pass at all (AA Off, no jitter, no velocity,
+	// the history targets untouched): the viewport keeps its history.
+	const bool liveTaaValid = m_taaHistoryValid;
 	m_taaHistoryValid = false;
 
 	EncodeFrame(m_primarySdlWindow, m_primaryTarget, /*isPrimary=*/true);
@@ -12506,7 +12509,7 @@ bool MetalRenderer::RenderSceneImage(const EditorCameraOverride& camera, uint32_
 	m_mbEnabled = liveMb; m_ssrEnabled = liveSsr; m_giEnabled = liveGi; m_giReflEnabled = liveGiRefl;
 	m_renderScale = liveScale;
 	m_renderPath  = livePath;
-	m_taaHistoryValid = false;
+	m_taaHistoryValid = camera.rawOutput ? liveTaaValid : false;
 
 	if (!ok) rgba.clear();
 	return ok;
@@ -19950,11 +19953,13 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 				m_taaJitter = glm::vec2(halton(n, 2) - 0.5f, halton(n, 3) - 0.5f);
 				++m_taaFrameIndex;
 			}
-			else if (m_taaHistory)
+			else if (m_taaHistory && !m_rawCapture)
 			{
 				// Freed as soon as the mode is off, and the history is dropped
 				// with it — a stale one would blend against a different world
-				// the moment TAA comes back on.
+				// the moment TAA comes back on. Not by a raw capture (an RVT page,
+				// the far image): its AA reads Off for that frame only, and it
+				// dropped the viewport's history on every frame that painted a page.
 				DestroyTaaTargets();
 				DestroyMetalFX();
 				m_taaJitter = glm::vec2(0.0f);
