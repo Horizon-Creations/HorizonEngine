@@ -6,6 +6,7 @@
 
 #include <cstdint>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 class HorizonWorld;
@@ -65,6 +66,7 @@ private:
 	LandscapeHlodProxyConfig m_config;
 	const HorizonWorld* m_world = nullptr;
 	std::unordered_map<LandscapeHlodCellKey, entt::entity, LandscapeHlodCellKeyHash> m_cells;
+	std::unordered_set<LandscapeHlodCellKey, LandscapeHlodCellKeyHash> m_wanted;   // the table pass's answer, kept between passes: no allocation each pass
 	unsigned m_frame = 0;
 	LandscapeHlodProxyStats m_stats;
 	// The table's palette as a texture and the one material every proxy draws with (LandscapeCellHlod.h). Null ids: no palette.

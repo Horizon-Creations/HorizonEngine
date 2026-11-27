@@ -11,10 +11,13 @@
 #include <HorizonScene/LandscapeSource.h>
 #include <HorizonScene/SceneSerializer.h>
 
+#include <nlohmann/json.hpp>
+#include <chrono>
 #include <filesystem>
 #include <map>
 #include <random>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace
@@ -37,6 +40,7 @@ struct Placed
 	HE::UUID mesh;
 	glm::vec3 at;
 	bool dynamic = false;
+	HE::UUID material{};   // an override on the entity: the instance's colour
 };
 
 std::vector<uint8_t> cellOf(const std::vector<Placed>& list)
@@ -52,6 +56,12 @@ std::vector<uint8_t> cellOf(const std::vector<Placed>& list)
 		MeshComponent mc;
 		mc.meshAssetId = p.mesh;
 		w.registry().emplace<MeshComponent>(e, mc);
+		if (p.material != HE::UUID{})
+		{
+			MaterialComponent matc;
+			matc.materialAssetId = p.material;
+			w.registry().emplace<MaterialComponent>(e, matc);
+		}
 		if (p.dynamic)
 		{
 			RigidBodyComponent rb;
@@ -187,6 +197,159 @@ TEST_CASE("bakeCellProxies: the budgets drop the small instances, not the big on
 	float maxX = -1e9f;
 	for (const auto& v : table.find(0, 0)->vertices) maxX = std::max(maxX, v.position.x);
 	CHECK(maxX == doctest::Approx(80.0f));   // the 50 m quad at x = 30
+}
+
+TEST_CASE("bakeCellProxies: a loose JSON cell file (what the editor's splitter writes) bakes like a CBOR one")
+{
+	ContentManager cm{ "." };
+	const HE::UUID quad = registerQuad(cm, 10.0f);
+	const std::vector<uint8_t> cbor = cellOf({ { quad, { 20, 0, 30 } } });
+	const std::string text = nlohmann::json::from_cbor(cbor).dump();
+	Files files;
+	files["H.cells/cell_0_0.hescene"] = std::vector<uint8_t>(text.begin(), text.end());
+	HE::CellHlodBakeStats st;
+	const HE::LandscapeHlodTable table = HE::bakeCellProxies(manifestOf({ { 0, 0 } }), readerOver(files), cm, {}, &st);
+	CHECK(st.failed == 0);
+	REQUIRE(table.find(0, 0));
+	CHECK(table.find(0, 0)->indices.size() == 6);
+}
+
+namespace
+{
+// The files of a test project with a stamp each: the size, and a version counted up by every edit (a real file's mtime).
+struct Project
+{
+	Files files;
+	std::map<std::string, int64_t> version;
+	void put(const std::string& path, std::vector<uint8_t> bytes) { files[path] = std::move(bytes); ++version[path]; }
+	HE::CellHlodStamper stamper() const
+	{
+		return [this](const std::string& path, HE::CellHlodStamp& out) {
+			const auto it = files.find(path);
+			if (it == files.end()) return false;
+			out.size = it->second.size();
+			out.modified = version.at(path);
+			return true;
+		};
+	}
+};
+
+// Pumps a bake to its end (the pool does the rest), with a wall-clock cap.
+void run(HE::CellHlodBakeJob& job, ContentManager& cm)
+{
+	for (int i = 0; i < 5000 && !job.finished(); ++i)
+	{
+		job.pump(cm, 4.0);
+		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+	}
+	REQUIRE(job.finished());
+}
+}
+
+TEST_CASE("CellHlodBakeJob: an edit of one cell's file rebakes that cell only; the others keep their proxy and the palette keeps its entries")
+{
+	ContentManager cm{ "." };
+	const HE::UUID quad = registerQuad(cm, 10.0f);
+	const auto material = [&](float r, float g, float b) {
+		MaterialAsset a;
+		a.type = HE::AssetType::Material;
+		a.baseColor[0] = r; a.baseColor[1] = g; a.baseColor[2] = b;
+		return cm.registerMaterial(std::move(a));
+	};
+	const HE::UUID red = material(1, 0, 0), green = material(0, 1, 0), blue = material(0, 0, 1);
+
+	Project p;
+	p.put("H.cells/cell_0_0.hescene", cellOf({ { quad, { 20, 0, 30 }, false, red } }));
+	p.put("H.cells/cell_1_0.hescene", cellOf({ { quad, { 120, 0, 30 }, false, green } }));
+	p.put("H.cells/cell_2_0.hescene", cellOf({}));
+	const HE::CellManifest m = manifestOf({ { 0, 0 }, { 1, 0 }, { 2, 0 } });
+	HE::CellHlodCache cache;
+	HE::CellHlodBakeJob job;
+
+	// the first bake: everything
+	job.start(m, readerOver(p.files), p.stamper(), {}, cache);
+	run(job, cm);
+	CHECK(job.stats().cells == 3);
+	CHECK(job.stats().reused == 0);
+	CHECK(job.stats().baked == 2);
+	CHECK(job.stats().empty == 1);
+	CHECK(cache.table.cellCount() == 2);
+	CHECK(cache.stamps.size() == 3);   // the empty cell has its stamp too: it is not looked at again
+	const std::vector<uint8_t> paletteBefore = cache.table.palette;
+	REQUIRE(paletteBefore.size() == 6);
+	const HE::LandscapeHlodMesh untouched = *cache.table.find(0, 0);
+
+	// nothing changed: nothing baked
+	job.start(m, readerOver(p.files), p.stamper(), {}, cache);
+	run(job, cm);
+	CHECK(job.stats().reused == 3);
+	CHECK(job.stats().baked + job.stats().empty + job.stats().failed == 0);
+
+	// one cell edited (a second quad, in a colour the palette does not have yet): that one cell is baked again, in the same palette
+	p.put("H.cells/cell_1_0.hescene", cellOf({ { quad, { 120, 0, 30 }, false, green }, { quad, { 140, 0, 30 }, false, blue } }));
+	job.start(m, readerOver(p.files), p.stamper(), {}, cache);
+	run(job, cm);
+	CHECK(job.stats().reused == 2);
+	CHECK(job.stats().baked == 1);
+	CHECK(job.stats().baked + job.stats().empty + job.stats().failed == 1);   // the rebuild count of the edit
+	REQUIRE(cache.table.find(1, 0));
+	CHECK(cache.table.find(1, 0)->indices.size() == 12);
+	REQUIRE(cache.table.find(0, 0));
+	CHECK(cache.table.find(0, 0)->vertices.size() == untouched.vertices.size());   // the other cell's proxy is the very one it had
+	CHECK(cache.table.find(0, 0)->vertices[0].uv == untouched.vertices[0].uv);
+	CHECK(cache.table.palette.size() == 9);
+	CHECK(std::equal(paletteBefore.begin(), paletteBefore.end(), cache.table.palette.begin()));   // append only: the old uvs still mean what they did
+
+	// a cell dropped from the manifest goes out of the cache; other budgets bake every cell again
+	job.start(manifestOf({ { 0, 0 }, { 1, 0 } }), readerOver(p.files), p.stamper(), {}, cache);
+	run(job, cm);
+	CHECK(job.stats().reused == 2);
+	CHECK(cache.stamps.size() == 2);
+	HE::CellHlodBakeOptions fewer;
+	fewer.maxTrianglesPerCell = 2;
+	job.start(manifestOf({ { 0, 0 }, { 1, 0 } }), readerOver(p.files), p.stamper(), fewer, cache);
+	run(job, cm);
+	CHECK(job.stats().reused == 0);
+	CHECK(job.stats().baked == 2);
+	CHECK(cache.table.find(1, 0)->indices.size() == 6);
+
+	// the cache survives its bytes (an editor restart)
+	HE::CellHlodCache back;
+	REQUIRE(HE::CellHlodCache::decode(cache.encode(), back));
+	CHECK(back.optionsKey == cache.optionsKey);
+	CHECK(back.stamps == cache.stamps);
+	CHECK(back.table.cellCount() == cache.table.cellCount());
+	CHECK(back.table.palette == cache.table.palette);
+	job.start(manifestOf({ { 0, 0 }, { 1, 0 } }), readerOver(p.files), p.stamper(), fewer, back);
+	run(job, cm);
+	CHECK(job.stats().reused == 2);
+}
+
+TEST_CASE("CellHlodBakeJob: a missing or unreadable cell is counted once and not tried again until its file changes; cancel keeps what was done")
+{
+	ContentManager cm{ "." };
+	const HE::UUID quad = registerQuad(cm, 10.0f);
+	Project p;
+	p.put("H.cells/cell_0_0.hescene", cellOf({ { quad, { 20, 0, 30 } } }));
+	p.put("H.cells/cell_1_0.hescene", { 1, 2, 3 });   // not a scene
+	const HE::CellManifest m = manifestOf({ { 0, 0 }, { 1, 0 }, { 2, 0 } });   // (2,0) has no file
+	HE::CellHlodCache cache;
+	HE::CellHlodBakeJob job;
+	job.start(m, readerOver(p.files), p.stamper(), {}, cache);
+	run(job, cm);
+	CHECK(job.stats().baked == 1);
+	CHECK(job.stats().failed == 2);
+	job.start(m, readerOver(p.files), p.stamper(), {}, cache);
+	run(job, cm);
+	CHECK(job.stats().reused == 3);
+
+	// a bake cancelled before it pumped does nothing to the cache
+	HE::CellHlodCache other;
+	job.start(m, readerOver(p.files), p.stamper(), {}, other);
+	job.cancel();
+	CHECK_FALSE(job.active());
+	CHECK(other.table.cellCount() == 0);
+	CHECK(other.stamps.empty());
 }
 
 TEST_CASE("landscapePackSetHlod: appends to a pack without a table, replaces one that has it, removes it with an empty table, refuses a non-pack")

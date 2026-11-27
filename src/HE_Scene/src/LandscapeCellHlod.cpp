@@ -171,11 +171,54 @@ bool LandscapeHlodTable::decode(const std::vector<uint8_t>& bytes, LandscapeHlod
 	return true;
 }
 
+namespace
+{
+constexpr uint32_t kHlodCacheMagic   = 0x43444c48u;   // 'HLDC' little-endian
+constexpr uint32_t kHlodCacheVersion = 1;
+}
+
+std::vector<uint8_t> CellHlodCache::encode() const
+{
+	std::vector<uint8_t> out;
+	put(out, kHlodCacheMagic);
+	put(out, kHlodCacheVersion);
+	put(out, optionsKey);
+	put(out, static_cast<uint32_t>(stamps.size()));
+	for (const auto& [k, s] : stamps)
+	{
+		put(out, static_cast<int32_t>(k.x));
+		put(out, static_cast<int32_t>(k.z));
+		put(out, s.size);
+		put(out, s.modified);
+	}
+	const std::vector<uint8_t> t = table.encode();
+	out.insert(out.end(), t.begin(), t.end());
+	return out;
+}
+
+bool CellHlodCache::decode(const std::vector<uint8_t>& bytes, CellHlodCache& out)
+{
+	out = {};
+	size_t pos = 0;
+	uint32_t magic = 0, version = 0, count = 0;
+	if (!getVal(bytes, pos, magic) || magic != kHlodCacheMagic) return false;
+	if (!getVal(bytes, pos, version) || version != kHlodCacheVersion) return false;
+	if (!getVal(bytes, pos, out.optionsKey) || !getVal(bytes, pos, count)) return false;
+	for (uint32_t i = 0; i < count; ++i)
+	{
+		int32_t x = 0, z = 0;
+		CellHlodStamp s;
+		if (!getVal(bytes, pos, x) || !getVal(bytes, pos, z) || !getVal(bytes, pos, s.size) || !getVal(bytes, pos, s.modified)) return false;
+		out.stamps[{ x, z }] = s;
+	}
+	const std::vector<uint8_t> tableBytes(bytes.begin() + static_cast<std::ptrdiff_t>(pos), bytes.end());
+	return LandscapeHlodTable::decode(tableBytes, out.table);
+}
+
 std::vector<LandscapeHlodCellKey> hlodCellsToDraw(const LandscapeHlodTable& table, const CellStreamer& streamer)
 {
 	std::vector<LandscapeHlodCellKey> out;
-	for (const LandscapeHlodCellKey& k : table.cells())
-		if (!streamer.isLoaded(k.x, k.z)) out.push_back(k);
+	table.forEachCell([&](const LandscapeHlodCellKey& k, const LandscapeHlodMesh&) { if (!streamer.isLoaded(k.x, k.z)) out.push_back(k); });
 	return out;
 }
 

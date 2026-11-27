@@ -361,6 +361,12 @@ json parseSceneText(const std::string& text, size_t minPieceBytes, size_t* piece
 	return scene.is_discarded() ? parseWhole(text) : scene;
 }
 
+json parseSceneBytes(const std::vector<uint8_t>& data)
+{
+	const auto first = std::find_if(data.begin(), data.end(), [](uint8_t b) { return b != ' ' && b != '\t' && b != '\n' && b != '\r'; });
+	return first != data.end() && *first == '{' ? parseSceneText(std::string(data.begin(), data.end())) : parseSceneCbor(data);
+}
+
 json parseSceneCbor(const std::vector<uint8_t>& data, size_t minPieceBytes, size_t* piecesUsed)
 {
 	if (piecesUsed) *piecesUsed = 1;

@@ -246,15 +246,7 @@ size_t prepareLandscapePacksForExport(HorizonWorld& world, const std::filesystem
 		{
 			it->hlodDone = true;
 			CellHlodBakeStats st;
-			LandscapeHlodTable table = bakeCellProxies(
-				manifest,
-				[&projectRoot](const std::string& path) -> std::function<bool(std::vector<uint8_t>&)> {
-					const std::filesystem::path file = projectRoot / path;
-					std::error_code ec;
-					if (!std::filesystem::is_regular_file(file, ec)) return {};
-					return [file](std::vector<uint8_t>& out) { return readFile(file, out); };
-				},
-				content, options.bakeOptions, &st);
+			LandscapeHlodTable table = bakeCellProxies(manifest, cellFileReader(projectRoot), content, options.bakeOptions, &st);
 			sum(plan.bake, st);
 			if (table.cellCount() > 0) it->hlod = std::make_shared<LandscapeHlodTable>(std::move(table));
 			say(0, "Landscape HLOD: " + std::to_string(st.baked) + " of " + std::to_string(st.cells) + " cell(s) baked ("

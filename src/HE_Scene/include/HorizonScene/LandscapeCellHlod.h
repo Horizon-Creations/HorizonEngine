@@ -116,6 +116,8 @@ public:
 	bool                     has(int cellX, int cellZ) const { return find(cellX, cellZ) != nullptr; }
 	size_t                   cellCount() const { return m_cells.size(); }
 	std::vector<LandscapeHlodCellKey> cells() const;
+	// Every cell, no allocation: f(const LandscapeHlodCellKey&, const LandscapeHlodMesh&). For a pass over a big table every few frames.
+	template <class F> void  forEachCell(F&& f) const { for (const auto& [k, mesh] : m_cells) f(k, mesh); }
 	size_t                   bytes() const;
 	void                     clear() { m_cells.clear(); palette.clear(); }
 
@@ -134,6 +136,30 @@ public:
 
 private:
 	std::unordered_map<LandscapeHlodCellKey, LandscapeHlodMesh, LandscapeHlodCellKeyHash> m_cells;
+};
+
+// A cell's file stamp: size and modification time, as cheap to read as a stat. It decides whether the cell's proxy is baked again
+// (CellHlodBakeJob). A touch without a change bakes a cell once more, nothing worse; a change of a MESH or MATERIAL asset the cell uses is
+// not seen (the cell file is the same): bake those by hand with a cleared cache.
+struct CellHlodStamp
+{
+	uint64_t size = 0;
+	int64_t  modified = 0;
+	bool operator==(const CellHlodStamp&) const = default;
+};
+
+// What a bake leaves and the next one starts from: the proxies, and the stamp every cell of the manifest was baked at (a cell with no static
+// mesh, or with an unreadable file, has a stamp and no proxy: it is not looked at again until its file changes).
+struct CellHlodCache
+{
+	LandscapeHlodTable table;
+	std::unordered_map<LandscapeHlodCellKey, CellHlodStamp, LandscapeHlodCellKeyHash> stamps;
+	uint64_t optionsKey = 0;   // cellHlodOptionsKey of the bake that made it: other budgets, every cell bakes again
+
+	// Little-endian: u32 magic 'HLDC', u32 version (1), u64 optionsKey, u32 stampCount, i32 x, i32 z, u64 size, i64 modified a stamp, then the
+	// table's own bytes (LandscapeHlodTable::encode) to the end.
+	std::vector<uint8_t> encode() const;
+	static bool          decode(const std::vector<uint8_t>& bytes, CellHlodCache& out);
 };
 
 // The CPU-only selector: which of the table's cells should show their HLOD proxy

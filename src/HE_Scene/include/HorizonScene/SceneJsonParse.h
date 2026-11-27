@@ -35,4 +35,8 @@ nlohmann::json parseSceneText(const std::string& text, size_t minPieceBytes = si
 nlohmann::json parseSceneCbor(const std::vector<uint8_t>& data, size_t minPieceBytes = size_t(1) << 20,
                               size_t* piecesUsed = nullptr);
 
+// A scene file's bytes in whichever form it is in: a loose JSON file opens with '{' (after white space), a packed or binary one with a CBOR
+// map head. Discarded for anything that is neither.
+nlohmann::json parseSceneBytes(const std::vector<uint8_t>& data);
+
 } // namespace HE

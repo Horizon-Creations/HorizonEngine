@@ -376,3 +376,52 @@ TEST_CASE("LandscapeHlodProxies: a cell without content gets an entity inside th
 	proxies.clear(world, cm, nullptr);
 	streamer.clear(world);
 }
+
+TEST_CASE("LandscapeHlodProxies: the camera walks past the load radius, the cell's real meshes unload and its proxy takes their place")
+{
+	HorizonWorld world;
+	HE::CellStreamer streamer;
+	Files files;
+	files["H.cells/cell_0_0.hescene"] = cellBytes(0.0f, 0.0f);
+	files["H.cells/cell_1_0.hescene"] = cellBytes(100.0f, 0.0f);
+	HE::CellManifest m;
+	REQUIRE(HE::CellManifest::parse(kManifest, m));
+	streamer.begin(m, readerOver(files), {});
+	streamer.setRegionConfig({});
+
+	HE::LandscapeHlodTable table;
+	table.set(0, 0, oneTriangle());
+	table.set(1, 0, oneTriangle());
+
+	ContentManager cm{ "." };
+	HE::LandscapeHlodProxies proxies;
+	HE::LandscapeHlodProxyConfig cfg;
+	cfg.drawRadius = 500.0;
+	cfg.everyFrames = 1;
+	proxies.setConfig(cfg);
+	const auto realMeshes = [&] {   // what the cells built: a mesh entity that is no proxy
+		size_t n = 0;
+		for (auto e : world.registry().view<MeshComponent>())
+			if (!world.registry().all_of<LandscapeProxyComponent>(e)) ++n;
+		return n;
+	};
+
+	// standing in cell (0,0): its box is built, cell (1,0), 50 m past the 40 m load radius, is a proxy
+	streamAt(streamer, world, { 50.0, 0.0, 50.0 }, [&] { return streamer.isLoaded(0, 0); });
+	REQUIRE(streamer.isLoaded(0, 0));
+	proxies.sync(world, table, streamer, { 50.0, 0.0, 50.0 }, cm, nullptr);
+	CHECK(realMeshes() == 1);
+	CHECK(proxies.stats().entities == 1);
+
+	// 250 m on: both cells are past the 50 m unload radius, no real mesh is left, and each cell has its proxy
+	streamAt(streamer, world, { 300.0, 0.0, 50.0 }, [&] { return !streamer.isLoaded(0, 0); });
+	REQUIRE_FALSE(streamer.isLoaded(0, 0));
+	REQUIRE_FALSE(streamer.isLoaded(1, 0));
+	proxies.sync(world, table, streamer, { 300.0, 0.0, 50.0 }, cm, nullptr);
+	CHECK(realMeshes() == 0);
+	CHECK(proxies.stats().entities == 2);
+	CHECK(streamer.stats().loaded == 0);
+
+	proxies.clear(world, cm, nullptr);
+	streamer.clear(world);
+}

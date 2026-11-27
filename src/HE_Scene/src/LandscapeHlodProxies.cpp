@@ -6,6 +6,7 @@
 #include "HorizonScene/Components/MeshComponent.h"
 #include "HorizonScene/Components/TransformComponent.h"
 #include <ContentManager/ContentManager.h>
+#include <Diagnostics/Profiler.h>
 #include <Renderer/IRenderer.h>
 
 #include <algorithm>
@@ -83,6 +84,7 @@ void LandscapeHlodProxies::clear(HorizonWorld& world, ContentManager& content, I
 void LandscapeHlodProxies::sync(HorizonWorld& world, const LandscapeHlodTable& table, const CellStreamer& streamer,
                                 const glm::dvec3& cameraAbsolute, ContentManager& content, IRenderer* renderer)
 {
+	HE_PROFILE_SCOPE_N("LandscapeHlodSync");
 	// Another palette than the one the proxies were made with (another table, a re-bake): all of them go and are made again.
 	if (table.palette != m_palette)
 	{
@@ -123,30 +125,32 @@ void LandscapeHlodProxies::sync(HorizonWorld& world, const LandscapeHlodTable& t
 	{
 		++m_stats.passes;
 		const float cell = streamer.manifest().cellSize;
-		std::unordered_set<LandscapeHlodCellKey, LandscapeHlodCellKeyHash> wanted;
+		const double radius2 = m_config.drawRadius * m_config.drawRadius;
+		m_wanted.clear();
+		// hlodCellsToDraw's rule (a cell that is not built) with the draw radius first: only the few cells near the camera cost a streamer
+		// lookup, and a table of tens of thousands of cells costs this pass no allocation.
 		if (cell > 0.0f)
-			for (const LandscapeHlodCellKey& k : hlodCellsToDraw(table, streamer))
+			table.forEachCell([&](const LandscapeHlodCellKey& k, const LandscapeHlodMesh& mesh)
 			{
+				if (mesh.empty()) return;
 				// ground-plane distance from the camera to the cell's square, the distance CellStreamer loads by
 				const double x0 = static_cast<double>(k.x) * cell, z0 = static_cast<double>(k.z) * cell;
 				const double dx = std::max({ x0 - cameraAbsolute.x, 0.0, cameraAbsolute.x - (x0 + cell) });
 				const double dz = std::max({ z0 - cameraAbsolute.z, 0.0, cameraAbsolute.z - (z0 + cell) });
-				if (dx * dx + dz * dz > m_config.drawRadius * m_config.drawRadius) continue;
-				const LandscapeHlodMesh* mesh = table.find(k.x, k.z);
-				if (!mesh || mesh->empty()) continue;
-				wanted.insert(k);
-			}
+				if (dx * dx + dz * dz > radius2) return;
+				if (!streamer.isLoaded(k.x, k.z)) m_wanted.insert(k);
+			});
 
 		for (auto it = m_cells.begin(); it != m_cells.end();)
 		{
-			if (!wanted.count(it->first) || !alive(reg, it->second))
+			if (!m_wanted.count(it->first) || !alive(reg, it->second))
 			{
 				if (alive(reg, it->second)) removeEntity(world, content, renderer, it->second);
 				it = m_cells.erase(it);
 			}
 			else ++it;
 		}
-		for (const LandscapeHlodCellKey& k : wanted)
+		for (const LandscapeHlodCellKey& k : m_wanted)
 		{
 			if (m_cells.count(k)) continue;
 			const HE::UUID meshId = content.registerStaticMesh(meshOf(*table.find(k.x, k.z)));

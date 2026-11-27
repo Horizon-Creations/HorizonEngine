@@ -565,12 +565,7 @@ void CellStreamer::update(HorizonWorld& world, const std::vector<Anchor>& anchor
 				p->state.store(2, std::memory_order_release);
 				return;
 			}
-			// A JSON scene opens with '{', a CBOR one with a map head (0xA0-0xBF).
-			const auto first = std::find_if(bytes.begin(), bytes.end(),
-			                                [](uint8_t b) { return b != ' ' && b != '\t' && b != '\n' && b != '\r'; });
-			const bool text  = first != bytes.end() && *first == '{';
-			json scene = text ? parseSceneText(std::string(bytes.begin(), bytes.end()))
-			                  : parseSceneCbor(bytes);
+			json scene = parseSceneBytes(bytes);
 			if (scene.is_discarded() || !scene.is_object())
 			{
 				p->state.store(2, std::memory_order_release);
