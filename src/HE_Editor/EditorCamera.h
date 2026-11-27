@@ -156,6 +156,9 @@ private:
 
 	float     m_fov       = 60.0f;
 	float     m_near      = 0.1f;
-	float     m_far       = 5000.0f;
+	// No view limit in practice: past a 100 km tile world's diagonal plus height. The tile world loads tiles to at least 7.6 km and draws
+	// its far image beyond them, so a few kilometres here hid exactly that. Precision does not suffer: with a float depth buffer it is set
+	// by the near plane, the far one barely moves it. Shadows keep their own distance (kShadowDistance).
+	float     m_far       = 250000.0f;
 	float     m_flySpeed  = 6.0f;       // world units / second
 };

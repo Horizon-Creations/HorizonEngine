@@ -65,13 +65,13 @@ TEST_CASE("landscape shader source: the uniforms are the ones the frame contract
 	for (const char* u : { "uViewProj", "uCameraRel", "uWorld", "uHeightInfo", "uOrigin", "uTile", "uHeightRect", "uCoarseGrid", "uPatch",
 	                       "uPatchPos", "uMorph", "uTileHeights", "uSlotTable", "uCoarseHeights" })
 		CHECK_MESSAGE(vs.count(u) == 1, "vertex shader lacks " << u);
-	for (const char* u : { "uWorld", "uHeightInfo", "uOrigin", "uTile", "uLayerColor", "uSunDir", "uSunColor", "uAmbient", "uSlotTable",
+	for (const char* u : { "uWorld", "uHeightInfo", "uCameraRel", "uOrigin", "uTile", "uLayerColor", "uSunDir", "uSunColor", "uAmbient", "uSlotTable",
 	                       "uTileWeights0", "uTileWeights1", "uTileWeights2", "uCoarseWeights0", "uCoarseWeights1", "uCoarseWeights2",
 	                       "uTex", "uTexMaps", "uAlbedoArray", "uNormalArray", "uMaskArray", "uFarAlbedo" })
 		CHECK_MESSAGE(fs.count(u) == 1, "fragment shader lacks " << u);
 	// nothing else sneaks in unannounced: a new uniform needs the frame contract, the doc and this list
 	CHECK(vs.size() == 14);
-	CHECK(fs.size() == 21);
+	CHECK(fs.size() == 22);   // uCameraRel: the camera's tile, against the slot table's toroidal aliases
 }
 
 TEST_CASE("landscape shader source: the morph distance is horizontal plus the slab term, never the vertex's own height")
