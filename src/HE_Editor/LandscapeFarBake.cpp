@@ -7,9 +7,15 @@
 #include "ProjectManager.h"
 #include <HorizonScene/HorizonScene.h>
 #include <HorizonScene/LandscapeHlod.h>
+#include <HorizonScene/LandscapeEdit.h>
+#include <HorizonScene/LandscapeExport.h>      // landscapeFarPaintFor: what the export paints with
+#include <HorizonScene/LandscapeFarBake.h>     // the region bake of the tile world
+#include <HorizonScene/LandscapeRuntime.h>
 #include <nlohmann/json.hpp>
 
+#include <atomic>
 #include <chrono>
+#include <thread>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -195,6 +201,167 @@ namespace
 	{
 		return ctx.projectLoaded && ctx.world && ctx.contentManager && ctx.renderer && ctx.projectManager;
 	}
+
+	// ── The tile world's far image ─────────────────────────────────────────────
+	struct TileJob
+	{
+		std::thread                                thread;
+		std::atomic<bool>                          done{ false };
+		std::atomic<bool>                          cancel{ false };
+		std::shared_ptr<HE::LandscapeEditSource>   edits;    // kept alive: the runtime may reset meanwhile
+		std::shared_ptr<HE::LandscapeFarTable>     table = std::make_shared<HE::LandscapeFarTable>();
+		HE::LandscapeFarBakeStats                  stats;
+		uint64_t                                   revision = 0;   // the runtime's coarseRevision when it started
+		fs::path                                   cacheFile;
+		double                                     started = 0.0;
+	};
+	HE::LandscapeRuntime*                       s_tileRuntime = nullptr;
+	std::unique_ptr<TileJob>                    s_tileJob;
+	std::shared_ptr<const HE::LandscapeFarTable> s_tileLast;          // the last table: what the next bake reuses region by region
+	const HE::LandscapeEditSource*              s_tileOverlay = nullptr;   // the overlay s_tileLast and the revisions belong to
+	uint64_t                                    s_tileBaked = ~0ull;  // coarseRevision the far image is up to date with
+	uint64_t                                    s_tileSeen = 0;
+	double                                      s_tileChangeAt = 0.0;
+	std::string                                 s_tileSummary;
+
+	fs::path tileCacheFile(AppContext& ctx)
+	{
+		fs::path p = ctx.projectManager->currentProject().path;
+		if (fs::is_regular_file(p)) p = p.parent_path();
+		// The export's own cache (ExportDialogPanel: farCacheDir), so an export after an editor bake paints nothing again.
+		return p / "Saved" / "LandscapeFar" / (s_tileRuntime->packFile().stem().generic_string() + ".far");
+	}
+
+	void stopTileJob()
+	{
+		if (!s_tileJob) return;
+		s_tileJob->cancel = true;
+		if (s_tileJob->thread.joinable()) s_tileJob->thread.join();
+		s_tileJob.reset();
+	}
+
+	// The finished job's table onto the overlay it was baked from, if that is still the runtime's.
+	void finishTileJob()
+	{
+		TileJob& j = *s_tileJob;
+		if (j.thread.joinable()) j.thread.join();
+		const auto edits = s_tileRuntime ? s_tileRuntime->editsShared() : nullptr;
+		char line[200];
+		if (j.stats.cancelled)
+			std::snprintf(line, sizeof(line), "Far image: cancelled.");
+		else if (!edits || edits != j.edits || j.table->empty())
+			std::snprintf(line, sizeof(line), "Far image: nothing came out (%d of %d region(s) failed).", j.stats.failed, j.stats.regions);
+		else
+		{
+			const uint64_t before = s_tileRuntime->coarseRevision();
+			edits->setFarImage(j.table);
+			s_tileRuntime->coarseChanged();   // the window assembles and uploads the new image
+			s_tileLast = j.table;
+			// Up to date only if nothing was edited while it baked; else the next automatic bake catches up.
+			s_tileBaked = (before == j.revision) ? s_tileRuntime->coarseRevision() : j.revision;
+			std::snprintf(line, sizeof(line), "Far image: %d region(s) painted, %d kept, in %.1f s.", j.stats.baked, j.stats.reused,
+			              now() - j.started);
+		}
+		s_tileSummary = line;
+		HE_LOG_INFO(Editor, "LandscapeFarBake: %s", s_tileSummary.c_str());
+		s_tileJob.reset();
+	}
+
+	// Once per overlay: the last bake from the cache, so a reopened world shows it without painting.
+	void adoptTileCache(AppContext& ctx, HE::LandscapeEditSource& edits)
+	{
+		s_tileOverlay = &edits;
+		s_tileLast.reset();
+		s_tileBaked = ~0ull;
+		if (ctx.editorConfig.LandscapeFarBake == 0) return;
+		std::ifstream in(tileCacheFile(ctx), std::ios::binary);
+		if (!in) return;
+		const std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+		auto table = std::make_shared<HE::LandscapeFarTable>();
+		if (!HE::LandscapeFarTable::decode(bytes, *table) || table->empty()) return;
+		edits.setFarImage(table);
+		s_tileRuntime->coarseChanged();
+		s_tileLast = table;
+		// Manual: the cached image is what was baked last, shown as it is. Automatic checks it against the tiles once (a bake
+		// that finds every region's hash unchanged paints nothing).
+		s_tileBaked = ctx.editorConfig.LandscapeFarBake == 2 ? ~0ull : s_tileRuntime->coarseRevision();
+		HE_LOG_INFO(Editor, "LandscapeFarBake: the tile world's far image from %s", tileCacheFile(ctx).string().c_str());
+	}
+
+	void tickTile(AppContext& ctx, bool userBusy)
+	{
+		if (!s_tileRuntime || !s_tileRuntime->active()) return;
+		if (s_tileJob && s_tileJob->done) finishTileJob();
+		HE::LandscapeEditSource* edits = s_tileRuntime->edits();
+		if (!edits) return;
+		if (edits != s_tileOverlay) { stopTileJob(); adoptTileCache(ctx, *edits); }
+
+		const double t = now();
+		const uint64_t rev = s_tileRuntime->coarseRevision();
+		if (rev != s_tileSeen) { s_tileSeen = rev; s_tileChangeAt = t; }
+		if (ctx.editorConfig.LandscapeFarBake != 2 || userBusy || ctx.isPlaying || s_tileJob) return;
+		if (rev != s_tileBaked && t - s_tileChangeAt >= 4.0) bakeTileWorld(ctx);
+	}
+}
+
+void setTileRuntime(HE::LandscapeRuntime* runtime)
+{
+	if (runtime != s_tileRuntime) { stopTileJob(); s_tileOverlay = nullptr; s_tileLast.reset(); }
+	s_tileRuntime = runtime;
+}
+
+TileState tileState()
+{
+	if (!s_tileRuntime || !s_tileRuntime->active() || !s_tileRuntime->edits()) return TileState::NoWorld;
+	if (s_tileJob) return TileState::Baking;
+	if (s_tileBaked == s_tileRuntime->coarseRevision()) return TileState::UpToDate;
+	return s_tileLast ? TileState::Stale : TileState::Idle;
+}
+
+const std::string& tileSummary() { return s_tileSummary; }
+
+bool bakeTileWorld(AppContext& ctx)
+{
+	if (!usable(ctx) || s_tileJob || !s_tileRuntime || !s_tileRuntime->active()) return false;
+	const auto edits = s_tileRuntime->editsShared();
+	if (!edits) return false;
+	const auto pack = std::dynamic_pointer_cast<const HE::LandscapePackSource>(edits->baseShared());
+	if (!pack) { s_tileSummary = "Far image: the world is not a pack."; return false; }
+
+	// Main thread: what to paint with (the content manager), the hash of the unedited tiles, the options.
+	const HE::LandscapeFarPaint paint = HE::landscapeFarPaintFor(s_tileRuntime->config().textureGroup, *ctx.contentManager);
+	auto job = std::make_unique<TileJob>();
+	job->edits = edits;
+	job->revision = s_tileRuntime->coarseRevision();
+	job->cacheFile = tileCacheFile(ctx);
+	job->started = now();
+	HE::LandscapeFarBakeOptions bo;
+	bo.painter = HE::landscapeFarWeightPainter(paint);
+	bo.painterHash = HE::landscapeFarPaintHash(paint);
+	TileJob* jp = job.get();
+	bo.progress = [jp](int, int) { return !jp->cancel.load(); };
+	std::shared_ptr<const HE::LandscapeFarTable> previous = s_tileLast ? s_tileLast
+		: pack->farImage() ? std::make_shared<HE::LandscapeFarTable>(*pack->farImage()) : nullptr;
+	const HE::LandscapeFarTileHash packHash = HE::landscapePackTileHash(*pack);
+
+	job->thread = std::thread([jp, bo, previous, packHash, pack]
+	{
+		const HE::LandscapeEditSource& world = *jp->edits;
+		const HE::LandscapeFarTileHash hash = [&world, &packHash](HE::LandscapeTileKey k) { return world.contentHash(k, packHash); };
+		HE::bakeLandscapeFar(world, hash, bo, previous.get(), *jp->table, jp->stats);
+		if (!jp->stats.cancelled && !jp->table->empty())
+		{
+			std::error_code ec;
+			fs::create_directories(jp->cacheFile.parent_path(), ec);
+			const std::vector<uint8_t> bytes = jp->table->encode();
+			std::ofstream(jp->cacheFile, std::ios::binary).write(reinterpret_cast<const char*>(bytes.data()),
+			                                                     static_cast<std::streamsize>(bytes.size()));
+		}
+		jp->done = true;
+	});
+	s_tileJob = std::move(job);
+	s_tileSummary = "Far image: baking...";
+	return true;
 }
 
 void reset()
@@ -205,6 +372,10 @@ void reset()
 	s_measured.clear();
 	s_refused.clear();
 	s_summary.clear();
+	stopTileJob();   // waits for a running tile bake (it is cancelled first)
+	s_tileOverlay = nullptr;
+	s_tileLast.reset();
+	s_tileSummary.clear();
 }
 
 const std::string& lastSummary() { return s_summary; }
@@ -300,6 +471,7 @@ void tick(AppContext& ctx, bool userBusy)
 		readIndex(ctx);
 		s_nextMeasure = 0.0;
 	}
+	tickTile(ctx, userBusy);   // every frame: a finished bake is applied the frame it ends
 	const double t = now();
 	if (t < s_nextMeasure) return;
 	s_nextMeasure = t + 1.0;

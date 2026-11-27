@@ -2,6 +2,7 @@
 #include <string>
 
 struct AppContext;
+namespace HE { class LandscapeRuntime; }
 
 // The baked far landscape in the editor. Until now only the export baked it
 // (ExportDialogPanel, HE::landscape::bakeWorldLandscapes): what a landscape's
@@ -34,4 +35,18 @@ namespace LandscapeFarBake
 
 	// The project or scene changed: what was loaded and measured is forgotten.
 	void reset();
+
+	// ── The tile world (LandscapeRuntime, Thema 326 / 355) ───────────────────────
+	// Its far image is the export's region bake (HorizonScene/LandscapeFarBake.h,
+	// the weight painter): CPU only, so it runs on a worker while the editor goes
+	// on, over the edit overlay, and only the regions whose tiles changed are
+	// painted again. The table goes to the export's own cache
+	// (Saved/LandscapeFar/<pack>.far), so the next export paints nothing that
+	// the editor already painted, and onto the overlay, which draws it at once.
+	void setTileRuntime(HE::LandscapeRuntime* runtime);
+	enum class TileState { NoWorld, Idle, Baking, Stale, UpToDate };
+	TileState tileState();
+	// Starts a bake of the tile world (false: none to bake, or one is running).
+	bool bakeTileWorld(AppContext& ctx);
+	const std::string& tileSummary();
 }

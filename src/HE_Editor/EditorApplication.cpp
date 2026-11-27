@@ -4300,7 +4300,12 @@ void EditorApplication::OnRender(float dt)
 			// Every call, not just the first bind below: RenderExtractor reads this to build the GI
 			// shadow kernel's height clipmap (step 4).
 			m_editorWorld->setLandscapeRuntime(&m_landscape);
-			if (!m_landscapeToolsBound) { LandscapeWorldTools::setRuntime(&m_landscape); m_landscapeToolsBound = true; }   // the tile brush edits this runtime
+			if (!m_landscapeToolsBound)
+			{
+				LandscapeWorldTools::setRuntime(&m_landscape);   // the tile brush edits this runtime
+				LandscapeFarBake::setTileRuntime(&m_landscape);  // and its far image is baked in the editor
+				m_landscapeToolsBound = true;
+			}
 			LandscapeWorldTools::pump(*m_editorWorld);   // before the update: a rebuilt pack is opened again this frame
 			if (contentManager().contentRoot() != m_landscapeContentRoot)
 			{
@@ -17927,6 +17932,7 @@ void EditorApplication::OnShutdown()
 	// First, while the viewport still holds the last frame the user saw.
 	captureProjectThumbnail();
 	saveProjectCameraView();
+	LandscapeFarBake::reset();   // cancels and joins a far-image bake still running on its worker
 	// The virtual texture driver gives its pool back to the renderer, so it must go while the renderer still exists: left to
 	// the destructor it would call into a renderer that has been shut down and crash on the way out.
 	m_rvtLandscape.reset();

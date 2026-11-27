@@ -204,6 +204,10 @@ public:
 	// The whole world's edge lengths in metres (not the render window's).
 	glm::dvec2 worldSizeM() const;
 	LandscapeEditSource* edits() const { return m_edits.get(); }
+	// The same overlay, kept alive by the caller: a far bake on a worker reads it while the runtime may be reset.
+	std::shared_ptr<LandscapeEditSource> editsShared() const { return m_edits; }
+	// Counts every change of the far data (coarseChanged): the editor's automatic far bake watches it.
+	uint64_t coarseRevision() const { return m_coarseRevision; }
 	const std::filesystem::path& packFile() const { return m_packFile; }
 	void tilesReplaced(const std::vector<std::pair<LandscapeTileKey, std::shared_ptr<const LandscapeTile>>>& tiles);
 	void coarseChanged(const std::vector<LandscapeTileKey>* keys = nullptr);   // `keys`: the tiles whose far data changed (takeChangedTiles names them)

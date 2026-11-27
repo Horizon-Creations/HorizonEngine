@@ -8213,6 +8213,12 @@ namespace
 	{ "Tile Landscape/Generate Procedural World", "",
 	  "Builds a pack from the engine's noise: mountains, valleys, and layer paint by height and slope. It runs in the background with a progress bar and can be cancelled. Good for tests and as a starting point.",
 	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Bake Far Image", "",
+	  "Bakes the image the ground beyond the loaded tiles is drawn with, from the tiles as you edited them: the same bake the "
+	  "export runs, only the regions whose tiles changed are painted again. It runs in the background, the editor goes on. The "
+	  "result is kept in the project's Saved folder, where the next export finds it, and shows at once. Preferences decides "
+	  "whether it runs by itself after an edit.",
+	  "", "editor#landscape-mode" },
 	{ "Tile Landscape/Migrate Terrain to Tiles", "",
 	  "Cuts the scene's Terrain (its sculpted heights and painted layers) into tiles and writes them as a pack. The Terrain's south-west corner lands at the pack's origin. Its water is not carried over. The Terrain stays in the scene; hide or delete it once the tile landscape looks right.",
 	  "", "editor#landscape-mode" },

@@ -2,6 +2,7 @@
 #include "EditorApplication.h"   // AppContext
 #include "EditorHelp.h"
 #include "NotificationStore.h"
+#include "LandscapeFarBake.h"   // the Far Image block
 #include <HorizonScene/Components/LandscapeWorldComponent.h>
 #include <HorizonScene/Components/LandscapeStampComponent.h>
 #include <HorizonScene/Components/FoliageComponent.h>
@@ -418,6 +419,27 @@ void drawSection(AppContext& ctx, Entity entity, const std::function<void()>& af
 	{
 		if (s.statusError) ImGui::TextColored(ImVec4(0.95f, 0.45f, 0.40f, 1.0f), "%s", s.status.c_str());
 		else ImGui::TextDisabled("%s", s.status.c_str());
+	}
+
+	// The far image: what the ground beyond the tile atlas is drawn from, baked here as the export bakes it
+	// (LandscapeFarBake.h), on a worker; Preferences decides whether it runs by itself.
+	using FS = LandscapeFarBake::TileState;
+	const FS fs = LandscapeFarBake::tileState();
+	if (fs != FS::NoWorld)
+	{
+		ImGui::SeparatorText("Far Image");
+		ImGui::TextDisabled("%s", fs == FS::Baking   ? "Baking on a worker; the editor goes on meanwhile."
+		                        : fs == FS::UpToDate ? "Up to date with the edited tiles."
+		                        : fs == FS::Stale    ? "Tiles changed since the last bake; the far ground shows the older image."
+		                                             : "Not baked in the editor yet; the far ground shows the pack's image.");
+		const int mode = ctx.editorConfig.LandscapeFarBake;
+		ImGui::BeginDisabled(mode == 0 || fs == FS::Baking);
+		if (EditorWidgets::button("Bake Far Image##tlfar")) LandscapeFarBake::bakeTileWorld(ctx);
+		ImGui::EndDisabled();
+		ImGui::TextDisabled("%s", mode == 0 ? "Off in Preferences: only the export bakes it."
+		                        : mode == 2 ? "Automatic: it bakes again a few seconds after the last edit."
+		                                    : "Manual: bake again after edits (Automatic is in Preferences).");
+		if (!LandscapeFarBake::tileSummary().empty()) ImGui::TextDisabled("%s", LandscapeFarBake::tileSummary().c_str());
 	}
 }
 #else

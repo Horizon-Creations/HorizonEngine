@@ -68,7 +68,12 @@ public:
 	void setWaterTable(LandscapeWaterTable table);
 	bool waterEdited() const { return m_water != nullptr; }
 	const LandscapeHlodTable* hlod() const override { return m_base->hlod(); }
-	const LandscapeFarTable* farImage() const override { return m_base->farImage(); }
+	// The far image of the world as it is edited, once the editor baked one (setFarImage, main thread): the pack's own shows the
+	// ground before the edits. The runtime takes it up on its next coarseChanged().
+	const LandscapeFarTable* farImage() const override { return m_far ? m_far.get() : m_base->farImage(); }
+	void setFarImage(std::shared_ptr<const LandscapeFarTable> table) { m_far = std::move(table); }
+	// The pack under the overlay: what a far bake hashes the unedited tiles by.
+	std::shared_ptr<const LandscapeTileSource> baseShared() const { return m_base; }
 	const LandscapeTileSource& base() const { return *m_base; }
 
 	// Main thread. A tile with every level (buildMips); null takes the edit away (the base's tile shows again). The coarse copy is
@@ -109,6 +114,7 @@ public:
 
 private:
 	std::shared_ptr<const LandscapeTileSource> m_base;
+	std::shared_ptr<const LandscapeFarTable> m_far;   // the editor's bake (setFarImage); null: the base's
 	mutable std::mutex m_mutex;
 	std::map<std::pair<int, int>, LandscapeTilePtr> m_tiles;
 	LandscapeCoarseWorld m_coarse;   // a copy of the base's, made at the first edit
