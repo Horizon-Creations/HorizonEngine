@@ -15039,8 +15039,9 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 		// background), so the heavy sky shader is never paid for behind solid
 		// objects. With no geometry the whole frame is background → full sky.
 		// skyEnabled == false (no Sky entity) skips the pass → the cleared background shows.
-		DrawSkyFullscreen(invViewProj, sunDir, m_renderWorld.camera.position,
-		                  GetEnvironment(), /*allowLowResClouds=*/true, pw, ph);
+		// The sky's rays from the camera's rotation alone (HE::SkyViewProj), on the scene's jitter grid.
+		DrawSkyFullscreen(glm::inverse(JitteredViewProj(HE::SkyViewProj(m_renderWorld.camera.projection, m_renderWorld.camera.view), pw, ph)),
+		                  sunDir, m_renderWorld.camera.position, GetEnvironment(), /*allowLowResClouds=*/true, pw, ph);
 		// Volumetric fog Apply (Thema 225 step 4): full-screen blit of the
 		// integrated volume onto the now-finished opaque scene + sky, between
 		// it and the translucent tail — the same seam Metal's EncodeScene

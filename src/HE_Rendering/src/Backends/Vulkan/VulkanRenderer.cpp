@@ -12391,8 +12391,9 @@ void VulkanRenderer::destroySkyPipeline()
 
 void VulkanRenderer::drawSky(VkCommandBuffer cmd, uint32_t /*width*/, uint32_t /*height*/, bool hdr)
 {
+    // The sky's rays from the camera's rotation alone (HE::SkyViewProj): the translation lost them far from the origin.
     drawSkyFrom(cmd, hdr,
-                taaJittered(HE::kVulkanClipFix * m_renderWorld.camera.projection * m_renderWorld.camera.view),
+                taaJittered(HE::kVulkanClipFix * HE::SkyViewProj(m_renderWorld.camera.projection, m_renderWorld.camera.view)),
                 m_renderWorld.sunDirection, m_renderWorld.camera.position, m_wallTime, m_environment);
 }
 
