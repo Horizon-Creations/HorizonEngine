@@ -5786,6 +5786,9 @@ void EditorApplication::captureLiveFrameIfAsked()
 			("EditorApplication: live frame capture failed → " + std::string(s_out)).c_str());
 }
 
+// HE_DUMP_SKINTEST's column mesh, posed by the dump's frame loop.
+static HE::UUID s_dumpSkinMesh;
+
 // ── The witness scenes of the headless dump ─────────────────────────────────
 // Every HE_DUMP_* block that builds a scene for one capture (sky, material,
 // water, landscape, lights, …), in the order dumpFrameHeadless ran them inline;
@@ -5793,6 +5796,7 @@ void EditorApplication::captureLiveFrameIfAsked()
 // variable is set. Two ids leave it: the material-test material, which the
 // preview-path witness reuses, and the landscape layer material, which
 // HE_DUMP_LAYEREDIT and the GI refit witness edit after the warmup.
+
 void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTestId,
                                                HE::UUID& s_layerMatId)
 {
@@ -7088,6 +7092,59 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 			reg.emplace<MaterialComponent>(e, mc);
 			HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_GLASSCUBE translucent cube added (opacity %s)", gc);
 		}
+	}
+
+	// HE_DUMP_SKINTEST=<degrees per frame>: a two-joint column right of the cube row whose upper half bends further
+	// every settle frame (the frame loop below poses it) while the camera stands still — the witness of the skinned
+	// meshes' own velocity (HE_TAA_VELOCITY_STATS; HE_TAA_SKINVEL=0 is its negative control).
+	if (const char* sk = std::getenv("HE_DUMP_SKINTEST"); sk && *sk && m_editorWorld)
+	{
+		SkeletalMeshAsset col;
+		col.type = HE::AssetType::SkeletalMesh;
+		col.name = "DumpSkinColumn";
+		// Two boxes, 0.8 m square: y 0..1.5 on joint 0, y 1.5..3 on joint 1. Four vertices per face, flat normals.
+		auto box = [&](float y0, float y1, uint32_t joint)
+		{
+			const float h = 0.4f;
+			const glm::vec3 n[6] = { {1,0,0}, {-1,0,0}, {0,1,0}, {0,-1,0}, {0,0,1}, {0,0,-1} };
+			for (const glm::vec3& f : n)
+			{
+				const glm::vec3 u = std::abs(f.y) > 0.5f ? glm::vec3(1, 0, 0) : glm::vec3(0, 1, 0);
+				const glm::vec3 v = glm::cross(f, u);
+				const uint32_t base = static_cast<uint32_t>(col.vertices.size() / 3);
+				for (int c = 0; c < 4; ++c)
+				{
+					const float su = (c == 1 || c == 2) ? 1.0f : -1.0f, sv = (c >= 2) ? 1.0f : -1.0f;
+					glm::vec3 p = f + u * su + v * sv;                       // a corner of the unit cube (-1..1)
+					p = glm::vec3(p.x * h, glm::mix(y0, y1, p.y * 0.5f + 0.5f), p.z * h);
+					col.vertices.insert(col.vertices.end(), { p.x, p.y, p.z });
+					col.normals.insert(col.normals.end(), { f.x, f.y, f.z });
+					col.uvs.insert(col.uvs.end(), { 0.0f, 0.0f });
+					col.boneIDs.insert(col.boneIDs.end(), { joint, 0u, 0u, 0u });
+					col.boneWeights.insert(col.boneWeights.end(), { 1.0f, 0.0f, 0.0f, 0.0f });
+				}
+				col.indices.insert(col.indices.end(), { base, base + 1, base + 2, base, base + 2, base + 3 });
+			}
+		};
+		box(0.0f, 1.5f, 0);
+		box(1.5f, 3.0f, 1);
+		SkeletonJoint j0; j0.name = "Base"; j0.parent = -1;
+		SkeletonJoint j1; j1.name = "Top";  j1.parent = 0;
+		const glm::mat4 id(1.0f);
+		std::memcpy(j0.inverseBindMatrix.data(), &id[0][0], sizeof(float) * 16);
+		std::memcpy(j1.inverseBindMatrix.data(), &id[0][0], sizeof(float) * 16);
+		col.skeleton = { j0, j1 };
+		s_dumpSkinMesh = contentManager().registerSkeletalMesh(std::move(col));
+		auto& reg = m_editorWorld->registry();
+		auto e = m_editorWorld->createEntity("DumpSkinColumn");
+		TransformComponent tc;
+		tc.position = glm::vec3(4.0f, 0.0f, -6.0f);
+		reg.emplace<TransformComponent>(e, tc);
+		SkeletalMeshComponent smc;
+		smc.meshAssetId  = s_dumpSkinMesh;
+		smc.boneMatrices = { glm::mat4(1.0f), glm::mat4(1.0f) };
+		reg.emplace<SkeletalMeshComponent>(e, smc);
+		HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_SKINTEST skinned column added (%s deg per frame)", sk);
 	}
 
 	// ── GI-reflections witness (HE_DUMP_GIREFLTEST=1): a mirror floor with a
@@ -11366,6 +11423,26 @@ void EditorApplication::dumpFrameHeadless()
 			("EditorApplication: HE_DUMP_PANYAW/PANMOVE panned the camera by " + std::to_string(panYaw)
 			 + " deg / " + std::to_string(panMove) + " units per frame over "
 			 + std::to_string(settleFrames) + " frames").c_str());
+		settleFrames = 0;
+	}
+	// HE_DUMP_SKINTEST: the column's upper joint bends by the step every settle frame about the joint between its halves
+	// (y 1.5), the captured frame at step x (frames - 1). The camera stands still: whatever moves in the velocity target
+	// is the skin's own motion.
+	if (const float skStep = mbEnvF("HE_DUMP_SKINTEST"); skStep != 0.0f && s_dumpSkinMesh != HE::UUID{} && m_editorWorld)
+	{
+		auto& reg = m_editorWorld->registry();
+		for (int i = 0; i < settleFrames; ++i)
+		{
+			const glm::vec3 pivot(0.0f, 1.5f, 0.0f);
+			const glm::mat4 bend = glm::translate(glm::mat4(1.0f), pivot)
+			                     * glm::rotate(glm::mat4(1.0f), glm::radians(skStep * float(i)), glm::vec3(0, 0, 1))
+			                     * glm::translate(glm::mat4(1.0f), -pivot);
+			for (auto [e, smc] : reg.view<SkeletalMeshComponent>().each())
+				if (smc.meshAssetId == s_dumpSkinMesh) { smc.boneMatrices = { glm::mat4(1.0f), bend }; smc.poseKey = 0; }
+			r->Render();
+		}
+		HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_SKINTEST bent the column by %.2f deg per frame over %d frames",
+		            skStep, settleFrames);
 		settleFrames = 0;
 	}
 	// HE_DUMP_TODSTEP (day fraction, with HE_DUMP_SKYTEST): the OCCLUDER-motion

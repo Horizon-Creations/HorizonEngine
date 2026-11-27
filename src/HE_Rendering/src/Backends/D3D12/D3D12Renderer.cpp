@@ -1944,6 +1944,13 @@ struct D3D12RendererImpl
     ComPtr<ID3D12RootSignature>  taaVelocityRootSig;  // [0] root CBV b0 (HE::TaaVelocityConstants)
     ComPtr<ID3D12RootSignature>  taaResolveRootSig;   // [0] 4 constants b0, [1] table t0..t2, s0
     ComPtr<ID3D12PipelineState>  taaVelocityPSO, taaResolvePSO, taaSharpenPSO;
+    // Skinned meshes' velocity: root CBVs b0 (the constants), b2 (this frame's palette, the skinned pass's bones-ring
+    // slot), b3 (last frame's, prevBonesCB). The skinned pass records what it drew (skinVelDraws); the velocity pass
+    // draws those again, each entity's pose against the one it had last frame (taaPrevSkins).
+    ComPtr<ID3D12RootSignature>  taaVelocitySkinnedRootSig;
+    ComPtr<ID3D12PipelineState>  taaVelocitySkinnedPSO;
+    struct PrevSkin { glm::mat4 transform{ 1.0f }; std::vector<glm::mat4> bones; };
+    std::unordered_map<uint32_t, PrevSkin> taaPrevSkins, taaCurSkins;
     ComPtr<ID3D12Resource>       taaVelocityRT;       // RG16F, uvNow - uvPrev
     ComPtr<ID3D12DescriptorHeap> taaVelocityRtvHeap;
     D3D12_RESOURCE_STATES        taaVelocityState = D3D12_RESOURCE_STATE_RENDER_TARGET;
@@ -2025,6 +2032,48 @@ struct D3D12RendererImpl
         HE_LOG_INFO(RHI, "D3D12Renderer: FSR reactive mask %ux%u: %llu px > 0.1 (%.2f %%), mean %.4f", f.Width, f.Height,
                     static_cast<unsigned long long>(marked), 100.0 * double(marked) / double(f.Width * f.Height),
                     double(sum) / 255.0 / double(f.Width * f.Height));
+    }
+    // HE_TAA_VELOCITY_STATS=1: the velocity target read back after its pass and the moving pixels logged (> 0.25 px of
+    // motion, mean in pixels); HE_TAA_VELOCITY_PGM=<file> writes |motion| x 16 as a picture. Witness runs only (a flush).
+    ComPtr<ID3D12Resource> velReadback;
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT velFp{};
+    bool                   velPending = false;
+    void logVelocityStats()
+    {
+        if (!velPending || !velReadback) return;
+        velPending = false;
+        waitForAllFrames();
+        const auto& f = velFp.Footprint;
+        const uint8_t* px = nullptr;
+        D3D12_RANGE rr{ 0, static_cast<SIZE_T>(velReadback->GetDesc().Width) };
+        if (FAILED(velReadback->Map(0, &rr, reinterpret_cast<void**>(const_cast<uint8_t**>(&px)))) || !px) return;
+        std::vector<uint8_t> img(static_cast<size_t>(f.Width) * f.Height);
+        uint64_t moving = 0;
+        double sumPx = 0.0;
+        for (UINT y = 0; y < f.Height; ++y)
+        {
+            const uint16_t* row = reinterpret_cast<const uint16_t*>(px + static_cast<size_t>(y) * f.RowPitch);
+            for (UINT x = 0; x < f.Width; ++x)
+            {
+                const float vx = glm::unpackHalf1x16(row[2 * x]) * float(f.Width);
+                const float vy = glm::unpackHalf1x16(row[2 * x + 1]) * float(f.Height);
+                const float m = std::sqrt(vx * vx + vy * vy);
+                if (m > 0.25f) { ++moving; sumPx += m; }
+                img[static_cast<size_t>(y) * f.Width + x] = static_cast<uint8_t>(std::min(255.0f, m * 16.0f));
+            }
+        }
+        D3D12_RANGE none{ 0, 0 };
+        velReadback->Unmap(0, &none);
+        if (const char* pgm = std::getenv("HE_TAA_VELOCITY_PGM"); pgm && *pgm)
+            if (FILE* fp = std::fopen(pgm, "wb"))
+            {
+                std::fprintf(fp, "P5\n%u %u\n255\n", f.Width, f.Height);
+                std::fwrite(img.data(), 1, img.size(), fp);
+                std::fclose(fp);
+            }
+        HE_LOG_INFO(RHI, "D3D12Renderer: velocity %ux%u: %llu px moving > 0.25 px (%.2f %%), mean %.3f px", f.Width, f.Height,
+                    static_cast<unsigned long long>(moving), 100.0 * double(moving) / double(f.Width * f.Height),
+                    moving ? sumPx / double(moving) : 0.0);
     }
     bool ensureFsrReactiveTargets()
     {
@@ -2632,12 +2681,61 @@ struct D3D12RendererImpl
             return true;
         };
 
-        ComPtr<ID3DBlob> velVS, velPS, resPS, shpPS;
+        ComPtr<ID3DBlob> velVS, velPS, resPS, shpPS, velSkVS;
         if (!compile(kTaaVelocityHLSL, "VSVelocity", "vs_5_0", velVS)
          || !compile(kTaaVelocityHLSL, "PSVelocity", "ps_5_0", velPS)
          || !compile(kTaaResolveHLSL,  "main",       "ps_5_0", resPS)
          || !compile(kTaaSharpenHLSL,  "main",       "ps_5_0", shpPS))
             return;
+        // Skinned velocity: optional — without it skinned meshes keep the clear's zero, as before.
+        if (compile(kTaaVelocityHLSL, "VSVelocitySkinned", "vs_5_0", velSkVS))
+        {
+            D3D12_ROOT_PARAMETER rp[3]{};
+            const UINT regs[3] = { 0, 2, 3 };
+            for (int i = 0; i < 3; ++i)
+            {
+                rp[i].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+                rp[i].Descriptor.ShaderRegister = regs[i];
+                rp[i].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+            }
+            D3D12_ROOT_SIGNATURE_DESC rsd{};
+            rsd.NumParameters = 3; rsd.pParameters = rp;
+            rsd.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+            if (makeRootSig(rsd, taaVelocitySkinnedRootSig))
+            {
+                // The skinned pass's input layout (slot 0 pos/normal/uv, 1 bone ids, 2 weights), the velocity PSO's state.
+                const D3D12_INPUT_ELEMENT_DESC skLayout[] = {
+                    { "POSITION",     0, DXGI_FORMAT_R32G32B32_FLOAT,    0,  0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+                    { "NORMAL",       0, DXGI_FORMAT_R32G32B32_FLOAT,    0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+                    { "TEXCOORD",     0, DXGI_FORMAT_R32G32_FLOAT,       0, 24, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+                    { "BLENDINDICES", 0, DXGI_FORMAT_R32G32B32A32_UINT,  1,  0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+                    { "BLENDWEIGHT",  0, DXGI_FORMAT_R32G32B32A32_FLOAT, 2,  0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+                };
+                D3D12_GRAPHICS_PIPELINE_STATE_DESC pd{};
+                pd.pRootSignature        = taaVelocitySkinnedRootSig.Get();
+                pd.VS                    = { velSkVS->GetBufferPointer(), velSkVS->GetBufferSize() };
+                pd.PS                    = { velPS->GetBufferPointer(), velPS->GetBufferSize() };
+                pd.InputLayout           = { skLayout, 5 };
+                pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+                pd.NumRenderTargets      = 1;
+                pd.RTVFormats[0]         = DXGI_FORMAT_R16G16_FLOAT;
+                pd.DSVFormat             = DXGI_FORMAT_D32_FLOAT;
+                pd.SampleDesc.Count      = 1;
+                pd.SampleMask            = UINT_MAX;
+                pd.RasterizerState.FillMode        = D3D12_FILL_MODE_SOLID;
+                pd.RasterizerState.CullMode        = D3D12_CULL_MODE_NONE;
+                pd.RasterizerState.DepthClipEnable = TRUE;
+                pd.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+                pd.DepthStencilState.DepthEnable    = TRUE;
+                pd.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
+                pd.DepthStencilState.DepthFunc      = D3D12_COMPARISON_FUNC_LESS_EQUAL;
+                if (FAILED(device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&taaVelocitySkinnedPSO))))
+                {
+                    HE_LOG_WARN(RHI, "%s", "D3D12Renderer: skinned TAA velocity PSO failed — skinned meshes keep zero motion");
+                    taaVelocitySkinnedPSO.Reset();
+                }
+            }
+        }
 
         // Velocity: one root CBV (b0) per draw out of perObjectRing, the scene's
         // vertex layout.
@@ -5319,6 +5417,12 @@ struct D3D12RendererImpl
     static constexpr UINT64 k_bonesCBSlot    = 128 * 64; // exactly 8192 — already 256-aligned
     ComPtr<ID3D12Resource>  m_bonesCB[k_frameCount];
     uint8_t*                m_bonesCBPtr[k_frameCount]{};
+    // Last frame's palettes for the skinned velocity (one slot per skinned velocity draw, the bones ring's size).
+    ComPtr<ID3D12Resource>  m_prevBonesCB[k_frameCount];
+    uint8_t*                m_prevBonesCBPtr[k_frameCount]{};
+    // What the skinned pass drew this frame, for the velocity pass to draw again (its bones-ring address included).
+    struct SkinVelDraw { const SkinnedDrawCall* sdc; GpuSkeletalMesh12* skm; D3D12_GPU_VIRTUAL_ADDRESS bones; };
+    std::vector<SkinVelDraw> skinVelDraws;
     std::unordered_map<HE::UUID, GpuSkeletalMesh12> m_skeletalMeshCache;
 
     // ── 2D UI canvas pipeline ─────────────────────────────────────────────────
@@ -11096,6 +11200,8 @@ struct D3D12RendererImpl
         {
             m_bonesCB[f] = createUploadBuffer(static_cast<UINT64>(k_maxSkinnedDraws) * k_bonesCBSlot,
                                               reinterpret_cast<void**>(&m_bonesCBPtr[f]));
+            m_prevBonesCB[f] = createUploadBuffer(static_cast<UINT64>(k_maxSkinnedDraws) * k_bonesCBSlot,
+                                                  reinterpret_cast<void**>(&m_prevBonesCBPtr[f]));
         }
         return true;
     }
@@ -12667,7 +12773,12 @@ void D3D12Renderer::Shutdown()
     m_impl->m_skinnedHdrPSO.Reset();
     m_impl->skinnedRootSig.Reset();
     for (UINT i = 0; i < k_frameCount; ++i)
+    {
         m_impl->m_bonesCB[i].Reset();
+        m_impl->m_prevBonesCB[i].Reset();
+    }
+    m_impl->taaVelocitySkinnedPSO.Reset();
+    m_impl->taaVelocitySkinnedRootSig.Reset();
     // GI resources (accel buffers, targets, atlases, pipelines, heaps, CBs).
     // waitForAllFrames above already flushed the GPU.
     m_impl->destroyGiAccel();
@@ -14514,6 +14625,7 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
         }
 
         // ── Skinned draw calls ────────────────────────────────────────────────
+        p.skinVelDraws.clear();
         if (p.m_skinnedPSO && p.skinnedRootSig && !cmds.skinnedDrawCalls().empty())
         {
             auto* activeSkinnedPso = (p.usingHDR && p.m_skinnedHdrPSO)
@@ -14591,6 +14703,8 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                 {
                     cl->DrawIndexedInstanced(range.count, 1, range.start, 0, 0);
                     ++p.statDraws; p.statTris += range.count / 3;
+                    if (bonesBase && p.taaFrame && p.taaVelocityRT && p.usingHDR)   // drawn again by the velocity pass
+                        p.skinVelDraws.push_back({ &sdc, skm, bonesBase + static_cast<UINT64>(skinnedIdx) * p.k_bonesCBSlot });
                 }
 
                 ++drawIdx;
@@ -14722,6 +14836,83 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                 cl->DrawIndexedInstanced(mesh->indexCount, 1, 0, 0, 0);
                 ++drawIdx;
             }
+            // Skinned meshes: each one the skinned pass drew, with this frame's palette (its bones-ring slot) and the one
+            // its entity had last frame — the limbs' own motion on top of the camera's. Same rules as the rigid objects:
+            // first seen (or a palette of another size) = no motion of its own. Sections of one mesh share the entity's
+            // pose. One prevBones slot and one ring slot per draw.
+            p.taaCurSkins.clear();
+            const D3D12_GPU_VIRTUAL_ADDRESS prevBonesBase =
+                p.m_prevBonesCB[p.frameIndex] ? p.m_prevBonesCB[p.frameIndex]->GetGPUVirtualAddress() : 0;
+            uint8_t* prevBonesPtr = p.m_prevBonesCBPtr[p.frameIndex];
+            static const bool s_noSkinVel = [] { const char* e = std::getenv("HE_TAA_SKINVEL"); return e && *e == '0'; }();   // negative control
+            if (!p.skinVelDraws.empty() && p.taaVelocitySkinnedPSO && prevBonesBase && prevBonesPtr && !s_noSkinVel)
+            {
+                cl->SetGraphicsRootSignature(p.taaVelocitySkinnedRootSig.Get());
+                cl->SetPipelineState(p.taaVelocitySkinnedPSO.Get());
+                UINT slot = 0;
+                for (const D3D12RendererImpl::SkinVelDraw& d : p.skinVelDraws)
+                {
+                    if (velFull() || slot >= p.k_maxSkinnedDraws) break;
+                    const SkinnedDrawCall& sdc = *d.sdc;
+                    const size_t boneCount = std::min(sdc.boneMatrices.size(), size_t(128));
+                    const auto it = p.taaPrevSkins.find(sdc.entityId);
+                    const bool known = it != p.taaPrevSkins.end() && it->second.bones.size() == sdc.boneMatrices.size();
+                    const std::vector<glm::mat4>& prevBones = known ? it->second.bones : sdc.boneMatrices;
+                    std::memcpy(prevBonesPtr + static_cast<size_t>(slot) * p.k_bonesCBSlot, prevBones.data(),
+                                boneCount * sizeof(glm::mat4));
+                    if (!p.taaCurSkins.count(sdc.entityId))
+                        p.taaCurSkins[sdc.entityId] = D3D12RendererImpl::PrevSkin{ sdc.transform, sdc.boneMatrices };
+
+                    HE::TaaVelocityConstants c;
+                    c.mvpJitter = viewProj * sdc.transform;          // the skinned pass's own mvp: its depth, exactly
+                    c.mvpNow    = viewProjClean * sdc.transform;
+                    c.mvpPrev   = known ? p.taaPrevViewProj * it->second.transform : prevHere * sdc.transform;
+                    std::memcpy(ringPtr + static_cast<size_t>(drawIdx) * k_cbSlot, &c, sizeof(c));
+                    cl->SetGraphicsRootConstantBufferView(0, ringBase + static_cast<UINT64>(drawIdx) * k_cbSlot);
+                    cl->SetGraphicsRootConstantBufferView(1, d.bones);
+                    cl->SetGraphicsRootConstantBufferView(2, prevBonesBase + static_cast<UINT64>(slot) * p.k_bonesCBSlot);
+                    D3D12_VERTEX_BUFFER_VIEW vbvs[3] = { d.skm->vbv, d.skm->boneIdVbv, d.skm->boneWgtVbv };
+                    cl->IASetVertexBuffers(0, 3, vbvs);
+                    cl->IASetIndexBuffer(&d.skm->ibv);
+                    const D3D12IndexRange range = DrawIndexRange(sdc, d.skm->indexCount);
+                    if (range.count > 0) cl->DrawIndexedInstanced(range.count, 1, range.start, 0, 0);
+                    ++drawIdx;
+                    ++slot;
+                }
+            }
+            p.taaPrevSkins.swap(p.taaCurSkins);
+
+            // HE_TAA_VELOCITY_STATS=1: this frame's velocity read back (logged at the next Render, logVelocityStats).
+            static const bool s_velStats = [] { const char* e = std::getenv("HE_TAA_VELOCITY_STATS"); return e && *e == '1'; }();
+            if (s_velStats)
+            {
+                const D3D12_RESOURCE_DESC vd = p.taaVelocityRT->GetDesc();
+                UINT64 bytes = 0;
+                p.device->GetCopyableFootprints(&vd, 0, 1, 0, &p.velFp, nullptr, nullptr, &bytes);
+                if (!p.velReadback || p.velReadback->GetDesc().Width < bytes)
+                {
+                    p.velReadback.Reset();
+                    D3D12_HEAP_PROPERTIES hp{}; hp.Type = D3D12_HEAP_TYPE_READBACK;
+                    D3D12_RESOURCE_DESC bd{};
+                    bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER; bd.Width = bytes; bd.Height = 1; bd.DepthOrArraySize = 1;
+                    bd.MipLevels = 1; bd.SampleDesc.Count = 1; bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+                    p.device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &bd, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                                      IID_PPV_ARGS(&p.velReadback));
+                }
+                if (p.velReadback)
+                {
+                    cl->OMSetRenderTargets(0, nullptr, FALSE, nullptr);
+                    p.barrier12(cl, p.taaVelocityRT.Get(), p.taaVelocityState, D3D12_RESOURCE_STATE_COPY_SOURCE);
+                    D3D12_TEXTURE_COPY_LOCATION src{}, dst{};
+                    src.pResource = p.taaVelocityRT.Get(); src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+                    dst.pResource = p.velReadback.Get(); dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+                    dst.PlacedFootprint = p.velFp;
+                    cl->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+                    p.barrier12(cl, p.taaVelocityRT.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, p.taaVelocityState);
+                    p.velPending = true;
+                }
+            }
+
             // Advance the history HERE, at the end of the one pass that consumed
             // it, so a frame is never compared against itself.
             p.taaPrevViewProj = viewProjClean;
@@ -15063,6 +15254,7 @@ void D3D12Renderer::Render()
     // Swapchain to the window's client size (flushes the GPU only when it changed).
     p.resizeSwapchainIfNeeded();
     p.logReactiveStats();   // HE_FSR_REACTIVE_STATS: last frame's mask (a flush, witness runs only)
+    p.logVelocityStats();   // HE_TAA_VELOCITY_STATS: last frame's motion (likewise)
 
     // FSR frame generation on the game's swapchain: the first frame that wants it replaces the swapchain by FSR's frame
     // interpolation proxy (one flush, once per run; AMD's sample pattern). Kept afterwards; FG switches per frame.

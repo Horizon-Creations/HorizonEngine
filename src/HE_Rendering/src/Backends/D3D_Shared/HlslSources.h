@@ -750,6 +750,36 @@ float2 PSVelocity(VSOut i) : SV_TARGET
     float2 ndcPrev = i.clipPrev.xy / max(i.clipPrev.w, 1e-6);
     return (ndcNow - ndcPrev) * float2(0.5, -0.5);   // uvNow - uvPrev
 }
+// Skinned meshes: this frame's palette (the one the skinned pass drew with, b2) and last frame's (b3). The skin and the
+// clip position are formed exactly as kSkinnedHLSL's VSMainSkinned forms them, so the raster lands on its depth.
+cbuffer TaaBonesCB     : register(b2) { float4x4 uBones[128]; };
+cbuffer TaaPrevBonesCB : register(b3) { float4x4 uPrevBones[128]; };
+struct VSInSkinned
+{
+    float3 pos     : POSITION;
+    float3 n       : NORMAL;
+    float2 uv      : TEXCOORD0;
+    uint4  boneIds : BLENDINDICES;
+    float4 boneWgt : BLENDWEIGHT;
+};
+VSOut VSVelocitySkinned(VSInSkinned i)
+{
+    float4x4 skin = i.boneWgt.x * uBones[i.boneIds.x]
+                  + i.boneWgt.y * uBones[i.boneIds.y]
+                  + i.boneWgt.z * uBones[i.boneIds.z]
+                  + i.boneWgt.w * uBones[i.boneIds.w];
+    float4x4 prev = i.boneWgt.x * uPrevBones[i.boneIds.x]
+                  + i.boneWgt.y * uPrevBones[i.boneIds.y]
+                  + i.boneWgt.z * uPrevBones[i.boneIds.z]
+                  + i.boneWgt.w * uPrevBones[i.boneIds.w];
+    float4 sp = mul(skin, float4(i.pos, 1.0f));
+    float4 pp = mul(prev, float4(i.pos, 1.0f));
+    VSOut o;
+    o.clip     = mul(uMvpJitter, sp);
+    o.clipNow  = mul(uMvpNow,    sp);
+    o.clipPrev = mul(uMvpPrev,   pp);
+    return o;
+}
 )HLSL";
 
 // Blend this frame's tonemapped image (t0) with the reprojected history (t1)
