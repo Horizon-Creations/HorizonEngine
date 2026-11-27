@@ -27,7 +27,9 @@
    realtime pacing, frames → MP4 via ffmpeg or `scripts/he_video_encode.swift`); `docs/headless-runs.md` has the recipe.
 7. **Clouds jumped in flight** (`0306c3087`): the sky rebuilt its view rays from inverse(proj × view) with the camera's 38 km
    translation inside; `HE::SkyViewProj` (rotation only) for Metal / GL / Vulkan. Measured with `cloud_track.py` (here) on
-   `--keep-frames` flights: straight flight at 38 km 23.6 → 0.2 px a frame. D3D11/12 still the old way (Windows).
+   `--keep-frames` flights: straight flight at 38 km 23.6 → 0.2 px a frame. D3D11 / D3D12 the same (topic step 17, NN-WS03,
+   27.11.): the main scene's sky inverts `HE::SkyViewProj` with the frame's TAA jitter; the asset preview (camera at the origin)
+   and the D3D12 cube-face bake are unchanged, as on Metal. Witness in `d3d-sky/` here (path JSONs + `cloud_track.py` output).
 
 **Verified**
 
@@ -42,6 +44,10 @@
   (`docs/landscape-one-system-far-image-2026-11-27/flight.json`: 4 keys, 24 s; 721 frames in 36 s). ctest 410/410 after 5. and 6.
   Weather Snow Cover 0.8 in the scene: the baked image unchanged; top-down far image vs the whole material everywhere: mean
   difference 1.43 levels, 2 302 of 1.9 M px off by > 30 (30.08 / 220 675 without the Auto-share factor).
+- D3D sky (7.), NN-WS03 RTX 4070, Release, a copy of HEProject (sky with clouds), 2 s straight flights at 95 m a frame,
+  `cloud_track.py` mean |dx| over 60 frames: 38 km out, before → after: D3D11 16.2 → 0.4 px, D3D12 15.9 → 0.4 px (sign flips 38 / 36
+  → 25 / 32 of 59: at 0.4 px the sign is noise). At the origin: D3D11 1.0 → 0.4 px, D3D12 after 0.3 px. Before = the same tree with
+  the two D3D files checked out, rebuilt. `landscape_gpu_check --only d3d11|d3d12` exit 0; `he_tests` 6 620 passed, 0 failed.
 
 **Not verified**
 

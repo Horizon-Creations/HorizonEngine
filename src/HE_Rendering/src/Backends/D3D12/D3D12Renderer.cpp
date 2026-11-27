@@ -12507,7 +12507,9 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
     // Sky is independent of scene geometry — draw it before any early returns so
     // it always renders even when objects/sortedIndices is empty.
     {
-        const glm::mat4& svp = viewProj;
+        // The sky's rays from the camera's rotation alone (HE::SkyViewProj): the translation lost them far from the origin.
+        const glm::mat4 svpClean = HE::SkyViewProj(p.m_renderWorld.camera.projection, p.m_renderWorld.camera.view);
+        const glm::mat4 svp = p.taaFrame ? HE::taaJitteredViewProj(svpClean, p.taaJitter, width, height) : svpClean;
         p.drawSky(cl, p.frameIndex, glm::inverse(svp), p.m_renderWorld.sunDirection, m_environment,
                   p.m_renderWorld.camera.position, p.m_wallTime, p.usingHDR);
     }

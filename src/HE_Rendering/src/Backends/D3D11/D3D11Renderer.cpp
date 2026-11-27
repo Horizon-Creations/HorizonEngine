@@ -7813,7 +7813,9 @@ void D3D11Renderer::DrawScene(int width, int height)
     // even when objects/sortedIndices are empty (early returns below).
     {
         ID3D11DeviceContext* skyCtx = p.context.Get();
-        const glm::mat4& skyVP = viewProj;
+        // The sky's rays from the camera's rotation alone (HE::SkyViewProj): the translation lost them far from the origin.
+        const glm::mat4 skyVPClean = HE::SkyViewProj(p.m_renderWorld.camera.projection, p.m_renderWorld.camera.view);
+        const glm::mat4 skyVP = p.taaFrame ? HE::taaJitteredViewProj(skyVPClean, p.taaJitter, width, height) : skyVPClean;
         p.drawSky(skyCtx, glm::inverse(skyVP), p.m_renderWorld.sunDirection, m_environment,
                   p.m_renderWorld.camera.position, p.m_wallTime);
     }
