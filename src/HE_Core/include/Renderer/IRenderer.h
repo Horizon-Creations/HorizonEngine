@@ -176,6 +176,8 @@ enum class AAMethod : int
     MetalFX = 4, // MTLFXTemporalScaler (Apple Silicon) — TAA quality from the OS
     FSR     = 5, // AMD FSR (FidelityFX API: FSR 3.1.x, FSR 4 on RDNA 4), D3D12 / Vulkan; the SDK's runtime DLLs
                  // (docs/upscalers-fsr-dlss-xess-plan-2026-11-27.md)
+    DLSS    = 6, // NVIDIA DLSS Super Resolution (RTX) — listed, no backend has it yet (supportsDLSS)
+    XeSS    = 7, // Intel XeSS Super Resolution — listed, no backend has it yet (supportsXeSS)
 };
 
 // ─── Viewport view mode ──────────────────────────────────────────────────────
@@ -337,6 +339,9 @@ public:
         // AMD FSR upscaling / native AA: the FSR runtime DLLs loaded and a context made for this device. Implies
         // supportsTemporalAA (the same jitter and velocity feed it).
         bool supportsFSR = false;
+        // NVIDIA DLSS / Intel XeSS super resolution: no backend reports them yet; the editor lists them greyed out.
+        bool supportsDLSS = false;
+        bool supportsXeSS = false;
         // A second window with its own widget tree (docs/he-apps-plan.md §13.3).
         // Reported by the backends that actually DRAW into one: Software (its own
         // SDL surface per window) and Metal (a layer per window). OpenGL, Vulkan
@@ -500,9 +505,12 @@ public:
     // backend's own GetCapabilities().
     static HE::AAMethod ResolveAAMethod(int requested, const Capabilities& caps)
     {
-        if (requested < 0 || requested > static_cast<int>(HE::AAMethod::FSR))
+        if (requested < 0 || requested > static_cast<int>(HE::AAMethod::XeSS))
             return HE::AAMethod::FXAA;
         HE::AAMethod m = static_cast<HE::AAMethod>(requested);
+        // A vendor upscaler that is not there becomes the one that runs on every GPU, then the chain below.
+        if (m == HE::AAMethod::DLSS    && !caps.supportsDLSS)        m = HE::AAMethod::FSR;
+        if (m == HE::AAMethod::XeSS    && !caps.supportsXeSS)        m = HE::AAMethod::FSR;
         if (m == HE::AAMethod::FSR     && !caps.supportsFSR)         m = caps.supportsMetalFX ? HE::AAMethod::MetalFX : HE::AAMethod::TAA;
         if (m == HE::AAMethod::MetalFX && !caps.supportsMetalFX)     m = HE::AAMethod::TAA;
         if (m == HE::AAMethod::TAA     && !caps.supportsTemporalAA)  m = HE::AAMethod::SMAA;

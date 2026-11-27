@@ -166,6 +166,9 @@ namespace Row
 	bool dragInt(const char* label, int* v, float speed = 1.0f, int min = 0, int max = 0);
 	bool inputInt(const char* label, int* v);
 	bool combo(const char* label, int* v, const char* const items[], int count);
+	// The same combo where entries can be unavailable on this machine: `unavailable[i]` non-null = item i is greyed out,
+	// marked "(unavailable)", cannot be picked, and the text is its tooltip (why, and what it falls back to).
+	bool comboAvailable(const char* label, int* v, const char* const items[], int count, const char* const unavailable[]);
 	// Zero-separated item list ("A\0B\0C\0"), matching ImGui's other Combo overload.
 	bool comboZ(const char* label, int* v, const char* itemsSeparatedByZeros);
 	bool colorEdit3(const char* label, float* rgb, ImGuiColorEditFlags flags = 0);

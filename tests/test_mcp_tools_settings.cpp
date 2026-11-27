@@ -318,7 +318,7 @@ TEST_CASE("settings_set: an enum takes its NAME or its index, and nothing else")
 	REQUIRE(codeOf(g) == "<ok>");
 	CHECK(g.content["value"] == "FXAA");
 	CHECK(g.content["index"] == 1);
-	CHECK(g.content["options"].size() == 6);   // Off, FXAA, SMAA, TAA, MetalFX, FSR
+	CHECK(g.content["options"].size() == 8);   // Off, FXAA, SMAA, TAA, MetalFX, FSR, DLSS, XeSS
 }
 
 TEST_CASE("settings_set: the values that travel through a callback actually do")

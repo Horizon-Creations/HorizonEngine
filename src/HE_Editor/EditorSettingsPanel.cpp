@@ -443,9 +443,23 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const DrawOptions& o
 		const bool taaOK    = ctx.renderer && ctx.renderer->GetCapabilities().supportsTemporalAA;
 		const bool mfxOK    = ctx.renderer && ctx.renderer->GetCapabilities().supportsMetalFX;
 		const bool fsrOK    = ctx.renderer && ctx.renderer->GetCapabilities().supportsFSR;
-		const char* kAA[]   = { "Off", "FXAA", "SMAA", "TAA", "MetalFX", "FSR" };
-		int aaMode = std::clamp(cfg.AntiAliasing, 0, 5);
-		if (Row::combo("Anti-Aliasing", &aaMode, kAA, IM_ARRAYSIZE(kAA)))
+		const bool dlssOK   = ctx.renderer && ctx.renderer->GetCapabilities().supportsDLSS;
+		const bool xessOK   = ctx.renderer && ctx.renderer->GetCapabilities().supportsXeSS;
+		const char* kAA[]   = { "Off", "FXAA", "SMAA", "TAA", "MetalFX", "FSR", "DLSS", "XeSS" };
+		// The upscalers are always listed; one this machine or backend cannot run is greyed out with the reason, so
+		// "FSR does nothing here" is visible before it is picked. A config that names one anyway falls back at push time.
+		const bool d3d12 = ctx.backend == HE::RendererBackend::D3D12;
+		const char* kWhyNot[IM_ARRAYSIZE(kAA)] = {
+			nullptr, nullptr, nullptr,
+			taaOK  ? nullptr : "This backend writes no velocity buffer yet — TAA falls back to SMAA.",
+			mfxOK  ? nullptr : "MetalFX needs Metal on Apple Silicon — falls back to TAA.",
+			fsrOK  ? nullptr : d3d12 ? "AMD's FSR runtime (amd_fidelityfx_*.dll) was not found beside the editor — falls back to TAA."
+			                         : "AMD FSR runs on DirectX 12 in this version (Vulkan follows) — falls back to TAA.",
+			dlssOK ? nullptr : "NVIDIA DLSS is not built into this engine version yet (it will need an RTX GPU) — falls back to FSR, else TAA.",
+			xessOK ? nullptr : "Intel XeSS is not built into this engine version yet — falls back to FSR, else TAA.",
+		};
+		int aaMode = std::clamp(cfg.AntiAliasing, 0, IM_ARRAYSIZE(kAA) - 1);
+		if (Row::comboAvailable("Anti-Aliasing", &aaMode, kAA, IM_ARRAYSIZE(kAA), kWhyNot))
 			cfg.AntiAliasing = aaMode;
 		{
 			SubGroup sub(aaMode >= 3);
@@ -478,10 +492,8 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const DrawOptions& o
 		ImGui::EndDisabled();
 		if (!specOK && specHovered)
 			ImGui::SetTooltip("Metal and OpenGL only — Vulkan and DirectX ignore it.");
-		if (aaMode == 4 && !mfxOK)
-			hint("MetalFX needs Apple Silicon — falls back to TAA.");
-		else if (aaMode == 5 && !fsrOK)
-			hint("FSR needs DirectX 12 or Vulkan with AMD's FSR runtime beside the editor — falls back to TAA.");
+		if (kWhyNot[aaMode])
+			hint(kWhyNot[aaMode]);   // a config that names an unavailable mode: what runs instead
 		else if (aaMode == 5)
 			hint("AMD FSR: temporal anti-aliasing (and upscaling with Render Scale below 1).");
 		else if (aaMode >= 3 && !taaOK)

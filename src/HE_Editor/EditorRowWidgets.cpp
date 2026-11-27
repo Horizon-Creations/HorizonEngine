@@ -438,6 +438,37 @@ bool combo(const char* label, int* v, const char* const items[], int count)
 	return row(label, [&]{ return ImGui::Combo("##v", v, items, count); });
 }
 
+bool comboAvailable(const char* label, int* v, const char* const items[], int count, const char* const unavailable[])
+{
+	return row(label, [&]{
+		const auto shown = [&](int i) {
+			return std::string(items[i]) + (unavailable[i] ? "  (unavailable)" : "");
+		};
+		const std::string preview = (*v >= 0 && *v < count) ? shown(*v) : std::string();
+		bool changed = false;
+		if (ImGui::BeginCombo("##v", preview.c_str()))
+		{
+			for (int i = 0; i < count; ++i)
+			{
+				ImGui::PushID(i);
+				ImGui::BeginDisabled(unavailable[i] != nullptr);
+				if (ImGui::Selectable(shown(i).c_str(), *v == i) && !unavailable[i] && *v != i)
+				{
+					*v = i;
+					changed = true;
+				}
+				ImGui::EndDisabled();
+				if (unavailable[i] && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+					ImGui::SetTooltip("%s", unavailable[i]);
+				if (*v == i) ImGui::SetItemDefaultFocus();
+				ImGui::PopID();
+			}
+			ImGui::EndCombo();
+		}
+		return changed;
+	});
+}
+
 bool comboZ(const char* label, int* v, const char* itemsSeparatedByZeros)
 {
 	if (mixedMask(label))
