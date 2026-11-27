@@ -1,49 +1,51 @@
-# Tile world: far image baked in the editor, and drawn under the material (topic 355, step 5, 27.11.)
+# Tile world: far image baked in the editor, from the landscape material (topic 355, step 5, 27.11.)
 
 ## Handoff
 
 **Done** (branch `claude/landscape-one-system`):
 
-1. **Editor bake of the far image** (`ae6b126c1`).
-   - `src/HE_Editor/LandscapeFarBake.{h,cpp}`, the tile half: `setTileRuntime`, `bakeTileWorld`, `tickTile`.
-   - It runs the export's region bake (`HE::bakeLandscapeFar`, weight painter) over the edit overlay, on a `std::thread` with cancel.
-   - The result goes to the export's own cache, `Saved/LandscapeFar/<pack>.far` (`ExportDialogPanel` `farCacheDir`), and onto the overlay with `LandscapeEditSource::setFarImage`; the runtime takes it up on `coarseChanged()`.
-   - Setting: `EditorConfig::LandscapeFarBake`, the same one the old landscape uses: Off / Manual (Tile Landscape ▸ Far Image ▸ **Bake Far Image**) / Automatic (4 s after `LandscapeRuntime::coarseRevision()` last changed).
-   - A reopened world takes the cached image. Automatic re-checks it, which keeps unchanged regions.
-   - New engine accessors: `LandscapeRuntime::editsShared`, `coarseRevision`; `LandscapeEditSource::setFarImage`, `baseShared`.
-2. **Far image under the material, Metal** (this commit).
-   - `kLandscapeMaterialFragmentHead` gets `HE_LS_FAR`: `heLsFar()` reads the far image at binding 62.
-   - `landscapeFragmentSource(..., farImage)` puts an early-out at the top of `main` for the lit forward and the G-buffer variants: a fragment whose tile is not in the atlas writes the far image's colour and AO (geometric normal, roughness 0.9) and returns before the graph.
-   - MSL pin 62 → texture 31, with a new `MslOptions::constexprMipLinearSamplers` (a mip-linear inline sampler).
-   - `MetalLandscape` binds the image on 31 in the material branch and sets `uTile.w` = 1 when there is one.
-   - `HE_LS_FAR=0` turns it off (the A/B switch).
-   - **Texture 31:** the old comment "25-30, the last free ones" assumed the 31-entry argument table. An M5 builds pipelines with textures 31, 40, 96 and 127; Apple GPUs and the Mac family take 128 per stage.
+1. **Editor bake on a worker** (`ae6b126c1`): `src/HE_Editor/LandscapeFarBake.{h,cpp}`. Cache `Saved/LandscapeFar/<pack>.far` (the export's).
+   Setting `EditorConfig::LandscapeFarBake`: Off / Manual (Tile Landscape ▸ Far Image ▸ Bake Far Image) / Automatic.
+2. **Far image under the material, Metal** (`547bfe380`): `HE_LS_FAR` early-out in `kLandscapeMaterialFragmentHead`, texture 31.
+3. **No view limit** (`98a27027c`, `444dad4d6`): the editor camera's far plane is 250 km (`EditorCamera.h`); it was 5 km while tiles load
+   to ≥ 7.6 km, so the far image was never on screen. Framing keeps 4.5 km (`kFrameMaxDistance`).
+   The slot table is toroidal and no shader checked the entry's owner: ground ~32 km out read a near tile. Every tile fragment
+   shader (GL/Vulkan GLSL, MSL, HLSL, material head) now treats a tile ≥ half a window from the camera's tile as not resident,
+   only when the world is wider than the table (keepAll worlds unchanged).
+4. **Far image from the material** (`d2d547ac2`): `RvtLandscape::renderTileGroundImage` draws a region from above with the base colour
+   layer view (`rvtTileGround`, `rvtSlot < 0`, `Capabilities::landscapeGroundImage`, Metal only). The worker asks, the main thread
+   draws once the region's tiles are in the atlas (`askGround`/`serveGround`), 4×4 px a texel. Manual walks the streaming anchor
+   (`tileAnchor`); Automatic paints only loaded regions, the rest stay stale (`stats.deferred`). The export keeps those regions
+   (`farKeepPainterHash`). Witness switch `HE_LANDSCAPE_FAR_BAKE_NOW=1`.
 
 **Verified**
 
-- `landscape_gpu_check --only metal` and `--only gl` exit 0; the material still draws.
-- `ctest`: see the commit.
-- Help audit green.
-- 100 km Catania tile world, headless, Automatic:
-  - 625 regions baked in 7.9 s on the worker, the cache written, no frame-hitch warning;
-  - second start: 0 painted, 625 kept, image from the cache.
-- A/B at 1000 m (`HE_LS_FAR` 0/1): 7 182 of 1.9 M pixels differ (only the ground beyond the atlas); GPU p50 14.68 vs 14.72 ms (no gain there).
+- ctest 409/409; help audit; `landscape_gpu_check` metal / gl / vulkan exit 0; HLSL through glslang (PSMain, VSMain).
+- 100 km Catania from 3000 m: `HE_LS_FAR` 0/1 differs in 182 782 px (was 4 with the 5 km far plane); aliased patches at the horizon gone.
+  The old line "7 182 px at 1000 m, only the ground beyond the atlas" was most likely tiles still streaming, not the far image.
+- Catania is flat (all heights 0) with one layer everywhere: any far image of it is one colour. Witness world instead:
+  `docs/landscape-one-system-far-image-2026-11-27/far_testworld.py` (decoder: `far_to_png.py` there) → 40 km, 79×79 tiles, 900 m mountain, rock ring, snow layer, a letter F of dirt;
+  migrated with `docs/landscape-one-system-baseline-2026-11-26/tools/migrate.cpp` (include fixed). Manual bake: 100 regions from
+  the material in 91 s; the decoded `.far` has F and mountain in place (not mirrored/transposed); drawn beyond the atlas top-down and
+  at eye level.
 
 **Not verified**
 
-- An edit followed by an automatic re-bake of only the touched regions (the hashing says so: an unchanged world paints 0).
-- Frame times under 33 ms during a bake (only "no hitch warning").
-- The editor panel by eye.
-- MoltenVK, GL 4.6, D3D11/12: they still evaluate the material over the coarse weights beyond the atlas. On Vulkan, the far image would need a free descriptor.
+- Automatic mode with the material over a session (edit → only the touched, loaded regions); the 30 s timeout path.
+- Frame times while a manual bake walks (the viewport shows coarse ground meanwhile; nothing covers it).
+- Other backends: they keep the weight painter (no `landscapeGroundImage`), and the alias fix is not run on D3D.
 
-**Decisions taken**
+**Decisions taken / open**
 
-- The far image is drawn only where the tile is NOT in the atlas. It is 16 texels per tile (≈32 m on 512 m tiles), too coarse to stand in for atlas tiles that only lie outside the RVT window.
-- **Step 4's remaining cost** (the full material over atlas tiles beyond the 4 km RVT window, seen from 200 m and up) is therefore not removed by this step. The fix would be a coarse whole-world RVT volume, or a far image at the RVT's coarse mips. This is open for the queen to decide.
+- The coarse quadtree patches are the "static mesh"; no mesh assets for the ground.
+- **Open, owner:** the auto landscape material draws snow, puddles, sand ripples and trails LIVE after the RVT read (weather).
+  The bake takes the RVT base colour, and the far early-out skips the live part: beyond the atlas there is no snow while the near
+  ground has it. Fix: far fragments run the consumer's live part with the far image as the RVT read (base colour from the image,
+  geometric normal, roughness/AO default). Costs the live part's procedural work on the far ground.
+- Texture changes of the material are not in the painter hash (only the graph key): re-bake by hand after a texture edit.
 
 **Next steps**
 
-1. Witness an edit → automatic re-bake of only the touched regions.
-2. The same early-out on Vulkan/D3D/GL 4.6 (Windows, NN-WS03).
-3. The cost beyond the RVT window inside the atlas (see the decisions above).
-4. Step 6 (mesh HLOD per cell).
+1. The live part on far fragments (above), after the owner's answer.
+2. The same ground image read-back on GL/Vulkan, then Windows (D3D).
+3. Step 6 (mesh HLOD per cell).
