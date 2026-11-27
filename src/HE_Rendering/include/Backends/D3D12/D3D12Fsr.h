@@ -51,8 +51,15 @@ public:
         float frameMs = 16.6f;
         float sharpness = 0.0f;               // 0 = FSR's sharpening off
         bool  reset = false;                  // history discarded (first frame, cut, resize)
+        ID3D12Resource* reactive = nullptr;   // R8 render size, PIXEL|NON_PIXEL read; null = none (generateReactive)
     };
     bool dispatch(const Dispatch& d);
+
+    // FSR's own reactive mask from the frame before and after its blended tail (particles, glass, water): where the
+    // tail changed the image FSR trusts its history less, so what moves without velocity does not smear. All render
+    // size; opaque and color PIXEL|NON_PIXEL read, reactive R8_UNORM with UAV in UNORDERED_ACCESS.
+    bool generateReactive(ID3D12GraphicsCommandList* cl, ID3D12Resource* opaque, ID3D12Resource* color,
+                          ID3D12Resource* reactive, uint32_t renderW, uint32_t renderH);
 
     void destroy();   // the context (the caller has waited for the GPU); the DLL stays loaded
 

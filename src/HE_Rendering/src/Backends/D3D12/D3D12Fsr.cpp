@@ -197,9 +197,38 @@ bool D3D12Fsr::dispatch(const Dispatch& d)
     u.cameraFar        = d.farZ;
     u.cameraFovAngleVertical  = d.fovY;
     u.viewSpaceToMetersFactor = 1.0f;
+    if (d.reactive) u.reactive = ffxApiGetResourceDX12(d.reactive, readState);
+    // HE_FSR_DEBUGVIEW=1: AMD's debug view in the output (reactive mask, motion vectors, ... in a grid).
+    static const bool s_view = [] { const char* e = std::getenv("HE_FSR_DEBUGVIEW"); return e && *e == '1'; }();
+    if (s_view) u.flags |= FFX_UPSCALE_FLAG_DRAW_DEBUG_VIEW;
     return fns(m_fns).Dispatch(reinterpret_cast<ffxContext*>(&m_context), &u.header) == FFX_API_RETURN_OK;
 #else
     (void)d;
+    return false;
+#endif
+}
+
+bool D3D12Fsr::generateReactive(ID3D12GraphicsCommandList* cl, ID3D12Resource* opaque, ID3D12Resource* color,
+                                ID3D12Resource* reactive, uint32_t renderW, uint32_t renderH)
+{
+#ifdef HE_HAVE_FSR
+    if (!m_context || !cl || !opaque || !color || !reactive) return false;
+    ffxDispatchDescUpscaleGenerateReactiveMask g{};
+    g.header.type = FFX_API_DISPATCH_DESC_TYPE_UPSCALE_GENERATEREACTIVEMASK;
+    g.commandList = cl;
+    g.colorOpaqueOnly = ffxApiGetResourceDX12(opaque, FFX_API_RESOURCE_STATE_PIXEL_COMPUTE_READ);
+    g.colorPreUpscale = ffxApiGetResourceDX12(color, FFX_API_RESOURCE_STATE_PIXEL_COMPUTE_READ);
+    g.outReactive     = ffxApiGetResourceDX12(reactive, FFX_API_RESOURCE_STATE_UNORDERED_ACCESS);
+    g.renderSize = { renderW, renderH };
+    // AMD sample's values (fsrapirendermodule.cpp, "hard-coded in the original FSR2 sample").
+    g.scale = 1.0f;
+    g.cutoffThreshold = 0.2f;
+    g.binaryValue = 0.9f;
+    g.flags = FFX_UPSCALE_AUTOREACTIVEFLAGS_APPLY_TONEMAP | FFX_UPSCALE_AUTOREACTIVEFLAGS_APPLY_THRESHOLD
+            | FFX_UPSCALE_AUTOREACTIVEFLAGS_USE_COMPONENTS_MAX;
+    return fns(m_fns).Dispatch(reinterpret_cast<ffxContext*>(&m_context), &g.header) == FFX_API_RETURN_OK;
+#else
+    (void)cl; (void)opaque; (void)color; (void)reactive; (void)renderW; (void)renderH;
     return false;
 #endif
 }

@@ -7067,6 +7067,27 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 		HE_LOG_INFO(Editor, "%s", contact
 			? "EditorApplication: HE_DUMP_SHADOWINSTTEST=contact floor + seven standing cubes added"
 			: "EditorApplication: HE_DUMP_SHADOWINSTTEST floor + seven-cube row added");
+		// HE_DUMP_GLASSCUBE=<opacity>: one more cube in front of the row, translucent, so the blended tail (where
+		// particles and glass draw) has something in it — the witness of FSR's reactive mask (HE_FSR_REACTIVE_STATS).
+		if (const char* gc = std::getenv("HE_DUMP_GLASSCUBE"); gc && *gc)
+		{
+			MaterialAsset glass;
+			glass.type = HE::AssetType::Material;
+			glass.name = "DumpGlass";
+			glass.baseColor[0] = 0.3f; glass.baseColor[1] = 0.6f; glass.baseColor[2] = 1.0f;
+			glass.opacity = std::clamp(static_cast<float>(std::atof(gc)), 0.05f, 0.95f);
+			const HE::UUID glassId = contentManager().registerMaterial(std::move(glass));
+			auto e = m_editorWorld->createEntity("DumpGlassCube");
+			TransformComponent tc;
+			tc.position = glm::vec3(0.0f, 1.5f, -6.0f);
+			tc.scale    = glm::vec3(3.0f, 3.0f, 1.0f);
+			reg.emplace<TransformComponent>(e, tc);
+			reg.emplace<MeshComponent>(e, MeshComponent{ HE::kDefaultCubeMeshId });
+			MaterialComponent mc;
+			mc.materialAssetId = glassId;
+			reg.emplace<MaterialComponent>(e, mc);
+			HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_GLASSCUBE translucent cube added (opacity %s)", gc);
+		}
 	}
 
 	// ── GI-reflections witness (HE_DUMP_GIREFLTEST=1): a mirror floor with a

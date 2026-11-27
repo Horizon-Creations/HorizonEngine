@@ -1984,6 +1984,65 @@ struct D3D12RendererImpl
     bool                   fsrReset = true;        // the next dispatch discards the history
     uint64_t               fsrLastNs = 0;
     float                  renderScale = 1.0f;     // AntiAliasingSettings::renderScale, as asked
+    // FSR's reactive mask (particles and the rest of the blended tail have no velocity): hdrRT copied right before the
+    // tail, the mask generated right after it (DrawScene), handed to the upscale dispatch. Scene size; made lazily,
+    // dropped with the post targets (createPostFXResources, GPU idle).
+    ComPtr<ID3D12Resource> fsrOpaque, fsrReactive;
+    D3D12_RESOURCE_STATES  fsrOpaqueState = D3D12_RESOURCE_STATE_COPY_DEST, fsrReactiveState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    bool                   fsrReactiveValid = false;   // this frame's mask was generated
+    bool                   fsrOpaqueTaken = false;     // this frame's opaque snapshot was taken
+    // HE_FSR_REACTIVE_STATS=1: the mask read back and its marked pixels logged (the witness that only the tail is in it).
+    ComPtr<ID3D12Resource> fsrReactiveReadback;
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT fsrReactiveFp{};
+    bool                   fsrReactivePending = false;
+    void logReactiveStats()
+    {
+        if (!fsrReactivePending || !fsrReactiveReadback) return;
+        fsrReactivePending = false;
+        waitForAllFrames();
+        const auto& f = fsrReactiveFp.Footprint;
+        const uint8_t* px = nullptr;
+        D3D12_RANGE rr{ 0, static_cast<SIZE_T>(fsrReactiveReadback->GetDesc().Width) };   // the last row is not padded
+        const HRESULT mhr = fsrReactiveReadback->Map(0, &rr, reinterpret_cast<void**>(const_cast<uint8_t**>(&px)));
+        if (FAILED(mhr) || !px) { HE_LOG_WARN(RHI, "D3D12Renderer: FSR reactive mask readback failed (0x%08X)", unsigned(mhr)); return; }
+        if (const char* pgm = std::getenv("HE_FSR_REACTIVE_PGM"); pgm && *pgm)   // the mask itself, as a picture
+            if (FILE* fp = std::fopen(pgm, "wb"))
+            {
+                std::fprintf(fp, "P5\n%u %u\n255\n", f.Width, f.Height);
+                for (UINT y = 0; y < f.Height; ++y) std::fwrite(px + static_cast<size_t>(y) * f.RowPitch, 1, f.Width, fp);
+                std::fclose(fp);
+            }
+        uint64_t marked = 0, sum = 0;
+        for (UINT y = 0; y < f.Height; ++y)
+            for (UINT x = 0; x < f.Width; ++x)
+            {
+                const uint8_t v = px[static_cast<size_t>(y) * f.RowPitch + x];
+                sum += v;
+                if (v > 25) ++marked;   // > 0.1
+            }
+        D3D12_RANGE none{ 0, 0 };
+        fsrReactiveReadback->Unmap(0, &none);
+        HE_LOG_INFO(RHI, "D3D12Renderer: FSR reactive mask %ux%u: %llu px > 0.1 (%.2f %%), mean %.4f", f.Width, f.Height,
+                    static_cast<unsigned long long>(marked), 100.0 * double(marked) / double(f.Width * f.Height),
+                    double(sum) / 255.0 / double(f.Width * f.Height));
+    }
+    bool ensureFsrReactiveTargets()
+    {
+        if (fsrOpaque && fsrReactive) return true;
+        if (!hdrRT) return false;
+        D3D12_HEAP_PROPERTIES hp{}; hp.Type = D3D12_HEAP_TYPE_DEFAULT;
+        D3D12_RESOURCE_DESC rd = hdrRT->GetDesc();
+        rd.Flags = D3D12_RESOURCE_FLAG_NONE;   // a copy target FSR reads
+        if (FAILED(device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                                   IID_PPV_ARGS(&fsrOpaque)))) { fsrOpaque.Reset(); return false; }
+        fsrOpaqueState = D3D12_RESOURCE_STATE_COPY_DEST;
+        rd.Format = DXGI_FORMAT_R8_UNORM;
+        rd.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+        if (FAILED(device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                                                   nullptr, IID_PPV_ARGS(&fsrReactive)))) { fsrOpaque.Reset(); fsrReactive.Reset(); return false; }
+        fsrReactiveState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        return true;
+    }
     // Frame generation (SetFrameGeneration): the packaged game's swapchain frames only, with FSR. The first FG frame
     // replaces the swapchain by FSR's proxy (kept afterwards; FG then switches per frame). fgHudless = the frame before
     // its UI, which FG needs to keep the UI out of the interpolation.
@@ -2120,6 +2179,7 @@ struct D3D12RendererImpl
         if (!sceneW || !sceneH) { sceneW = w; sceneH = h; }
         hdrRT.Reset(); hdrRtvHeap.Reset();
         fsrOut.Reset();   // one owner while upscaling (slot 1 below points at it); the native-AA case makes its own lazily
+        fsrOpaque.Reset(); fsrReactive.Reset();   // hdrRT's size: made again on the next FSR frame
         bloomRT[0].Reset(); bloomRtvHeap[0].Reset();
         bloomRT[1].Reset(); bloomRtvHeap[1].Reset();
         ldrRT.Reset(); ldrRtvHeap.Reset();
@@ -2880,6 +2940,7 @@ struct D3D12RendererImpl
                 fd.frameMs = fsrLastNs ? float(double(nowNs - fsrLastNs) * 1e-6) : 16.6f;
                 fd.sharpness = aaSharpness;
                 fd.reset = fsrReset || !taaFrame;
+                fd.reactive = fsrReactiveValid ? fsrReactive.Get() : nullptr;   // the blended tail (DrawScene)
                 fsrLastNs = nowNs;
                 const bool fsrOk = fsr.dispatch(fd);
                 if (fsrOk && upscale)
@@ -14731,6 +14792,23 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
             cl->SetPipelineState(scenePso);
         }
 
+        // FSR reactive mask, part 1: the frame without its blended tail (particles, glass, water). Only the tail sits
+        // between this snapshot and the mask (DrawScene's end): the fog and caustics after it would mark the whole frame.
+        p.fsrOpaqueTaken = false;
+        p.fsrReactiveValid = false;
+        if (!transparentDCs.empty() && transePso && p.fsrFrame() && p.usingHDR && p.hdrRT && p.fsr.hasContext()
+            && p.ensureFsrReactiveTargets())
+        {
+            cl->OMSetRenderTargets(0, nullptr, FALSE, nullptr);
+            p.barrier12(cl, p.hdrRT.Get(), p.hdrState, D3D12_RESOURCE_STATE_COPY_SOURCE);
+            p.barrier12(cl, p.fsrOpaque.Get(), p.fsrOpaqueState, D3D12_RESOURCE_STATE_COPY_DEST);
+            cl->CopyResource(p.fsrOpaque.Get(), p.hdrRT.Get());
+            p.barrier12(cl, p.hdrRT.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, p.hdrState);
+            p.fsrOpaqueState = D3D12_RESOURCE_STATE_COPY_DEST;
+            rebindSceneTarget();
+            p.fsrOpaqueTaken = true;
+        }
+
         if (!transparentDCs.empty() && transePso) {
             allowInstancing = false; // transparent batches keep the per-instance loop (blend + depth sort)
             activeScenePso = transePso; // A4: graph-material draws in the transparent pass restore THIS
@@ -14766,6 +14844,53 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
             auto hrtv = p.hdrRtvHeap->GetCPUDescriptorHandleForHeapStart();
             auto vdsv = p.viewportDsvHeap->GetCPUDescriptorHandleForHeapStart();
             cl->OMSetRenderTargets(1, &hrtv, FALSE, &vdsv);
+        }
+
+        // FSR reactive mask, part 2: the tail's footprint, from the snapshot and the finished geometry. FSR's dispatch
+        // leaves its own heaps and root signature on the list; runPostFX binds its own before anything else draws.
+        if (p.fsrOpaqueTaken)
+        {
+            constexpr D3D12_RESOURCE_STATES kRead = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+            cl->OMSetRenderTargets(0, nullptr, FALSE, nullptr);
+            p.barrier12(cl, p.fsrOpaque.Get(), p.fsrOpaqueState, kRead);
+            p.fsrOpaqueState = kRead;
+            p.barrier12(cl, p.hdrRT.Get(), p.hdrState, kRead);
+            p.barrier12(cl, p.fsrReactive.Get(), p.fsrReactiveState, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            p.fsrReactiveState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+            p.fsrReactiveValid = p.fsr.generateReactive(cl, p.fsrOpaque.Get(), p.hdrRT.Get(), p.fsrReactive.Get(),
+                                                        UINT(width), UINT(height));
+            static const bool s_rxStats = [] { const char* e = std::getenv("HE_FSR_REACTIVE_STATS"); return e && *e == '1'; }();
+            if (s_rxStats && p.fsrReactiveValid)
+            {
+                const D3D12_RESOURCE_DESC rd = p.fsrReactive->GetDesc();
+                UINT64 bytes = 0;
+                p.device->GetCopyableFootprints(&rd, 0, 1, 0, &p.fsrReactiveFp, nullptr, nullptr, &bytes);
+                if (!p.fsrReactiveReadback || p.fsrReactiveReadback->GetDesc().Width < bytes)
+                {
+                    p.fsrReactiveReadback.Reset();
+                    D3D12_HEAP_PROPERTIES hp{}; hp.Type = D3D12_HEAP_TYPE_READBACK;
+                    D3D12_RESOURCE_DESC bd{};
+                    bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER; bd.Width = bytes; bd.Height = 1; bd.DepthOrArraySize = 1;
+                    bd.MipLevels = 1; bd.SampleDesc.Count = 1; bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+                    p.device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &bd, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                                      IID_PPV_ARGS(&p.fsrReactiveReadback));
+                }
+                if (p.fsrReactiveReadback)
+                {
+                    p.barrier12(cl, p.fsrReactive.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
+                    D3D12_TEXTURE_COPY_LOCATION src{}, dst{};
+                    src.pResource = p.fsrReactive.Get(); src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+                    dst.pResource = p.fsrReactiveReadback.Get(); dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+                    dst.PlacedFootprint = p.fsrReactiveFp;
+                    cl->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+                    p.barrier12(cl, p.fsrReactive.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                    p.fsrReactivePending = true;
+                }
+            }
+            p.barrier12(cl, p.fsrReactive.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, kRead);
+            p.fsrReactiveState = kRead;
+            p.barrier12(cl, p.hdrRT.Get(), kRead, p.hdrState);
+            rebindSceneTarget();
         }
     });
 }
@@ -14937,6 +15062,7 @@ void D3D12Renderer::Render()
 
     // Swapchain to the window's client size (flushes the GPU only when it changed).
     p.resizeSwapchainIfNeeded();
+    p.logReactiveStats();   // HE_FSR_REACTIVE_STATS: last frame's mask (a flush, witness runs only)
 
     // FSR frame generation on the game's swapchain: the first frame that wants it replaces the swapchain by FSR's frame
     // interpolation proxy (one flush, once per run; AMD's sample pattern). Kept afterwards; FG switches per frame.
