@@ -406,6 +406,22 @@ endif()
 
 he_deploy_dll(HorizonRendering)
 
+# AMD FSR (cmake/HeFidelityFX.cmake): headers for the D3D12 / Vulkan backends; the signed DLLs and the SDK's license
+# beside HorizonRendering and in the editor deploy, where FsrUpscaler loads them at run time (no link dependency).
+if(HE_HAVE_FSR)
+    foreach(_t RendererD3D12 RendererVulkan)
+        if(TARGET ${_t})
+            target_include_directories(${_t} PRIVATE ${HE_FSR_INCLUDE_DIRS})
+            target_compile_definitions(${_t} PRIVATE HE_HAVE_FSR)
+        endif()
+    endforeach()
+    add_custom_command(TARGET HorizonRendering POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different ${HE_FSR_RUNTIME_FILES} "$<TARGET_FILE_DIR:HorizonRendering>"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${DEPLOY_EDITOR}"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different ${HE_FSR_RUNTIME_FILES} "${DEPLOY_EDITOR}"
+        VERBATIM)
+endif()
+
 # ─── Embedded-shader validation ────────────────────────────────────────────────
 # The D3D and GL backends hold most of their shaders as string literals compiled at
 # RUNTIME (D3DCompile / glCompileShader), so the C++ build never type-checks them.

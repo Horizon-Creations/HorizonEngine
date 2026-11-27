@@ -810,6 +810,8 @@ else()
     message(STATUS "HorizonEngine: Steam Audio disabled (pass -DHE_ENABLE_STEAM_AUDIO=ON to compile the HRTF backend)")
 endif()
 
+include("${CMAKE_SOURCE_DIR}/cmake/HeFidelityFX.cmake")   # AMD FSR upscaler: HE_HAVE_FSR, HE_FSR_INCLUDE_DIRS, HE_FSR_RUNTIME_FILES
+
 # ─── Shader cross-compiler: glslang + SPIRV-Cross (Material-System M0) ──────────
 # Canonical GLSL → glslang → SPIR-V → SPIRV-Cross → MSL / HLSL / GLSL(-ES).
 # The backbone for the cross-backend material system (docs/material-system-design.md).

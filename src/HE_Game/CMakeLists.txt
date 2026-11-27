@@ -166,6 +166,12 @@ if(HE_HAVE_STEAM_AUDIO)
 			"${HE_STEAM_AUDIO_LIB}" "${_he_game_engine_dir}"
 		VERBATIM)
 endif()
+if(HE_HAVE_FSR)
+	# The FSR runtime (loaded at run time beside the engine library) and AMD's license notice, which must travel with it.
+	add_custom_command(TARGET HorizonGame POST_BUILD
+		COMMAND ${CMAKE_COMMAND} -E copy_if_different ${HE_FSR_RUNTIME_FILES} "${_he_game_engine_dir}"
+		VERBATIM)
+endif()
 if(WIN32)
 	# Whatever else HorizonEngine.dll imports from an imported target (a vcpkg
 	# lz4/zstd/OpenSSL), beside it.
