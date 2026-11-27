@@ -17,6 +17,12 @@
    draws once the region's tiles are in the atlas (`askGround`/`serveGround`), 4×4 px a texel. Manual walks the streaming anchor
    (`tileAnchor`); Automatic paints only loaded regions, the rest stay stale (`stats.deferred`). The export keeps those regions
    (`farKeepPainterHash`). Witness switch `HE_LANDSCAPE_FAR_BAKE_NOW=1`.
+5. **Snow and sand in it** (`2f9a7ffec`): the bake draws the material's FINAL base colour (`TileGround::farView`: the graph with its
+   RVT pair inlined, the Output's Base Color cut through one more Write node), so snow, sand ripples, puddles and trails are baked as
+   they are at the bake (owner, 27.11.: their live changes do not show at that distance). Painter version 2. The material path's
+   `heLsFar` takes its gradient before the branch (`textureGrad`): a bright line on the atlas edge's tile steps is gone.
+6. **Camera flights as video** (`9a2c73f66`): `scripts/he_flythrough.py` + `src/HE_Editor/EditorFlythrough.{h,cpp}` (path JSON,
+   realtime pacing, frames → MP4 via ffmpeg or `scripts/he_video_encode.swift`); `docs/headless-runs.md` has the recipe.
 
 **Verified**
 
@@ -27,7 +33,8 @@
   `docs/landscape-one-system-far-image-2026-11-27/far_testworld.py` (decoder: `far_to_png.py` there) → 40 km, 79×79 tiles, 900 m mountain, rock ring, snow layer, a letter F of dirt;
   migrated with `docs/landscape-one-system-baseline-2026-11-26/tools/migrate.cpp` (include fixed). Manual bake: 100 regions from
   the material in 91 s; the decoded `.far` has F and mountain in place (not mirrored/transposed); drawn beyond the atlas top-down and
-  at eye level.
+  at eye level. With snow (5.): 100 regions in 47 s, the snow band continuous across the atlas edge top-down, flight video
+  (`docs/landscape-one-system-far-image-2026-11-27/flight.json`: 4 keys, 24 s; 721 frames in 36 s). ctest 410/410 after 5. and 6.
 
 **Not verified**
 
@@ -38,14 +45,12 @@
 **Decisions taken / open**
 
 - The coarse quadtree patches are the "static mesh"; no mesh assets for the ground.
-- **Open, owner:** the auto landscape material draws snow, puddles, sand ripples and trails LIVE after the RVT read (weather).
-  The bake takes the RVT base colour, and the far early-out skips the live part: beyond the atlas there is no snow while the near
-  ground has it. Fix: far fragments run the consumer's live part with the far image as the RVT read (base colour from the image,
-  geometric normal, roughness/AO default). Costs the live part's procedural work on the far ground.
+- Snow, sand, puddles and trails are BAKED into the far image (owner, 27.11.), not run live on far fragments: the far ground
+  shows the weather of the bake. A change of snow cover does not trigger a re-bake (weather is not in the painter hash).
 - Texture changes of the material are not in the painter hash (only the graph key): re-bake by hand after a texture edit.
 
 **Next steps**
 
-1. The live part on far fragments (above), after the owner's answer.
+1. Watch flights over a real project with `he_flythrough.py` (streaming pop-in at speed, the atlas-edge change in motion).
 2. The same ground image read-back on GL/Vulkan, then Windows (D3D).
 3. Step 6 (mesh HLOD per cell).
