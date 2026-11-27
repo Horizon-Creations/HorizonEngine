@@ -22,6 +22,7 @@
 #include <HorizonScene/MaterialOverrides.h> // meshes an entity overrides: the texture bake skips them
 #include <HorizonScene/LandscapeHlod.h>      // the far-landscape bake the export runs
 #include <HorizonScene/LandscapeExport.h>    // a tile landscape's pack ships beside the pak, with its cell proxies
+#include "LandscapeFarBake.h"                // the far image the editor baked from the landscape material
 #include <HorizonScene/RvtBaseBake.h>        // the RVT base bake the export runs (RVT 2.0 step 6)
 #include <MaterialGraph/RvtSplit.h>          // matRvtEnabled
 #include <HorizonScene/EntityHost.h>         // a class's component body, for the same scan
@@ -1566,6 +1567,7 @@ void startExport(AppContext& ctx)
                     lo.bakeFar = s_exportBakeFarLandscape;
                     lo.farBudgetBytes = static_cast<uint64_t>(std::max(16, s_exportFarLandscapeMB)) << 20;
                     lo.farCacheDir = projectRoot / "Saved" / "LandscapeFar";
+                    lo.farKeepPainterHash = LandscapeFarBake::groundPainterHash();   // what the editor baked from the material ships as it is
                     // cookLogLines, not Build::log: Build::begin() below would clear it (see bakeFarLandscapes).
                     HE::prepareLandscapePacksForExport(w, projectRoot, *ctx.contentManager, lo, landscapePlan,
                         [&](int level, const std::string& text) { cookLogLines.push_back((level ? "Warning: " : "") + label + ": " + text); });

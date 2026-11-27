@@ -52,6 +52,9 @@ struct LandscapeExportOptions
 	bool     bakeFar = true;
 	uint64_t farBudgetBytes = 128ull << 20;
 	std::filesystem::path farCacheDir;
+	// The painter hash of the editor's bake from the landscape material (LandscapeFarBakeOptions::keepPainterHash; 0 = none): regions of the
+	// cache it made for the tiles as they are now are shipped as they are, not painted again from the weights.
+	uint64_t farKeepPainterHash = 0;
 	std::function<bool(int done, int total)> farProgress;   // after every region; false cancels the bake (the pack then ships without one)
 };
 

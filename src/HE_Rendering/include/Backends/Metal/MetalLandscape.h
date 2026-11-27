@@ -36,6 +36,7 @@ public:
 		void* passPipeline = nullptr;
 		bool  passKeepsDepthState = false;   // the pass set its own depth state (velocity: test, no write); else Less + write
 		glm::mat4 aux0{ 1.0f }, aux1{ 1.0f };   // LsGlobals::aux0 / aux1, what the pass's functions read (kLandscapeMSL)
+		bool  noFarImage = false;   // the ground image the far image is baked from: never drawn from the far image itself
 	};
 	struct Stats
 	{

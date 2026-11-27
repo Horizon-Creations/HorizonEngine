@@ -4304,6 +4304,14 @@ void EditorApplication::OnRender(float dt)
 			{
 				LandscapeWorldTools::setRuntime(&m_landscape);   // the tile brush edits this runtime
 				LandscapeFarBake::setTileRuntime(&m_landscape);  // and its far image is baked in the editor
+				// ... from the landscape material, drawn from above by the RVT driver (which builds its layer views), where it can be.
+				LandscapeFarBake::setGroundImage(
+					[this](const glm::dvec2& mn, const glm::dvec2& mx, uint32_t px, std::vector<uint8_t>& rgba) {
+						return m_rvtLandscape && m_editorWorld && m_rvtLandscape->renderTileGroundImage(*m_editorWorld, mn, mx, px, rgba);
+					},
+					[this]() -> uint64_t {
+						return m_rvtLandscape && renderer() && renderer()->GetCapabilities().landscapeGroundImage ? m_rvtLandscape->tileGroundMaterialKey() : 0;
+					});
 				m_landscapeToolsBound = true;
 			}
 			LandscapeWorldTools::pump(*m_editorWorld);   // before the update: a rebuilt pack is opened again this frame
@@ -4338,7 +4346,8 @@ void EditorApplication::OnRender(float dt)
 			if (m_isPlaying) m_landscape.update(*m_editorWorld, gameDt);
 			else
 			{
-				const glm::dvec3 eye = glm::dvec3(m_editorCamera.makeOverride().position) + m_editorWorld->origin();
+				// The camera, or the region a manual far-image bake from the material waits for.
+				const glm::dvec3 eye = LandscapeFarBake::tileAnchor(glm::dvec3(m_editorCamera.makeOverride().position) + m_editorWorld->origin());
 				m_landscape.update(*m_editorWorld, gameDt, 1.0, &eye);
 			}
 			m_landscapeStamps.sync(*m_editorWorld, m_landscape, contentManager());   // stamp entities that moved: their tiles are read again

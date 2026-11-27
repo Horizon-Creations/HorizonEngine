@@ -28,7 +28,8 @@ struct LandscapeFarPaint
 	std::array<float, 12>     layerAo{};      // ambient occlusion of each layer, 1 = none
 };
 
-// Fills `rgba` (layout.regionSide()^2 * 4) for region (rx, rz). False: the region could not be painted (it then stays unbaked).
+// Fills `rgba` (layout.regionSide()^2 * 4) for region (rx, rz). False: the region could not be painted now (it keeps the image `previous`
+// has for it, with that image's hash, so the next bake tries again; without one it stays unbaked).
 using LandscapeFarPainter = std::function<bool(const LandscapeTileSource& source, const LandscapeFarLayout& layout, int rx, int rz,
                                                std::vector<uint8_t>& rgba)>;
 LandscapeFarPainter landscapeFarWeightPainter(const LandscapeFarPaint& paint);
@@ -45,6 +46,9 @@ struct LandscapeFarBakeOptions
 	int      maxSide = 8192;               // texels a side of the assembled image (what every backend's 2D texture takes)
 	LandscapeFarPainter painter;
 	uint64_t painterHash = 0;              // the painter's settings, part of every region's hash
+	// A second painter whose regions are as good as this one's (0 = none): a region of `previous` whose hash is the one it would have with
+	// this painter hash is kept too. The export paints with the weights but keeps what the editor baked from the material.
+	uint64_t keepPainterHash = 0;
 	std::function<bool(int done, int total)> progress;   // after every region; false cancels
 };
 
@@ -53,7 +57,8 @@ struct LandscapeFarBakeStats
 	int  regions = 0;      // regions of the world
 	int  baked = 0;        // painted in this run
 	int  reused = 0;       // kept from `previous` (hash unchanged)
-	int  failed = 0;       // the painter said no
+	int  failed = 0;       // the painter said no and `previous` had nothing: unbaked
+	int  deferred = 0;     // the painter said no and the region kept its image from `previous` (stale)
 	bool cancelled = false;
 };
 

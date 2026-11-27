@@ -1,5 +1,9 @@
 #pragma once
+#include <cstdint>
+#include <functional>
 #include <string>
+#include <vector>
+#include <glm/glm.hpp>
 
 struct AppContext;
 namespace HE { class LandscapeRuntime; }
@@ -37,16 +41,34 @@ namespace LandscapeFarBake
 	void reset();
 
 	// ── The tile world (LandscapeRuntime, Thema 326 / 355) ───────────────────────
-	// Its far image is the export's region bake (HorizonScene/LandscapeFarBake.h,
-	// the weight painter): CPU only, so it runs on a worker while the editor goes
-	// on, over the edit overlay, and only the regions whose tiles changed are
-	// painted again. The table goes to the export's own cache
-	// (Saved/LandscapeFar/<pack>.far), so the next export paints nothing that
-	// the editor already painted, and onto the overlay, which draws it at once.
+	// Its far image is the export's region bake (HorizonScene/LandscapeFarBake.h)
+	// on a worker while the editor goes on, over the edit overlay; only the
+	// regions whose tiles changed are painted again. The table goes to the
+	// export's own cache (Saved/LandscapeFar/<pack>.far), so the next export
+	// paints nothing that the editor already painted, and onto the overlay,
+	// which draws it at once.
+	//
+	// What a region is painted from: the landscape MATERIAL, drawn once from
+	// straight above (the ground image below) wherever the backend reads it back
+	// and the material writes a virtual texture; else the layer weights times the
+	// layer colours (the export's painter). The material needs the region's tiles
+	// in the atlas: the main thread draws it when the worker asks. A manual bake
+	// moves the streaming anchor from region to region for that (tileAnchor), an
+	// automatic one paints only the regions loaded now and leaves the others as
+	// they were (stale) until a manual bake.
 	void setTileRuntime(HE::LandscapeRuntime* runtime);
+	using GroundImage = std::function<bool(const glm::dvec2& minAbs, const glm::dvec2& maxAbs, uint32_t px, std::vector<uint8_t>& rgba)>;
+	// The ground image (RvtLandscape::renderTileGroundImage) and the key of the material it draws (0 = none now), from the owner of the
+	// RVT driver. Unset: every region is painted from the weights.
+	void setGroundImage(GroundImage image, std::function<uint64_t()> materialKey);
+	// The painter hash of a bake from the material as things stand (0 = there would be none): the export keeps those regions.
+	uint64_t groundPainterHash();
+	// Where the tile world streams around this frame: `eye`, or the region a manual bake from the material is waiting for.
+	glm::dvec3 tileAnchor(const glm::dvec3& eye);
 	enum class TileState { NoWorld, Idle, Baking, Stale, UpToDate };
 	TileState tileState();
-	// Starts a bake of the tile world (false: none to bake, or one is running).
-	bool bakeTileWorld(AppContext& ctx);
+	// Starts a bake of the tile world (false: none to bake, or one is running). `walk`: a material bake moves the streaming anchor to
+	// every region it has to paint (the manual bake); without, a region that is not loaded keeps its old image.
+	bool bakeTileWorld(AppContext& ctx, bool walk = true);
 	const std::string& tileSummary();
 }

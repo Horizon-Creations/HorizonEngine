@@ -270,6 +270,43 @@ uint32_t RvtLandscape::paintTileGround(HorizonWorld& live, uint16_t volume, cons
     return painted;
 }
 
+bool RvtLandscape::renderTileGroundImage(HorizonWorld& live, const glm::dvec2& minAbs, const glm::dvec2& maxAbs, uint32_t px,
+                                         std::vector<uint8_t>& rgba)
+{
+    TileGround& t = m_tiles;
+    const HE::LandscapeRuntime* rt = live.landscapeRuntime();
+    rgba.clear();
+    if (!rt || t.key == 0 || t.view[0] == HE::UUID{} || px == 0 || !m_renderer.GetCapabilities().landscapeGroundImage) return false;
+    // The page camera of paintTileGround over the rectangle, the base colour view read back instead of written into the pool.
+    if (!t.scratch) t.scratch = std::make_shared<HorizonWorld>();
+    const glm::dvec3 origin = live.origin();
+    t.scratch->setOrigin(origin);
+    m_renderer.SetWorld(t.scratch.get());
+    const glm::dvec2 c = (minAbs + maxAbs) * 0.5;
+    EditorCameraOverride cam;
+    cam.active          = true;
+    cam.orthographic    = true;
+    cam.rawOutput       = true;
+    cam.rawSrgb         = true;
+    cam.editorIcons     = false;
+    cam.orthoHalfHeight = float((maxAbs.y - minAbs.y) * 0.5);
+    const glm::vec3 eye(float(c.x - origin.x), float(double(rt->config().heightMinM) + double(rt->config().heightScaleM) - origin.y) + 10.0f,
+                        float(c.y - origin.z));
+    cam.position      = eye;
+    cam.view          = glm::lookAt(eye, eye + glm::vec3(0.0f, -1.0f, 0.0f), glm::vec3(0.0f, 0.0f, -1.0f));
+    cam.nearPlane     = 0.1f;
+    cam.farPlane      = rt->config().heightScaleM + 40.0f;
+    cam.rvtSlot       = -1;
+    cam.rvtTileGround = true;
+    cam.rvtLayer      = 0;
+    cam.rvtMaterial   = t.view[0];
+    if (!t.seen[0]) { m_renderer.InvalidateMaterial(t.view[0]); t.seen[0] = true; }
+    const bool ok = m_renderer.RenderSceneImage(cam, px, px, rgba) && rgba.size() == size_t(px) * px * 4;
+    m_renderer.SetWorld(&live);
+    if (!ok) rgba.clear();
+    return ok;
+}
+
 void RvtLandscape::tileGroundTables(HorizonWorld& live, FrameStats& st)
 {
     TileGround& t = m_tiles;

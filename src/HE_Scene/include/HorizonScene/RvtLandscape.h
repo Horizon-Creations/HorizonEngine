@@ -156,6 +156,13 @@ namespace HE::landscape
         HE::UUID consumerOf(entt::entity landscape) const;
         // Whether the segment's pages come from the export's baked base right now (a witness / test hook).
         bool bakedBase(entt::entity landscape) const { const auto it = m_segments.find(landscape); return it != m_segments.end() && it->second.baked; }
+        // The tile ground drawn once with its material, straight down over the absolute XZ rectangle [minAbs, maxAbs]: the base colour
+        // layer view (sRGB, unlit), px x px RGBA8, row-major from (minAbs.x, minAbs.y). What the editor bakes the far image from
+        // (LandscapeFarBake). False: no layer view (RVT off, a material that writes no virtual texture, no tick yet), or the backend
+        // cannot read the ground back (Capabilities::landscapeGroundImage).
+        bool renderTileGroundImage(HorizonWorld& live, const glm::dvec2& minAbs, const glm::dvec2& maxAbs, uint32_t px, std::vector<uint8_t>& rgba);
+        // What the layer views were cut from (tileGroundKey), 0 = none: a far image baked from them is stale when it changes.
+        uint64_t tileGroundMaterialKey() const { return m_tiles.key; }
         uint64_t pagesPaintedTotal() const { return m_paintedTotal; }
         uint32_t materialsRegistered() const { return m_materialsRegistered; }   // view + consumer materials made so far (never freed)
 

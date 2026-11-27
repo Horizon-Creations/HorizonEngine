@@ -72,6 +72,8 @@ struct EditorCameraOverride
     HE::UUID  rvtMaterial;
     // With rvtSlot >= 0: the page is the TILE landscape's (SetLandscapeProvider), whose ground is then drawn with rvtMaterial.
     // False: a page of meshes, and the tile ground stays out of it.
+    // With rvtSlot < 0 (Capabilities::landscapeGroundImage): the tile ground drawn with rvtMaterial into the image RenderSceneImage
+    // reads back, never from the far image or the virtual texture: the far image is baked from this (the editor's LandscapeFarBake).
     bool      rvtTileGround = false;
 };
 
@@ -305,6 +307,9 @@ public:
         // SetRvtTileGround / EditorCameraOverride::rvtTileGround work: the tile landscape's ground can be painted into virtual
         // texture pages and drawn from them. Without it the ground is computed in place.
         bool landscapeRvt = false;
+        // EditorCameraOverride::rvtTileGround with rvtSlot < 0 works: the tile ground's material (a layer view) is read back from
+        // RenderSceneImage, the far image is baked from it. Without it the far image is painted from the layer weights.
+        bool landscapeGroundImage = false;
         // CreateRvtPool / EditorCameraOverride::rvtSlot work: the backend can hold the page pool of the Runtime
         // Virtual Textures and fill a slice of it from RenderSceneImage (Thema 333). False = the landscape keeps
         // running its material directly.

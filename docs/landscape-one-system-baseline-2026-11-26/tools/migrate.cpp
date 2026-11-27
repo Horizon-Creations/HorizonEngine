@@ -4,6 +4,7 @@
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/SceneSerializer.h>
 #include <HorizonScene/LandscapePackBuild.h>
+#include <HorizonScene/TransformHierarchy.h>   // worldPositionOf
 #include <HorizonScene/Components/TerrainComponent.h>
 #include <HorizonScene/Components/LandscapeWorldComponent.h>
 #include <HorizonScene/Components/NameComponent.h>

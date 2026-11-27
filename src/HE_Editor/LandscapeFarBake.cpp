@@ -11,10 +11,13 @@
 #include <HorizonScene/LandscapeExport.h>      // landscapeFarPaintFor: what the export paints with
 #include <HorizonScene/LandscapeFarBake.h>     // the region bake of the tile world
 #include <HorizonScene/LandscapeRuntime.h>
+#include <HorizonScene/LandscapeAtlas.h>       // which tiles a region drawn from the material has in the atlas
 #include <nlohmann/json.hpp>
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
+#include <mutex>
 #include <thread>
 #include <cstdio>
 #include <cstring>
@@ -203,18 +206,47 @@ namespace
 	}
 
 	// ── The tile world's far image ─────────────────────────────────────────────
+	// A region the worker wants drawn from the material: it waits, the main thread draws it when the region's tiles are in the atlas.
+	struct GroundRequest
+	{
+		std::mutex              m;
+		std::condition_variable cv;
+		bool                    pending = false, answered = false, ok = false;
+		int                     rx = 0, rz = 0;
+		std::vector<uint8_t>    rgba;
+	};
 	struct TileJob
 	{
 		std::thread                                thread;
 		std::atomic<bool>                          done{ false };
 		std::atomic<bool>                          cancel{ false };
 		std::shared_ptr<HE::LandscapeEditSource>   edits;    // kept alive: the runtime may reset meanwhile
+		std::shared_ptr<const HE::LandscapePackSource> pack;
 		std::shared_ptr<HE::LandscapeFarTable>     table = std::make_shared<HE::LandscapeFarTable>();
 		HE::LandscapeFarBakeStats                  stats;
 		uint64_t                                   revision = 0;   // the runtime's coarseRevision when it started
+		uint64_t                                   painterHash = 0;
 		fs::path                                   cacheFile;
 		double                                     started = 0.0;
+		// From the material (a GroundRequest per region), else from the weights on the worker alone.
+		bool                                       material = false, walk = false;
+		HE::LandscapeFarLayout                     layout;   // what bakeLandscapeFar plans (default budget and side)
+		GroundRequest                              ground;
+		std::atomic<int>                           progress{ 0 };
+		// Main thread only: the region being waited for.
+		int                                        waitRx = -1, waitRz = -1, residentFrames = 0;
+		double                                     waitSince = 0.0;
 	};
+	// Supersampling of the ground image: the far image's texel is the mean of 4 x 4 pixels of it (a texel of 32 m from 8 m pixels).
+	constexpr uint32_t kGroundSupersample = 4;
+	constexpr uint64_t kGroundPainterVersion = 1;
+	constexpr double   kGroundWaitSeconds = 30.0;   // a region whose tiles never all arrive (an atlas that refused one) keeps its old image
+	LandscapeFarBake::GroundImage               s_groundImage;
+	std::function<uint64_t()>                   s_groundKey;
+	bool                                        s_anchorOn = false;
+	glm::dvec3                                  s_anchor{ 0.0 };
+	int                                         s_tileDeferred = 0;   // regions the last bake left as they were (not loaded)
+	uint64_t                                    s_tileBakedPainter = 0;
 	HE::LandscapeRuntime*                       s_tileRuntime = nullptr;
 	std::unique_ptr<TileJob>                    s_tileJob;
 	std::shared_ptr<const HE::LandscapeFarTable> s_tileLast;          // the last table: what the next bake reuses region by region
@@ -234,10 +266,112 @@ namespace
 
 	void stopTileJob()
 	{
+		s_anchorOn = false;
 		if (!s_tileJob) return;
-		s_tileJob->cancel = true;
+		s_tileJob->cancel = true;   // a worker waiting for a region of the material sees it within 50 ms
 		if (s_tileJob->thread.joinable()) s_tileJob->thread.join();
 		s_tileJob.reset();
+	}
+
+	uint64_t groundHashOf(uint64_t materialKey)
+	{
+		if (materialKey == 0) return 0;
+		uint64_t h = 1469598103934665603ull;
+		for (const uint64_t v : { kGroundPainterVersion, materialKey, uint64_t(kGroundSupersample) })
+			for (int b = 0; b < 8; ++b) h = (h ^ ((v >> (8 * b)) & 0xFF)) * 1099511628211ull;
+		return h;
+	}
+
+	// The worker's side of a region drawn from the material: asks, waits for the main thread (or a cancel).
+	bool askGround(TileJob& j, int rx, int rz, std::vector<uint8_t>& rgba)
+	{
+		GroundRequest& g = j.ground;
+		std::unique_lock<std::mutex> lock(g.m);
+		g.rx = rx; g.rz = rz;
+		g.pending = true; g.answered = false; g.ok = false;
+		g.rgba.clear();
+		while (!g.answered && !j.cancel.load()) g.cv.wait_for(lock, std::chrono::milliseconds(50));
+		g.pending = false;
+		if (!g.answered || !g.ok) return false;
+		rgba = std::move(g.rgba);
+		return true;
+	}
+
+	void answerGround(TileJob& j, bool ok, std::vector<uint8_t>&& rgba)
+	{
+		{
+			std::lock_guard<std::mutex> lock(j.ground.m);
+			j.ground.ok = ok;
+			j.ground.rgba = std::move(rgba);
+			j.ground.answered = true;
+		}
+		j.ground.cv.notify_all();
+		j.waitRx = j.waitRz = -1;
+		j.residentFrames = 0;
+	}
+
+	// The main thread's side, once a frame: the region the worker waits for, drawn from above once its tiles are in the atlas.
+	void serveGround(TileJob& j)
+	{
+		int rx, rz;
+		{
+			std::lock_guard<std::mutex> lock(j.ground.m);
+			if (!j.ground.pending || j.ground.answered) return;
+			rx = j.ground.rx; rz = j.ground.rz;
+		}
+		const HE::LandscapeFarLayout& l = j.layout;
+		const HE::LandscapeAtlas* atlas = s_tileRuntime ? s_tileRuntime->atlas() : nullptr;
+		const double tileM = s_tileRuntime ? double(s_tileRuntime->quadtree().tileM) : 0.0;
+		if (!atlas || tileM <= 0.0 || !s_groundImage) { answerGround(j, false, {}); return; }
+		if (rx != j.waitRx || rz != j.waitRz) { j.waitRx = rx; j.waitRz = rz; j.waitSince = now(); j.residentFrames = 0; }
+
+		const int x0 = rx * l.regionTiles, z0 = rz * l.regionTiles;
+		const int x1 = std::min(x0 + l.regionTiles, l.tilesX), z1 = std::min(z0 + l.regionTiles, l.tilesZ);
+		bool resident = true;
+		for (int z = z0; z < z1 && resident; ++z)
+			for (int x = x0; x < x1 && resident; ++x)
+				if (j.pack->has({ x, z }) && atlas->lookup(x, z) == HE::LandscapeAtlas::kNoSlot) resident = false;
+		const glm::dvec2 mn(double(x0) * tileM, double(z0) * tileM), mx = mn + glm::dvec2(double(l.regionTiles) * tileM);
+		if (!resident)
+		{
+			j.residentFrames = 0;
+			// Automatic: a region that is not loaded keeps what it had. Manual: the streaming goes there and the region waits for it.
+			if (!j.walk || now() - j.waitSince > kGroundWaitSeconds)
+			{
+				if (j.walk) HE_LOG_WARN(Editor, "LandscapeFarBake: region (%d, %d) did not load in %.0f s, it keeps its old image", rx, rz, kGroundWaitSeconds);
+				answerGround(j, false, {});
+				return;
+			}
+			s_anchorOn = true;
+			s_anchor = glm::dvec3((mn.x + mx.x) * 0.5, double(s_tileRuntime->config().heightMinM), (mn.y + mx.y) * 0.5);
+			return;
+		}
+		// One frame more: the uploads of tiles that just got a slot go out with the next frame the landscape builds.
+		if (++j.residentFrames < 2) return;
+
+		const int side = l.regionSide();
+		const uint32_t px = uint32_t(side) * kGroundSupersample;
+		std::vector<uint8_t> image;
+		if (!s_groundImage(mn, mx, px, image) || image.size() != size_t(px) * px * 4) { answerGround(j, false, {}); return; }
+		// The mean of each texel's pixels in linear light; texels past the world's last tile stay 0 (a tile the world has not).
+		std::vector<uint8_t> rgba(size_t(side) * size_t(side) * 4, 0);
+		const int realX = (x1 - x0) * l.texelsPerTile, realZ = (z1 - z0) * l.texelsPerTile;
+		const float inv = 1.0f / float(kGroundSupersample * kGroundSupersample);
+		for (int ty = 0; ty < realZ; ++ty)
+			for (int tx = 0; tx < realX; ++tx)
+			{
+				float sum[3] = { 0.0f, 0.0f, 0.0f };
+				for (uint32_t sy = 0; sy < kGroundSupersample; ++sy)
+					for (uint32_t sx = 0; sx < kGroundSupersample; ++sx)
+					{
+						const uint8_t* p = &image[((size_t(ty) * kGroundSupersample + sy) * px + size_t(tx) * kGroundSupersample + sx) * 4];
+						for (int c = 0; c < 3; ++c) sum[c] += HE::landscapeFarDecodeSrgb(p[c]);
+					}
+				uint8_t* d = &rgba[(size_t(ty) * size_t(side) + size_t(tx)) * 4];
+				for (int c = 0; c < 3; ++c) d[c] = HE::landscapeFarEncodeSrgb(sum[c] * inv);
+				d[3] = 255;   // the material's base colour has its own occlusion in it; no separate AO
+			}
+		answerGround(j, true, std::move(rgba));
 	}
 
 	// The finished job's table onto the overlay it was baked from, if that is still the runtime's.
@@ -245,6 +379,7 @@ namespace
 	{
 		TileJob& j = *s_tileJob;
 		if (j.thread.joinable()) j.thread.join();
+		s_anchorOn = false;   // the streaming goes back to the camera
 		const auto edits = s_tileRuntime ? s_tileRuntime->editsShared() : nullptr;
 		char line[200];
 		if (j.stats.cancelled)
@@ -259,8 +394,14 @@ namespace
 			s_tileLast = j.table;
 			// Up to date only if nothing was edited while it baked; else the next automatic bake catches up.
 			s_tileBaked = (before == j.revision) ? s_tileRuntime->coarseRevision() : j.revision;
-			std::snprintf(line, sizeof(line), "Far image: %d region(s) painted, %d kept, in %.1f s.", j.stats.baked, j.stats.reused,
-			              now() - j.started);
+			s_tileBakedPainter = j.painterHash;
+			s_tileDeferred = j.stats.deferred;
+			if (j.stats.deferred > 0)
+				std::snprintf(line, sizeof(line), "Far image: %d region(s) painted from the %s, %d kept, %d not loaded (stale until a manual bake), in %.1f s.",
+				              j.stats.baked, j.material ? "material" : "weights", j.stats.reused, j.stats.deferred, now() - j.started);
+			else
+				std::snprintf(line, sizeof(line), "Far image: %d region(s) painted from the %s, %d kept, in %.1f s.", j.stats.baked,
+				              j.material ? "material" : "weights", j.stats.reused, now() - j.started);
 		}
 		s_tileSummary = line;
 		HE_LOG_INFO(Editor, "LandscapeFarBake: %s", s_tileSummary.c_str());
@@ -290,17 +431,31 @@ namespace
 
 	void tickTile(AppContext& ctx, bool userBusy)
 	{
-		if (!s_tileRuntime || !s_tileRuntime->active()) return;
+		if (!s_tileRuntime || !s_tileRuntime->active()) { s_anchorOn = false; return; }
 		if (s_tileJob && s_tileJob->done) finishTileJob();
 		HE::LandscapeEditSource* edits = s_tileRuntime->edits();
 		if (!edits) return;
 		if (edits != s_tileOverlay) { stopTileJob(); adoptTileCache(ctx, *edits); }
+		if (s_tileJob && s_tileJob->material)
+		{
+			serveGround(*s_tileJob);
+			char line[160];
+			std::snprintf(line, sizeof(line), "Far image: baking from the material, region %d of %d...", s_tileJob->progress.load(),
+			              s_tileJob->layout.regionsX() * s_tileJob->layout.regionsZ());
+			s_tileSummary = line;
+		}
 
 		const double t = now();
 		const uint64_t rev = s_tileRuntime->coarseRevision();
 		if (rev != s_tileSeen) { s_tileSeen = rev; s_tileChangeAt = t; }
+		// A witness: HE_LANDSCAPE_FAR_BAKE_NOW=1 presses Bake Far Image once, as soon as the material can be drawn.
+		static bool s_witnessBaked = false;
+		if (!s_witnessBaked && !s_tileJob && groundPainterHash() != 0)
+			if (const char* e = std::getenv("HE_LANDSCAPE_FAR_BAKE_NOW"); e && *e == '1') { s_witnessBaked = true; bakeTileWorld(ctx, /*walk=*/true); return; }
 		if (ctx.editorConfig.LandscapeFarBake != 2 || userBusy || ctx.isPlaying || s_tileJob) return;
-		if (rev != s_tileBaked && t - s_tileChangeAt >= 4.0) bakeTileWorld(ctx);
+		// A new edit, or another material (or the material became readable): the regions loaded now, after a few quiet seconds.
+		const bool painterChanged = s_tileBaked != ~0ull && groundPainterHash() != 0 && groundPainterHash() != s_tileBakedPainter;
+		if ((rev != s_tileBaked || painterChanged) && t - s_tileChangeAt >= 4.0) bakeTileWorld(ctx, /*walk=*/false);
 	}
 }
 
@@ -314,13 +469,29 @@ TileState tileState()
 {
 	if (!s_tileRuntime || !s_tileRuntime->active() || !s_tileRuntime->edits()) return TileState::NoWorld;
 	if (s_tileJob) return TileState::Baking;
-	if (s_tileBaked == s_tileRuntime->coarseRevision()) return TileState::UpToDate;
+	if (s_tileBaked == s_tileRuntime->coarseRevision() && s_tileDeferred == 0) return TileState::UpToDate;
 	return s_tileLast ? TileState::Stale : TileState::Idle;
 }
 
 const std::string& tileSummary() { return s_tileSummary; }
 
-bool bakeTileWorld(AppContext& ctx)
+void setGroundImage(GroundImage image, std::function<uint64_t()> materialKey)
+{
+	s_groundImage = std::move(image);
+	s_groundKey = std::move(materialKey);
+}
+
+uint64_t groundPainterHash()
+{
+	return s_groundImage && s_groundKey ? groundHashOf(s_groundKey()) : 0;
+}
+
+glm::dvec3 tileAnchor(const glm::dvec3& eye)
+{
+	return s_anchorOn && s_tileJob ? s_anchor : eye;
+}
+
+bool bakeTileWorld(AppContext& ctx, bool walk)
 {
 	if (!usable(ctx) || s_tileJob || !s_tileRuntime || !s_tileRuntime->active()) return false;
 	const auto edits = s_tileRuntime->editsShared();
@@ -329,17 +500,34 @@ bool bakeTileWorld(AppContext& ctx)
 	if (!pack) { s_tileSummary = "Far image: the world is not a pack."; return false; }
 
 	// Main thread: what to paint with (the content manager), the hash of the unedited tiles, the options.
-	const HE::LandscapeFarPaint paint = HE::landscapeFarPaintFor(s_tileRuntime->config().textureGroup, *ctx.contentManager);
 	auto job = std::make_unique<TileJob>();
 	job->edits = edits;
+	job->pack = pack;
 	job->revision = s_tileRuntime->coarseRevision();
 	job->cacheFile = tileCacheFile(ctx);
 	job->started = now();
+	job->walk = walk;
 	HE::LandscapeFarBakeOptions bo;
-	bo.painter = HE::landscapeFarWeightPainter(paint);
-	bo.painterHash = HE::landscapeFarPaintHash(paint);
 	TileJob* jp = job.get();
-	bo.progress = [jp](int, int) { return !jp->cancel.load(); };
+	const uint64_t groundHash = groundPainterHash();
+	job->layout = HE::planLandscapeFar(edits->geometry(), edits->tilesX(), edits->tilesZ(), bo.budgetBytes, bo.maxSide, bo.regionTiles);
+	if (groundHash != 0)
+	{
+		// The landscape material, drawn region by region on the main thread (serveGround).
+		job->material = true;
+		bo.painter = [jp](const HE::LandscapeTileSource&, const HE::LandscapeFarLayout&, int rx, int rz, std::vector<uint8_t>& rgba) {
+			return askGround(*jp, rx, rz, rgba);
+		};
+		bo.painterHash = groundHash;
+	}
+	else
+	{
+		const HE::LandscapeFarPaint paint = HE::landscapeFarPaintFor(s_tileRuntime->config().textureGroup, *ctx.contentManager);
+		bo.painter = HE::landscapeFarWeightPainter(paint);
+		bo.painterHash = HE::landscapeFarPaintHash(paint);
+	}
+	job->painterHash = bo.painterHash;
+	bo.progress = [jp](int done, int) { jp->progress = done; return !jp->cancel.load(); };
 	std::shared_ptr<const HE::LandscapeFarTable> previous = s_tileLast ? s_tileLast
 		: pack->farImage() ? std::make_shared<HE::LandscapeFarTable>(*pack->farImage()) : nullptr;
 	const HE::LandscapeFarTileHash packHash = HE::landscapePackTileHash(*pack);
@@ -376,6 +564,8 @@ void reset()
 	s_tileOverlay = nullptr;
 	s_tileLast.reset();
 	s_tileSummary.clear();
+	s_tileDeferred = 0;
+	s_tileBakedPainter = 0;
 }
 
 const std::string& lastSummary() { return s_summary; }

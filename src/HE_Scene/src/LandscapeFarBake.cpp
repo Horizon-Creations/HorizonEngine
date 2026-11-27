@@ -116,20 +116,21 @@ void bakeLandscapeFar(const LandscapeTileSource& source, const LandscapeFarTileH
 		for (int rx = 0; rx < rxN; ++rx)
 		{
 			const size_t i = static_cast<size_t>(rz) * static_cast<size_t>(rxN) + static_cast<size_t>(rx);
-			uint64_t h = fnvValue(kFnvBasis, kLandscapeFarVersion);
-			h = fnvValue(h, options.painterHash);
-			h = fnvValue(h, l.texelsPerTile);
-			h = fnvValue(h, l.regionTiles);
+			// The tiles' part once; the painter's in front of it, for each painter that may have made the region.
+			uint64_t tiles = fnvValue(fnvValue(kFnvBasis, l.texelsPerTile), l.regionTiles);
 			for (int tz = 0; tz < l.regionTiles; ++tz)
 				for (int tx = 0; tx < l.regionTiles; ++tx)
 				{
 					const LandscapeTileKey key{ rx * l.regionTiles + tx, rz * l.regionTiles + tz };
-					if (key.x < l.tilesX && key.z < l.tilesZ) h = fnvValue(h, tileHash ? tileHash(key) : 0);
+					if (key.x < l.tilesX && key.z < l.tilesZ) tiles = fnvValue(tiles, tileHash ? tileHash(key) : 0);
 				}
+			const auto hashWith = [&](uint64_t painter) { return fnvValue(fnvValue(fnvValue(kFnvBasis, kLandscapeFarVersion), painter), tiles); };
+			const uint64_t h = hashWith(options.painterHash);
 			LandscapeFarRegion& r = out.regions[i];
-			if (usePrevious && previous->regions[i].hash == h && previous->regions[i].baked())
+			const LandscapeFarRegion* prev = usePrevious && previous->regions[i].baked() ? &previous->regions[i] : nullptr;
+			if (prev && (prev->hash == h || (options.keepPainterHash != 0 && prev->hash == hashWith(options.keepPainterHash))))
 			{
-				r = previous->regions[i];
+				r = *prev;
 				++stats.reused;
 			}
 			else if (options.painter(source, l, rx, rz, r.rgba) && r.rgba.size() == imageBytes)
@@ -137,6 +138,11 @@ void bakeLandscapeFar(const LandscapeTileSource& source, const LandscapeFarTileH
 				r.hash = h;
 				out.compact(i);   // kept stored from here on: the table of a large world is then its file's size, not its pixels'
 				++stats.baked;
+			}
+			else if (prev)
+			{
+				r = *prev;   // its old hash: stale, painted again by the next bake that can
+				++stats.deferred;
 			}
 			else
 			{

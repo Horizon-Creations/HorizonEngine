@@ -288,7 +288,7 @@ void MetalLandscape::encode(void* renderEncoder, const LandscapeRenderFrame& f, 
 		g.heightInfo[0] = w.heightMinM; g.heightInfo[1] = static_cast<float>(w.tilesX); g.heightInfo[2] = static_cast<float>(w.tilesZ); g.heightInfo[3] = static_cast<float>(w.tableWindow);
 		g.origin[0] = static_cast<float>(f.origin.x); g.origin[1] = static_cast<float>(f.origin.y); g.origin[2] = static_cast<float>(f.origin.z);
 		g.tile[0] = w.hCells; g.tile[1] = w.wTexels; g.tile[2] = w.tileLevels;
-		g.tile[3] = m.farAlbedo ? 1 : 0;   // the material variant's heLsFar (uTile.w): the far image on texture 31 is bound
+		g.tile[3] = m.farAlbedo && !shading.noFarImage ? 1 : 0;   // the material variant's heLsFar (uTile.w): the far image on texture 31 is bound
 		for (int l = 0; l < w.heightLevels && l < 8; ++l)
 			for (int c = 0; c < 4; ++c) g.heightRect[l][c] = w.heightRect[l][c];
 		for (int gi = 0; gi < w.coarseGridCount && gi < 16; ++gi)
@@ -302,7 +302,7 @@ void MetalLandscape::encode(void* renderEncoder, const LandscapeRenderFrame& f, 
 		const double k = tex ? 1.0 / static_cast<double>(w.textureMeters) : 1.0;
 		g.texMaps[0] = tex && shading.normalArray && !w.normalArrayPath.empty() ? 1.0f : 0.0f;
 		g.texMaps[1] = tex && shading.maskArray && !w.maskArrayPath.empty() ? 1.0f : 0.0f;
-		g.texMaps[2] = m.farAlbedo ? 1.0f : 0.0f;
+		g.texMaps[2] = m.farAlbedo && !shading.noFarImage ? 1.0f : 0.0f;
 		g.tex[0] = static_cast<float>(k); g.tex[1] = tex ? 1.0f : 0.0f;
 		// uvOrigin, not origin: the absolute floating origin (origin is the render window's, LandscapeRenderFrame.h).
 		g.tex[2] = static_cast<float>(f.uvOrigin.x * k - std::floor(f.uvOrigin.x * k)); g.tex[3] = static_cast<float>(f.uvOrigin.z * k - std::floor(f.uvOrigin.z * k));

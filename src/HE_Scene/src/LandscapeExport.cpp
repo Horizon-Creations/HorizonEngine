@@ -105,6 +105,7 @@ namespace
 		bo.budgetBytes = options.farBudgetBytes;
 		bo.painter = landscapeFarWeightPainter(paint);
 		bo.painterHash = landscapeFarPaintHash(paint);
+		bo.keepPainterHash = options.farKeepPainterHash;
 		bo.progress = options.farProgress;
 
 		// The last export's table, else what the pack itself carries: both are only a cache, every region is checked by its hash.
