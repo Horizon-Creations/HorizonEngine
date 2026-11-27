@@ -25,6 +25,9 @@
    Snow Max Slope found by their `// param:` names). `heLsFar` takes its gradient before the branch (no bright atlas-edge line).
 6. **Camera flights as video** (`9a2c73f66`): `scripts/he_flythrough.py` + `src/HE_Editor/EditorFlythrough.{h,cpp}` (path JSON,
    realtime pacing, frames → MP4 via ffmpeg or `scripts/he_video_encode.swift`); `docs/headless-runs.md` has the recipe.
+7. **Clouds jumped in flight** (`0306c3087`): the sky rebuilt its view rays from inverse(proj × view) with the camera's 38 km
+   translation inside; `HE::SkyViewProj` (rotation only) for Metal / GL / Vulkan. Measured with `cloud_track.py` (here) on
+   `--keep-frames` flights: straight flight at 38 km 23.6 → 0.2 px a frame. D3D11/12 still the old way (Windows).
 
 **Verified**
 
