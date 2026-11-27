@@ -307,6 +307,7 @@ add_executable(HorizonEditor WIN32
 	InspectorPrefabKeys.cpp
 	TerrainTools.cpp
 	LandscapeFarBake.cpp
+	EditorFlythrough.cpp
 	LandscapeWorldTools.cpp
 	ViewportPanel.cpp
 	ViewportActions.cpp

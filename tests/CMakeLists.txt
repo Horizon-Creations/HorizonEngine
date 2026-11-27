@@ -172,6 +172,7 @@ add_executable(he_tests
     # The reward moments: once per frame, once per build run, the fade.
     test_editor_rewards.cpp
     test_editorcamera.cpp
+    test_flythrough.cpp
     test_camera_bookmarks.cpp
     test_asset_thumbnail_cache.cpp
     test_rendergraph.cpp
@@ -1035,6 +1036,8 @@ add_executable(he_tests
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/TerrainTools.cpp
     # Its Setup tab's Far Landscape section (the bake itself is HorizonScene's).
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/LandscapeFarBake.cpp
+    # The camera flight's path (test_flythrough.cpp).
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorFlythrough.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/LandscapeWorldTools.cpp
     # The Spline mode's tool, for test_spline_tool_ui.cpp: same AppContext, same
     # per-file HE_IMGUI_ENABLED; SplineEdit and the point gizmo are already here.

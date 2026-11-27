@@ -591,6 +591,7 @@ static std::string pickLaunchProject(const std::vector<std::string>& args,
 
 void EditorApplication::OnInit()
 {
+	m_flythrough.startFromEnvironment();   // HE_FLYTHROUGH: a camera flight from the command line (EditorFlythrough.h)
 	// A received collaboration snapshot replaces the whole world. Selection and
 	// undo history still hold entity handles from the world that just went away,
 	// so acting on them afterwards would touch freed storage.
@@ -3283,6 +3284,11 @@ void EditorApplication::OnRender(float dt)
 #ifdef HE_IMGUI_ENABLED
 	if (m_imguiReady) healStuckImGuiKeys(dt);
 #endif
+	// A camera flight from the command line: writes the frame drawn last, places the camera for this one (before the
+	// viewport hands it to the renderer), leaves after the last frame.
+	if (m_flythrough.active())
+		m_flythrough.tick(m_projectLoaded && m_editorWorld != nullptr, m_editorCamera, renderer(),
+		                  m_editorWorld ? m_editorWorld->origin() : glm::dvec3(0.0), [this] { Quit(); });
 	// Where the window is, for the next start (hidden runs never record one).
 	if (!HE::hiddenWindowRequested())
 	{

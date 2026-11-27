@@ -91,6 +91,7 @@ struct SDLDialogBridge
 // header of their own so the settings table the MCP tools drive can be
 // compiled — and tested — without this file's ImGui/SDL/renderer stack.
 #include "EditorConfig.h"
+#include "EditorFlythrough.h"
 
 // One captured warning/error from a play session (post-PIE report).
 struct PlayLogEntry
@@ -865,6 +866,8 @@ private:
 
 	// Editor scene-view camera
 	EditorCamera m_editorCamera;
+	// A camera flight from the command line (HE_FLYTHROUGH, scripts/he_flythrough.py): moves m_editorCamera, writes the frames.
+	HE::Ed::Flythrough m_flythrough;
 
 	// Live collaboration. Poll-driven: pumped once per frame from OnRender.
 	CollabController m_collab;

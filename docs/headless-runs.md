@@ -287,6 +287,14 @@ Shell gewinnt). Wer den Editor für eigene MCP-Tests von Hand mit `HE_MCP=1`
 startet, muss es selbst setzen, denn ohne Frame-Budget und ohne `HE_DUMP_PATH`
 wird nichts automatisch versteckt.
 
+**Kameraflug als Video:** `scripts/he_flythrough.py --project <.heproj> --path flight.json --out flight.mp4
+[--set KEY=VALUE] [--env KEY=VALUE] [--keep-frames]`. Die Pfaddatei (Keys mit `t` in Sekunden, `pos` in absoluten
+Weltmetern, `yaw`/`pitch` in Grad oder `lookAt`; Format in `src/HE_Editor/EditorFlythrough.h`) fliegt der Editor
+versteckt mit eigenem Config-Ordner ab: erst `warmupSeconds` auf dem ersten Key (Streaming, Shader), dann ein Bild je
+1/fps Pfadzeit, mit `realtime` (Standard) nie schneller als die Bildrate, damit das Streaming das Tempo eines Spiels
+hat. Die Bilder (`HE_FLYTHROUGH_OUT`, PPM) werden mit ffmpeg oder, ohne ffmpeg, mit `scripts/he_video_encode.swift`
+(AVFoundation) zu H.264. Eine volle Viewport-PPM sind ~5,7 MB: 24 s bei 30 fps brauchen kurz 4 GB Platz.
+
 ## Fallen
 
 - **Config-RHI gegen `HE_DUMP_RHI` (behoben, Thema 124 A6):** Bis dahin tauschte
