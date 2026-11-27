@@ -375,6 +375,29 @@ TEST_CASE("RVT: a pool too small for the view starves instead of evicting what t
 	CHECK(m.isResident({ v, 4, 0, 0 }));              // the coverage pages went in first
 }
 
+TEST_CASE("RVT: a pool that grew takes the pages it starved for, and keeps every page it had")
+{
+	RvtManager m(10, 100000);
+	const uint16_t v = m.addVolume(square512());
+	m.beginFrame();
+	m.update(v, viewAt(256, 256));
+	const Stats before = m.stats();
+	REQUIRE(before.starved > 0);
+	const std::vector<uint32_t> table0 = m.pageTable(v, 4);
+	m.growPool(200);
+	CHECK(m.poolSlots() == 200);
+	CHECK(m.freeSlots() == 190);
+	CHECK(m.pageTable(v, 4) == table0);              // nothing that was resident moved
+	m.growPool(100);                                 // never shrinks
+	CHECK(m.poolSlots() == 200);
+	m.beginFrame();
+	m.update(v, viewAt(256, 256));
+	const Stats after = m.stats();
+	CHECK(after.starved == before.starved);          // the view fits now: no request found the pool full
+	CHECK(after.resident > 10);
+	CHECK(after.wantedMissing == 0);
+}
+
 TEST_CASE("RVT page table: every entry falls back to the nearest resident coarser page")
 {
 	RvtManager m(1000, 5);                            // only the 5 pinned coverage pages in frame one

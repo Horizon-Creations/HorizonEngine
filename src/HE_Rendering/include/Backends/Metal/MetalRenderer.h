@@ -109,6 +109,7 @@ public:
 	// The pool is three BGRA8 texture2d_array (the format of the viewport target a page is drawn into, so the page goes in with
 	// a plain blit; BaseColor is read through an sRGB view), the tables one R32Uint mipmapped texture per consumer material.
 	bool  CreateRvtPool(uint32_t slots, uint32_t pagePx) override;
+	bool  GrowRvtPoolSlots(uint32_t slots) override;
 	void  DestroyRvtPool() override;
 	bool  ReadbackRvtSlot(int layer, uint32_t slot, std::vector<uint8_t>& rgba) override;
 	bool  SetRvtPageTable(const HE::UUID& consumerMaterial, const std::vector<std::vector<uint32_t>>& mips) override;

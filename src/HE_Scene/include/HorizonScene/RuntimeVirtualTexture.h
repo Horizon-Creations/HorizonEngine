@@ -182,6 +182,9 @@ public:
 
 	Stats stats() const;
 	uint32_t freeSlots() const { return uint32_t(m_freeSlots.size()); }
+	uint32_t poolSlots() const { return m_poolSlots; }
+	// More slots (the renderer's pool grew to match, IRenderer::GrowRvtPoolSlots): the new ones are free, every page stays.
+	void     growPool(uint32_t poolSlots);
 
 private:
 	struct Page { uint32_t slot = 0; uint64_t lastUsed = 0; uint8_t dirty = 0; bool pinned = false; };   // dirty: stale layers (bit k)

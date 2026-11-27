@@ -260,6 +260,12 @@ namespace HE::landscape
         std::string     m_lastNote;
         uint32_t        m_lastStarved = 0;
         bool            m_starvedWarned = false;
+        // The pool grows while the view wants more pages than fit (growPoolIfShort): Settings::poolSlots is where it starts.
+        uint32_t        m_fullTicks = 0;      // ticks in a row the pool was full and short
+        double          m_msPerPage = 0.0;    // what a page has cost lately (the paint budget's divisor), 0 = not known yet
+        uint32_t        m_growCooldown = 0;   // ticks to wait after a growth before judging again
+        bool            m_growRefused = false;
+        void growPoolIfShort(const rvt::Stats& ms, uint32_t feedbackPages);
         float           m_fovY = 1.0471976f;         // setView
         float           m_viewportH = 1080.0f;
         // The GPU feedback, kept for a while: a frame samples one pixel in 64, so a page stays wanted for kFeedbackTicks ticks

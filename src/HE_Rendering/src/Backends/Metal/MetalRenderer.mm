@@ -7212,7 +7212,7 @@ void MetalRenderer::Shutdown()
 	DestroyViewportTarget();
 	DestroyHDRTarget();
 	DestroyGBufferTargets();
-	if (m_gbufferPipeline)             { CFBridgingRelease(m_gbufferPipeline);             m_gbufferPipeline = nullptr; }
+	if (m_gbufferPipeline)            { CFBridgingRelease(m_gbufferPipeline);             m_gbufferPipeline = nullptr; }
 	// Dropped with its twin: EnsureDeferredPipelines keys "already built" off
 	// m_gbufferPipeline, so a surviving instanced PSO would be a stale descriptor.
 	if (m_gbufferInstancedPipeline)    { CFBridgingRelease(m_gbufferInstancedPipeline);    m_gbufferInstancedPipeline = nullptr; }
@@ -12628,6 +12628,33 @@ bool MetalRenderer::CreateRvtPool(uint32_t slots, uint32_t pagePx)
 	            double(slots) * pagePx * pagePx * (m_rvtPack ? 8.0 : 12.0) / (1024.0 * 1024.0), m_rvtColdOn ? "on" : "off", std::getenv("HE_RVT_COLD_MIN") ? std::getenv("HE_RVT_COLD_MIN") : "256", m_rvtPack ? "RGBA8 + RG8 + RG8" : "RGBA8 x 3",
 	            double(device.currentAllocatedSize) / (1024.0 * 1024.0),
 	            double(device.recommendedMaxWorkingSetSize) / (1024.0 * 1024.0));
+	return true;
+}
+
+// The pool's slot count is only the limit: hot and cold arrays are allocated as pages arrive (GrowRvtPool / GrowRvtCold) and the
+// hot ones shrink back when unused (UpdateRvtCold step 5), so raising it costs the per-slot bookkeeping and nothing on the GPU yet.
+bool MetalRenderer::GrowRvtPoolSlots(uint32_t slots)
+{
+	if (!m_rvtPool[0] || slots > 2048) return false;
+	if (slots <= m_rvtSlots) return true;
+	// Not past 70 % of the device's working set with the new pages fully used (hot arrays; the cold ASTC copies are a quarter).
+	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+	const double more = double(slots - m_rvtSlots) * m_rvtPagePx * m_rvtPagePx * (m_rvtPack ? 8.0 : 12.0) * 1.25;
+	if (double(device.currentAllocatedSize) + more > 0.7 * double(device.recommendedMaxWorkingSetSize))
+	{
+		HE_LOG_INFO(RHI, "MetalRenderer: the RVT pool stays at %u pages: %u would pass 70 %% of the device's working set (%.0f of %.0f MB in use)",
+		            m_rvtSlots, slots, double(device.currentAllocatedSize) / (1024.0 * 1024.0),
+		            double(device.recommendedMaxWorkingSetSize) / (1024.0 * 1024.0));
+		return false;
+	}
+	HE_LOG_INFO(RHI, "MetalRenderer: RVT pool limit %u -> %u pages (up to %.0f MB at full use)", m_rvtSlots, slots,
+	            double(slots) * m_rvtPagePx * m_rvtPagePx * (m_rvtPack ? 8.0 : 12.0) / (1024.0 * 1024.0));
+	m_rvtSlots = slots;
+	m_rvtSlotHot.resize(slots, -1);
+	m_rvtSlotCold.resize(slots, 0);
+	m_rvtSlotBusy.resize(slots, 0);
+	m_rvtSlotVer.resize(slots, 0);
+	m_rvtSlotPainted.resize(slots, 0);
 	return true;
 }
 

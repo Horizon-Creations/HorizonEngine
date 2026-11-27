@@ -54,6 +54,16 @@ RvtManager::RvtManager(uint32_t poolSlots, uint32_t maxRendersPerFrame, int pinn
 	for (uint32_t i = poolSlots; i > 0; --i) m_freeSlots.push_back(i - 1);   // slot 0 is handed out first
 }
 
+void RvtManager::growPool(uint32_t poolSlots)
+{
+	if (poolSlots <= m_poolSlots) return;
+	// The new slots go under the free ones already there: what was free is still handed out first, lowest first.
+	std::vector<uint32_t> added;
+	for (uint32_t i = poolSlots; i > m_poolSlots; --i) added.push_back(i - 1);
+	m_freeSlots.insert(m_freeSlots.begin(), added.begin(), added.end());
+	m_poolSlots = poolSlots;
+}
+
 uint16_t RvtManager::addVolume(const VolumeDesc& d)
 {
 	for (size_t i = 0; i < m_volumes.size(); ++i)

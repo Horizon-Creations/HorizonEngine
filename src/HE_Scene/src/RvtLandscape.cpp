@@ -9,6 +9,7 @@
 #include <HorizonScene/Components/TerrainComponent.h>
 #include <ContentManager/ContentManager.h>
 #include <Diagnostics/Log.h>
+#include <Diagnostics/Profiler.h>
 #include <MaterialGraph/AutoLandscapeMaterial.h>
 #include <MaterialGraph/MaterialGraph.h>
 #include <MaterialGraph/RvtSplit.h>
@@ -257,9 +258,38 @@ uint32_t RvtLandscape::markStale(Segment& seg, uint8_t layers, FrameStats& st, c
     return n;
 }
 
+// While the camera wants more pages than the pool holds, the same pages are thrown out and painted again every frame (the 100 km
+// tile world in flight: ~1350 wanted, 1024 slots, 8 repaints a frame at ~4 ms each). So the pool grows: once it has been full and
+// short for kShortTicks ticks in a row (a request that found no slot, or more pages wanted by the GPU feedback than it holds), its
+// limit rises by a quarter, in whole 64-page steps, up to 2048 (the page table's slot field and the backends' limit) and as far as
+// the renderer agrees (Metal refuses past 70 % of the device's working set). The memory follows use: the renderer allocates the
+// arrays as pages arrive and shrinks them when they go unused, so a larger limit costs nothing until the view needs it.
+void RvtLandscape::growPoolIfShort(const rvt::Stats& ms, uint32_t feedbackPages)
+{
+    constexpr uint32_t kShortTicks = 8, kCooldownTicks = 30, kMaxSlots = 2048;
+    if (m_growCooldown > 0) { --m_growCooldown; return; }
+    const bool full = ms.resident >= ms.poolSlots && m_manager->freeSlots() == 0;
+    const bool short_ = ms.starved > m_lastStarved || feedbackPages > ms.poolSlots;
+    m_fullTicks = (full && short_) ? m_fullTicks + 1 : 0;
+    if (m_fullTicks < kShortTicks || m_growRefused || ms.poolSlots >= kMaxSlots) return;
+    m_fullTicks = 0;
+    const uint32_t want = std::min(kMaxSlots, ((std::max(ms.poolSlots + ms.poolSlots / 4, feedbackPages + feedbackPages / 8) + 63u) / 64u) * 64u);
+    if (!m_renderer.GrowRvtPoolSlots(want))
+    {
+        m_growRefused = true;
+        HE_LOG_INFO(Scene, "RvtLandscape: the pool stays at %u pages (the renderer cannot give it %u)", ms.poolSlots, want);
+        return;
+    }
+    m_manager->growPool(want);
+    m_growCooldown = kCooldownTicks;
+    HE_LOG_INFO(Scene, "RvtLandscape: pool grew %u -> %u pages (%u wanted by the view)", ms.poolSlots, want, feedbackPages);
+}
+
 bool RvtLandscape::ensurePool()
 {
     if (m_poolMade) return true;
+    m_fullTicks = m_growCooldown = 0;
+    m_growRefused = false;
     m_pagePx = static_cast<uint32_t>(rvt::VolumeLayout(rvt::VolumeDesc{}).physicalPageSize());
     if (!m_renderer.CreateRvtPool(m_settings.poolSlots, m_pagePx))
     {
@@ -667,7 +697,11 @@ RvtLandscape::FrameStats RvtLandscape::tick(HorizonWorld& live, const glm::vec3&
         it = m_segments.erase(it);
     }
     // The tile landscape's ground (RvtLandscapeTiles.cpp) shares the pool; its position is absolute (the floating origin added).
-    const bool tiles = tileGroundWanted(live);
+    bool tiles = false;
+    {
+        HE_PROFILE_SCOPE_N("Rvt::tileWanted");
+        tiles = tileGroundWanted(live);
+    }
     const glm::dvec2 camAbs(double(cameraPos.x) + live.origin().x, double(cameraPos.z) + live.origin().z);
     if (lands.empty() && !tiles)
     {
@@ -775,7 +809,11 @@ RvtLandscape::FrameStats RvtLandscape::tick(HorizonWorld& live, const glm::vec3&
         for (const auto& kv : m_segments)
             if (kv.second.analysis && kv.second.analysis->split.hasRvtNodes && ensurePool()) break;
     if (!m_manager && tiles) ensurePool();
-    if (m_manager && tiles) tileGroundVolumes(live, camAbs, st);
+    if (m_manager && tiles)
+    {
+        HE_PROFILE_SCOPE_N("Rvt::tileVolumes");
+        tileGroundVolumes(live, camAbs, st);
+    }
     if (!m_manager) { note("idle: no landscape near enough (activation radius " + std::to_string(static_cast<int>(m_settings.activationRadiusM)) + " m)"); return st; }
 
     // The journals: scratch copies up to date, the pages under each change stale.
@@ -833,6 +871,7 @@ RvtLandscape::FrameStats RvtLandscape::tick(HorizonWorld& live, const glm::vec3&
 
     // The GPU feedback (a backend that has it): the pages pixels asked for, kept wanted for a while after their last report.
     {
+        HE_PROFILE_SCOPE_N("Rvt::feedback");
         constexpr uint64_t kFeedbackTicks = 120;
         m_feedbackScratch.clear();
         if (m_renderer.ReadRvtFeedback(m_feedbackScratch))
@@ -879,10 +918,29 @@ RvtLandscape::FrameStats RvtLandscape::tick(HorizonWorld& live, const glm::vec3&
     }
     if (tiles) tileGroundViews(camAbs, views);
     m_manager->beginFrame();
+    // A time budget for the painting, once the first fill is done (until then the ground is drawn without the pages, and the fill
+    // should be over quickly): as many pages as fit in kPaintBudgetMs at the cost a page has had lately, at least one, at most the
+    // setting. A tile-ground page renders its three layers as three frames (~4 ms on the 100 km Catania), so eight a frame were
+    // 30 ms in flight; the pages a fast camera wants then arrive a few frames later, over the coarser page that stands in for them.
+    {
+        static const double kPaintBudgetMs = [] { const char* v = std::getenv("HE_RVT_PAINT_BUDGET_MS"); return (v && *v) ? std::atof(v) : 6.0; }();
+        bool allFilled = !(tiles && m_tiles.volumeLive && !m_tiles.filled);
+        for (const auto& kv : m_segments)
+            if (kv.second.volumeLive && !kv.second.filled) allFilled = false;
+        uint32_t pages = m_settings.maxPagesPerFrame;
+        if (kPaintBudgetMs > 0.0 && allFilled && m_msPerPage > 0.0)
+            pages = std::clamp(uint32_t(kPaintBudgetMs / m_msPerPage), 1u, std::max(1u, m_settings.maxPagesPerFrame));
+        m_manager->setMaxRendersPerFrame(pages);
+    }
     const auto paintT0 = std::chrono::steady_clock::now();
     if (!views.empty())
     {
-        const std::vector<rvt::PageRender> renders = m_manager->updateAll(views);
+        std::vector<rvt::PageRender> renders;
+        {
+            HE_PROFILE_SCOPE_N("Rvt::updateAll");
+            renders = m_manager->updateAll(views);
+        }
+        HE_PROFILE_SCOPE_N("Rvt::paint");
         // All the pages of this tick between one Begin and one End: a backend whose page is the general still frame keeps one
         // page-size set across them instead of building and repairing it around every page. Closed on every way out.
         struct PageBracket
@@ -904,7 +962,12 @@ RvtLandscape::FrameStats RvtLandscape::tick(HorizonWorld& live, const glm::vec3&
         m_paintedTotal += st.pagesPainted;
     }
     st.paintMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - paintT0).count();
-    if (st.pagesPainted) m_lastPainting = st;
+    if (st.pagesPainted)
+    {
+        m_lastPainting = st;
+        const double perPage = st.paintMs / double(st.pagesPainted);
+        m_msPerPage = m_msPerPage > 0.0 ? 0.8 * m_msPerPage + 0.2 * perPage : perPage;   // what the paint budget divides by
+    }
     // The pages went quiet: let go of the scratch landscape's chunk meshes on the GPU (HE_RVT_IDLE_RELEASE = seconds, 0 = never).
     // The next page draw uploads them again, which is one hitch of the size of the geometry, so not at the first quiet frame.
     {
@@ -956,16 +1019,21 @@ RvtLandscape::FrameStats RvtLandscape::tick(HorizonWorld& live, const glm::vec3&
         if (seg.swapOn) ++st.activeSegments;
     }
     updateNearChunks(live, cameraPos, st);
-    if (tiles) tileGroundTables(live, st);
+    if (tiles)
+    {
+        HE_PROFILE_SCOPE_N("Rvt::tileTables");
+        tileGroundTables(live, st);
+    }
 
     const rvt::Stats ms = m_manager->stats();
+    growPoolIfShort(ms, st.feedbackPages);
     // One warning per episode: a pool that is too small starves every frame, and the number alone changes the text each time.
     if (ms.starved > m_lastStarved)
     {
-        if (!m_starvedWarned)
-            HE_LOG_WARN(Scene, "RvtLandscape: the pool is full (%u of %u pages): %u request(s) found no slot; raise poolSlots or lower the activation radius",
+        if (!m_starvedWarned && m_growRefused)
+            HE_LOG_WARN(Scene, "RvtLandscape: the pool is full (%u of %u pages) and cannot grow: %u request(s) found no slot; raise poolSlots or lower the activation radius",
                         ms.resident, ms.poolSlots, ms.starved - m_lastStarved);
-        m_starvedWarned = true;
+        m_starvedWarned = m_growRefused;
         m_lastStarved = ms.starved;
     }
     else m_starvedWarned = false;

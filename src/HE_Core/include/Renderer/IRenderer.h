@@ -805,6 +805,9 @@ public:
     // False (and nothing created) when the backend cannot (Capabilities::supportsRvt).
     virtual bool CreateRvtPool(uint32_t /*slots*/, uint32_t /*pagePx*/) { return false; }
     virtual void DestroyRvtPool() {}
+    // More pages in the pool made by CreateRvtPool, keeping every page that is in it (slots only grow, at most 2048). The
+    // driver asks for it while the view wants more pages than fit (RvtLandscape). False: the backend's pool is fixed in size.
+    virtual bool GrowRvtPoolSlots(uint32_t /*slots*/) { return false; }
     // Reads one slice back (a witness or a debug view; not for per-frame use). `rgba` = pagePx * pagePx * 4 bytes,
     // row 0 first. False when there is no pool or the slice is out of range.
     virtual bool ReadbackRvtSlot(int /*layer*/, uint32_t /*slot*/, std::vector<uint8_t>& /*rgba*/) { return false; }
