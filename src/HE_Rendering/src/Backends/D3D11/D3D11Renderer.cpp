@@ -46,6 +46,7 @@
 #include <HorizonRendering/SkyNoise3D.h>      // CPU sky/cloud noise volume bake
 #include <HorizonRendering/SsaoKernel.h>      // SSAO sample kernel + rotation noise
 #include <HorizonRendering/SkyFrameParams.h>  // HE::BuildSkyFrameParams (folds in the cloud wind vector)
+#include <HorizonRendering/MotionBlurShared.h> // HE::motionBlurReproject / motionBlurParams
 #include <HorizonRendering/SkyShaderSource.h> // the GL sky, cross-compiled for the sky pass
 #include <HorizonRendering/SkyEnvBake.h>      // shared CPU sky bake (graph materials' heSkyEnv)
 #include <JobSystem/JobSystem.h>              // parallel_for for that bake
@@ -1792,6 +1793,21 @@ struct D3D11RendererImpl
     ComPtr<ID3D11Buffer>            underwaterFogCB;
     ComPtr<ID3D11BlendState>        underwaterFogBlendState;
     bool underwaterFogReady = false;
+
+    // ── Camera motion blur (IRenderer::MotionBlurSettings; kMbVelocityHLSL / kMbBlurHLSL) ──
+    // Velocity (RG16F, px) from the depth and the two cameras, then the smear into mbTex, copied back over hdrTex so the
+    // bloom and the tonemap read the blurred image. mbPrevViewProj moves with every REAL frame (Render()), on or off, so
+    // switching it on never measures against an old camera; a still (RenderSceneImage, an RVT page) neither runs it nor
+    // moves it (mbRealFrame).
+    ComPtr<ID3D11PixelShader>        mbVelocityPS, mbBlurPS;
+    ComPtr<ID3D11Buffer>             mbCB;
+    ComPtr<ID3D11Texture2D>          mbVelTex, mbTex;
+    ComPtr<ID3D11RenderTargetView>   mbVelRTV, mbRTV;
+    ComPtr<ID3D11ShaderResourceView> mbVelSRV;
+    uint32_t  mbW = 0, mbH = 0;
+    bool      mbReady = false, mbEnabled = false, mbHasPrev = false, mbRealFrame = false;
+    float     mbIntensity = 0.5f, mbMaxBlur = 24.0f;
+    glm::mat4 mbPrevViewProj{ 1.0f };
 
     // ── Volumetric fog (Thema 225 step 8, docs/volumetric-fog-d3d-acceptance-2026-11-06.md) ──
     // Inject/Integrate (compute, giShadowCS's pattern) + Apply (fullscreen fragment, the
@@ -4635,6 +4651,8 @@ struct D3D11RendererImpl
         if (!compile(kBloomBlurHLSL,  "main", "ps_5_0", blB)) return false;
         const std::string fogSrc = HE::withUnderwaterSurface(kUnderwaterFogHLSL, HE::SurfaceLang::HLSL);
         const bool underwaterCompiled = compile(fogSrc.c_str(), "main", "ps_5_0", uwB);
+        ComPtr<ID3DBlob> mbvB, mbbB;   // motion blur: optional, a failure only switches it off
+        const bool mbCompiled = compile(kMbVelocityHLSL, "main", "ps_5_0", mbvB) && compile(kMbBlurHLSL, "main", "ps_5_0", mbbB);
         ComPtr<ID3DBlob> ucB;
         std::string causticsSrc = HE::withUnderwaterSurface(kUnderwaterCausticsHLSL, HE::SurfaceLang::HLSL);
         causticsSrc.replace(causticsSrc.find("@TRAINS@"), 8, HE::causticsWaveTrainsList());
@@ -4693,6 +4711,17 @@ struct D3D11RendererImpl
           device->CreateBuffer(&bd, nullptr, &underwaterCausticsCB); }
         underwaterCausticsReady = causticsCompiled && underwaterCausticsPS && underwaterCausticsCB
                                 && underwaterFogBlendState && fsVS && noDepthDSS && fsRastState;
+        if (mbCompiled)
+        {
+            device->CreatePixelShader(mbvB->GetBufferPointer(), mbvB->GetBufferSize(), nullptr, &mbVelocityPS);
+            device->CreatePixelShader(mbbB->GetBufferPointer(), mbbB->GetBufferSize(), nullptr, &mbBlurPS);
+            D3D11_BUFFER_DESC bd{};
+            bd.ByteWidth = 96u; bd.Usage = D3D11_USAGE_DYNAMIC;   // mat4 + 2 x float4, see kMbVelocityHLSL
+            bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER; bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+            device->CreateBuffer(&bd, nullptr, &mbCB);
+        }
+        mbReady = mbVelocityPS && mbBlurPS && mbCB && fsVS && noDepthDSS && fsRastState;
+        if (!mbReady) HE_LOG_WARN(RHI, "%s", "D3D11Renderer: motion blur unavailable (its shaders did not build)");
 
         postFxReady = fsVS && tonemapPS && fxaaPS && smaaPS && aaBlitPS && bloomBrightPS && bloomBlurPS
                    && linearSampler && noDepthDSS && fsRastState && postFxCB;
@@ -9815,6 +9844,73 @@ void D3D11Renderer::DrawViewportFrame()
             ID3D11RenderTargetView* n2 = nullptr; p.context->OMSetRenderTargets(1, &n2, nullptr);
         }
 
+        // Camera motion blur, after the fog and before the bloom (GL / Metal's place): velocity, then the smear into mbTex,
+        // copied back over hdrTex so everything after reads the blurred image. Real frames of a perspective camera only.
+        const glm::mat4 mbViewProj = p.m_renderWorld.camera.projection * p.m_renderWorld.camera.view;
+        if (p.mbEnabled && p.mbReady && p.mbRealFrame && p.mbHasPrev && !p.rawCapture && p.viewportDepthSRV
+            && p.m_renderWorld.camera.projection[3][3] == 0.0f)
+        {
+            D3D11RendererImpl::GpuPassScope _mbTimer(&p, "MotionBlur");
+            if (!p.mbTex || p.mbW != p.viewportW || p.mbH != p.viewportH)
+            {
+                p.mbVelSRV.Reset(); p.mbVelRTV.Reset(); p.mbVelTex.Reset(); p.mbRTV.Reset(); p.mbTex.Reset();
+                D3D11_TEXTURE2D_DESC td{};
+                td.Width = p.viewportW; td.Height = p.viewportH; td.MipLevels = td.ArraySize = 1;
+                td.SampleDesc.Count = 1; td.Usage = D3D11_USAGE_DEFAULT;
+                td.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+                td.Format = DXGI_FORMAT_R16G16_FLOAT;
+                if (SUCCEEDED(p.device->CreateTexture2D(&td, nullptr, &p.mbVelTex)))
+                {
+                    p.device->CreateRenderTargetView(p.mbVelTex.Get(), nullptr, &p.mbVelRTV);
+                    p.device->CreateShaderResourceView(p.mbVelTex.Get(), nullptr, &p.mbVelSRV);
+                }
+                td.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;   // hdrTex's, so CopyResource takes it
+                td.BindFlags = D3D11_BIND_RENDER_TARGET;
+                if (SUCCEEDED(p.device->CreateTexture2D(&td, nullptr, &p.mbTex)))
+                    p.device->CreateRenderTargetView(p.mbTex.Get(), nullptr, &p.mbRTV);
+                p.mbW = p.viewportW; p.mbH = p.viewportH;
+            }
+            if (p.mbVelRTV && p.mbVelSRV && p.mbRTV)
+            {
+                struct { float reproject[16]; glm::vec4 params; float texel[4]; } cb{};
+                const glm::mat4 reproject = HE::motionBlurReproject(p.mbPrevViewProj, mbViewProj);
+                std::memcpy(cb.reproject, &reproject[0][0], sizeof(cb.reproject));
+                cb.params = HE::motionBlurParams(p.mbIntensity, p.mbMaxBlur, int(p.viewportW), int(p.viewportH));
+                cb.texel[0] = 1.0f / float(p.viewportW); cb.texel[1] = 1.0f / float(p.viewportH);
+                D3D11_MAPPED_SUBRESOURCE mr{};
+                if (SUCCEEDED(p.context->Map(p.mbCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mr)))
+                {
+                    std::memcpy(mr.pData, &cb, sizeof(cb));
+                    p.context->Unmap(p.mbCB.Get(), 0);
+                }
+                p.context->RSSetViewports(1, &vvp);
+                p.context->IASetInputLayout(nullptr);
+                p.context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+                p.context->VSSetShader(p.fsVS.Get(), nullptr, 0);
+                p.context->OMSetDepthStencilState(p.noDepthDSS.Get(), 0);
+                p.context->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFFu);
+                p.context->RSSetState(p.fsRastState.Get());
+                p.context->PSSetConstantBuffers(0, 1, p.mbCB.GetAddressOf());
+                // 1. velocity from the depth (point: no depth blended across a silhouette)
+                p.context->OMSetRenderTargets(1, p.mbVelRTV.GetAddressOf(), nullptr);
+                p.context->PSSetShader(p.mbVelocityPS.Get(), nullptr, 0);
+                p.context->PSSetShaderResources(0, 1, p.viewportDepthSRV.GetAddressOf());
+                p.context->PSSetSamplers(0, 1, p.gbPointClamp ? p.gbPointClamp.GetAddressOf() : p.linearSampler.GetAddressOf());
+                p.context->Draw(3, 0);
+                // 2. the smear: (hdr, velocity) → mbTex, then back over hdrTex
+                p.context->OMSetRenderTargets(1, p.mbRTV.GetAddressOf(), nullptr);
+                p.context->PSSetShader(p.mbBlurPS.Get(), nullptr, 0);
+                ID3D11ShaderResourceView* mbSrvs[2] = { p.hdrSRV.Get(), p.mbVelSRV.Get() };
+                p.context->PSSetShaderResources(0, 2, mbSrvs);
+                p.context->PSSetSamplers(0, 1, p.linearSampler.GetAddressOf());
+                p.context->Draw(3, 0);
+                ID3D11ShaderResourceView* noSrvs[2] = {};
+                p.context->PSSetShaderResources(0, 2, noSrvs);
+                ID3D11RenderTargetView* noRtv = nullptr; p.context->OMSetRenderTargets(1, &noRtv, nullptr);
+                p.context->CopyResource(p.hdrTex.Get(), p.mbTex.Get());
+            }
+        }
+
         // Bloom bright-pass + ping-pong blur → bloomTex[0] (or dummyTexture if disabled).
         const uint32_t bw = std::max(1u, p.viewportW / 2);
         const uint32_t bh = std::max(1u, p.viewportH / 2);
@@ -10003,6 +10099,8 @@ void D3D11Renderer::Render()
 
     const bool useViewport = !gameChain && p.viewportRTV && p.viewportDSV;
 
+    // Motion blur runs in, and its previous camera moves with, these real frames only (not a still or an RVT page).
+    p.mbRealFrame = gameFrame || useViewport;
     if (gameFrame)
     {
         DrawViewportFrame();
@@ -10041,6 +10139,13 @@ void D3D11Renderer::Render()
         DrawScene(p.width, p.height);
         // UI canvas pass: swapchain RT + scene viewport already bound.
         p.renderUIPass(p.context.Get(), p.width, p.height, m_contentManager);
+    }
+    // This frame's camera is the motion blur's previous one now, whether it ran or not (GL's rule).
+    if (p.mbRealFrame)
+    {
+        p.mbPrevViewProj = p.m_renderWorld.camera.projection * p.m_renderWorld.camera.view;
+        p.mbHasPrev      = true;
+        p.mbRealFrame    = false;   // a still taken before the next Render() is not one
     }
 
     if (m_overlayCallback)
@@ -11403,6 +11508,13 @@ void D3D11Renderer::SetBloomSettings(const BloomSettings& s)
     m_impl->bloomEnabled   = s.enabled;
     m_impl->bloomThreshold = s.threshold;
     m_impl->bloomStrength  = s.intensity;
+}
+
+void D3D11Renderer::SetMotionBlurSettings(const MotionBlurSettings& s)
+{
+    m_impl->mbEnabled   = s.enabled;
+    m_impl->mbIntensity = s.intensity;
+    m_impl->mbMaxBlur   = s.maxBlur;
 }
 
 void D3D11Renderer::SetAntiAliasingSettings(const AntiAliasingSettings& s)

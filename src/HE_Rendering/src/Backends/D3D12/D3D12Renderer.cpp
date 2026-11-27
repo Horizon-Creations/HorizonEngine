@@ -43,6 +43,7 @@
 #include <HorizonRendering/SkyNoise3D.h>      // CPU sky/cloud noise volume bake
 #include <HorizonRendering/SsaoKernel.h>      // SSAO sample kernel + rotation noise
 #include <HorizonRendering/SkyFrameParams.h>  // HE::BuildSkyFrameParams (folds in the cloud wind vector)
+#include <HorizonRendering/MotionBlurShared.h> // HE::motionBlurReproject / motionBlurParams
 #include <HorizonRendering/SkyShaderSource.h> // the GL sky, cross-compiled for the sky pass
 #include <HorizonRendering/SkyEnvBake.h>      // shared CPU sky bake (graph materials' heSkyEnv)
 #include <JobSystem/JobSystem.h>              // parallel_for for that bake
@@ -1921,7 +1922,22 @@ struct D3D12RendererImpl
     // refreshed in this SAME heap everywhere viewportDepth is (re)created — see
     // the k_decalViewportDepthSlot sibling writes into sceneSrvHeap.
     static constexpr UINT k_underwaterFogDepthSlot = 13;
-    static constexpr UINT k_postFxSrvCount = 14;
+    // Motion blur's smear reads {hdr, velocity} through ONE table (t0..t1): its own view of hdrRT next to the velocity's.
+    static constexpr UINT k_mbSrvBlur = 14;   // 14 = hdrRT, 15 = mbVelRT (ensureMotionBlurTargets)
+    static constexpr UINT k_postFxSrvCount = 16;
+    // ── Camera motion blur (IRenderer::MotionBlurSettings; kMbVelocityHLSL / kMbBlurHLSL) ──
+    // Velocity (RG16F, px) from the depth (k_underwaterFogDepthSlot) and the two cameras, the smear into mbRT, copied back over
+    // hdrRT so the bloom and the tonemap read the blurred image. mbPrevViewProj moves with every REAL frame (Render()), on or
+    // off; a still or an RVT page neither runs it nor moves it (mbRealFrame). Targets made on first use (ensureMotionBlurTargets).
+    ComPtr<ID3D12RootSignature>  mbVelRootSig, mbBlurRootSig;   // [0] 24 constants b0, [1] table t0 (velocity) / t0..t1 (smear)
+    ComPtr<ID3D12PipelineState>  mbVelPSO, mbBlurPSO;
+    ComPtr<ID3D12Resource>       mbVelRT, mbRT;
+    ComPtr<ID3D12DescriptorHeap> mbRtvHeap;                     // [0] velocity, [1] smear
+    D3D12_RESOURCE_STATES        mbVelState = D3D12_RESOURCE_STATE_RENDER_TARGET, mbState = D3D12_RESOURCE_STATE_RENDER_TARGET;
+    UINT      mbW = 0, mbH = 0;
+    bool      mbReady = false, mbEnabled = false, mbHasPrev = false, mbRealFrame = false;
+    float     mbIntensity = 0.5f, mbMaxBlur = 24.0f;
+    glm::mat4 mbPrevViewProj{ 1.0f };
     ComPtr<ID3D12RootSignature>  taaVelocityRootSig;  // [0] root CBV b0 (HE::TaaVelocityConstants)
     ComPtr<ID3D12RootSignature>  taaResolveRootSig;   // [0] 4 constants b0, [1] table t0..t2, s0
     ComPtr<ID3D12PipelineState>  taaVelocityPSO, taaResolvePSO, taaSharpenPSO;
@@ -2165,6 +2181,50 @@ struct D3D12RendererImpl
         // just rebuilt; the GPU is already idle (waitForAllFrames above).
         if (taaWanted()) createTaaTargets(w, h);
         else             destroyTaaTargets();
+        // Motion blur's views lived in the old heap: made again at the new size on its next use.
+        mbVelRT.Reset(); mbRT.Reset(); mbRtvHeap.Reset(); mbW = mbH = 0;
+    }
+
+    // Motion blur's two full-res targets and their views (k_mbSrvBlur), on first use or after a resize. The GPU is waited for:
+    // the old ones may still be read by a frame in flight (only on a resize or when it is switched on).
+    bool ensureMotionBlurTargets(UINT w, UINT h)
+    {
+        if (mbRT && mbW == w && mbH == h) return true;
+        if (!postFxSrvHeap || !hdrRT) return false;
+        waitForAllFrames();
+        mbVelRT.Reset(); mbRT.Reset(); mbRtvHeap.Reset(); mbW = mbH = 0;
+        D3D12_HEAP_PROPERTIES hp{}; hp.Type = D3D12_HEAP_TYPE_DEFAULT;
+        D3D12_DESCRIPTOR_HEAP_DESC hd{}; hd.NumDescriptors = 2; hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+        if (FAILED(device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&mbRtvHeap)))) return false;
+        const UINT rtvInc = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+        auto make = [&](DXGI_FORMAT fmt, ComPtr<ID3D12Resource>& rt, UINT rtvIndex) -> bool {
+            D3D12_RESOURCE_DESC rd{};
+            rd.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+            rd.Width = w; rd.Height = h; rd.DepthOrArraySize = 1; rd.MipLevels = 1;
+            rd.Format = fmt; rd.SampleDesc.Count = 1; rd.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+            D3D12_CLEAR_VALUE cv{}; cv.Format = fmt;
+            if (FAILED(device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd, D3D12_RESOURCE_STATE_RENDER_TARGET, &cv,
+                                                       IID_PPV_ARGS(&rt)))) return false;
+            D3D12_CPU_DESCRIPTOR_HANDLE h = mbRtvHeap->GetCPUDescriptorHandleForHeapStart();
+            h.ptr += SIZE_T(rtvIndex) * rtvInc;
+            device->CreateRenderTargetView(rt.Get(), nullptr, h);
+            return true;
+        };
+        if (!make(DXGI_FORMAT_R16G16_FLOAT, mbVelRT, 0) || !make(DXGI_FORMAT_R16G16B16A16_FLOAT, mbRT, 1))   // mbRT: hdrRT's format
+        {
+            mbVelRT.Reset(); mbRT.Reset(); mbRtvHeap.Reset();
+            return false;
+        }
+        D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
+        sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D; sv.Texture2D.MipLevels = 1;
+        sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        sv.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        device->CreateShaderResourceView(hdrRT.Get(), &sv, srvCpuHandle(k_mbSrvBlur));
+        sv.Format = DXGI_FORMAT_R16G16_FLOAT;
+        device->CreateShaderResourceView(mbVelRT.Get(), &sv, srvCpuHandle(k_mbSrvBlur + 1));
+        mbVelState = mbState = D3D12_RESOURCE_STATE_RENDER_TARGET;
+        mbW = w; mbH = h;
+        return true;
     }
 
     // Compiles and creates all PostFX root signatures + PSOs.
@@ -2296,6 +2356,55 @@ struct D3D12RendererImpl
                 pd.SampleDesc.Count = 1;
                 underwaterFogReady = SUCCEEDED(device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&underwaterFogPSO)));
             }
+        }
+
+        // Camera motion blur: two root sigs of the fog's shape (24 constants: mat4 + 2 x float4), the velocity's with the
+        // depth table and a point sampler, the smear's with the {hdr, velocity} table and a linear one. Optional: a failure
+        // only leaves it off.
+        {
+            ComPtr<ID3DBlob> mbvB, mbbB;
+            const bool compiled = compile(kMbVelocityHLSL, "main", "ps_5_0", mbvB) && compile(kMbBlurHLSL, "main", "ps_5_0", mbbB);
+            auto makeSig = [&](UINT srvs, D3D12_FILTER filter, ComPtr<ID3D12RootSignature>& out) -> bool {
+                D3D12_DESCRIPTOR_RANGE r0{}; r0.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+                r0.NumDescriptors = srvs; r0.BaseShaderRegister = 0;
+                D3D12_ROOT_PARAMETER params[2]{};
+                params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+                params[0].Constants = { 0, 0, 24 };
+                params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+                params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+                params[1].DescriptorTable = { 1, &r0 };
+                params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+                D3D12_STATIC_SAMPLER_DESC samp{};
+                samp.Filter = filter;
+                samp.AddressU = samp.AddressV = samp.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+                samp.ShaderRegister = 0; samp.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+                D3D12_ROOT_SIGNATURE_DESC rsd{};
+                rsd.NumParameters = 2; rsd.pParameters = params;
+                rsd.NumStaticSamplers = 1; rsd.pStaticSamplers = &samp;
+                ComPtr<ID3DBlob> sig, err;
+                return SUCCEEDED(D3D12SerializeRootSignature(&rsd, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &err))
+                    && SUCCEEDED(device->CreateRootSignature(0, sig->GetBufferPointer(), sig->GetBufferSize(), IID_PPV_ARGS(&out)));
+            };
+            auto makeMbPSO = [&](ID3D12RootSignature* sig, ID3DBlob* ps, DXGI_FORMAT fmt, ComPtr<ID3D12PipelineState>& out) -> bool {
+                D3D12_GRAPHICS_PIPELINE_STATE_DESC pd{};
+                pd.pRootSignature = sig;
+                pd.VS = { vsB->GetBufferPointer(), vsB->GetBufferSize() };
+                pd.PS = { ps->GetBufferPointer(), ps->GetBufferSize() };
+                pd.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+                pd.SampleMask = UINT_MAX;
+                pd.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+                pd.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+                pd.DepthStencilState.DepthEnable = FALSE;
+                pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+                pd.NumRenderTargets = 1; pd.RTVFormats[0] = fmt;
+                pd.SampleDesc.Count = 1;
+                return SUCCEEDED(device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&out)));
+            };
+            mbReady = compiled
+                   && makeSig(1, D3D12_FILTER_MIN_MAG_MIP_POINT, mbVelRootSig) && makeSig(2, D3D12_FILTER_MIN_MAG_MIP_LINEAR, mbBlurRootSig)
+                   && makeMbPSO(mbVelRootSig.Get(), mbvB.Get(), DXGI_FORMAT_R16G16_FLOAT, mbVelPSO)
+                   && makeMbPSO(mbBlurRootSig.Get(), mbbB.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT, mbBlurPSO);
+            if (!mbReady) HE_LOG_WARN(RHI, "%s", "D3D12Renderer: motion blur unavailable (its shaders or pipelines did not build)");
         }
 
         // Underwater caustics (Thema 185 Schritt 3): the fog's root sig / PSO shape again, only
@@ -2648,6 +2757,57 @@ struct D3D12RendererImpl
             cl->DrawInstanced(3, 1, 0, 0);
             barrier12(cl, viewportDepth.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
                       D3D12_RESOURCE_STATE_DEPTH_WRITE);
+        }
+
+        // Camera motion blur, after the fog and before the bloom (GL / Metal's place): velocity, then the smear into mbRT,
+        // copied back over hdrRT so everything after reads the blurred image. Real frames of a perspective camera only.
+        if (mbEnabled && mbReady && mbRealFrame && mbHasPrev && !rawCapture && viewportDepth
+            && m_renderWorld.camera.projection[3][3] == 0.0f && ensureMotionBlurTargets(w, h))
+        {
+            _post.next("MotionBlur");
+            struct { float reproject[16]; glm::vec4 params; float texel[4]; } mb{};
+            static_assert(sizeof(mb) == 96, "24 root constants: must match the cbuffer of kMbVelocityHLSL / kMbBlurHLSL");
+            const glm::mat4 reproject = HE::motionBlurReproject(mbPrevViewProj, m_renderWorld.camera.projection * m_renderWorld.camera.view);
+            std::memcpy(mb.reproject, &reproject[0][0], sizeof(mb.reproject));
+            mb.params = HE::motionBlurParams(mbIntensity, mbMaxBlur, int(w), int(h));
+            mb.texel[0] = 1.0f / float(w); mb.texel[1] = 1.0f / float(h);
+            const UINT rtvInc = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+            D3D12_CPU_DESCRIPTOR_HANDLE velRtv = mbRtvHeap->GetCPUDescriptorHandleForHeapStart(), mbRtv = velRtv;
+            mbRtv.ptr += rtvInc;
+            ID3D12DescriptorHeap* mbHeaps[] = { postFxSrvHeap.Get() };
+            cl->SetDescriptorHeaps(1, mbHeaps);
+            cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+            setVP(w, h);
+            // 1. velocity from the depth (the fog's depth view and its round trip off the DSV)
+            barrier12(cl, viewportDepth.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            barrier12(cl, mbVelRT.Get(), mbVelState, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            mbVelState = D3D12_RESOURCE_STATE_RENDER_TARGET;
+            cl->OMSetRenderTargets(1, &velRtv, FALSE, nullptr);
+            cl->SetGraphicsRootSignature(mbVelRootSig.Get());
+            cl->SetPipelineState(mbVelPSO.Get());
+            cl->SetGraphicsRoot32BitConstants(0, 24, &mb, 0);
+            cl->SetGraphicsRootDescriptorTable(1, srvGpuHandle(k_underwaterFogDepthSlot));
+            cl->DrawInstanced(3, 1, 0, 0);
+            barrier12(cl, viewportDepth.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+            // 2. the smear: {hdr, velocity} → mbRT
+            barrier12(cl, mbVelRT.Get(), mbVelState, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            mbVelState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+            barrier12(cl, hdrRT.Get(), hdrState, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            barrier12(cl, mbRT.Get(), mbState, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            mbState = D3D12_RESOURCE_STATE_RENDER_TARGET;
+            cl->OMSetRenderTargets(1, &mbRtv, FALSE, nullptr);
+            cl->SetGraphicsRootSignature(mbBlurRootSig.Get());
+            cl->SetPipelineState(mbBlurPSO.Get());
+            cl->SetGraphicsRoot32BitConstants(0, 24, &mb, 0);
+            cl->SetGraphicsRootDescriptorTable(1, srvGpuHandle(k_mbSrvBlur));
+            cl->DrawInstanced(3, 1, 0, 0);
+            // 3. back over hdrRT, which goes on as a render target (the barrier below makes it readable for the bloom)
+            barrier12(cl, mbRT.Get(), mbState, D3D12_RESOURCE_STATE_COPY_SOURCE);
+            mbState = D3D12_RESOURCE_STATE_COPY_SOURCE;
+            barrier12(cl, hdrRT.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
+            cl->CopyResource(hdrRT.Get(), mbRT.Get());
+            barrier12(cl, hdrRT.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            hdrState = D3D12_RESOURCE_STATE_RENDER_TARGET;
         }
 
         // Bind PostFX root sig + SRV heap once for all passes.
@@ -14689,6 +14849,8 @@ void D3D12Renderer::Render()
     swapBarrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
     auto rtv = p.rtvHandle(p.frameIndex);
 
+    // Motion blur runs in, and its previous camera moves with, these real frames only (not a still or an RVT page).
+    p.mbRealFrame = gameFrame || useViewport;
     if (gameFrame)
     {
         // Viewport frame (UI canvas included), then copy it into the back
@@ -14754,6 +14916,13 @@ void D3D12Renderer::Render()
             }
             p.renderUIPass12(p.cmdList.Get(), p.frameIndex, p.width, p.height, m_contentManager);
         }
+    }
+    // This frame's camera is the motion blur's previous one now, whether it ran or not (GL's rule).
+    if (p.mbRealFrame)
+    {
+        p.mbPrevViewProj = p.m_renderWorld.camera.projection * p.m_renderWorld.camera.view;
+        p.mbHasPrev      = true;
+        p.mbRealFrame    = false;   // a still taken before the next Render() is not one
     }
 
     // Overlay (ImGui) records into this command list and binds its own SRV heap.
@@ -16519,6 +16688,13 @@ void D3D12Renderer::SetBloomSettings(const BloomSettings& s)
     m_impl->bloomEnabled   = s.enabled;
     m_impl->bloomThreshold = s.threshold;
     m_impl->bloomStrength  = s.intensity;
+}
+
+void D3D12Renderer::SetMotionBlurSettings(const MotionBlurSettings& s)
+{
+    m_impl->mbEnabled   = s.enabled;   // the targets follow on first use (ensureMotionBlurTargets)
+    m_impl->mbIntensity = s.intensity;
+    m_impl->mbMaxBlur   = s.maxBlur;
 }
 
 void D3D12Renderer::SetAntiAliasingSettings(const AntiAliasingSettings& s)

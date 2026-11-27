@@ -423,6 +423,66 @@ float4 main(In i) : SV_Target {
 }
 )HLSL";
 
+// ─── Camera motion blur (IRenderer::MotionBlurSettings) ──────────────────────
+// The two passes of the GL / Metal backends (OpenGLRenderer.cpp's kMbVelocityFS / kMbBlurFS,
+// MetalRenderer.mm's kMotionBlurMSL), line for line. The D3D scene depth holds GL ndc z and
+// the uv origin is top-left (kFSTriangleVS), which is Metal's case: ndc.y = 1 - 2 uv.y in, the
+// previous uv flipped back out. Velocity in PIXELS (R16G16_FLOAT), capped at the max blur.
+// cbuffer b0 (96 B, D3D12: 24 root constants): reproject = prevViewProj * inverse(viewProj),
+// params = (shutter fraction, max blur px, target w, h), texel = (1/w, 1/h).
+// Velocity: t0 = scene depth, s0 = point clamp. Blur: t0 = HDR, t1 = velocity, s0 = linear clamp.
+inline constexpr const char* kMbVelocityHLSL = R"HLSL(
+Texture2D    uDepth : register(t0);
+SamplerState uSamp  : register(s0);
+cbuffer CB : register(b0) { float4x4 uReproject; float4 uParams; float4 uTexel; };
+struct In { float4 pos : SV_POSITION; float2 uv : TEXCOORD0; };
+float2 main(In i) : SV_Target
+{
+    float  d    = uDepth.Sample(uSamp, i.uv).r;
+    float4 ndc  = float4(i.uv.x * 2.0 - 1.0, 1.0 - 2.0 * i.uv.y, d, 1.0);
+    float4 prev = mul(uReproject, ndc);
+    if (prev.w <= 1e-5) return float2(0.0, 0.0);   // behind the previous camera
+    float2 prevNdc = prev.xy / prev.w;
+    float2 prevUV  = float2(prevNdc.x * 0.5 + 0.5, 1.0 - (prevNdc.y * 0.5 + 0.5));
+    float2 vPx     = (i.uv - prevUV) * uParams.zw * uParams.x;
+    float  len     = length(vPx);
+    if (len > uParams.y) vPx *= uParams.y / len;
+    return vPx;
+}
+)HLSL";
+
+inline constexpr const char* kMbBlurHLSL = R"HLSL(
+Texture2D    uImage    : register(t0);
+Texture2D    uVelocity : register(t1);
+SamplerState uSamp     : register(s0);
+cbuffer CB : register(b0) { float4x4 uReproject; float4 uParams; float4 uTexel; };
+struct In { float4 pos : SV_POSITION; float2 uv : TEXCOORD0; };
+float4 main(In i) : SV_Target
+{
+    const int kTaps = 6;   // per side; 12 taps + centre over the velocity's length
+    float2 vC = uVelocity.Sample(uSamp, i.uv).rg;
+    float  lC = length(vC);
+    float4 c0 = uImage.Sample(uSamp, i.uv);
+    if (lC < 0.5) return float4(c0.rgb, 1.0);   // still: pass through, bit-exact
+    float3 sum  = c0.rgb;
+    float  wsum = 1.0;
+    [unroll] for (int k = 1; k <= kTaps; ++k)
+    {
+        float t = float(k) / float(kTaps + 1);
+        [unroll] for (int s = -1; s <= 1; s += 2)
+        {
+            float2 uv = i.uv + vC * (0.5 * t * float(s)) * uTexel.xy;
+            float2 vT = uVelocity.Sample(uSamp, uv).rg;
+            // a (near) still tap belongs to something that is not streaking: barely counted
+            float  w  = clamp(length(vT) * 2.0 / lC, 0.0, 1.0);
+            sum  += uImage.Sample(uSamp, uv).rgb * w;
+            wsum += w;
+        }
+    }
+    return float4(sum / wsum, 1.0);
+}
+)HLSL";
+
 // ─── Underwater fog post pass (Thema 185 Schritt 2) ─────────────────────────
 // A straight alpha-blended overlay onto the HDR scene colour — no ping-pong
 // target, the depth-reconstruction convention is the deferred resolve's own
