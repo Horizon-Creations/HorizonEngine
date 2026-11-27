@@ -49,6 +49,7 @@
 #include <HorizonRendering/MaterialScalars.h>
 #include <HorizonRendering/RenderConstants.h>
 #include <HorizonRendering/SkyFrameParams.h>
+#include <HorizonRendering/MotionBlurShared.h>   // HE::motionBlurReproject / motionBlurParams
 #include <HorizonRendering/SkyNoise3D.h>
 #include <HorizonRendering/SkyShaderSource.h> // the GL sky, compiled to SPIR-V for the sky pass
 #include <HorizonRendering/SkyEnvBake.h>     // shared CPU sky bake (graph materials' heSkyEnv)
@@ -710,7 +711,12 @@ void VulkanRenderer::Render()
         // GI/SSAO/SSR, scene, PostFX, AA resolve, UI canvas. Lives in its own
         // method because RenderSceneImage() records exactly this and nothing of
         // the swapchain part below.
+        // Motion blur runs in, and its previous camera moves with, these real frames only (not a still or an RVT page).
+        m_mbRealFrame = true;
         DrawViewportFrame(cmd);
+        m_mbPrevViewProj = m_renderWorld.camera.projection * m_renderWorld.camera.view;   // whether it ran or not (GL's rule)
+        m_mbHasPrev      = true;
+        m_mbRealFrame    = false;
         if (gameFrame)
         {
             // The image is SHADER_READ_ONLY already (final AA / UI pass), but
@@ -1115,6 +1121,80 @@ void VulkanRenderer::DrawViewportFrame(VkCommandBuffer cmd)
             depthBarrier(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
                 VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
                 VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT);
+        }
+
+        // Camera motion blur, after the fog and before the bloom (GL / Metal's place): velocity, then the smear into
+        // m_mbImage, copied back over m_hdrImage so everything after reads the blurred image. Real frames of a perspective
+        // camera only (m_mbRealFrame: Render()).
+        if (m_mbEnabled && m_mbReady && m_mbRealFrame && m_mbHasPrev && !m_rawCapture && m_mbFB && m_mbVelFB
+            && m_viewportDepthImage && m_renderWorld.camera.projection[3][3] == 0.0f)
+        {
+            _frame.next("MotionBlur");
+            auto imageBarrier = [&](VkImage img, VkImageAspectFlags aspect, VkImageLayout from, VkImageLayout to,
+                                    VkAccessFlags srcAccess, VkAccessFlags dstAccess,
+                                    VkPipelineStageFlags srcStage, VkPipelineStageFlags dstStage) {
+                VkImageMemoryBarrier b{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+                b.oldLayout = from; b.newLayout = to;
+                b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                b.image = img; b.subresourceRange = { aspect, 0, 1, 0, 1 };
+                b.srcAccessMask = srcAccess; b.dstAccessMask = dstAccess;
+                vkCmdPipelineBarrier(cmd, srcStage, dstStage, 0, 0, nullptr, 0, nullptr, 1, &b);
+            };
+            struct { float reproject[16]; glm::vec4 params; float texel[4]; } mbpc{};
+            static_assert(sizeof(mbpc) == 96, "must match the push-constant block of motionblur_velocity/_blur.frag");
+            // The matrices the scene was rasterised with (kVulkanClipFix), so the shader's (uv * 2 - 1, depth) is a Vulkan ndc point.
+            const glm::mat4 reproject = HE::motionBlurReproject(HE::kVulkanClipFix * m_mbPrevViewProj,
+                                                                HE::kVulkanClipFix * m_renderWorld.camera.projection * m_renderWorld.camera.view);
+            std::memcpy(mbpc.reproject, &reproject[0][0], sizeof(mbpc.reproject));
+            mbpc.params = HE::motionBlurParams(m_mbIntensity, m_mbMaxBlur, int(m_viewportW), int(m_viewportH));
+            mbpc.texel[0] = 1.0f / float(m_viewportW); mbpc.texel[1] = 1.0f / float(m_viewportH);
+            const VkViewport mbvp{ 0, 0, (float)m_viewportW, (float)m_viewportH, 0, 1 };
+            const VkRect2D   mbsc{ { 0, 0 }, { m_viewportW, m_viewportH } };
+            auto pass = [&](VkRenderPass rp, VkFramebuffer fb, VkPipeline pipe, VkPipelineLayout layout, VkDescriptorSet ds) {
+                VkRenderPassBeginInfo bi{ VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
+                bi.renderPass = rp; bi.framebuffer = fb; bi.renderArea.extent = { m_viewportW, m_viewportH };
+                vkCmdBeginRenderPass(cmd, &bi, VK_SUBPASS_CONTENTS_INLINE);
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
+                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, 0, 1, &ds, 0, nullptr);
+                vkCmdPushConstants(cmd, layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(mbpc), &mbpc);
+                vkCmdSetViewport(cmd, 0, 1, &mbvp);
+                vkCmdSetScissor(cmd, 0, 1, &mbsc);
+                vkCmdDraw(cmd, 3, 1, 0, 0);
+                vkCmdEndRenderPass(cmd);
+            };
+            // 1. velocity from the depth (off the attachment for the draw, the fog's round trip)
+            imageBarrier(m_viewportDepthImage, VK_IMAGE_ASPECT_DEPTH_BIT,
+                VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
+                VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+            pass(m_mbVelRP, m_mbVelFB, m_mbVelPipe, m_mbVelPipeLayout, m_mbVelDS);
+            imageBarrier(m_viewportDepthImage, VK_IMAGE_ASPECT_DEPTH_BIT,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT);
+            // 2. the smear: {hdr, velocity} → m_mbImage
+            runPostFXBarrier(cmd, m_mbVelImage, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+            runPostFXBarrier(cmd, m_hdrImage, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+            pass(m_mbRP, m_mbFB, m_mbPipe, m_mbPipeLayout, m_mbDS);
+            // 3. back over m_hdrImage, which goes on as a colour attachment (the barrier below hands it to the bloom)
+            imageBarrier(m_mbImage, VK_IMAGE_ASPECT_COLOR_BIT,
+                VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+                VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+            imageBarrier(m_hdrImage, VK_IMAGE_ASPECT_COLOR_BIT,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+            VkImageCopy copy{};
+            copy.srcSubresource = copy.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+            copy.extent = { m_viewportW, m_viewportH, 1 };
+            vkCmdCopyImage(cmd, m_mbImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, m_hdrImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+            imageBarrier(m_hdrImage, VK_IMAGE_ASPECT_COLOR_BIT,
+                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_READ_BIT,
+                VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
         }
 
         _frame.next("Bloom");
@@ -5297,10 +5377,10 @@ void VulkanRenderer::createPostFXPipelines()
     }
 
     // 5 chain sets + m_presentDS (the game's present pass), 2 samplers each,
-    // + 1 underwater-fog set, 1 sampler.
-    VkDescriptorPoolSize ps{ VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 13 };
+    // + 1 underwater-fog set, 1 sampler, + motion blur's velocity set (1) and smear set (2).
+    VkDescriptorPoolSize ps{ VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 16 };
     VkDescriptorPoolCreateInfo dpci{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
-    dpci.maxSets = 7; dpci.poolSizeCount = 1; dpci.pPoolSizes = &ps;
+    dpci.maxSets = 9; dpci.poolSizeCount = 1; dpci.pPoolSizes = &ps;
     vkCheck(vkCreateDescriptorPool(m_device, &dpci, nullptr, &m_postFxDSPool), "postfx pool");
 
     VkDescriptorSetLayout layouts[5]; for (auto& l : layouts) l = m_postFxDSLayout;
@@ -5311,6 +5391,9 @@ void VulkanRenderer::createPostFXPipelines()
     vkCheck(vkAllocateDescriptorSets(m_device, &dsai, &m_presentDS), "present ds alloc");
     dsai.pSetLayouts = &m_underwaterFogDSLayout;
     vkCheck(vkAllocateDescriptorSets(m_device, &dsai, &m_underwaterFogDS), "underwaterfog ds alloc");
+    vkCheck(vkAllocateDescriptorSets(m_device, &dsai, &m_mbVelDS), "motion blur velocity ds alloc");   // the depth, like the fog's
+    dsai.pSetLayouts = &m_postFxDSLayout;
+    vkCheck(vkAllocateDescriptorSets(m_device, &dsai, &m_mbDS), "motion blur smear ds alloc");         // hdr, velocity
 
     // Dummy 1×1 RGBA8 image for unused binding slots.
     {
@@ -5424,6 +5507,9 @@ void VulkanRenderer::createPostFXPipelines()
     makeBlitRP(VK_FORMAT_R16G16B16A16_SFLOAT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, m_postFxBlitF16);
     makeBlitRP(VK_FORMAT_R8G8B8A8_UNORM,      VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, m_postFxBlitF8);
     makeBlitRP(VK_FORMAT_R8G8B8A8_UNORM,      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, m_postFxFinalRP);
+    // Motion blur's two targets: the velocity (RG16F) and the smear (RGBA16F; m_postFxBlitF16's format, its own pass all the same).
+    makeBlitRP(VK_FORMAT_R16G16_SFLOAT,       VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, m_mbVelRP);
+    makeBlitRP(VK_FORMAT_R16G16B16A16_SFLOAT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, m_mbRP);
 
     // ── Pipelines ─────────────────────────────────────────────────────────────
     VkShaderModule vsM  = loadShaderModule("postfx.vert.spv");
@@ -5441,16 +5527,19 @@ void VulkanRenderer::createPostFXPipelines()
     // Same for the caustics (Thema 185 Schritt 3): optional, gated by
     // m_underwaterCausticsReady on its own.
     VkShaderModule ucFS = loadShaderModule("postfx_underwatercaustics.frag.spv");
+    // Motion blur: optional too (m_mbReady).
+    VkShaderModule mbvFS = loadShaderModule("motionblur_velocity.frag.spv");
+    VkShaderModule mbbFS = loadShaderModule("motionblur_blur.frag.spv");
 
     if (!vsM || !tmFS || !fxFS || !smFS || !btFS || !brFS || !blFS)
     {
         HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: PostFX shaders missing — no HDR/bloom/FXAA");
-        for (auto m : {vsM,tmFS,fxFS,smFS,btFS,brFS,blFS,uwFS,ucFS}) if (m) vkDestroyShaderModule(m_device,m,nullptr);
+        for (auto m : {vsM,tmFS,fxFS,smFS,btFS,brFS,blFS,uwFS,ucFS,mbvFS,mbbFS}) if (m) vkDestroyShaderModule(m_device,m,nullptr);
         return;
     }
 
     auto makePipe = [&](VkShaderModule fs, VkRenderPass rp, VkPipeline& out,
-                        const VkPipelineDepthStencilStateCreateInfo* depth = nullptr) {
+                        const VkPipelineDepthStencilStateCreateInfo* depth = nullptr, VkPipelineLayout layout = VK_NULL_HANDLE) {
         VkPipelineShaderStageCreateInfo stages[2]{};
         stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
         stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT; stages[0].module = vsM; stages[0].pName = "main";
@@ -5479,7 +5568,7 @@ void VulkanRenderer::createPostFXPipelines()
         pci.pViewportState = &vp; pci.pRasterizationState = &rs;
         pci.pMultisampleState = &ms; pci.pColorBlendState = &cb;
         pci.pDepthStencilState = depth;
-        pci.pDynamicState = &dyn; pci.layout = m_postFxPipeLayout;
+        pci.pDynamicState = &dyn; pci.layout = layout ? layout : m_postFxPipeLayout;
         pci.renderPass = rp; pci.subpass = 0;
         vkCheck(createGraphicsPipelines(1, &pci, nullptr, &out), "postfx pipeline");
     };
@@ -5595,7 +5684,24 @@ void VulkanRenderer::createPostFXPipelines()
 
     createTaaPipelines(vsM);                         // optional — see taaReady()
 
-    for (auto m : {vsM,tmFS,fxFS,smFS,btFS,brFS,blFS,uwFS,ucFS}) if (m) vkDestroyShaderModule(m_device,m,nullptr);
+    // Camera motion blur: 96 bytes of push constants (mat4 + 2 x vec4, see the .frag files) over the fog's depth set
+    // (velocity) and the chain's two-image set (smear).
+    if (mbvFS && mbbFS && m_mbVelRP && m_mbRP && m_mbVelDS && m_mbDS)
+    {
+        VkPushConstantRange mbpcr{ VK_SHADER_STAGE_FRAGMENT_BIT, 0, 96 };
+        VkPipelineLayoutCreateInfo mbl{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+        mbl.setLayoutCount = 1; mbl.pushConstantRangeCount = 1; mbl.pPushConstantRanges = &mbpcr;
+        mbl.pSetLayouts = &m_underwaterFogDSLayout;
+        vkCheck(vkCreatePipelineLayout(m_device, &mbl, nullptr, &m_mbVelPipeLayout), "motion blur velocity pipe layout");
+        mbl.pSetLayouts = &m_postFxDSLayout;
+        vkCheck(vkCreatePipelineLayout(m_device, &mbl, nullptr, &m_mbPipeLayout), "motion blur smear pipe layout");
+        makePipe(mbvFS, m_mbVelRP, m_mbVelPipe, nullptr, m_mbVelPipeLayout);
+        makePipe(mbbFS, m_mbRP,    m_mbPipe,    nullptr, m_mbPipeLayout);
+    }
+    m_mbReady = m_mbVelPipe && m_mbPipe;
+    if (!m_mbReady) HE_LOG_WARN(RHI, "%s", "VulkanRenderer: motion blur unavailable (motionblur_*.frag.spv missing or its pipelines failed)");
+
+    for (auto m : {vsM,tmFS,fxFS,smFS,btFS,brFS,blFS,uwFS,ucFS,mbvFS,mbbFS}) if (m) vkDestroyShaderModule(m_device,m,nullptr);
 
     m_postFxReady = true;
     // ── HDR-compatible scene pipelines ────────────────────────────────────────
@@ -5696,6 +5802,12 @@ void VulkanRenderer::destroyPostFXPipelines()
     m_underwaterCausticsReady = false;
     if (m_underwaterCausticsPipe)       { vkDestroyPipeline(m_device, m_underwaterCausticsPipe, nullptr); m_underwaterCausticsPipe=VK_NULL_HANDLE; }
     if (m_underwaterCausticsPipeLayout) { vkDestroyPipelineLayout(m_device, m_underwaterCausticsPipeLayout, nullptr); m_underwaterCausticsPipeLayout=VK_NULL_HANDLE; }
+    m_mbReady = false;
+    m_mbVelDS = m_mbDS = VK_NULL_HANDLE;  // freed with the pool below
+    for (auto p : {m_mbVelPipe, m_mbPipe}) if (p) vkDestroyPipeline(m_device, p, nullptr);
+    for (auto l : {m_mbVelPipeLayout, m_mbPipeLayout}) if (l) vkDestroyPipelineLayout(m_device, l, nullptr);
+    for (auto rp : {m_mbVelRP, m_mbRP}) if (rp) vkDestroyRenderPass(m_device, rp, nullptr);
+    m_mbVelPipe = m_mbPipe = VK_NULL_HANDLE; m_mbVelPipeLayout = m_mbPipeLayout = VK_NULL_HANDLE; m_mbVelRP = m_mbRP = VK_NULL_HANDLE;
     m_underwaterFogReady = false;
     m_underwaterFogDS = VK_NULL_HANDLE;   // freed with the pool below
     if (m_underwaterFogPipe)       { vkDestroyPipeline(m_device, m_underwaterFogPipe, nullptr); m_underwaterFogPipe=VK_NULL_HANDLE; }
@@ -5747,9 +5859,10 @@ void VulkanRenderer::createPostFXResources(uint32_t w, uint32_t h)
 
     const VkImageUsageFlags RTf = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
     const uint32_t bw = std::max(1u, w/2), bh = std::max(1u, h/2);
-    // TRANSFER_SRC on the HDR target only: forward SSR copies the finished frame
-    // into m_ssrColorHist for the NEXT frame's trace (CaptureSSRColorHistory).
-    makeImg(VK_FORMAT_R16G16B16A16_SFLOAT, w,  h,  RTf | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+    // TRANSFER_SRC on the HDR target: forward SSR copies the finished frame
+    // into m_ssrColorHist for the NEXT frame's trace (CaptureSSRColorHistory);
+    // TRANSFER_DST: motion blur copies its smear back over it.
+    makeImg(VK_FORMAT_R16G16B16A16_SFLOAT, w,  h,  RTf | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
             m_hdrImage, m_hdrMemory, m_hdrView);
     makeImg(VK_FORMAT_R16G16B16A16_SFLOAT, bw, bh, RTf, m_bloomImage[0],m_bloomMemory[0],m_bloomView[0]);
     makeImg(VK_FORMAT_R16G16B16A16_SFLOAT, bw, bh, RTf, m_bloomImage[1],m_bloomMemory[1],m_bloomView[1]);
@@ -5816,6 +5929,30 @@ void VulkanRenderer::createPostFXResources(uint32_t w, uint32_t h)
         vkUpdateDescriptorSets(m_device, 1, &dw, 0, nullptr);
     }
 
+    // Camera motion blur's two full-res targets, sets and framebuffers.
+    // shortcut: made with the chain whether the blur is on or not (12 bytes a pixel); made on first use if that matters.
+    if (m_mbReady && m_viewportDepthView)
+    {
+        makeImg(VK_FORMAT_R16G16_SFLOAT, w, h, RTf, m_mbVelImage, m_mbVelMemory, m_mbVelView);
+        makeImg(VK_FORMAT_R16G16B16A16_SFLOAT, w, h, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+                m_mbImage, m_mbMemory, m_mbView);
+        makeFB(m_mbVelRP, m_mbVelView, w, h, m_mbVelFB);
+        makeFB(m_mbRP,    m_mbView,    w, h, m_mbFB);
+        VkDescriptorImageInfo ii[3] = { { VK_NULL_HANDLE, m_viewportDepthView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL },
+                                        { VK_NULL_HANDLE, m_hdrView,           VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL },
+                                        { VK_NULL_HANDLE, m_mbVelView,         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL } };
+        VkWriteDescriptorSet mw[3]{};
+        for (int i = 0; i < 3; ++i)
+        {
+            mw[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; mw[i].descriptorCount = 1;
+            mw[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; mw[i].pImageInfo = &ii[i];
+        }
+        mw[0].dstSet = m_mbVelDS; mw[0].dstBinding = 0;
+        mw[1].dstSet = m_mbDS;    mw[1].dstBinding = 0;
+        mw[2].dstSet = m_mbDS;    mw[2].dstBinding = 1;
+        vkUpdateDescriptorSets(m_device, 3, mw, 0, nullptr);
+    }
+
     // TAA's targets follow the same size and read m_ldrView / the viewport
     // depth just (re)built; the GPU is idle (destroyPostFXResources above).
     if (taaWanted()) createTaaTargets(w, h);
@@ -5834,6 +5971,10 @@ void VulkanRenderer::destroyPostFXResources()
     if (m_bloomFB[1]) { vkDestroyFramebuffer(m_device, m_bloomFB[1], nullptr); m_bloomFB[1]=VK_NULL_HANDLE; }
     if (m_bloomFB[0]) { vkDestroyFramebuffer(m_device, m_bloomFB[0], nullptr); m_bloomFB[0]=VK_NULL_HANDLE; }
     if (m_underwaterFogFB) { vkDestroyFramebuffer(m_device, m_underwaterFogFB, nullptr); m_underwaterFogFB=VK_NULL_HANDLE; }
+    for (VkFramebuffer* fb : { &m_mbVelFB, &m_mbFB }) if (*fb) { vkDestroyFramebuffer(m_device, *fb, nullptr); *fb = VK_NULL_HANDLE; }
+    for (VkImageView* v : { &m_mbVelView, &m_mbView }) if (*v) { vkDestroyImageView(m_device, *v, nullptr); *v = VK_NULL_HANDLE; }
+    for (VkImage* i : { &m_mbVelImage, &m_mbImage }) if (*i) { vkDestroyImage(m_device, *i, nullptr); *i = VK_NULL_HANDLE; }
+    for (VkDeviceMemory* m : { &m_mbVelMemory, &m_mbMemory }) if (*m) { vkFreeMemory(m_device, *m, nullptr); *m = VK_NULL_HANDLE; }
     if (m_hdrFB)      { vkDestroyFramebuffer(m_device, m_hdrFB,      nullptr); m_hdrFB=VK_NULL_HANDLE; }
     if (m_ldrView)    { vkDestroyImageView(m_device, m_ldrView,    nullptr); m_ldrView=VK_NULL_HANDLE; }
     if (m_ldrImage)   { vkDestroyImage    (m_device, m_ldrImage,   nullptr); m_ldrImage=VK_NULL_HANDLE; }
@@ -15694,6 +15835,13 @@ void VulkanRenderer::SetBloomSettings(const BloomSettings& s)
     m_bloomEnabled   = s.enabled;
     m_bloomThreshold = s.threshold;
     m_bloomStrength  = s.intensity;
+}
+
+void VulkanRenderer::SetMotionBlurSettings(const MotionBlurSettings& s)
+{
+    m_mbEnabled   = s.enabled;
+    m_mbIntensity = s.intensity;
+    m_mbMaxBlur   = s.maxBlur;
 }
 
 void VulkanRenderer::SetAntiAliasingSettings(const AntiAliasingSettings& s)

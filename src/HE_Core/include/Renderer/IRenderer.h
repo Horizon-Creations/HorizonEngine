@@ -640,7 +640,9 @@ public:
     //   maxBlur   — cap on the smear length in pixels at 720p (scales with the
     //               target height), so a camera cut is one bad-ish frame and
     //               not a full-screen wipe
-    // Implemented by the OpenGL and Metal backends; the others ignore it. Off by
+    // Implemented by every GPU backend (D3D11 / D3D12 / Vulkan since the port of
+    // GL's two passes; HorizonRendering/MotionBlurShared.h holds the shared
+    // reprojection); the software renderer ignores it. Off by
     // default, and off (or a camera that did not move) = the image is
     // byte-identical to the pass not existing.
     struct MotionBlurSettings

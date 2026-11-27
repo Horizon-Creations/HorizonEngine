@@ -4504,7 +4504,7 @@ namespace
 	{ "Preferences/Post-Processing/Motion Blur", "",
 	  "Streaks the picture along the camera's movement between two frames, the "
 	  "way a real shutter does. Only the camera counts: an object crossing a "
-	  "still camera stays sharp. OpenGL and Metal.",
+	  "still camera stays sharp. Every backend but the software renderer.",
 	  "", "rendering#postfx" },
 	{ "Preferences/Post-Processing/Shutter", "",
 	  "How much of one frame's motion goes into the streak. 0.5 is the classic "

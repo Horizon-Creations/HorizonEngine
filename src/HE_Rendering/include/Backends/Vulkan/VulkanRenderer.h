@@ -65,6 +65,7 @@ public:
 	void SetMoonTexture(const void* rgba8Pixels, int width, int height) override;
 	void SetSSAOSettings(const SSAOSettings& s) override;
 	void SetBloomSettings(const BloomSettings& s) override;
+	void SetMotionBlurSettings(const MotionBlurSettings& s) override;
 	void SetAntiAliasingSettings(const AntiAliasingSettings& s) override;
 	void SetGISettings(const GISettings& s) override;
 	void SetGIReflectionSettings(const GIReflectionSettings& s) override;
@@ -1173,6 +1174,22 @@ private:
 	VkPipeline            m_underwaterFogPipe      = VK_NULL_HANDLE;
 	VkDescriptorSet       m_underwaterFogDS        = VK_NULL_HANDLE;
 	bool                  m_underwaterFogReady     = false;
+
+	// ── Camera motion blur (IRenderer::MotionBlurSettings; motionblur_velocity/_blur.frag) ──
+	// Velocity (RG16F, px) from the depth (the fog's set layout, its own set) and the two cameras, the smear into m_mbImage
+	// (the postFx set layout: hdr, velocity), copied back over m_hdrImage so the bloom and the tonemap read the blurred image.
+	// m_mbPrevViewProj moves with every REAL frame (Render()), on or off; a still or an RVT page neither runs it nor moves it.
+	VkRenderPass          m_mbVelRP = VK_NULL_HANDLE, m_mbRP = VK_NULL_HANDLE;
+	VkPipelineLayout      m_mbVelPipeLayout = VK_NULL_HANDLE, m_mbPipeLayout = VK_NULL_HANDLE;
+	VkPipeline            m_mbVelPipe = VK_NULL_HANDLE, m_mbPipe = VK_NULL_HANDLE;
+	VkDescriptorSet       m_mbVelDS = VK_NULL_HANDLE, m_mbDS = VK_NULL_HANDLE;   // from m_postFxDSPool
+	VkImage               m_mbVelImage = VK_NULL_HANDLE, m_mbImage = VK_NULL_HANDLE;
+	VkDeviceMemory        m_mbVelMemory = VK_NULL_HANDLE, m_mbMemory = VK_NULL_HANDLE;
+	VkImageView           m_mbVelView = VK_NULL_HANDLE, m_mbView = VK_NULL_HANDLE;
+	VkFramebuffer         m_mbVelFB = VK_NULL_HANDLE, m_mbFB = VK_NULL_HANDLE;
+	bool                  m_mbReady = false, m_mbEnabled = false, m_mbHasPrev = false, m_mbRealFrame = false;
+	float                 m_mbIntensity = 0.5f, m_mbMaxBlur = 24.0f;
+	glm::mat4             m_mbPrevViewProj{ 1.0f };
 
 	// ── Underwater caustics (Thema 185 Schritt 3) ───────────────────────────
 	// The refracted-light net (postfx_underwatercaustics.frag, GLSL twin of

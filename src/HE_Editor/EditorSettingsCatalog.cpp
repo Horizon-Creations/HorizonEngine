@@ -410,7 +410,7 @@ std::vector<SettingDesc> buildCatalog()
 	                     1.0, 22.0, "f-number: f/1.4 blurs most, f/22 next to nothing."));
 	t.push_back(boolRow("postProcess.motionBlurEnabled", "Motion Blur", "Post-Processing",
 	                    "motionblur", &EditorConfig::MotionBlurEnabled,
-	                    "Camera motion blur (OpenGL, Metal)."));
+	                    "Camera motion blur (every GPU backend)."));
 	t.push_back(floatRow("postProcess.motionBlurIntensity", "Shutter",
 	                     "Post-Processing", "motionblur", &EditorConfig::MotionBlurIntensity,
 	                     0.0, 2.0, "Fraction of a frame's motion in the streak; 0.5 = 180° shutter."));

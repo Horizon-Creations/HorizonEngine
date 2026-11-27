@@ -143,6 +143,7 @@ if(HE_VULKAN_ENABLED)
                       postfx_smaa.frag postfx_aa_blit.frag
                       postfx_bloom_bright.frag postfx_bloom_blur.frag
                       postfx_underwaterfog.frag postfx_underwatercaustics.frag
+                      motionblur_velocity.frag motionblur_blur.frag
                       taa_velocity.vert taa_velocity.frag taa_resolve.frag taa_sharpen.frag
                       sky.vert sky.frag
                       debug_line.vert debug_line.frag

@@ -526,9 +526,8 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const DrawOptions& o
 			hint("Lens blur outside the focus band; a smaller f-number blurs more.");
 	});
 	row("motionblur", "Post-Processing", [&]{
-		// Same backend pair as DoF; the other backends ignore the push.
-		const bool mbOK = (ctx.backend == HE::RendererBackend::Metal ||
-		                   ctx.backend == HE::RendererBackend::OpenGL);
+		// Every GPU backend; only the software renderer (UI only) ignores the push.
+		const bool mbOK = ctx.backend != HE::RendererBackend::Software;
 		ImGui::BeginDisabled(!mbOK);
 		EditorWidgets::checkbox("Motion Blur", &cfg.MotionBlurEnabled);
 		const bool hovered = ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled);
@@ -539,7 +538,7 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const DrawOptions& o
 		}
 		ImGui::EndDisabled();
 		if (!mbOK && hovered)
-			ImGui::SetTooltip("Metal and OpenGL only — Vulkan and DirectX ignore it.");
+			ImGui::SetTooltip("The software renderer draws no 3D scene to blur.");
 		else if (mbOK)
 			hint("Streaks along the camera's motion; objects moving past a still camera stay sharp.");
 	});
