@@ -1,7 +1,7 @@
 # Tile ground on D3D11 / D3D12 (topic 355, step 18, NN-WS03, 27.11.)
 
-Step 18: on Windows, run the slot-table alias fix, measure the RVT table upload, the far image from the material. Parts 1
-and 2 are done here; part 3 is not started (see Next steps).
+Step 18: on Windows, run the slot-table alias fix, measure the RVT table upload, the far image from the material. All three
+parts are done here.
 
 ## Handoff
 
@@ -16,6 +16,16 @@ and 2 are done here; part 3 is not started (see Next steps).
      the table (`RvtTable::mapped`) instead of a fresh 16 MB vector per call.
    - D3D12 `uploadRvtTable12` (`D3D12Renderer.cpp` ~15290): the same slot map, entries written straight into the upload
      buffer (no intermediate vector + row memcpy). Still synchronous, still one upload buffer per call (see Fallen).
+3. **Far image from the material on D3D** (Metal's `547bfe380` + `d2d547ac2`):
+   - Drawn: the HLSL landscape variant gets `HE_LS_FAR` (`MaterialShaderLibrary.cpp` fragmentVariant, `farImage` for HLSL);
+     `heLsFarImage` (binding 62) → **t56, s0**: s0 is the variant's one live sampler (heLandscapeWeights, s0's live user in
+     every other material, is replaced in it). D3D12: `kLandscapeSrvCount` 9 → 10 (`D3D12MaterialRootSignature.h`), the static
+     s0 is linear + mips + clamp already; `D3D12Landscape::writeMaterialViews` writes the far view (or a null one) tenth.
+     D3D11: `D3D11Landscape::drawPatches` binds the far SRV on t56 and its own far sampler on s0, puts the material's s0 back.
+     Both `drawPatches(…, farImage)` set `uTile.w`.
+   - Baked: `Capabilities::landscapeGroundImage` on D3D11/D3D12 (= `landscapeRvt`). `drawGroundMaterial`: rvtTileGround with
+     no slot = the ground image: `rvtMaterial` on the whole ground, no RVT consumer patches, no far image (also not in the
+     fixed blend: `Shading::noFarImage`).
 
 **Verified** (Release, RTX 4070; test world `make_world.py` here: HEProject's scene with only terrain/sky/weather, terrain
 stretched to 100 km with far_testworld's mountain/F/rock/snow; tiles via the baseline's `tools/migrate.cpp`, 196 × 196)
@@ -29,10 +39,18 @@ stretched to 100 km with far_testworld's mountain/F/rock/snow; tiles via the bas
 - Alias A/B on the tile world, camera on the mountain at (75 000, 3 500, 25 000) looking west (`stillMountain.json`): with
   the test switched off the near rock/snow discs repeat as ellipses at the horizon (`t100m-D3D11-alias-off.jpg`), with it
   they are gone (`t100m-D3D11-alias-fix.jpg`); 5 983 px differ on D3D11 and on D3D12 alike.
-- `landscape_gpu_check --only d3d11|d3d12` exit 0; he_tests 6 620 passed, 0 failed.
+- `landscape_gpu_check --only d3d11|d3d12` exit 0; he_tests 6 620 passed, 0 failed (parts 1-2, 6f5e03483).
+- Far image (part 3), 40 km tile world (`make_world.py … 40000`, migrated: 79 × 79 tiles), RVT on, Manual bake pressed
+  by `HE_LANDSCAPE_FAR_BAKE_NOW=1` (`farbake.json`): "100 region(s) painted from the material" in 91.8 s (D3D11) and
+  94.6 s (D3D12; Metal 91 s). The decoded `.far` (`far_to_png.py`, its `zstd` call swapped for Python's `compression.zstd`)
+  has the mountain with rock ring and snow north-east and the hill south-west, not mirrored (`far-baked-d3d11.jpg`);
+  D3D11 and D3D12 bakes differ by at most 1 level. Drawn, from (38 000, 3 000, 38 000): `HE_LS_FAR` 0/1 changes 92 241
+  ground px by > 2 levels, all beyond the atlas edge (`far-ab-d3d11.jpg`: off, on, difference × 8); D3D11 vs D3D12 with
+  it 0.13 levels. `test_material_graph`'s D3D register case checks t56/s0.
 
 **Not verified:** RVT on the tile ground in flight on D3D (all flights above are the old landscape: the tile RVT
-thrash of step 15 would dominate); D3D11 / D3D12 under the debug layer.
+thrash of step 15 would dominate); D3D11 / D3D12 under the debug layer; the far image's weather snow on D3D (Snow Cover
+> 0: same GLSL as Metal, not rendered here); Automatic bake mode on D3D; GPU cost of the far branch.
 
 **Fallen**
 
@@ -48,9 +66,7 @@ thrash of step 15 would dominate); D3D11 / D3D12 under the debug layer.
 
 **Next steps**
 
-1. Part 3, far image from the material on D3D: `landscapeFragmentSource(farImage=true)` for the HLSL backends, binding 62 →
-   an SRV + mip-linear sampler in both D3D material layouts, bind the far texture in `D3D11Landscape`/`D3D12Landscape`
-   (`uTile.w`), `noFarImage` + the rvtTileGround-with-rvtSlot<0 path (`BindLandscapeMaterial`, `TakeRvtTilePatches`
-   equivalents) and `Capabilities::landscapeGroundImage`. Metal reference: `547bfe380`, `d2d547ac2`, `2f9a7ffec`, `4564d8a1a`.
+1. Vulkan / OpenGL: the same far image from the material (step 16); the D3D shape above is the template (a free register
+   and a live sampler in the material layout, `drawPatches(farImage)`, `landscapeGroundImage`).
 2. D3D12 page renders (9-10 ms a frame vs 1.5 on D3D11): every page bracket opens with `rvtStillEnter` →
    `createViewportRT` → a full flush, 50-60 a second.

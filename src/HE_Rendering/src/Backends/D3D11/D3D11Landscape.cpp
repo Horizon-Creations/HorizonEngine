@@ -465,7 +465,7 @@ void D3D11Landscape::drawVelocity(ID3D11DeviceContext* ctx, const HE::LandscapeR
 	m_impl->depthOnly = false;
 }
 
-bool D3D11Landscape::drawPatches(ID3D11DeviceContext* ctx, const HE::LandscapeRenderFrame& f, const glm::mat4& viewProj)
+bool D3D11Landscape::drawPatches(ID3D11DeviceContext* ctx, const HE::LandscapeRenderFrame& f, const glm::mat4& viewProj, bool farImage)
 {
 	Impl& m = *m_impl;
 	if (!m.ok || !f.active || !f.world || f.patches.empty() || !m.world || m.world->generation != f.world->generation) return false;
@@ -484,6 +484,8 @@ bool D3D11Landscape::drawPatches(ID3D11DeviceContext* ctx, const HE::LandscapeRe
 	}
 	vkls::Globals g;
 	vkls::fillGlobals(g, f, viewProj, glm::vec3(0.0f, 1.0f, 0.0f), glm::vec3(1.0f), glm::vec3(0.0f), false, false, false, false);   // the material lights, not these
+	const bool farOn = farImage && m.farSrv;
+	g.tile[3] = farOn ? 1 : 0;   // the variant's heLsFar (uTile.w): the far image on t56 / s0, bound below
 	D3D11_MAPPED_SUBRESOURCE mapped{};
 	if (FAILED(ctx->Map(m.matGlobalsCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) return false;
 	std::memcpy(mapped.pData, &g, sizeof(g));
@@ -506,6 +508,14 @@ bool D3D11Landscape::drawPatches(ID3D11DeviceContext* ctx, const HE::LandscapeRe
 	ctx->PSSetConstantBuffers(kGlobals, 1, cbs);
 	ctx->VSSetShaderResources(kFirst, kCount, views);
 	ctx->PSSetShaderResources(kFirst, kCount, views);
+	// The far image behind the nine (t56) and its own sampler on s0, the variant's one live sampler there (MaterialShaderLibrary's
+	// HLSL pins); the material's s0 is put back below.
+	ComPtr<ID3D11SamplerState> s0;
+	ctx->PSGetSamplers(0, 1, s0.GetAddressOf());
+	ID3D11ShaderResourceView* farView = farOn ? m.farSrv.Get() : nullptr;
+	ID3D11SamplerState* farSmp = m.farSampler.Get();
+	ctx->PSSetShaderResources(kFirst + kCount, 1, &farView);
+	ctx->PSSetSamplers(0, 1, &farSmp);
 	ctx->IASetInputLayout(nullptr);   // the grid comes from SV_VertexID
 	ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 	ctx->IASetIndexBuffer(m.indices.Get(), DXGI_FORMAT_R16_UINT, 0);
@@ -534,10 +544,12 @@ bool D3D11Landscape::drawPatches(ID3D11DeviceContext* ctx, const HE::LandscapeRe
 		++m.stats.patches;
 	}
 
-	ID3D11ShaderResourceView* none[kCount] = {};
+	ID3D11ShaderResourceView* none[kCount + 1] = {};
 	ID3D11Buffer* noCb[2] = {};
 	ctx->VSSetShaderResources(kFirst, kCount, none);
-	ctx->PSSetShaderResources(kFirst, kCount, none);
+	ctx->PSSetShaderResources(kFirst, kCount + 1, none);
+	ID3D11SamplerState* oldS0 = s0.Get();
+	ctx->PSSetSamplers(0, 1, &oldS0);
 	ctx->VSSetConstantBuffers(kGlobals, 2, noCb);
 	ctx->PSSetConstantBuffers(kGlobals, 1, noCb);
 	ctx->RSSetState(raster.Get());
@@ -556,7 +568,7 @@ void D3D11Landscape::draw(ID3D11DeviceContext* ctx, const HE::LandscapeRenderFra
 
 	d3dls::Globals g;
 	d3dls::fillGlobals(g, f, viewProj, shading.sunDir, shading.sunColor, shading.ambient, shading.albedoArray != nullptr,
-	                   shading.normalArray != nullptr, shading.maskArray != nullptr, m.farSrv != nullptr);
+	                   shading.normalArray != nullptr, shading.maskArray != nullptr, m.farSrv != nullptr && !shading.noFarImage);
 	if (m.viewPos) d3dls::setViewRows(g, *m.viewPos);
 	if (m.velNow) { d3dls::setViewRows(g, *m.velNow, 0); d3dls::setViewRows(g, *m.velPrev, 4); }
 	D3D11_MAPPED_SUBRESOURCE mapped{};

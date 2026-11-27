@@ -809,11 +809,21 @@ bool D3D12Landscape::writeMaterialViews(size_t cpuFirst, unsigned increment) con
 		h.ptr = cpuFirst + static_cast<SIZE_T>(i) * increment;
 		m.device->CreateShaderResourceView(m.images[i].res.Get(), &m.images[i].view, h);
 	}
+	// t56: the baked far image (HE_LS_FAR), or a null view of its shape (read only where uTile.w says so).
+	ID3D12Resource* farRes = m.farPresent ? m.farTex.Get() : nullptr;
+	D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
+	sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+	sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+	sv.Format = farRes ? farRes->GetDesc().Format : DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+	sv.Texture2D.MipLevels = farRes ? farRes->GetDesc().MipLevels : 1;
+	D3D12_CPU_DESCRIPTOR_HANDLE h{};
+	h.ptr = cpuFirst + static_cast<SIZE_T>(d3dls::kImageCount) * increment;
+	m.device->CreateShaderResourceView(farRes, &sv, h);
 	return true;
 }
 
 bool D3D12Landscape::drawPatches(ID3D12GraphicsCommandList* cl, const HE::LandscapeRenderFrame& f, const glm::mat4& viewProj, unsigned rootGlobals,
-                                 unsigned rootPatch)
+                                 unsigned rootPatch, bool farImage)
 {
 	Impl& m = *m_impl;
 	if (!m.ok || !f.active || !f.world || f.patches.empty() || !m.world || m.world->generation != f.world->generation) return false;
@@ -824,6 +834,7 @@ bool D3D12Landscape::drawPatches(ID3D12GraphicsCommandList* cl, const HE::Landsc
 	if (m.globalsStride < sizeof(vkls::Globals)) return false;
 	vkls::Globals g;
 	vkls::fillGlobals(g, f, viewProj, glm::vec3(0.0f, 1.0f, 0.0f), glm::vec3(1.0f), glm::vec3(0.0f), false, false, false, false);   // the material lights, not these
+	g.tile[3] = farImage && m.farPresent ? 1 : 0;   // the variant's heLsFar (uTile.w): the far image on t56 (writeMaterialViews)
 	const unsigned slot = m.globalsNext++ % kGlobalsSlots;
 	std::memcpy(m.globalsMapped + static_cast<size_t>(slot) * m.globalsStride, &g, sizeof(g));
 	cl->SetGraphicsRootConstantBufferView(rootGlobals, m.globals->GetGPUVirtualAddress() + static_cast<UINT64>(slot) * m.globalsStride);
@@ -866,7 +877,7 @@ void D3D12Landscape::draw(ID3D12GraphicsCommandList* cl, const HE::LandscapeRend
 
 	d3dls::Globals g;
 	d3dls::fillGlobals(g, f, viewProj, shading.sunDir, shading.sunColor, shading.ambient, shading.albedoArray != nullptr,
-	                   shading.normalArray != nullptr, shading.maskArray != nullptr, m.farPresent);
+	                   shading.normalArray != nullptr, shading.maskArray != nullptr, m.farPresent && !shading.noFarImage);
 	const unsigned slot = m.globalsNext++ % kGlobalsSlots;
 	std::memcpy(m.globalsMapped + static_cast<size_t>(slot) * m.globalsStride, &g, sizeof(g));
 	const unsigned set = m.setNext++ % kSets;

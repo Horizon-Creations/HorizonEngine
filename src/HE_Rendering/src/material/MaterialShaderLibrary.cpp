@@ -1783,7 +1783,7 @@ vec4 heLsWeightOnePage(vec2 uv) { return vec4(0.0); }
 // The baked far image (HorizonScene/LandscapeFarMap.h), over the render window: rgb = what the layer blend comes to, a = AO. A tile
 // that is not in the atlas (beyond it, or still streaming) is drawn from it alone, as the fixed blend does: without it such a fragment
 // evaluated the whole material over the coarse weights, the cost of the far ground from high up (topic 355, step 4). uTile.w = 1: the
-// world has one (MetalLandscape sets it with the image). Metal only for now (the slot: MaterialShaderLibrary's MSL pins).
+// world has one (the backend's landscape class sets it with the image). Metal and D3D11/D3D12 (the slot: the MSL / HLSL pins).
 layout(set = 0, binding = 62) uniform sampler2D heLsFarImage;
 bool heLsFar(out vec4 c)
 {
@@ -3439,11 +3439,13 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fragmentVariant(
     // The landscape variant: the same text with its weights read from the tile atlas (landscapeFragmentSource).
     // Metal reads the weight pages FILTERED: its inline samplers are linear and cost no sampler slot. Vulkan's images have no
     // sampler at all (see landscapeSeparateImages), and an OpenGL landscape's weight textures are made nearest.
-    // HE_LS_FAR=0 leaves the far image out of the Metal variant (the A/B of landscape_gpu_check and the witnesses).
+    // The far image (HE_LS_FAR) on Metal and D3D11/D3D12 (HLSL); HE_LS_FAR=0 leaves it out (the A/B of landscape_gpu_check and the
+    // witnesses).
     static const bool lsFar = [] { const char* e = std::getenv("HE_LS_FAR"); return !(e && *e == '0'); }();
     const std::string landscapeText = landscape ? landscapeFragmentSource(glslIn, /*separateImages=*/backend == Backend::SpirV,
                                                                           /*filtered=*/backend == Backend::Metal,
-                                                                          /*farImage=*/backend == Backend::Metal && lsFar) : std::string();
+                                                                          /*farImage=*/(backend == Backend::Metal || backend == Backend::HLSL)
+                                                                                        && lsFar) : std::string();
     const std::string& glsl = landscape ? landscapeText : glslIn;
     if (landscape && landscapeText.empty())
     {
@@ -3784,6 +3786,10 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fragmentVariant(
                 pins.push_back({ Stage::Fragment, 0, static_cast<uint32_t>(52 + p), static_cast<uint32_t>(kHlslLandscapeFirstSrv + 3 + p), 0 });   // heLsTileWeights
                 pins.push_back({ Stage::Fragment, 0, static_cast<uint32_t>(55 + p), static_cast<uint32_t>(kHlslLandscapeFirstSrv + 6 + p), 0 });   // heLsCoarseWeights
             }
+            // The far image (HE_LS_FAR) behind them on t56, read FILTERED through its mips: the one live sampler on s0. This variant
+            // replaces heLandscapeWeights, s0's live user in every other material, so only dead SamplerStates share it here. D3D12's
+            // static s0 is linear + mips, clamped; D3D11Landscape::drawPatches binds the far image's own sampler there.
+            pins.push_back({ Stage::Fragment, 0, 62, kHlslLandscapeFirstSrv + 9, 0 });   // heLsFarImage
         }
         out = toCompiled(compileHlslPinned(withRvtWin(injected, /*allowCold=*/true), Stage::Fragment, pins));
     }

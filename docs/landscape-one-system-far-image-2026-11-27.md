@@ -53,7 +53,8 @@
 
 - Automatic mode with the material over a session (edit → only the touched, loaded regions); the 30 s timeout path.
 - Frame times while a manual bake walks (the viewport shows coarse ground meanwhile; nothing covers it).
-- Other backends: they keep the weight painter (no `landscapeGroundImage`), and the alias fix is not run on D3D.
+- GL / Vulkan: they keep the weight painter (no `landscapeGroundImage`). D3D11 / D3D12 bake from the material and draw the
+  far image under it since step 18, and run the alias fix (`landscape-one-system-d3d-tile-ground-2026-11-27.md`).
 
 **Decisions taken / open**
 

@@ -7852,6 +7852,7 @@ void D3D11Renderer::DrawScene(int width, int height)
     {
         if (!p.landscapeFrameLive) return;
         D3D11Landscape::Shading sh;
+        sh.noFarImage = m_editorCamera.rvtTileGround;
         sh.sunDir = glm::normalize(p.m_renderWorld.sunDirection);
         sh.ambient = p.m_renderWorld.ambient;
         for (const LightData& l : p.m_renderWorld.lights)
@@ -9077,7 +9078,8 @@ void D3D11Renderer::DrawScene(int width, int height)
                             // blocks and images (D3D11Landscape::drawPatches); the index buffer it leaves is replaced by the
                             // next draw, the rest by the restore below.
                             uploadMatDraw(viewProj, glm::mat4(1.0f));
-                            lsDrawn = p.landscape.drawPatches(ctx, *lsDraw, viewProj);
+                            // (no far image in a page of the ground or in the ground image it is baked from)
+                            lsDrawn = p.landscape.drawPatches(ctx, *lsDraw, viewProj, /*farImage=*/!m_editorCamera.rvtTileGround);
                         }
                         else if (shInst && shInst->vs && shInst->ps && shInst->il
                             && SUCCEEDED(ctx->Map(p.m_matInstVB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &im)))
@@ -9284,16 +9286,19 @@ void D3D11Renderer::DrawScene(int width, int height)
                 lsDraw = nullptr;
                 return lsDrawn;
             };
+            // The ground image the far image is baked from (Capabilities::landscapeGroundImage: rvtTileGround, no slot): the
+            // view drawn on the whole ground, never from the pages or the far image itself.
+            const bool groundImage = !page && m_editorCamera.rvtTileGround;
             // What is drawn: on a page of the ground (rvtTileGround) the layer's view; else the extractor's derived material
             // where the landscape's own cannot be drawn (RenderWorld::tileLandscapeMaterial), else the landscape's own.
-            const HE::UUID own = page ? m_editorCamera.rvtMaterial
+            const HE::UUID own = (page || groundImage) ? m_editorCamera.rvtMaterial
                                : p.m_renderWorld.tileLandscapeMaterial != HE::UUID{} ? p.m_renderWorld.tileLandscapeMaterial : lf.materialId;
             // Under a virtual texture (SetRvtTileGround) the patches inside its rectangle are drawn with the consumer, which
             // reads the pages; when the consumer's variant does not build they go back to the ground's own material.
             HE::LandscapeRenderFrame rest = lf, paged = lf;
             paged.patches.clear();
             bool any = false;
-            if (!page && m_tileRvtConsumer != HE::UUID{} && p.rvtPoolSRV[0] && p.rvtTables.count(m_tileRvtConsumer))
+            if (!page && !groundImage && m_tileRvtConsumer != HE::UUID{} && p.rvtPoolSRV[0] && p.rvtTables.count(m_tileRvtConsumer))
             {
                 HE::splitRvtTilePatches(rest, m_tileRvtMin, m_tileRvtMax, m_tileRvtNearM, paged.patches);
                 if (drawWith(m_tileRvtConsumer, paged)) any = true;
@@ -10111,6 +10116,7 @@ IRenderer::Capabilities D3D11Renderer::GetCapabilities() const
     c.landscapeCoarseRevision   = true;   // D3D11Landscape.cpp: new coarse and far images, the atlas stays
     c.landscapeMaterial         = m_impl->m_matReady;   // drawDC with lsDraw: the ground through its material's landscape variant
     c.landscapeRvt              = c.landscapeMaterial && c.supportsRvt;   // SetRvtTileGround, rvtTileGround pages (drawGroundMaterial)
+    c.landscapeGroundImage      = c.landscapeRvt;   // rvtTileGround without a slot read back (the far image's bake; drawGroundMaterial)
     // Froxel volumetric fog (Thema 225 step 8): Inject/Integrate/Apply compiled and
     // the HeFogVol/dummy resources built at Initialize. False leaves the analytic
     // height-fog (applyFog/uFog) running everywhere, byte-identical to before.

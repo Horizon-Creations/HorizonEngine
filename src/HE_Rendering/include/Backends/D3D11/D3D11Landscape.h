@@ -39,6 +39,7 @@ public:
 		// like the GL/Vulkan/Metal backends. Null normal = the geometric normal; null mask = no AO.
 		ID3D11ShaderResourceView* normalArray = nullptr;
 		ID3D11ShaderResourceView* maskArray = nullptr;
+		bool noFarImage = false;   // the ground image the far image is baked from: never drawn from the far image itself
 	};
 	struct Stats
 	{
@@ -87,8 +88,10 @@ public:
 	// caller has bound the material's shaders and everything a mesh draw of that material binds; this adds the landscape's data where
 	// those shaders read it (b12 LsGlobals, b13 LsPatch in the GLSL blocks' layout; t47..t55 the nine images, both stages), draws with
 	// its own rasteriser and depth state (no culling, LESS with writes), and takes its registers and states off again. The shaders,
-	// the input layout and the index buffer are the caller's to put back. False when there is nothing to draw (the fixed blend then).
-	bool drawPatches(ID3D11DeviceContext* ctx, const HE::LandscapeRenderFrame& frame, const glm::mat4& viewProj);
+	// the input layout and the index buffer are the caller's to put back. `farImage`: the baked far image on t56 / s0, which the
+	// variant draws where a tile is not in the atlas (uTile.w; false for the ground image the far image is baked from). False when
+	// there is nothing to draw (the fixed blend then).
+	bool drawPatches(ID3D11DeviceContext* ctx, const HE::LandscapeRenderFrame& frame, const glm::mat4& viewProj, bool farImage = true);
 
 	const Stats& stats() const;
 

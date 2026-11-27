@@ -2047,6 +2047,11 @@ TEST_CASE("tile landscape variant on D3D: the HLSL of the patch vertex and of th
 		// the landscape's images are read without a filter: no live sampler of theirs, the dead ones on s0
 		CHECK(fr.at("_heLsSlotTable_sampler") == "s0");
 		CHECK(fr.at("_heLsTileWeights0_sampler") == "s0");
+		// the baked far image (HE_LS_FAR) behind them, filtered: the one live sampler on s0 (heLandscapeWeights, s0's live user
+		// elsewhere, is gone in this variant); D3D12's landscape table covers t47..t56 (kLandscapeSrvCount)
+		CHECK(fr.at("heLsFarImage") == t(L::kHlslLandscapeFirstSrv + 9));
+		CHECK(fr.at("_heLsFarImage_sampler") == "s0");
+		CHECK(f.source.find("_heLandscapeWeights_sampler") == std::string::npos);
 		// nothing of the landscape's lands on a register a material binds (its own rows end at t46)
 		for (const auto& [name, reg] : fr)
 			if (name.rfind("heLs", 0) == 0) CHECK_MESSAGE(std::atoi(reg.c_str() + 1) >= static_cast<int>(L::kHlslLandscapeFirstSrv), name, " ", reg);

@@ -323,9 +323,10 @@ inline void DescribeResolveRootSignature(ResolveRootSignature& out)
 // material one plus what only they read — the kHlslLandscape* contract:
 //   b12       LsGlobals (HE::vkls::Globals, both stages)            → param 9
 //   b13       LsPatch   (HE::vkls::PatchPush, 12 root constants)    → param 10
-//   t47..t55  tile heights, slot table, coarse heights, 3 + 3 weight
-//             pages, in a table of their own (the landscape's images
-//             change with the world, not with the draw)             → param 11
+//   t47..t56  tile heights, slot table, coarse heights, 3 + 3 weight
+//             pages, the baked far image (HE_LS_FAR, read through the
+//             static s0), in a table of their own (the landscape's
+//             images change with the world, not with the draw)      → param 11
 // Params 0..8 keep their indices, so every bind of a mesh draw of the material
 // (and bindClusterRoots) works on this signature unchanged. No input layout:
 // the grid comes from SV_VertexID.
@@ -335,7 +336,7 @@ constexpr UINT kRootLandscapeTable   = kParamCount + 2;   // 11
 constexpr UINT kLandscapeParamCount  = kParamCount + 3;
 constexpr UINT kLandscapeGlobalsReg  = 12;                // == MaterialShaderLibrary::kHlslLandscapeGlobalsReg
 constexpr UINT kLandscapeFirstSrv    = 47;                // == MaterialShaderLibrary::kHlslLandscapeFirstSrv
-constexpr UINT kLandscapeSrvCount    = 9;
+constexpr UINT kLandscapeSrvCount    = 10;
 constexpr UINT kLandscapePatchDwords = 12;                // sizeof(HE::vkls::PatchPush) / 4
 
 struct LandscapeRootSignature
