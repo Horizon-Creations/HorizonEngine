@@ -442,8 +442,9 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const DrawOptions& o
 		// the hint says so rather than silently doing something else.
 		const bool taaOK    = ctx.renderer && ctx.renderer->GetCapabilities().supportsTemporalAA;
 		const bool mfxOK    = ctx.renderer && ctx.renderer->GetCapabilities().supportsMetalFX;
-		const char* kAA[]   = { "Off", "FXAA", "SMAA", "TAA", "MetalFX" };
-		int aaMode = std::clamp(cfg.AntiAliasing, 0, 4);
+		const bool fsrOK    = ctx.renderer && ctx.renderer->GetCapabilities().supportsFSR;
+		const char* kAA[]   = { "Off", "FXAA", "SMAA", "TAA", "MetalFX", "FSR" };
+		int aaMode = std::clamp(cfg.AntiAliasing, 0, 5);
 		if (Row::combo("Anti-Aliasing", &aaMode, kAA, IM_ARRAYSIZE(kAA)))
 			cfg.AntiAliasing = aaMode;
 		{
@@ -479,6 +480,10 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const DrawOptions& o
 			ImGui::SetTooltip("Metal and OpenGL only — Vulkan and DirectX ignore it.");
 		if (aaMode == 4 && !mfxOK)
 			hint("MetalFX needs Apple Silicon — falls back to TAA.");
+		else if (aaMode == 5 && !fsrOK)
+			hint("FSR needs DirectX 12 or Vulkan with AMD's FSR runtime beside the editor — falls back to TAA.");
+		else if (aaMode == 5)
+			hint("AMD FSR: temporal anti-aliasing (and upscaling with Render Scale below 1).");
 		else if (aaMode >= 3 && !taaOK)
 			hint("TAA needs a velocity buffer, which this backend does not write yet; falls back to SMAA.");
 		else if (aaMode == 0)

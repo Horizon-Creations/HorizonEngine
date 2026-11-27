@@ -68,6 +68,7 @@
 #include "Backends/D3D_Shared/DxgiAdapterLog.h"   // names the GPU in the log
 #include "Backends/D3D12/D3D12MaterialRootSignature.h" // A4: the material root signature, shared with he_tests (Thema 56)
 #include "Backends/D3D12/D3D12Landscape.h"            // the world-scale landscape (Thema 326)
+#include "Backends/D3D12/D3D12Fsr.h"                  // AMD FSR (AAMethod::FSR)
 #include <SDL3/SDL.h>
 #include <d3d12.h>
 #include <d3d12sdklayers.h>
@@ -1964,7 +1965,20 @@ struct D3D12RendererImpl
     std::unordered_map<uint32_t, glm::mat4> taaPrevTransforms, taaCurTransforms;
 
     bool taaReady() const { return postFxReady && taaVelocityPSO && taaResolvePSO && taaSharpenPSO; }
-    bool taaWanted() const { return aaMethod == HE::AAMethod::TAA && taaReady(); }
+    // TAA's targets, jitter and velocity pass: for TAA itself and for FSR, which takes the jitter and the velocity (not the
+    // resolve, see aaTaa in runPostFX). shortcut: FSR keeps TAA's two RGBA8 history targets it never reads; split if memory matters.
+    bool taaWanted() const { return (aaMethod == HE::AAMethod::TAA || aaMethod == HE::AAMethod::FSR) && taaReady(); }
+
+    // ── AMD FSR (AAMethod::FSR; D3D12Fsr.h) ──────────────────────────────────
+    // Dispatched on the HDR image right after the underwater fog (before motion blur, bloom and the tonemap: AMD's order),
+    // its output copied back over hdrRT. Real frames only (mbRealFrame): a still or an RVT page must not feed its history.
+    HE::D3D12Fsr           fsr;
+    ComPtr<ID3D12Resource> fsrOut;                 // RGBA16F + UAV, display size
+    D3D12_RESOURCE_STATES  fsrOutState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    glm::vec2              fsrJitter{ 0.0f };      // this frame's, as FSR gave it (taaJitter holds the engine's sign)
+    bool                   fsrReset = true;        // the next dispatch discards the history
+    uint64_t               fsrLastNs = 0;
+    bool fsrFrame() const { return aaMethod == HE::AAMethod::FSR && fsr.available(); }
 
     // Caller guarantees the GPU no longer reads the targets (waitForAllFrames).
     void destroyTaaTargets()
@@ -2759,6 +2773,69 @@ struct D3D12RendererImpl
                       D3D12_RESOURCE_STATE_DEPTH_WRITE);
         }
 
+        // AMD FSR, right after the fog and before motion blur, bloom and the tonemap (AMD's order: an image already smeared or
+        // bloomed would ghost in its history). Native AA for now: render size = display size; the output goes back over hdrRT.
+        if (taaFrame && fsrFrame() && mbRealFrame && fsr.sizedFor(w, h, w, h) && viewportDepth && taaVelocityRT)
+        {
+            _post.next("FSR");
+            if (!fsrOut || fsrOut->GetDesc().Width != w || fsrOut->GetDesc().Height != h)
+            {
+                fsrOut.Reset();
+                D3D12_HEAP_PROPERTIES hp{}; hp.Type = D3D12_HEAP_TYPE_DEFAULT;
+                D3D12_RESOURCE_DESC rd{};
+                rd.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+                rd.Width = w; rd.Height = h; rd.DepthOrArraySize = 1; rd.MipLevels = 1;
+                rd.Format = DXGI_FORMAT_R16G16B16A16_FLOAT; rd.SampleDesc.Count = 1;
+                rd.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+                if (FAILED(device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                                                           nullptr, IID_PPV_ARGS(&fsrOut))))
+                    fsrOut.Reset();
+                fsrOutState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+            }
+            if (fsrOut)
+            {
+                constexpr D3D12_RESOURCE_STATES kRead = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+                barrier12(cl, hdrRT.Get(), hdrState, kRead);
+                barrier12(cl, viewportDepth.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE, kRead);
+                barrier12(cl, taaVelocityRT.Get(), taaVelocityState, kRead);
+                taaVelocityState = kRead;
+                barrier12(cl, fsrOut.Get(), fsrOutState, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                fsrOutState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+                // The depth holds GL ndc z, the half D3D keeps: a 0..1 depth whose near plane is where GL's z is 0,
+                // 2fn / (f + n), not n. FSR linearises it with that plane.
+                const glm::mat4& P = m_renderWorld.camera.projection;
+                const float A = P[2][2], B = P[3][2];
+                const float n = B / (A - 1.0f), f = B / (A + 1.0f);
+                const uint64_t nowNs = SDL_GetTicksNS();
+                HE::D3D12Fsr::Dispatch fd;
+                fd.cl = cl; fd.color = hdrRT.Get(); fd.depth = viewportDepth.Get(); fd.velocity = taaVelocityRT.Get();
+                fd.output = fsrOut.Get();
+                fd.renderW = w; fd.renderH = h; fd.displayW = w; fd.displayH = h;
+                fd.jitter = fsrJitter;
+                fd.nearZ = 2.0f * f * n / (f + n); fd.farZ = f;
+                fd.fovY = 2.0f * std::atan(1.0f / P[1][1]);
+                fd.frameMs = fsrLastNs ? float(double(nowNs - fsrLastNs) * 1e-6) : 16.6f;
+                fd.sharpness = aaSharpness;
+                fd.reset = fsrReset;
+                fsrLastNs = nowNs;
+                if (fsr.dispatch(fd))
+                {
+                    fsrReset = false;
+                    barrier12(cl, fsrOut.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
+                    fsrOutState = D3D12_RESOURCE_STATE_COPY_SOURCE;
+                    barrier12(cl, hdrRT.Get(), kRead, D3D12_RESOURCE_STATE_COPY_DEST);
+                    cl->CopyResource(hdrRT.Get(), fsrOut.Get());
+                    barrier12(cl, hdrRT.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_RENDER_TARGET);
+                }
+                else
+                    barrier12(cl, hdrRT.Get(), kRead, D3D12_RESOURCE_STATE_RENDER_TARGET);
+                hdrState = D3D12_RESOURCE_STATE_RENDER_TARGET;
+                barrier12(cl, viewportDepth.Get(), kRead, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+                // FSR left its own heaps, root signature and pipeline on the list: everything after sets its own again
+                // (the motion blur and the chain below both bind heap, root signature and pipeline before drawing).
+            }
+        }
+
         // Camera motion blur, after the fog and before the bloom (GL / Metal's place): velocity, then the smear into mbRT,
         // copied back over hdrRT so everything after reads the blurred image. Real frames of a perspective camera only.
         if (mbEnabled && mbReady && mbRealFrame && mbHasPrev && !rawCapture && viewportDepth
@@ -2878,7 +2955,7 @@ struct D3D12RendererImpl
         // the next dozen frames. The AA slot below then sharpens history[cur]
         // instead of filtering ldr.
         UINT aaSrcSlot = 4; // t0 of the AA slot: ldrSRV, or the resolved history
-        const bool aaTaa = taaFrame && taaHistoryRT[0] && taaW == w && taaH == h;
+        const bool aaTaa = taaFrame && aaMethod == HE::AAMethod::TAA && taaHistoryRT[0] && taaW == w && taaH == h;
         if (aaTaa)
         {
             const int cur  = taaHistoryCur;
@@ -12345,6 +12422,7 @@ void D3D12Renderer::Initialize(HE::Window* window)
     if (!m_impl->createPostFXPipelines())
         HE_LOG_ERROR(RHI, "%s", "D3D12Renderer: PostFX pipeline creation failed — no HDR/bloom/FXAA");
     laps.mark("createPostFXPipelines");
+    m_impl->fsr.load();   // AMD FSR's loader DLL beside the exe, if it is there (supportsFSR)
     // The deferred path (Thema 150) after both: it needs the scene root
     // signature and the material resources from createPipeline, and the flag
     // it feeds is read together with postFxReady (GetCapabilities).
@@ -12657,7 +12735,18 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
     // pre-pass — and the JITTERED one rasterises everything that lands in the
     // image: sky, geometry, decals, transparency, debug lines. Without a TAA
     // frame (see taaFrame) the two are the same matrix.
-    if (p.taaFrame)
+    if (p.taaFrame && p.fsrFrame() && !p.fsr.sizedFor(UINT(width), UINT(height), UINT(width), UINT(height)))
+    {
+        if (p.fsr.hasContext()) p.waitForAllFrames();   // frames in flight still dispatch into the old context
+        p.fsrReset = true;
+    }
+    if (p.taaFrame && p.fsrFrame() && p.fsr.ensureContext(p.device.Get(), UINT(width), UINT(height), UINT(width), UINT(height)))
+    {
+        // FSR's own sequence (its phase count follows the scale). It gives the offset in pixels the way its dispatch wants it;
+        // the clip-space shift that produces it has y the other way round (AMD's integration guide: +2x/w, -2y/h).
+        p.fsrJitter = p.fsr.jitter(p.taaFrameIndex++, UINT(width), UINT(width));
+        p.taaJitter = glm::vec2(p.fsrJitter.x, -p.fsrJitter.y);    }
+    else if (p.taaFrame)
         p.taaJitter = HE::taaJitter(p.taaFrameIndex++);
     const glm::mat4 viewProjClean = p.m_renderWorld.camera.projection * p.m_renderWorld.camera.view;
     const glm::mat4 viewProj      = p.taaFrame
@@ -14622,7 +14711,8 @@ void D3D12Renderer::DrawViewportFrame()
         // early on an empty scene, and the resolve must not then read last
         // frame's motion.
         p.taaFrame = p.taaWanted() && p.taaHistoryRT[0]
-                  && p.taaW == p.viewportW && p.taaH == p.viewportH;
+                  && p.taaW == p.viewportW && p.taaH == p.viewportH
+                  && !(p.fsrFrame() && !p.mbRealFrame);   // FSR: a still or an RVT page is drawn unjittered, outside its history
         if (p.taaFrame)
         {
             p.barrier12(p.cmdList.Get(), p.taaVelocityRT.Get(), p.taaVelocityState,
@@ -15017,6 +15107,8 @@ IRenderer::Capabilities D3D12Renderer::GetCapabilities() const
     // chain SSR needs — false only if a TAA shader or PSO failed. Only the
     // direct swapchain fallback renders unjittered (taaFrame).
     c.supportsTemporalAA = m_impl->taaReady();
+    // AMD FSR: the loader DLL opened at Initialize; it takes TAA's jitter + velocity, so TAA's readiness too.
+    c.supportsFSR        = c.supportsTemporalAA && m_impl->fsr.available();
     // Deferred (Thema 150): G-buffer PSOs + resolve built at Initialize. Like
     // SSR/TAA it lives on the viewport frame's HDR target (Render()'s
     // usingHDR branch); the LDR viewport branch, the direct-swapchain branch

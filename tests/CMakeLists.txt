@@ -76,6 +76,7 @@ add_executable(he_tests
     test_temporal_aa.cpp
     # Camera motion blur on D3D11/D3D12/Vulkan: the reprojection far from the origin, the HLSL on FXC.
     test_motion_blur.cpp
+    test_upscaler_fallback.cpp
     test_gi_bvh.cpp
     test_gi_blas_store.cpp
     # Rays / resolution / blur per GI-reflection tier, one table for all backends.

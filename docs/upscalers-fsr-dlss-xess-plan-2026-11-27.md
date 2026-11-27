@@ -51,7 +51,23 @@ later). Branch `claude/upscalers-fsr`, on top of `claude/motion-blur-d3d-vulkan`
 
 ## Handoff
 
-- **Topic / step:** none (owner's direct request, not a Hive topic). This doc is step 0.
-- **Done:** this plan. **Verified:** the survey's file:line references; the FSR SDK tree, sizes and license
-  head via `gh api` (tag v2.4.0). **Not verified:** DLSS/XeSS SDK details beyond press and vendor pages.
-- **Next:** step 1, then step 2 once the owner allows the SDK download.
+- **Topic / step:** none (owner's direct request, not a Hive topic).
+- **Done** (branch `claude/upscalers-fsr`):
+  1. This plan; the SDK fetched at configure (`cmake/HeFidelityFX.cmake`, `7785dc13b`; owner allowed the download).
+  2. FSR on **D3D12 as native AA** (render size = display size): `AAMethod::FSR = 5`, `Capabilities::supportsFSR`,
+     `ResolveAAMethod` FSR → MetalFX/TAA; `D3D12Fsr.{h,cpp}` (loader by absolute path beside the exe, context with
+     HDR + auto exposure, `HE_FSR_DEBUG=1` = the runtime's checks + its messages in the log, version logged);
+     TAA's targets, jitter and velocity serve FSR (`taaWanted`), its resolve not (`aaTaa` = TAA only); FSR's
+     jitter sequence (engine clip shift `(x, -y)`), dispatch after the fog and before motion blur (AMD's order —
+     Metal runs MB before MetalFX), output copied back over `hdrRT`; real frames only (`mbRealFrame`); depth
+     near plane = `2fn/(f+n)` (the depth is GL ndc z's kept half). Editor: "FSR" in the AA list, hint, help.
+- **Verified** (NN-WS03, RTX 4070, Release; `HE_DUMP` SHADOWINSTTEST, 40 settle frames, cube band): the loader
+  picks **FSR 3.1.6**, `HE_FSR_DEBUG=1` reports nothing. Sign A/B against the AA-off frame of the same pose
+  (run-to-run noise 0.040): still FSR 0.754 vs jitter-y flipped 0.855; pan (`HE_DUMP_PANYAW=0.5`) FSR 1.239 vs
+  motion vectors flipped 1.841 (visible ghost). FSR keeps the edge gradient (2.41 vs 2.39 off). Loader DLL
+  renamed: one log line, TAA runs instead.
+- **Not verified:** FSR 4 (needs an RX 9000); render scale < 1 (step 1 is not done: D3D12 still renders at
+  viewport size); Vulkan; skinned meshes / particles under FSR (no velocity: they will ghost); the exported game.
+- **Decisions:** the dispatch sits before motion blur, unlike MetalFX; FSR's own sharpening takes AA Sharpness.
+- **Next:** render scale on D3D12 (scene/depth/velocity at render size, FSR output and everything after at display
+  size), then Vulkan (`amd_fidelityfx_loader_vk.dll`), then velocity for skinned meshes and particles.

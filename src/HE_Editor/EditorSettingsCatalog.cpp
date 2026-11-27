@@ -363,7 +363,7 @@ std::vector<SettingDesc> buildCatalog()
 	// ── Rendering ▸ Post-Processing ─────────────────────────────────────────
 	t.push_back(enumRow("postProcess.antiAliasing", "Anti-Aliasing",
 	                    "Post-Processing", "aa", &EditorConfig::AntiAliasing,
-	                    { "Off", "FXAA", "SMAA", "TAA", "MetalFX" },
+	                    { "Off", "FXAA", "SMAA", "TAA", "MetalFX", "FSR" },
 	                    "Methods the backend cannot do fall back at push time."));
 	t.push_back(floatRow("postProcess.aaSharpness", "AA Sharpness", "Post-Processing",
 	                     "aa", &EditorConfig::AASharpness, 0.0, 1.0,

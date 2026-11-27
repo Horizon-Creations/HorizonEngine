@@ -4441,7 +4441,8 @@ namespace
 	{ "Preferences/Post-Processing/Anti-Aliasing", "",
 	  "How jagged edges are smoothed. SMAA is one cheap pass; TAA is steadier in "
 	  "motion but needs a velocity buffer, which falls back to SMAA on a backend "
-	  "that is not ready to write one yet.",
+	  "that is not ready to write one yet. FSR is AMD's temporal upscaler "
+	  "(DirectX 12 for now, any GPU vendor); without it, it falls back to TAA.",
 	  "", "rendering#postfx" },
 	{ "Preferences/Post-Processing/AA Sharpness", "",
 	  "How much detail is pulled back after the anti-aliasing pass softened it. "

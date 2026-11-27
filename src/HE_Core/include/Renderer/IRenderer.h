@@ -174,6 +174,8 @@ enum class AAMethod : int
     SMAA    = 2, // edge detect + pattern classification + coverage blend
     TAA     = 3, // jittered projection + velocity reprojection + history
     MetalFX = 4, // MTLFXTemporalScaler (Apple Silicon) — TAA quality from the OS
+    FSR     = 5, // AMD FSR (FidelityFX API: FSR 3.1.x, FSR 4 on RDNA 4), D3D12 / Vulkan; the SDK's runtime DLLs
+                 // (docs/upscalers-fsr-dlss-xess-plan-2026-11-27.md)
 };
 
 // ─── Viewport view mode ──────────────────────────────────────────────────────
@@ -332,6 +334,9 @@ public:
         // MetalFX temporal scaling (A5). Metal on Apple Silicon with a macOS
         // that has MTLFXTemporalScaler; implies supportsTemporalAA (same inputs).
         bool supportsMetalFX = false;
+        // AMD FSR upscaling / native AA: the FSR runtime DLLs loaded and a context made for this device. Implies
+        // supportsTemporalAA (the same jitter and velocity feed it).
+        bool supportsFSR = false;
         // A second window with its own widget tree (docs/he-apps-plan.md §13.3).
         // Reported by the backends that actually DRAW into one: Software (its own
         // SDL surface per window) and Metal (a layer per window). OpenGL, Vulkan
@@ -495,9 +500,10 @@ public:
     // backend's own GetCapabilities().
     static HE::AAMethod ResolveAAMethod(int requested, const Capabilities& caps)
     {
-        if (requested < 0 || requested > static_cast<int>(HE::AAMethod::MetalFX))
+        if (requested < 0 || requested > static_cast<int>(HE::AAMethod::FSR))
             return HE::AAMethod::FXAA;
         HE::AAMethod m = static_cast<HE::AAMethod>(requested);
+        if (m == HE::AAMethod::FSR     && !caps.supportsFSR)         m = caps.supportsMetalFX ? HE::AAMethod::MetalFX : HE::AAMethod::TAA;
         if (m == HE::AAMethod::MetalFX && !caps.supportsMetalFX)     m = HE::AAMethod::TAA;
         if (m == HE::AAMethod::TAA     && !caps.supportsTemporalAA)  m = HE::AAMethod::SMAA;
         return m;

@@ -256,6 +256,8 @@ if(WIN32)
         src/Backends/D3D12/D3D12Renderer.cpp
         src/Backends/D3D12/D3D12ShaderManager.cpp
         src/Backends/D3D12/D3D12Landscape.cpp
+        src/Backends/D3D12/D3D12Fsr.cpp
+        include/Backends/D3D12/D3D12Fsr.h
         include/Backends/D3D12/D3D12Landscape.h
         include/Backends/D3D12/D3D12ShaderManager.h)
     target_include_directories(RendererD3D12 PUBLIC
