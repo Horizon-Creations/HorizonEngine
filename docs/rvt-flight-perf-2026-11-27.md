@@ -47,22 +47,27 @@ Page cost 3.88 → 0.48 ms. Frames 100/200/330 of the recorded flight: mean diff
   tile Catania: 1024 → 1280 → 1600 pages, no starved warning. Test: `test_rvt_core` "a pool that grew takes the pages…".
 - Paint budget: `HE_RVT_PAINT_BUDGET_MS` (default 6) / the recent CPU cost a page, after the first fill. Profiler scopes
   `Rvt::feedback|updateAll|paint|tileTables|tileVolumes|tileWanted`.
-- **p95 did not move** (tile flight p50 14.3-14.9, p95 46.6-48.7, 31-35 of 361 frames > 33 ms; before the step ~137). Measured why:
-  - with no page painted after the fill: p50 4.9, p95 10.8, 0 over, so the cost is the pages' GPU work;
-  - the last ~2 s of the path the REAL frame's GPU climbs 17 → 25-30 ms even without painting (detailed capture: the
-    "GBuffer" command buffer 13-16 → 23-27 ms); the old-system flight stays flat at 16-17 ms. With pages on top it passes 33.
-  - The 4-page ticks that take 35-40 ms are `[queue commandBuffer]` waiting at Metal's 64-buffer limit. Tried
-    `newCommandQueueWithMaxCommandBufferCount:256`: the stall goes, but frames over budget go 31 → 123 (the stall was the
-    only GPU back-pressure; the budget sees CPU time and clamps to 8). Reverted. Per-command-buffer GPU times are no budget
-    signal either (a page frame reads 0.2 ms, 20-30 ms under overlap).
-  - A page frame (136 px) rebuilds the live HDR / LDR / G-buffer targets and the next real frame rebuilds them back (525× in
-    12 s). Keeping a separate page-size set measured neutral; not committed.
-  - `RenderSceneImage` clears `m_taaHistoryValid`: the viewport loses TAA history on every frame that paints a page.
+- That alone left p95 at ~47 ms (31-35 of 361 frames > 33 ms). The cause, found with a still camera (start and end both
+  16.8 ms GPU) and `HE_RVT=0` (G-buffer 26 ms flat): the tile RVT volume (4.2 km, 2048 pages) waited for a successor
+  filled from scratch (~600 pages) and swapped once, 200 frames late; the ground ahead outside the old square ran the
+  whole landscape material (G-buffer 14 → 25 ms). Fixed, step 19 (commits `288b6b03d`, `44f063224`, `d1680139b`):
+  - `RvtManager::moveVolume`: the square moves with the camera (quarter-edge grid = whole pages), pages that land on the
+    new grid keep slot + picture under a NEW volume id (stale feedback ignored); edge ring and non-aligned mips dropped.
+  - `refreshSubtree` under a wide page: existing pages over a plain parent copy (was a hash lookup per mip-0 entry,
+    25-40 ms for the top page). `setWidePageMeters(1000)`: pages ≥ 1 km one a frame. Move ticks now 9-12 ms.
+  - Metal table upload: staging buffer per ring entry + remap on the workers (5.9 → 2.0 ms a frame; the table changed every
+    frame in flight). `RvtPageRendersInFlight` gate (`HE_RVT_MAX_IN_FLIGHT`, 6): no new pages while 6+ layer renders queue.
+  - TAA: a raw capture destroyed the TAA/MetalFX targets (its AA reads Off): 497 of 720 resolves without history → 3.
+- **Result**, tile flight `--stats-only`: p50 10-11 ms, p95 17-19 ms, 0-1 of 361 frames > 33 ms (was p95 47, 31-35). Pictures
+  (`--keep-frames`): no frame-to-frame jump at the 3 moves. ctest 411/411; `landscape_gpu_check` metal/gl/vulkan exit 0.
+- **Not fixed: near ground blurs in fast flight.** Near-ground sharpness (`rvt-flight-perf-2026-11-27/sharp.py`, mean |dx| bottom third; `framediff.py` for jumps) 2.0 still
+  (2.57 full material) → 0.26 after 140 frames at 300 m/s in BOTH builds; late in the flight now ~0.1 (the old build
+  showed 2.5 there only because it ran the full material). 16/32 pages a frame: 0.30. The fine pages do not keep up.
+- Tried and dropped: Metal queue of 256 command buffers (stall gone, frames over 31 → 123: lost back-pressure); a page-size
+  target set (neutral); a LOD camera for wide pages (neutral). D3D/GL/Vulkan: scene-side changes unverified there (step 18).
 
 **Next steps**
 
-1. Bring 494725791 + 12e7ebd28 to release/0.8.0 (the owner runs that branch) — owner's call. Done (894761fd5).
-2. Tile-world real-frame GPU at the end of `fly_tiles.json` (51489,235,63781 → 47889,235,62021): a still camera at the end
-   key with pages filled first. Near 17 ms → the cost comes from motion (streaming, table/atlas uploads, the 1100-1300
-   wanted vs 600-900 resident backlog); near 28 ms → that location (what the G-buffer draws there).
-3. Then a GPU-aware paint budget (back-pressure on page command buffers still in flight, not their GPU times).
+1. RVT page throughput in fast flight: what the near pages wait for (ranking of bare vs. near pages, the distance clamp
+   `band0` in `tileGroundViews`, pool size vs. ~1500 wanted). Sharpness against `sharp.py` on `fly_tiles.json`.
+2. Merge `claude/landscape-migration` into `claude/landscape-one-system` after the bee's step 6.
