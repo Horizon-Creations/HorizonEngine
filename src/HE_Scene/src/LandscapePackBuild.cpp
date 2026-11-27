@@ -1,7 +1,15 @@
 #include "HorizonScene/LandscapePackBuild.h"
 
 #include "HorizonScene/Components/TerrainComponent.h"
+#include "HorizonScene/Components/TerrainChunkComponent.h"
+#include "HorizonScene/Components/TransformComponent.h"
+#include "HorizonScene/Components/HierarchyComponent.h"
+#include "HorizonScene/Components/LandscapeWorldComponent.h"
+#include "HorizonScene/Components/MaterialComponent.h"
+#include "HorizonScene/HorizonWorld.h"
+#include "HorizonScene/TransformHierarchy.h"
 #include "HorizonScene/TerrainHeightmap.h"
+#include <MaterialGraph/AutoLandscapeMaterial.h>   // which Auto Landscape group a terrain's material is
 #include "HorizonScene/TerrainMeshGenerator.h"
 
 #include <algorithm>
@@ -566,6 +574,76 @@ bool LandscapeBuildJob::poll(LandscapeBuildResult& out)
 	if (m_thread.joinable()) m_thread.join();
 	out = std::move(m_result);
 	return true;
+}
+
+// ── Moving a scene off the single landscape ──────────────────────────────────
+LandscapeSceneMigration planSceneLandscapeMigration(HorizonWorld& world)
+{
+	LandscapeSceneMigration plan;
+	auto& reg = world.registry();
+	if (!reg.view<LandscapeWorldComponent>().empty()) { plan.error = "The scene already has a tile landscape."; return plan; }
+	for (auto e : reg.view<TerrainComponent>())
+	{
+		if (plan.terrain != entt::null) { plan.error = "The scene has more than one Terrain: one tile world can take one."; return plan; }
+		plan.terrain = e;
+	}
+	if (plan.terrain == entt::null) { plan.error = "The scene has no Terrain."; return plan; }
+	const entt::entity root = world.rootEntity();
+	if (const auto* h = reg.try_get<HierarchyComponent>(plan.terrain); h && h->parent != entt::null && h->parent != root)
+	{
+		plan.error = "The Terrain sits under another entity: move it to the top of the scene first.";
+		return plan;
+	}
+	if (const auto* t = reg.try_get<TransformComponent>(plan.terrain);
+	    t && (glm::any(glm::notEqual(t->rotation, glm::vec3(0.0f))) || glm::any(glm::notEqual(t->scale, glm::vec3(1.0f)))))
+	{
+		plan.error = "The Terrain is rotated or scaled: a tile world is neither.";
+		return plan;
+	}
+	const TerrainComponent& tc = reg.get<TerrainComponent>(plan.terrain);
+	const glm::vec3 pos = worldPositionOf(world, plan.terrain);
+	plan.terrainCopy = std::make_shared<const TerrainComponent>(tc);
+	plan.params.yOffsetM = pos.y;   // the field is local to the entity; the pack's heights are the world's
+	plan.shift = glm::dvec3(-(double(pos.x) - double(tc.sizeX) * 0.5), 0.0, -(double(pos.z) - double(tc.sizeZ) * 0.5));
+	if (const auto* mc = reg.try_get<MaterialComponent>(plan.terrain))
+		for (int g = 0; g < kAutoLandscapeGroupCount; ++g)
+			if (mc->materialAssetId == kAutoLandscapeGroups[g].materialId) plan.textureGroup = g;
+	return plan;
+}
+
+size_t applySceneLandscapeMigration(HorizonWorld& world, const LandscapeSceneMigration& plan, const LandscapeBuildResult& pack,
+                                    const std::string& packRef)
+{
+	auto& reg = world.registry();
+	if (!pack.ok || !plan.ok() || !reg.valid(plan.terrain) || !reg.all_of<TerrainComponent>(plan.terrain)) return 0;
+	// The chunk meshes the terrain made (children of its entity, never saved) go with it.
+	std::vector<entt::entity> chunks;
+	for (auto [ce, cc] : reg.view<TerrainChunkComponent>().each())
+		if (cc.terrain == plan.terrain) chunks.push_back(ce);
+	for (const entt::entity ce : chunks)
+		if (reg.valid(ce)) world.destroyEntity(ce);
+	reg.remove<TerrainComponent>(plan.terrain);
+	LandscapeWorldComponent lw;
+	lw.pack = packRef;
+	lw.heightMinM = pack.heightMinM;
+	lw.heightScaleM = pack.heightScaleM;
+	lw.textureGroup = plan.textureGroup;
+	reg.emplace_or_replace<LandscapeWorldComponent>(plan.terrain, lw);
+
+	// The scene moves with the ground: every top-level entity (children follow their parents).
+	const entt::entity root = world.rootEntity();
+	const glm::vec3 shift(plan.shift);
+	size_t moved = 0;
+	for (auto [e, t] : reg.view<TransformComponent>().each())
+	{
+		if (e == root) continue;
+		const auto* h = reg.try_get<HierarchyComponent>(e);
+		if (h && h->parent != entt::null && h->parent != root) continue;
+		t.position += shift;
+		t.dirty = true;
+		++moved;
+	}
+	return moved;
 }
 
 } // namespace HE

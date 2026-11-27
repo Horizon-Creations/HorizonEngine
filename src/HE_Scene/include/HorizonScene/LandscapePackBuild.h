@@ -2,6 +2,9 @@
 #include "HorizonScene/LandscapeSource.h"
 #include "HorizonScene/LandscapeTile.h"
 
+#include <entt/entt.hpp>
+#include <glm/glm.hpp>
+
 #include <atomic>
 #include <cstdint>
 #include <functional>
@@ -11,6 +14,7 @@
 #include <vector>
 
 struct TerrainComponent;
+class HorizonWorld;
 
 namespace HE
 {
@@ -73,6 +77,32 @@ struct LandscapeMigrateParams
 };
 LandscapeBuildResult migrateTerrainToPack(const TerrainComponent& terrain, const std::string& path, const LandscapeMigrateParams& params,
                                           const LandscapeBuildOptions& options = {});
+
+// ── Moving a scene off the single landscape (topic 355, step 9) ───────────────────────────────────────
+// A scene whose ground is one TerrainComponent becomes a tile world in two steps, so the pack can be written on a worker:
+//   plan  (main thread): which terrain, what the pack is made from, and how far the scene moves;
+//   migrateTerrainToPack(*plan.terrain, path, plan.params) on any thread;
+//   apply (main thread): the scene changed to match.
+// The tile world starts at world (0, 0) and has no position of its own, while the terrain lies centred on its entity. So the whole
+// scene moves: every top-level entity by `shift`, which puts the terrain's south-west corner at (0, 0); children move with their
+// parents, so nothing changes place relative to the ground. The terrain's entity stays (its name, children, material, references to
+// it): its TerrainComponent and the chunk meshes it made go, a LandscapeWorldComponent naming the pack comes. Its MaterialComponent
+// is what the tile ground is drawn with (with the entity's parameter overrides), as before.
+struct LandscapeSceneMigration
+{
+	entt::entity terrain = entt::null;
+	std::shared_ptr<const TerrainComponent> terrainCopy;   // what the pack is written from (the scene may go on changing meanwhile)
+	LandscapeMigrateParams params;
+	glm::dvec3   shift{ 0.0 };     // added to every top-level entity's position
+	int          textureGroup = 0; // the Auto Landscape group of the terrain's material, else 0 (its own material is kept anyway)
+	std::string  error;            // not possible: no terrain, more than one, a tile landscape already, a rotated or scaled terrain
+	bool ok() const { return error.empty() && terrain != entt::null && terrainCopy; }
+};
+LandscapeSceneMigration planSceneLandscapeMigration(HorizonWorld& world);
+// `pack` is the result of writing the pack, `packRef` the path the component names (project-relative where it can be). Returns how
+// many top-level entities moved. Nothing happens for a failed pack.
+size_t applySceneLandscapeMigration(HorizonWorld& world, const LandscapeSceneMigration& plan, const LandscapeBuildResult& pack,
+                                    const std::string& packRef);
 
 // ── Height map import ────────────────────────────────────────────────────────
 // One grid of equally sized files (a single picture is a grid of one). Pixel (px, pz) of the whole grid is the sample at world

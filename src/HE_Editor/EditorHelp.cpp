@@ -8076,6 +8076,15 @@ namespace
 	  "away until the next bake. Only Auto Landscape materials are baked. "
 	  "Preferences decides whether this runs by itself.",
 	  "", "editor#landscape-mode" },
+	{ "Landscape/Convert to Tile World", "",
+	  "Moves this scene's landscape onto the tile world: its heights, painted layers "
+	  "and water are written into a tile pack (Content/Landscape/<scene>.hlp), and the "
+	  "landscape's entity draws from it with the same material. The tile world starts "
+	  "at (0, 0), so the whole scene moves with the ground and the camera follows; "
+	  "nothing changes place relative to the landscape. The scene is saved when the "
+	  "pack is done, and the scene as it was is kept beside it as "
+	  "<scene>.before-tiles.hescene. Needs a saved scene with one unrotated landscape.",
+	  "", "editor#landscape-mode" },
 	{ "Preferences/Content Browser/Far Landscape Bake", "",
 	  "When the editor bakes a landscape's far tiles. Off: only the export does. "
 	  "Manual: with Bake Far Landscape in Landscape Setup. Automatic: by itself, a "

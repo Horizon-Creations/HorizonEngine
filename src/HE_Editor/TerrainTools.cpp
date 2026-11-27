@@ -7,6 +7,7 @@
 #include "EditorWidgets.h"               // asset drop slot + WrapText (text wraps, never runs off)
 #include "NotificationStore.h"           // failures go to the footer bell, not to red text
 #include "LandscapeFarBake.h"            // Setup ▸ Far Landscape
+#include "LandscapeWorldTools.h"         // Setup ▸ Tile World (the conversion)
 #include <HorizonScene/HorizonScene.h>
 #include <HorizonScene/TerrainPaint.h>   // landscape layer brush
 #include <HorizonScene/FoliagePaint.h>   // foliage density-mask brush
@@ -1942,6 +1943,23 @@ void renderPanel(AppContext& ctx)
                                             : "Manual: bake again after changes (Automatic is in Preferences).");
                     if (!LandscapeFarBake::lastSummary().empty())
                         dimText("%s", LandscapeFarBake::lastSummary().c_str());
+                }
+
+                // ── Tile world (topic 355, step 9) ───────────────────────
+                // The single landscape onto the tile world: streamed tiles, the far image, a virtual texture that stays
+                // sharp on a 100 km world. LandscapeWorldTools::startConvertScene keeps a copy of the scene and saves it.
+                sectionLabel("Tile World");
+                {
+                    static std::string s_convertWhy;
+                    const bool running = LandscapeWorldTools::convertRunning();
+                    ImGui::BeginDisabled(running);
+                    if (EditorWidgets::button("Convert to Tile World"))
+                        s_convertWhy = LandscapeWorldTools::startConvertScene(ctx);
+                    EditorWidgets::helpForLabel("Convert to Tile World");
+                    ImGui::EndDisabled();
+                    dimText("%s", running ? "Converting: the tile pack is being written..."
+                                          : s_convertWhy.empty() ? "Moves the scene so the landscape starts at (0, 0); the old scene is kept as a copy."
+                                                                 : s_convertWhy.c_str());
                 }
             }
             // ═════════════════════════ PAINT ═════════════════════════════

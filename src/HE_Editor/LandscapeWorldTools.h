@@ -24,6 +24,16 @@ namespace LandscapeWorldTools
 	// component at the pack and makes the runtime open it again. Needs no ImGui; safe to call with no build running.
 	void pump(HorizonWorld& world);
 
+	// ── Converting a scene off the single landscape (topic 355, step 9; HE::planSceneLandscapeMigration) ──
+	// The open scene's Terrain becomes a tile world: a copy of the scene file is kept beside it (<scene>.before-tiles.hescene), the
+	// pack is written on a worker to <project>/Content/Landscape/<scene>.hlp, then the scene moves so the landscape starts at (0, 0),
+	// the editor camera with it, the entity gets its LandscapeWorldComponent and the scene is saved. "" = started, else why not.
+	std::string startConvertScene(AppContext& ctx);
+	bool        convertRunning();
+	// Once a frame with the editor's context: finishes a conversion, says once per scene that it still uses the single landscape (with
+	// the way to convert it), and with HE_CONVERT_LANDSCAPE=1 converts such a scene unasked as soon as it is open (the unattended way).
+	void pumpConvert(AppContext& ctx);
+
 	// The section's body for an entity that has a LandscapeWorldComponent. Drawn by InspectorPanel.
 	// `afterEdit` is called right after each widget that edits the component (the Details panel's undo tracking hangs on the last item).
 	void drawSection(AppContext& ctx, Entity entity, const std::function<void()>& afterEdit = {});

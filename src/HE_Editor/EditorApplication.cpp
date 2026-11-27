@@ -4227,6 +4227,7 @@ void EditorApplication::OnRender(float dt)
 			{
 				AppContext fbCtx = makeContext();
 				LandscapeFarBake::tick(fbCtx, ImGui::GetCurrentContext() && ImGui::IsAnyMouseDown());
+				LandscapeWorldTools::pumpConvert(fbCtx);   // a scene still on the single landscape: its conversion to tiles
 			}
 			HE_PROFILE_SCOPE_N("SceneSystemsTick");
 			SceneSystems::tickWorld(*m_editorWorld, contentManager(), renderer(),

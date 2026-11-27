@@ -3,6 +3,8 @@
 #include "EditorHelp.h"
 #include "NotificationStore.h"
 #include "LandscapeFarBake.h"   // the Far Image block
+#include "EditorCamera.h"       // a converted scene moves the camera with it
+#include "ProjectManager.h"
 #include <HorizonScene/Components/LandscapeWorldComponent.h>
 #include <HorizonScene/Components/LandscapeStampComponent.h>
 #include <HorizonScene/Components/FoliageComponent.h>
@@ -250,6 +252,125 @@ void pump(HorizonWorld& world)
 	{
 		HE_LOG_WARN(Editor, "Tile landscape build failed: %s", r.error.c_str());
 		HE::Ed::notify(HE::Ed::NoteLevel::Important, "Tile landscape build failed.", r.error);
+	}
+}
+
+// ── Converting a scene off the single landscape ──────────────────────────────
+namespace
+{
+struct Convert
+{
+	HE::LandscapeBuildJob        job;
+	HE::LandscapeSceneMigration  plan;
+	std::string packAbs, packRef, scenePath, backupPath;
+	std::string notedScene;      // the scene the "still the single landscape" note was given for
+	bool        autoTried = false;
+};
+Convert& conv()
+{
+	static Convert c;
+	return c;
+}
+
+fs::path projectDirOf(AppContext& ctx)
+{
+	fs::path p = ctx.projectManager ? fs::path(ctx.projectManager->currentProject().path) : fs::path();
+	std::error_code ec;
+	if (fs::is_regular_file(p, ec)) p = p.parent_path();
+	return p;
+}
+
+bool sceneHasSingleLandscape(HorizonWorld& world)
+{
+	auto& reg = world.registry();
+	return !reg.view<TerrainComponent>().empty() && reg.view<LandscapeWorldComponent>().empty();
+}
+} // namespace
+
+bool convertRunning() { return conv().job.running(); }
+
+std::string startConvertScene(AppContext& ctx)
+{
+	Convert& c = conv();
+	if (!ctx.world || !ctx.projectManager || !ctx.projectLoaded) return "No project is open.";
+	if (c.job.running() || st().job.running()) return "A landscape build is already running.";
+	if (ctx.currentScenePath.empty()) return "Save the scene first: the conversion keeps a copy of it and saves it afterwards.";
+	if (ctx.sceneDirty) return "Save the scene first: the copy kept beside it is the saved scene.";
+	HE::LandscapeSceneMigration plan = HE::planSceneLandscapeMigration(*ctx.world);
+	if (!plan.ok()) return plan.error;
+
+	const fs::path dir = projectDirOf(ctx);
+	const fs::path scene(ctx.currentScenePath);
+	std::error_code ec;
+	// The scene as it is now, beside it, before anything changes: the way back.
+	c.backupPath = (scene.parent_path() / (scene.stem().string() + ".before-tiles" + scene.extension().string())).string();
+	fs::copy_file(scene, c.backupPath, fs::copy_options::overwrite_existing, ec);
+	if (ec) return "The copy of the scene could not be written (" + ec.message() + ").";
+	const fs::path content = dir / "Content" / "Landscape";
+	fs::create_directories(content, ec);
+	c.packAbs = (content / (scene.stem().string() + ".hlp")).string();
+	const fs::path rel = fs::relative(c.packAbs, dir, ec);
+	c.packRef = (ec || rel.empty()) ? c.packAbs : rel.generic_string();   // project-relative, as LandscapeWorldComponent::pack documents
+	c.scenePath = ctx.currentScenePath;
+	c.plan = std::move(plan);
+	const auto copy = c.plan.terrainCopy;
+	const HE::LandscapeMigrateParams params = c.plan.params;
+	const std::string out = c.packAbs;
+	if (!c.job.start("Converting the landscape to tiles", [copy, params, out](const HE::LandscapeBuildOptions& o) {
+		    return HE::migrateTerrainToPack(*copy, out, params, o);
+	    }))
+		return "A landscape build is already running.";
+	HE_LOG_INFO(Editor, "Landscape conversion: %s -> %s (scene copy %s)", c.scenePath.c_str(), c.packAbs.c_str(), c.backupPath.c_str());
+	HE::Ed::notify(HE::Ed::NoteLevel::Info, "Converting the landscape to tiles",
+	               "The tile pack is written in the background; the scene is saved when it is done. The old scene stays as " + c.backupPath + ".");
+	return {};
+}
+
+void pumpConvert(AppContext& ctx)
+{
+	Convert& c = conv();
+	if (!ctx.world || !ctx.projectLoaded) return;
+	HE::LandscapeBuildResult r;
+	if (c.job.poll(r))
+	{
+		if (!r.ok)
+		{
+			HE_LOG_WARN(Editor, "Landscape conversion failed: %s", r.cancelled ? "cancelled" : r.error.c_str());
+			HE::Ed::notify(HE::Ed::NoteLevel::Important, "Converting the landscape failed.", r.cancelled ? "Cancelled." : r.error);
+			return;
+		}
+		const size_t moved = HE::applySceneLandscapeMigration(*ctx.world, c.plan, r, c.packRef);
+		// The camera stays over the same ground.
+		if (ctx.editorCamera)
+			ctx.editorCamera->restoreView(ctx.editorCamera->position() + glm::vec3(c.plan.shift), ctx.editorCamera->yaw(),
+			                              ctx.editorCamera->pitch(), ctx.editorCamera->pivotDistance());
+		const bool saved = ctx.saveSceneToPath && ctx.saveSceneToPath(c.scenePath);
+		std::string summary = r.summary();
+		while (!summary.empty() && (summary.back() == '.' || summary.back() == ' ')) summary.pop_back();
+		char line[512];
+		std::snprintf(line, sizeof(line), "%s. %zu top-level entit%s moved by (%.0f, %.0f) m so the landscape starts at (0, 0). %s The old scene: %s",
+		              summary.c_str(), moved, moved == 1 ? "y" : "ies", c.plan.shift.x, c.plan.shift.z,
+		              saved ? "The scene is saved." : "The scene could NOT be saved: save it by hand.", c.backupPath.c_str());
+		HE_LOG_INFO(Editor, "Landscape conversion: %s", line);
+		HE::Ed::notify(saved ? HE::Ed::NoteLevel::Info : HE::Ed::NoteLevel::Important, "The landscape is a tile world now", line);
+		return;
+	}
+	if (c.job.running() || !sceneHasSingleLandscape(*ctx.world)) return;
+	// Unattended: HE_CONVERT_LANDSCAPE=1 converts the scene as soon as it is open (once a run).
+	static const bool autoConvert = [] { const char* e = std::getenv("HE_CONVERT_LANDSCAPE"); return e && *e == '1'; }();
+	if (autoConvert && !c.autoTried)
+	{
+		c.autoTried = true;
+		const std::string why = startConvertScene(ctx);
+		if (!why.empty()) HE_LOG_WARN(Editor, "HE_CONVERT_LANDSCAPE: not converted: %s", why.c_str());
+		return;
+	}
+	if (c.notedScene != ctx.currentScenePath)
+	{
+		c.notedScene = ctx.currentScenePath;
+		HE::Ed::notify(HE::Ed::NoteLevel::Info, "This scene still uses the single landscape",
+		               "Landscape mode > Setup > Convert to Tile World moves it onto the tile world: streamed tiles, the far image, "
+		               "a virtual texture that stays sharp on a 100 km world. The old scene is kept as a copy.");
 	}
 }
 

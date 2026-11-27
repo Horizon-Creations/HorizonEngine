@@ -312,6 +312,7 @@ add_executable(he_tests
     test_landscape_window.cpp
     test_landscape_cell_regions.cpp
     test_landscape_pack_build.cpp
+    test_landscape_scene_migration.cpp
     test_landscape_region_streaming.cpp
     test_landscape_store.cpp
     test_landscape_quadtree.cpp
