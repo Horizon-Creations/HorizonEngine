@@ -534,6 +534,13 @@ public:
         const uint32_t r = static_cast<uint32_t>(static_cast<float>(display) * s + 0.5f);
         return r > display ? display : (r > 0u ? r : 1u);
     }
+    // The texture mip bias while FSR upscales (AMD's formula, super-resolution-upscaler.md "Mipmap biasing"):
+    // log2(render / display) - 1, e.g. -2 at Performance (half per axis), -1 at native AA.
+    static float UpscaleMipBias(uint32_t renderW, uint32_t displayW)
+    {
+        if (!renderW || !displayW) return 0.0f;
+        return std::log2(static_cast<float>(renderW) / static_cast<float>(displayW)) - 1.0f;
+    }
 
     // ── SSAO (screen-space ambient occlusion) ───────────────────────────────
     // Pushed by the editor from its preferences. Backends that implement SSAO

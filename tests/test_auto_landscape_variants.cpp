@@ -112,8 +112,19 @@ TEST_CASE("Groups unwired: the array nodes emit exactly the text they always did
 	{
 		CAPTURE(plain);
 		const HE::MatShaderGen gen = HE::generateFragment(makeArrayGraph(plain));
-		const uint64_t h = fnv1a(gen.glsl + "\n//GB\n" + gen.glslGBuffer);
+		// The upscaler's mip bias (HE_TEX_BIAS: its default block, the extra argument on the texture reads, the scale on
+		// the bombed reads' gradients) came after the pin: with it taken out, the text is the old one byte for byte.
+		std::string text = gen.glsl + "\n//GB\n" + gen.glslGBuffer;
+		for (const std::string cut : { std::string("#ifndef HE_TEX_BIAS\n#define HE_TEX_BIAS 0.0\n#endif\n"),
+		                               std::string(", HE_TEX_BIAS"), std::string(" * exp2(HE_TEX_BIAS)") })
+			for (size_t at; (at = text.find(cut)) != std::string::npos;) text.erase(at, cut.size());
+		const uint64_t h = fnv1a(text);
 		CHECK(h == (plain ? 0x38da6e5dc31502aaULL : 0xcebe9db1000ebfb8ULL));
+		// Every implicit-LOD read carries it: no "texture(" call is left without the bias argument.
+		size_t reads = 0, biased = 0;
+		for (size_t at = 0; (at = gen.glsl.find("texture(", at)) != std::string::npos; ++at) ++reads;
+		for (size_t at = 0; (at = gen.glsl.find(", HE_TEX_BIAS)", at)) != std::string::npos; ++at) ++biased;
+		CHECK(biased == reads);
 		CHECK(gen.glsl.find("heBombGridV") == std::string::npos);
 		CHECK(gen.glsl.find("heBombTapV") == std::string::npos);
 	}

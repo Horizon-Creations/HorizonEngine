@@ -42,3 +42,11 @@ TEST_CASE("Upscale render size: display times scale, rounded, clamped to [1/4, 1
     CHECK(IRenderer::UpscaleRenderSize(1920, std::nanf("")) == 480);
     CHECK(IRenderer::UpscaleRenderSize(1, 0.25f) == 1);
 }
+
+TEST_CASE("Upscale mip bias: AMD's log2(render / display) - 1")
+{
+    CHECK(IRenderer::UpscaleMipBias(1920, 1920) == doctest::Approx(-1.0f));
+    CHECK(IRenderer::UpscaleMipBias(960, 1920) == doctest::Approx(-2.0f));
+    CHECK(IRenderer::UpscaleMipBias(1280, 1920) == doctest::Approx(-1.585f).epsilon(0.001));
+    CHECK(IRenderer::UpscaleMipBias(0, 1920) == 0.0f);
+}

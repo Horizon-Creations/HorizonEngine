@@ -487,7 +487,7 @@ cbuffer PerFrame : register(b1)
     float4   uSunDir;    // xyz = sun direction
     float4   uFog;       // x=fogDensity, y=fogHeightFalloff
     float4   uViewport;  // x=W, y=H, z=ssaoEnabled
-    float4   uGIParams;     // x = GI enabled (0/1), y = indirect intensity
+    float4   uGIParams;     // x = GI enabled (0/1), y = indirect intensity, w = the albedo's mip bias while FSR upscales
     float4   uGIGridOrigin; // xyz = probe grid origin, w = spacing
     float4   uGIGridCounts; // xyz = probe counts, w = probesPerRow
     // Forward SSR (docs/ssr-cross-backend-plan.md C5/D): x = 1 → a trace ran this
@@ -777,7 +777,7 @@ float4 PSMain(VSOut i) : SV_TARGET
 {
     // Mirrors GL/Metal/D3D11: a base-color texture (when present, flagged by uColor.a)
     // replaces the flat colour; PBR scalars still come from uPBR.
-    float3 base  = (uColor.a > 0.5) ? uAlbedo.Sample(uAlbedoSamp, i.uv).rgb : uColor.rgb;
+    float3 base  = (uColor.a > 0.5) ? uAlbedo.SampleBias(uAlbedoSamp, i.uv, uGIParams.w).rgb : uColor.rgb;
     // Unlit view mode: the material's base colour and nothing else — before
     // any lighting, shadow or weather term. Twin of GL's uUnlit/Metal's
     // scene.unlit/D3D11's kSceneHLSL; heLitP in MaterialShaderLibrary.cpp
@@ -968,7 +968,7 @@ struct GBufOut
 GBufOut GBufPS(VSOut i)
 {
     GBufOut o;
-    float3 base = (uColor.a > 0.5) ? uAlbedo.Sample(uAlbedoSamp, i.uv).rgb * uColor.rgb : uColor.rgb;
+    float3 base = (uColor.a > 0.5) ? uAlbedo.SampleBias(uAlbedoSamp, i.uv, uGIParams.w).rgb * uColor.rgb : uColor.rgb;
     float3 N    = normalize(i.normal);
     o.gb0 = float4(base, saturate(uPBR.x));
     o.gb1 = float4(giOctEncode(N) * 0.5 + 0.5, saturate(uPBR.y), 0.5);
@@ -2108,8 +2108,7 @@ struct D3D12RendererImpl
     UINT                   sceneW = 0, sceneH = 0; // the scene targets' size (createViewportRT); = viewport unless upscaling
     bool fsrFrame() const { return aaMethod == HE::AAMethod::FSR && fsr.available(); }
     // The scene size a viewport of w x h wants now: smaller only through FSR, on the post chain, outside a still.
-    // shortcut: no negative texture LOD bias while upscaling (textures pick the render size's mips, a little soft);
-    // add log2(scene / viewport) to the material samplers' MipLODBias when the softness matters.
+    // The materials' texture reads take FSR's mip bias meanwhile (lit.giParams.w, HE_TEX_BIAS).
     UINT sceneSizeFor(UINT v) const
     {
         const bool up = fsrFrame() && postFxReady && !rvtStill.active && renderScale < 1.0f;
@@ -6719,6 +6718,9 @@ struct D3D12RendererImpl
         samplers[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
         samplers[2].Filter         = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
         samplers[2].AddressU = samplers[2].AddressV = samplers[2].AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+        // Every mip: the zero-initialised desc's MaxLOD = 0 pinned base-colour textures to mip 0 (shimmer at a distance,
+        // and nothing for the upscaler's mip bias to move).
+        samplers[2].MaxLOD         = D3D12_FLOAT32_MAX;
         samplers[2].ShaderRegister = 2; // s2
         samplers[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
         samplers[3].Filter         = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
@@ -11106,6 +11108,7 @@ struct D3D12RendererImpl
         samplers[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
         samplers[2].Filter         = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
         samplers[2].AddressU = samplers[2].AddressV = samplers[2].AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+        samplers[2].MaxLOD         = D3D12_FLOAT32_MAX;   // every mip (the scene root signature's s2, same reason)
         samplers[2].ShaderRegister = 2;
         samplers[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
         samplers[3].Filter         = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
@@ -13008,6 +13011,13 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
     const glm::mat4 viewProj      = p.taaFrame
         ? HE::taaJitteredViewProj(viewProjClean, p.taaJitter, width, height)
         : viewProjClean;
+    // FSR on this frame's scene targets: AMD's mip bias on texture reads — the scene shader's albedo (uGIParams.w) and
+    // the graph materials' reads (lit.giParams.w, HE_TEX_BIAS). 0 otherwise (TAA, stills, RVT pages, the swapchain
+    // path); HE_FSR_MIPBIAS=0 is the witness's control.
+    static const bool s_noMipBias = [] { const char* e = std::getenv("HE_FSR_MIPBIAS"); return e && *e == '0'; }();
+    const float frameMipBias = (!s_noMipBias && p.fsrFrame() && p.usingHDR && (p.taaFrame || p.sceneScaled())
+                                && UINT(width) == p.sceneW && p.viewportW)
+                             ? IRenderer::UpscaleMipBias(p.sceneW, p.viewportW) : 0.0f;
 
     // Sky is independent of scene geometry — draw it before any early returns so
     // it always renders even when objects/sortedIndices is empty.
@@ -13237,8 +13247,7 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
         f.fog    = glm::vec4(p.m_fogFrameActive ? 0.0f : m_environment.fogDensity,
                              m_environment.fogHeightFalloff, 0, 0);
         f.viewport = glm::vec4(float(width), float(height), aoActive ? 1.0f : 0.0f, 0.0f);
-        f.giParams     = glm::vec4(giActive ? 1.0f : 0.0f, p.giIndirectIntensity, 0.0f, 0.0f);
-        f.ambient      = glm::vec4(p.m_renderWorld.ambient, 0.0f); // GI-branch floor only
+        f.giParams     = glm::vec4(giActive ? 1.0f : 0.0f, p.giIndirectIntensity, 0.0f, frameMipBias);   // w: the scene shader's albedo        f.ambient      = glm::vec4(p.m_renderWorld.ambient, 0.0f); // GI-branch floor only
         f.giGridOrigin = glm::vec4(p.giGridOrigin, p.giProbeSpacing);
         f.giGridCounts = glm::vec4(glm::vec3(p.giGridCounts), float(p.giProbesPerRow));
         // x is the gate the built-in scene shader's reflection cascade tests;
@@ -13323,6 +13332,7 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
         lit.giParams[0] = static_cast<float>(width);
         lit.giParams[1] = static_cast<float>(height);
         lit.giParams[2] = giActive ? 1.0f : 0.0f;
+        lit.giParams[3] = frameMipBias;   // graph materials' texture reads (HE_TEX_BIAS)
         // GI reflections: the gate rises ONLY when runGiReflections produced this
         // frame's result (it resets in updateGiAccel), so heGIReflFwd (t32, the
         // template slot ensureGiReflTargets writes) is never sampled stale, and

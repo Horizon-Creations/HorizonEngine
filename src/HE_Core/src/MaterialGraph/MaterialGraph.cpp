@@ -686,6 +686,19 @@ struct Scope
 // nodes that need one read mip 0 or hand back a neutral value instead of failing
 // to compile (the same courtesy Water Ripple extends to the WPO scope "vs").
 bool dsStage(const Scope& sc) { return sc.key == "ds" || sc.key.rfind("ds/", 0) == 0; }
+// The texture-read bias argument: HE_TEX_BIAS (the upscaler's mip bias, kLightingPreamble; 0 where nothing defines it)
+// in the fragment stage of a surface material only — a vertex (WPO "vs") or domain stage has no implicit LOD to bias,
+// and a UI material is drawn at the window's own size.
+std::string texBias(const EmitCtx& c, const Scope& sc)
+{
+    const bool vertex = sc.key == "vs" || sc.key.rfind("vs/", 0) == 0;
+    return (c.uiDomain || vertex || dsStage(sc)) ? std::string() : std::string(", HE_TEX_BIAS");
+}
+// The same bias for an explicit-gradient read (textureGrad): the gradients scaled by 2^bias.
+std::string texGradScale(const EmitCtx& c, const Scope& sc)
+{
+    return texBias(c, sc).empty() ? std::string() : std::string(" * exp2(HE_TEX_BIAS)");
+}
 
 // ── Real branching for If ────────────────────────────────────────────────────
 // A node may move into an If's branch only when its text is plain arithmetic:
@@ -1046,9 +1059,11 @@ std::string bombGrid(EmitCtx& c, const Scope& sc, const std::string& uv, const s
     decl += std::string(variants ? "heBombGridV(" : "heBombGrid(") + uv + ", " + cell + ", " + fmtF(rot) + ", "
           + fmtF(sharp) + ", " + seed + ", " + g + "t0, " + g + "t1, " + g + "t2, " + g + "r0, " + g + "r1, "
           + g + "r2, " + g + "w" + (variants ? ", " + g + "s" : std::string()) + "); "
-          // Domain stage: no derivatives, and zero gradients make textureGrad read mip 0.
+          // Domain stage: no derivatives, and zero gradients make textureGrad read mip 0. Elsewhere the gradients
+          // carry the upscaler's mip bias as a scale (a bias of b is gradients x 2^b; x 1 exactly at 0).
           + (dsStage(sc) ? "vec2 " + g + "dx = vec2(0.0); vec2 " + g + "dy = vec2(0.0); "
-                         : "vec2 " + g + "dx = dFdx(" + uv + "); vec2 " + g + "dy = dFdy(" + uv + "); ");
+                         : "vec2 " + g + "dx = dFdx(" + uv + ")" + texGradScale(c, sc) + "; vec2 " + g + "dy = dFdy(" + uv
+                           + ")" + texGradScale(c, sc) + "; ");
     c.bombGrids.emplace(key, g);
     return g;
 }
@@ -1272,7 +1287,7 @@ HE_MG_NOINLINE bool emitTextureNode(EmitCtx& c, const Scope& sc, const MatGraphN
             if (c.uiDomain) uv = "vec2((" + uv + ").x, 1.0 - (" + uv + ").y)";
             decl = dsStage(sc) // no derivatives → mip 0
                 ? "vec4 " + v + " = textureLod(" + sampler + ", " + uv + ", 0.0);"
-                : "vec4 " + v + " = texture(" + sampler + ", " + uv + ");";
+                : "vec4 " + v + " = texture(" + sampler + ", " + uv + texBias(c, sc) + ");";
             pinExpr = { v + ".xyz", v + ".w" };
             break;
         }
@@ -1290,7 +1305,7 @@ HE_MG_NOINLINE bool emitTextureNode(EmitCtx& c, const Scope& sc, const MatGraphN
             c.usesNormalPerturb = true;
             const float strength = n.p[0] > 0.0f ? n.p[0] : 1.0f;
             decl = "vec2 " + v + "_uv = " + uvInput(c, sc, n, 0) + ";"
-                 + " vec3 " + v + "_t = texture(" + sampler + ", " + v + "_uv).xyz * 2.0 - 1.0;"
+                 + " vec3 " + v + "_t = texture(" + sampler + ", " + v + "_uv" + texBias(c, sc) + ").xyz * 2.0 - 1.0;"
                  + " " + v + "_t.xy *= " + fmtF(strength) + ";"
                  + " vec3 " + v + " = hePerturbNormal(normalize(vNormal), normalize(" + v
                  + "_t), vWorldPos, " + v + "_uv);";
@@ -1330,7 +1345,7 @@ HE_MG_NOINLINE bool emitTextureNode(EmitCtx& c, const Scope& sc, const MatGraphN
             {
                 decl += dsStage(sc)
                     ? " vec4 " + v + " = textureLod(" + sampler + ", " + coord + ", 0.0);"
-                    : " vec4 " + v + " = texture(" + sampler + ", " + coord + ");";
+                    : " vec4 " + v + " = texture(" + sampler + ", " + coord + texBias(c, sc) + ");";
                 pinExpr = { v + ".xyz", v + ".w" };
             }
             else
@@ -1338,7 +1353,7 @@ HE_MG_NOINLINE bool emitTextureNode(EmitCtx& c, const Scope& sc, const MatGraphN
                 // The Normal Map node's frame, fed from one layer of the array.
                 c.usesNormalPerturb = true;
                 const float strength = n.p[0] > 0.0f ? n.p[0] : 1.0f;
-                decl += " vec3 " + v + "_t = texture(" + sampler + ", " + coord + ").xyz * 2.0 - 1.0;"
+                decl += " vec3 " + v + "_t = texture(" + sampler + ", " + coord + texBias(c, sc) + ").xyz * 2.0 - 1.0;"
                       + " " + v + "_t.xy *= " + fmtF(strength) + ";"
                       + " vec3 " + v + " = hePerturbNormal(normalize(vNormal), normalize(" + v
                       + "_t), vWorldPos, " + v + "_uv);";
@@ -2649,6 +2664,8 @@ MatShaderGen generateFragment(const MaterialGraph& graphIn, const MatFunctionLoa
     const std::string headerCommon =
         "#version 450\n"
         "// GENERATED by the material node graph — do not edit by hand.\n"
+        // The upscaler's mip bias on texture reads (texBias): kLightingPreamble, injected above this, defines it.
+        "#ifndef HE_TEX_BIAS\n#define HE_TEX_BIAS 0.0\n#endif\n"
         "layout(location = 0) in vec3 vNormal;\n"
         "layout(location = 1) in vec3 vColor;\n"
         "layout(location = 2) in vec2 vUV;\n"

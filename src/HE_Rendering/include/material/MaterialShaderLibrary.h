@@ -62,7 +62,7 @@ public:
         // Screen-space GI shadow inputs for heLitP(): xy = viewport size,
         // z = 1 when the GI masks are bound and valid this frame (0 → heLitP
         // skips the mask samples entirely; UI/preview passes leave this 0).
-        float giParams[4]       = {};
+        float giParams[4]       = {};   // w = the material texture reads' mip bias while an upscaler runs (HE_TEX_BIAS)
         // CSM fallback (v2.2, append-only): when the GI masks are NOT valid,
         // heLitP shadows directional lights against the engine's cascaded shadow
         // map instead (binding 12 in the preamble). The fill site pre-bakes its

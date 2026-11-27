@@ -90,6 +90,28 @@ later). Branch `claude/upscalers-fsr`, on top of `claude/motion-blur-d3d-vulkan`
      `maxFrameGeneration = 2` when the provider answers; `settings.frameGenerationModes` is empty unless the
      upscaler is FSR. Game push per frame; `HE_GAME_FRAMEGEN=n` forces it, `HE_FSR_FG_STATS=1` logs generated /
      rendered, `HE_FSR_FG_DEBUG=1` AMD's tear lines.
+  7. **Reactive mask** (`714b08504`): particles, glass and water have no velocity. `hdrRT` copied right before the
+     blended tail (`fsrOpaque`), FSR's GENERATEREACTIVEMASK right after it at the end of DrawScene (AMD sample's
+     scale 1 / cutoff 0.2 / binary 0.9 / tonemap+threshold+max), handed to the upscale dispatch. Fog and the
+     underwater passes come after it, so they stay out. Witness switches `HE_DUMP_GLASSCUBE=<opacity>`,
+     `HE_FSR_REACTIVE_STATS=1`, `HE_FSR_REACTIVE_PGM=<file>`, `HE_FSR_DEBUGVIEW=1`.
+  8. **Skinned velocity** (`d406c6cd0`): the velocity pass redraws what the skinned pass drew
+     (`skinVelDraws`, its bones-ring address) with `VSVelocitySkinned` (HlslSources.h, skins exactly like
+     VSMainSkinned) and last frame's palette per entity (`taaPrevSkins`, second ring `m_prevBonesCB`). TAA, FSR and
+     FG all read it. Witness `HE_DUMP_SKINTEST=<deg/frame>` (two-joint column), `HE_TAA_VELOCITY_STATS=1` /
+     `HE_TAA_VELOCITY_PGM`, control `HE_TAA_SKINVEL=0`.
+  9. **Mip bias** (AMD: `log2(render/display) - 1`, `IRenderer::UpscaleMipBias`): `frameMipBias` in DrawScene (FSR
+     frames only) → `uGIParams.w` (scene shader's albedo `SampleBias`, PSMain + GBufPS) and `lit.giParams.w` =
+     `HE_TEX_BIAS` (kLightingPreamble) for graph materials: `MaterialGraph::texBias` adds it to fragment-stage
+     `texture()` reads (not `vs`/`ds`, not UI), `texGradScale` scales the bombed reads' gradients by `exp2`. The
+     generated header defaults `HE_TEX_BIAS` to 0, so every other backend is unchanged (giParams.w = 0 there).
+     The 5 shipped auto-landscape materials regenerated (+128 bytes each; Mix via a temp dir, its arrays untouched)
+     and `DisplacementDemo.hasset` (`mat_gen` into a temp dir; its text differs by the bias only). `Water.hasset`
+     NOT taken: its bake also lacks two older generator changes (`vWorldPos + heLight.worldOrigin`, `heApplyFogT`)
+     nobody regenerated — a pre-existing stale bake, worth its own `mat_gen` commit.
+     **Pre-existing fix on the way:** D3D12's static albedo sampler `s2` had `MaxLOD = 0` (zero-initialised desc),
+     so simple textured materials never left mip 0 — they shimmered at a distance. Now `D3D12_FLOAT32_MAX`.
+     Witness `HE_DUMP_MIPTEST=1` (1024² one-texel checker floor with its mip chain), control `HE_FSR_MIPBIAS=0`.
 - **Verified** (NN-WS03, RTX 4070, Release; `HE_DUMP` SHADOWINSTTEST, 40 settle frames, cube band): the loader
   picks **FSR 3.1.6**, `HE_FSR_DEBUG=1` reports nothing. Sign A/B against the AA-off frame of the same pose
   (run-to-run noise 0.040): still FSR 0.754 vs jitter-y flipped 0.855; pan (`HE_DUMP_PANYAW=0.5`) FSR 1.239 vs
@@ -97,7 +119,8 @@ later). Branch `claude/upscalers-fsr`, on top of `claude/motion-blur-d3d-vulkan`
   renamed: one log line, TAA runs instead.
   Render scale 0.5 (log `FSR 3.1.6 active (640x360 -> 1280x720)`): whole frame (quadrant means = 1.0's), still
   1.35 vs off (1.0: 0.75; softer, no mip bias). Pan at 0.5: 1.35 vs motion-vector scale at display size 1.98 and
-  sign flipped 2.18 (FSR run-to-run noise in a pan ~0.3-0.7). TAA at 0.5 = TAA at 1.0 (0.004: D3D12 does not
+  sign flipped 2.18 (FSR run-to-run noise in a pan 0.045; an earlier "0.3-0.7" was a run that inherited a test
+  switch, see the trap below). TAA at 0.5 = TAA at 1.0 (0.004: D3D12 does not
   scale without FSR). `HE_DUMP_GPUTIME=300,2560x1440`, 3 interleaved pairs: GPU median 9.96/8.89/8.82 ms at 1.0
   vs 3.74/3.90/4.44 ms at 0.5 (paired −6.2/−5.0/−4.4 ms); that run also resized the upscaled viewport (1280x720 →
   2560x1440 → back, `createViewportRT`). Motion blur + bloom at 0.5 with `HE_GPU_DEBUG=1` (+ `HE_FSR_DEBUG=1`):
@@ -108,8 +131,21 @@ later). Branch `claude/upscalers-fsr`, on top of `claude/motion-blur-d3d-vulkan`
   `2640 generated / 2640 rendered = 1.00` (and on); FG off: `0 generated / 13920 rendered`. FG + `HE_GPU_DEBUG=1`
   + `HE_FSR_DEBUG=1`: no error. PrintWindow FG vs no FG: 0.097 mean diff (clouds only). Earlier run counted DXGI
   PresentCount ≈ 2.0 too (unreliable in a window: stalls; hence the callback counter).
-- **Not verified:** FSR 4 (needs an RX 9000); Vulkan; skinned meshes / particles under FSR (no velocity: they will
-  ghost); a player choice through `settings.setUpscaler` / `setFrameGeneration` in a running game (rows unit-tested;
+  Reactive mask at 0.5: a 0.9 glass cube marks 1.92 % of the frame, exactly the cube (PGM); with volumetric fog the
+  fog stays unmarked; a 0.4 glass over white stays under AMD's threshold (1 px), as designed; no tail = no mask;
+  debug layer clean. Skinned velocity, 3°/frame, static camera: FSR 0.5 ~700 px moving (mean 1.16 px) only on the
+  bending half (PGM), TAA 1.0 ~2900 px (mean 2.26 px); `HE_TAA_SKINVEL=0` 0 px; debug layer clean. Mip bias,
+  checker floor far band (luma std): 0.5 without bias 0.81 → with 3.94 (repeat 3.93), 1.0 7.42 → 8.65; near/mid
+  unchanged (mip 0 there); a forced +4 blurs it to 0 (the chain works); `test_material_graph` "Texture reads carry
+  the upscaler's mip bias" (HLSL `SampleBias(..., heLight_giParams.w)`, `exp2` on the bombed gradients), the
+  pinned-text test now proves the bias is the only change.
+  **Witness trap:** `cap.ps1` clears `HE_DUMP_*` only — an `HE_FSR_*`/`HE_TAA_*` switch set for one capture stays
+  set for every later capture IN THE SAME PowerShell call. Set them explicitly (=0/=1) per capture.
+- **Not verified:** FSR 4 (needs an RX 9000); Vulkan; GPU particles (D3D12 draws none: CPU particles are tail
+  draws, covered by the mask); the mip bias in motion (more shimmer is AMD's trade-off) and for the RVT landscape
+  main view (`heRvtSample` picks its page mip from derivatives — not biased, so RVT-textured ground stays softer
+  at 0.5); D3D11's albedo sampler (same zero `MaxLOD`? not looked at); a player choice through
+  `settings.setUpscaler` / `setFrameGeneration` in a running game (rows unit-tested;
   the game ran with config keys / `HE_GAME_FRAMEGEN`); FG with a camera in motion judged by eye (counted only);
   FG in fullscreen and across a window resize (code path: `destroyFrameGen` before `ResizeBuffers`);
   `he_perf_capture` in the real loop (the hidden editor drew no viewport here). RVT page ticks: the still bracket
@@ -117,8 +153,9 @@ later). Branch `claude/upscalers-fsr`, on top of `claude/motion-blur-d3d-vulkan`
   history, like TAA's before — a landscape streaming pages at 0.5 was not looked at.
 - **Decisions:** the dispatch sits before motion blur, unlike MetalFX; FSR's own sharpening takes AA Sharpness.
   Render scale on D3D12 only through FSR (no bilinear fallback); no supersampling (> 1 counts as 1).
-  `shortcut:` no negative texture mip bias while upscaling (sceneSizeFor comment).
+  Particles get FSR's reactive mask, not velocity (AMD's guidance for alpha-blended effects).
   Frame generation 2× only: FSR 3.1's swapchain path generates one frame; 3×/4× (DLSS MFG, RTX 50) stay
   unavailable. FG renders at most ~half the frames it would without (pacing), as AMD's.
-- **Next:** Vulkan FSR + FG (`*_vk.dll`); a settings menu in the template wired to the new rows; mip bias;
-  velocity for skinned meshes and particles; DLSS / XeSS (steps 4, 5).
+- **Next:** Vulkan FSR + FG (`*_vk.dll`, and the same skinned velocity / reactive mask / mip bias there); the
+  RVT page lookup's mip bias; D3D11's albedo sampler MaxLOD; a settings menu in the template wired to the new rows;
+  DLSS / XeSS (steps 4, 5).

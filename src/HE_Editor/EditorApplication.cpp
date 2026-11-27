@@ -7037,6 +7037,63 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 			"EditorApplication: HE_DUMP_SRGBTEST linear/sRGB cube pair added");
 	}
 
+	// HE_DUMP_MIPTEST=1: a 60 x 60 m floor wearing a 1024² one-texel checker with its full box-filtered mip chain. Seen
+	// at a grazing angle it is minified hard, so which mip a read takes shows directly: mip 0 is black and white, every
+	// level above it grey. The witness of the upscaler's mip bias (HE_FSR_MIPBIAS=0 is the control). Frame it with
+	// CAMY=1.5 CAMZ=25 PITCH=-8.
+	if (const char* mt = std::getenv("HE_DUMP_MIPTEST"); mt && *mt && m_editorWorld)
+	{
+		TextureAsset tex;
+		tex.type = HE::AssetType::Texture;
+		tex.name = "DumpMipChecker";
+		tex.width = tex.height = 1024; tex.channels = 4; tex.srgb = false;
+		uint32_t n = 1024;
+		std::vector<uint8_t> level(static_cast<size_t>(n) * n * 4);
+		for (uint32_t y = 0; y < n; ++y)
+			for (uint32_t x = 0; x < n; ++x)
+			{
+				const uint8_t v = ((x ^ y) & 1u) ? 255 : 0;
+				uint8_t* p = &level[(static_cast<size_t>(y) * n + x) * 4];
+				p[0] = p[1] = p[2] = v; p[3] = 255;
+			}
+		tex.data = level;
+		tex.mipLevels = 1;
+		while (n > 1)   // box filter down to 1x1, appended level after level
+		{
+			const uint32_t m = n / 2;
+			std::vector<uint8_t> next(static_cast<size_t>(m) * m * 4);
+			for (uint32_t y = 0; y < m; ++y)
+				for (uint32_t x = 0; x < m; ++x)
+					for (int c = 0; c < 4; ++c)
+					{
+						const auto at = [&](uint32_t xx, uint32_t yy) { return level[(static_cast<size_t>(yy) * n + xx) * 4 + c]; };
+						next[(static_cast<size_t>(y) * m + x) * 4 + c] = static_cast<uint8_t>(
+							(at(2 * x, 2 * y) + at(2 * x + 1, 2 * y) + at(2 * x, 2 * y + 1) + at(2 * x + 1, 2 * y + 1) + 2) / 4);
+					}
+			tex.data.insert(tex.data.end(), next.begin(), next.end());
+			level.swap(next);
+			n = m;
+			++tex.mipLevels;
+		}
+		const HE::UUID texId = contentManager().registerTexture(std::move(tex));
+		MaterialAsset m;
+		m.type = HE::AssetType::Material;
+		m.name = "DumpMipChecker";
+		m.baseColor[0] = m.baseColor[1] = m.baseColor[2] = 1.0f;
+		m.roughness = 1.0f;
+		m.texturePaths = { "DumpMipChecker.tex" };
+		m.textureIds   = { texId };
+		auto& reg = m_editorWorld->registry();
+		auto e = m_editorWorld->createEntity("DumpMipFloor");
+		TransformComponent tc;
+		tc.position = glm::vec3(0.0f, -0.05f, 0.0f);
+		tc.scale    = glm::vec3(60.0f, 0.1f, 60.0f);
+		reg.emplace<TransformComponent>(e, tc);
+		reg.emplace<MeshComponent>(e, MeshComponent{ HE::kDefaultCubeMeshId });
+		reg.emplace<MaterialComponent>(e, MaterialComponent{ contentManager().registerMaterial(std::move(m)) });
+		HE_LOG_INFO(Editor, "%s", "EditorApplication: HE_DUMP_MIPTEST checker floor added (1024², 11 mips)");
+	}
+
 	// ── Shadow-instancing witness (HE_DUMP_SHADOWINSTTEST=1): a flat floor slab
 	// and a row of cubes hovering above it, ALL the default cube mesh with no
 	// material — so the scene pass AND every shadow cascade see one same-mesh

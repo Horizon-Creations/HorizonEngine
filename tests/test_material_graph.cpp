@@ -4772,6 +4772,30 @@ MaterialGraph backdropGraph()
 }
 } // namespace
 
+TEST_CASE("Texture reads carry the upscaler's mip bias into HLSL: SampleBias on giParams.w, scaled gradients when bombed")
+{
+	// HE_TEX_BIAS (MaterialGraph texBias / texGradScale): kLightingPreamble defines it as heLight.giParams.w, which a
+	// backend sets while FSR renders below the display size and leaves 0 otherwise. A surface material's reads take it,
+	// a UI material's do not.
+	using B = HE::MaterialShaderLibrary::Backend;
+	HE::MaterialShaderLibrary lib;
+	auto hlslOf = [&](MatNodeType t, HE::MatDomain dom) {
+		const std::string glsl = HE::generateFragment(graphForNode(t, dom)).glsl;
+		const auto& r = lib.fragment(std::hash<std::string>{}(glsl), glsl, B::HLSL);
+		REQUIRE_MESSAGE(r.ok, r.log);
+		return r.source;
+	};
+	const std::string plain = hlslOf(MatNodeType::TextureSample, HE::MatDomain::Surface);
+	CHECK(plain.find("SampleBias") != std::string::npos);
+	CHECK(plain.find("giParams.w") != std::string::npos);
+	const std::string bombed = hlslOf(MatNodeType::TextureArrayBombSample, HE::MatDomain::Surface);
+	CHECK(bombed.find("SampleGrad") != std::string::npos);
+	CHECK(bombed.find("exp2(heLight_giParams.w)") != std::string::npos);
+	// The UI domain reads at the window's own size: no bias argument.
+	const std::string ui = HE::generateFragment(graphForNode(MatNodeType::TextureSample, HE::MatDomain::UserInterface)).glsl;
+	CHECK(ui.find(", HE_TEX_BIAS") == std::string::npos);
+}
+
 TEST_CASE("Every node emits HLSL and SPIR-V (what D3D11/D3D12 and Vulkan are handed)")
 {
 	using B = HE::MaterialShaderLibrary::Backend;

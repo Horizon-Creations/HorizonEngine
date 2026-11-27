@@ -261,7 +261,7 @@ layout(std140, set = 0, binding = 0) uniform HeLighting {
     vec4 lightColor[8];  // rgb = colour, w = intensity
     vec4 lightParams[8]; // x = range
     vec4 counts;         // x = light count
-    vec4 giParams;       // xy = viewport, z = GI masks valid (heLitP samples them)
+    vec4 giParams;       // xy = viewport, z = GI masks valid (heLitP samples them), w = texture mip bias (HE_TEX_BIAS)
     mat4 csmVP[3];       // CSM fallback: per-cascade light view-proj (conventions pre-baked)
     vec4 csmSplits;      // xyz = planar view-space far distances; w = cascade count (0 = off)
     vec4 camFwd;         // xyz = camera forward (planar cascade selection)
@@ -289,6 +289,9 @@ layout(std140, set = 0, binding = 0) uniform HeLighting {
     mat4 fogViewProj;    // world → clip, unjittered, y flip pre-baked: uv = clip.xy / clip.w * 0.5 + 0.5, clip.w = planar depth
     vec4 worldOrigin;    // xyz = the floating origin: vWorldPos + worldOrigin.xyz is the absolute position (World Position node)
 } heLight;
+// The material texture reads' mip bias (MaterialGraph texBias): giParams.w, which a backend sets while an upscaler
+// renders below the display size (0 everywhere else, the block's default).
+#define HE_TEX_BIAS heLight.giParams.w
 // Screen-space ray-traced shadow masks (GI): sun visibility (.r) + local-light
 // visibility (one channel per the first 4 point/spot lights). Bindings 10/11 —
 // 8/9 belong to the WPO custom vertex's UBOs (wpoDeclarations). Bound to 1x1
