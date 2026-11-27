@@ -350,21 +350,28 @@ std::string upscalerMode()
     return std::find(modes.begin(), modes.end(), m) != modes.end() ? m : std::string("NativeAA");
 }
 
+// The most frames per rendered one available NOW: frame generation runs on FSR's inputs, so it needs FSR as the upscaler.
+static int frameGenerationMax()
+{
+    if (upscaler() != "FSR") return 1;
+    return std::clamp(support().maxFrameGeneration, 1, kFrameGenMax);
+}
+
 std::vector<int> frameGenerationModes()
 {
     std::vector<int> out;
-    for (int n = 2; n <= std::min(support().maxFrameGeneration, kFrameGenMax); ++n) out.push_back(n);
+    for (int n = 2; n <= frameGenerationMax(); ++n) out.push_back(n);
     return out;
 }
 
-bool isFrameGenerationAvailable() { return support().maxFrameGeneration > 1; }
+bool isFrameGenerationAvailable() { return frameGenerationMax() > 1; }
 
 void setFrameGeneration(int multiplier)
 {
-    if (multiplier > 1 && multiplier > std::min(support().maxFrameGeneration, kFrameGenMax))
+    if (multiplier > 1 && multiplier > frameGenerationMax())
     {
         HE_LOG_WARN(Script, "settings.setFrameGeneration: %dx is not available here — ignored "
-                    "(settings.frameGenerationModes lists what is)", multiplier);
+                    "(settings.frameGenerationModes lists what is; it needs FSR as the upscaler)", multiplier);
         return;
     }
     state().values.frameGeneration = std::max(multiplier, 1);
@@ -373,7 +380,7 @@ void setFrameGeneration(int multiplier)
 int frameGeneration()
 {
     const int n = state().values.frameGeneration.value_or(1);
-    return n <= std::min(support().maxFrameGeneration, kFrameGenMax) ? n : 1;
+    return n <= frameGenerationMax() ? n : 1;
 }
 
 int aaMethodFor(int configuredMethod)

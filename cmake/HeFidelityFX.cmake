@@ -15,6 +15,7 @@ set(HE_FSR_SDK_ROOT "" CACHE PATH "Folder laid out like the FSR SDK's Kits/Fidel
 set(HE_FSR_SDK_VERSION "2.4.0")
 set(HE_FSR_SDK_COMMIT "7539ae8b6568ad29ed78a753404351daf3b5cca7")   # tag v2.4.0
 set(HE_HAVE_FSR FALSE)
+set(HE_HAVE_FSR_FG FALSE)      # frame generation: its own files, so a failed download of them keeps the upscaler
 set(HE_FSR_INCLUDE_DIRS "")
 set(HE_FSR_RUNTIME_FILES "")   # the DLLs and the license, copied beside the engine
 
@@ -34,11 +35,19 @@ elseif(HE_ENABLE_FSR AND WIN32 AND CMAKE_SYSTEM_PROCESSOR MATCHES "(AMD64|x86_64
         "signedbin/amd_fidelityfx_loader_vk.dll"    38a56a01fb3565c0757d9f5c1e4e69de4b65e5f2e5769b323b200dc1f142bab9
         "signedbin/amd_fidelityfx_upscaler_dx12.dll" aad4fccccb29084a655f9a4f9f613bd22c8c03fb4a0f8840148cc6543b4ccace
         "signedbin/amd_fidelityfx_upscaler_vk.dll"  4a7e895af6e0b615d40a84d59eb8c2b1054ad91cdd0c739567940270d51bdab7)
+    # Frame generation (FSR 3.1 FG and its frame interpolation swapchain), D3D12. Its headers include the API ones by a
+    # relative path, so they keep the Kits/FidelityFX layout.
+    set(_fsr_fg_files
+        "framegeneration/include/ffx_framegeneration.h"           bc78a18aa95f5157b4699b0602700592b624788c5bc55d1762cb46a1b6557ca1
+        "framegeneration/include/ffx_framegeneration_api_types.h" 396596af3df63310674e8036abd2ad0fcd061e61334e7a2c76653a2be3c686b4
+        "framegeneration/include/dx12/ffx_api_framegeneration_dx12.h" 8ddb1cb78f83caf3598509df4968e84c851504cd6c00d9923261a5fc2c7ef0ed
+        "signedbin/amd_fidelityfx_framegeneration_dx12.dll"       e6843252f58b0341a0d80f6a20bc0d840643ee95bc48c22cac08745344577bb6)
     set(_fsr_root "${HE_FSR_SDK_ROOT}")
     if(NOT _fsr_root)
         set(_fsr_root "${CMAKE_BINARY_DIR}/_deps/fsr-sdk-${HE_FSR_SDK_VERSION}")
         set(_fsr_base "https://raw.githubusercontent.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/${HE_FSR_SDK_COMMIT}/Kits/FidelityFX")
         set(_fsr_ok TRUE)
+        list(APPEND _fsr_files ${_fsr_fg_files})   # one loop; a failed FG file only leaves FG out (checked below)
         list(LENGTH _fsr_files _fsr_n)
         math(EXPR _fsr_last "${_fsr_n} - 1")
         foreach(_i RANGE 0 ${_fsr_last} 2)
@@ -51,14 +60,18 @@ elseif(HE_ENABLE_FSR AND WIN32 AND CMAKE_SYSTEM_PROCESSOR MATCHES "(AMD64|x86_64
                     continue()
                 endif()
             endif()
-            if(_f MATCHES "upscaler_")
+            if(_f MATCHES "upscaler_|framegeneration_dx12")
                 message(STATUS "HorizonEngine: downloading FSR SDK ${HE_FSR_SDK_VERSION} ${_f} (once per build tree)")
             endif()
             file(DOWNLOAD "${_fsr_base}/${_f}" "${_fsr_root}/${_f}" EXPECTED_HASH SHA256=${_h} STATUS _st)
             list(GET _st 0 _rc)
             if(NOT _rc EQUAL 0)
                 list(GET _st 1 _msg)
-                message(WARNING "HorizonEngine: FSR SDK download of ${_f} failed (${_msg}) — FSR left out. "
+                set(_fsr_what "FSR")
+                if(_f MATCHES "framegeneration")
+                    set(_fsr_what "FSR frame generation")
+                endif()
+                message(WARNING "HorizonEngine: FSR SDK download of ${_f} failed (${_msg}) — ${_fsr_what} left out. "
                                 "Configure with -DHE_FSR_SDK_ROOT=<Kits/FidelityFX of the SDK> or -DHE_ENABLE_FSR=OFF.")
                 file(REMOVE "${_fsr_root}/${_f}")
                 set(_fsr_ok FALSE)
@@ -82,6 +95,15 @@ elseif(HE_ENABLE_FSR AND WIN32 AND CMAKE_SYSTEM_PROCESSOR MATCHES "(AMD64|x86_64
         configure_file("${_fsr_root}/docs/license.md" "${_fsr_root}/AMD_FSR_SDK_LICENSE.md" COPYONLY)
         set(HE_FSR_RUNTIME_FILES ${_fsr_runtime} "${_fsr_root}/AMD_FSR_SDK_LICENSE.md")
         message(STATUS "HorizonEngine: AMD FSR SDK ${HE_FSR_SDK_VERSION} enabled (${_fsr_root})")
+        if(EXISTS "${_fsr_root}/framegeneration/include/dx12/ffx_api_framegeneration_dx12.h"
+           AND EXISTS "${_fsr_root}/signedbin/amd_fidelityfx_framegeneration_dx12.dll")
+            set(HE_HAVE_FSR_FG TRUE)
+            list(APPEND HE_FSR_INCLUDE_DIRS "${_fsr_root}/framegeneration/include")
+            list(APPEND HE_FSR_RUNTIME_FILES "${_fsr_root}/signedbin/amd_fidelityfx_framegeneration_dx12.dll")
+            message(STATUS "HorizonEngine: FSR frame generation enabled (D3D12)")
+        else()
+            message(WARNING "HorizonEngine: FSR frame generation files missing under '${_fsr_root}' — frame generation left out")
+        endif()
     else()
         message(WARNING "HorizonEngine: FSR SDK incomplete under '${_fsr_root}' — FSR left out")
     endif()

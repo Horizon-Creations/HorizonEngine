@@ -474,13 +474,17 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const DrawOptions& o
 		// upscales (with TAA that becomes TAAU), > 1 is plain supersampling.
 		// Only a backend that sizes its render targets by it reports
 		// supportsRenderScale; on the others the slider moved and nothing happened.
-		const bool scaleOK = ctx.renderer && ctx.renderer->GetCapabilities().supportsRenderScale;
+		// Metal scales under any AA mode; the others only through an upscaler (FSR).
+		const bool scaleCap = ctx.renderer && ctx.renderer->GetCapabilities().supportsRenderScale;
+		const bool scaleOK  = scaleCap && (ctx.backend == HE::RendererBackend::Metal || aaMode == 5);
 		ImGui::BeginDisabled(!scaleOK);
 		Row::sliderFloat("Render Scale", &cfg.RenderScale, 0.5f, 2.0f, "%.2f");
 		ImGui::EndDisabled();
 		if (!scaleOK && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-			ImGui::SetTooltip("This backend always renders at the window's own "
-			                  "resolution (no render scale yet).");
+			ImGui::SetTooltip(scaleCap ? "Choose FSR as the anti-aliasing: on this backend the "
+			                             "upscaler is what renders below the window size."
+			                           : "This backend always renders at the window's own "
+			                             "resolution (no render scale yet).");
 		// Same story one step further: the normal-variance term is in the Metal and
 		// OpenGL shading paths, Vulkan and both DirectX backends ignore it.
 		const bool specOK = (ctx.backend == HE::RendererBackend::Metal ||

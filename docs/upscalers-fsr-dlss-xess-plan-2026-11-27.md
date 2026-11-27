@@ -61,13 +61,64 @@ later). Branch `claude/upscalers-fsr`, on top of `claude/motion-blur-d3d-vulkan`
      jitter sequence (engine clip shift `(x, -y)`), dispatch after the fog and before motion blur (AMD's order —
      Metal runs MB before MetalFX), output copied back over `hdrRT`; real frames only (`mbRealFrame`); depth
      near plane = `2fn/(f+n)` (the depth is GL ndc z's kept half). Editor: "FSR" in the AA list, hint, help.
+  3. **Availability in the UI** (`360d2b3fa`): `AAMethod::DLSS = 6`, `XeSS = 7` (no backend has them;
+     fallback DLSS/XeSS → FSR → …); `Row::comboAvailable` greys an entry out with "(unavailable)" and a tooltip
+     why; the capability list shows FSR/DLSS/XeSS/render scale/frame generation.
+  4. **HorizonCode** (`7d9f51b09`): eleven `settings.*` rows (PlayerSettings.cpp:286-400, EngineApi.cpp:7198):
+     `upscalers`, `isUpscalerAvailable`, `set/upscaler`, `upscalerModes` (NativeAA … UltraPerformance, the
+     ratios of `ffx_upscale.h`), `set/upscalerMode`, `frameGenerationModes` (ints > 1), `isFrameGenerationAvailable`,
+     `set/frameGeneration` (1 = off). Lists from `Host::graphicsSupport` (renderer caps at call time); a setter
+     given what the machine cannot run warns and keeps the old value; saved with `settings.save`. The game's
+     per-frame AA push lays the choice over the config (`settings::aaMethodFor` / `renderScaleFor`,
+     GameApplication.cpp:3708); the editor's Play only records it (like VSync). New caps `supportsRenderScale`,
+     `maxFrameGeneration` (IRenderer.h:348). `registry.json` NOT regenerated (its dump script is macOS-only).
+  5. **Render scale / upscaling with FSR on D3D12**: `sceneW/H` (D3D12Renderer.cpp:1992, `IRenderer::UpscaleRenderSize`,
+     clamp [1/4, 1]) sizes depth, `hdrRT`, TAA/velocity and every DrawScene pass; `fsrOut` (display size, made in
+     `createPostFXResources`, slot 1) is what the tail reads (motion blur via `tailHdr()`, bloom, tonemap, AA, UI);
+     caustics/fog draw at the scene size; FSR runs in every upscaled frame (unjittered + reset outside `taaFrame`).
+     Context sized render → display (recreated on a scale change). Stills (RVT) stay unscaled; `rvtStillLeave`
+     restores the scene size. `supportsRenderScale = supportsFSR` on D3D12; the Preferences slider needs FSR there.
+     The FSR loader is found beside the module (`GetModuleHandleEx`), not the exe: the game keeps the engine in
+     `HorizonEngine/`, where FSR never loaded before.
+  6. **Frame generation, FSR 3.1 FG on D3D12** (game swapchain only, needs FSR as the AA method): own CMake files +
+     `HE_HAVE_FSR_FG` (`amd_fidelityfx_framegeneration_dx12.dll`, 30 MB, signed by AMD, SHA256-pinned).
+     `D3D12Fsr::replaceSwapchain` — AMD sample's pattern, NOT Wrap: the hwnd's swapchain is released and the
+     swapchain context makes the proxy `ForHwnd` (first FG frame, once per run, never back); FG context at the back
+     buffer size (recreated after `ResizeBuffers`); per frame `ffxConfigure` (frameID +1, `frameGenerationCallback`
+     dispatches inside Present, HUD-less = `viewportRT` copied before the UI pass) + `PrepareV2` on the upscaler's
+     depth/velocity/jitter; teardown FG off → FG ctx → swapchain ctx → swapchain. `IRenderer::SetFrameGeneration`,
+     `maxFrameGeneration = 2` when the provider answers; `settings.frameGenerationModes` is empty unless the
+     upscaler is FSR. Game push per frame; `HE_GAME_FRAMEGEN=n` forces it, `HE_FSR_FG_STATS=1` logs generated /
+     rendered, `HE_FSR_FG_DEBUG=1` AMD's tear lines.
 - **Verified** (NN-WS03, RTX 4070, Release; `HE_DUMP` SHADOWINSTTEST, 40 settle frames, cube band): the loader
   picks **FSR 3.1.6**, `HE_FSR_DEBUG=1` reports nothing. Sign A/B against the AA-off frame of the same pose
   (run-to-run noise 0.040): still FSR 0.754 vs jitter-y flipped 0.855; pan (`HE_DUMP_PANYAW=0.5`) FSR 1.239 vs
   motion vectors flipped 1.841 (visible ghost). FSR keeps the edge gradient (2.41 vs 2.39 off). Loader DLL
   renamed: one log line, TAA runs instead.
-- **Not verified:** FSR 4 (needs an RX 9000); render scale < 1 (step 1 is not done: D3D12 still renders at
-  viewport size); Vulkan; skinned meshes / particles under FSR (no velocity: they will ghost); the exported game.
+  Render scale 0.5 (log `FSR 3.1.6 active (640x360 -> 1280x720)`): whole frame (quadrant means = 1.0's), still
+  1.35 vs off (1.0: 0.75; softer, no mip bias). Pan at 0.5: 1.35 vs motion-vector scale at display size 1.98 and
+  sign flipped 2.18 (FSR run-to-run noise in a pan ~0.3-0.7). TAA at 0.5 = TAA at 1.0 (0.004: D3D12 does not
+  scale without FSR). `HE_DUMP_GPUTIME=300,2560x1440`, 3 interleaved pairs: GPU median 9.96/8.89/8.82 ms at 1.0
+  vs 3.74/3.90/4.44 ms at 0.5 (paired −6.2/−5.0/−4.4 ms); that run also resized the upscaled viewport (1280x720 →
+  2560x1440 → back, `createViewportRT`). Motion blur + bloom at 0.5 with `HE_GPU_DEBUG=1` (+ `HE_FSR_DEBUG=1`):
+  no debug-layer error (only the ClearRenderTargetView clear-value hint), MB acts (yaw-step horizontal gradient
+  ×0.68). he_tests: full suite 6618/6621 (the 3 = gamepad tests, a real pad is attached), help audit.
+  **Game** (export of a witness project via `ProjectExporter` from a throwaway test, D3D12, AA 5, scale 0.5, 1600x900):
+  log `FSR 3.1.6 active (800x450 -> 1600x900)`, `frame interpolation swapchain in place`; `HE_GAME_FRAMEGEN=2`:
+  `2640 generated / 2640 rendered = 1.00` (and on); FG off: `0 generated / 13920 rendered`. FG + `HE_GPU_DEBUG=1`
+  + `HE_FSR_DEBUG=1`: no error. PrintWindow FG vs no FG: 0.097 mean diff (clouds only). Earlier run counted DXGI
+  PresentCount ≈ 2.0 too (unreliable in a window: stalls; hence the callback counter).
+- **Not verified:** FSR 4 (needs an RX 9000); Vulkan; skinned meshes / particles under FSR (no velocity: they will
+  ghost); a player choice through `settings.setUpscaler` / `setFrameGeneration` in a running game (rows unit-tested;
+  the game ran with config keys / `HE_GAME_FRAMEGEN`); FG with a camera in motion judged by eye (counted only);
+  FG in fullscreen and across a window resize (code path: `destroyFrameGen` before `ResizeBuffers`);
+  `he_perf_capture` in the real loop (the hidden editor drew no viewport here). RVT page ticks: the still bracket
+  already rebuilt the post set in Enter and (page size ≠ viewport) in Leave; while upscaled Leave also resets FSR's
+  history, like TAA's before — a landscape streaming pages at 0.5 was not looked at.
 - **Decisions:** the dispatch sits before motion blur, unlike MetalFX; FSR's own sharpening takes AA Sharpness.
-- **Next:** render scale on D3D12 (scene/depth/velocity at render size, FSR output and everything after at display
-  size), then Vulkan (`amd_fidelityfx_loader_vk.dll`), then velocity for skinned meshes and particles.
+  Render scale on D3D12 only through FSR (no bilinear fallback); no supersampling (> 1 counts as 1).
+  `shortcut:` no negative texture mip bias while upscaling (sceneSizeFor comment).
+  Frame generation 2× only: FSR 3.1's swapchain path generates one frame; 3×/4× (DLSS MFG, RTX 50) stay
+  unavailable. FG renders at most ~half the frames it would without (pacing), as AMD's.
+- **Next:** Vulkan FSR + FG (`*_vk.dll`); a settings menu in the template wired to the new rows; mip bias;
+  velocity for skinned meshes and particles; DLSS / XeSS (steps 4, 5).

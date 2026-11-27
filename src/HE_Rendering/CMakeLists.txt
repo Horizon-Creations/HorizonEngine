@@ -417,6 +417,9 @@ if(HE_HAVE_FSR)
             target_compile_definitions(${_t} PRIVATE HE_HAVE_FSR)
         endif()
     endforeach()
+    if(HE_HAVE_FSR_FG AND TARGET RendererD3D12)
+        target_compile_definitions(RendererD3D12 PRIVATE HE_HAVE_FSR_FG)   # frame generation, D3D12 only for now
+    endif()
     add_custom_command(TARGET HorizonRendering POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different ${HE_FSR_RUNTIME_FILES} "$<TARGET_FILE_DIR:HorizonRendering>"
         COMMAND ${CMAKE_COMMAND} -E make_directory "${DEPLOY_EDITOR}"

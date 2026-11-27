@@ -1783,11 +1783,13 @@ struct D3D12RendererImpl
         device->CreateRenderTargetView(viewportRT.Get(), nullptr,
             viewportRtvHeap->GetCPUDescriptorHandleForHeapStart());
 
-        // Depth texture
+        // Depth texture, at the scene size (smaller than the viewport while upscaling)
+        sceneW = sceneSizeFor(w);
+        sceneH = sceneSizeFor(h);
         D3D12_RESOURCE_DESC dd{};
         dd.Dimension        = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-        dd.Width            = w;
-        dd.Height           = h;
+        dd.Width            = sceneW;
+        dd.Height           = sceneH;
         dd.DepthOrArraySize = 1;
         dd.MipLevels        = 1;
         dd.Format           = DXGI_FORMAT_R32_TYPELESS; // C2, as in createDepth
@@ -1970,15 +1972,45 @@ struct D3D12RendererImpl
     bool taaWanted() const { return (aaMethod == HE::AAMethod::TAA || aaMethod == HE::AAMethod::FSR) && taaReady(); }
 
     // ── AMD FSR (AAMethod::FSR; D3D12Fsr.h) ──────────────────────────────────
-    // Dispatched on the HDR image right after the underwater fog (before motion blur, bloom and the tonemap: AMD's order),
-    // its output copied back over hdrRT. Real frames only (mbRealFrame): a still or an RVT page must not feed its history.
+    // Dispatched on the HDR image right after the underwater fog (before motion blur, bloom and the tonemap: AMD's order).
+    // Native AA (scene size = viewport size): its output is copied back over hdrRT, real frames only (mbRealFrame): a still
+    // or an RVT page must not feed its history. Upscaling (renderScale < 1): the scene targets — depth, hdrRT, velocity,
+    // TAA's, every DrawScene pass — are sceneW x sceneH, fsrOut is the viewport size and the tail of the post chain
+    // (motion blur, bloom, tonemap; slot 1 and k_mbSrvBlur) reads it instead of hdrRT, so FSR runs in every such frame.
     HE::D3D12Fsr           fsr;
     ComPtr<ID3D12Resource> fsrOut;                 // RGBA16F + UAV, display size
     D3D12_RESOURCE_STATES  fsrOutState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
     glm::vec2              fsrJitter{ 0.0f };      // this frame's, as FSR gave it (taaJitter holds the engine's sign)
     bool                   fsrReset = true;        // the next dispatch discards the history
     uint64_t               fsrLastNs = 0;
+    float                  renderScale = 1.0f;     // AntiAliasingSettings::renderScale, as asked
+    // Frame generation (SetFrameGeneration): the packaged game's swapchain frames only, with FSR. The first FG frame
+    // replaces the swapchain by FSR's proxy (kept afterwards; FG then switches per frame). fgHudless = the frame before
+    // its UI, which FG needs to keep the UI out of the interpolation.
+    int                    fgWanted = 1;
+    bool                   fgFrame = false;        // this Render(): FG prepared (game frame, FSR, a jittered frame)
+    uint64_t               fgFrameId = 0;
+    ComPtr<ID3D12Resource> fgHudless;              // RGBA8, back-buffer size
+    D3D12_RESOURCE_STATES  fgHudlessState = D3D12_RESOURCE_STATE_COPY_DEST;
+    uint64_t               fgPresents = 0;         // Render() presents since FG went on (HE_FSR_FG_STATS witness)
+    uint64_t               fgStatsBase = 0;        // generatedFrames() when FG went on
+    bool                   fgTried = false;        // the swapchain replacement was attempted (once per run)
+    bool                   fgWasOn = false;        // last frame configured FG on: switching it off is one configure
+    uint64_t               fgLastNs = 0;
+    UINT                   sceneW = 0, sceneH = 0; // the scene targets' size (createViewportRT); = viewport unless upscaling
     bool fsrFrame() const { return aaMethod == HE::AAMethod::FSR && fsr.available(); }
+    // The scene size a viewport of w x h wants now: smaller only through FSR, on the post chain, outside a still.
+    // shortcut: no negative texture LOD bias while upscaling (textures pick the render size's mips, a little soft);
+    // add log2(scene / viewport) to the material samplers' MipLODBias when the softness matters.
+    UINT sceneSizeFor(UINT v) const
+    {
+        const bool up = fsrFrame() && postFxReady && !rvtStill.active && renderScale < 1.0f;
+        return up ? IRenderer::UpscaleRenderSize(v, renderScale) : v;
+    }
+    bool sceneScaled() const { return sceneW != viewportW || sceneH != viewportH; }
+    // What the post chain after FSR reads: fsrOut while upscaling, else hdrRT.
+    ID3D12Resource*        tailHdr()      { return sceneScaled() ? fsrOut.Get() : hdrRT.Get(); }
+    D3D12_RESOURCE_STATES& tailHdrState() { return sceneScaled() ? fsrOutState : hdrState; }
 
     // Caller guarantees the GPU no longer reads the targets (waitForAllFrames).
     void destroyTaaTargets()
@@ -2081,10 +2113,13 @@ struct D3D12RendererImpl
 
     // Creates the RGBA16F HDR RT, bloom[2] RT and RGBA8 LDR RT, plus their RTVs
     // and the PostFX SRV descriptor heap.  Called whenever the viewport is resized.
+    // w x h is the viewport (bloom, LDR, fsrOut); hdrRT and TAA's follow the scene size sceneW x sceneH, set with the depth.
     void createPostFXResources(UINT w, UINT h)
     {
         waitForAllFrames();
+        if (!sceneW || !sceneH) { sceneW = w; sceneH = h; }
         hdrRT.Reset(); hdrRtvHeap.Reset();
+        fsrOut.Reset();   // one owner while upscaling (slot 1 below points at it); the native-AA case makes its own lazily
         bloomRT[0].Reset(); bloomRtvHeap[0].Reset();
         bloomRT[1].Reset(); bloomRtvHeap[1].Reset();
         ldrRT.Reset(); ldrRtvHeap.Reset();
@@ -2159,17 +2194,37 @@ struct D3D12RendererImpl
         }
 
         const UINT bw = std::max(1u, w/2), bh = std::max(1u, h/2);
-        makeTex(DXGI_FORMAT_R16G16B16A16_FLOAT, w,  h,  hdrRT,     hdrRtvHeap,     1);
+        makeTex(DXGI_FORMAT_R16G16B16A16_FLOAT, sceneW, sceneH, hdrRT, hdrRtvHeap, 1);
         makeTex(DXGI_FORMAT_R16G16B16A16_FLOAT, bw, bh, bloomRT[0], bloomRtvHeap[0], 2);
         makeTex(DXGI_FORMAT_R16G16B16A16_FLOAT, bw, bh, bloomRT[1], bloomRtvHeap[1], 3);
         makeTex(DXGI_FORMAT_R8G8B8A8_UNORM,     w,  h,  ldrRT,     ldrRtvHeap,     4);
+        // Upscaling: FSR's display-size output, and slot 1 (the tail's "hdr") is IT rather than the render-size hdrRT.
+        if ((sceneW != w || sceneH != h) && postFxSrvHeap)
+        {
+            D3D12_RESOURCE_DESC rd{};
+            rd.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+            rd.Width = w; rd.Height = h; rd.DepthOrArraySize = 1; rd.MipLevels = 1;
+            rd.Format = DXGI_FORMAT_R16G16B16A16_FLOAT; rd.SampleDesc.Count = 1;
+            rd.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+            if (SUCCEEDED(device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                                                          nullptr, IID_PPV_ARGS(&fsrOut))))
+            {
+                D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
+                sv.Format = rd.Format; sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+                sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+                sv.Texture2D.MipLevels = 1;
+                device->CreateShaderResourceView(fsrOut.Get(), &sv, srvCpuHandle(1));
+            }
+            fsrOutState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+            fsrReset = true;
+        }
 
         // All freshly created in RENDER_TARGET state.
         hdrState      = D3D12_RESOURCE_STATE_RENDER_TARGET;
         bloomState[0] = D3D12_RESOURCE_STATE_RENDER_TARGET;
         bloomState[1] = D3D12_RESOURCE_STATE_RENDER_TARGET;
         ldrState      = D3D12_RESOURCE_STATE_RENDER_TARGET;
-        postFxW = w; postFxH = h;
+        postFxW = sceneW; postFxH = sceneH;   // TAA's size (syncTaaTargets): the scene's
 
         // Forward SSR's radiance source: a full-res copy of the PREVIOUS frame's
         // hdrRT. Built here, with the target it copies, so the two can never
@@ -2193,7 +2248,7 @@ struct D3D12RendererImpl
 
         // TAA's targets follow the same size and their SRVs live in the heap
         // just rebuilt; the GPU is already idle (waitForAllFrames above).
-        if (taaWanted()) createTaaTargets(w, h);
+        if (taaWanted()) createTaaTargets(sceneW, sceneH);
         else             destroyTaaTargets();
         // Motion blur's views lived in the old heap: made again at the new size on its next use.
         mbVelRT.Reset(); mbRT.Reset(); mbRtvHeap.Reset(); mbW = mbH = 0;
@@ -2204,7 +2259,7 @@ struct D3D12RendererImpl
     bool ensureMotionBlurTargets(UINT w, UINT h)
     {
         if (mbRT && mbW == w && mbH == h) return true;
-        if (!postFxSrvHeap || !hdrRT) return false;
+        if (!postFxSrvHeap || !tailHdr()) return false;
         waitForAllFrames();
         mbVelRT.Reset(); mbRT.Reset(); mbRtvHeap.Reset(); mbW = mbH = 0;
         D3D12_HEAP_PROPERTIES hp{}; hp.Type = D3D12_HEAP_TYPE_DEFAULT;
@@ -2233,7 +2288,7 @@ struct D3D12RendererImpl
         sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D; sv.Texture2D.MipLevels = 1;
         sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
         sv.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
-        device->CreateShaderResourceView(hdrRT.Get(), &sv, srvCpuHandle(k_mbSrvBlur));
+        device->CreateShaderResourceView(tailHdr(), &sv, srvCpuHandle(k_mbSrvBlur));   // display size: after FSR
         sv.Format = DXGI_FORMAT_R16G16_FLOAT;
         device->CreateShaderResourceView(mbVelRT.Get(), &sv, srvCpuHandle(k_mbSrvBlur + 1));
         mbVelState = mbState = D3D12_RESOURCE_STATE_RENDER_TARGET;
@@ -2637,6 +2692,10 @@ struct D3D12RendererImpl
         if (!postFxReady || !postFxSrvHeap || !hdrRT) return;
         GpuPassScope _post(this, "PostFX");   // what runs before the bloom: caustics, fog, DoF, motion blur
 
+        // w x h is the viewport; the passes up to FSR draw on the scene targets, sw x sh (smaller while upscaling).
+        const bool upscale = sceneScaled();
+        const UINT sw = upscale ? sceneW : w, sh = upscale ? sceneH : h;
+        if (upscale && !fsrOut) return;   // createPostFXResources could not make it: nothing to show the scene through
         const UINT bw = std::max(1u, w/2), bh = std::max(1u, h/2);
         const float tw = 1.0f/float(bw), th = 1.0f/float(bh);
 
@@ -2704,7 +2763,7 @@ struct D3D12RendererImpl
             cl->SetGraphicsRootSignature(underwaterCausticsRootSig.Get());
             cl->SetPipelineState(underwaterCausticsPSO.Get());
             cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-            setVP(w, h);
+            setVP(sw, sh);   // before FSR: the scene size
             setRTV(hdrRtvHeap);
             cl->SetGraphicsRoot32BitConstants(0, 44, &ucb, 0);
             // Depth off the DSV before it is readable as an SRV — the fog's own dance, round trip.
@@ -2761,7 +2820,7 @@ struct D3D12RendererImpl
             cl->SetGraphicsRootSignature(underwaterFogRootSig.Get());
             cl->SetPipelineState(underwaterFogPSO.Get());
             cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-            setVP(w, h);
+            setVP(sw, sh);   // before FSR: the scene size
             setRTV(hdrRtvHeap);
             cl->SetGraphicsRoot32BitConstants(0, 36, &cb, 0);
             // Depth off the DSV before it is readable as an SRV — same dance EncodeDecals uses.
@@ -2774,11 +2833,15 @@ struct D3D12RendererImpl
         }
 
         // AMD FSR, right after the fog and before motion blur, bloom and the tonemap (AMD's order: an image already smeared or
-        // bloomed would ghost in its history). Native AA for now: render size = display size; the output goes back over hdrRT.
-        if (taaFrame && fsrFrame() && mbRealFrame && fsr.sizedFor(w, h, w, h) && viewportDepth && taaVelocityRT)
+        // bloomed would ghost in its history). Native AA: the output goes back over hdrRT, real frames only. Upscaling: every
+        // frame, since nothing else brings the scene to the viewport size; the tail reads fsrOut. A frame outside the jitter
+        // sequence (no taaFrame) goes through unjittered with the history reset.
+        const bool fsrNative  = !upscale && taaFrame && fsrFrame() && mbRealFrame && fsr.sizedFor(w, h, w, h);
+        const bool fsrUpscale = upscale && fsrFrame() && fsr.sizedFor(sw, sh, w, h);
+        if ((fsrNative || fsrUpscale) && viewportDepth && taaVelocityRT)
         {
             _post.next("FSR");
-            if (!fsrOut || fsrOut->GetDesc().Width != w || fsrOut->GetDesc().Height != h)
+            if (!upscale && (!fsrOut || fsrOut->GetDesc().Width != w || fsrOut->GetDesc().Height != h))
             {
                 fsrOut.Reset();
                 D3D12_HEAP_PROPERTIES hp{}; hp.Type = D3D12_HEAP_TYPE_DEFAULT;
@@ -2810,15 +2873,23 @@ struct D3D12RendererImpl
                 HE::D3D12Fsr::Dispatch fd;
                 fd.cl = cl; fd.color = hdrRT.Get(); fd.depth = viewportDepth.Get(); fd.velocity = taaVelocityRT.Get();
                 fd.output = fsrOut.Get();
-                fd.renderW = w; fd.renderH = h; fd.displayW = w; fd.displayH = h;
-                fd.jitter = fsrJitter;
+                fd.renderW = sw; fd.renderH = sh; fd.displayW = w; fd.displayH = h;
+                fd.jitter = taaFrame ? fsrJitter : glm::vec2(0.0f);
                 fd.nearZ = 2.0f * f * n / (f + n); fd.farZ = f;
                 fd.fovY = 2.0f * std::atan(1.0f / P[1][1]);
                 fd.frameMs = fsrLastNs ? float(double(nowNs - fsrLastNs) * 1e-6) : 16.6f;
                 fd.sharpness = aaSharpness;
-                fd.reset = fsrReset;
+                fd.reset = fsrReset || !taaFrame;
                 fsrLastNs = nowNs;
-                if (fsr.dispatch(fd))
+                const bool fsrOk = fsr.dispatch(fd);
+                if (fsrOk && upscale)
+                {
+                    fsrReset = !taaFrame;   // an unjittered frame starts no history the next one could build on
+                    barrier12(cl, fsrOut.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+                    fsrOutState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+                    barrier12(cl, hdrRT.Get(), kRead, D3D12_RESOURCE_STATE_RENDER_TARGET);
+                }
+                else if (fsrOk)
                 {
                     fsrReset = false;
                     barrier12(cl, fsrOut.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
@@ -2869,7 +2940,8 @@ struct D3D12RendererImpl
             // 2. the smear: {hdr, velocity} → mbRT
             barrier12(cl, mbVelRT.Get(), mbVelState, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
             mbVelState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-            barrier12(cl, hdrRT.Get(), hdrState, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            barrier12(cl, tailHdr(), tailHdrState(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            tailHdrState() = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
             barrier12(cl, mbRT.Get(), mbState, D3D12_RESOURCE_STATE_RENDER_TARGET);
             mbState = D3D12_RESOURCE_STATE_RENDER_TARGET;
             cl->OMSetRenderTargets(1, &mbRtv, FALSE, nullptr);
@@ -2878,13 +2950,13 @@ struct D3D12RendererImpl
             cl->SetGraphicsRoot32BitConstants(0, 24, &mb, 0);
             cl->SetGraphicsRootDescriptorTable(1, srvGpuHandle(k_mbSrvBlur));
             cl->DrawInstanced(3, 1, 0, 0);
-            // 3. back over hdrRT, which goes on as a render target (the barrier below makes it readable for the bloom)
+            // 3. back over the tail's hdr (hdrRT, or fsrOut while upscaling), readable for the bloom
             barrier12(cl, mbRT.Get(), mbState, D3D12_RESOURCE_STATE_COPY_SOURCE);
             mbState = D3D12_RESOURCE_STATE_COPY_SOURCE;
-            barrier12(cl, hdrRT.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
-            cl->CopyResource(hdrRT.Get(), mbRT.Get());
-            barrier12(cl, hdrRT.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_RENDER_TARGET);
-            hdrState = D3D12_RESOURCE_STATE_RENDER_TARGET;
+            barrier12(cl, tailHdr(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
+            cl->CopyResource(tailHdr(), mbRT.Get());
+            barrier12(cl, tailHdr(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            tailHdrState() = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
         }
 
         // Bind PostFX root sig + SRV heap once for all passes.
@@ -2894,9 +2966,9 @@ struct D3D12RendererImpl
         cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
         // HDR should already be in RENDER_TARGET after scene writes.
-        // Transition to SRV for PostFX reads.
-        barrier12(cl, hdrRT.Get(), hdrState, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-        hdrState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        // Transition to SRV for PostFX reads (slot 1: hdrRT, or fsrOut while upscaling).
+        barrier12(cl, tailHdr(), tailHdrState(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        tailHdrState() = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
 
         _post.next("Bloom");
         // ── Bloom bright pass: hdrSRV → bloomRT[0] ─────────────────────────
@@ -4177,7 +4249,7 @@ struct D3D12RendererImpl
         UINT w = 0, h = 0;       // the still's size
         ComPtr<ID3D12Resource>       liveRT, liveDepth, liveReadback;
         ComPtr<ID3D12DescriptorHeap> liveRtvHeap, liveDsvHeap;
-        UINT liveW = 0, liveH = 0, liveReqW = 0, liveReqH = 0;
+        UINT liveW = 0, liveH = 0, liveReqW = 0, liveReqH = 0, liveSceneW = 0, liveSceneH = 0;
         D3D12_RESOURCE_STATES liveState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
         bool liveResChanged = false, liveUsingHDR = false;
         EditorCameraOverride liveCam;
@@ -5996,6 +6068,7 @@ struct D3D12RendererImpl
         // in flight reading them. The flush also makes the frame-slot switch
         // below safe: every slot's fence value is complete afterwards.
         waitForAllFrames();
+        fsr.destroyFrameGen(swapchain.Get());   // sized to the display: made again at the new size by the next FG frame
         for (UINT i = 0; i < k_frameCount; ++i) renderTargets[i].Reset();
         const HRESULT hr = swapchain->ResizeBuffers(k_frameCount, static_cast<UINT>(w), static_cast<UINT>(h),
                                                     DXGI_FORMAT_UNKNOWN, swapchainFlags);
@@ -12649,6 +12722,11 @@ void D3D12Renderer::Shutdown()
     m_impl->tsReadback.Reset();
     m_impl->tsQueryHeap.Reset();
     m_impl->cmdList.Reset();
+    // FSR frame generation (AMD's order): FG off and its context, then the proxy swapchain's context; the proxy itself
+    // goes with the swapchain reference below.
+    m_impl->fsr.destroyFrameGen(m_impl->swapchain.Get());
+    m_impl->fsr.destroySwapchainContext();
+    m_impl->fgHudless.Reset();
     for (UINT i = 0; i < k_frameCount; ++i)
     {
         m_impl->cmdAllocators[i].Reset();
@@ -12735,16 +12813,22 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
     // pre-pass — and the JITTERED one rasterises everything that lands in the
     // image: sky, geometry, decals, transparency, debug lines. Without a TAA
     // frame (see taaFrame) the two are the same matrix.
-    if (p.taaFrame && p.fsrFrame() && !p.fsr.sizedFor(UINT(width), UINT(height), UINT(width), UINT(height)))
+    // While FSR upscales, this pass draws the scene size and FSR's context is sized render -> viewport; a scale change makes
+    // a new context (rare: a settings change) rather than one context at the largest render size.
+    const bool upscaleHere = p.usingHDR && p.sceneScaled() && UINT(width) == p.sceneW && UINT(height) == p.sceneH;
+    const UINT fsrDispW = upscaleHere ? p.viewportW : UINT(width), fsrDispH = upscaleHere ? p.viewportH : UINT(height);
+    const bool fsrCtx = p.fsrFrame() && (p.taaFrame || upscaleHere);
+    if (fsrCtx && !p.fsr.sizedFor(UINT(width), UINT(height), fsrDispW, fsrDispH))
     {
         if (p.fsr.hasContext()) p.waitForAllFrames();   // frames in flight still dispatch into the old context
         p.fsrReset = true;
     }
-    if (p.taaFrame && p.fsrFrame() && p.fsr.ensureContext(p.device.Get(), UINT(width), UINT(height), UINT(width), UINT(height)))
+    const bool fsrOk = fsrCtx && p.fsr.ensureContext(p.device.Get(), UINT(width), UINT(height), fsrDispW, fsrDispH);
+    if (p.taaFrame && fsrOk)
     {
         // FSR's own sequence (its phase count follows the scale). It gives the offset in pixels the way its dispatch wants it;
         // the clip-space shift that produces it has y the other way round (AMD's integration guide: +2x/w, -2y/h).
-        p.fsrJitter = p.fsr.jitter(p.taaFrameIndex++, UINT(width), UINT(width));
+        p.fsrJitter = p.fsr.jitter(p.taaFrameIndex++, UINT(width), fsrDispW);
         p.taaJitter = glm::vec2(p.fsrJitter.x, -p.fsrJitter.y);    }
     else if (p.taaFrame)
         p.taaJitter = HE::taaJitter(p.taaFrameIndex++);
@@ -14711,7 +14795,7 @@ void D3D12Renderer::DrawViewportFrame()
         // early on an empty scene, and the resolve must not then read last
         // frame's motion.
         p.taaFrame = p.taaWanted() && p.taaHistoryRT[0]
-                  && p.taaW == p.viewportW && p.taaH == p.viewportH
+                  && p.taaW == p.sceneW && p.taaH == p.sceneH
                   && !(p.fsrFrame() && !p.mbRealFrame);   // FSR: a still or an RVT page is drawn unjittered, outside its history
         if (p.taaFrame)
         {
@@ -14727,16 +14811,28 @@ void D3D12Renderer::DrawViewportFrame()
         p.cmdList->ClearRenderTargetView(hrtv, bgColor, 0, nullptr);
         p.cmdList->ClearDepthStencilView(vdsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
 
-        D3D12_VIEWPORT vvp{ 0, 0, (float)p.viewportW, (float)p.viewportH, 0.0f, 1.0f };
-        D3D12_RECT     vsc{ 0, 0, (LONG)p.viewportW, (LONG)p.viewportH };
+        // The scene at its own size (smaller than the viewport while FSR upscales; runPostFX brings it up).
+        D3D12_VIEWPORT vvp{ 0, 0, (float)p.sceneW, (float)p.sceneH, 0.0f, 1.0f };
+        D3D12_RECT     vsc{ 0, 0, (LONG)p.sceneW, (LONG)p.sceneH };
         p.cmdList->RSSetViewports(1, &vvp);
         p.cmdList->RSSetScissorRects(1, &vsc);
         p.usingHDR = true;
-        DrawScene(p.cmdList.Get(), static_cast<int>(p.viewportW), static_cast<int>(p.viewportH));
+        DrawScene(p.cmdList.Get(), static_cast<int>(p.sceneW), static_cast<int>(p.sceneH));
         p.hdrState = D3D12_RESOURCE_STATE_RENDER_TARGET;
 
         // PostFX chain: HDR→bloom→tonemap→FXAA→viewportRT (leaves viewportRT in PSR).
         p.runPostFX(p.cmdList.Get(), p.viewportW, p.viewportH);
+
+        // Frame generation: the finished frame BEFORE its UI, so FG can keep the UI out of the interpolation.
+        if (p.fgFrame && p.fgHudless)
+        {
+            p.barrier12(p.cmdList.Get(), p.viewportRT.Get(), p.viewportState, D3D12_RESOURCE_STATE_COPY_SOURCE);
+            p.viewportState = D3D12_RESOURCE_STATE_COPY_SOURCE;
+            p.barrier12(p.cmdList.Get(), p.fgHudless.Get(), p.fgHudlessState, D3D12_RESOURCE_STATE_COPY_DEST);
+            p.cmdList->CopyResource(p.fgHudless.Get(), p.viewportRT.Get());
+            p.fgHudlessState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+            p.barrier12(p.cmdList.Get(), p.fgHudless.Get(), D3D12_RESOURCE_STATE_COPY_DEST, p.fgHudlessState);
+        }
 
         // ── 2D UI canvas: draw on top of the final tonemapped image ─────────
         // runPostFX left viewportRT in PSR; transition back to RT for UI draw.
@@ -14762,6 +14858,9 @@ void D3D12Renderer::DrawViewportFrame()
     else
     {
         // ── Fallback: Scene → viewport RT directly (no PostFX) ───────────
+        // Its depth is the scene's: smaller than viewportRT while upscaling, and nothing here would upscale. Not reached in
+        // practice (upscaling needs the post chain, sceneSizeFor), but a mismatched RTV/DSV pair must not be bound.
+        if (p.sceneScaled()) return;
         p.barrier12(p.cmdList.Get(), p.viewportRT.Get(),
                     p.viewportState, D3D12_RESOURCE_STATE_RENDER_TARGET);
         p.viewportState = D3D12_RESOURCE_STATE_RENDER_TARGET;
@@ -14839,6 +14938,26 @@ void D3D12Renderer::Render()
     // Swapchain to the window's client size (flushes the GPU only when it changed).
     p.resizeSwapchainIfNeeded();
 
+    // FSR frame generation on the game's swapchain: the first frame that wants it replaces the swapchain by FSR's frame
+    // interpolation proxy (one flush, once per run; AMD's sample pattern). Kept afterwards; FG switches per frame.
+    const bool fgWant = p.fgWanted >= 2 && p.swapchainPostFx && p.postFxReady && p.fsrFrame()
+                     && p.fsr.frameGenAvailable(p.device.Get());
+    if (fgWant && !p.fgTried)
+    {
+        p.fgTried = true;
+        p.waitForAllFrames();
+        for (UINT i = 0; i < k_frameCount; ++i) p.renderTargets[i].Reset();
+        p.fsr.replaceSwapchain(p.swapchain, p.cmdQueue.Get());   // on failure a plain swapchain again
+        if (!p.swapchain) throw std::runtime_error("D3D12Renderer: no swapchain after the FSR frame generation attempt");
+        for (UINT i = 0; i < k_frameCount; ++i)
+        {
+            if (FAILED(p.swapchain->GetBuffer(i, IID_PPV_ARGS(&p.renderTargets[i]))))
+                throw std::runtime_error("D3D12Renderer: GetBuffer after the FSR swapchain failed");
+            p.device->CreateRenderTargetView(p.renderTargets[i].Get(), nullptr, p.rtvHandle(i));
+        }
+        p.frameIndex = p.swapchain->GetCurrentBackBufferIndex();
+    }
+
     // The packaged game (SetSwapchainPostProcessing): the post chain — HDR,
     // bloom, tonemap, AA, TAA, SSR — exists only in the viewport frame, so the
     // game runs that frame at the back buffer's size and copies the finished
@@ -14858,7 +14977,8 @@ void D3D12Renderer::Render()
                         && bbDesc.SampleDesc.Count == 1 && bbW > 0 && bbH > 0;
     if (gameChain)
     {
-        if (!p.gameViewport || p.viewportW != bbW || p.viewportH != bbH)
+        if (!p.gameViewport || p.viewportW != bbW || p.viewportH != bbH
+            || p.sceneW != p.sceneSizeFor(bbW) || p.sceneH != p.sceneSizeFor(bbH))   // the upscale scale or mode changed
         {
             p.createViewportRT(bbW, bbH);
             p.gameViewport = true;
@@ -14878,6 +14998,7 @@ void D3D12Renderer::Render()
         p.viewportRtvHeap.Reset(); p.viewportDsvHeap.Reset();
         p.createDepthSrv(nullptr, D3D12RendererImpl::k_decalViewportDepthSlot);
         p.viewportW = p.viewportH = 0;
+        p.sceneW = p.sceneH = 0;
         p.viewportState   = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
         p.gameViewport    = false;
         p.taaHistoryValid = false;
@@ -14885,7 +15006,8 @@ void D3D12Renderer::Render()
 
     // Resize viewport RT if the editor requested a different size.
     if (!gameChain && p.viewportReqW > 0 && p.viewportReqH > 0 &&
-        (p.viewportReqW != p.viewportW || p.viewportReqH != p.viewportH))
+        (p.viewportReqW != p.viewportW || p.viewportReqH != p.viewportH
+         || p.sceneW != p.sceneSizeFor(p.viewportReqW) || p.sceneH != p.sceneSizeFor(p.viewportReqH)))
         p.createViewportRT(p.viewportReqW, p.viewportReqH);
     // TAA targets to the mode in force (only flushes on a toggle), before the
     // command list below starts recording against them.
@@ -14894,6 +15016,27 @@ void D3D12Renderer::Render()
     const bool gameFrame   = gameChain && p.viewportRT && p.viewportDsvHeap
                           && p.viewportW == bbW && p.viewportH == bbH;
     const bool useViewport = !gameChain && p.viewportRT && p.viewportW > 0 && p.viewportH > 0;
+
+    // Frame generation this frame: its context at the back buffer's size, and the hudless copy target (both outside the
+    // recording; a size change makes them again).
+    p.fgFrame = false;
+    if (fgWant && gameFrame && p.fsr.swapchainReplaced()
+        && p.fsr.ensureFrameGen(p.device.Get(), bbW, bbH, bbDesc.Format))
+    {
+        if (!p.fgHudless || p.fgHudless->GetDesc().Width != bbW || p.fgHudless->GetDesc().Height != bbH)
+        {
+            p.waitForAllFrames();
+            p.fgHudless.Reset();
+            D3D12_HEAP_PROPERTIES hp{}; hp.Type = D3D12_HEAP_TYPE_DEFAULT;
+            D3D12_RESOURCE_DESC rd = bbDesc;
+            rd.Flags = D3D12_RESOURCE_FLAG_NONE;   // a copy target FG reads
+            if (FAILED(p.device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd, D3D12_RESOURCE_STATE_COPY_DEST,
+                                                         nullptr, IID_PPV_ARGS(&p.fgHudless))))
+                p.fgHudless.Reset();
+            p.fgHudlessState = D3D12_RESOURCE_STATE_COPY_DEST;
+        }
+        p.fgFrame = p.fgHudless != nullptr;
+    }
 
     {
         HE_PROFILE_SCOPE_N("WaitFrame");   // the CPU idles here when the GPU is the slower side
@@ -14964,6 +15107,51 @@ void D3D12Renderer::Render()
         copyBarriers[1].Transition.StateAfter  = D3D12_RESOURCE_STATE_RENDER_TARGET;
         p.cmdList->ResourceBarrier(2, copyBarriers);
         p.viewportState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+
+        // FSR frame generation: configure, and on a jittered FSR frame its prepare on the upscaler's inputs (depth and
+        // velocity at the scene size, FSR's jitter). The proxy swapchain generates inside Present.
+        const bool fgOn = p.fgFrame && p.taaFrame && p.viewportDepth && p.taaVelocityRT;
+        if (fgOn || p.fgWasOn)
+        {
+            constexpr D3D12_RESOURCE_STATES kRead = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+            HE::D3D12Fsr::FrameGen fg;
+            fg.cl = p.cmdList.Get();
+            fg.swapchain = p.swapchain.Get();
+            fg.enabled = fgOn;
+            fg.frameID = ++p.fgFrameId;
+            if (fgOn)
+            {
+                p.barrier12(p.cmdList.Get(), p.viewportDepth.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE, kRead);
+                p.barrier12(p.cmdList.Get(), p.taaVelocityRT.Get(), p.taaVelocityState, kRead);
+                p.taaVelocityState = kRead;
+                const glm::mat4& P = p.m_renderWorld.camera.projection;
+                const float A = P[2][2], B = P[3][2];
+                const float n = B / (A - 1.0f), f = B / (A + 1.0f);
+                const glm::mat4 inv = glm::inverse(p.m_renderWorld.camera.view);
+                const uint64_t nowNs = SDL_GetTicksNS();
+                fg.hudless = p.fgHudless.Get();
+                fg.depth = p.viewportDepth.Get(); fg.velocity = p.taaVelocityRT.Get();
+                fg.renderW = p.sceneW; fg.renderH = p.sceneH; fg.displayW = bbW; fg.displayH = bbH;
+                fg.jitter = p.fsrJitter;
+                fg.nearZ = 2.0f * f * n / (f + n); fg.farZ = f;   // the depth's own near plane, as the upscaler's
+                fg.fovY = 2.0f * std::atan(1.0f / P[1][1]);
+                fg.frameMs = p.fgLastNs ? float(double(nowNs - p.fgLastNs) * 1e-6) : 16.6f;
+                fg.reset = !p.fgWasOn;
+                fg.camPos = glm::vec3(inv[3]); fg.camUp = glm::normalize(glm::vec3(inv[1]));
+                fg.camRight = glm::normalize(glm::vec3(inv[0])); fg.camForward = -glm::normalize(glm::vec3(inv[2]));
+                p.fgLastNs = nowNs;
+            }
+            if (!p.fsr.frameGen(fg) && fgOn)
+            {
+                static bool s_fgFailLogged = false;
+                if (!s_fgFailLogged) { s_fgFailLogged = true; HE_LOG_WARN(RHI, "%s", "D3D12Renderer: FSR frame generation configure/prepare failed"); }
+            }
+            if (fgOn)
+                p.barrier12(p.cmdList.Get(), p.viewportDepth.Get(), kRead, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+            if (fgOn && !p.fgWasOn) { p.fgPresents = 0; p.fgStatsBase = p.fsr.generatedFrames(); HE_LOG_INFO(RHI, "%s", "D3D12Renderer: FSR frame generation on (2x)"); }
+            else if (!fgOn && p.fgWasOn) HE_LOG_INFO(RHI, "%s", "D3D12Renderer: FSR frame generation off");
+            p.fgWasOn = fgOn;
+        }
 
         // The overlay (if any) draws on top of the copied image.
         p.cmdList->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
@@ -15050,6 +15238,20 @@ void D3D12Renderer::Render()
             prHr = p.swapchain->Present(0, p.allowTearing ? DXGI_PRESENT_ALLOW_TEARING : 0);
     }
 
+    // HE_FSR_FG_STATS=1: frames FSR generated against frames rendered, every 240 game frames (DXGI's PresentCount is
+    // no witness in a window: it stalls while the compositor owns the frame). ~1 with FG 2x, 0 without.
+    if (p.swapchainPostFx)
+    {
+        static const bool s_fgStats = [] { const char* e = std::getenv("HE_FSR_FG_STATS"); return e && *e == '1'; }();
+        if (s_fgStats && ++p.fgPresents % 240 == 0)
+        {
+            const uint64_t gen = p.fsr.generatedFrames();
+            HE_LOG_INFO(RHI, "D3D12Renderer: frames (FG %s): %llu generated / %llu rendered = %.2f",
+                        p.fgWasOn ? "on" : "off", static_cast<unsigned long long>(gen - p.fgStatsBase),
+                        static_cast<unsigned long long>(p.fgPresents), double(gen - p.fgStatsBase) / double(p.fgPresents));
+        }
+    }
+
     // A failed Present usually means the device was removed/reset. Log the reason +
     // a DRED breadcrumb dump (which op hung) ONCE — a permanently-removed device fails
     // Present every frame, which would otherwise flood the log with thousands of lines.
@@ -15109,6 +15311,9 @@ IRenderer::Capabilities D3D12Renderer::GetCapabilities() const
     c.supportsTemporalAA = m_impl->taaReady();
     // AMD FSR: the loader DLL opened at Initialize; it takes TAA's jitter + velocity, so TAA's readiness too.
     c.supportsFSR        = c.supportsTemporalAA && m_impl->fsr.available();
+    c.supportsRenderScale = c.supportsFSR && m_impl->postFxReady;   // smaller scene targets only with FSR to bring them up (sceneSizeFor)
+    // FSR 3.1 frame generation makes one frame per rendered one (the packaged game's swapchain; SetFrameGeneration).
+    c.maxFrameGeneration = (c.supportsFSR && m_impl->fsr.frameGenAvailable(m_impl->device.Get())) ? 2 : 1;
     // Deferred (Thema 150): G-buffer PSOs + resolve built at Initialize. Like
     // SSR/TAA it lives on the viewport frame's HDR target (Render()'s
     // usingHDR branch); the LDR viewport branch, the direct-swapchain branch
@@ -16112,6 +16317,8 @@ void D3D12Renderer::rvtStillEnter(uint32_t width, uint32_t height)
     st.liveDsvHeap    = std::move(p.viewportDsvHeap);
     st.liveW          = p.viewportW;
     st.liveH          = p.viewportH;
+    st.liveSceneW     = p.sceneW;
+    st.liveSceneH     = p.sceneH;
     st.liveReqW       = p.viewportReqW;
     st.liveReqH       = p.viewportReqH;
     st.liveState      = p.viewportState;
@@ -16157,6 +16364,8 @@ void D3D12Renderer::rvtStillLeave()
     p.viewportDsvHeap    = std::move(st.liveDsvHeap);
     p.viewportW          = st.liveW;
     p.viewportH          = st.liveH;
+    p.sceneW             = st.liveSceneW;
+    p.sceneH             = st.liveSceneH;
     p.viewportReqW       = st.liveReqW;
     p.viewportReqH       = st.liveReqH;
     p.viewportState      = st.liveState;
@@ -16175,7 +16384,8 @@ void D3D12Renderer::rvtStillLeave()
     p.createDepthSrv(p.viewportDepth.Get(), D3D12RendererImpl::k_decalViewportDepthSlot);
     // Intermediates back to the live size (see above). No live viewport (the
     // direct-to-swapchain path) means nothing reads them; leave them.
-    if (st.liveW && st.liveH && (st.liveW != st.w || st.liveH != st.h))
+    // An upscaled live set always: the still's hdrRT was made at its full size, the live depth is the scene size.
+    if (st.liveW && st.liveH && (st.liveW != st.w || st.liveH != st.h || p.sceneScaled()))
         p.createPostFXResources(st.liveW, st.liveH);
     // The SSR history is the screenshot camera's now (a same-size request kept
     // the targets, and the frame just captured into them). So is TAA's: the
@@ -16795,6 +17005,13 @@ void D3D12Renderer::SetAntiAliasingSettings(const AntiAliasingSettings& s)
     // not here, where a command list may be recording.
     m_impl->aaMethod    = IRenderer::ResolveAAMethod(s.method, GetCapabilities());
     m_impl->aaSharpness = std::clamp(s.sharpness, 0.0f, 1.0f);
+    // The scene size follows at the top of the next Render too (sceneSizeFor); below 1 only with FSR.
+    m_impl->renderScale = std::isfinite(s.renderScale) ? s.renderScale : 1.0f;
+}
+
+void D3D12Renderer::SetFrameGeneration(int multiplier)
+{
+    m_impl->fgWanted = multiplier;   // acted on in Render(): the game's swapchain frames, with FSR (maxFrameGeneration)
 }
 
 void D3D12Renderer::InvalidateMaterial(const HE::UUID& materialId)

@@ -3594,6 +3594,7 @@ void GameApplication::OnRender(float deltaTime)
 			IRenderer::AntiAliasingSettings aaOff;
 			aaOff.method = static_cast<int>(HE::AAMethod::Off);
 			r->SetAntiAliasingSettings(aaOff);
+			r->SetFrameGeneration(1);
 			// Forward: the deferred path builds a G-buffer and runs a fullscreen
 			// lighting resolve, for surfaces that do not exist here.
 			r->SetRenderPath(HE::RenderPath::Forward);
@@ -3712,6 +3713,9 @@ void GameApplication::OnRender(float deltaTime)
 			aa.specularAA         = GlobalState::getInstance().getCustomConfigBool("SpecularAA", true);
 			aa.specularAAStrength = static_cast<float>(GlobalState::getInstance().getCustomConfigFloat("SpecularAAStrength", 1.0f));
 			r->SetAntiAliasingSettings(aa);
+			// The player's (settings.setFrameGeneration); 1 = off. HE_GAME_FRAMEGEN=n forces it for a witness run.
+			static const char* s_fgOverride = std::getenv("HE_GAME_FRAMEGEN");
+			r->SetFrameGeneration(s_fgOverride && *s_fgOverride ? std::atoi(s_fgOverride) : HE::api::settings::frameGeneration());
 
 			// Render path — same config.json key the editor's Preferences combo
 			// writes ("RenderPath": 0 = Forward, 1 = Deferred), capability-gated. An absent

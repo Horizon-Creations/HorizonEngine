@@ -320,8 +320,12 @@ TEST_CASE("Player settings: upscaler and frame generation answer what the machin
     CHECK(settings::aaMethodFor(static_cast<int>(HE::AAMethod::FSR)) == static_cast<int>(HE::AAMethod::TAA));
     CHECK(settings::aaMethodFor(1) == 1);
 
-    // Frame generation up to 2x: 3x refused, 1 is off.
+    // Frame generation up to 2x: only with FSR as the upscaler; 3x refused, 1 is off.
     g.maxFrameGeneration = 2;
+    CHECK(settings::frameGenerationModes().empty());      // upscaler is Off
+    call("settings.setFrameGeneration", { Value::ofInt(2) });
+    CHECK_FALSE(settings::values().frameGeneration.has_value());
+    settings::setUpscaler("FSR");
     const auto fg = call("settings.frameGenerationModes")[0];
     REQUIRE(fg.items.size() == 1);
     CHECK(fg.items[0].i == 2);

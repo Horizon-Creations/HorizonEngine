@@ -4452,7 +4452,9 @@ namespace
 	  "", "rendering#postfx" },
 	{ "Preferences/Post-Processing/Render Scale", "",
 	  "Renders the 3D view at a fraction of the window size and upscales it. The "
-	  "single most effective performance dial there is; 0.75 is often invisible.",
+	  "single most effective performance dial there is; 0.75 is often invisible. "
+	  "On Metal any AA mode upscales; on DirectX 12 it needs FSR as the "
+	  "anti-aliasing (greyed out without an upscaler), and values above 1 count as 1.",
 	  "", "rendering#performance" },
 	{ "Preferences/Post-Processing/Specular AA", "",
 	  "Tames the sparkle that fine, shiny detail produces in motion, by widening "

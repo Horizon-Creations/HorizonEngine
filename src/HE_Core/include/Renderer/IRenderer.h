@@ -505,6 +505,9 @@ public:
         float specularAAStrength = 1.0f;  // 0 … 2, scales the variance term
     };
     virtual void SetAntiAliasingSettings(const AntiAliasingSettings& /*settings*/) {}
+    // Frame generation (Capabilities::maxFrameGeneration): frames shown per rendered one, 1 = off. Only the packaged
+    // game's swapchain generates (the editor viewport is no swapchain), and only with FSR as the AA method.
+    virtual void SetFrameGeneration(int /*multiplier*/) {}
 
     // The one place the fallback chain lives, so five backends cannot disagree
     // about what "TAA on a machine without TAA" means. `caps` is normally the
@@ -521,6 +524,15 @@ public:
         if (m == HE::AAMethod::MetalFX && !caps.supportsMetalFX)     m = HE::AAMethod::TAA;
         if (m == HE::AAMethod::TAA     && !caps.supportsTemporalAA)  m = HE::AAMethod::SMAA;
         return m;
+    }
+
+    // One axis of the scene's render size for an upscaler: the display axis times the scale, rounded, never 0. The scale
+    // is clamped to [1/4, 1] — an upscaler renders smaller, never larger (supersampling is not an upscaler's job).
+    static uint32_t UpscaleRenderSize(uint32_t display, float scale)
+    {
+        const float s = scale > 0.25f ? (scale < 1.0f ? scale : 1.0f) : 0.25f;   // NaN lands on 1/4 too
+        const uint32_t r = static_cast<uint32_t>(static_cast<float>(display) * s + 0.5f);
+        return r > display ? display : (r > 0u ? r : 1u);
     }
 
     // ── SSAO (screen-space ambient occlusion) ───────────────────────────────

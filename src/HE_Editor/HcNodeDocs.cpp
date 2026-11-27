@@ -1074,7 +1074,8 @@ namespace
 	{ "settings.frameGenerationModes",
 	  "The frame generation multipliers this machine can run: 2 shows one "
 	  "generated frame between two rendered ones, 3 and 4 two and three. Empty "
-	  "when frame generation is not available." },
+	  "when frame generation is not available, and while the upscaler is not "
+	  "FSR (frame generation runs on FSR's inputs): set the upscaler first." },
 	{ "settings.isFrameGenerationAvailable",
 	  "True when this machine can generate frames (Available Frame Generation "
 	  "Modes is not empty)." },

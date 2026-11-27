@@ -1,5 +1,6 @@
 #include "doctest.h"
 #include <Renderer/IRenderer.h>
+#include <cmath>
 
 // AAMethod::FSR (docs/upscalers-fsr-dlss-xess-plan-2026-11-27.md): the one fallback chain every backend uses.
 TEST_CASE("AA fallback: FSR without the FSR runtime becomes MetalFX on Metal, else TAA, else SMAA; out of range is FXAA")
@@ -28,4 +29,16 @@ TEST_CASE("AA fallback: FSR without the FSR runtime becomes MetalFX on Metal, el
     CHECK(IRenderer::ResolveAAMethod(int(AAMethod::DLSS), caps) == AAMethod::DLSS);
     CHECK(IRenderer::ResolveAAMethod(int(AAMethod::XeSS), caps) == AAMethod::XeSS);
     CHECK(IRenderer::ResolveAAMethod(-1, caps) == AAMethod::FXAA);
+}
+
+TEST_CASE("Upscale render size: display times scale, rounded, clamped to [1/4, 1], never 0")
+{
+    CHECK(IRenderer::UpscaleRenderSize(1920, 1.0f) == 1920);
+    CHECK(IRenderer::UpscaleRenderSize(1920, 0.5f) == 960);
+    CHECK(IRenderer::UpscaleRenderSize(1080, 1.0f / 1.5f) == 720);
+    CHECK(IRenderer::UpscaleRenderSize(1080, 1.0f / 3.0f) == 360);
+    CHECK(IRenderer::UpscaleRenderSize(1920, 2.0f) == 1920);   // no supersampling through an upscaler
+    CHECK(IRenderer::UpscaleRenderSize(1920, 0.1f) == 480);    // floor 1/4
+    CHECK(IRenderer::UpscaleRenderSize(1920, std::nanf("")) == 480);
+    CHECK(IRenderer::UpscaleRenderSize(1, 0.25f) == 1);
 }
