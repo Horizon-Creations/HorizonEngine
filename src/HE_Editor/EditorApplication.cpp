@@ -16457,6 +16457,22 @@ void EditorApplication::setPlayMode(bool play)
 				return bus == HE::api::settings::kMaster ? m_audioEngine.getMasterVolume()
 				                                         : m_audioEngine.getBusVolume(bus);
 			};
+			// Upscaler and frame generation: answered from the editor's renderer, so a
+			// settings menu lists what the machine runs; the choice is recorded, not
+			// applied (the viewport's AA stays the Preferences one, like VSync).
+			host.upscaler    = HE::api::settings::upscalerNameOf(m_editorConfig.AntiAliasing);
+			host.renderScale = m_editorConfig.RenderScale;
+			host.graphicsSupport = [this]
+			{
+				HE::api::settings::GraphicsSupport g;
+				IRenderer* const r = renderer();
+				if (!r) return g;
+				const IRenderer::Capabilities c = r->GetCapabilities();
+				g.fsr = c.supportsFSR; g.dlss = c.supportsDLSS; g.xess = c.supportsXeSS; g.metalFX = c.supportsMetalFX;
+				g.renderScale        = c.supportsRenderScale;
+				g.maxFrameGeneration = c.maxFrameGeneration;
+				return g;
+			};
 			HE::api::settings::install(std::move(host));
 		}
 

@@ -355,6 +355,11 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const DrawOptions& o
 				{ nullptr, "Deferred render path", c.supportsDeferredRendering },
 				{ nullptr, "Temporal anti-aliasing", c.supportsTemporalAA },
 				{ nullptr, "MetalFX upscaling", c.supportsMetalFX },
+				{ nullptr, "AMD FSR", c.supportsFSR },
+				{ nullptr, "NVIDIA DLSS", c.supportsDLSS },
+				{ nullptr, "Intel XeSS", c.supportsXeSS },
+				{ nullptr, "Render scale", c.supportsRenderScale },
+				{ nullptr, "Frame generation", c.maxFrameGeneration > 1 },
 				{ nullptr, "Screen-space reflections", c.supportsScreenSpaceReflections },
 				{ nullptr, "Volumetric fog", c.supportsVolumetricFog },
 				{ nullptr, "GPU particles", c.supportsGpuParticles },
@@ -467,17 +472,15 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const DrawOptions& o
 		}
 		// Render scale is independent of the AA mode: < 1 renders smaller and
 		// upscales (with TAA that becomes TAAU), > 1 is plain supersampling.
-		// Only Metal sizes its render targets by it — the other four never read
-		// renderScale, so the slider moved and nothing happened. Gated on the
-		// ACTIVE backend rather than on a new IRenderer capability: one slider
-		// does not justify a change in five backends.
-		const bool scaleOK = (ctx.backend == HE::RendererBackend::Metal);
+		// Only a backend that sizes its render targets by it reports
+		// supportsRenderScale; on the others the slider moved and nothing happened.
+		const bool scaleOK = ctx.renderer && ctx.renderer->GetCapabilities().supportsRenderScale;
 		ImGui::BeginDisabled(!scaleOK);
 		Row::sliderFloat("Render Scale", &cfg.RenderScale, 0.5f, 2.0f, "%.2f");
 		ImGui::EndDisabled();
 		if (!scaleOK && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-			ImGui::SetTooltip("Metal only — the other backends always render at the "
-			                  "window's own resolution.");
+			ImGui::SetTooltip("This backend always renders at the window's own "
+			                  "resolution (no render scale yet).");
 		// Same story one step further: the normal-variance term is in the Metal and
 		// OpenGL shading paths, Vulkan and both DirectX backends ignore it.
 		const bool specOK = (ctx.backend == HE::RendererBackend::Metal ||

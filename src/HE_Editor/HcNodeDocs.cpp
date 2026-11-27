@@ -1045,6 +1045,46 @@ namespace
 	  "Forget the player's settings and go back to the project's, applied at "
 	  "once. Use Save Settings to make that stick; bindings have their own "
 	  "Reset Input Bindings." },
+	{ "settings.upscalers",
+	  "The upscalers this machine can run: \"Off\" first, then any of \"FSR\", "
+	  "\"DLSS\", \"XeSS\", \"MetalFX\" the graphics card and backend support. "
+	  "What a settings menu fills its upscaler list from." },
+	{ "settings.isUpscalerAvailable",
+	  "True when the named upscaler (\"FSR\", \"DLSS\", \"XeSS\", \"MetalFX\", "
+	  "\"Off\") runs on this machine." },
+	{ "settings.setUpscaler",
+	  "Switch the upscaler (\"Off\" = the project's anti-aliasing). Applied at "
+	  "once in the game; Save Settings keeps it. A name Available Upscalers does "
+	  "not list is ignored with a warning." },
+	{ "settings.upscaler",
+	  "The upscaler in use: the player's choice, else the project's. \"Off\" "
+	  "when the saved one cannot run on this machine." },
+	{ "settings.upscalerModes",
+	  "The quality modes the upscaler can run: \"NativeAA\", \"Quality\", "
+	  "\"Balanced\", \"Performance\", \"UltraPerformance\" (render at 1, 1/1.5, "
+	  "1/1.7, 1/2, 1/3 of the window per axis). Only NativeAA on a backend that "
+	  "cannot render below the window size; empty when no upscaler is available." },
+	{ "settings.setUpscalerMode",
+	  "Choose the upscaler's quality mode (one of Available Upscaler Modes). "
+	  "Lower modes render fewer pixels and run faster. Applied at once in the "
+	  "game; Save Settings keeps it." },
+	{ "settings.upscalerMode",
+	  "The upscaler's quality mode: the player's choice, else the one nearest "
+	  "the project's render scale." },
+	{ "settings.frameGenerationModes",
+	  "The frame generation multipliers this machine can run: 2 shows one "
+	  "generated frame between two rendered ones, 3 and 4 two and three. Empty "
+	  "when frame generation is not available." },
+	{ "settings.isFrameGenerationAvailable",
+	  "True when this machine can generate frames (Available Frame Generation "
+	  "Modes is not empty)." },
+	{ "settings.setFrameGeneration",
+	  "Turn frame generation on with a multiplier (2, 3, 4 — one of Available "
+	  "Frame Generation Modes) or off with 1. Save Settings keeps it. A "
+	  "multiplier this machine cannot run is ignored with a warning." },
+	{ "settings.frameGeneration",
+	  "The frame generation multiplier in use, 1 = off. 1 when the saved one "
+	  "cannot run on this machine." },
 
 	// ── Date and time ────────────────────────────────────────────────────────
 	{ "datetime.now",

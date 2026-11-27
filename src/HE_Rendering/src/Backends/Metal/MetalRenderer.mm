@@ -21045,6 +21045,7 @@ IRenderer::Capabilities MetalRenderer::GetCapabilities() const
 	// top of the device/OS check made at Initialize.
 	c.supportsMetalFX    = m_mfxSupported && c.supportsTemporalAA;
 #endif
+	c.supportsRenderScale = true;   // the scene targets are sized by AntiAliasingSettings::renderScale
 	return c;
 }
 

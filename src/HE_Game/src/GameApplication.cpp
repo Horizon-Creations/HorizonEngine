@@ -3704,9 +3704,11 @@ void GameApplication::OnRender(float deltaTime)
 			// IRenderer::ResolveAAMethod fallback itself, so a config authored on a
 			// Metal machine opens sanely in a D3D11 build of the same game.
 			IRenderer::AntiAliasingSettings aa;
-			aa.method             = GlobalState::getInstance().getCustomConfigInt("AntiAliasing", 1);
+			// The player's upscaler and its mode (settings.setUpscaler …) over the configured ones.
+			aa.method             = HE::api::settings::aaMethodFor(GlobalState::getInstance().getCustomConfigInt("AntiAliasing", 1));
 			aa.sharpness          = static_cast<float>(GlobalState::getInstance().getCustomConfigFloat("AASharpness", 0.35f));
-			aa.renderScale        = static_cast<float>(GlobalState::getInstance().getCustomConfigFloat("RenderScale", 1.0f));
+			aa.renderScale        = HE::api::settings::renderScaleFor(
+				static_cast<float>(GlobalState::getInstance().getCustomConfigFloat("RenderScale", 1.0f)));
 			aa.specularAA         = GlobalState::getInstance().getCustomConfigBool("SpecularAA", true);
 			aa.specularAAStrength = static_cast<float>(GlobalState::getInstance().getCustomConfigFloat("SpecularAAStrength", 1.0f));
 			r->SetAntiAliasingSettings(aa);
@@ -3841,6 +3843,21 @@ void GameApplication::installPlayerSettings()
 		if (!m_audioEngine.isInitialized()) return 1.0f;
 		return bus == HE::api::settings::kMaster ? m_audioEngine.getMasterVolume()
 		                                         : m_audioEngine.getBusVolume(bus);
+	};
+	// No apply hook for the upscaler: the renderer-settings push in OnRender
+	// reads the choice every frame (settings::aaMethodFor / renderScaleFor).
+	host.upscaler    = HE::api::settings::upscalerNameOf(GlobalState::getInstance().getCustomConfigInt("AntiAliasing", 1));
+	host.renderScale = static_cast<float>(GlobalState::getInstance().getCustomConfigFloat("RenderScale", 1.0f));
+	host.graphicsSupport = [this]
+	{
+		HE::api::settings::GraphicsSupport g;
+		IRenderer* const r = renderer();
+		if (!r || m_appMode) return g;   // an application draws no world to upscale
+		const IRenderer::Capabilities c = r->GetCapabilities();
+		g.fsr = c.supportsFSR; g.dlss = c.supportsDLSS; g.xess = c.supportsXeSS; g.metalFX = c.supportsMetalFX;
+		g.renderScale        = c.supportsRenderScale;
+		g.maxFrameGeneration = c.maxFrameGeneration;
+		return g;
 	};
 	HE::api::settings::install(std::move(host));
 }

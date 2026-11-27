@@ -342,6 +342,12 @@ public:
         // NVIDIA DLSS / Intel XeSS super resolution: no backend reports them yet; the editor lists them greyed out.
         bool supportsDLSS = false;
         bool supportsXeSS = false;
+        // AntiAliasingSettings::renderScale sizes the scene targets (render below the window, upscale after). Off =
+        // the backend ignores it and renders at the viewport size; the editor greys the slider, settings.upscalerModes
+        // answers NativeAA only.
+        bool supportsRenderScale = false;
+        // Frame generation: the most frames shown per rendered one (2 = one generated in between). 1 = none.
+        int  maxFrameGeneration = 1;
         // A second window with its own widget tree (docs/he-apps-plan.md §13.3).
         // Reported by the backends that actually DRAW into one: Software (its own
         // SDL surface per window) and Metal (a layer per window). OpenGL, Vulkan

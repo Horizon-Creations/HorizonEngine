@@ -2394,7 +2394,23 @@ namespace settings {
         std::optional<bool>  vsync;
         std::optional<bool>  fullscreen;
         std::map<std::string, float> volumes;          // bus → 0..2, kMaster = master
+        std::optional<std::string> upscaler;           // kUpscalers: "Off", "FSR", "DLSS", "XeSS", "MetalFX"
+        std::optional<std::string> upscalerMode;       // kUpscalerModes: "NativeAA" … "UltraPerformance"
+        std::optional<int>         frameGeneration;    // frames shown per rendered one, 1 = off, up to 4
     };
+    // What the renderer the game runs on can do, asked at call time (a backend
+    // can load its upscaler runtime after the window is up).
+    struct GraphicsSupport
+    {
+        bool fsr = false, dlss = false, xess = false, metalFX = false;
+        bool renderScale = false;        // the backend sizes its scene targets by the scale
+        int  maxFrameGeneration = 1;     // 1 = no frame generation
+    };
+    // The upscaler names (the AAMethod each stands for) and the quality modes,
+    // with the per-axis render scale ffx_upscale.h documents for each.
+    inline constexpr const char* kUpscalers[]     = { "Off", "FSR", "DLSS", "XeSS", "MetalFX" };
+    inline constexpr const char* kUpscalerModes[] = { "NativeAA", "Quality", "Balanced", "Performance",
+                                                      "UltraPerformance" };
     inline constexpr const char* kMaster   = "Master";
     inline constexpr const char* kPrefsKey = "settings";
 
@@ -2417,6 +2433,12 @@ namespace settings {
         std::function<void(const std::string& bus, std::optional<float> volume)> applyVolume;
         // What a bus is at now, for volume() when the player never set it.
         std::function<float(const std::string& bus)> currentVolume;
+        // The project's upscaler (kUpscalers name, "Off" when its AA is none)
+        // and render scale, for the getters before the player chooses.
+        std::string upscaler    = "Off";
+        float       renderScale = 1.0f;
+        // Empty = nothing is supported (a test, an application without a renderer).
+        std::function<GraphicsSupport()> graphicsSupport;
     };
     // install applies every value once (the start-up apply); uninstall only
     // drops the hooks. The values stay — the camera rig keeps reading them.
@@ -2449,6 +2471,28 @@ namespace settings {
     bool  save();
     // Back to the project's values, applied at once. Not saved until save().
     void  resetToDefaults();
+
+    // Upscaling and frame generation. The lists answer what THIS machine can
+    // run; a setter given something else warns and changes nothing. The game
+    // reads the choice every frame (aaMethodFor / renderScaleFor), so it applies
+    // at once; Save Settings keeps it. The editor's Play records it only.
+    std::vector<std::string> upscalers();            // available ones, "Off" first
+    bool        isUpscalerAvailable(const std::string& name);
+    void        setUpscaler(const std::string& name);
+    std::string upscaler();                          // effective; "Off" when the choice is not available here
+    std::vector<std::string> upscalerModes();        // NativeAA only when the backend has no render scale
+    void        setUpscalerMode(const std::string& mode);
+    std::string upscalerMode();
+    std::vector<int> frameGenerationModes();         // multipliers above 1, empty = none
+    bool        isFrameGenerationAvailable();
+    void        setFrameGeneration(int multiplier);  // 1 = off
+    int         frameGeneration();                   // effective; 1 when the choice is not available here
+    // For the renderer push, not rows: the configured AAMethod / render scale
+    // with the player's choice over them (unchanged when they chose nothing).
+    int   aaMethodFor(int configuredMethod);
+    float renderScaleFor(float configuredScale);
+    // The kUpscalers name of an AAMethod, "Off" for one that is no upscaler (for Host::upscaler).
+    const char* upscalerNameOf(int aaMethod);
 }
 
 // ── Date and time ────────────────────────────────────────────────────────────

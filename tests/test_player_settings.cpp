@@ -4,6 +4,7 @@
 #include "doctest.h"
 #include "TestFsUtil.h"
 #include <HorizonScene/EngineApi.h>
+#include <Renderer/IRenderer.h>
 #include <nlohmann/json.hpp>
 #include <cmath>
 #include <filesystem>
@@ -270,4 +271,109 @@ TEST_CASE("Player settings: uninstall drops the hooks but keeps the values")
     // The camera half keeps working without any host.
     camera::setStickSensitivityScale(2.0f);
     CHECK(settings::values().stickSensitivityScale.value_or(0.0f) == doctest::Approx(2.0f));
+}
+
+TEST_CASE("Player settings: upscaler and frame generation answer what the machine can run")
+{
+    Clean clean;
+    settings::GraphicsSupport g;   // nothing supported
+    settings::Host h;
+    h.upscaler    = "Off";
+    h.renderScale = 1.0f;
+    h.graphicsSupport = [&g] { return g; };
+    settings::install(h);
+
+    // Nothing there: Off only, no modes, no frame generation, setters refuse.
+    CHECK(settings::upscalers() == std::vector<std::string>{ "Off" });
+    CHECK(settings::upscalerModes().empty());
+    CHECK(settings::frameGenerationModes().empty());
+    CHECK_FALSE(call("settings.isFrameGenerationAvailable")[0].b);
+    call("settings.setUpscaler", { Value::ofString("FSR") });
+    CHECK_FALSE(settings::values().upscaler.has_value());
+    call("settings.setFrameGeneration", { Value::ofInt(2) });
+    CHECK_FALSE(settings::values().frameGeneration.has_value());
+    CHECK(settings::aaMethodFor(3) == 3);              // nothing chosen: the project's
+    CHECK(std::string(settings::upscalerNameOf(static_cast<int>(HE::AAMethod::FSR))) == "FSR");
+    CHECK(std::string(settings::upscalerNameOf(static_cast<int>(HE::AAMethod::TAA))) == "Off");
+
+    // FSR without render scale (D3D12 before upscaling): NativeAA only.
+    g.fsr = true;
+    const auto names = call("settings.upscalers")[0];
+    REQUIRE(names.isArray);
+    REQUIRE(names.items.size() == 2);
+    CHECK(names.items[1].s == "FSR");
+    CHECK(settings::upscalerModes() == std::vector<std::string>{ "NativeAA" });
+    call("settings.setUpscaler", { Value::ofString("FSR") });
+    CHECK(call("settings.upscaler")[0].s == "FSR");
+    CHECK(settings::aaMethodFor(3) == static_cast<int>(HE::AAMethod::FSR));
+    call("settings.setUpscalerMode", { Value::ofString("Performance") });   // refused
+    CHECK_FALSE(settings::values().upscalerMode.has_value());
+
+    // With render scale every mode; the mode sets the scale only with an upscaler.
+    g.renderScale = true;
+    CHECK(settings::upscalerModes().size() == 5);
+    call("settings.setUpscalerMode", { Value::ofString("Performance") });
+    CHECK(call("settings.upscalerMode")[0].s == "Performance");
+    CHECK(settings::renderScaleFor(1.0f) == doctest::Approx(0.5f));
+    settings::setUpscaler("Off");
+    CHECK(settings::renderScaleFor(0.8f) == doctest::Approx(0.8f));
+    CHECK(settings::aaMethodFor(static_cast<int>(HE::AAMethod::FSR)) == static_cast<int>(HE::AAMethod::TAA));
+    CHECK(settings::aaMethodFor(1) == 1);
+
+    // Frame generation up to 2x: 3x refused, 1 is off.
+    g.maxFrameGeneration = 2;
+    const auto fg = call("settings.frameGenerationModes")[0];
+    REQUIRE(fg.items.size() == 1);
+    CHECK(fg.items[0].i == 2);
+    call("settings.setFrameGeneration", { Value::ofInt(3) });
+    CHECK(settings::frameGeneration() == 1);
+    call("settings.setFrameGeneration", { Value::ofInt(2) });
+    CHECK(call("settings.frameGeneration")[0].i == 2);
+    settings::setFrameGeneration(1);
+    CHECK(settings::frameGeneration() == 1);
+
+    // A saved choice this machine cannot run reads back as the fallback.
+    settings::setUpscaler("FSR");
+    settings::setFrameGeneration(2);
+    g = settings::GraphicsSupport{};
+    CHECK(settings::upscaler() == "Off");
+    CHECK(settings::frameGeneration() == 1);
+    CHECK(settings::upscalerMode() == "NativeAA");
+}
+
+TEST_CASE("Player settings: upscaler choices survive JSON, and alone keep the prefs key")
+{
+    Clean clean;
+    settings::Values v;
+    v.upscaler        = "FSR";
+    v.upscalerMode    = "Balanced";
+    v.frameGeneration = 2;
+    settings::Values back;
+    REQUIRE(settings::fromJson(settings::toJson(v), back));
+    CHECK(back.upscaler.value_or("") == "FSR");
+    CHECK(back.upscalerMode.value_or("") == "Balanced");
+    CHECK(back.frameGeneration.value_or(0) == 2);
+
+    // Unknown names are dropped, multipliers clamped.
+    REQUIRE(settings::fromJson(R"({"upscaler":"Magic","upscalerMode":"Fast","frameGeneration":9})", back));
+    CHECK_FALSE(back.upscaler.has_value());
+    CHECK_FALSE(back.upscalerMode.has_value());
+    CHECK(back.frameGeneration.value_or(0) == 4);
+
+    // Only an upscaler chosen is not "nothing chosen": save keeps the key.
+    const auto sandbox = std::filesystem::temp_directory_path() / "he_test_player_settings_upscaler";
+    he_test::removeAllQuiet(sandbox);
+    fs::setSandboxRoot(sandbox.string());
+    Ctx ctx;
+    settings::Values only;
+    only.upscaler = "FSR";
+    settings::set(only);
+    REQUIRE(settings::save());
+    CHECK(prefs::has(ctx, settings::kPrefsKey));
+    settings::resetToDefaults();
+    REQUIRE(settings::load());
+    CHECK(settings::values().upscaler.value_or("") == "FSR");
+    prefs::remove(ctx, settings::kPrefsKey);
+    fs::setSandboxRoot("");
+    he_test::removeAllQuiet(sandbox);
 }

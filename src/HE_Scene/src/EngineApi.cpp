@@ -7188,6 +7188,38 @@ const std::vector<ApiFn>& registry()
             [](Ctx&, const VV&){ return VV{ Value::ofBool(settings::save()) }; } });
         t.push_back({ "settings.resetToDefaults", "Settings", true, {}, {}, "HE::api::settings::resetToDefaults",
             [](Ctx&, const VV&){ settings::resetToDefaults(); return VV{}; } });
+        // Upscaling and frame generation: what this machine can run, and the choice.
+        auto strings = [](std::vector<std::string> v)
+        {
+            Value arr; arr.isArray = true; arr.type = P::String;
+            for (auto& s : v) arr.items.push_back(Value::ofString(std::move(s)));
+            return VV{ std::move(arr) };
+        };
+        t.push_back({ "settings.upscalers", "Settings", false, {}, {{"names", P::String, /*isArray=*/true}}, "HE::api::settings::upscalers",
+            [strings](Ctx&, const VV&){ return strings(settings::upscalers()); } });
+        t.push_back({ "settings.isUpscalerAvailable", "Settings", false, {{"name", P::String}}, {{"available", P::Bool}}, "HE::api::settings::isUpscalerAvailable",
+            [](Ctx&, const VV& a){ return VV{ Value::ofBool(settings::isUpscalerAvailable(aS(a, 0))) }; } });
+        t.push_back({ "settings.setUpscaler", "Settings", true, {{"name", P::String}}, {}, "HE::api::settings::setUpscaler",
+            [](Ctx&, const VV& a){ settings::setUpscaler(aS(a, 0)); return VV{}; } });
+        t.push_back({ "settings.upscaler", "Settings", false, {}, {{"name", P::String}}, "HE::api::settings::upscaler",
+            [](Ctx&, const VV&){ return VV{ Value::ofString(settings::upscaler()) }; } });
+        t.push_back({ "settings.upscalerModes", "Settings", false, {}, {{"modes", P::String, /*isArray=*/true}}, "HE::api::settings::upscalerModes",
+            [strings](Ctx&, const VV&){ return strings(settings::upscalerModes()); } });
+        t.push_back({ "settings.setUpscalerMode", "Settings", true, {{"mode", P::String}}, {}, "HE::api::settings::setUpscalerMode",
+            [](Ctx&, const VV& a){ settings::setUpscalerMode(aS(a, 0)); return VV{}; } });
+        t.push_back({ "settings.upscalerMode", "Settings", false, {}, {{"mode", P::String}}, "HE::api::settings::upscalerMode",
+            [](Ctx&, const VV&){ return VV{ Value::ofString(settings::upscalerMode()) }; } });
+        t.push_back({ "settings.frameGenerationModes", "Settings", false, {}, {{"multipliers", P::Int, /*isArray=*/true}}, "HE::api::settings::frameGenerationModes",
+            [](Ctx&, const VV&){
+                Value arr; arr.isArray = true; arr.type = P::Int;
+                for (int n : settings::frameGenerationModes()) arr.items.push_back(Value::ofInt(n));
+                return VV{ std::move(arr) }; } });
+        t.push_back({ "settings.isFrameGenerationAvailable", "Settings", false, {}, {{"available", P::Bool}}, "HE::api::settings::isFrameGenerationAvailable",
+            [](Ctx&, const VV&){ return VV{ Value::ofBool(settings::isFrameGenerationAvailable()) }; } });
+        t.push_back({ "settings.setFrameGeneration", "Settings", true, {{"multiplier", P::Int}}, {}, "HE::api::settings::setFrameGeneration",
+            [](Ctx&, const VV& a){ settings::setFrameGeneration(aI(a, 0)); return VV{}; } });
+        t.push_back({ "settings.frameGeneration", "Settings", false, {}, {{"multiplier", P::Int}}, "HE::api::settings::frameGeneration",
+            [](Ctx&, const VV&){ return VV{ Value::ofInt(settings::frameGeneration()) }; } });
 
         // Date and time — the WALL clock, unlike the time group. Double pins:
         // at today's epoch a float steps in 128 s, so on a Float pin `now` read
@@ -8439,6 +8471,14 @@ const std::vector<ApiFn>& registry()
             { "prefs.clear", "Clear Prefs" },
             { "settings.setVolume", "Set Volume Setting" }, { "settings.volume", "Get Volume Setting" },
             { "settings.save", "Save Settings" },        { "settings.resetToDefaults", "Reset Settings" },
+            { "settings.upscalers", "Available Upscalers" }, { "settings.isUpscalerAvailable", "Is Upscaler Available" },
+            { "settings.setUpscaler", "Set Upscaler" },  { "settings.upscaler", "Get Upscaler" },
+            { "settings.upscalerModes", "Available Upscaler Modes" },
+            { "settings.setUpscalerMode", "Set Upscaler Mode" }, { "settings.upscalerMode", "Get Upscaler Mode" },
+            { "settings.frameGenerationModes", "Available Frame Generation Modes" },
+            { "settings.isFrameGenerationAvailable", "Is Frame Generation Available" },
+            { "settings.setFrameGeneration", "Set Frame Generation" },
+            { "settings.frameGeneration", "Get Frame Generation" },
             { "datetime.now", "Now" }, { "datetime.format", "Format Time" },
             { "datetime.year", "Year" }, { "datetime.month", "Month" }, { "datetime.day", "Day" },
             { "datetime.hour", "Hour" }, { "datetime.minute", "Minute" },
@@ -8687,6 +8727,7 @@ const std::vector<ApiFn>& registry()
                 { "audio.setVolume",     "volume",  1.0f }, { "audio.setPitch", "pitch", 1.0f },
                 { "audio.setBusVolume",  "volume",  1.0f },
                 { "settings.setVolume",  "volume",  1.0f },
+                { "settings.setFrameGeneration", "multiplier", 2.0f },
             };
             for (auto& fn : t)
                 for (const Def& d : kDefs)
