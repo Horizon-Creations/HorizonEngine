@@ -108,6 +108,8 @@ if(HE_VULKAN_ENABLED)
         src/Backends/Vulkan/VulkanRenderer.cpp
         src/Backends/Vulkan/VulkanShaderManager.cpp
         src/Backends/Vulkan/VulkanLandscape.cpp
+        src/Backends/Vulkan/VulkanFsr.cpp
+        include/Backends/Vulkan/VulkanFsr.h
         include/Backends/Vulkan/VulkanLandscape.h
         include/Backends/Vulkan/VulkanLandscapeLayout.h
         include/Backends/Vulkan/VulkanShaderManager.h)

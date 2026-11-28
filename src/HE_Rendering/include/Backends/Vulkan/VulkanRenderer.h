@@ -3,6 +3,7 @@
 #include <Renderer/IRenderer.h>
 #include <MaterialGraph/MaterialParamLimits.h> // kMatParamFloats / kMatParamBytes
 #include "VulkanShaderManager.h"
+#include "VulkanFsr.h"
 #include "VulkanUploadAlloc.h"
 #include <HorizonRendering/RenderConstants.h>
 #include <HorizonRendering/InstanceArena.h>
@@ -620,7 +621,7 @@ private:
 		VkImage        liveImage = VK_NULL_HANDLE;      VkDeviceMemory liveMemory = VK_NULL_HANDLE;    VkImageView liveView = VK_NULL_HANDLE;
 		VkImage        liveDepthImage = VK_NULL_HANDLE; VkDeviceMemory liveDepthMemory = VK_NULL_HANDLE; VkImageView liveDepthView = VK_NULL_HANDLE;
 		VkRenderPass   liveRenderPass = VK_NULL_HANDLE; VkFramebuffer liveFramebuffer = VK_NULL_HANDLE; VkSampler liveSampler = VK_NULL_HANDLE;
-		uint32_t liveW = 0, liveH = 0, liveReqW = 0, liveReqH = 0;
+		uint32_t liveW = 0, liveH = 0, liveReqW = 0, liveReqH = 0, liveSceneW = 0, liveSceneH = 0;
 		VkImageLayout liveLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 		bool liveResChanged = false;
 		EditorCameraOverride liveCam;
@@ -1232,7 +1233,39 @@ private:
 		return m_postFxReady && m_taaVelocityRP && m_taaVelocityPipe && m_taaResolvePipe
 		    && m_taaSharpenPipe && m_taaDSPool;
 	}
-	bool taaWanted() const { return m_aaMethod == HE::AAMethod::TAA && taaReady(); }
+	bool taaWanted() const { return (m_aaMethod == HE::AAMethod::TAA || m_aaMethod == HE::AAMethod::FSR) && taaReady(); }
+
+	// ── AMD FSR (AAMethod::FSR; VulkanFsr.h), the D3D12 backend's design ────
+	// Dispatched on the HDR image right after the underwater fog, before motion blur, bloom and the tonemap. Native AA
+	// (scene size = viewport size): its output is copied back over m_hdrImage, real frames only (m_mbRealFrame).
+	// Upscaling (renderScale < 1): the scene targets — depth, HDR, TAA's and velocity, SSAO, decal depth, every
+	// DrawScene pass — are m_sceneW x m_sceneH, m_fsrOutImage is the viewport size and the tail (motion blur, bloom,
+	// tonemap; m_postFxDS[0]/[3], m_mbDS) reads it instead of m_hdrImage, so FSR runs in every such frame.
+	HE::VulkanFsr  m_fsr;
+	VkImage        m_fsrOutImage  = VK_NULL_HANDLE;   // RGBA16F, STORAGE | SAMPLED | TRANSFER, viewport size
+	VkDeviceMemory m_fsrOutMemory = VK_NULL_HANDLE;
+	VkImageView    m_fsrOutView   = VK_NULL_HANDLE;
+	VkImageLayout  m_fsrOutLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	glm::vec2      m_fsrJitter{ 0.0f };     // this frame's, as FSR gave it (m_taaJitter holds the engine's sign)
+	bool           m_fsrReset = true;       // the next dispatch discards the history
+	uint64_t       m_fsrLastNs = 0;
+	float          m_renderScale = 1.0f;    // AntiAliasingSettings::renderScale, as asked
+	uint32_t       m_sceneW = 0, m_sceneH = 0;   // the scene targets' size (createViewportResources)
+	bool fsrFrame() const { return m_aaMethod == HE::AAMethod::FSR && m_fsr.available(); }
+	// The scene size a viewport axis of v wants now: smaller only through FSR, on the post chain, outside a still.
+	uint32_t sceneSizeFor(uint32_t v) const
+	{
+		const bool up = fsrFrame() && m_postFxReady && !m_still.active && m_renderScale < 1.0f;
+		return up ? IRenderer::UpscaleRenderSize(v, m_renderScale) : v;
+	}
+	bool sceneScaled() const { return m_sceneW != m_viewportW || m_sceneH != m_viewportH; }
+	// The image the tail after FSR reads: m_fsrOutImage while upscaling, else m_hdrImage.
+	VkImage        tailHdrImage()  const { return sceneScaled() ? m_fsrOutImage : m_hdrImage; }
+	VkImageLayout& tailHdrLayout()       { return sceneScaled() ? m_fsrOutLayout : m_hdrLayout; }
+	void createFsrOut(uint32_t w, uint32_t h);
+	void destroyFsrOut();
+	// The FSR dispatch of DrawViewportFrame (after the fog, before motion blur); false = it did not run.
+	bool encodeFsr(VkCommandBuffer cmd);
 
 	VkRenderPass          m_taaVelocityRP        = VK_NULL_HANDLE; // RG16F clear + scene depth LOAD
 	VkPipeline            m_taaVelocityPipe      = VK_NULL_HANDLE; // m_scenePipelineLayout (128 B push)

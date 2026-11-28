@@ -453,13 +453,13 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const DrawOptions& o
 		const char* kAA[]   = { "Off", "FXAA", "SMAA", "TAA", "MetalFX", "FSR", "DLSS", "XeSS" };
 		// The upscalers are always listed; one this machine or backend cannot run is greyed out with the reason, so
 		// "FSR does nothing here" is visible before it is picked. A config that names one anyway falls back at push time.
-		const bool d3d12 = ctx.backend == HE::RendererBackend::D3D12;
+		const bool fsrBackend = ctx.backend == HE::RendererBackend::D3D12 || ctx.backend == HE::RendererBackend::Vulkan;
 		const char* kWhyNot[IM_ARRAYSIZE(kAA)] = {
 			nullptr, nullptr, nullptr,
 			taaOK  ? nullptr : "This backend writes no velocity buffer yet — TAA falls back to SMAA.",
 			mfxOK  ? nullptr : "MetalFX needs Metal on Apple Silicon — falls back to TAA.",
-			fsrOK  ? nullptr : d3d12 ? "AMD's FSR runtime (amd_fidelityfx_*.dll) was not found beside the editor — falls back to TAA."
-			                         : "AMD FSR runs on DirectX 12 in this version (Vulkan follows) — falls back to TAA.",
+			fsrOK  ? nullptr : fsrBackend ? "AMD's FSR runtime (amd_fidelityfx_*.dll) was not found beside the editor — falls back to TAA."
+			                              : "AMD FSR runs on DirectX 12 and Vulkan — falls back to TAA.",
 			dlssOK ? nullptr : "NVIDIA DLSS is not built into this engine version yet (it will need an RTX GPU) — falls back to FSR, else TAA.",
 			xessOK ? nullptr : "Intel XeSS is not built into this engine version yet — falls back to FSR, else TAA.",
 		};

@@ -217,6 +217,7 @@ void VulkanRenderer::Initialize(HE::Window* window)
     createScenePipeline();  HE_LOG_INFO(RHI, "%s", "VulkanRenderer: scene pipeline created");
     createCube();           HE_LOG_INFO(RHI, "%s", "VulkanRenderer: initialized successfully");
     createPostFXPipelines();
+    m_fsr.load();   // AMD FSR's loader DLL beside the engine, if it is there (supportsFSR)
     createSkyPipeline();         HE_LOG_INFO(RHI, "%s", "VulkanRenderer: sky pipeline created");
     createDebugLinePipeline();   HE_LOG_INFO(RHI, "%s", "VulkanRenderer: debug line pipeline created");
     createSSAOPipeline();        HE_LOG_INFO(RHI, "%s", "VulkanRenderer: SSAO pipeline created");
@@ -281,6 +282,7 @@ void VulkanRenderer::Shutdown()
     destroyDebugLinePipeline();
     destroyRibbonMeshes();
     destroyPostFXResources();      // the G-buffer targets with them
+    m_fsr.destroy();               // its resources live on the device (the GPU is idle above)
     destroyFogResources();         // its Apply pipeline is built against the underwater fog's render pass
     destroyDeferredPipelines();    // before the material pipelines' render passes go
     destroyPostFXPipelines();
@@ -594,7 +596,8 @@ void VulkanRenderer::Render()
     if (gameChain)
     {
         if (m_swapExtent.width > 0 && m_swapExtent.height > 0
-            && (!m_gameViewport || m_viewportW != m_swapExtent.width || m_viewportH != m_swapExtent.height))
+            && (!m_gameViewport || m_viewportW != m_swapExtent.width || m_viewportH != m_swapExtent.height
+                || m_sceneW != sceneSizeFor(m_swapExtent.width) || m_sceneH != sceneSizeFor(m_swapExtent.height)))
         {
             deviceWaitIdle();
             createViewportResources(m_swapExtent.width, m_swapExtent.height);
@@ -631,7 +634,8 @@ void VulkanRenderer::Render()
 
     // Resize viewport resources if the editor requested a different size.
     if (!gameChain && m_viewportReqW > 0 && m_viewportReqH > 0 &&
-        (m_viewportReqW != m_viewportW || m_viewportReqH != m_viewportH))
+        (m_viewportReqW != m_viewportW || m_viewportReqH != m_viewportH
+         || m_sceneW != sceneSizeFor(m_viewportReqW) || m_sceneH != sceneSizeFor(m_viewportReqH)))   // or the upscale changed
     {
         deviceWaitIdle();
         createViewportResources(m_viewportReqW, m_viewportReqH);
@@ -862,6 +866,8 @@ void VulkanRenderer::DrawViewportFrame(VkCommandBuffer cmd)
     m_sceneMatOffset = 0;
 
     const bool useHDR = m_postFxReady && m_hdrFB && m_ldrFB && m_fxaaFB;
+    // Everything up to FSR draws at the scene size (smaller than the viewport while FSR upscales); the tail at the viewport's.
+    const uint32_t sW = m_sceneW, sH = m_sceneH;
 
     // ── TAA: this frame's jitter (A2) ───────────────────────────────────────
     // Chosen HERE, before the first pass: the decal depth pre-pass, the sky and
@@ -870,8 +876,24 @@ void VulkanRenderer::DrawViewportFrame(VkCommandBuffer cmd)
     // chain resolves it (the HDR branch below) is jittered; the targets were
     // synced to the mode at the top of Render (syncTaaTargets).
     m_taaFrame = useHDR && taaWanted() && m_taaHistoryFB[0] && m_taaVelocityFB
-              && m_taaW == m_viewportW && m_taaH == m_viewportH;
-    if (m_taaFrame)
+              && m_taaW == sW && m_taaH == sH
+              && !(fsrFrame() && !m_mbRealFrame);   // FSR: a still or an RVT page is drawn unjittered, outside its history
+    // FSR: its context sized scene -> viewport (made again on a size change: rare, a settings change) and its own
+    // jitter sequence. FSR gives the offset in pixels the way its dispatch wants it; the Vulkan clip has y down like the
+    // pixels, so the engine's clip shift is (x, y) — D3D12's is (x, -y). Witnessed at 0.5: (x, -y) 1.63 vs 1.36 off-diff.
+    const bool fsrCtx = useHDR && fsrFrame() && (m_taaFrame || sceneScaled());
+    if (fsrCtx && !m_fsr.sizedFor(sW, sH, m_viewportW, m_viewportH))
+    {
+        if (m_fsr.hasContext()) deviceWaitIdle();   // frames in flight still dispatch into the old context
+        m_fsrReset = true;
+    }
+    const bool fsrOk = fsrCtx && m_fsr.ensureContext(m_physDevice, m_device, sW, sH, m_viewportW, m_viewportH);
+    if (m_taaFrame && fsrOk)
+    {
+        m_fsrJitter = m_fsr.jitter(m_taaFrameIndex++, sW, m_viewportW);
+        m_taaJitter = m_fsrJitter;
+    }
+    else if (m_taaFrame)
         m_taaJitter = HE::taaJitter(m_taaFrameIndex++);
     m_taaSceneSorted = false;
     // ── Deferred render path (Thema 150): decided before the first pass, so a
@@ -880,7 +902,7 @@ void VulkanRenderer::DrawViewportFrame(VkCommandBuffer cmd)
     // lazily at the viewport size; a failed allocation keeps the frame forward
     // (one log line).
     m_deferredFrame = useHDR && m_renderPath == HE::RenderPath::Deferred && m_deferredReady && m_matReady
-                   && ensureGBufferTargets(m_viewportW, m_viewportH);
+                   && ensureGBufferTargets(sW, sH);
 
     // Graph materials' sky cube (heSkyEnv): a transfer, so before every pass.
     updateSkyEnvCube(cmd);
@@ -913,7 +935,7 @@ void VulkanRenderer::DrawViewportFrame(VkCommandBuffer cmd)
         // ── Ray-traced GI (software compute): G-buffer + shadow rays +
         // temporal + blur + probe update. Extracts the scene itself.
         // Replaces the CSM lookup AND SSAO in scene.frag when it runs.
-        runGi(cmd, m_viewportW, m_viewportH);
+        runGi(cmd, sW, sH);
 
         // ── Deferred (Thema 150, decided at the top): a deferred frame runs the
         // SAME forward trace below, and the resolve composites it through
@@ -937,12 +959,12 @@ void VulkanRenderer::DrawViewportFrame(VkCommandBuffer cmd)
         // whole point of the aoWanted flag.
         const bool aoWanted = !m_giRanThisFrame && m_ssaoEnabled;
         if (aoWanted || ssrWanted)
-            runSSAO(cmd, m_viewportW, m_viewportH, /*reflMrt=*/ssrWanted, aoWanted);
+            runSSAO(cmd, sW, sH, /*reflMrt=*/ssrWanted, aoWanted);
 
         // ── SSR trace + blur chain (own render passes, before the scene) ─
         if (ssrWanted)
         {
-            m_ssrResultView  = RenderForwardSSR(cmd, m_viewportW, m_viewportH);
+            m_ssrResultView  = RenderForwardSSR(cmd, sW, sH);
             m_ssrRanThisFrame = m_ssrResultView != VK_NULL_HANDLE;
         }
 
@@ -957,11 +979,11 @@ void VulkanRenderer::DrawViewportFrame(VkCommandBuffer cmd)
         VkRenderPassBeginInfo hdrpbi{ VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
         hdrpbi.renderPass  = m_postFxSceneRP;
         hdrpbi.framebuffer = m_hdrFB;
-        hdrpbi.renderArea.extent = { m_viewportW, m_viewportH };
+        hdrpbi.renderArea.extent = { sW, sH };
         hdrpbi.clearValueCount   = 2;
         hdrpbi.pClearValues      = clears;
         vkCmdBeginRenderPass(cmd, &hdrpbi, VK_SUBPASS_CONTENTS_INLINE);
-        DrawScene(cmd, m_viewportW, m_viewportH, /*hdr=*/true);
+        DrawScene(cmd, sW, sH, /*hdr=*/true);
         vkCmdEndRenderPass(cmd);
         m_fogFrameActive = false; // consumed: the world previews and the swapchain fallback must never see it
         m_hdrLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
@@ -978,7 +1000,7 @@ void VulkanRenderer::DrawViewportFrame(VkCommandBuffer cmd)
         // the same reason Metal takes it after its scene encoder and GL at
         // the end of the geometry pass: earlier and the reflection would
         // show a half-drawn world.
-        if (ssrWanted) CaptureSSRColorHistory(cmd, m_viewportW, m_viewportH);
+        if (ssrWanted) CaptureSSRColorHistory(cmd, sW, sH);
 
         // Underwater fog (Thema 185 Schritt 2): straight onto m_hdrView while it
         // is still COLOR_ATTACHMENT_OPTIMAL (before the barrier below hands it to
@@ -1052,7 +1074,7 @@ void VulkanRenderer::DrawViewportFrame(VkCommandBuffer cmd)
 
             VkRenderPassBeginInfo bi{ VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
             bi.renderPass = m_underwaterFogRP; bi.framebuffer = m_underwaterFogFB;
-            bi.renderArea.extent = { m_viewportW, m_viewportH };
+            bi.renderArea.extent = { sW, sH };
             vkCmdBeginRenderPass(cmd, &bi, VK_SUBPASS_CONTENTS_INLINE);
 
             // Underwater caustics (Thema 185 Schritt 3), drawn FIRST in this same pass so the
@@ -1104,8 +1126,8 @@ void VulkanRenderer::DrawViewportFrame(VkCommandBuffer cmd)
                 vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                     m_underwaterCausticsPipeLayout, 0, 1, &m_underwaterFogDS, 0, nullptr);
                 vkCmdPushConstants(cmd, m_underwaterCausticsPipeLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, 128, &ucpc);
-                VkViewport ucvp{0,0,(float)m_viewportW,(float)m_viewportH,0,1}; vkCmdSetViewport(cmd,0,1,&ucvp);
-                VkRect2D ucsc{{0,0},{m_viewportW,m_viewportH}}; vkCmdSetScissor(cmd,0,1,&ucsc);
+                VkViewport ucvp{0,0,(float)sW,(float)sH,0,1}; vkCmdSetViewport(cmd,0,1,&ucvp);
+                VkRect2D ucsc{{0,0},{sW,sH}}; vkCmdSetScissor(cmd,0,1,&ucsc);
                 vkCmdDraw(cmd, 3, 1, 0, 0);
             }
 
@@ -1113,8 +1135,8 @@ void VulkanRenderer::DrawViewportFrame(VkCommandBuffer cmd)
             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                 m_underwaterFogPipeLayout, 0, 1, &m_underwaterFogDS, 0, nullptr);
             vkCmdPushConstants(cmd, m_underwaterFogPipeLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, 128, &pc);
-            VkViewport vp{0,0,(float)m_viewportW,(float)m_viewportH,0,1}; vkCmdSetViewport(cmd,0,1,&vp);
-            VkRect2D sc{{0,0},{m_viewportW,m_viewportH}}; vkCmdSetScissor(cmd,0,1,&sc);
+            VkViewport vp{0,0,(float)sW,(float)sH,0,1}; vkCmdSetViewport(cmd,0,1,&vp);
+            VkRect2D sc{{0,0},{sW,sH}}; vkCmdSetScissor(cmd,0,1,&sc);
             vkCmdDraw(cmd, 3, 1, 0, 0);
             vkCmdEndRenderPass(cmd);
 
@@ -1123,9 +1145,18 @@ void VulkanRenderer::DrawViewportFrame(VkCommandBuffer cmd)
                 VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT);
         }
 
+        // AMD FSR (encodeFsr): after the fog, before motion blur. While upscaling everything below reads m_fsrOutImage
+        // (the tail, viewport size); without it this frame there is nothing to show the scene through.
+        const bool fsrRan = encodeFsr(cmd);
+        if (sceneScaled() && !fsrRan)
+        {
+            static bool s_noFsrLogged = false;
+            if (!s_noFsrLogged) { s_noFsrLogged = true; HE_LOG_WARN(RHI, "%s", "VulkanRenderer: upscaled frame without an FSR dispatch"); }
+        }
+
         // Camera motion blur, after the fog and before the bloom (GL / Metal's place): velocity, then the smear into
-        // m_mbImage, copied back over m_hdrImage so everything after reads the blurred image. Real frames of a perspective
-        // camera only (m_mbRealFrame: Render()).
+        // m_mbImage, copied back over the tail's HDR (m_hdrImage, or m_fsrOutImage while upscaling) so everything after
+        // reads the blurred image. Real frames of a perspective camera only (m_mbRealFrame: Render()).
         if (m_mbEnabled && m_mbReady && m_mbRealFrame && m_mbHasPrev && !m_rawCapture && m_mbFB && m_mbVelFB
             && m_viewportDepthImage && m_renderWorld.camera.projection[3][3] == 0.0f)
         {
@@ -1175,34 +1206,36 @@ void VulkanRenderer::DrawViewportFrame(VkCommandBuffer cmd)
             // 2. the smear: {hdr, velocity} → m_mbImage
             runPostFXBarrier(cmd, m_mbVelImage, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                 VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
-            runPostFXBarrier(cmd, m_hdrImage, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            runPostFXBarrier(cmd, tailHdrImage(), tailHdrLayout(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                 VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+            tailHdrLayout() = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
             pass(m_mbRP, m_mbFB, m_mbPipe, m_mbPipeLayout, m_mbDS);
-            // 3. back over m_hdrImage, which goes on as a colour attachment (the barrier below hands it to the bloom)
+            // 3. back over the tail's HDR, readable for the bloom
             imageBarrier(m_mbImage, VK_IMAGE_ASPECT_COLOR_BIT,
                 VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                 VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT,
                 VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
-            imageBarrier(m_hdrImage, VK_IMAGE_ASPECT_COLOR_BIT,
+            imageBarrier(tailHdrImage(), VK_IMAGE_ASPECT_COLOR_BIT,
                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                 VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
                 VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
             VkImageCopy copy{};
             copy.srcSubresource = copy.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
             copy.extent = { m_viewportW, m_viewportH, 1 };
-            vkCmdCopyImage(cmd, m_mbImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, m_hdrImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
-            imageBarrier(m_hdrImage, VK_IMAGE_ASPECT_COLOR_BIT,
-                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_READ_BIT,
-                VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+            vkCmdCopyImage(cmd, m_mbImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, tailHdrImage(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+            imageBarrier(tailHdrImage(), VK_IMAGE_ASPECT_COLOR_BIT,
+                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
+                VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+            tailHdrLayout() = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         }
 
         _frame.next("Bloom");
-        // Transition HDR → SHADER_READ_ONLY for bloom bright pass.
-        runPostFXBarrier(cmd, m_hdrImage,
-            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        // Transition HDR (the tail's: m_fsrOutImage while upscaling) → SHADER_READ_ONLY for bloom bright pass.
+        runPostFXBarrier(cmd, tailHdrImage(),
+            tailHdrLayout(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
             VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
-        m_hdrLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        tailHdrLayout() = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
         // Helper: run one fullscreen blit pass.
         auto blitPass = [&](VkRenderPass rp, VkFramebuffer fb, uint32_t bw, uint32_t bh,
@@ -1293,7 +1326,7 @@ void VulkanRenderer::DrawViewportFrame(VkCommandBuffer cmd)
         // instead of filtering ldr. Every history image is SHADER_READ_ONLY
         // outside this block (primed at creation, re-parked after each write).
         VkDescriptorSet aaSet = m_postFxDS[4];
-        const bool aaTaa = m_taaFrame && m_taaHistoryFB[0]
+        const bool aaTaa = m_taaFrame && m_aaMethod == HE::AAMethod::TAA && m_taaHistoryFB[0]   // FSR resolved already
                         && m_taaW == m_viewportW && m_taaH == m_viewportH;
         if (aaTaa)
         {
@@ -1380,6 +1413,9 @@ void VulkanRenderer::DrawViewportFrame(VkCommandBuffer cmd)
     else
     {
         // ── Fallback: Scene → viewport RT (no PostFX) ─────────────────
+        // Its framebuffer is the scene's size (the depth's): while FSR upscales nothing here could bring it up. Not reached
+        // in practice (upscaling needs the post chain, sceneSizeFor).
+        if (sceneScaled()) return;
         const bool fromUndefined = (m_viewportLayout == VK_IMAGE_LAYOUT_UNDEFINED);
         VkImageMemoryBarrier toColor{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
         toColor.oldLayout = m_viewportLayout; toColor.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
@@ -1464,6 +1500,9 @@ IRenderer::Capabilities VulkanRenderer::GetCapabilities() const
     // chain — false only if a TAA shader (.spv) or pipeline is missing. Only
     // the direct swapchain fallback renders unjittered (m_taaFrame).
     c.supportsTemporalAA = taaReady();
+    // FSR rides on TAA's jitter and velocity; render scale only through it (sceneSizeFor).
+    c.supportsFSR         = c.supportsTemporalAA && m_fsr.available();
+    c.supportsRenderScale = c.supportsFSR;
     // Deferred (Thema 150): G-buffer pass + resolve built at Initialize. Like
     // SSR/TAA it lives on the HDR viewport frame (DrawViewportFrame's useHDR
     // branch), which the editor viewport and the packaged game both run; the
@@ -1785,26 +1824,50 @@ void VulkanRenderer::createDevice()
         m_tessSupported = have.tessellationShader == VK_TRUE && !(tessEnv && std::strcmp(tessEnv, "0") == 0);
         coreEnable.tessellationShader = m_tessSupported ? VK_TRUE : VK_FALSE;
         HE::setWaterTessellationAvailable(m_tessSupported);
+        coreEnable.shaderInt16 = have.shaderInt16;   // AMD FSR's shaders declare Int16 (VulkanFsr)
         HE_LOG_INFO(RHI, "%s", m_tessSupported
             ? "VulkanRenderer: tessellationShader enabled (material Displacement pin)"
             : "VulkanRenderer: no tessellation (feature missing or HE_TESSELLATION=0), "
               "displacement materials draw untessellated");
     }
 
-    // A portability device (MoltenVK) must have VK_KHR_portability_subset enabled when it advertises it.
+    // A portability device (MoltenVK) must have VK_KHR_portability_subset enabled when it advertises it. AMD FSR's
+    // shaders use compute-shader derivatives where the device has them (VK_KHR_compute_shader_derivatives).
+    VkPhysicalDeviceComputeShaderDerivativesFeaturesKHR derivEnable{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COMPUTE_SHADER_DERIVATIVES_FEATURES_KHR };
+    bool wantDerivatives = false;
     {
         uint32_t n = 0;
         vkEnumerateDeviceExtensionProperties(m_physDevice, nullptr, &n, nullptr);
         std::vector<VkExtensionProperties> props(n);
         if (n) vkEnumerateDeviceExtensionProperties(m_physDevice, nullptr, &n, props.data());
         for (const auto& e : props)
+        {
             if (std::strcmp(e.extensionName, "VK_KHR_portability_subset") == 0)
-            { devExts.push_back("VK_KHR_portability_subset"); break; }
+                devExts.push_back("VK_KHR_portability_subset");
+            else if (std::strcmp(e.extensionName, VK_KHR_COMPUTE_SHADER_DERIVATIVES_EXTENSION_NAME) == 0
+                     && m_instanceApiVersion >= VK_API_VERSION_1_1)
+                wantDerivatives = true;
+        }
+        if (wantDerivatives)
+        {
+            VkPhysicalDeviceComputeShaderDerivativesFeaturesKHR have{
+                VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COMPUTE_SHADER_DERIVATIVES_FEATURES_KHR };
+            VkPhysicalDeviceFeatures2 feat2{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2 };
+            feat2.pNext = &have;
+            vkGetPhysicalDeviceFeatures2(m_physDevice, &feat2);
+            derivEnable.computeDerivativeGroupLinear = have.computeDerivativeGroupLinear;
+            derivEnable.computeDerivativeGroupQuads  = have.computeDerivativeGroupQuads;
+            wantDerivatives = have.computeDerivativeGroupLinear || have.computeDerivativeGroupQuads;
+            if (wantDerivatives) devExts.push_back(VK_KHR_COMPUTE_SHADER_DERIVATIVES_EXTENSION_NAME);
+        }
     }
+    derivEnable.pNext = wantHwRt ? static_cast<void*>(&asEnable) : nullptr;
 
     VkDeviceCreateInfo dci{};
     dci.sType                   = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
-    dci.pNext                   = wantHwRt ? &asEnable : nullptr;
+    dci.pNext                   = wantDerivatives ? static_cast<void*>(&derivEnable)
+                                : wantHwRt        ? static_cast<void*>(&asEnable) : nullptr;
     dci.pEnabledFeatures        = &coreEnable;
     dci.queueCreateInfoCount    = 1;
     dci.pQueueCreateInfos       = &qci;
@@ -5859,11 +5922,15 @@ void VulkanRenderer::createPostFXResources(uint32_t w, uint32_t h)
 
     const VkImageUsageFlags RTf = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
     const uint32_t bw = std::max(1u, w/2), bh = std::max(1u, h/2);
+    // w x h is the viewport (bloom, LDR, the tail); the HDR target and TAA's follow the scene size, set with the depth.
+    if (!m_sceneW || !m_sceneH) { m_sceneW = w; m_sceneH = h; }
+    const uint32_t sw = m_sceneW, sh = m_sceneH;
     // TRANSFER_SRC on the HDR target: forward SSR copies the finished frame
     // into m_ssrColorHist for the NEXT frame's trace (CaptureSSRColorHistory);
     // TRANSFER_DST: motion blur copies its smear back over it.
-    makeImg(VK_FORMAT_R16G16B16A16_SFLOAT, w,  h,  RTf | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+    makeImg(VK_FORMAT_R16G16B16A16_SFLOAT, sw, sh, RTf | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
             m_hdrImage, m_hdrMemory, m_hdrView);
+    if (sw != w || sh != h) createFsrOut(w, h);   // upscaling: FSR's display-size output is what the tail reads
     makeImg(VK_FORMAT_R16G16B16A16_SFLOAT, bw, bh, RTf, m_bloomImage[0],m_bloomMemory[0],m_bloomView[0]);
     makeImg(VK_FORMAT_R16G16B16A16_SFLOAT, bw, bh, RTf, m_bloomImage[1],m_bloomMemory[1],m_bloomView[1]);
     makeImg(VK_FORMAT_R8G8B8A8_UNORM,      w,  h,  RTf, m_ldrImage,     m_ldrMemory,     m_ldrView);
@@ -5874,7 +5941,7 @@ void VulkanRenderer::createPostFXResources(uint32_t w, uint32_t h)
         VkImageView atts[] = { m_hdrView, m_viewportDepthView };
         VkFramebufferCreateInfo fci{ VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO };
         fci.renderPass = m_postFxSceneRP; fci.attachmentCount = 2; fci.pAttachments = atts;
-        fci.width = w; fci.height = h; fci.layers = 1;
+        fci.width = sw; fci.height = sh; fci.layers = 1;
         vkCheck(vkCreateFramebuffer(m_device, &fci, nullptr, &m_hdrFB), "hdr scene fb");
     }
     makeFB(m_postFxBlitF16, m_bloomView[0], bw, bh, m_bloomFB[0]);
@@ -5885,7 +5952,7 @@ void VulkanRenderer::createPostFXResources(uint32_t w, uint32_t h)
     // the SAME m_hdrView — valid in Vulkan since load/store ops are not part of
     // render-pass compatibility (see m_postFxSceneRP's depth attachment comment).
     if (m_underwaterFogRP)
-        makeFB(m_underwaterFogRP, m_hdrView, w, h, m_underwaterFogFB);
+        makeFB(m_underwaterFogRP, m_hdrView, sw, sh, m_underwaterFogFB);
     // UI overlay framebuffer — uses the same viewport image with LOAD_OP_LOAD render pass.
     if (m_uiViewportRP && m_viewportView)
         makeFB(m_uiViewportRP, m_viewportView, w, h, m_uiViewportFB);
@@ -5894,11 +5961,12 @@ void VulkanRenderer::createPostFXResources(uint32_t w, uint32_t h)
     //                         [3]=tonemap, [4]=fxaa
     //                         and the game's present pass (the finished viewport image)
     struct DSEntry { VkDescriptorSet set; VkImageView t0; VkImageView t1; };
+    const VkImageView tailHdr = m_fsrOutView ? m_fsrOutView : m_hdrView;   // after FSR while upscaling
     DSEntry dss[6] = {
-        { m_postFxDS[0], m_hdrView,      m_dummyView    },
+        { m_postFxDS[0], tailHdr,        m_dummyView    },
         { m_postFxDS[1], m_bloomView[0], m_dummyView    },
         { m_postFxDS[2], m_bloomView[1], m_dummyView    },
-        { m_postFxDS[3], m_hdrView,      m_bloomView[0] },
+        { m_postFxDS[3], tailHdr,        m_bloomView[0] },
         { m_postFxDS[4], m_ldrView,      m_dummyView    },
         { m_presentDS,   m_viewportView ? m_viewportView : m_dummyView, m_dummyView },
     };
@@ -5939,7 +6007,7 @@ void VulkanRenderer::createPostFXResources(uint32_t w, uint32_t h)
         makeFB(m_mbVelRP, m_mbVelView, w, h, m_mbVelFB);
         makeFB(m_mbRP,    m_mbView,    w, h, m_mbFB);
         VkDescriptorImageInfo ii[3] = { { VK_NULL_HANDLE, m_viewportDepthView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL },
-                                        { VK_NULL_HANDLE, m_hdrView,           VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL },
+                                        { VK_NULL_HANDLE, tailHdr,             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL },
                                         { VK_NULL_HANDLE, m_mbVelView,         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL } };
         VkWriteDescriptorSet mw[3]{};
         for (int i = 0; i < 3; ++i)
@@ -5955,7 +6023,138 @@ void VulkanRenderer::createPostFXResources(uint32_t w, uint32_t h)
 
     // TAA's targets follow the same size and read m_ldrView / the viewport
     // depth just (re)built; the GPU is idle (destroyPostFXResources above).
-    if (taaWanted()) createTaaTargets(w, h);
+    if (taaWanted()) createTaaTargets(sw, sh);
+}
+
+// FSR's display-size output while upscaling: written by FSR (STORAGE), read by the tail (SAMPLED), the target of motion
+// blur's copy back (TRANSFER_DST). Parked in SHADER_READ_ONLY between frames.
+void VulkanRenderer::createFsrOut(uint32_t w, uint32_t h)
+{
+    destroyFsrOut();
+    VkImageCreateInfo ici{ VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+    ici.imageType = VK_IMAGE_TYPE_2D; ici.format = VK_FORMAT_R16G16B16A16_SFLOAT;
+    ici.extent = { w, h, 1 }; ici.mipLevels = 1; ici.arrayLayers = 1; ici.samples = VK_SAMPLE_COUNT_1_BIT;
+    ici.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT
+              | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    if (vkCreateImage(m_device, &ici, nullptr, &m_fsrOutImage) != VK_SUCCESS) { m_fsrOutImage = VK_NULL_HANDLE; return; }
+    VkMemoryRequirements req{}; vkGetImageMemoryRequirements(m_device, m_fsrOutImage, &req);
+    VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+    mai.allocationSize = req.size;
+    mai.memoryTypeIndex = findMemoryType(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    if (vkAllocateMemory(m_device, &mai, nullptr, &m_fsrOutMemory) != VK_SUCCESS) { destroyFsrOut(); return; }
+    vkBindImageMemory(m_device, m_fsrOutImage, m_fsrOutMemory, 0);
+    VkImageViewCreateInfo vci{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+    vci.image = m_fsrOutImage; vci.viewType = VK_IMAGE_VIEW_TYPE_2D; vci.format = ici.format;
+    vci.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+    if (vkCreateImageView(m_device, &vci, nullptr, &m_fsrOutView) != VK_SUCCESS) { destroyFsrOut(); return; }
+    m_fsrOutLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    m_fsrReset = true;
+}
+
+// AMD FSR, right after the fog and before motion blur, bloom and the tonemap. Native AA (scene = viewport): real jittered
+// frames only, the output copied back over m_hdrImage (left COLOR_ATTACHMENT, as the scene pass left it). Upscaling: the
+// tail reads m_fsrOutImage (left SHADER_READ_ONLY). Outside any render pass; m_hdrImage COLOR_ATTACHMENT on entry.
+bool VulkanRenderer::encodeFsr(VkCommandBuffer cmd)
+{
+    const bool upscale = sceneScaled();
+    const uint32_t sW = m_sceneW, sH = m_sceneH, dW = m_viewportW, dH = m_viewportH;
+    if (!fsrFrame() || !m_taaFrame || !m_mbRealFrame || !m_fsr.sizedFor(sW, sH, dW, dH)
+        || !m_viewportDepthImage || !m_taaVelocityImage) return false;
+    if (!upscale && !m_fsrOutImage) createFsrOut(dW, dH);   // native AA: its own output, made once (no descriptor names it)
+    if (!m_fsrOutImage) return false;
+    GpuPassScope _passTimer(this, "FSR");
+    auto barrier = [&](VkImage img, VkImageAspectFlags aspect, VkImageLayout from, VkImageLayout to,
+                       VkAccessFlags srcAccess, VkAccessFlags dstAccess, VkPipelineStageFlags srcStage, VkPipelineStageFlags dstStage)
+    {
+        if (from == to) return;
+        VkImageMemoryBarrier b{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+        b.oldLayout = from; b.newLayout = to;
+        b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b.image = img; b.subresourceRange = { aspect, 0, 1, 0, 1 };
+        b.srcAccessMask = srcAccess; b.dstAccessMask = dstAccess;
+        vkCmdPipelineBarrier(cmd, srcStage, dstStage, 0, 0, nullptr, 0, nullptr, 1, &b);
+    };
+    constexpr VkPipelineStageFlags kCompute = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+    barrier(m_hdrImage, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, kCompute);
+    barrier(m_viewportDepthImage, VK_IMAGE_ASPECT_DEPTH_BIT, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
+            VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT, kCompute);
+    // The velocity pass left its image SHADER_READ_ONLY for a fragment read: its writes made visible to compute too.
+    {
+        VkMemoryBarrier mb{ VK_STRUCTURE_TYPE_MEMORY_BARRIER };
+        mb.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        mb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, kCompute, 0, 1, &mb, 0, nullptr, 0, nullptr);
+    }
+    barrier(m_fsrOutImage, VK_IMAGE_ASPECT_COLOR_BIT, m_fsrOutLayout, VK_IMAGE_LAYOUT_GENERAL,
+            m_fsrOutLayout == VK_IMAGE_LAYOUT_UNDEFINED ? 0u : VkAccessFlags(VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_READ_BIT),
+            VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT, kCompute);
+    m_fsrOutLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+    const glm::mat4& P = m_renderWorld.camera.projection;
+    const float A = P[2][2], B = P[3][2];
+    const uint64_t nowNs = SDL_GetTicksNS();
+    HE::VulkanFsr::Dispatch fd;
+    fd.cmd      = cmd;
+    fd.color    = { m_hdrImage, VK_FORMAT_R16G16B16A16_SFLOAT, sW, sH, false };
+    fd.depth    = { m_viewportDepthImage, m_depthFormat, sW, sH, false };
+    fd.velocity = { m_taaVelocityImage, VK_FORMAT_R16G16_SFLOAT, sW, sH, false };
+    fd.output   = { m_fsrOutImage, VK_FORMAT_R16G16B16A16_SFLOAT, dW, dH, true };
+    fd.renderW = sW; fd.renderH = sH; fd.displayW = dW; fd.displayH = dH;
+    fd.jitter = m_fsrJitter;
+    // kVulkanClipFix maps GL's whole -1..1 onto 0..1: the depth's planes are the projection's own.
+    fd.nearZ = B / (A - 1.0f); fd.farZ = B / (A + 1.0f);
+    fd.fovY = 2.0f * std::atan(1.0f / P[1][1]);
+    fd.frameMs = m_fsrLastNs ? float(double(nowNs - m_fsrLastNs) * 1e-6) : 16.6f;
+    fd.sharpness = m_aaSharpness;
+    fd.reset = m_fsrReset;
+    m_fsrLastNs = nowNs;
+    // FFX is told the layout each image is in: PIXEL_COMPUTE_READ = SHADER_READ_ONLY, UNORDERED_ACCESS = GENERAL.
+    const bool ok = m_fsr.dispatch(fd);
+    if (ok) m_fsrReset = false;
+
+    barrier(m_viewportDepthImage, VK_IMAGE_ASPECT_DEPTH_BIT, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+            kCompute, VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT);
+    if (upscale)
+    {
+        barrier(m_fsrOutImage, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, kCompute, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+        m_fsrOutLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        m_hdrLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;   // done with for this frame (the next scene pass clears it)
+        return ok;
+    }
+    // Native AA: back over m_hdrImage, which goes on as a colour attachment (the chain below expects it so).
+    if (ok)
+    {
+        barrier(m_fsrOutImage, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT, kCompute, VK_PIPELINE_STAGE_TRANSFER_BIT);
+        m_fsrOutLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        barrier(m_hdrImage, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, kCompute, VK_PIPELINE_STAGE_TRANSFER_BIT);
+        VkImageCopy copy{};
+        copy.srcSubresource = copy.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+        copy.extent = { dW, dH, 1 };
+        vkCmdCopyImage(cmd, m_fsrOutImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, m_hdrImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+        barrier(m_hdrImage, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_READ_BIT,
+                VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+    }
+    else
+        barrier(m_hdrImage, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, kCompute, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+    m_hdrLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    return ok;
+}
+
+void VulkanRenderer::destroyFsrOut()
+{
+    if (m_fsrOutView)   { vkDestroyImageView(m_device, m_fsrOutView, nullptr); m_fsrOutView = VK_NULL_HANDLE; }
+    if (m_fsrOutImage)  { vkDestroyImage(m_device, m_fsrOutImage, nullptr); m_fsrOutImage = VK_NULL_HANDLE; }
+    if (m_fsrOutMemory) { vkFreeMemory(m_device, m_fsrOutMemory, nullptr); m_fsrOutMemory = VK_NULL_HANDLE; }
+    m_fsrOutLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 }
 
 void VulkanRenderer::destroyPostFXResources()
@@ -5987,6 +6186,7 @@ void VulkanRenderer::destroyPostFXResources()
     if (m_hdrView)    { vkDestroyImageView(m_device, m_hdrView,    nullptr); m_hdrView=VK_NULL_HANDLE; }
     if (m_hdrImage)   { vkDestroyImage    (m_device, m_hdrImage,   nullptr); m_hdrImage=VK_NULL_HANDLE; }
     if (m_hdrMemory)  { vkFreeMemory      (m_device, m_hdrMemory,  nullptr); m_hdrMemory=VK_NULL_HANDLE; }
+    destroyFsrOut();
     m_hdrLayout = m_bloomLayout[0] = m_bloomLayout[1] = m_ldrLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 }
 
@@ -6330,19 +6530,19 @@ void VulkanRenderer::destroyTaaTargets()
 // actually changes, i.e. on a toggle. Must run before this frame's commands.
 void VulkanRenderer::syncTaaTargets()
 {
-    const bool want = taaWanted() && m_ldrView && m_viewportW > 0 && m_viewportH > 0;
-    const bool have = m_taaHistoryImage[0] && m_taaW == m_viewportW && m_taaH == m_viewportH;
+    const bool want = taaWanted() && m_ldrView && m_sceneW > 0 && m_sceneH > 0;
+    const bool have = m_taaHistoryImage[0] && m_taaW == m_sceneW && m_taaH == m_sceneH;
     if (want ? have : !m_taaHistoryImage[0]) return;
     deviceWaitIdle();
-    if (want) createTaaTargets(m_viewportW, m_viewportH);
+    if (want) createTaaTargets(m_sceneW, m_sceneH);
     else      { destroyTaaTargets(); m_taaJitter = glm::vec2(0.0f); }
 }
 
 glm::mat4 VulkanRenderer::taaJittered(const glm::mat4& clipViewProj) const
 {
     return m_taaFrame
-        ? HE::taaJitteredViewProj(clipViewProj, m_taaJitter, static_cast<int>(m_viewportW),
-                                  static_cast<int>(m_viewportH))
+        ? HE::taaJitteredViewProj(clipViewProj, m_taaJitter, static_cast<int>(m_sceneW),
+                                  static_cast<int>(m_sceneH))   // the raster's own size
         : clipViewProj;
 }
 
@@ -6360,7 +6560,7 @@ void VulkanRenderer::encodeTaaVelocity(VkCommandBuffer cmd)
     clears[0].color = { { 0.0f, 0.0f, 0.0f, 0.0f } };   // zero = "did not move"
     VkRenderPassBeginInfo bi{ VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
     bi.renderPass = m_taaVelocityRP; bi.framebuffer = m_taaVelocityFB;
-    bi.renderArea.extent = { m_viewportW, m_viewportH };
+    bi.renderArea.extent = { m_sceneW, m_sceneH };
     bi.clearValueCount = 2; bi.pClearValues = clears;
     vkCmdBeginRenderPass(cmd, &bi, VK_SUBPASS_CONTENTS_INLINE);
 
@@ -6380,10 +6580,10 @@ void VulkanRenderer::encodeTaaVelocity(VkCommandBuffer cmd)
         const glm::mat4 prevJitHere = m_taaPrevOriginKnown ? taaJittered(HE::taaPrevViewProjAt(m_taaPrevViewProj, originNow, m_taaPrevOrigin))
                                                            : prevJit;
         if (m_landscapeFrameLive && m_landscape && HE::landscapePassesOn())
-            m_landscape->drawDepth(cmd, m_taaVelocityRP, VkExtent2D{ m_viewportW, m_viewportH }, m_currentFrame, m_landscapeFrame,
+            m_landscape->drawDepth(cmd, m_taaVelocityRP, VkExtent2D{ m_sceneW, m_sceneH }, m_currentFrame, m_landscapeFrame,
                                    m_landscapeViewProj, &m_taaViewProjJit, false, &prevJitHere);
-        VkViewport vp{ 0, 0, (float)m_viewportW, (float)m_viewportH, 0, 1 }; vkCmdSetViewport(cmd, 0, 1, &vp);
-        VkRect2D   sc{ { 0, 0 }, { m_viewportW, m_viewportH } };          vkCmdSetScissor(cmd, 0, 1, &sc);
+        VkViewport vp{ 0, 0, (float)m_sceneW, (float)m_sceneH, 0, 1 }; vkCmdSetViewport(cmd, 0, 1, &vp);
+        VkRect2D   sc{ { 0, 0 }, { m_sceneW, m_sceneH } };          vkCmdSetScissor(cmd, 0, 1, &sc);
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_taaVelocityPipe);
         m_taaCurTransforms.clear();
         for (const uint32_t idx : m_sortedIndices)
@@ -6453,6 +6653,7 @@ void VulkanRenderer::destroyViewportResources()
     if (m_viewportImage)       { vkDestroyImage      (m_device, m_viewportImage, nullptr);       m_viewportImage = VK_NULL_HANDLE; }
     if (m_viewportMemory)      { vkFreeMemory        (m_device, m_viewportMemory, nullptr);      m_viewportMemory = VK_NULL_HANDLE; }
     m_viewportW = m_viewportH = 0;
+    m_sceneW = m_sceneH = 0;
     m_viewportLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 }
 
@@ -6491,6 +6692,9 @@ void VulkanRenderer::createViewportResources(uint32_t w, uint32_t h)
         m_viewportMemory = VK_NULL_HANDLE;
     }
     destroyViewportResources();
+    // The scene targets' size: smaller than the viewport while FSR upscales (sceneSizeFor).
+    m_sceneW = sceneSizeFor(w);
+    m_sceneH = sceneSizeFor(h);
 
     // ── Color image (RGBA8, sampled by ImGui, written by scene render pass) ─
     {
@@ -6528,7 +6732,7 @@ void VulkanRenderer::createViewportResources(uint32_t w, uint32_t h)
         VkImageCreateInfo ici{ VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
         ici.imageType   = VK_IMAGE_TYPE_2D;
         ici.format      = m_depthFormat;
-        ici.extent      = { w, h, 1 };
+        ici.extent      = { m_sceneW, m_sceneH, 1 };   // the scene's (FSR reads it at the render size)
         ici.mipLevels   = 1;
         ici.arrayLayers = 1;
         ici.samples     = VK_SAMPLE_COUNT_1_BIT;
@@ -6621,8 +6825,10 @@ void VulkanRenderer::createViewportResources(uint32_t w, uint32_t h)
         fci.renderPass      = m_viewportRenderPass;
         fci.attachmentCount = 2;
         fci.pAttachments    = atts;
-        fci.width           = w;
-        fci.height          = h;
+        // No larger than its smallest attachment: the depth is the scene's. While FSR upscales nothing draws through
+        // this one (the non-HDR fallback; DrawViewportFrame skips it then).
+        fci.width           = m_sceneW;
+        fci.height          = m_sceneH;
         fci.layers          = 1;
         vkCheck(vkCreateFramebuffer(m_device, &fci, nullptr, &m_viewportFramebuffer), "viewport framebuffer");
     }
@@ -6644,8 +6850,8 @@ void VulkanRenderer::createViewportResources(uint32_t w, uint32_t h)
     m_viewportResChanged = true;
 
     createPostFXResources(w, h);
-    createSSAOTargets(w, h);
-    createDecalDepth(m_decalDepthVp, w, h);
+    createSSAOTargets(m_sceneW, m_sceneH);
+    createDecalDepth(m_decalDepthVp, m_sceneW, m_sceneH);
 }
 
 void  VulkanRenderer::SetViewportSize(uint32_t w, uint32_t h)
@@ -7730,6 +7936,7 @@ void VulkanRenderer::stillEnter(uint32_t width, uint32_t height)
     st.liveDepthImage = m_viewportDepthImage; st.liveDepthMemory = m_viewportDepthMemory; st.liveDepthView = m_viewportDepthView;
     st.liveRenderPass = m_viewportRenderPass; st.liveFramebuffer = m_viewportFramebuffer; st.liveSampler = m_viewportSampler;
     st.liveW = m_viewportW; st.liveH = m_viewportH; st.liveReqW = m_viewportReqW; st.liveReqH = m_viewportReqH;
+    st.liveSceneW = m_sceneW; st.liveSceneH = m_sceneH;
     st.liveLayout = m_viewportLayout;
     st.liveResChanged = m_viewportResChanged;
     st.liveCam = m_editorCamera;
@@ -7789,6 +7996,8 @@ void VulkanRenderer::stillLeave()
     m_viewportSampler     = st.liveSampler;
     m_viewportW          = st.liveW;
     m_viewportH          = st.liveH;
+    m_sceneW             = st.liveSceneW;
+    m_sceneH             = st.liveSceneH;
     m_viewportReqW       = st.liveReqW;
     m_viewportReqH       = st.liveReqH;
     m_viewportLayout     = st.liveLayout;
@@ -7810,8 +8019,8 @@ void VulkanRenderer::stillLeave()
         // The tail of createViewportResources, at the live size — unconditionally,
         // see the framebuffer note above.
         createPostFXResources(liveW, liveH);
-        createSSAOTargets(liveW, liveH);
-        createDecalDepth(m_decalDepthVp, liveW, liveH);
+        createSSAOTargets(m_sceneW, m_sceneH);
+        createDecalDepth(m_decalDepthVp, m_sceneW, m_sceneH);
     }
     else
     {
@@ -15850,6 +16059,8 @@ void VulkanRenderer::SetAntiAliasingSettings(const AntiAliasingSettings& s)
     // not here, between two passes of a frame being recorded.
     m_aaMethod    = IRenderer::ResolveAAMethod(s.method, GetCapabilities());
     m_aaSharpness = std::clamp(s.sharpness, 0.0f, 1.0f);
+    // The scene size follows at the top of the next Render too (sceneSizeFor); below 1 only with FSR.
+    m_renderScale = std::isfinite(s.renderScale) ? s.renderScale : 1.0f;
 }
 
 void VulkanRenderer::InvalidateMaterial(const HE::UUID& materialId)
