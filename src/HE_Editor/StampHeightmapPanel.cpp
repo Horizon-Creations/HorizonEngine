@@ -50,9 +50,6 @@ const char* const kShapes[] = { "Hills", "Mountain", "Mountain Range", "Plateau"
 const char* const kBlends[] = { "Replace", "Add", "Subtract", "Lighten (Max)", "Darken (Min)" };
 // The test landscape's grid: 2^9 + 1 a side, four times as fine as it was. A 256 picture is then drawn finer than it is stored.
 constexpr uint32_t kPreviewResolution = 513;
-// What the ground colours are multiplied with. Below 1 on purpose: a white sheet under the preview's sun burns out, and should
-// the texture ever not arrive, the landscape is an even grey instead of that.
-constexpr float kGroundAlbedo = 0.6f;
 
 struct State
 {
@@ -90,6 +87,10 @@ struct State
 	bool  camFramed = false, previewDirty = true, previewSaid = false, groundColours = true;
 	double lastPreview = 0.0;
 	float previewSize = 256.0f, previewHeight = 80.0f, timeOfDay = 0.33f;
+	// What the ground colours are multiplied with (the material's base colour). Well below 1: a white sheet under the preview's
+	// sun burns out. The preview has no exposure of its own to turn down, so this is the brightness control; the sky keeps its own.
+	float groundBrightness = 0.35f;
+	float clouds = 0.35f;              // WorldPreviewEnv::cloudCoverage: overcast dims the sun
 };
 State& st() { static State s; return s; }
 
@@ -234,13 +235,25 @@ void drawEditMenu(State& s)
 	ImGui::EndPopup();
 }
 
-void drawViewMenu(State& s)
+void applyGroundBrightness(AppContext& ctx, State& s)
+{
+	if (s.worldContent != ctx.contentManager) return;
+	if (MaterialAsset* mat = ctx.contentManager->getMaterialMutable(s.groundMaterial))
+	{
+		mat->baseColor[0] = mat->baseColor[1] = mat->baseColor[2] = s.groundBrightness;
+		ctx.renderer->InvalidateMaterial(s.groundMaterial);
+	}
+}
+
+void drawViewMenu(AppContext& ctx, State& s)
 {
 	ImGui::SetNextWindowSizeConstraints(ImVec2(280.0f, 0.0f), ImVec2(420.0f, FLT_MAX));
 	if (!ImGui::BeginPopup("##shViewMenu")) return;
 	if (Row::dragFloat("Test Size", &s.previewSize, 1.0f, 16.0f, 8192.0f, "%.0f m")) { s.previewDirty = true; s.camFramed = false; }
 	if (Row::dragFloat("Test Height", &s.previewHeight, 0.5f, 1.0f, 4096.0f, "%.0f m")) s.previewDirty = true;
 	Row::sliderFloat("Time of Day", &s.timeOfDay, 0.2f, 0.8f);
+	if (Row::sliderFloat("Brightness", &s.groundBrightness, 0.05f, 1.0f)) applyGroundBrightness(ctx, s);
+	Row::sliderFloat("Clouds", &s.clouds, 0.0f, 1.0f);
 	if (EditorWidgets::menuItem("Ground Colours", nullptr, s.groundColours)) { s.groundColours = !s.groundColours; s.previewDirty = true; }
 	if (EditorWidgets::menuItem("Frame Test Landscape", "F")) s.camFramed = false;
 	ImGui::EndPopup();
@@ -280,7 +293,7 @@ void drawBar(AppContext& ctx, State& s)
 	if (openMenu) ImGui::OpenPopup(openMenu);
 	drawFileMenu(ctx, s);
 	drawEditMenu(s);
-	drawViewMenu(s);
+	drawViewMenu(ctx, s);
 }
 
 // ── The left column: the options of the mode that is on, and its one action ──
@@ -523,7 +536,7 @@ void drawPreview(AppContext& ctx, State& s, const ImVec2& avail)
 		MaterialAsset mat;
 		mat.type = HE::AssetType::Material;
 		mat.name = "StampHeightmapGround";
-		mat.baseColor[0] = mat.baseColor[1] = mat.baseColor[2] = kGroundAlbedo;
+		mat.baseColor[0] = mat.baseColor[1] = mat.baseColor[2] = s.groundBrightness;
 		mat.roughness = 0.95f;
 		mat.texturePaths = { "StampHeightmapGround.tex" };
 		mat.textureIds = { s.groundTexture };
@@ -574,6 +587,7 @@ void drawPreview(AppContext& ctx, State& s, const ImVec2& avail)
 	WorldPreviewEnv env;
 	env.sky = true;
 	env.timeOfDay = s.timeOfDay;
+	env.cloudCoverage = s.clouds;
 	env.grid = false;
 	void* tex = ctx.renderer->RenderWorldPreview(*ctx.contentManager, *s.world, static_cast<uint32_t>(av.x), static_cast<uint32_t>(av.y),
 	                                              s.cam.makeOverride(), glm::vec3(0.0f), env);

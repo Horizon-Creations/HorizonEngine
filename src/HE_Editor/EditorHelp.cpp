@@ -2604,6 +2604,13 @@ namespace
 	  "Colours the test landscape as ground: grass low, soil above, rock where it is steep, snow on top. Off shows it in "
 	  "one even grey, to judge the form alone.",
 	  "", "editor#landscape-mode" },
+	{ "Stamp Heightmap/Brightness", "",
+	  "How bright the ground of the test landscape is. Turn it down when the relief burns out in the sun; the sky behind "
+	  "it keeps its own brightness.",
+	  "", "editor#landscape-mode" },
+	{ "Stamp Heightmap/Clouds", "",
+	  "How overcast the sky over the test landscape is. More clouds dim the sun and soften the shadows.",
+	  "", "editor#landscape-mode" },
 	{ "Stamp Heightmap/Frame Test Landscape", "",
 	  "Puts the whole test landscape back in view. F does the same while the mouse is over it.",
 	  "", "editor#landscape-mode" },
