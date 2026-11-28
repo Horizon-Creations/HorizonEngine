@@ -353,6 +353,8 @@ add_executable(HorizonEditor WIN32
 	PlayReportPanel.cpp
 	AudioMixerPanel.cpp
 	UndoHistoryPanel.cpp
+	StampHeightmap.cpp
+	StampHeightmapPanel.cpp
 	HcEditorUtil.cpp
 	HcFallbackReport.cpp
 	ExportSdkBuild.cpp

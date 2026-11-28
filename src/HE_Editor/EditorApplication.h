@@ -181,6 +181,8 @@ struct AppContext
 	// made when the page asks, empty (running == false) while the driver is off. A callback rather than a pointer to the
 	// driver, which the editor resets whenever the setting is switched off.
 	std::function<HE::landscape::RvtLandscape::DebugInfo()> rvtDebugInfo;
+	// A stamp's heightmap file was rewritten (the Stamp Heightmap window): the stamps' pictures are read again and their tiles with them.
+	std::function<void()> reloadLandscapeStamps;
 	ScriptEngine*      propScriptEngine = nullptr; // read-only, for inspector property reading
 
 	// Editor scene-view camera (orbit/fly/focus). Owned by EditorApplication;

@@ -83,6 +83,7 @@
 #include "PlayReportPanel.h"             // post-PIE warning/error report
 #include "UndoHistoryPanel.h"            // Window > Undo History window
 #include "HcWatchPanel.h"                // Window > Watch window (a stopped HorizonCode run's values)
+#include "StampHeightmapPanel.h"         // Window > Stamp Heightmap (paints a Landscape Stamp's heightmap)
 #include "TaskBoardPanel.h"              // Window > Task Board (the project's to-do list) + its chip jumps
 #include "TeamSyncView.h"                // a conflict's Resolve opens Source Control
 #include "TaskBoardFooter.h"             // ...and its count, next task and tick-off list in the footer
@@ -273,6 +274,8 @@ static bool s_showUndoHistory = false;
 // Toggled by Window > Watch; drives the window that shows what a HorizonCode run
 // stopped at a breakpoint is holding. Also raised by a stop itself (below).
 static bool s_showWatch = false;
+// Toggled by Window > Stamp Heightmap; drives the window that paints a Landscape Stamp's heightmap.
+static bool s_showStampHeightmap = false;
 
 // Help ▸ Documentation Online. The published manual on the website; the OFFLINE
 // copy the reader panel shows ships next to the editor (EditorDeps/Docs), which
@@ -357,6 +360,7 @@ static PanelVisibilityPref s_panelPrefs[] = {
 	{ "Console",              "PanelOpenConsole",       &s_showConsole       },
 	{ "Undo History",         "PanelOpenUndoHistory",   &s_showUndoHistory   },
 	{ "Watch",                "PanelOpenWatch",         &s_showWatch         },
+	{ "Stamp Heightmap",      "PanelOpenStampHeightmap", &s_showStampHeightmap },
 	// The secondary scene viewports: a Top view docked beside the Scene window
 	// is a layout decision like any other panel's.
 	{ "Scene 2",              "PanelOpenScene2",        &SecondaryViewportPanel::open(0) },
@@ -3018,6 +3022,7 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		MacMenuBar::setToggleState(MC::ToggleConsole,       s_showConsole);
 		MacMenuBar::setToggleState(MC::ToggleUndoHistory,   s_showUndoHistory);
 		MacMenuBar::setToggleState(MC::ToggleWatch,         s_showWatch);
+		MacMenuBar::setToggleState(MC::ToggleStampHeightmap, s_showStampHeightmap);
 		MacMenuBar::setToggleState(MC::ToggleScene2,        SecondaryViewportPanel::open(0));
 		MacMenuBar::setToggleState(MC::ToggleScene3,        SecondaryViewportPanel::open(1));
 		MacMenuBar::setToggleState(MC::ToggleScene4,        SecondaryViewportPanel::open(2));
@@ -3167,6 +3172,7 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 			case MC::ToggleConsole:   togglePanelWindow(s_showConsole, "Console");            break;
 			case MC::ToggleUndoHistory: togglePanelWindow(s_showUndoHistory, "Undo History");  break;
 			case MC::ToggleWatch:     togglePanelWindow(s_showWatch, "Watch");                break;
+			case MC::ToggleStampHeightmap: togglePanelWindow(s_showStampHeightmap, "Stamp Heightmap"); break;
 			case MC::OpenTaskBoard:   if (ctx.projectLoaded) openPlannerTasks(HE::UUID{});  break;
 			case MC::ToggleScene2:
 				if (ctx.projectLoaded) togglePanelWindow(SecondaryViewportPanel::open(0), "Scene 2"); break;
@@ -3538,6 +3544,8 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
             togglePanelWindow(s_showUndoHistory, "Undo History");
         if (EditorWidgets::menuItem("Watch", nullptr, s_showWatch))
             togglePanelWindow(s_showWatch, "Watch");
+        if (EditorWidgets::menuItem("Stamp Heightmap", nullptr, s_showStampHeightmap))
+            togglePanelWindow(s_showStampHeightmap, "Stamp Heightmap");
         if (EditorWidgets::menuItem("Task Board", nullptr, false, ctx.projectLoaded))
             openPlannerTasks(HE::UUID{});
         // The extra scene panes and the level's own graph: game things, like
@@ -4506,6 +4514,7 @@ void EditorUI::renderOverlays(AppContext& ctx, float dt)
 		s_wasHcPaused = paused;
 	}
 	HcWatchPanel::DrawWatchWindow(ctx, s_showWatch);
+	StampHeightmapPanel::DrawWindow(ctx, s_showStampHeightmap);
 	// The task board: a task is read and ticked off from wherever the work is,
 	// which is as often a graph tab as the scene. Drawn even while closed — a
 	// chip that had to open a scene selects its entity once the scene is in.

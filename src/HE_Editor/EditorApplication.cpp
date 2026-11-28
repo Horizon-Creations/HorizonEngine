@@ -15704,6 +15704,7 @@ AppContext EditorApplication::makeContext()
 		.rvtDebugInfo = [this]() -> HE::landscape::RvtLandscape::DebugInfo {
 			return m_rvtLandscape ? m_rvtLandscape->debugInfo() : HE::landscape::RvtLandscape::DebugInfo{};
 		},
+		.reloadLandscapeStamps = [this]() { m_landscapeStamps.reset(); },
 		.propScriptEngine    = m_propScriptEngine.get(),
 		.editorCamera        = &m_editorCamera,
 		.selection           = m_selection,

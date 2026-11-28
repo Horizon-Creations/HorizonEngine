@@ -1047,6 +1047,9 @@ add_executable(he_tests
     # The Watch window, for test_hc_watch_ui.cpp: same AppContext, same per-file
     # HE_IMGUI_ENABLED. It reads HcExecTrace and HcWatch (both already here).
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/HcWatchPanel.cpp
+    # The Stamp Heightmap window's strokes and file (no ImGui), for test_stamp_heightmap.cpp.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/StampHeightmap.cpp
+    test_stamp_heightmap.cpp
     # The Task Board's data core and link chips (the window is the Planner's now):
     # same AppContext, same per-file HE_IMGUI_ENABLED. It reads TaskBoard,
     # EditorCommands and the thumbnail cache, all already here.

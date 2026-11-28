@@ -71,6 +71,8 @@ namespace LandscapeWorldTools
 	// A native file dialog for a stamp's heightmap file (16-bit PNG / PGM / .r16 ...). The chosen path goes into `entity`'s
 	// LandscapeStampComponent, or with a null entity into the Stamp tool's field; taken up by pump().
 	void browseStampFile(AppContext& ctx, Entity entity);
+	// The heightmap file the Stamp tool's next stamp gets, set from outside the section (the Stamp Heightmap window).
+	void setStampToolFile(const std::string& path);
 	// One stroke of the Water tool at an absolute place, without a viewport: a lake `radius` wide, 4 m above the ground there, with a
 	// bed dug under it. What the headless dump paints (HE_DUMP_TILEWATER); false when no editing region holds it.
 	bool paintLake(double absX, double absZ, float radius);

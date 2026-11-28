@@ -252,6 +252,8 @@ void pump(HorizonWorld& world)
 	}
 }
 
+void setStampToolFile(const std::string& path) { st().stampToolFile = path; }
+
 #ifdef HE_IMGUI_ENABLED
 namespace
 {
