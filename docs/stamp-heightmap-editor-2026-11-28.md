@@ -1,37 +1,59 @@
-# Stamp Heightmap window (2026-11-28)
+# Stamp Heightmap editor (2026-11-28)
 
-Window > Stamp Heightmap paints the heightmap file of a Landscape Stamp (`LandscapeStampComponent::heightmapFile`).
+An editor tab that makes the heightmap file of a Landscape Stamp (`LandscapeStampComponent::heightmapFile`): generate, sketch and
+naturalize, erode, filter, with a test landscape beside the picture.
+
+## Decisions
+
+- **No new asset type (yet).** The document is the file a stamp already reads at 16 bits: `<project>/Heightmaps/<Name>.pgm`.
+  A real asset would be a new `AssetType::LandscapeHeightmap` (16-bit payload) plus a `heightmapId` on the stamp component, its
+  serialisation, the export bake and the Content Browser rows (about ten files, see how `BoneMask` is spread). Only suggested.
+- **Ways in:** Window > Stamp Heightmap; "Edit Heightmap..." on a Landscape Stamp (Inspector) and on the Landscape mode's Stamp
+  tool, both through `HE::StampHeightmap::requestEdit(file)`, taken up in `EditorUI.cpp` (search `takeEditRequest`).
+- **Test landscape = an engine terrain.** A one-entity `HorizonWorld` with a `TerrainComponent` (129 x 129, `sculptHeights` from the
+  picture), built by `TerrainSystem::updateTerrains` and drawn by `IRenderer::RenderWorldPreview`, the Mesh Viewer's path.
+- **Destructive picture + undo**, no node graph and no layers. A painted selection limits generators and filters to a region.
 
 ## Handoff
 
 **What exists**
-- `src/HE_Editor/StampHeightmap.{h,cpp}`: the picture (floats 0..1) and its strokes, no ImGui: `dab` (raise/lower), `smooth`,
-  `line` (height runs from start to end, fades to the sides), `gradient` (transition over the whole picture), `writePgm16`, `read`.
-- `src/HE_Editor/StampHeightmapPanel.{h,cpp}`: the window. Controls left, canvas right. Saves `<project>/Heightmaps/<Name>.pgm`
-  (16 bit). "Assign to Selected Stamp" and "Use in Stamp Tool" (`LandscapeWorldTools::setStampToolFile`) hand the file on.
-- Live preview: after Save or Load, every stroke rewrites the file (at most ~7 times a second during a stroke) and calls
-  `AppContext::reloadLandscapeStamps` (= `LandscapeStampSync::reset()`, wired in `EditorApplication.cpp` next to `.rvtDebugInfo`).
-- Canvas: `IRenderer::CreateImGuiTexture`, old texture destroyed one frame later; a backend that returns null (Software) gets
-  64 x 64 flat cells instead.
-- Registered in `EditorUI.cpp` (toggle, panel pref `PanelOpenStampHeightmap`, Window menu, draw), `MacMenuBar.{h,mm}`,
-  help entries `Stamp Heightmap/*` and `Window/Stamp Heightmap` in `EditorHelp.cpp`.
+- `src/HE_Editor/StampHeightmap.{h,cpp}` (no ImGui): strokes (`dab`, `smooth`, `flatten`, `line`, `gradient`); `generate`
+  (Hills, Mountain, Mountain Range, Plateau, Crater, Volcano, Dunes, Island; gradient noise, fBm, ridged multifractal, domain
+  warp; blend Replace/Add/Subtract/Max/Min); `refine` (the sketch-to-ground pass: blur, warp, height-scaled ridged relief,
+  erosion); `erode` (droplet erosion after Beyer 2015 + thermal passes); `blur`, `terrace`, `normalize`, `invert`, `fadeEdges`;
+  every generator and filter takes an optional mask; `writePgm16`, `read`; `requestEdit` / `takeEditRequest`.
+- `src/HE_Editor/StampHeightmapPanel.{h,cpp}`: the tab (`kTabPath`, `render`, `open`, `save`). Controls left, picture in the
+  middle, test landscape right. Undo/Redo 16 steps. Ctrl+S saves the picture (`doSaveActiveTab` in `EditorUI.cpp`).
+- Live preview on the real landscape: after Save or Load every change rewrites the file and calls
+  `AppContext::reloadLandscapeStamps` (= `LandscapeStampSync::reset()`).
+- Registered: `EditorUI.cpp` (Window menu, tab dispatch, save, request), `MacMenuBar.{h,mm}` (`OpenStampHeightmap`),
+  `InspectorPanel.cpp` and `LandscapeWorldTools.cpp` (the two buttons), help entries `Stamp Heightmap/*` in `EditorHelp.cpp`.
+- `HE_DUMP_STAMPHEIGHTMAP=1`: a headless run opens the tab with a generated, naturalized mountain and writes
+  `Heightmaps/Stamp.pgm` into the project.
 
 **Verified**
-- `he_tests --test-case="stamp heightmap*"`: 3 cases green (line, transition, brush, PGM round trip through `readGrey16`). Release, MSVC.
+- `he_tests --source-file=*test_stamp_heightmap.cpp`: 8 cases (strokes, every landform deterministic per seed and in 0..1, mask
+  limits every generator and filter, naturalize, erosion keeps mass and is deterministic, filters, PGM round trip through
+  `readGrey16`, the edit request). Also green: `test_landscape_world_ui`, `test_terrain_tools_ui`, `test_inspector_ui`. Release, MSVC.
 - `editor_help_audit.py --check`: green.
-- Deployed Release editor, hidden, private APPDATA, panel open by pref, CPU-rastered UI shot (`HE_DUMP_UI`): OpenGL, Vulkan,
-  D3D11, D3D12 each show the window with a texture on the canvas (flat grey in the shot = a GPU texture, not the fallback).
+- Deployed Release editor, hidden, private APPDATA, `HE_DUMP_STAMPHEIGHTMAP=1`, 3000 frames, on OpenGL, Vulkan, D3D11, D3D12:
+  the tab opens (CPU-rastered UI shot), the log has "TerrainSystem: rebuilt 4 of 4 chunks ... field height 0 .. 64.6" and
+  "test landscape drawn by the renderer's world preview", exit code 0.
+- The generated mountain was looked at as a hillshade of the written PGM (ridges, gullies, no rim). That was before the
+  settling blur at the end of `erode` was added; the picture after it was not looked at again.
 
 **Not verified**
-- No stroke was drawn with a real mouse, and the live preview on a landscape was not watched: both need a person at the editor.
-- Metal (`MacMenuBar.mm` edit not compiled here) and the Software fallback.
-- No headless UI test of the panel (`tests/test_*_ui.cpp` style).
+- The PIXELS of the test landscape: the UI shot rasters foreign textures as flat grey, so only "a texture came back and the
+  terrain was built" is proven, not what it looks like. Nobody has looked at the tab on a real screen yet.
+- Any stroke with a real mouse, camera navigation in the test landscape, the live preview on a real landscape.
+- Metal (`MacMenuBar.mm` not compiled here); Software has no world preview and no ImGui textures (text + coarse cells instead).
 
 **Known limits (marked `shortcut:` in code)**
+- `erode` runs on the UI thread and caps at 300 000 drops: a 1024 picture blocks for a moment and is eroded more thinly.
 - A live write reloads every stamp's picture, not only the edited file's.
-- The texture of the window is not released at shutdown; undo is the window's own (button, 32 steps, no Ctrl+Z, no redo).
+- Brushes ignore the selection (generators and filters respect it). No Ctrl+Z in the tab (buttons only).
 
 **Next steps, if wanted**
-1. Noise / erosion tools, flatten brush, redo.
-2. Per-file reload in `LandscapeStampSync` instead of `reset()`.
-3. A `test_stamp_heightmap_ui.cpp` that drags on the canvas.
+1. Look at the tab on screen on each backend; tune the generator constants by eye.
+2. The asset type above, so heightmaps live in the Content Browser and ship without the bake being the only carrier.
+3. Erosion on the job pool with progress; brushes that respect the selection; a noise brush; rivers along a drawn line.

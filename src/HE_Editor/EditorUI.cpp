@@ -83,7 +83,8 @@
 #include "PlayReportPanel.h"             // post-PIE warning/error report
 #include "UndoHistoryPanel.h"            // Window > Undo History window
 #include "HcWatchPanel.h"                // Window > Watch window (a stopped HorizonCode run's values)
-#include "StampHeightmapPanel.h"         // Window > Stamp Heightmap (paints a Landscape Stamp's heightmap)
+#include "StampHeightmapPanel.h"         // Window > Stamp Heightmap (the tab that makes a Landscape Stamp's heightmap)
+#include "StampHeightmap.h"              // ... and the request the Inspector and the Landscape mode open it with
 #include "TaskBoardPanel.h"              // Window > Task Board (the project's to-do list) + its chip jumps
 #include "TeamSyncView.h"                // a conflict's Resolve opens Source Control
 #include "TaskBoardFooter.h"             // ...and its count, next task and tick-off list in the footer
@@ -274,8 +275,6 @@ static bool s_showUndoHistory = false;
 // Toggled by Window > Watch; drives the window that shows what a HorizonCode run
 // stopped at a breakpoint is holding. Also raised by a stop itself (below).
 static bool s_showWatch = false;
-// Toggled by Window > Stamp Heightmap; drives the window that paints a Landscape Stamp's heightmap.
-static bool s_showStampHeightmap = false;
 
 // Help ▸ Documentation Online. The published manual on the website; the OFFLINE
 // copy the reader panel shows ships next to the editor (EditorDeps/Docs), which
@@ -359,9 +358,7 @@ static PanelVisibilityPref s_panelPrefs[] = {
 	{ "Source Control",       "PanelOpenSourceControl", &s_showSourceControl },
 	{ "Console",              "PanelOpenConsole",       &s_showConsole       },
 	{ "Undo History",         "PanelOpenUndoHistory",   &s_showUndoHistory   },
-	{ "Watch",                "PanelOpenWatch",         &s_showWatch         },
-	{ "Stamp Heightmap",      "PanelOpenStampHeightmap", &s_showStampHeightmap },
-	// The secondary scene viewports: a Top view docked beside the Scene window
+	{ "Watch",                "PanelOpenWatch",         &s_showWatch         },	// The secondary scene viewports: a Top view docked beside the Scene window
 	// is a layout decision like any other panel's.
 	{ "Scene 2",              "PanelOpenScene2",        &SecondaryViewportPanel::open(0) },
 	{ "Scene 3",              "PanelOpenScene3",        &SecondaryViewportPanel::open(1) },
@@ -2473,6 +2470,8 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		const std::string path =
 			(ctx.activeTab >= 0 && ctx.activeTab < static_cast<int>(ctx.tabs.size()))
 				? ctx.tabs[ctx.activeTab].assetPath : std::string{};
+		// The Stamp Heightmap tab holds a picture of its own: Save writes its file, not the scene.
+		if (path == StampHeightmapPanel::kTabPath) { StampHeightmapPanel::save(ctx); return; }
 		if (path.empty()
 		    || path == LevelScriptPanel::kTabPath
 		    || path == GameInstancePanel::kTabPath
@@ -3021,9 +3020,7 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		MacMenuBar::setToggleState(MC::ToggleSourceControl, s_showSourceControl);
 		MacMenuBar::setToggleState(MC::ToggleConsole,       s_showConsole);
 		MacMenuBar::setToggleState(MC::ToggleUndoHistory,   s_showUndoHistory);
-		MacMenuBar::setToggleState(MC::ToggleWatch,         s_showWatch);
-		MacMenuBar::setToggleState(MC::ToggleStampHeightmap, s_showStampHeightmap);
-		MacMenuBar::setToggleState(MC::ToggleScene2,        SecondaryViewportPanel::open(0));
+		MacMenuBar::setToggleState(MC::ToggleWatch,         s_showWatch);		MacMenuBar::setToggleState(MC::ToggleScene2,        SecondaryViewportPanel::open(0));
 		MacMenuBar::setToggleState(MC::ToggleScene3,        SecondaryViewportPanel::open(1));
 		MacMenuBar::setToggleState(MC::ToggleScene4,        SecondaryViewportPanel::open(2));
 		MacMenuBar::setToggleState(MC::ToggleLandscapeTools, ctx.editorConfig.mode == EditorMode::Landscape);
@@ -3172,7 +3169,7 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 			case MC::ToggleConsole:   togglePanelWindow(s_showConsole, "Console");            break;
 			case MC::ToggleUndoHistory: togglePanelWindow(s_showUndoHistory, "Undo History");  break;
 			case MC::ToggleWatch:     togglePanelWindow(s_showWatch, "Watch");                break;
-			case MC::ToggleStampHeightmap: togglePanelWindow(s_showStampHeightmap, "Stamp Heightmap"); break;
+			case MC::OpenStampHeightmap: if (ctx.projectLoaded) openVirtualTab("Stamp Heightmap", StampHeightmapPanel::kTabPath); break;
 			case MC::OpenTaskBoard:   if (ctx.projectLoaded) openPlannerTasks(HE::UUID{});  break;
 			case MC::ToggleScene2:
 				if (ctx.projectLoaded) togglePanelWindow(SecondaryViewportPanel::open(0), "Scene 2"); break;
@@ -3544,8 +3541,6 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
             togglePanelWindow(s_showUndoHistory, "Undo History");
         if (EditorWidgets::menuItem("Watch", nullptr, s_showWatch))
             togglePanelWindow(s_showWatch, "Watch");
-        if (EditorWidgets::menuItem("Stamp Heightmap", nullptr, s_showStampHeightmap))
-            togglePanelWindow(s_showStampHeightmap, "Stamp Heightmap");
         if (EditorWidgets::menuItem("Task Board", nullptr, false, ctx.projectLoaded))
             openPlannerTasks(HE::UUID{});
         // The extra scene panes and the level's own graph: game things, like
@@ -3569,6 +3564,8 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
             openVirtualTab("Game Instance", GameInstancePanel::kTabPath);
         if (EditorWidgets::menuItem("Planner", nullptr, false, ctx.projectLoaded))
             openVirtualTab("Planner", PlannerPanel::kTabPath);
+        if (!appProj && EditorWidgets::menuItem("Stamp Heightmap", nullptr, false, ctx.projectLoaded))
+            openVirtualTab("Stamp Heightmap", StampHeightmapPanel::kTabPath);
         if (!appProj)
         {
             ImGui::Separator();
@@ -4325,6 +4322,8 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
             GameInstancePanel::render(ctx, tabPos, tabSize);
         else if (tabPath == PlannerPanel::kTabPath)
             PlannerPanel::render(ctx, tabPos, tabSize);
+        else if (tabPath == StampHeightmapPanel::kTabPath)
+            StampHeightmapPanel::render(ctx, tabPos, tabSize);
         else
             assetPanelFor(tabPath).render(ctx, tabPath, tabPos, tabSize);
 
@@ -4514,7 +4513,17 @@ void EditorUI::renderOverlays(AppContext& ctx, float dt)
 		s_wasHcPaused = paused;
 	}
 	HcWatchPanel::DrawWatchWindow(ctx, s_showWatch);
-	StampHeightmapPanel::DrawWindow(ctx, s_showStampHeightmap);
+	// "Edit Heightmap..." on a Landscape Stamp or the Stamp tool (and HE_DUMP_STAMPHEIGHTMAP, once, for a headless run): the tab, with that file.
+	{
+		static bool s_dumpAsked = false;
+		if (!s_dumpAsked && ctx.projectLoaded && std::getenv("HE_DUMP_STAMPHEIGHTMAP")) HE::StampHeightmap::requestEdit("");
+		s_dumpAsked = s_dumpAsked || ctx.projectLoaded;
+		if (std::string file; ctx.projectLoaded && HE::StampHeightmap::takeEditRequest(file))
+		{
+			EditorTabs::openOrFocus(ctx.tabs, ctx.activeTab, s_tabSelectRequest, StampHeightmapPanel::kTabPath, "Stamp Heightmap");
+			StampHeightmapPanel::open(ctx, file);
+		}
+	}
 	// The task board: a task is read and ticked off from wherever the work is,
 	// which is as often a graph tab as the scene. Drawn even while closed — a
 	// chip that had to open a scene selects its entity once the scene is in.

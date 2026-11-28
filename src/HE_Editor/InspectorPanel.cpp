@@ -9,6 +9,7 @@
 #include "HcEditorUtil.h"                // HorizonCode class listing (Script slot)
 #include "TerrainTools.h"                // the Terrain section's Heightmap block
 #include "LandscapeWorldTools.h"         // the Tile Landscape section
+#include "StampHeightmap.h"              // "Edit Heightmap..." on a Landscape Stamp opens the Stamp Heightmap tab
 #include "AutoLodDialog.h"               // Generate LODs on a foliage layer and a LOD component
 #include "NotificationStore.h"          // the result line of Bake Impostor
 #include "AudioMixView.h"                // the Audio Editor's bus dropdown (Audio Source, weather sounds)
@@ -3717,6 +3718,9 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			// A file keeps 16 bits (65 536 height steps); the texture asset above has 8 (256). The file wins when both are set.
 			Row::inputText("Heightmap File##lstamp", &ls->heightmapFile); trackEdit();
 			if (EditorWidgets::button("Browse Heightmap...##lstamp")) LandscapeWorldTools::browseStampFile(ctx, entity);
+			ImGui::SameLine();
+			// The Stamp Heightmap tab, with this stamp's file in it (none: a new picture, assigned from there).
+			if (EditorWidgets::button("Edit Heightmap...##lstamp")) HE::StampHeightmap::requestEdit(ls->heightmapFile);
 			static const char* const kStampChannels[] = { "Red", "Green", "Blue", "Alpha", "Luminance" };
 			ls->channel = std::clamp(ls->channel, 0, 4);
 			Row::combo("Channel##lstamp", &ls->channel, kStampChannels, 5); trackEdit();

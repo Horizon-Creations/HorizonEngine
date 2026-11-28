@@ -4,6 +4,7 @@
 #include "NotificationStore.h"
 #include <HorizonScene/Components/LandscapeWorldComponent.h>
 #include <HorizonScene/Components/LandscapeStampComponent.h>
+#include "StampHeightmap.h"   // "Edit Heightmap..." on the Stamp tool opens the Stamp Heightmap tab
 #include <HorizonScene/Components/FoliageComponent.h>
 #include <HorizonScene/FoliagePaint.h>
 #include <HorizonScene/WaterBrush.h>
@@ -572,6 +573,8 @@ void drawEditBlock(AppContext& ctx)
 		// A file keeps 16 bits (65 536 height steps); a texture asset has 8 (256). The file wins when both are set.
 		Row::inputText("Stamp Heightmap File##tlwe", &st().stampToolFile);
 		if (EditorWidgets::button("Browse Heightmap...##tlwe")) browseStampFile(ctx, entt::null);
+		ImGui::SameLine();
+		if (EditorWidgets::button("Edit Heightmap...##tlwe")) HE::StampHeightmap::requestEdit(st().stampToolFile);   // the Stamp Heightmap tab
 		static const char* const kStampChannels[] = { "Red", "Green", "Blue", "Alpha", "Luminance" };
 		Row::combo("Stamp Channel##tlwe", &e.stampChannel, kStampChannels, 5);
 		Row::dragFloat("Stamp Height##tlwe", &e.stampHeight, 1.0f, -5000.0f, 5000.0f, "%.0f m");
