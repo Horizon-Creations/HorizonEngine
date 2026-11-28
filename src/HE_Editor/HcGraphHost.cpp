@@ -14,6 +14,8 @@
 #include "EditorRewards.h"       // drag cues (EditorDragCues.h) go out through postDragCue
 #include <HorizonScene/EngineApi.h>
 #include <HorizonCode/HcClassResolve.h>   // member menus read the FLATTENED class
+#include <UIWidget/UIElement.h>           // control classes: an element's properties as members
+#include <UIWidget/UIWidgetBinding.h>     // uiPropTypeToPin
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
 #include <misc/cpp/imgui_stdlib.h>
@@ -231,6 +233,22 @@ const char* pinTypeName(PT t)
 	}
 }
 
+// "OnBeginOverlap" -> "On Begin Overlap", "fontSize" -> "Font Size": registry and
+// property names, readable on the canvas and in menus. Display only — the name
+// stays what graphs store and the runtime matches.
+static std::string spacedName(const std::string& s)
+{
+	std::string out;
+	for (size_t i = 0; i < s.size(); ++i)
+	{
+		const unsigned char c = static_cast<unsigned char>(s[i]);
+		if (i > 0 && std::isupper(c) && std::islower(static_cast<unsigned char>(s[i - 1])))
+			out += ' ';
+		out += static_cast<char>(i == 0 ? std::toupper(c) : c);
+	}
+	return out;
+}
+
 std::vector<GraphEditor::Pin> nodePins(const HC::Node& n)
 {
 	std::vector<GraphEditor::Pin> out;
@@ -239,7 +257,7 @@ std::vector<GraphEditor::Pin> nodePins(const HC::Node& n)
 	auto push = [&](const HC::PinDesc& pd, bool input, bool isExec)
 	{
 		GraphEditor::Pin p;
-		p.id = id++; p.label = pd.name ? pd.name : "";
+		p.id = id++; p.label = pd.name ? spacedName(pd.name) : "";
 		p.color = HcEditorUtil::pinTypeColor(pd.type); p.input = input; p.isExec = isExec;
 		// The canvas draws one glyph per container KIND, so hand it the resolved
 		// kind — pd.kind(), not pd.container, or the legacy "isArray without a
@@ -261,6 +279,11 @@ std::vector<GraphEditor::Pin> nodePins(const HC::Node& n)
 	for (const auto& pd : s.execOuts) push(pd, false, true);
 	for (const auto& pd : s.dataIns)  push(pd, true,  false);
 	for (const auto& pd : s.dataOuts) push(pd, false, false);
+	// A Get Variable's one output says WHICH variable, not "Value": the canvas
+	// then draws it as a Blueprint getter pill ("Score ●", its title ending in
+	// the label). Display only — the signature's pin name stays "Value".
+	if (n.type == NT::GetVariable && !n.s.empty() && !out.empty())
+		out.back().label = n.s;
 	return out;
 }
 
@@ -383,7 +406,7 @@ std::string defaultNodeTitle(const HC::Node& n)
 	const char* base = HC::nodeDisplayName(n.type);
 	switch (n.type)
 	{
-		case NT::Event:        return n.s.empty() ? std::string(base) : n.s;
+		case NT::Event:        return n.s.empty() ? std::string(base) : spacedName(n.s);
 		case NT::GetVariable:  return "Get " + (n.s.empty() ? std::string("var") : n.s);
 		case NT::SetVariable:  return "Set " + (n.s.empty() ? std::string("var") : n.s);
 		case NT::FunctionEntry:
@@ -479,6 +502,61 @@ bool loadClassGraph(ContentManager* content, const std::string& path, HC::Graph&
 		return HC::fromJson(w->graphJson, out);
 	return false;
 }
+
+namespace
+{
+// One type as the drag-off menu lists it: what a reference of that type can be
+// asked for by name. A control has properties; a class or widget asset has
+// public functions and variables (inherited ones included — the graph is the
+// flattened one loadClassGraph returns).
+struct TypeMembers
+{
+	std::string key;     // class key the created nodes record (asset path or "ui:Text")
+	std::string label;   // "Enemy (Class)", "Text (Control)"
+	std::vector<HE::UIPropDesc> props;
+	std::vector<HC::Node>       fns;
+	std::vector<HC::Variable>   vars;
+};
+
+TypeMembers controlMembers(HE::UIWidgetType t)
+{
+	TypeMembers m;
+	m.key   = HE::uiClassKey(t);
+	m.label = spacedName(HE::uiWidgetTypeName(t)) + " (Control)";
+	m.props = HE::uiClassProperties(t);
+	return m;
+}
+
+TypeMembers classMembers(const HC::Graph& g, const std::string& key, const std::string& label)
+{
+	TypeMembers m;
+	m.key = key; m.label = label;
+	for (const auto& n : g.nodes)
+		if (n.type == NT::FunctionEntry && n.access == 0 && !n.s.empty()) m.fns.push_back(n);
+	for (const auto& v : g.variables)
+		if (v.access == 0 && v.scope == 0) m.vars.push_back(v);   // locals are never members
+	return m;
+}
+
+// Every type a reference can be: the project's classes and widgets, then the
+// engine's controls. Loads every class asset — call it once per menu opening.
+std::vector<TypeMembers> allTypeMembers(ContentManager* content)
+{
+	std::vector<TypeMembers> out;
+	const struct { HE::AssetType type; const char* suffix; } kinds[] = {
+		{ HE::AssetType::HorizonCodeClass, " (Class)" }, { HE::AssetType::Widget, " (Widget)" } };
+	for (const auto& k : kinds)
+		for (const HcEditorUtil::ClassRef& c : HcEditorUtil::listAssets(content, k.type))
+		{
+			HC::Graph g;
+			if (!loadClassGraph(content, c.path, g)) continue;
+			TypeMembers m = classMembers(g, c.path, c.label + k.suffix);
+			if (!m.fns.empty() || !m.vars.empty()) out.push_back(std::move(m));
+		}
+	for (HE::UIWidgetType t : HE::uiWidgetTypeRegistry()) out.push_back(controlMembers(t));
+	return out;
+}
+} // namespace
 
 bool syncCreateWidgetPins(ContentManager* content, HC::Graph& g, bool force)
 {
@@ -668,6 +746,27 @@ GraphEditor::Model buildModel(const Host& h)
 	GraphEditor::Model m;
 	m.multiSelect = true;      // shift-click / box-select; drag + Delete act on all
 	m.compactPureNodes = true; // getters/literals draw as compact chips
+	// Math and logic draw as Blueprint operator chips: the symbol, no title, no
+	// A/B labels. The name stays in the hover tooltip and the node reference.
+	// × and ÷ are Latin-1, which every editor font range carries.
+	m.compactTitle = [&graph](int id) -> std::string {
+		const HC::Node* n = graph.findNode(id);
+		if (!n) return {};
+		switch (n->type)
+		{
+			case NT::Add:      return "+";
+			case NT::Subtract: return "-";
+			case NT::Multiply: return "\xC3\x97";   // ×
+			case NT::Divide:   return "\xC3\xB7";   // ÷
+			case NT::Greater:  return ">";
+			case NT::Less:     return "<";
+			case NT::Equals:   return "==";
+			case NT::And:      return "AND";
+			case NT::Or:       return "OR";
+			case NT::Not:      return "NOT";
+			default:           return {};
+		}
+	};
 	// The last compile check's error node gets a red halo; a node the
 	// interpreter just ran an amber one that fades over HcExecTrace::kFadeSeconds.
 	// The error wins where both apply — a broken node running is still broken.
@@ -1412,51 +1511,106 @@ int drawPinDragMenu(const Host& h, int srcNode, int srcPin, bool srcInput, const
 			HC::Node* nn = graph.findNode(newId);
 			if (nn) graph.connect(srcNode, srcPin, newId, pinRanges(*nn).dataIn0); // → Target
 		};
-		HC::Graph scratch;
-		const HC::Graph* cls = resolveClassGraph(refSrc, graph, h.giGraph, h.content, scratch);
 		// The key behind that graph, recorded on whatever this menu creates: the
 		// menu already knows which class it is offering members of, and writing it
 		// down here is what lets a rename find these nodes later without re-walking
 		// a wire that may since have been re-routed.
 		const std::string clsKey = HcRename::classOfRefSource(graph, refSrc, h.selfKey, "Game Instance");
-		if (cls)
+		// A control class ("ui:Text" — a Get Element, or a variable of that
+		// class): its PROPERTIES are the members, read and written through the
+		// same Get/Set (Ref) nodes a class's public variables use.
+		HE::UIWidgetType uiType{};
+		const bool uiClass = HE::uiClassFromKey(clsKey, uiType);
+		HC::Graph scratch;
+		const HC::Graph* cls = uiClass ? nullptr
+			: resolveClassGraph(refSrc, graph, h.giGraph, h.content, scratch);
+
+		// One type's members, by name: a control's properties, a class's public
+		// functions and variables. Each pick is the Get/Set/Call (Ref) node
+		// already bound to that member and that class, and wired to this Ref.
+		// `idTag` keeps the ImGui ids of two types' "Get Health" apart.
+		const auto offerMembers = [&](const TypeMembers& t, const std::string& idTag) -> bool
 		{
-			// SNAPSHOT the offered signatures first: with a "Get Self" source,
-			// `cls` ALIASES `graph`, and a pick addNode()s into that very
-			// nodes-vector — iterating it live would leave the loop iterator
-			// AND `fn` (read after the add) dangling on reallocation.
-			std::vector<HC::Node> fns;
-			for (const auto& fn : cls->nodes)
-				if (fn.type == NT::FunctionEntry && fn.access == 0 && !fn.s.empty())
-					fns.push_back(fn);
-			bool fh = false;
-			for (const auto& fn : fns)
-				if (matches("Call " + fn.s))
+			bool any = false;
+			for (const HE::UIPropDesc& pd : t.props)
+				for (const bool get : { true, false })
 				{
-					if (!fh) { ImGui::TextDisabled("Functions"); fh = true; }
-					if (HcEditorUtil::searchMenuItem("Call " + fn.s))
-					{
-						const int id = addNode(graph, NT::CallExternal, pos, h.currentGraph);
-						HC::Node* nn = graph.findNode(id);
-						nn->s = fn.s; nn->params = fn.params; nn->results = fn.results; // typed signature
-						nn->className = clsKey;   // whose function this is, while the menu still knows
-						wire(id); created = id; ImGui::CloseCurrentPopup();
-					}
+					const std::string lbl = (get ? "Get " : "Set ") + spacedName(pd.name);
+					if (!matches(lbl)) continue;
+					any = true;
+					if (!HcEditorUtil::searchMenuItem(lbl + idTag)) continue;
+					const int id = addNode(graph, get ? NT::GetExternal : NT::SetExternal, pos, h.currentGraph);
+					HC::Node* nn = graph.findNode(id);
+					nn->s = pd.name;
+					nn->propType = HE::uiPropTypeToPin(pd.type);
+					nn->className = t.key;
+					wire(id); created = id; ImGui::CloseCurrentPopup();
 				}
-			bool vh = false;
-			for (const auto& var : cls->variables)
-				if (var.access == 0)
+			for (const HC::Node& fn : t.fns)
+			{
+				const std::string lbl = "Call " + fn.s;
+				if (!matches(lbl)) continue;
+				any = true;
+				if (!HcEditorUtil::searchMenuItem(lbl + idTag)) continue;
+				const int id = addNode(graph, NT::CallExternal, pos, h.currentGraph);
+				HC::Node* nn = graph.findNode(id);
+				nn->s = fn.s; nn->params = fn.params; nn->results = fn.results; // typed signature
+				nn->className = t.key;   // whose function this is, while the menu still knows
+				wire(id); created = id; ImGui::CloseCurrentPopup();
+			}
+			for (const HC::Variable& var : t.vars)
+				for (const bool get : { true, false })
 				{
-					if (!vh && (matches("Get " + var.name) || matches("Set " + var.name)))
-					{ ImGui::TextDisabled("Variables"); vh = true; }
-					if (matches("Get " + var.name) && HcEditorUtil::searchMenuItem("Get " + var.name))
-					{ const int id = addNode(graph, NT::GetExternal, pos, h.currentGraph); HC::Node* nn = graph.findNode(id); nn->s = var.name; nn->propType = var.type; nn->className = clsKey; wire(id); created = id; ImGui::CloseCurrentPopup(); }
-					if (matches("Set " + var.name) && HcEditorUtil::searchMenuItem("Set " + var.name))
-					{ const int id = addNode(graph, NT::SetExternal, pos, h.currentGraph); HC::Node* nn = graph.findNode(id); nn->s = var.name; nn->propType = var.type; nn->className = clsKey; wire(id); created = id; ImGui::CloseCurrentPopup(); }
+					const std::string lbl = (get ? "Get " : "Set ") + var.name;
+					if (!matches(lbl)) continue;
+					any = true;
+					if (!HcEditorUtil::searchMenuItem(lbl + idTag)) continue;
+					const int id = addNode(graph, get ? NT::GetExternal : NT::SetExternal, pos, h.currentGraph);
+					HC::Node* nn = graph.findNode(id);
+					nn->s = var.name; nn->propType = var.type; nn->typeName = var.typeName;
+					nn->className = t.key;
+					wire(id); created = id; ImGui::CloseCurrentPopup();
 				}
-			if (fh || vh) ImGui::Separator();
+			return any;
+		};
+
+		if (uiClass || cls)
+		{
+			// SNAPSHOT the members first: with a "Get Self" source `cls` ALIASES
+			// `graph`, and a pick addNode()s into that very nodes-vector.
+			const TypeMembers t = uiClass ? controlMembers(uiType) : classMembers(*cls, clsKey, "");
+			ImGui::TextDisabled("%s", uiClass ? HE::uiWidgetTypeName(uiType)
+			                                  : std::filesystem::path(clsKey).stem().string().c_str());
+			if (!offerMembers(t, "")) ImGui::TextDisabled("(no public members)");
+			ImGui::Separator();
 		}
-		else ImGui::TextDisabled("(untyped object)");
+		else
+		{
+			// No type known: every type the project and the engine have, each
+			// with its members by name — the reflection a typed reference gets,
+			// for all of them at once. Folded per type; a search opens them.
+			// Read once per menu opening: loading every class asset is not a
+			// per-frame cost (EDT-902).
+			static std::vector<TypeMembers> s_all;
+			if (ImGui::IsWindowAppearing() || s_all.empty()) s_all = allTypeMembers(h.content);
+			ImGui::TextDisabled("All types (this object's type is not known)");
+			for (const TypeMembers& t : s_all)
+			{
+				// Draw nothing for a type the search filters out completely.
+				bool hit = false;
+				for (const auto& pd : t.props) hit = hit || matches("Get " + pd.name) || matches("Set " + pd.name);
+				for (const auto& fn : t.fns)   hit = hit || matches("Call " + fn.s);
+				for (const auto& v : t.vars)   hit = hit || matches("Get " + v.name) || matches("Set " + v.name);
+				if (!hit) continue;
+				if (!q.empty()) ImGui::SetNextItemOpen(true);
+				if (ImGui::TreeNode((t.label + "##ty" + t.key).c_str()))
+				{
+					offerMembers(t, "##" + t.key);
+					ImGui::TreePop();
+				}
+			}
+			ImGui::Separator();
+		}
 
 		// What the reference INHERITS: the members its engine base class brings
 		// with it. They are HE::api registry rows, not nodes in any graph, so
@@ -1489,15 +1643,16 @@ int drawPinDragMenu(const Host& h, int srcNode, int srcPin, bool srcInput, const
 			if (eh) ImGui::Separator();
 		}
 
+		// The member nodes are offered BY NAME above; their unbound forms ("Get
+		// (Ref)" with a name still to type) are not offered at all, and the
+		// generic walk below must not bring them back.
+		refOffered.insert(refOffered.end(), { NT::CallExternal, NT::GetExternal, NT::SetExternal });
 		ImGui::TextDisabled("Reference");
 		auto refItem = [&](const char* lbl, NT t){
 			refOffered.push_back(t);   // the generic walk below must skip these
 			if (matches(lbl) && HcEditorUtil::searchMenuItem(lbl))
 			{ const int id = addNode(graph, t, pos, h.currentGraph); wire(id); created = id; ImGui::CloseCurrentPopup(); } };
-		refItem("Call Function (Ref)", NT::CallExternal);
 		refItem("Bind Event",          NT::BindEvent);
-		refItem("Get (Ref)",           NT::GetExternal);
-		refItem("Set (Ref)",           NT::SetExternal);
 		refItem("Destroy Object",      NT::DestroyObject);
 		ImGui::Separator();
 	}
@@ -1589,6 +1744,34 @@ int drawPinDragMenu(const Host& h, int srcNode, int srcPin, bool srcInput, const
 		if (gh) ImGui::Spacing();
 	}
 
+	// ── The host's own ready-made nodes (a widget's element references) ────
+	if (h.dragOffers)
+	{
+		bool ph = false;
+		const std::vector<Host::DragOffer> offers = h.dragOffers();
+		for (size_t oi = 0; oi < offers.size(); ++oi)
+		{
+			const Host::DragOffer& o = offers[oi];
+			if (!matches(o.label)) continue;
+			if (HcEditorUtil::dragMatchPinOn(o.proto, dragType, dragCtr, srcInput, isExecPin) < 0)
+				continue;
+			if (!ph) { ImGui::TextDisabled("Elements"); ph = true; }
+			// Two unnamed elements of one type read the same; the index keeps
+			// their ImGui ids apart.
+			if (!HcEditorUtil::searchMenuItem(o.label + "##offer" + std::to_string(oi))) continue;
+			HC::Node n = o.proto;
+			n.id = 0;
+			n.x = pos.x; n.y = pos.y;
+			n.subgraph = h.currentGraph;
+			const int id = graph.addNode(std::move(n));
+			const int pin = HcEditorUtil::dragMatchPinOn(*graph.findNode(id), dragType, dragCtr,
+			                                             srcInput, isExecPin);
+			if (pin >= 0) wireAt(id, pin);
+			created = id; ImGui::CloseCurrentPopup();
+		}
+		if (ph) ImGui::Spacing();
+	}
+
 	// ── Engine API calls with a compatible pin ─────────────────────────────
 	{
 		bool eh = false;
@@ -1625,7 +1808,10 @@ int drawPinDragMenu(const Host& h, int srcNode, int srcPin, bool srcInput, const
 			const HC::Variable& v = *vp;
 			if (v.scope != 0 && v.scope != h.currentGraph) continue;
 			const bool sameShape = v.type == dragType && v.kind() == dragCtr;
-			const bool setOk = (isExecPin && !srcInput) || (!isExecPin && !srcInput && sameShape);
+			// Set has an exec pin each way and passes its value through as an
+			// output, so it fits any exec drag and a same-shape drag from either
+			// side; Get only feeds an input.
+			const bool setOk = isExecPin || sameShape;
 			const bool getOk = !isExecPin && srcInput && sameShape;
 			auto add = [&](bool get){
 				const int id = addNode(graph, get ? NT::GetVariable : NT::SetVariable, pos, h.currentGraph);
@@ -1637,7 +1823,9 @@ int drawPinDragMenu(const Host& h, int srcNode, int srcPin, bool srcInput, const
 				nn->keyTypeName = v.keyTypeName;
 				nn->typeName = v.typeName;   // Enum/Struct: WHICH definition (like the add menu)
 				const PinRanges r = pinRanges(*nn);
-				wireAt(id, get ? r.dataOut0 : (isExecPin ? r.execIn0 : r.dataIn0));
+				wireAt(id, get       ? r.dataOut0
+				         : isExecPin ? (srcInput ? r.execOut0 : r.execIn0)
+				                     : (srcInput ? r.dataOut0 : r.dataIn0));
 				created = id; ImGui::CloseCurrentPopup(); };
 			if (setOk && matches("Set " + v.name))
 			{
@@ -1653,21 +1841,27 @@ int drawPinDragMenu(const Host& h, int srcNode, int srcPin, bool srcInput, const
 		if (vh) ImGui::Spacing();
 	}
 
-	// ── Declared functions (exec drags call them) ──────────────────────────
-	if (isExecPin)
+	// ── Declared functions: exec drags call them, and so does a data wire of a
+	//    type one of their inputs (dragging an output) or outputs (dragging an
+	//    input) takes. Exec-only used to hide every function from a data drag.
 	{
 		bool fh = false;
 		for (const HC::Node& e : offerableFunctions(graph))
 		{
 			if (!matches("Call " + e.s)) continue;
+			HC::Node probe;
+			probe.type = NT::FunctionCall;
+			probe.s = e.s; probe.params = e.params; probe.results = e.results;
+			if (HcEditorUtil::dragMatchPinOn(probe, dragType, dragCtr, srcInput, isExecPin) < 0)
+				continue;
 			if (!fh) { ImGui::TextDisabled("Functions"); fh = true; }
 			if (HcEditorUtil::searchMenuItem("Call " + e.s))
 			{
 				const int id = addNode(graph, NT::FunctionCall, pos, h.currentGraph);
 				bindCallTo(graph, id, e);
-				HC::Node* nn = graph.findNode(id);
-				const PinRanges r = pinRanges(*nn);
-				wireAt(id, srcInput ? r.execOut0 : r.execIn0);
+				const int pin = HcEditorUtil::dragMatchPinOn(*graph.findNode(id), dragType, dragCtr,
+				                                             srcInput, isExecPin);
+				if (pin >= 0) wireAt(id, pin);
 				created = id; ImGui::CloseCurrentPopup();
 			}
 		}

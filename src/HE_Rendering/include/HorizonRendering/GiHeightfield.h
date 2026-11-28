@@ -1,6 +1,8 @@
 #pragma once
 #include "RenderWorld.h"
+#include <glm/glm.hpp>
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <vector>
 

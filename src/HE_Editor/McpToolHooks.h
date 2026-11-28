@@ -352,7 +352,7 @@ void registerSceneTools(McpToolRegistry& registry, ContentManager& content,
 // A TerrainComponent's payload is two blobs: `sculptHeightsB64` (res² floats,
 // 263k of them at the resolution the chunk builder snaps to) and
 // `layerWeightsB64` (weightRes² RGBA texels, layers 0..3; layers 4..7 ride in
-// `layerWeights2B64` once painted). The generic component tools hand
+// `layerWeights2B64` once painted, layers 8..11 in `layerWeights3B64`). The generic component tools hand
 // those to a client as base64 and take them back the same way, which is not an
 // interface — it is the absence of one. A client cannot read a height out of it,
 // cannot change one without re-encoding the whole field, and has no way at all
@@ -649,12 +649,12 @@ struct McpMaterialHooks
 	// second "is it open" question. Absent = no tabs.
 	std::function<bool(const std::string& contentRel)> reloadFromDisk;
 
-	// Does THIS project author materials at all? The Content Browser's create menu
-	// and its "Create Material Instance" row are both gated on the project's
-	// Advanced Shader Effects setting, and the same rule as everywhere else
-	// applies: MCP must not create what the menu will not offer. Absent = yes,
-	// which is what a test wants.
-	std::function<bool()> materialsAllowed;
+	// Does THIS project's material editor offer only the nodes the CPU can run
+	// (HE::matCpuSupports)? True with Advanced Shader Effects off: such a project
+	// ships on the software renderer, which runs a material's graph itself. The
+	// same rule as everywhere else applies: MCP must not insert what the add
+	// menu will not offer. Absent = no restriction, which is what a test wants.
+	std::function<bool()> cpuNodesOnly;
 
 	// A file that was not there before — the same pair the asset and scene tools
 	// carry, for the same two reasons: a create IS published (nothing refers to a

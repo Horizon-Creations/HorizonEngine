@@ -1,5 +1,7 @@
 #include "HorizonScene/SceneSerializer.h"
 #include "HorizonScene/HorizonWorld.h"
+#include "HorizonScene/CookAnalysis.h"
+#include "HorizonScene/CookedStatic.h"
 #include "HorizonScene/Components/NameComponent.h"
 #include "HorizonScene/Components/HierarchyComponent.h"
 #include "HorizonScene/Components/TransformComponent.h"
@@ -20,10 +22,13 @@
 #include "HorizonScene/Components/JointComponent.h"
 #include "HorizonScene/Components/CharacterControllerComponent.h"
 #include "HorizonScene/Components/ScriptComponent.h"
+#include "HorizonScene/Components/LandscapeWorldComponent.h"
+#include "HorizonScene/Components/LandscapeStampComponent.h"
 #include "HorizonScene/Components/SaveStateComponent.h"
 #include "HorizonScene/Components/StreamingComponent.h"
 #include "HorizonScene/Components/EditorLockComponent.h"   // the Outliner's lock, an entity-level field
 #include "HorizonScene/Components/InactiveComponent.h"     // the "Active" switch, a component like any other
+#include "HorizonScene/Components/MobilityComponent.h"    // the author's Static/Movable choice (entity cooking)
 #include "HorizonScene/Components/PrefabInstanceComponent.h"
 #include "HorizonScene/Components/EnvironmentComponent.h"
 #include "HorizonScene/Components/EnvironmentLightComponent.h"
@@ -199,6 +204,12 @@ namespace
 		if (l.heightMin != def.heightMin)           j["heightMin"]      = l.heightMin;
 		if (l.heightMax != def.heightMax)           j["heightMax"]      = l.heightMax;
 		if (l.weightLayer != def.weightLayer)       j["weightLayer"]    = l.weightLayer;
+		// Apply-tag (Thema 327): absent for a hand-added layer, exactly like today.
+		if (l.sourceAssetId != def.sourceAssetId)
+		{
+			j["sourceAsset"] = uuidToJson(l.sourceAssetId);
+			j["sourceEntry"] = l.sourceEntry;
+		}
 		// Farther detail levels; a layer without any writes no key at all.
 		if (!l.lods.empty())
 		{
@@ -242,6 +253,11 @@ namespace
 		// Out of range = no paint rule (a hand-edited file, or a peer with more layers).
 		l.weightLayer     = c.value("weightLayer", l.weightLayer);
 		if (l.weightLayer < 0 || l.weightLayer >= kTerrainMaxLayers) l.weightLayer = -1;
+		if (c.contains("sourceAsset"))
+		{
+			l.sourceAssetId = jsonToUuid(c["sourceAsset"]);
+			l.sourceEntry   = c.value("sourceEntry", l.sourceEntry);
+		}
 		if (c.contains("lods") && c["lods"].is_array())
 		{
 			for (const json& d : c["lods"])
@@ -352,8 +368,16 @@ namespace
 		if (auto* m = registry.try_get<MeshComponent>(entity);
 		    m != nullptr && !registry.all_of<TerrainComponent>(entity))
 		{
+			// The mesh the entity HAS, not the level LODSystem swapped in this frame:
+			// when the id is one of the entity's levels, LOD0 is levels[0] (navigation
+			// and physics read it there too).
+			HE::UUID asset = m->meshAssetId;
+			if (const auto* lod = registry.try_get<LODComponent>(entity); lod && !lod->levels.empty()
+			    && !(lod->levels[0].meshId == HE::UUID{}))
+				for (size_t i = 1; i < lod->levels.size(); ++i)
+					if (lod->levels[i].meshId == asset) { asset = lod->levels[0].meshId; break; }
 			comps["mesh"] = {
-				{ "asset",          uuidToJson(m->meshAssetId) },
+				{ "asset",          uuidToJson(asset) },
 				{ "lodBias",        m->lodBias },
 				{ "visible",        m->visible },
 				{ "castsShadow",    m->castsShadow },
@@ -614,6 +638,34 @@ namespace
 				{ "saveScriptVars", ss->saveScriptVars },
 			};
 		}
+		// The world-scale tile landscape (Thema 326): a pack and how far to stream it.
+		if (auto* lw = registry.try_get<LandscapeWorldComponent>(entity))
+		{
+			comps["landscapeWorld"] = {
+				{ "enabled",      lw->enabled },
+				{ "pack",         lw->pack },
+				{ "streaming",    lw->streaming },
+				{ "loadRadius",   lw->loadRadius },
+				{ "budgetMB",     lw->budgetMB },
+				{ "heightMinM",   lw->heightMinM },
+				{ "heightScaleM", lw->heightScaleM },
+				{ "textureGroup", lw->textureGroup },
+				{ "textureMeters", lw->textureMeters },
+			};
+		}
+		// A heightmap stamped onto the tile landscape (LandscapeStamps.h); its place is the entity's transform.
+		if (auto* ls = registry.try_get<LandscapeStampComponent>(entity))
+		{
+			comps["landscapeStamp"] = {
+				{ "enabled", ls->enabled },
+				{ "texture", uuidToJson(ls->textureId) },
+				{ "heightmapFile", ls->heightmapFile },
+				{ "channel", ls->channel },
+				{ "sizeM",   ls->sizeM },
+				{ "heightM", ls->heightM },
+				{ "falloff", ls->falloff },
+			};
+		}
 		// Where the entity lives in a split scene (the splitter reads it, CellSplit.cpp).
 		if (auto* st = registry.try_get<StreamingComponent>(entity))
 			comps["streaming"] = { { "mode", static_cast<int>(st->mode) } };
@@ -738,9 +790,23 @@ namespace
 				// its weightRes² × 4 meaning and older builds still read the
 				// first four layers of a scene written by this one.
 				if (t->layerWeights2.size() == t->layerWeights.size())
+				{
 					tc["layerWeights2B64"] = base64Encode(t->layerWeights2.data(),
 					                                      t->layerWeights2.size());
+					// Layers 8..11 the same way, only beside a second page and only
+					// once there is one: a scene with no third page is written exactly
+					// as before there were twelve layers, and an older build reads
+					// the first eight layers of one that has it.
+					if (t->layerWeights3.size() == t->layerWeights.size())
+						tc["layerWeights3B64"] = base64Encode(t->layerWeights3.data(),
+						                                      t->layerWeights3.size());
+				}
 			}
+			// Mixed texture groups (Thema 233): layers 8..11 are the four groups' shares.
+			// Written only when on, so a one-group terrain (every scene before this field)
+			// saves byte for byte as before. The first build kept two shares in layers 6/7
+			// under "mixGroups"; that was never rendered and is not read any more.
+			if (t->groupMix) { tc["groupMix"] = true; tc["baseGroup"] = t->baseGroup; }
 			if (!t->sculptHeights.empty())
 			{
 				// As a base64 blob, NOT a JSON array of N floats — the array form
@@ -1094,7 +1160,9 @@ namespace
 				{ "params",            std::move(params) },
 			};
 		}
-		if (auto* lod = registry.try_get<LODComponent>(entity))
+		// Levels mirrored from the mesh asset's own (LODSystem::bindAssetLevels) are not
+		// the scene's: they come back from the asset on load, and follow it when it changes.
+		if (auto* lod = registry.try_get<LODComponent>(entity); lod && !lod->fromAsset)
 		{
 			json levels = json::array();
 			for (const auto& lvl : lod->levels)
@@ -1147,6 +1215,10 @@ namespace
 				{ "fontSize", t2->fontSize },
 				{ "color",    vec4ToJson(t2->color) },
 			};
+			// Same key as UIElement in UIWidgetTree.cpp. Empty = default UI font,
+			// so older readers and scenes without the key stay identical. The baked
+			// fontAtlasKey is transient and re-resolved at extract.
+			if (!t2->font.empty()) comps["uitext"]["font"] = t2->font;
 		}
 		if (auto* img = registry.try_get<UIImageComponent>(entity))
 		{
@@ -1171,6 +1243,10 @@ namespace
 		// when set; see InactiveComponent.h.
 		if (registry.all_of<InactiveComponent>(entity))
 			comps["inactive"] = json::object();
+		// Static/Movable, only when the author decided; no component means "derived
+		// by CookAnalysis", which is what every older scene loads as.
+		if (const auto* mob = registry.try_get<MobilityComponent>(entity))
+			comps["mobility"] = mob->mode == MobilityComponent::Mode::Static ? "static" : "movable";
 		return comps;
 	}
 
@@ -1597,6 +1673,34 @@ namespace
 			ss.saveScriptVars = c.value("saveScriptVars", ss.saveScriptVars);
 			registry.emplace_or_replace<SaveStateComponent>(entity, ss);
 		}
+		if (comps.contains("landscapeWorld"))
+		{
+			const json& c = comps["landscapeWorld"];
+			LandscapeWorldComponent lw;
+			lw.enabled      = c.value("enabled",      lw.enabled);
+			lw.pack         = c.value("pack",         lw.pack);
+			lw.streaming    = c.value("streaming",    lw.streaming);   // absent in a scene from before the switch: streamed, as it was
+			lw.loadRadius   = c.value("loadRadius",   lw.loadRadius);
+			lw.budgetMB     = c.value("budgetMB",     lw.budgetMB);
+			lw.heightMinM   = c.value("heightMinM",   lw.heightMinM);
+			lw.heightScaleM = c.value("heightScaleM", lw.heightScaleM);
+			lw.textureGroup = c.value("textureGroup", lw.textureGroup);
+			lw.textureMeters = c.value("textureMeters", lw.textureMeters);
+			registry.emplace_or_replace<LandscapeWorldComponent>(entity, lw);
+		}
+		if (comps.contains("landscapeStamp"))
+		{
+			const json& c = comps["landscapeStamp"];
+			LandscapeStampComponent ls;
+			ls.enabled   = c.value("enabled", ls.enabled);
+			ls.textureId = jsonToUuid(c.value("texture", json()));
+			ls.heightmapFile = c.value("heightmapFile", ls.heightmapFile);   // absent in a scene from before the file field
+			ls.channel   = c.value("channel", ls.channel);   // absent: red, what a stamp read before the choice existed
+			ls.sizeM     = c.value("sizeM",   ls.sizeM);
+			ls.heightM   = c.value("heightM", ls.heightM);
+			ls.falloff   = c.value("falloff", ls.falloff);
+			registry.emplace_or_replace<LandscapeStampComponent>(entity, ls);
+		}
 		if (comps.contains("streaming"))
 		{
 			const json& c = comps["streaming"];
@@ -1756,6 +1860,23 @@ namespace
 				if (t.layerWeights2.size() != t.layerWeights.size())
 					t.layerWeights2.clear();
 			}
+			// Absent in every scene written before there were twelve layers → empty =
+			// layers 8..11 all zero. Needs a second page beside it (the writer only
+			// emits it then); a mismatched blob is dropped like the others.
+			if (!t.layerWeights2.empty() && c.contains("layerWeights3B64")
+			    && c["layerWeights3B64"].is_string())
+			{
+				t.layerWeights3 = base64Decode(c["layerWeights3B64"].get<std::string>());
+				if (t.layerWeights3.size() != t.layerWeights.size())
+					t.layerWeights3.clear();
+			}
+			// Mixed texture groups. Absent in every scene written before this field, and in
+			// every one-group terrain written by this build → both slots stay -1, which is
+			// the legacy, single-group look. Out-of-range or duplicate entries are dropped
+			// rather than carried, same as a truncated weightmap above.
+			t.groupMix = c.value("groupMix", false)
+			             && !t.layerWeights.empty() && t.layerWeights3.size() == t.layerWeights.size();
+			t.baseGroup = t.groupMix ? std::clamp(c.value("baseGroup", 0), 0, 3) : -1;
 			if (c.contains("sculptHeightsB64") && c["sculptHeightsB64"].is_string())
 			{
 				const std::vector<uint8_t> bytes =
@@ -2374,6 +2495,7 @@ namespace
 			t2.text     = c.value("text",     t2.text);
 			t2.fontSize = c.value("fontSize", t2.fontSize);
 			t2.color    = jsonToVec4(c.value("color", json()), t2.color);
+			t2.font     = c.value("font",     std::string());
 			registry.emplace_or_replace<UITextComponent>(entity, std::move(t2));
 		}
 		if (comps.contains("uiimage"))
@@ -2396,6 +2518,13 @@ namespace
 		}
 		if (comps.contains("inactive"))
 			registry.emplace_or_replace<InactiveComponent>(entity);
+		if (comps.contains("mobility"))
+		{
+			MobilityComponent mob;
+			if (comps["mobility"].is_string() && comps["mobility"].get<std::string>() == "static")
+				mob.mode = MobilityComponent::Mode::Static;
+			registry.emplace_or_replace<MobilityComponent>(entity, mob);
+		}
 	}
 #undef HE_NAVCFG_FIELDS
 
@@ -2482,6 +2611,71 @@ namespace
 	}
 
 	// ── JSON → Scene ─────────────────────────────────────────────────────────
+	// ── The packed cook verdict (project setting "Cook static entities") ─────────
+	// An OPTIONAL top-level key, the way levelScript and cells are: a reader that does not know it
+	// walks past it, and a scene without it is analysed at its first extract as ever, so no format
+	// version moves. What it holds is the VERDICT only: the entities analyzeCookability() cleared,
+	// as the 16 bytes of their UUIDs, base64 in one string (the entity ids are what the file keys
+	// everything by; entt handles are not stable across a load). Not a matrix, not a bound: the
+	// first walk after the load produces those, from a mesh that is resident by then.
+	constexpr const char* kCookedStaticKey = "cookedStatic";
+	static_assert(sizeof(HE::UUID) == 2 * sizeof(uint64_t), "the packed verdict is the UUIDs' raw bytes");
+
+	// `outSummary`, when given, gets the same population `ids` is drawn from, broken down
+	// by blocker reason (HE::summarizeCookability) — the export log's per-scene line
+	// (ExportDialogPanel.cpp). Built from this one analyzeCookability() pass, not a second walk.
+	void addCookedSeed(HorizonWorld& world, json& scene, HE::CookSummary* outSummary = nullptr)
+	{
+		auto& registry = world.registry();
+		const std::vector<HE::CookEntry> entries = HE::analyzeCookability(registry);
+		std::vector<HE::UUID> ids;
+		std::vector<HE::CookEntry> candidates;
+		if (outSummary) candidates.reserve(entries.size());
+		for (const HE::CookEntry& ce : entries)
+		{
+			// What buildSceneJson wrote is all the load can find again.
+			if (!registry.all_of<MeshComponent, NameComponent>(ce.entity) || isEngineGenerated(registry, ce.entity))
+				continue;
+			if (outSummary) candidates.push_back(ce);
+			if (ce.verdict.cookable())
+				ids.push_back(entityUuid(registry, ce.entity));
+		}
+		scene[kCookedStaticKey] = {
+			{ "version",  1 },
+			{ "cookable", base64Encode(reinterpret_cast<const uint8_t*>(ids.data()), ids.size() * sizeof(HE::UUID)) } };
+		if (outSummary) *outSummary = HE::summarizeCookability(candidates, registry);
+	}
+
+	// Hands the block the verdict the scene carried. One UUID that does not name an entity of this load,
+	// or one without a transform and a mesh, and the whole verdict is dropped: the scene was edited
+	// by something that did not know it, and the analysis at the first extract is the safe answer.
+	void applyCookedSeed(HorizonWorld& world, const json& packed,
+	                     const std::unordered_map<HE::UUID, Entity>& idMap)
+	{
+		if (!packed.is_object() || packed.value("version", 0) != 1) return;
+		const auto it = packed.find("cookable");
+		if (it == packed.end() || !it->is_string()) return;
+		const std::vector<uint8_t> bytes = base64Decode(it->get_ref<const std::string&>());
+		if (bytes.empty() || bytes.size() % sizeof(HE::UUID) != 0) return;
+
+		auto& registry = world.registry();
+		std::vector<Entity> cookable;
+		cookable.reserve(bytes.size() / sizeof(HE::UUID));
+		for (size_t off = 0; off < bytes.size(); off += sizeof(HE::UUID))
+		{
+			HE::UUID id;
+			std::memcpy(&id, bytes.data() + off, sizeof(HE::UUID));
+			const auto found = idMap.find(id);
+			if (found == idMap.end() || !registry.all_of<TransformComponent, MeshComponent>(found->second))
+			{
+				HE_LOG_WARN(Serialize, "Scene load: the packed cook verdict does not match the scene; it is ignored");
+				return;
+			}
+			cookable.push_back(found->second);
+		}
+		HE::seedCookedStatic(registry, std::move(cookable), world.structureEpoch());
+	}
+
 	bool applySceneJson(HorizonWorld& world, const json& scene)
 	{
 		// Level script (scene-wide HorizonCode graph). Load it before the early
@@ -2568,6 +2762,10 @@ namespace
 		// the ordinary "Sun"/"Moon" copies such a scene file carries.
 		world.ensureEnvironmentLights();
 		world.markHierarchyDirty();
+		// Last, so the epoch it is valid for is the one the world is left at, and the block's
+		// listeners only hear what happens after the load.
+		if (const auto packed = scene.find(kCookedStaticKey); packed != scene.end())
+			applyCookedSeed(world, *packed, idMap);
 		return true;
 	}
 
@@ -2967,6 +3165,8 @@ namespace
 	X("joint",               JointComponent) \
 	X("characterController", CharacterControllerComponent) \
 	X("saveState",           SaveStateComponent) 	X("streaming",           StreamingComponent) \
+	X("landscapeWorld",      LandscapeWorldComponent) \
+	X("landscapeStamp",      LandscapeStampComponent) \
 	X("prefab",              PrefabInstanceComponent) \
 	X("script",              ScriptComponent) \
 	X("environment",         EnvironmentComponent) \
@@ -2993,7 +3193,8 @@ namespace
 	X("uitext",              UITextComponent) \
 	X("uiimage",             UIImageComponent) \
 	X("uibutton",            UIButtonComponent) \
-	X("inactive",            InactiveComponent)
+	X("inactive",            InactiveComponent) \
+	X("mobility",            MobilityComponent)
 
 	bool removeComponentForKey(entt::registry& registry, Entity entity, const std::string& key)
 	{
@@ -3235,6 +3436,8 @@ bool SceneSerializer::isKnownComponentKey(const std::string& key)
 		"network",
 		"decal", "environment", "foliage", "joint", "light", "lod", "material", "mesh",
 		"navagent", "navmesh", "particlesystem",
+		// The world-scale tile landscape (LandscapeWorldComponent, Thema 326).
+		"landscapeWorld", "landscapeStamp",
 		// Which prefab an entity was instantiated from (PrefabInstanceComponent).
 		"prefab",
 		"propertyanimator",
@@ -3247,6 +3450,8 @@ bool SceneSerializer::isKnownComponentKey(const std::string& key)
 		"uiimage", "uitext", "weather",
 		// The "Active" switch, off (InactiveComponent) — an empty object.
 		"inactive",
+		// Static/Movable (MobilityComponent) — "static" or "movable".
+		"mobility",
 		// Not a component: serializeEntityComponents carries the display name
 		// in the same object, because a rename would otherwise be the one edit
 		// the component-sync path drops.
@@ -3617,9 +3822,11 @@ bool SceneSerializer::loadJSON(HorizonWorld& world, const std::filesystem::path&
 }
 
 // ── In-memory snapshots (CBOR) ────────────────────────────────────────────────
-bool SceneSerializer::saveToMemory(const HorizonWorld& world, std::vector<uint8_t>& out)
+bool SceneSerializer::saveToMemory(const HorizonWorld& world, std::vector<uint8_t>& out, bool packCookVerdict,
+                                    HE::CookSummary* outCookSummary)
 {
     json scene = buildSceneJson(const_cast<HorizonWorld&>(world));
+    if (packCookVerdict) addCookedSeed(const_cast<HorizonWorld&>(world), scene, outCookSummary);
     out = json::to_cbor(scene);
     HE_LOG_DEBUG(Serialize, "Scene snapshot to memory: %zu entity/-ies, %zu byte(s)",
                  sceneEntityCount(scene), out.size());

@@ -29,6 +29,7 @@ Schalter hängt: `src/HE_Core/include/Platform/BuildProfile.h`; Nachweis am Bina
 | `HE_CAPTURE_FRAME=N`, `HE_CAPTURE_PATH=datei.ppm` | Game + Editor | Frame N (genauer: den davor) als PPM schreiben. Liest das Offscreen-Target, braucht kein sichtbares Fenster. | nein |
 | `HE_DUMP_PATH=bild.bmp` (+ `HE_DUMP_QUIT=1`, `HE_DUMP_FRAMES`, `HE_DUMP_RHI`, `HE_DUMP_<KEY>`) | nur Editor | Offscreen-Dump in `OnInit`, **vor** dem ersten UI-Frame. `HE_DUMP_QUIT=1` beendet danach. Das ist, was `he_shot.py` setzt. | ja, automatisch |
 | `HE_DUMP_LIVE=bild.bmp`, `HE_DUMP_LIVE_TRIGGER=datei` | nur Editor | Viewport des **laufenden** Editors schreiben, sobald die Trigger-Datei auftaucht. | **nein**, selbst setzen |
+| `HE_CLOSE_PROJECT_AT_FRAME=N`, `HE_REOPEN_PROJECT_AT_FRAME=M` | nur Editor | UI-Frame N: File ▸ Close Project über denselben geschützten Weg wie das Menü. Frame M: dasselbe Projekt aus dem Hub wieder öffnen (ProjectPreflight). Zeuge, dass ein Schließen beendet, was das Projekt laufen ließ (`docs/project-close-teardown-2026-11-25.md`). | nein |
 | `HE_NO_SPLASH=1` | Game + Editor | Nur den Splash weglassen, Hauptfenster bleibt sichtbar. Im Hidden-Modus unnötig. | nein |
 | `HE_BACKGROUND_FPS=N` | Game + Editor | Rate für ein verstecktes, verdecktes oder minimiertes Fenster (Standard 15). `0` = nicht drosseln. Bild-Läufe (`HE_EXIT_AFTER_FRAMES`≠0, `HE_DUMP_PATH`, `HE_CAPTURE_FRAME`≠0) und eine laufende Profiler-Aufnahme sind ohnehin ausgenommen. | nein |
 

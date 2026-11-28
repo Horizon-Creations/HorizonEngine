@@ -2016,6 +2016,7 @@ private:
             return input(n, 1, fnCtx);
         case NT::GetGameInstance: return "hc::gameInstance(m_ctx)";
         case NT::GetSelf:         return "hc::self(m_ctx)";
+        case NT::GetElement:      return "hc::elementRef(m_ctx, " + std::to_string(n.elem) + ")";
         // Exec-cached outputs → RunState fields (§5.4).
         case NT::CreateWidget:
         case NT::CreateObject:

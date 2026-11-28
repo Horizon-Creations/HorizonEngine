@@ -42,6 +42,8 @@ namespace
 		{ "Script",                 "script" },
 		{ "Terrain",                "terrain" },
 		{ "Foliage",                "foliage" },
+		{ "Tile Landscape",         "landscapeWorld" },
+		{ "Landscape Stamp",        "landscapeStamp" },
 		{ "Nav Mesh",               "navmesh" },
 		{ "Nav Agent",              "navagent" },
 		{ "Audio Source",           "audiosource" },

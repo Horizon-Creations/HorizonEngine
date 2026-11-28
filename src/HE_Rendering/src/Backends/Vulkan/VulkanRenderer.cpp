@@ -1,5 +1,11 @@
 #include "Backends/Vulkan/VulkanRenderer.h"
+#include <MaterialGraph/RvtLookup.h>   // kRvtTableBinding (40..43), kRvtAlbedoColdBinding (44..46)
+#include <ContentManager/BlockEncode.h> // RVT cold pages: BC7 encode on a worker thread (Thema 333 step 9)
 #include <chrono>
+#include <condition_variable>
+#include <deque>
+#include <mutex>
+#include <thread>
 #include <cstdint>
 #include <Window/Window.h>
 #include <ContentManager/ContentManager.h>
@@ -23,13 +29,16 @@
 #include <memory>
 #include <functional>
 #include <Diagnostics/Logger.h>
+#include <Backends/Vulkan/VulkanLandscape.h> // the world-scale landscape (Thema 326)
 #include <Diagnostics/Profiler.h>   // HE_PROFILE_SCOPE_N — GI accel split of Render()
 #include <HorizonRendering/ClipSpace.h>
 #include <HorizonRendering/GiCasterRange.h>
 #include <HorizonRendering/GiHeightfield.h>
+#include <HorizonRendering/RvtTilePatches.h>   // the tile ground's patches a virtual texture's consumer serves
 #include <Diagnostics/EngineProfiler.h>
 #include <HorizonRendering/GIJitter.h>       // GI: wrapped cone-jitter frame index (all backends)
 #include <HorizonRendering/GIReflectionTier.h> // GI reflections: quality tier + blur reach (shared, D3D/Vulkan)
+#include <HorizonRendering/UnderwaterSurfaceShared.h>  // the tessellated surface for the underwater fog
 #include <HorizonRendering/GiInstanceSurface.h> // GI reflections: a hit's albedo/emissive (all backends)
 #include <HorizonRendering/TemporalAA.h>      // TAA jitter sequence + jittered matrix (shared with D3D11/D3D12)
 #include <HorizonRendering/WorldPreviewGrid.h>  // RenderWorldPreview: grid, background, dump
@@ -132,7 +141,8 @@ namespace
         glm::vec4  cascadeSplits;
         glm::vec4  cameraFwd;
         glm::vec4  shadowBias;
-        glm::ivec4 shadowEnabled; // x = 0/1, y = 1 → tint fragments by cascade (debug)
+        glm::ivec4 shadowEnabled; // x = 0/1, y = 1 → tint fragments by cascade (debug),
+                                  // z = 1 → Unlit/Wireframe view (heLitP's twin)
         // sky/fog additions — must match scene.frag Frame block exactly
         glm::vec4  sunDir;    // xyz = sun direction, w = 0
         glm::vec4  fog;       // x = fogDensity, y = fogHeightFalloff, zw = 0
@@ -184,7 +194,7 @@ namespace
 }
 
 VulkanRenderer::VulkanRenderer()  = default;
-VulkanRenderer::~VulkanRenderer() = default;
+// Defined near VulkanRenderer::CreateRvtPool, below: the body (delete m_rvtWork) needs RvtColdWork's complete type.
 
 void VulkanRenderer::Initialize(HE::Window* window)
 {
@@ -215,6 +225,11 @@ void VulkanRenderer::Initialize(HE::Window* window)
     // cluster SSBOs) and the PostFX pipelines (m_postFxSceneRP): the flag it
     // feeds is read together with m_postFxReady (GetCapabilities).
     createDeferredPipelines();
+    // Volumetric fog (Thema 225 step 5): after the material layout (row 34), the PostFX passes
+    // (m_underwaterFogRP is Apply's render pass) and the deferred pipelines (m_hdrLoadRP).
+    // Eager, because the extractor only sets fogVolume.enabled once told the backend can.
+    createFogPipelines();
+    m_extractor.setVolumetricFogCapable(m_fogReady);
     // Deferred-path debug/headless knobs, GL's, Metal's and D3D's:
     // HE_RENDER_PATH=1/deferred forces the path without touching config,
     // HE_DUMP_GBUFFER=1..4 seeds a raw G-buffer view (the editor pushes its own
@@ -238,6 +253,13 @@ void VulkanRenderer::Shutdown()
 {
     HE_LOG_INFO(RHI, "%s", "VulkanRenderer: shutdown — waiting for GPU");
     if (m_device) deviceWaitIdle();
+    DestroyRvtPool();
+    if (m_rvtSampler) { vkDestroySampler(m_device, m_rvtSampler, nullptr); m_rvtSampler = VK_NULL_HANDLE; }
+    if (m_rvtPackPipeline)   { vkDestroyPipeline(m_device, m_rvtPackPipeline, nullptr); m_rvtPackPipeline = VK_NULL_HANDLE; }
+    if (m_rvtPackRP)         { vkDestroyRenderPass(m_device, m_rvtPackRP, nullptr); m_rvtPackRP = VK_NULL_HANDLE; }
+    if (m_rvtPackPipeLayout) { vkDestroyPipelineLayout(m_device, m_rvtPackPipeLayout, nullptr); m_rvtPackPipeLayout = VK_NULL_HANDLE; }
+    if (m_rvtPackSetLayout)  { vkDestroyDescriptorSetLayout(m_device, m_rvtPackSetLayout, nullptr); m_rvtPackSetLayout = VK_NULL_HANDLE; }
+    if (m_rvtPackDescPool)   { vkDestroyDescriptorPool(m_device, m_rvtPackDescPool, nullptr); m_rvtPackDescPool = VK_NULL_HANDLE; }
     // ImGui editor textures (logo + content-browser icons): destroy the GPU
     // resources we retained for them. The ImGui descriptor sets are freed by
     // ImGui's own shutdown, which the editor runs before tearing down the renderer.
@@ -251,10 +273,14 @@ void VulkanRenderer::Shutdown()
     m_imguiTextures.clear();
     // Before the render passes its framebuffers were made against go.
     destroyWorldPreview();
+    if (m_landscape) { m_landscape->shutdown(); m_landscape.reset(); }   // its images and pipelines, before the device and the passes go
+    m_landscapeFrame = HE::LandscapeRenderFrame{};
+    m_landscapeFrameLive = false;
     destroySkyPipeline();
     destroyDebugLinePipeline();
     destroyRibbonMeshes();
     destroyPostFXResources();      // the G-buffer targets with them
+    destroyFogResources();         // its Apply pipeline is built against the underwater fog's render pass
     destroyDeferredPipelines();    // before the material pipelines' render passes go
     destroyPostFXPipelines();
     // SSAO viewport-size targets (already freed by destroyViewportResources below,
@@ -325,6 +351,7 @@ void VulkanRenderer::Shutdown()
     for (auto& s : m_giReflSet) s = VK_NULL_HANDLE;
     m_giReflTabRaw = m_giReflTabPing = m_giReflTabBlur = m_giReflTabMix = VK_NULL_HANDLE;
     m_giReflPipesTried = false;
+    m_giReflWhyNot.clear();
     m_giReflReady      = false;
     if (m_giPointSampler) { vkDestroySampler(m_device, m_giPointSampler, nullptr);          m_giPointSampler = VK_NULL_HANDLE; }
     m_giPipelinesTried = false;
@@ -453,6 +480,8 @@ void VulkanRenderer::Shutdown()
 
 void VulkanRenderer::Render()
 {
+    if (m_still.kept) stillLeave();   // a bracket nobody closed: the live viewport comes back before it is drawn
+    UpdateRvtCold();   // RVT cold pages (Thema 333 step 9): a real frame only, never RenderSceneImage's still
     // Every pass below that needs the scene (cascades, decal depth pre-pass, GI, SSAO, the scene
     // itself) extracts on its own so its draw set and cascade fit agree with the others — five
     // full walks of the registry a frame, ~26 ms each at 50k entities. Inside this scope the world
@@ -915,6 +944,10 @@ void VulkanRenderer::DrawViewportFrame(VkCommandBuffer cmd)
         // A deferred frame leaves this pass after the sky: DrawScene ends it,
         // runs the G-buffer pass and reopens the HDR target as m_hdrLoadRP for
         // the resolve and the forward tail — the pass the End below closes.
+        // Volumetric fog (Thema 225): Inject + Integrate are compute, so they run here, outside
+        // any render pass, once the shadow maps / local atlas / sky cube of this frame are done.
+        // Sets m_fogFrameActive for DrawScene (Apply split, material fill); nothing at fogMode 0.
+        encodeFogVolume(cmd);
         VkRenderPassBeginInfo hdrpbi{ VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
         hdrpbi.renderPass  = m_postFxSceneRP;
         hdrpbi.framebuffer = m_hdrFB;
@@ -924,6 +957,7 @@ void VulkanRenderer::DrawViewportFrame(VkCommandBuffer cmd)
         vkCmdBeginRenderPass(cmd, &hdrpbi, VK_SUBPASS_CONTENTS_INLINE);
         DrawScene(cmd, m_viewportW, m_viewportH, /*hdr=*/true);
         vkCmdEndRenderPass(cmd);
+        m_fogFrameActive = false; // consumed: the world previews and the swapchain fallback must never see it
         m_hdrLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 
         // ── TAA velocity (A2): its own pass right after the scene, against the
@@ -965,18 +999,28 @@ void VulkanRenderer::DrawViewportFrame(VkCommandBuffer cmd)
             struct UnderwaterFogPC
             {
                 float invViewProj[16];
-                float depthParams[4];
                 float camPosSurfaceY[4];
                 float tintDensity[4];
+                float surfWave[4];
+                float surfParams[4];
             } pc{};
+            static_assert(sizeof(UnderwaterFogPC) == 128,
+                          "must match the push-constant block of postfx_underwaterfog.frag and the 128-byte range");
             std::memcpy(pc.invViewProj, &invViewProjUw[0][0], 16 * sizeof(float));
-            pc.depthParams[0] = 1.0f; pc.depthParams[1] = 1.0f; pc.depthParams[2] = 0.0f; pc.depthParams[3] = 0.0f;
             pc.camPosSurfaceY[0] = m_renderWorld.camera.position.x;
             pc.camPosSurfaceY[1] = m_renderWorld.camera.position.y;
             pc.camPosSurfaceY[2] = m_renderWorld.camera.position.z;
             pc.camPosSurfaceY[3] = uwCam.surfaceY;
             pc.tintDensity[0] = uwCam.tintColor.x; pc.tintDensity[1] = uwCam.tintColor.y;
             pc.tintDensity[2] = uwCam.tintColor.z; pc.tintDensity[3] = uwCam.density;
+            {
+                static const char* s_uwTimeOv = std::getenv("HE_SKY_TIME");   // pins the wave clock for captures
+                const float uwSeconds = (s_uwTimeOv && *s_uwTimeOv) ? static_cast<float>(std::atof(s_uwTimeOv))
+                                                                    : static_cast<float>(SDL_GetTicks()) / 1000.0f;
+                const HE::UnderwaterSurfaceUniforms su = HE::underwaterSurfaceUniforms(uwCam, uwSeconds);
+                std::memcpy(pc.surfWave, su.wave, sizeof(su.wave));
+                std::memcpy(pc.surfParams, su.params, sizeof(su.params));
+            }
 
             // Depth off the attachment before it is readable as a sampler — the
             // same flip EncodeDecalDepth's consumers use, just on the live
@@ -1062,7 +1106,7 @@ void VulkanRenderer::DrawViewportFrame(VkCommandBuffer cmd)
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_underwaterFogPipe);
             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                 m_underwaterFogPipeLayout, 0, 1, &m_underwaterFogDS, 0, nullptr);
-            vkCmdPushConstants(cmd, m_underwaterFogPipeLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, 112, &pc);
+            vkCmdPushConstants(cmd, m_underwaterFogPipeLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, 128, &pc);
             VkViewport vp{0,0,(float)m_viewportW,(float)m_viewportH,0,1}; vkCmdSetViewport(cmd,0,1,&vp);
             VkRect2D sc{{0,0},{m_viewportW,m_viewportH}}; vkCmdSetScissor(cmd,0,1,&sc);
             vkCmdDraw(cmd, 3, 1, 0, 0);
@@ -1143,7 +1187,8 @@ void VulkanRenderer::DrawViewportFrame(VkCommandBuffer cmd)
 
         _frame.next("Tonemap");
         // ── Tonemap: hdr+bloom[0] → ldrFB ─────────────────────────────
-        { const float p[4]={m_exposure, m_bloomEnabled ? m_bloomStrength : 0.0f, 0, 0};
+        { const float p[4]={m_rawCapture ? (m_rawSrgb ? -2.0f : -1.0f) : m_exposure,   // x < 0: raw (postfx_tonemap.frag)
+                            m_bloomEnabled ? m_bloomStrength : 0.0f, 0, 0};
           blitPass(m_postFxBlitF8, m_ldrFB, m_viewportW, m_viewportH, m_tonemapPipe, m_postFxDS[3], p); }
         m_ldrLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 
@@ -1344,6 +1389,19 @@ IRenderer::Capabilities VulkanRenderer::GetCapabilities() const
     // branch), which the editor viewport and the packaged game both run; the
     // direct swapchain fallback and the world previews stay forward.
     c.supportsDeferredRendering = m_postFxReady && m_deferredReady;
+    // Thema 225 step 5: true only if the Inject/Integrate/Apply pipelines actually built
+    // (createFogPipelines, eager at Initialize) AND the HDR chain exists to host the Apply
+    // split. Never a blanket "Vulkan + shaderc": a failed step leaves the analytic fog.
+    c.supportsVolumetricFog = m_fogReady && m_postFxReady;
+    c.landscapeCoarseRevision   = true;   // VulkanLandscape.cpp: new coarse images, the atlas stays
+    c.landscapeMaterial         = m_lsMatPipelineLayout != VK_NULL_HANDLE;   // DrawScene: the ground's material draws the patches (after Initialize)
+    // EncodeShadowMap: every shadow layer (proven on MoltenVK). runSSAO's position pre-pass is written and not proven: said only
+    // where it is on (HE::landscapeVkSsaoOn: a real Vulkan driver, or the variable), so the witness judges it there.
+    c.landscapePassMask         = kLandscapePassShadow | kLandscapePassGBuffer | kLandscapePassGi | kLandscapePassVelocity
+                                | (HE::landscapeVkSsaoOn() ? kLandscapePassSsao : 0u);
+    c.supportsRawCapture        = m_postFxReady;   // RenderSceneImage's rawOutput rides the tonemap pass
+    c.supportsRvt               = m_postFxReady && m_matReady && m_matRvt;   // a page is that raw capture copied into the pool
+    c.landscapeRvt              = c.landscapeMaterial && c.supportsRvt;      // SetRvtTileGround, rvtTileGround pages (drawGroundMaterial)
     return c;
 }
 
@@ -1448,12 +1506,33 @@ void VulkanRenderer::createInstance()
     m_instanceApiVersion = loaderVersion >= VK_API_VERSION_1_2 ? VK_API_VERSION_1_2
                                                                : VK_API_VERSION_1_0;
 
+    // MoltenVK (macOS) is a "portability" driver: a Khronos loader >= 1.3.216 hides such a driver
+    // (vkCreateInstance -> VK_ERROR_INCOMPATIBLE_DRIVER, no device) unless the instance asks for
+    // enumeration of them. Only when the loader offers the extension, so Windows/Linux are untouched.
+    VkInstanceCreateFlags instanceFlags = 0;
+    {
+        uint32_t en = 0;
+        vkEnumerateInstanceExtensionProperties(nullptr, &en, nullptr);
+        std::vector<VkExtensionProperties> eprops(en);
+        if (en) vkEnumerateInstanceExtensionProperties(nullptr, &en, eprops.data());
+        for (const auto& e : eprops)
+            if (std::strcmp(e.extensionName, VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME) == 0)
+            {
+                const bool listed = std::any_of(exts.begin(), exts.end(), [](const char* n) {
+                    return std::strcmp(n, VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME) == 0; });
+                if (!listed) exts.push_back(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
+                instanceFlags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
+                break;
+            }
+    }
+
     VkApplicationInfo appInfo{};
     appInfo.sType            = VK_STRUCTURE_TYPE_APPLICATION_INFO;
     appInfo.pApplicationName = "HorizonEngine";
     appInfo.apiVersion       = m_instanceApiVersion;
     VkInstanceCreateInfo ci{};
     ci.sType                   = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
+    ci.flags                   = instanceFlags;
     ci.pApplicationInfo        = &appInfo;
     ci.enabledExtensionCount   = static_cast<uint32_t>(exts.size());
     ci.ppEnabledExtensionNames = exts.data();
@@ -1630,6 +1709,17 @@ void VulkanRenderer::createDevice()
             ? "VulkanRenderer: tessellationShader enabled (material Displacement pin)"
             : "VulkanRenderer: no tessellation (feature missing or HE_TESSELLATION=0), "
               "displacement materials draw untessellated");
+    }
+
+    // A portability device (MoltenVK) must have VK_KHR_portability_subset enabled when it advertises it.
+    {
+        uint32_t n = 0;
+        vkEnumerateDeviceExtensionProperties(m_physDevice, nullptr, &n, nullptr);
+        std::vector<VkExtensionProperties> props(n);
+        if (n) vkEnumerateDeviceExtensionProperties(m_physDevice, nullptr, &n, props.data());
+        for (const auto& e : props)
+            if (std::strcmp(e.extensionName, "VK_KHR_portability_subset") == 0)
+            { devExts.push_back("VK_KHR_portability_subset"); break; }
     }
 
     VkDeviceCreateInfo dci{};
@@ -2950,22 +3040,51 @@ void VulkanRenderer::createMaterialResources()
             maxSamplers = std::min(maxSamplers, n);
             maxImages   = std::min(maxImages, n);
         }
-        m_matLandscapeWeights = HE::vkmat::landscapeWeightsFit(maxSamplers, maxImages);
-        char line[384];
+        // The fog volume (Thema 225 step 5) is dropped first: the materials then compile without
+        // HE_FOG_VOLUME BEFORE any of them is built (the library's switch is read at compile time),
+        // keep the analytic fog, and supportsVolumetricFog stays false. Only then is the layout
+        // without it held against the weightmap row.
+        m_matFogVolume        = HE::vkmat::fogVolumeFit(maxSamplers, maxImages);
+        m_matShaderLib.setSpirvFogVolume(m_matFogVolume);
+        m_matLandscapeWeights = HE::vkmat::landscapeWeightsFit(maxSamplers, maxImages, m_matFogVolume);
+        // The Runtime Virtual Texture's four rows (Thema 333) on top of whatever the two above decided:
+        // left out when the device cannot hold them.
+        m_matRvt = HE::vkmat::rvtFit(maxSamplers, maxImages, m_matLandscapeWeights, m_matFogVolume);
+        static_assert(HE::vkmat::kRvtFirstBinding == HE::kRvtTableBinding && HE::vkmat::kRvtBindingCount == 4,
+                      "the layout's RVT rows are the lookup's bindings");
+        if (!m_matRvt)
+            HE_LOG_INFO(RHI, "VulkanRenderer: Runtime Virtual Textures off: the material layout with their %u samplers does not fit "
+                        "maxPerStageDescriptorSamplers %u / SampledImages %u", HE::vkmat::kRvtBindingCount, maxSamplers, maxImages);
+        // Cold (BC7) pages on top of that (Thema 333 step 9): three more fragment samplers (rvtColdFit) — a GLSL
+        // sampler2DArray costs one combined-image-sampler descriptor in Vulkan regardless of whether the shader reads it
+        // with texelFetch or Sample, unlike D3D11/D3D12 where Load is free. MaterialShaderLibrary reads this decision
+        // back (SetRvtColdVulkanFits) so the SPIR-V never statically references a binding this layout lacks.
+        m_matRvtCold = m_matRvt && HE::vkmat::rvtColdFit(maxSamplers, maxImages, m_matLandscapeWeights, m_matFogVolume);
+        HE::MaterialShaderLibrary::SetRvtColdVulkanFits(m_matRvtCold);
+        if (m_matRvt && !m_matRvtCold)
+            HE_LOG_INFO(RHI, "VulkanRenderer: RVT cold pages off: the layout with their %u more samplers does not fit "
+                        "maxPerStageDescriptorSamplers %u / SampledImages %u", HE::vkmat::kRvtColdBindingCount, maxSamplers, maxImages);
+        char line[448];
         std::snprintf(line, sizeof line,
-            "VulkanRenderer: material set 0 needs %u fragment samplers (%u without heLandscapeWeights); "
-            "device maxPerStageDescriptorSamplers %u, maxPerStageDescriptorSampledImages %u%s -> heLandscapeWeights %s",
-            HE::vkmat::fragmentSamplerCount(true), HE::vkmat::fragmentSamplerCount(false),
+            "VulkanRenderer: material set 0 needs %u fragment samplers (%u without heFogVolume, %u without heLandscapeWeights either); "
+            "device maxPerStageDescriptorSamplers %u, maxPerStageDescriptorSampledImages %u%s -> heLandscapeWeights %s, heFogVolume %s",
+            HE::vkmat::fragmentSamplerCount(true, true), HE::vkmat::fragmentSamplerCount(true, false),
+            HE::vkmat::fragmentSamplerCount(false, false),
             maxSamplers, maxImages, (cap && *cap) ? " (capped by HE_VK_MAX_STAGE_SAMPLERS)" : "",
-            m_matLandscapeWeights ? "bound" : "LEFT OUT (layer-blend materials draw built-in)");
-        if (m_matLandscapeWeights) HE_LOG_INFO(RHI, "%s", line);
-        else                       HE_LOG_WARN(RHI, "%s", line);
+            m_matLandscapeWeights ? "bound" : "LEFT OUT (layer-blend materials draw built-in)",
+            m_matFogVolume ? "bound" : "LEFT OUT (volumetric fog off)");
+        if (m_matLandscapeWeights && m_matFogVolume) HE_LOG_INFO(RHI, "%s", line);
+        else                                         HE_LOG_WARN(RHI, "%s", line);
     }
     VkDescriptorSetLayoutBinding b[HE::vkmat::kBindingCount]{};
     uint32_t nb = 0;
     for (uint32_t i = 0; i < HE::vkmat::kBindingCount; ++i)
     {
         if (!m_matLandscapeWeights && HE::vkmat::kBindings[i].binding == HE::vkmat::kLandscapeWeightsBinding)
+            continue;
+        if (!m_matFogVolume && HE::vkmat::kBindings[i].binding == HE::vkmat::kFogVolumeBinding)
+            continue;
+        if (!m_matRvt && HE::vkmat::isRvtBinding(HE::vkmat::kBindings[i].binding))
             continue;
         b[nb].binding         = HE::vkmat::kBindings[i].binding;
         b[nb].descriptorType  = HE::vkmat::kBindings[i].dynamic ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC
@@ -2995,6 +3114,59 @@ void VulkanRenderer::createMaterialResources()
         return;
     }
 
+    // ── The tile landscape drawn with a material (Thema 326) ─────────────────────
+    // Its own set layout: the material's rows as they are, plus what the landscape variant of the two shaders reads
+    // (MaterialShaderLibrary::landscapeVertex / landscapeFragment): 50 LsGlobals (both stages), 51 the slot table (both), 52-57
+    // the tile and coarse weight pages (fragment), 59 and 60 the tile and coarse heights (vertex). A SECOND layout on purpose: in
+    // the material's own every mesh pipeline would count seven more fragment samplers against the device's limit. The pipeline
+    // layout carries the 48-byte push constant VulkanLandscape pushes per patch (LsPatch). Left null where the fragment stage
+    // cannot hold the seven more: the landscape then keeps its fixed blend (GetCapabilities().landscapeMaterial says so).
+    {
+        VkPhysicalDeviceProperties props{};
+        vkGetPhysicalDeviceProperties(m_physDevice, &props);
+        // The landscape's nine images are SAMPLED_IMAGE rows (read with texelFetch, no sampler: the SPIR-V form of the two
+        // shaders declares them as textures), so they count against the device's sampled IMAGES per stage, of which there are
+        // plenty, and not against its samplers, where a material is at the limit on a device with Metal's sixteen.
+        const uint32_t maxSamplers = props.limits.maxPerStageDescriptorSampledImages;
+        uint32_t fragSamplers = 7;
+        for (uint32_t i = 0; i < nb; ++i)
+            if (b[i].descriptorType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER && (b[i].stageFlags & VK_SHADER_STAGE_FRAGMENT_BIT)) ++fragSamplers;
+        if (fragSamplers <= maxSamplers)
+        {
+            std::vector<VkDescriptorSetLayoutBinding> lb(b, b + nb);
+            const auto add = [&](uint32_t binding, VkDescriptorType type, VkShaderStageFlags stages) {
+                VkDescriptorSetLayoutBinding r{};
+                r.binding = binding; r.descriptorType = type; r.descriptorCount = 1; r.stageFlags = stages;
+                lb.push_back(r);
+            };
+            const VkShaderStageFlags V = VK_SHADER_STAGE_VERTEX_BIT, F = VK_SHADER_STAGE_FRAGMENT_BIT;
+            add(50, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, V | F);
+            add(51, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, V | F);
+            for (uint32_t k = 52; k <= 57; ++k) add(k, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, F);
+            add(59, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, V);
+            add(60, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, V);
+            VkDescriptorSetLayoutCreateInfo lci{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
+            lci.bindingCount = static_cast<uint32_t>(lb.size());
+            lci.pBindings    = lb.data();
+            const VkPushConstantRange pcr{ VK_SHADER_STAGE_VERTEX_BIT, 0, 48 };
+            VkPipelineLayoutCreateInfo lpl{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+            lpl.setLayoutCount = 1;
+            lpl.pSetLayouts = &m_lsMatSetLayout;
+            lpl.pushConstantRangeCount = 1;
+            lpl.pPushConstantRanges = &pcr;
+            if (vkCreateDescriptorSetLayout(m_device, &lci, nullptr, &m_lsMatSetLayout) != VK_SUCCESS
+                || vkCreatePipelineLayout(m_device, &lpl, nullptr, &m_lsMatPipelineLayout) != VK_SUCCESS)
+            {
+                HE_LOG_WARN(RHI, "%s", "VulkanRenderer: the landscape's material layout failed; the landscape keeps its fixed blend");
+                if (m_lsMatSetLayout) { vkDestroyDescriptorSetLayout(m_device, m_lsMatSetLayout, nullptr); m_lsMatSetLayout = VK_NULL_HANDLE; }
+                m_lsMatPipelineLayout = VK_NULL_HANDLE;
+            }
+        }
+        else
+            HE_LOG_WARN(RHI, "VulkanRenderer: the landscape keeps its fixed blend, a fragment stage here holds %u samplers and its material needs %u",
+                        maxSamplers, fragSamplers);
+    }
+
     // Per-frame descriptor pool (reset whole each frame — no FREE bit) + UBO buffers.
     // Each allocated set consumes one descriptor per layout row of its kind, so the
     // pool covers k_matMaxDraws sets worth of each — counted from the same table as
@@ -3021,15 +3193,16 @@ void VulkanRenderer::createMaterialResources()
         using HE::vkmat::DescKind;
         using HE::vkmat::countOf;
         static_assert(HE::vkmat::dynamicCount() == HE::vkmat::kDynamicOffsetCount, "bindings 1, 3, 9");
-        VkDescriptorPoolSize ps[4] = {
+        VkDescriptorPoolSize ps[5] = {
             { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         (countOf(DescKind::UniformBuffer) - HE::vkmat::dynamicCount()) * k_matMaxDraws }, // b0,b8
             { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, HE::vkmat::dynamicCount()                       * k_matMaxDraws }, // b1,b3,b9
             { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, countOf(DescKind::CombinedImageSampler) * k_matMaxDraws }, // b2,b4-b7,b10-b18,b31-b33
             { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,         countOf(DescKind::StorageBuffer)        * k_matMaxDraws }, // b24-b26 (cluster lists)
+            { VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,          9 * 8 },   // the tile landscape's nine images (m_lsMatSetLayout), a few sets a frame
         };
         VkDescriptorPoolCreateInfo dpci{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
         dpci.maxSets       = k_matMaxDraws;
-        dpci.poolSizeCount = 4;
+        dpci.poolSizeCount = 5;
         dpci.pPoolSizes    = ps;
         if (vkCreateDescriptorPool(m_device, &dpci, nullptr, &m_matPool[f]) != VK_SUCCESS)
         {
@@ -3047,13 +3220,61 @@ void VulkanRenderer::createMaterialResources()
         }
     }
 
+    // Row 34's stand-in (a 3D view the sampler3D can legally point at). Part of the material
+    // path, not of the fog pipelines: every Translucent graph material uses the binding
+    // statically, so a layout with the row and nothing to bind there would be the binding-14
+    // crash again. Without it the whole path stays off, as for the other defaults above.
+    if (m_matFogVolume && !createFogDummy())
+    {
+        HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: A4 material path disabled — heFogVolume dummy volume failed");
+        return;
+    }
+
     m_matReady = true;
     HE_LOG_INFO(RHI, "%s", "VulkanRenderer: A4 material resources created");
+}
+
+// 1x1x1 RGBA16F (0, 0, 0, 1): bound at material binding 34 on every frame without the volume.
+bool VulkanRenderer::createFogDummy()
+{
+    if (m_fogDummy.view) return true;
+    if (!createFogImage3D(1, 1, 1, VK_FORMAT_R16G16B16A16_SFLOAT,
+                          VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, m_fogDummy))
+        return false;
+    VkCommandBufferAllocateInfo cbai{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+    cbai.commandPool = m_cmdPool; cbai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY; cbai.commandBufferCount = 1;
+    VkCommandBuffer oneCB = VK_NULL_HANDLE;
+    vkAllocateCommandBuffers(m_device, &cbai, &oneCB);
+    VkCommandBufferBeginInfo bi{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(oneCB, &bi);
+    const VkImageSubresourceRange rng{ VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+    VkImageMemoryBarrier b{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+    b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    b.image = m_fogDummy.img; b.subresourceRange = rng;
+    b.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED; b.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    b.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    vkCmdPipelineBarrier(oneCB, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         0, 0, nullptr, 0, nullptr, 1, &b);
+    VkClearColorValue zero{}; zero.float32[3] = 1.0f; // "no fog yet"
+    vkCmdClearColorImage(oneCB, m_fogDummy.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &zero, 1, &rng);
+    b.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL; b.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    b.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT; b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    vkCmdPipelineBarrier(oneCB, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                         0, 0, nullptr, 0, nullptr, 1, &b);
+    vkEndCommandBuffer(oneCB);
+    VkSubmitInfo si{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
+    si.commandBufferCount = 1; si.pCommandBuffers = &oneCB;
+    submitGraphics(si, VK_NULL_HANDLE);
+    vkQueueWaitIdle(m_graphicsQueue);
+    vkFreeCommandBuffers(m_device, m_cmdPool, 1, &oneCB);
+    return true;
 }
 
 void VulkanRenderer::destroyMaterialResources()
 {
     m_matReady = false;
+    destroyFogImage3D(m_fogDummy);
     for (auto& kv : m_materialPipelines)
         if (kv.second) vkDestroyPipeline(m_device, kv.second, nullptr);
     m_materialPipelines.clear();
@@ -3070,6 +3291,8 @@ void VulkanRenderer::destroyMaterialResources()
         m_matDrawCursor[f] = 0;
         m_matSetCache[f].clear();
     }
+    if (m_lsMatPipelineLayout) { vkDestroyPipelineLayout(m_device, m_lsMatPipelineLayout, nullptr); m_lsMatPipelineLayout = VK_NULL_HANDLE; }
+    if (m_lsMatSetLayout)      { vkDestroyDescriptorSetLayout(m_device, m_lsMatSetLayout, nullptr); m_lsMatSetLayout = VK_NULL_HANDLE; }
     if (m_matPipelineLayout) { vkDestroyPipelineLayout(m_device, m_matPipelineLayout, nullptr); m_matPipelineLayout = VK_NULL_HANDLE; }
     if (m_matSetLayout)      { vkDestroyDescriptorSetLayout(m_device, m_matSetLayout, nullptr); m_matSetLayout = VK_NULL_HANDLE; }
     if (m_whiteArrayView)    { vkDestroyImageView(m_device, m_whiteArrayView, nullptr);         m_whiteArrayView = VK_NULL_HANDLE; }
@@ -3558,6 +3781,83 @@ VkPipeline VulkanRenderer::GetOrBuildMaterialPipeline(uint64_t hash, const std::
     if (tcs) vkDestroyShaderModule(m_device, tcs, nullptr);
     if (tes) vkDestroyShaderModule(m_device, tes, nullptr);
     m_materialPipelines.emplace(key, pipe); // cache success OR failure (null → no per-draw retry)
+    return pipe;
+}
+
+// The pipeline that draws the tile landscape's patches with a material: the landscape's vertex stage (no vertex buffer, the grid
+// position is gl_VertexIndex; the per-patch numbers are a push constant) and the material's lit fragment with its layer weights from
+// the tile atlas. Forward only, into the scene pass (`hdr` as GetOrBuildMaterialPipeline). Null (cached): the variant does not build,
+// the landscape keeps its fixed blend.
+// `gbuffer`: `frag` is the material's G-buffer tail (resolveGBufferShaders), into m_gbufferRP's targets; its own key, never clustered.
+VkPipeline VulkanRenderer::GetOrBuildLandscapeMaterialPipeline(uint64_t hash, const std::string& frag, bool hdr, bool gbuffer)
+{
+    if (m_lsMatPipelineLayout == VK_NULL_HANDLE) return VK_NULL_HANDLE;
+    if (gbuffer) { hash ^= 0x7A11E56B0FFE2000ULL; hdr = false; }
+    const bool clustered = m_forwardClustered && m_clusterReady && !gbuffer;
+    const uint64_t key = hash ^ 0x7A11E51A2D5CA9E0ULL ^ (hdr ? 0x9E3779B97F4A7C15ULL : 0ULL) ^ (clustered ? 0xC1057E2ED0000001ULL : 0ULL);
+    if (auto it = m_materialPipelines.find(key); it != m_materialPipelines.end()) return it->second;
+    const VkRenderPass rp = gbuffer ? m_gbufferRP : hdr ? m_postFxSceneRP : m_renderPass;
+    if (rp == VK_NULL_HANDLE) return VK_NULL_HANDLE;   // not cached: retried when the pass is there
+
+    using Backend = HE::MaterialShaderLibrary::Backend;
+    const auto& v = m_matShaderLib.landscapeVertex(Backend::SpirV);
+    const auto& f = m_matShaderLib.landscapeFragment(hash, frag, Backend::SpirV, clustered);
+    VkPipeline pipe = VK_NULL_HANDLE;
+    VkShaderModule vs = VK_NULL_HANDLE, fs = VK_NULL_HANDLE;
+    const auto makeModule = [&](const std::vector<uint32_t>& spv) {
+        VkShaderModuleCreateInfo ci{ VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO };
+        ci.codeSize = spv.size() * sizeof(uint32_t);
+        ci.pCode    = spv.data();
+        VkShaderModule mod = VK_NULL_HANDLE;
+        return vkCreateShaderModule(m_device, &ci, nullptr, &mod) == VK_SUCCESS ? mod : VkShaderModule(VK_NULL_HANDLE);
+    };
+    if (v.ok && f.ok && !v.spirv.empty() && !f.spirv.empty()) { vs = makeModule(v.spirv); fs = makeModule(f.spirv); }
+    if (vs && fs)
+    {
+        VkPipelineShaderStageCreateInfo stages[2]{};
+        stages[0].sType = stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;   stages[0].module = vs; stages[0].pName = "main";
+        stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT; stages[1].module = fs; stages[1].pName = "main";
+        VkPipelineVertexInputStateCreateInfo vi{ VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };   // none: gl_VertexIndex
+        VkPipelineInputAssemblyStateCreateInfo ia{ VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO };
+        ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+        VkPipelineViewportStateCreateInfo vp{ VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO };
+        vp.viewportCount = 1; vp.scissorCount = 1;
+        VkPipelineRasterizationStateCreateInfo rs{ VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO };
+        rs.polygonMode = VK_POLYGON_MODE_FILL;
+        rs.cullMode    = VK_CULL_MODE_NONE;
+        rs.frontFace   = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+        rs.lineWidth   = 1.0f;
+        VkPipelineMultisampleStateCreateInfo ms{ VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO };
+        ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+        VkPipelineDepthStencilStateCreateInfo ds{ VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO };
+        ds.depthTestEnable = VK_TRUE; ds.depthWriteEnable = VK_TRUE; ds.depthCompareOp = VK_COMPARE_OP_LESS;
+        VkPipelineColorBlendAttachmentState cba{};
+        cba.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+        VkPipelineColorBlendStateCreateInfo cb{ VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO };
+        cb.attachmentCount = 1; cb.pAttachments = &cba;
+        VkPipelineColorBlendAttachmentState gbBlend[k_gbTargets];   // the G-buffer tail writes oGB0..oGB3, one state each (GetOrBuildMaterialPipeline)
+        if (gbuffer)
+        {
+            for (VkPipelineColorBlendAttachmentState& g : gbBlend) g = cba;
+            cb.attachmentCount = k_gbTargets;
+            cb.pAttachments    = gbBlend;
+        }
+        VkDynamicState dynStates[2] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+        VkPipelineDynamicStateCreateInfo dyn{ VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO };
+        dyn.dynamicStateCount = 2; dyn.pDynamicStates = dynStates;
+        VkGraphicsPipelineCreateInfo pci{ VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO };
+        pci.stageCount = 2; pci.pStages = stages;
+        pci.pVertexInputState = &vi; pci.pInputAssemblyState = &ia; pci.pViewportState = &vp; pci.pRasterizationState = &rs;
+        pci.pMultisampleState = &ms; pci.pDepthStencilState = &ds; pci.pColorBlendState = &cb; pci.pDynamicState = &dyn;
+        pci.layout = m_lsMatPipelineLayout; pci.renderPass = rp; pci.subpass = 0;
+        if (createGraphicsPipelines(1, &pci, nullptr, &pipe) != VK_SUCCESS) pipe = VK_NULL_HANDLE;
+    }
+    if (pipe == VK_NULL_HANDLE)
+        HE_LOG_WARN(RHI, "VulkanRenderer: the landscape keeps its fixed blend, its material's variant did not build: %s%s", v.log.c_str(), f.log.c_str());
+    if (vs) vkDestroyShaderModule(m_device, vs, nullptr);
+    if (fs) vkDestroyShaderModule(m_device, fs, nullptr);
+    m_materialPipelines.emplace(key, pipe);
     return pipe;
 }
 
@@ -5228,7 +5528,7 @@ void VulkanRenderer::createPostFXPipelines()
         vkCheck(vkCreateRenderPass(m_device, &rpci, nullptr, &m_underwaterFogRP), "underwaterfog render pass");
 
         VkPushConstantRange pcr2{};
-        pcr2.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT; pcr2.size = 112;   // mat4 + 3×vec4, see the .frag
+        pcr2.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT; pcr2.size = 128;   // mat4 + 4×vec4, see the .frag
         VkPipelineLayoutCreateInfo plci2{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
         plci2.setLayoutCount = 1; plci2.pSetLayouts = &m_underwaterFogDSLayout;
         plci2.pushConstantRangeCount = 1; plci2.pPushConstantRanges = &pcr2;
@@ -5927,13 +6227,23 @@ void VulkanRenderer::encodeTaaVelocity(VkCommandBuffer cmd)
     // before it, and m_sortedIndices would still hold last frame's objects.
     if (m_taaSceneSorted)
     {
+        // The tile landscape's ground stands still; the camera's own motion is its velocity. Before the meshes: the pass
+        // writes no depth, so what stands on the ground overwrites it (vkls::velocityClip). m_landscapeViewProj is the
+        // jittered matrix the ground's own draw used; the pass binds its own pipeline after this.
+        // Last frame's clean matrix with THIS frame's jitter — see taa_velocity.vert: the jitter then cancels out of the
+        // difference. `prevJitHere` is the one for what this frame places (the ground, a cluster's plants, a first-seen
+        // object): across a floating-origin hop it takes the origin's step (HE::taaPrevViewProjAt). A remembered model
+        // keeps prevJit.
+        const glm::dvec3 originNow = m_renderWorld.worldOrigin;
+        const glm::mat4 prevJit = taaJittered(m_taaPrevViewProj);
+        const glm::mat4 prevJitHere = m_taaPrevOriginKnown ? taaJittered(HE::taaPrevViewProjAt(m_taaPrevViewProj, originNow, m_taaPrevOrigin))
+                                                           : prevJit;
+        if (m_landscapeFrameLive && m_landscape && HE::landscapePassesOn())
+            m_landscape->drawDepth(cmd, m_taaVelocityRP, VkExtent2D{ m_viewportW, m_viewportH }, m_currentFrame, m_landscapeFrame,
+                                   m_landscapeViewProj, &m_taaViewProjJit, false, &prevJitHere);
         VkViewport vp{ 0, 0, (float)m_viewportW, (float)m_viewportH, 0, 1 }; vkCmdSetViewport(cmd, 0, 1, &vp);
         VkRect2D   sc{ { 0, 0 }, { m_viewportW, m_viewportH } };          vkCmdSetScissor(cmd, 0, 1, &sc);
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_taaVelocityPipe);
-
-        // Last frame's clean matrix with THIS frame's jitter — see
-        // taa_velocity.vert: the jitter then cancels out of the difference.
-        const glm::mat4 prevJit = taaJittered(m_taaPrevViewProj);
         m_taaCurTransforms.clear();
         for (const uint32_t idx : m_sortedIndices)
         {
@@ -5952,7 +6262,7 @@ void VulkanRenderer::encodeTaaVelocity(VkCommandBuffer cmd)
                 vkCmdBindVertexBuffers(cmd, 0, 1, &mesh->vbuf, &offset);
                 vkCmdBindIndexBuffer(cmd, mesh->ibuf, 0, VK_INDEX_TYPE_UINT32);
                 m_renderWorld.forEachInstance(obj, [&](const glm::mat4& model) {
-                    const PushConstants pc{ m_taaViewProjJit * model, prevJit * model };
+                    const PushConstants pc{ m_taaViewProjJit * model, prevJitHere * model };
                     vkCmdPushConstants(cmd, m_scenePipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(pc), &pc);
                     vkCmdDrawIndexed(cmd, mesh->indexCount, 1, 0, 0, 0);
                 });
@@ -5962,10 +6272,10 @@ void VulkanRenderer::encodeTaaVelocity(VkCommandBuffer cmd)
             // An object seen for the first time reports no motion — its
             // "previous" position is where it is now.
             const auto it = m_taaPrevTransforms.find(obj.entityId);
-            const glm::mat4 prevModel = (it != m_taaPrevTransforms.end()) ? it->second : obj.transform;
+            const bool known = it != m_taaPrevTransforms.end();
             m_taaCurTransforms[obj.entityId] = obj.transform;
 
-            const PushConstants pc{ m_taaViewProjJit * obj.transform, prevJit * prevModel };
+            const PushConstants pc{ m_taaViewProjJit * obj.transform, known ? prevJit * it->second : prevJitHere * obj.transform };
             vkCmdPushConstants(cmd, m_scenePipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(pc), &pc);
             VkDeviceSize offset = 0;
             vkCmdBindVertexBuffers(cmd, 0, 1, &mesh->vbuf, &offset);
@@ -5975,6 +6285,8 @@ void VulkanRenderer::encodeTaaVelocity(VkCommandBuffer cmd)
         // Advance the history HERE, at the end of the one pass that consumed
         // it, so a frame is never compared against itself.
         m_taaPrevViewProj = m_taaViewProjClean;
+        m_taaPrevOrigin = originNow;
+        m_taaPrevOriginKnown = true;
         m_taaPrevTransforms.swap(m_taaCurTransforms);
     }
     vkCmdEndRenderPass(cmd);
@@ -6208,6 +6520,7 @@ void VulkanRenderer::SetSwapchainPostProcessing(bool enabled)
 
 bool VulkanRenderer::CaptureViewport(std::vector<uint8_t>& rgba, uint32_t& outW, uint32_t& outH)
 {
+    if (m_still.kept) stillLeave();   // an outside caller wants the LIVE viewport, not a bracket's page set
     if (!m_viewportImage || m_viewportW == 0 || m_viewportH == 0) return false;
 
     const uint32_t w = m_viewportW;
@@ -6296,6 +6609,920 @@ bool VulkanRenderer::CaptureViewport(std::vector<uint8_t>& rgba, uint32_t& outW,
     return true;
 }
 
+// ─── Runtime Virtual Texture (Thema 333, docs/rvt-design-2026-11-04.md) ───────────────────────────────────────
+// The contract is in IRenderer.h; D3D11's is the reference (D3D11Renderer.cpp). Everything here runs between frames on the
+// CaptureViewport pattern: a one-shot command buffer between two full waits, so what it touches is idle on both sides.
+bool VulkanRenderer::rvtOneShot(const std::function<void(VkCommandBuffer)>& record)
+{
+    deviceWaitIdle();
+    VkCommandBufferAllocateInfo cbai{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+    cbai.commandPool        = m_cmdPool;
+    cbai.level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    cbai.commandBufferCount = 1;
+    VkCommandBuffer cmd = VK_NULL_HANDLE;
+    if (vkAllocateCommandBuffers(m_device, &cbai, &cmd) != VK_SUCCESS || !cmd) return false;
+    VkCommandBufferBeginInfo cbbi{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+    cbbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(cmd, &cbbi);
+    record(cmd);
+    vkEndCommandBuffer(cmd);
+    VkSubmitInfo si{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
+    si.commandBufferCount = 1;
+    si.pCommandBuffers    = &cmd;
+    const VkResult r = submitGraphics(si, VK_NULL_HANDLE);
+    vkQueueWaitIdle(m_graphicsQueue);
+    vkFreeCommandBuffers(m_device, m_cmdPool, 1, &cmd);
+    return r == VK_SUCCESS;
+}
+
+bool VulkanRenderer::rvtMakeImage(VkFormat format, uint32_t w, uint32_t h, uint32_t layers, uint32_t mips,
+                                  VkImageUsageFlags usage, VkImageCreateFlags flags, RvtImage& out)
+{
+    VkImageCreateInfo ici{ VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+    ici.flags         = flags;
+    ici.imageType     = VK_IMAGE_TYPE_2D;
+    ici.format        = format;
+    ici.extent        = { w, h, 1 };
+    ici.mipLevels     = mips;
+    ici.arrayLayers   = layers;
+    ici.samples       = VK_SAMPLE_COUNT_1_BIT;
+    ici.tiling        = VK_IMAGE_TILING_OPTIMAL;
+    ici.usage         = usage;
+    ici.sharingMode   = VK_SHARING_MODE_EXCLUSIVE;
+    ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    if (vkCreateImage(m_device, &ici, nullptr, &out.image) != VK_SUCCESS) return false;
+    VkMemoryRequirements req{};
+    vkGetImageMemoryRequirements(m_device, out.image, &req);
+    VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+    mai.allocationSize  = req.size;
+    mai.memoryTypeIndex = findMemoryType(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    if (vkAllocateMemory(m_device, &mai, nullptr, &out.memory) != VK_SUCCESS || vkBindImageMemory(m_device, out.image, out.memory, 0) != VK_SUCCESS)
+    {
+        rvtDestroyImage(out);
+        return false;
+    }
+    return true;
+}
+
+bool VulkanRenderer::rvtMakeView(RvtImage& img, VkFormat format, VkImageViewType type, uint32_t layers, uint32_t mips)
+{
+    VkImageViewCreateInfo vci{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+    vci.image            = img.image;
+    vci.viewType         = type;
+    vci.format           = format;
+    vci.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, mips, 0, layers };
+    return vkCreateImageView(m_device, &vci, nullptr, &img.view) == VK_SUCCESS;
+}
+
+void VulkanRenderer::rvtDestroyImage(RvtImage& img)
+{
+    if (img.view)   vkDestroyImageView(m_device, img.view, nullptr);
+    if (img.image)  vkDestroyImage(m_device, img.image, nullptr);
+    if (img.memory) vkFreeMemory(m_device, img.memory, nullptr);
+    img = {};
+}
+
+bool VulkanRenderer::rvtMakeBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkBuffer& buf, VkDeviceMemory& mem)
+{
+    VkBufferCreateInfo bci{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+    bci.size  = size;
+    bci.usage = usage;
+    if (vkCreateBuffer(m_device, &bci, nullptr, &buf) != VK_SUCCESS) return false;
+    VkMemoryRequirements req{};
+    vkGetBufferMemoryRequirements(m_device, buf, &req);
+    VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+    mai.allocationSize  = req.size;
+    mai.memoryTypeIndex = findMemoryType(req.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    if (vkAllocateMemory(m_device, &mai, nullptr, &mem) != VK_SUCCESS)
+    {
+        vkDestroyBuffer(m_device, buf, nullptr); buf = VK_NULL_HANDLE;
+        return false;
+    }
+    vkBindBufferMemory(m_device, buf, mem, 0);
+    return true;
+}
+
+namespace
+{
+// One whole-image layout change (all of `layers` x `mips`), the barrier every RVT copy is wrapped in.
+void rvtLayout(VkCommandBuffer c, VkImage image, uint32_t layers, uint32_t mips, VkImageLayout from, VkImageLayout to,
+               VkAccessFlags srcAccess, VkAccessFlags dstAccess, VkPipelineStageFlags srcStage, VkPipelineStageFlags dstStage)
+{
+    VkImageMemoryBarrier b{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+    b.oldLayout = from; b.newLayout = to;
+    b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    b.image = image;
+    b.srcAccessMask = srcAccess; b.dstAccessMask = dstAccess;
+    b.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, mips, 0, layers };
+    vkCmdPipelineBarrier(c, srcStage, dstStage, 0, 0, nullptr, 0, nullptr, 1, &b);
+}
+} // namespace
+
+// ── Cold pages (Thema 333 step 9, counterpart of Metal 6j / D3D11/D3D12's identical scheme): BC7 arrays, slice = slot
+// (no further decoupling). Unlike D3D12's null-SRV idiom, Vulkan has no descriptor that is valid-but-unbacked without
+// VK_EXT_robustness2 (not assumed here), so the cold images are allocated EAGERLY (1 slice) the moment the layout has
+// the rows (m_matRvtCold) — every RVT-consuming draw's descriptor set statically references bindings 44..46 and must
+// have a real view bound, whether or not any page has gone cold yet (never sampled for real until the table's bit 23
+// says so).
+bool VulkanRenderer::rvtGrowCold(uint32_t slot)
+{
+    if (slot < m_rvtColdAlloc) return true;
+    if (slot >= m_rvtSlots || !m_rvtCold[0].image) return false;
+    const uint32_t grown = std::min(m_rvtSlots, std::max((slot + 32u) & ~31u, m_rvtColdAlloc + std::max(32u, m_rvtColdAlloc / 2)));
+    deviceWaitIdle();
+    rvtDrainPending();
+    RvtImage fresh[3];
+    // TRANSFER_SRC too: growing again later reads FROM this very array (the copy below reads from m_rvtCold[layer]).
+    const VkImageUsageFlags use = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    bool ok = true;
+    for (uint32_t layer = 0; layer < 3 && ok; ++layer)
+        ok = rvtMakeImage(layer == 0 ? VK_FORMAT_BC7_SRGB_BLOCK : VK_FORMAT_BC7_UNORM_BLOCK, m_rvtPagePx, m_rvtPagePx, grown, 1, use,
+                          0, fresh[layer])
+          && rvtMakeView(fresh[layer], layer == 0 ? VK_FORMAT_BC7_SRGB_BLOCK : VK_FORMAT_BC7_UNORM_BLOCK, VK_IMAGE_VIEW_TYPE_2D_ARRAY, grown, 1);
+    if (ok)
+        ok = rvtOneShot([&](VkCommandBuffer c) {
+            for (uint32_t layer = 0; layer < 3; ++layer)
+            {
+                rvtLayout(c, m_rvtCold[layer].image, m_rvtColdAlloc, 1, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                          VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+                rvtLayout(c, fresh[layer].image, grown, 1, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                          0, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+                VkImageCopy region{};
+                region.srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, m_rvtColdAlloc };
+                region.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, m_rvtColdAlloc };
+                region.extent = { m_rvtPagePx, m_rvtPagePx, 1 };
+                vkCmdCopyImage(c, m_rvtCold[layer].image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                               fresh[layer].image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+                rvtLayout(c, fresh[layer].image, grown, 1, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                          VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+            }
+        });
+    if (!ok) { for (RvtImage& im : fresh) rvtDestroyImage(im); return false; }
+    for (uint32_t layer = 0; layer < 3; ++layer) { rvtDestroyImage(m_rvtCold[layer]); m_rvtCold[layer] = fresh[layer]; }
+    HE_LOG_INFO(RHI, "VulkanRenderer: RVT cold pool grew %u -> %u of %u pages (%.1f MB, BC7)", m_rvtColdAlloc, grown, m_rvtSlots,
+                double(grown) * HE::blockEncodedBytes(m_rvtPagePx, m_rvtPagePx) * 3.0 / (1024.0 * 1024.0));
+    m_rvtColdAlloc = grown;
+    return true;
+}
+
+// The hot slice of a manager slot, taking one from the free list (or growing the hot arrays) when it has none.
+uint32_t VulkanRenderer::rvtHotFor(uint32_t slot)
+{
+    if (m_rvtSlotHot[slot] >= 0) return uint32_t(m_rvtSlotHot[slot]);
+    if (m_rvtHotFree.empty())
+    {
+        const uint32_t before = m_rvtAlloc;
+        if (!rvtGrowPool(before) || m_rvtAlloc <= before) return 0xFFFFFFFFu;
+        for (uint32_t i = m_rvtAlloc; i-- > before;) m_rvtHotFree.push_back(i);
+    }
+    const uint32_t hot = m_rvtHotFree.back();
+    m_rvtHotFree.pop_back();
+    m_rvtSlotHot[slot] = int32_t(hot);
+    ++m_rvtStateVer;
+    return hot;
+}
+
+// The table the shader reads: the manager's entries with each slot rewritten to hot slice or bit 23 + slot (the same
+// contract as D3D11/D3D12/Metal). Always uploads (SetRvtPageTable's caller already knows it has new data); UpdateRvtCold
+// calls it again, unconditionally, only for tables whose stateVer fell behind.
+void VulkanRenderer::rvtUploadTable(RvtTable& t, bool freshImage)
+{
+    if (t.src.empty() || !t.img.image) return;
+    VkDeviceSize total = 0;
+    for (size_t m = 0; m < t.src.size(); ++m) total += VkDeviceSize(t.src[m].size()) * sizeof(uint32_t);
+    VkBuffer stage = VK_NULL_HANDLE; VkDeviceMemory stageMem = VK_NULL_HANDLE;
+    if (!rvtMakeBuffer(total, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, stage, stageMem)) return;
+    void* mapped = nullptr;
+    vkMapMemory(m_device, stageMem, 0, total, 0, &mapped);
+    std::vector<VkBufferImageCopy> regions(t.src.size());
+    std::vector<uint32_t> row;
+    VkDeviceSize off = 0;
+    for (size_t m = 0; m < t.src.size(); ++m)
+    {
+        const std::vector<uint32_t>& in = t.src[m];
+        const uint32_t ms = t.side >> m;
+        row.resize(in.size());
+        for (size_t i = 0; i < in.size(); ++i)
+        {
+            const uint32_t e = in[i];
+            if (e == 0xFFFFFFFFu) { row[i] = e; continue; }
+            const uint32_t slot = e & 0xFFFFFFu, eff = e >> 24;
+            if (slot >= m_rvtSlots)             row[i] = 0xFFFFFFFFu;
+            else if (m_rvtSlotCold[slot])       row[i] = (eff << 24) | 0x800000u | slot;
+            else if (m_rvtSlotHot[slot] >= 0)   row[i] = (eff << 24) | uint32_t(m_rvtSlotHot[slot]);
+            else                                 row[i] = 0xFFFFFFFFu;
+        }
+        std::memcpy(static_cast<uint8_t*>(mapped) + off, row.data(), row.size() * sizeof(uint32_t));
+        regions[m] = {};
+        regions[m].bufferOffset = off;
+        regions[m].imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, static_cast<uint32_t>(m), 0, 1 };
+        regions[m].imageExtent = { ms, ms, 1 };
+        off += VkDeviceSize(in.size()) * sizeof(uint32_t);
+    }
+    vkUnmapMemory(m_device, stageMem);
+    const VkImage img = t.img.image;
+    const uint32_t nMips = t.mips;
+    rvtOneShot([&](VkCommandBuffer c) {
+        rvtLayout(c, img, 1, nMips, freshImage ? VK_IMAGE_LAYOUT_UNDEFINED : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, freshImage ? 0 : VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+                  VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+        vkCmdCopyBufferToImage(c, stage, img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, nMips, regions.data());
+        rvtLayout(c, img, 1, nMips, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                  VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+    });
+    vkDestroyBuffer(m_device, stage, nullptr);
+    vkFreeMemory(m_device, stageMem, nullptr);
+    t.stateVer = m_rvtStateVer;
+}
+
+// The encoder thread (CPU only). Readback here is already a full device-idle (rvtOneShot), so like D3D12 there is no
+// async fence to poll: the RGBA bytes are ready to hand to the worker the moment the synchronous copy below returns.
+struct VulkanRenderer::RvtColdWork
+{
+    struct Todo { uint32_t slot, ver; std::vector<uint8_t> rgba[3]; };
+    struct Done { uint32_t slot, ver; std::vector<uint8_t> blocks[3]; };
+    std::mutex              mutex;
+    std::condition_variable cv;
+    std::deque<Todo>        todo;
+    std::deque<Done>        done;
+    std::thread             worker;
+    bool                    quit = false;
+    uint32_t                pagePx = 0;
+
+    void start(uint32_t px)
+    {
+        pagePx = px;
+        worker = std::thread([this] {
+            for (;;)
+            {
+                Todo job;
+                {
+                    std::unique_lock<std::mutex> lock(mutex);
+                    if (!cv.wait_for(lock, std::chrono::seconds(3), [this] { return quit || !todo.empty(); }))
+                    {
+                        lock.unlock();
+                        HE::releaseBlockEncoderCache();
+                        lock.lock();
+                        cv.wait(lock, [this] { return quit || !todo.empty(); });
+                    }
+                    if (quit) return;
+                    job = std::move(todo.front());
+                    todo.pop_front();
+                }
+                Done out; out.slot = job.slot; out.ver = job.ver;
+                bool ok = true;
+                for (int layer = 0; layer < 3 && ok; ++layer)
+                    ok = HE::encodeBlocks(HE::BlockFormat::Bc7, job.rgba[layer].data(), pagePx, pagePx, false, 0, out.blocks[layer]);
+                if (!ok) out.blocks[0].clear();
+                std::lock_guard<std::mutex> lock(mutex);
+                done.push_back(std::move(out));
+            }
+        });
+    }
+    void stop()
+    {
+        { std::lock_guard<std::mutex> lock(mutex); quit = true; }
+        cv.notify_all();
+        if (worker.joinable()) worker.join();
+    }
+    ~RvtColdWork() { stop(); }
+};
+
+VulkanRenderer::~VulkanRenderer() { delete m_rvtWork; }
+
+// mode 1 = normal (x, z = R, B of the page), mode 2 = surface (AO, roughness = R, G of the page) — same convention
+// as D3D11's kRvtPackHLSL / D3D12's kRvtPackHLSL12. texelFetch at gl_FragCoord: exact, an 8-bit value round-trips
+// through float unchanged. The vertex stage is m_matShaderLib.fullscreenVertex (no varyings, same trick as D3D's
+// kFSTriangleVS: gl_FragCoord carries the pixel position).
+static const char* kRvtPackFragGLSL = R"(#version 450
+layout(set = 0, binding = 0) uniform sampler2D rvtPackSrc;
+layout(push_constant) uniform RvtPackPC { uint mode; } pc;
+layout(location = 0) out vec2 outColor;
+void main()
+{
+    vec4 c = texelFetch(rvtPackSrc, ivec2(gl_FragCoord.xy), 0);
+    outColor = pc.mode == 1u ? c.rb : c.rg;
+}
+)";
+
+// Built lazily, once (a failure sticks — RenderSceneImage's page copy falls back to "page not packed, not written"
+// rather than retrying every page). Packed draws always wait synchronously (see the member comment in the header),
+// so ONE descriptor set is safe to update and reuse for every page: by the time the next one runs, the GPU is done
+// reading the last one's binding.
+bool VulkanRenderer::ensureRvtPackPipeline()
+{
+    if (m_rvtPackPipeline) return true;
+    if (m_rvtPackTried) return false;
+    m_rvtPackTried = true;
+#if !defined(HE_HAVE_SHADERC)
+    HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: RVT page pack needs the shader cross-compiler, not built into this binary");
+    return false;
+#else
+    const HE::MaterialShaderLibrary::Compiled& vc = m_matShaderLib.fullscreenVertex(HE::MaterialShaderLibrary::Backend::SpirV);
+    const he::shaderc::Result fc = he::shaderc::compile(kRvtPackFragGLSL, he::shaderc::Stage::Fragment, he::shaderc::Target::SpirvBinary);
+    if (!vc.ok || vc.spirv.empty() || !fc.ok || fc.spirv.empty())
+    {
+        HE_LOG_ERROR(RHI, "%s", (std::string("VulkanRenderer: RVT page pack shader compile failed: ") + vc.log + " " + fc.log).c_str());
+        return false;
+    }
+    auto makeModule = [&](const std::vector<uint32_t>& spv) -> VkShaderModule {
+        VkShaderModuleCreateInfo ci{ VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO };
+        ci.codeSize = spv.size() * sizeof(uint32_t);
+        ci.pCode    = spv.data();
+        VkShaderModule mod = VK_NULL_HANDLE;
+        vkCreateShaderModule(m_device, &ci, nullptr, &mod);
+        return mod;
+    };
+    VkShaderModule vs = makeModule(vc.spirv);
+    VkShaderModule fs = makeModule(fc.spirv);
+    if (!vs || !fs)
+    {
+        if (vs) vkDestroyShaderModule(m_device, vs, nullptr);
+        if (fs) vkDestroyShaderModule(m_device, fs, nullptr);
+        HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: RVT page pack shader module creation failed");
+        return false;
+    }
+
+    VkDescriptorSetLayoutBinding bind{};
+    bind.binding = 0; bind.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    bind.descriptorCount = 1; bind.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    VkDescriptorSetLayoutCreateInfo slci{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
+    slci.bindingCount = 1; slci.pBindings = &bind;
+    bool ok = vkCreateDescriptorSetLayout(m_device, &slci, nullptr, &m_rvtPackSetLayout) == VK_SUCCESS;
+
+    VkPushConstantRange pc{}; pc.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT; pc.size = 4;
+    VkPipelineLayoutCreateInfo plci{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+    plci.setLayoutCount = 1; plci.pSetLayouts = &m_rvtPackSetLayout;
+    plci.pushConstantRangeCount = 1; plci.pPushConstantRanges = &pc;
+    if (ok) ok = vkCreatePipelineLayout(m_device, &plci, nullptr, &m_rvtPackPipeLayout) == VK_SUCCESS;
+
+    VkAttachmentDescription att{};
+    att.format = VK_FORMAT_R8G8_UNORM; att.samples = VK_SAMPLE_COUNT_1_BIT;
+    att.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE; att.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    att.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE; att.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    // The caller transitions the slice to COLOR_ATTACHMENT_OPTIMAL before BeginRenderPass and back to
+    // SHADER_READ_ONLY_OPTIMAL after EndRenderPass (explicit barriers, this file's convention throughout RVT);
+    // the render pass itself makes no layout change.
+    att.initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    att.finalLayout    = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    VkAttachmentReference ref{ 0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL };
+    VkSubpassDescription sub{}; sub.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    sub.colorAttachmentCount = 1; sub.pColorAttachments = &ref;
+    VkRenderPassCreateInfo rpci{ VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO };
+    rpci.attachmentCount = 1; rpci.pAttachments = &att;
+    rpci.subpassCount = 1; rpci.pSubpasses = &sub;
+    if (ok) ok = vkCreateRenderPass(m_device, &rpci, nullptr, &m_rvtPackRP) == VK_SUCCESS;
+
+    if (ok)
+    {
+        VkPipelineShaderStageCreateInfo stages[2]{};
+        stages[0] = { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_VERTEX_BIT, vs, "main", nullptr };
+        stages[1] = { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_FRAGMENT_BIT, fs, "main", nullptr };
+        VkPipelineVertexInputStateCreateInfo vi{ VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
+        VkPipelineInputAssemblyStateCreateInfo ia{ VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO };
+        ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+        VkPipelineViewportStateCreateInfo vp{ VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO };
+        vp.viewportCount = 1; vp.scissorCount = 1;
+        VkPipelineRasterizationStateCreateInfo rs{ VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO };
+        rs.polygonMode = VK_POLYGON_MODE_FILL; rs.cullMode = VK_CULL_MODE_NONE; rs.lineWidth = 1.0f;
+        VkPipelineMultisampleStateCreateInfo ms{ VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO };
+        ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+        VkPipelineColorBlendAttachmentState cba{}; cba.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT;
+        VkPipelineColorBlendStateCreateInfo cb{ VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO };
+        cb.attachmentCount = 1; cb.pAttachments = &cba;
+        VkDynamicState dyn[2] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+        VkPipelineDynamicStateCreateInfo dsci{ VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO };
+        dsci.dynamicStateCount = 2; dsci.pDynamicStates = dyn;
+        VkGraphicsPipelineCreateInfo gp{ VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO };
+        gp.stageCount = 2; gp.pStages = stages;
+        gp.pVertexInputState = &vi; gp.pInputAssemblyState = &ia; gp.pViewportState = &vp;
+        gp.pRasterizationState = &rs; gp.pMultisampleState = &ms; gp.pColorBlendState = &cb; gp.pDynamicState = &dsci;
+        gp.layout = m_rvtPackPipeLayout; gp.renderPass = m_rvtPackRP; gp.subpass = 0;
+        ok = vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &gp, nullptr, &m_rvtPackPipeline) == VK_SUCCESS;
+    }
+    if (ok)
+    {
+        VkDescriptorPoolSize ps{ VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1 };
+        VkDescriptorPoolCreateInfo dpci{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
+        dpci.maxSets = 1; dpci.poolSizeCount = 1; dpci.pPoolSizes = &ps;
+        ok = vkCreateDescriptorPool(m_device, &dpci, nullptr, &m_rvtPackDescPool) == VK_SUCCESS;
+    }
+    vkDestroyShaderModule(m_device, vs, nullptr);
+    vkDestroyShaderModule(m_device, fs, nullptr);
+    if (!ok)
+    {
+        HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: RVT page pack pipeline creation failed");
+        if (m_rvtPackPipeline)     { vkDestroyPipeline(m_device, m_rvtPackPipeline, nullptr); m_rvtPackPipeline = VK_NULL_HANDLE; }
+        if (m_rvtPackRP)           { vkDestroyRenderPass(m_device, m_rvtPackRP, nullptr); m_rvtPackRP = VK_NULL_HANDLE; }
+        if (m_rvtPackPipeLayout)   { vkDestroyPipelineLayout(m_device, m_rvtPackPipeLayout, nullptr); m_rvtPackPipeLayout = VK_NULL_HANDLE; }
+        if (m_rvtPackSetLayout)    { vkDestroyDescriptorSetLayout(m_device, m_rvtPackSetLayout, nullptr); m_rvtPackSetLayout = VK_NULL_HANDLE; }
+        if (m_rvtPackDescPool)     { vkDestroyDescriptorPool(m_device, m_rvtPackDescPool, nullptr); m_rvtPackDescPool = VK_NULL_HANDLE; }
+        return false;
+    }
+    return true;
+#endif
+}
+
+// Destroys the PREVIOUS packed page's transient view/framebuffer. Called at the start of rvtPackPage (safe: that
+// page's command buffer has already been waited on synchronously by the time this one starts) and from
+// DestroyRvtPool (which waits for the device first).
+void VulkanRenderer::rvtPackReleaseTransient()
+{
+    if (m_rvtPackLastFb)   { vkDestroyFramebuffer(m_device, m_rvtPackLastFb, nullptr); m_rvtPackLastFb = VK_NULL_HANDLE; }
+    if (m_rvtPackLastView) { vkDestroyImageView(m_device, m_rvtPackLastView, nullptr); m_rvtPackLastView = VK_NULL_HANDLE; }
+}
+
+// The pack draw itself, recorded into `cmd` — the same command buffer RenderSceneImage's page copy uses. `srcImage`
+// is the just-drawn page (viewport image, already transitioned to SHADER_READ_ONLY_OPTIMAL by the caller — its
+// persistent m_viewportView is read directly, no transient source view needed); `dstImage` is the pool array for
+// this layer, slice `hotSlice`. The destination view/framebuffer this call creates are NOT destroyed here — the
+// command buffer that reads them has not even been submitted yet at this point, only recorded; they outlive the
+// call in m_rvtPackLastView/Fb and are freed by rvtPackReleaseTransient on the NEXT packed page (RenderSceneImage
+// forces a synchronous wait after every packed page's submission, so "next call" means "GPU already done").
+void VulkanRenderer::rvtPackPage(VkCommandBuffer cmd, VkImage srcImage, int layer, VkImage dstImage, uint32_t hotSlice, uint32_t px)
+{
+    rvtPackReleaseTransient();
+    VkImageView dstView = VK_NULL_HANDLE;
+    VkImageViewCreateInfo vci{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+    vci.image = dstImage; vci.viewType = VK_IMAGE_VIEW_TYPE_2D; vci.format = VK_FORMAT_R8G8_UNORM;
+    vci.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, hotSlice, 1 };
+    if (vkCreateImageView(m_device, &vci, nullptr, &dstView) != VK_SUCCESS) return;
+
+    VkFramebuffer fb = VK_NULL_HANDLE;
+    VkFramebufferCreateInfo fci{ VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO };
+    fci.renderPass = m_rvtPackRP; fci.attachmentCount = 1; fci.pAttachments = &dstView;
+    fci.width = px; fci.height = px; fci.layers = 1;
+    if (vkCreateFramebuffer(m_device, &fci, nullptr, &fb) != VK_SUCCESS) { vkDestroyImageView(m_device, dstView, nullptr); return; }
+
+    VkDescriptorSet set = VK_NULL_HANDLE;
+    VkDescriptorSetAllocateInfo dsai{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
+    dsai.descriptorPool = m_rvtPackDescPool; dsai.descriptorSetCount = 1; dsai.pSetLayouts = &m_rvtPackSetLayout;
+    // One set, allocated fresh each call and reset with the pool: packed draws always wait synchronously (the GPU is
+    // never still reading an older binding when this runs), so there is no overlap to race.
+    vkResetDescriptorPool(m_device, m_rvtPackDescPool, 0);
+    if (vkAllocateDescriptorSets(m_device, &dsai, &set) != VK_SUCCESS) { vkDestroyFramebuffer(m_device, fb, nullptr); vkDestroyImageView(m_device, dstView, nullptr); return; }
+    VkDescriptorImageInfo dii{ m_rvtSampler, m_viewportView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+    VkWriteDescriptorSet write{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+    write.dstSet = set; write.dstBinding = 0; write.descriptorCount = 1;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; write.pImageInfo = &dii;
+    vkUpdateDescriptorSets(m_device, 1, &write, 0, nullptr);
+
+    VkImageMemoryBarrier toAtt{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+    toAtt.srcQueueFamilyIndex = toAtt.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    toAtt.image = dstImage; toAtt.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL; toAtt.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    toAtt.srcAccessMask = VK_ACCESS_SHADER_READ_BIT; toAtt.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    toAtt.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, hotSlice, 1 };
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, 0, nullptr, 0, nullptr, 1, &toAtt);
+
+    VkRenderPassBeginInfo rpbi{ VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
+    rpbi.renderPass = m_rvtPackRP; rpbi.framebuffer = fb; rpbi.renderArea = { {0, 0}, {px, px} };
+    vkCmdBeginRenderPass(cmd, &rpbi, VK_SUBPASS_CONTENTS_INLINE);
+    VkViewport v{ 0, 0, float(px), float(px), 0, 1 };
+    VkRect2D sc{ {0, 0}, {px, px} };
+    vkCmdSetViewport(cmd, 0, 1, &v);
+    vkCmdSetScissor(cmd, 0, 1, &sc);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_rvtPackPipeline);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_rvtPackPipeLayout, 0, 1, &set, 0, nullptr);
+    const uint32_t mode = layer == 1 ? 1u : 2u;
+    vkCmdPushConstants(cmd, m_rvtPackPipeLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, 4, &mode);
+    vkCmdDraw(cmd, 3, 1, 0, 0);
+    vkCmdEndRenderPass(cmd);
+
+    VkImageMemoryBarrier toShader = toAtt;
+    toShader.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL; toShader.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    toShader.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT; toShader.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &toShader);
+
+    // NOT destroyed here — this command buffer is only recorded, not yet submitted. Kept until the next packed page
+    // (rvtPackReleaseTransient, above) or DestroyRvtPool.
+    m_rvtPackLastFb   = fb;
+    m_rvtPackLastView = dstView;
+    (void)srcImage;
+}
+
+bool VulkanRenderer::CreateRvtPool(uint32_t slots, uint32_t pagePx)
+{
+    DestroyRvtPool();
+    if (!m_device || !m_matReady || !m_matRvt || !m_postFxReady || slots == 0 || slots > 2048 || pagePx < 8 || pagePx > 1024) return false;
+    if (!m_rvtSampler)
+    {
+        VkSamplerCreateInfo sci{ VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
+        sci.magFilter = sci.minFilter = VK_FILTER_NEAREST;
+        sci.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+        sci.addressModeU = sci.addressModeV = sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        sci.maxLod = 0.0f;
+        if (vkCreateSampler(m_device, &sci, nullptr, &m_rvtSampler) != VK_SUCCESS) return false;
+    }
+    // The arrays start small and grow with the pages in use (rvtGrowPool); HE_RVT_GROW=0 allocates the whole pool at once.
+    static const bool s_grow = [] { const char* e = std::getenv("HE_RVT_GROW"); return !(e && *e == '0'); }();
+    const uint32_t first = s_grow ? std::min(slots, 64u) : slots;
+    static const bool packWanted = [] { const char* e = std::getenv("HE_RVT_PACK"); return !(e && *e == '0'); }();
+    m_rvtPack = packWanted;
+    // BaseColor is created UNORM (raw copies of the sRGB-encoded page) and read through an SRGB view. Layers 1/2
+    // (Thema 333 step 10, HE_RVT_PACK): two channels, COLOR_ATTACHMENT too (the pack pass is the only way data gets
+    // into them; a format change rules out vkCmdCopyImage).
+    const VkImageUsageFlags use = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    for (uint32_t layer = 0; layer < 3; ++layer)
+    {
+        const bool rg = m_rvtPack && layer > 0;
+        const VkImageUsageFlags layerUse = rg ? (use | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) : use;
+        const VkFormat layerFmt = rg ? VK_FORMAT_R8G8_UNORM : VK_FORMAT_R8G8B8A8_UNORM;
+        if (!rvtMakeImage(layerFmt, pagePx, pagePx, first, 1, layerUse,
+                          layer == 0 ? VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT : 0, m_rvtPool[layer])
+            || !rvtMakeView(m_rvtPool[layer], rg ? VK_FORMAT_R8G8_UNORM : (layer == 0 ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM),
+                            VK_IMAGE_VIEW_TYPE_2D_ARRAY, first, 1))
+        {
+            DestroyRvtPool();
+            return false;
+        }
+    }
+    const bool ok = rvtOneShot([&](VkCommandBuffer c) {
+        for (const RvtImage& im : m_rvtPool)
+            rvtLayout(c, im.image, first, 1, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                      0, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+    });
+    if (!ok) { DestroyRvtPool(); return false; }
+    m_rvtSlots  = slots;
+    m_rvtAlloc  = first;
+    m_rvtPagePx = pagePx;
+    m_rvtSlotHot.assign(slots, -1);
+    m_rvtSlotCold.assign(slots, 0);
+    m_rvtSlotBusy.assign(slots, 0);
+    m_rvtSlotVer.assign(slots, 0);
+    m_rvtSlotPainted.assign(slots, 0);
+    m_rvtHotFree.clear();
+    for (uint32_t i = first; i-- > 0;) m_rvtHotFree.push_back(i);
+    m_rvtColdOn = false;
+    // Eager, 1 slice: Vulkan has no "null but valid" descriptor without VK_EXT_robustness2, so every draw whose
+    // pipeline statically reads bindings 44..46 (m_matRvtCold) needs a real view bound from the first one onward.
+    if (m_matRvtCold)
+    {
+        // TRANSFER_SRC too: rvtGrowCold later reads FROM this very 1-slice array when it grows.
+        const VkImageUsageFlags coldUse = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+        bool coldOk = true;
+        for (uint32_t layer = 0; layer < 3 && coldOk; ++layer)
+            coldOk = rvtMakeImage(layer == 0 ? VK_FORMAT_BC7_SRGB_BLOCK : VK_FORMAT_BC7_UNORM_BLOCK, pagePx, pagePx, 1, 1, coldUse, 0, m_rvtCold[layer])
+                  && rvtMakeView(m_rvtCold[layer], layer == 0 ? VK_FORMAT_BC7_SRGB_BLOCK : VK_FORMAT_BC7_UNORM_BLOCK, VK_IMAGE_VIEW_TYPE_2D_ARRAY, 1, 1);
+        if (coldOk)
+            coldOk = rvtOneShot([&](VkCommandBuffer c) {
+                for (const RvtImage& im : m_rvtCold)
+                    rvtLayout(c, im.image, 1, 1, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                              0, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+            });
+        if (coldOk) m_rvtColdAlloc = 1;
+        else        for (RvtImage& im : m_rvtCold) rvtDestroyImage(im);   // RVT itself still works; cold just never turns on
+    }
+    return true;
+}
+
+// A page for a slot beyond the slices the arrays hold grows them: new arrays, the old slices copied across on the GPU,
+// the old arrays destroyed once the device is idle (the descriptors are written per draw from m_rvtPool[k].view, so they follow).
+// Called BEFORE the page's own command buffer is recorded. The manager hands out slots from 0 upwards and reuses freed ones (the highest slot in use never exceeds the peak page count), so a scene that
+// needs 70 pages holds ~100 instead of the configured 512.
+bool VulkanRenderer::rvtGrowPool(uint32_t slot)
+{
+    if (slot < m_rvtAlloc) return true;
+    if (slot >= m_rvtSlots || !m_rvtPool[0].image) return false;
+    const uint32_t grown = std::min(m_rvtSlots, std::max((slot + 32u) & ~31u, m_rvtAlloc + m_rvtAlloc / 2));
+    deviceWaitIdle();           // frames in flight read the pool
+    rvtDrainPending();          // and the layers kept by the page pipeline are done with
+    RvtImage fresh[3];
+    const VkImageUsageFlags use = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    bool ok = true;
+    for (uint32_t layer = 0; layer < 3 && ok; ++layer)
+    {
+        const bool rg = m_rvtPack && layer > 0;
+        const VkImageUsageFlags layerUse = rg ? (use | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) : use;
+        const VkFormat layerFmt = rg ? VK_FORMAT_R8G8_UNORM : VK_FORMAT_R8G8B8A8_UNORM;
+        ok = rvtMakeImage(layerFmt, m_rvtPagePx, m_rvtPagePx, grown, 1, layerUse,
+                          layer == 0 ? VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT : 0, fresh[layer])
+          && rvtMakeView(fresh[layer], rg ? VK_FORMAT_R8G8_UNORM : (layer == 0 ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM), VK_IMAGE_VIEW_TYPE_2D_ARRAY, grown, 1);
+    }
+    if (ok)
+        ok = rvtOneShot([&](VkCommandBuffer c) {
+            for (uint32_t layer = 0; layer < 3; ++layer)
+            {
+                rvtLayout(c, m_rvtPool[layer].image, m_rvtAlloc, 1, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                          VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+                rvtLayout(c, fresh[layer].image, grown, 1, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                          0, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+                VkImageCopy region{};
+                region.srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, m_rvtAlloc };
+                region.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, m_rvtAlloc };
+                region.extent = { m_rvtPagePx, m_rvtPagePx, 1 };
+                vkCmdCopyImage(c, m_rvtPool[layer].image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                               fresh[layer].image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+                rvtLayout(c, fresh[layer].image, grown, 1, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                          VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+            }
+        });
+    if (!ok)
+    {
+        for (RvtImage& im : fresh) rvtDestroyImage(im);
+        return false;
+    }
+    for (uint32_t layer = 0; layer < 3; ++layer)
+    {
+        rvtDestroyImage(m_rvtPool[layer]);
+        m_rvtPool[layer] = fresh[layer];
+    }
+    HE_LOG_INFO(RHI, "VulkanRenderer: RVT pool grew %u -> %u of %u pages (%.0f MB, %s)", m_rvtAlloc, grown, m_rvtSlots,
+                double(grown) * m_rvtPagePx * m_rvtPagePx * (m_rvtPack ? 8.0 : 12.0) / (1024.0 * 1024.0),
+                m_rvtPack ? "RGBA8 + RG8 + RG8" : "RGBA8 x 3");
+    m_rvtAlloc = grown;
+    return true;
+}
+
+void VulkanRenderer::DestroyRvtPool()
+{
+    if (!m_device) return;
+    const bool any = m_rvtPool[0].image || m_rvtPool[1].image || m_rvtPool[2].image || !m_rvtTables.empty() || !m_rvtSwaps.empty()
+                   || m_rvtPackLastView || m_rvtPackLastFb;
+    if (any) deviceWaitIdle();         // frames in flight read the pool and the tables
+    rvtDrainPending();                 // a bracket's command buffers are done too: free them before the pool goes
+    rvtPackReleaseTransient();         // the pack pipeline itself (PSO/RenderPass/layouts/pool) is renderer-lifetime, kept
+    if (m_rvtWork) { m_rvtWork->stop(); delete m_rvtWork; m_rvtWork = nullptr; }
+    m_rvtSwaps.clear();                // the pool the consumers read is gone: draw the landscapes themselves again
+    for (auto& kv : m_rvtTables) rvtDestroyImage(kv.second.img);
+    m_rvtTables.clear();
+    for (RvtImage& im : m_rvtPool) rvtDestroyImage(im);
+    for (RvtImage& im : m_rvtCold) rvtDestroyImage(im);
+    m_rvtSlots = m_rvtAlloc = m_rvtPagePx = m_rvtColdAlloc = 0;
+    m_rvtColdOn = false;
+    m_rvtPack = false;
+    m_rvtStateVer = 1;
+    m_rvtRealFrames = 0;
+    m_rvtSlotHot.clear(); m_rvtSlotCold.clear(); m_rvtSlotBusy.clear(); m_rvtSlotVer.clear(); m_rvtSlotPainted.clear(); m_rvtHotFree.clear();
+}
+
+void VulkanRenderer::SetRvtLandscape(uint32_t terrainEntity, const HE::UUID& landscapeMaterial, const HE::UUID& consumerMaterial)
+{
+    if (consumerMaterial == HE::UUID{}) m_rvtSwaps.erase(terrainEntity);
+    else                               m_rvtSwaps[terrainEntity] = { landscapeMaterial, consumerMaterial };
+}
+
+void VulkanRenderer::ReleaseRvtConsumer(const HE::UUID& consumerMaterial)
+{
+    for (auto it = m_rvtSwaps.begin(); it != m_rvtSwaps.end();)
+        it = it->second.consumerMat == consumerMaterial ? m_rvtSwaps.erase(it) : std::next(it);
+    const auto t = m_rvtTables.find(consumerMaterial);
+    if (t == m_rvtTables.end()) return;
+    deviceWaitIdle();                  // a recorded frame may still read this table
+    rvtDestroyImage(t->second.img);
+    m_rvtTables.erase(t);
+}
+
+bool VulkanRenderer::SetRvtPageTable(const HE::UUID& consumerMaterial, const std::vector<std::vector<uint32_t>>& mips)
+{
+    if (!m_device || !m_rvtSlots || mips.empty() || mips.size() > 12) return false;
+    uint32_t side = 1;
+    while (uint64_t(side) * side < mips[0].size()) ++side;
+    if (uint64_t(side) * side != mips[0].size() || (side & (side - 1)) != 0 || side > 4096) return false;   // a power of two
+    for (size_t m = 0; m < mips.size(); ++m)
+    {
+        const uint32_t ms = side >> m;
+        if (ms == 0 || mips[m].size() != size_t(ms) * ms) return false;
+    }
+    const uint32_t nMips = static_cast<uint32_t>(mips.size());
+    deviceWaitIdle();                  // a recorded frame may still read the old table
+    RvtTable& t = m_rvtTables[consumerMaterial];
+    const bool fresh = !t.img.image || t.side != side || t.mips != nMips;
+    if (fresh)
+    {
+        rvtDestroyImage(t.img);
+        if (!rvtMakeImage(VK_FORMAT_R32_UINT, side, side, 1, nMips,
+                          VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, 0, t.img)
+            || !rvtMakeView(t.img, VK_FORMAT_R32_UINT, VK_IMAGE_VIEW_TYPE_2D, 1, nMips))
+        {
+            rvtDestroyImage(t.img);
+            m_rvtTables.erase(consumerMaterial);
+            return false;
+        }
+        t.side = side;
+        t.mips = nMips;
+    }
+    t.src = mips;
+    rvtUploadTable(t, fresh);
+    return true;
+}
+
+bool VulkanRenderer::ReadbackRvtPageTable(const HE::UUID& consumerMaterial, std::vector<std::vector<uint32_t>>& mips)
+{
+    const auto found = m_rvtTables.find(consumerMaterial);
+    if (found == m_rvtTables.end() || !found->second.img.image) return false;
+    mips = found->second.src;   // the manager's form; the GPU image holds the rewritten one (hot slice / cold bit)
+    return true;
+}
+
+bool VulkanRenderer::ReadbackRvtSlot(int layer, uint32_t slot, std::vector<uint8_t>& rgba)
+{
+    // A cold page lives as BC7 blocks only: the witnesses read pages straight after painting them, hot.
+    if (layer < 0 || layer >= 3 || !m_rvtPool[layer].image || slot >= m_rvtSlots || slot >= m_rvtSlotHot.size() || m_rvtSlotHot[slot] < 0)
+        return false;
+    const uint32_t hotSlice = uint32_t(m_rvtSlotHot[slot]);
+    const bool rg = m_rvtPack && layer > 0;
+    const VkDeviceSize bytes = VkDeviceSize(m_rvtPagePx) * m_rvtPagePx * (rg ? 2 : 4);
+    VkBuffer buf = VK_NULL_HANDLE; VkDeviceMemory mem = VK_NULL_HANDLE;
+    if (!rvtMakeBuffer(bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT, buf, mem)) return false;
+    const VkImage img = m_rvtPool[layer].image;
+    const uint32_t slots = m_rvtAlloc, px = m_rvtPagePx;
+    const bool ok = rvtOneShot([&](VkCommandBuffer c) {
+        rvtLayout(c, img, slots, 1, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                  VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+        VkBufferImageCopy region{};
+        region.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, hotSlice, 1 };
+        region.imageExtent = { px, px, 1 };
+        vkCmdCopyImageToBuffer(c, img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, buf, 1, &region);
+        rvtLayout(c, img, slots, 1, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                  VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+    });
+    if (ok)
+    {
+        void* mapped = nullptr;
+        vkMapMemory(m_device, mem, 0, bytes, 0, &mapped);
+        const uint8_t* src = static_cast<const uint8_t*>(mapped);
+        if (rg)
+        {
+            // Two channels in the pool, tightly packed (no row-pitch padding on Vulkan buffer-image copies): normal
+            // (x, z) comes back as R and B, the surface as R and G, the rest zero (RvtLayerChannels: layer 1 = 0x5,
+            // layer 2 = 0x3).
+            rgba.assign(static_cast<size_t>(px) * px * 4, 0);
+            const int gDst = layer == 1 ? 2 : 1;
+            for (size_t i = 0; i < size_t(px) * px; ++i)
+            {
+                rgba[i * 4 + 0] = src[i * 2 + 0];
+                rgba[i * 4 + gDst] = src[i * 2 + 1];
+                rgba[i * 4 + 3] = 255;
+            }
+        }
+        else
+        {
+            rgba.resize(static_cast<size_t>(bytes));
+            std::memcpy(rgba.data(), src, static_cast<size_t>(bytes));
+        }
+        vkUnmapMemory(m_device, mem);
+    }
+    vkDestroyBuffer(m_device, buf, nullptr);
+    vkFreeMemory(m_device, mem, nullptr);
+    return ok;
+}
+
+uint32_t VulkanRenderer::RvtLayerChannels(int layer) const
+{
+    if (!m_rvtPack) return 0xFu;
+    return layer == 1 ? 0x5u : layer == 2 ? 0x3u : 0xFu;   // normal: R and B (x, z); surface: R and G; albedo: all
+}
+
+// Once per real frame (Render(), never RenderSceneImage): ages pages, harvests finished BC7 encodes, synchronously
+// reads back ONE page that has stood still (rvtOneShot — a full device-idle, like every other RVT admin op here; one
+// per frame bounds how often that happens), re-uploads tables whose entries changed temperature. Mirrors
+// D3D11Renderer::UpdateRvtCold / D3D12Renderer::UpdateRvtCold / MetalRenderer::UpdateRvtCold (step 6j).
+void VulkanRenderer::UpdateRvtCold()
+{
+    if (!m_rvtSlots || !m_rvtPool[0].image) return;
+    ++m_rvtRealFrames;
+
+    static const bool coldWanted = [] { const char* e = std::getenv("HE_RVT_COLD"); return !(e && *e == '0'); }();
+    if (!m_rvtColdOn && coldWanted && m_matRvtCold)
+    {
+        std::vector<uint8_t> probe(16 * 16 * 4, 128), blocks;
+        m_rvtColdOn = HE::encodeBlocks(HE::BlockFormat::Bc7, probe.data(), 16, 16, false, 0, blocks);
+    }
+    if (!m_rvtColdOn) return;
+
+    static const uint32_t coldMin = [] { const char* e = std::getenv("HE_RVT_COLD_MIN"); return e && *e ? uint32_t(std::max(0, std::atoi(e))) : 0u; }();
+    const uint32_t hotUsed = m_rvtAlloc - uint32_t(m_rvtHotFree.size());
+    if (!m_rvtWork && hotUsed >= coldMin)
+    {
+        m_rvtWork = new RvtColdWork();
+        m_rvtWork->start(m_rvtPagePx);
+        HE_LOG_INFO(RHI, "VulkanRenderer: RVT cold pool: %u hot pages in use, compressing the pages that stand still", hotUsed);
+    }
+    if (m_rvtWork)
+    {
+        static const uint64_t coldAfter = [] { const char* e = std::getenv("HE_RVT_COLD_AFTER"); return e && *e ? uint64_t(std::max(1, std::atoi(e))) : 120ull; }();
+        auto& w = *m_rvtWork;
+        const uint32_t px = m_rvtPagePx;
+        const size_t pageBytes = size_t(px) * px * 4;
+
+        // 1. Encodes that came back.
+        std::deque<RvtColdWork::Done> finished;
+        { std::lock_guard<std::mutex> lock(w.mutex); finished.swap(w.done); }
+        for (auto& d : finished)
+        {
+            m_rvtSlotBusy[d.slot] = 0;
+            if (d.blocks[0].empty() || d.ver != m_rvtSlotVer[d.slot] || m_rvtSlotHot[d.slot] < 0 || m_rvtSlotCold[d.slot]) continue;
+            if (!rvtGrowCold(d.slot)) continue;
+            VkDeviceSize blockBytes = 0;
+            for (auto& b : d.blocks) blockBytes += b.size();
+            VkBuffer stage = VK_NULL_HANDLE; VkDeviceMemory stageMem = VK_NULL_HANDLE;
+            if (!rvtMakeBuffer(blockBytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, stage, stageMem)) continue;
+            void* mapped = nullptr;
+            vkMapMemory(m_device, stageMem, 0, blockBytes, 0, &mapped);
+            VkDeviceSize off = 0;
+            VkBufferImageCopy regions[3]{};
+            for (int layer = 0; layer < 3; ++layer)
+            {
+                std::memcpy(static_cast<uint8_t*>(mapped) + off, d.blocks[layer].data(), d.blocks[layer].size());
+                regions[layer].bufferOffset = off;
+                regions[layer].imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, d.slot, 1 };
+                regions[layer].imageExtent = { px, px, 1 };
+                off += d.blocks[layer].size();
+            }
+            vkUnmapMemory(m_device, stageMem);
+            for (int layer = 0; layer < 3; ++layer)
+            {
+                const VkImage img = m_rvtCold[layer].image;
+                rvtOneShot([&](VkCommandBuffer c) {
+                    rvtLayout(c, img, m_rvtColdAlloc, 1, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                              VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+                    vkCmdCopyBufferToImage(c, stage, img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &regions[layer]);
+                    rvtLayout(c, img, m_rvtColdAlloc, 1, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                              VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+                });
+            }
+            vkDestroyBuffer(m_device, stage, nullptr);
+            vkFreeMemory(m_device, stageMem, nullptr);
+            m_rvtHotFree.push_back(uint32_t(m_rvtSlotHot[d.slot]));
+            m_rvtSlotHot[d.slot] = -1;
+            m_rvtSlotCold[d.slot] = 1;
+            ++m_rvtStateVer;
+        }
+
+        // 2. One page that has stood still long enough: read it back now (synchronous) and queue it for encoding.
+        for (uint32_t slot = 0; slot < m_rvtSlots; ++slot)
+        {
+            if (m_rvtSlotHot[slot] < 0 || m_rvtSlotCold[slot] || m_rvtSlotBusy[slot]) continue;
+            if (m_rvtRealFrames - m_rvtSlotPainted[slot] < coldAfter) continue;
+            const uint32_t hotSlice = uint32_t(m_rvtSlotHot[slot]);
+            // Per-layer byte size (Thema 333 step 10): layers 1/2 are RG8 when packed, half the bytes of RGBA8 — a
+            // shared pageBytes offset (the pre-step-10 shape) would misread them. Tightly packed either way (Vulkan
+            // buffer-image copies need no row-pitch padding, unlike D3D12's).
+            VkDeviceSize layerBytes[3], offset[3] = {}, bytes = 0;
+            for (int layer = 0; layer < 3; ++layer)
+            {
+                layerBytes[layer] = VkDeviceSize(px) * px * ((m_rvtPack && layer > 0) ? 2 : 4);
+                offset[layer] = bytes;
+                bytes += layerBytes[layer];
+            }
+            VkBuffer buf = VK_NULL_HANDLE; VkDeviceMemory mem = VK_NULL_HANDLE;
+            if (!rvtMakeBuffer(bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT, buf, mem)) break;
+            VkBufferImageCopy regions[3]{};
+            for (int layer = 0; layer < 3; ++layer)
+            {
+                regions[layer].bufferOffset = offset[layer];
+                regions[layer].imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, hotSlice, 1 };
+                regions[layer].imageExtent = { px, px, 1 };
+            }
+            const uint32_t slotsAlloc = m_rvtAlloc;
+            for (int layer = 0; layer < 3; ++layer)
+            {
+                const VkImage img = m_rvtPool[layer].image;
+                rvtOneShot([&](VkCommandBuffer c) {
+                    rvtLayout(c, img, slotsAlloc, 1, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                              VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+                    vkCmdCopyImageToBuffer(c, img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, buf, 1, &regions[layer]);
+                    rvtLayout(c, img, slotsAlloc, 1, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                              VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+                });
+            }
+            void* mapped = nullptr;
+            vkMapMemory(m_device, mem, 0, bytes, 0, &mapped);
+            RvtColdWork::Todo job; job.slot = slot; job.ver = m_rvtSlotVer[slot];
+            for (int layer = 0; layer < 3; ++layer)
+            {
+                job.rgba[layer].resize(pageBytes);
+                const uint8_t* base = static_cast<const uint8_t*>(mapped) + offset[layer];
+                if (m_rvtPack && layer > 0)
+                {
+                    // RG8: expand to RGBA for the BC7 encoder input (R, G; B, A fixed) — matches RvtLookup.h's cold
+                    // branch, which reads t.xy under HE_RVT_RGNORMAL regardless of hot or cold.
+                    for (size_t i = 0; i < size_t(px) * px; ++i)
+                    {
+                        job.rgba[layer][i * 4 + 0] = base[i * 2 + 0];
+                        job.rgba[layer][i * 4 + 1] = base[i * 2 + 1];
+                        job.rgba[layer][i * 4 + 2] = 0;
+                        job.rgba[layer][i * 4 + 3] = 255;
+                    }
+                }
+                else
+                    std::memcpy(job.rgba[layer].data(), base, pageBytes);
+            }
+            vkUnmapMemory(m_device, mem);
+            vkDestroyBuffer(m_device, buf, nullptr);
+            vkFreeMemory(m_device, mem, nullptr);
+            { std::lock_guard<std::mutex> lock(w.mutex); w.todo.push_back(std::move(job)); }
+            w.cv.notify_one();
+            m_rvtSlotBusy[slot] = 1;
+            break;   // at most one synchronous readback (one device idle) per real frame
+        }
+    }
+
+    // 3. Tables whose entries are out of date (a page changed temperature or got a hot slice since the last upload).
+    for (auto& kv : m_rvtTables)
+        if (kv.second.stateVer != m_rvtStateVer) rvtUploadTable(kv.second);
+}
+
 // ─── One still from somebody else's camera ────────────────────────────────────
 // The contract is in IRenderer.h; the shape is D3D11's/D3D12's, which is Metal's
 // without the capture flag: the live viewport set is SET ASIDE (the members are
@@ -6351,37 +7578,32 @@ bool VulkanRenderer::CaptureViewport(std::vector<uint8_t>& rgba, uint32_t& outW,
 //
 // Not run: the retired-viewport ageing sweep, the timestamp pair, the overlay,
 // the present — those count in REAL frames. Per-request path, not per-frame.
-bool VulkanRenderer::RenderSceneImage(const EditorCameraOverride& camera, uint32_t width,
-                                      uint32_t height, std::vector<uint8_t>& rgba)
+void VulkanRenderer::stillEnter(uint32_t width, uint32_t height)
 {
-    if (!m_device || !m_graphicsQueue || !m_cmdPool) return false;
-    if (width == 0 || height == 0) return false;
-
-    // Everything the frame reads that the request changes, saved by value. The
-    // handles go into locals and the members are nulled BEFORE
-    // createViewportResources runs: it opens by pushing the old colour image onto
-    // m_retiredViewports and then destroying the rest of the set, and the live
-    // one must survive both untouched.
-    VkImage        liveImage   = m_viewportImage;
-    VkDeviceMemory liveMemory  = m_viewportMemory;
-    VkImageView    liveView    = m_viewportView;
-    VkImage        liveDepthImage  = m_viewportDepthImage;
-    VkDeviceMemory liveDepthMemory = m_viewportDepthMemory;
-    VkImageView    liveDepthView   = m_viewportDepthView;
-    VkRenderPass   liveRenderPass  = m_viewportRenderPass;
-    VkFramebuffer  liveFramebuffer = m_viewportFramebuffer;
-    VkSampler      liveSampler     = m_viewportSampler;
-    const uint32_t      liveW          = m_viewportW;
-    const uint32_t      liveH          = m_viewportH;
-    const uint32_t      liveReqW       = m_viewportReqW;
-    const uint32_t      liveReqH       = m_viewportReqH;
-    const VkImageLayout liveLayout     = m_viewportLayout;
-    const bool          liveResChanged = m_viewportResChanged;
-    const EditorCameraOverride liveCam = m_editorCamera;
+    // Everything the frame reads that the request changes, saved by value. The handles go into the struct and the members
+    // are nulled BEFORE createViewportResources runs: it opens by pushing the old colour image onto m_retiredViewports and
+    // then destroying the rest of the set, and the live one must survive both untouched.
+    StillSet& st = m_still;
+    st = StillSet{};
+    st.liveImage = m_viewportImage; st.liveMemory = m_viewportMemory; st.liveView = m_viewportView;
+    st.liveDepthImage = m_viewportDepthImage; st.liveDepthMemory = m_viewportDepthMemory; st.liveDepthView = m_viewportDepthView;
+    st.liveRenderPass = m_viewportRenderPass; st.liveFramebuffer = m_viewportFramebuffer; st.liveSampler = m_viewportSampler;
+    st.liveW = m_viewportW; st.liveH = m_viewportH; st.liveReqW = m_viewportReqW; st.liveReqH = m_viewportReqH;
+    st.liveLayout = m_viewportLayout;
+    st.liveResChanged = m_viewportResChanged;
+    st.liveCam = m_editorCamera;
     // The counters are the profiler's picture of the last real frame; the
     // screenshot's draws would sit there until the next Render() otherwise.
-    const uint32_t liveDraws = m_statDraws, liveTris = m_statTris,
-                   liveVisible = m_statVisible, liveTotal = m_statTotal;
+    st.liveDraws = m_statDraws; st.liveTris = m_statTris; st.liveVisible = m_statVisible; st.liveTotal = m_statTotal;
+    // A raw capture is the materials' own colour: every effect that would change it is off for the frame and back
+    // afterwards (members the frame reads, saved by value like the camera above).
+    st.liveRaw = m_rawCapture; st.liveSrgb = m_rawSrgb;
+    st.liveBloom = m_bloomEnabled; st.liveSsao = m_ssaoEnabled; st.liveSsr = m_ssrEnabled;
+    st.liveGi = m_giEnabled; st.liveGiRefl = m_giReflEnabled;
+    st.liveAa = m_aaMethod;
+    st.livePath = m_renderPath;
+    st.active = true;
+    st.w = width; st.h = height;
 
     m_viewportImage   = VK_NULL_HANDLE;
     m_viewportMemory  = VK_NULL_HANDLE;
@@ -6397,100 +7619,51 @@ bool VulkanRenderer::RenderSceneImage(const EditorCameraOverride& camera, uint32
     m_viewportReqW = width;
     m_viewportReqH = height;
     m_viewportLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    m_editorCamera   = camera;
 
-    bool ok = false;
-    try
-    {
-        // Same order as the top of Render(): drop the caches for assets edited
-        // since the last frame (own device idle inside), then start the frame's
-        // per-pass flags from zero — m_giRanThisFrame left over from the live
-        // frame would decide this frame's aoWanted.
-        m_wallTime = static_cast<float>(SDL_GetTicks()) * 0.001f;
-        processPendingInvalidations();
-        m_ssaoRanThisFrame = false;
-        m_giRanThisFrame   = false;
-        m_ssrRanThisFrame  = false;
-        m_ssrResultView    = VK_NULL_HANDLE;
-        m_statDraws = m_statTris = m_statVisible = m_statTotal = 0;
-        // This frame's sun before DrawViewportFrame's first extraction, as in Render().
-        m_extractor.setDayNight(m_environment.dayNightCycle, m_environment.timeOfDay,
-                                m_environment.sunColor, m_environment.sunIntensity,
-                                m_environment.moonColor, m_environment.moonIntensity,
-                                m_environment.cloudCoverage);
-        // The same one-walk scope as Render(): DrawViewportFrame's passes extract on their own.
-        RenderExtractor::FrameScope extractOncePerFrame(m_extractor);
+    // Nothing may be in flight while the live set's siblings (PostFX, SSAO, decal depth) are torn down and rebuilt.
+    deviceWaitIdle();
+    createViewportResources(width, height);
+}
 
-        // Nothing may be in flight while the live set's siblings (PostFX, SSAO,
-        // decal depth) are torn down and rebuilt, and the one-shot buffer below
-        // records on m_currentFrame's rings.
-        deviceWaitIdle();
-        createViewportResources(width, height);
-
-        if (m_viewportImage && m_viewportFramebuffer && m_viewportW == width && m_viewportH == height)
-        {
-            VkCommandBufferAllocateInfo cbai{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
-            cbai.commandPool        = m_cmdPool;
-            cbai.level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-            cbai.commandBufferCount = 1;
-            VkCommandBuffer cmd = VK_NULL_HANDLE;
-            if (vkAllocateCommandBuffers(m_device, &cbai, &cmd) == VK_SUCCESS && cmd)
-            {
-                VkCommandBufferBeginInfo cbbi{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
-                cbbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-                vkBeginCommandBuffer(cmd, &cbbi);
-                DrawViewportFrame(cmd);
-                vkEndCommandBuffer(cmd);
-
-                VkSubmitInfo si{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
-                si.commandBufferCount = 1;
-                si.pCommandBuffers    = &cmd;
-                submitGraphics(si, VK_NULL_HANDLE);
-                vkQueueWaitIdle(m_graphicsQueue);
-                vkFreeCommandBuffers(m_device, m_cmdPool, 1, &cmd);
-
-                // CaptureViewport waits for the GPU and maps a staging buffer; no
-                // world → the cleared target, honestly black, which is what the
-                // viewport would show too.
-                uint32_t gotW = 0, gotH = 0;
-                ok = CaptureViewport(rgba, gotW, gotH) && gotW == width && gotH == height;
-            }
-        }
-    }
-    catch (const std::exception& e)
-    {
-        // vkCheck throws; a request too large to allocate must not take the live
-        // viewport down with it — fall through to the give-back below.
-        HE_LOG_ERROR(RHI, "VulkanRenderer::RenderSceneImage failed: %s", e.what());
-        ok = false;
-    }
-
+void VulkanRenderer::stillLeave()
+{
+    StillSet& st = m_still;
+    if (!st.active) return;
     // ── Give the live viewport back ─────────────────────────────────────────
     // The screenshot's set goes away whole (its colour image is NOT retired: the
     // editor's descriptor never pointed at it, and the device is idle). The live
     // handles go back into the members BEFORE the intermediates are rebuilt —
     // createPostFXResources builds m_hdrFB/m_fxaaFB/m_uiViewportFB on them.
     deviceWaitIdle();
+    rvtDrainPending();   // nothing is in flight any more: the page layers' buffers can go
     destroyViewportResources();
-    m_viewportImage       = liveImage;
-    m_viewportMemory      = liveMemory;
-    m_viewportView        = liveView;
-    m_viewportDepthImage  = liveDepthImage;
-    m_viewportDepthMemory = liveDepthMemory;
-    m_viewportDepthView   = liveDepthView;
-    m_viewportRenderPass  = liveRenderPass;
-    m_viewportFramebuffer = liveFramebuffer;
-    m_viewportSampler     = liveSampler;
-    m_viewportW          = liveW;
-    m_viewportH          = liveH;
-    m_viewportReqW       = liveReqW;
-    m_viewportReqH       = liveReqH;
-    m_viewportLayout     = liveLayout;
-    m_viewportResChanged = liveResChanged;
-    m_editorCamera       = liveCam;
-    m_statDraws = liveDraws; m_statTris = liveTris;
-    m_statVisible = liveVisible; m_statTotal = liveTotal;
+    m_viewportImage       = st.liveImage;
+    m_viewportMemory      = st.liveMemory;
+    m_viewportView        = st.liveView;
+    m_viewportDepthImage  = st.liveDepthImage;
+    m_viewportDepthMemory = st.liveDepthMemory;
+    m_viewportDepthView   = st.liveDepthView;
+    m_viewportRenderPass  = st.liveRenderPass;
+    m_viewportFramebuffer = st.liveFramebuffer;
+    m_viewportSampler     = st.liveSampler;
+    m_viewportW          = st.liveW;
+    m_viewportH          = st.liveH;
+    m_viewportReqW       = st.liveReqW;
+    m_viewportReqH       = st.liveReqH;
+    m_viewportLayout     = st.liveLayout;
+    m_viewportResChanged = st.liveResChanged;
+    m_editorCamera       = st.liveCam;
+    m_rawCapture = st.liveRaw; m_rawSrgb = st.liveSrgb;
+    m_bloomEnabled = st.liveBloom; m_ssaoEnabled = st.liveSsao; m_ssrEnabled = st.liveSsr;
+    m_giEnabled = st.liveGi; m_giReflEnabled = st.liveGiRefl;
+    m_aaMethod = st.liveAa;
+    m_renderPath = st.livePath;
+    m_statDraws = st.liveDraws; m_statTris = st.liveTris;
+    m_statVisible = st.liveVisible; m_statTotal = st.liveTotal;
 
+    const uint32_t liveW = st.liveW, liveH = st.liveH;
+    st.active = false;
+    st.kept   = false;
     if (liveW && liveH)
     {
         // The tail of createViewportResources, at the live size — unconditionally,
@@ -6513,7 +7686,225 @@ bool VulkanRenderer::RenderSceneImage(const EditorCameraOverride& camera, uint32
     m_ssrColorHistValid = false;
     m_ssrHistValid      = false;
     m_taaHistoryValid   = false;
+}
 
+void VulkanRenderer::rvtDrainPending()
+{
+    for (VkCommandBuffer c : m_rvtPendingCmds) vkFreeCommandBuffers(m_device, m_cmdPool, 1, &c);
+    m_rvtPendingCmds.clear();
+    m_rvtPending = 0;
+}
+
+void VulkanRenderer::BeginRvtPages(uint32_t pagePx) { m_rvtBracketPx = pagePx; }
+
+void VulkanRenderer::EndRvtPages()
+{
+    m_rvtBracketPx = 0;
+    if (m_still.kept) stillLeave();
+}
+
+bool VulkanRenderer::RenderSceneImage(const EditorCameraOverride& camera, uint32_t width,
+                                      uint32_t height, std::vector<uint8_t>& rgba)
+{
+    if (!m_device || !m_graphicsQueue || !m_cmdPool) return false;
+    if (width == 0 || height == 0) return false;
+
+    // Inside an RVT bracket (BeginRvtPages) the page-size set is built once and kept from one page to the next: building
+    // it (a device idle plus the post-FX targets) and repairing the live viewport's afterwards is what cost tens of
+    // milliseconds per page in the editor. Anything else closes a kept set first and runs the one-call path.
+    const bool page = camera.rvtSlot >= 0;
+    const bool keep = page && m_rvtBracketPx != 0 && width == m_rvtBracketPx && height == m_rvtBracketPx;
+    if (m_still.active && !(keep && m_still.w == width && m_still.h == height)) stillLeave();
+
+    bool ok = false;
+    bool rotated = false;
+    // HE_RVT_PIPELINE=0 waits after every layer again (the A/B guard and the reference of the cross-check).
+    static const bool s_pipeline = []() { const char* e = std::getenv("HE_RVT_PIPELINE"); return !(e && *e == '0'); }();
+    const bool pipe = keep && s_pipeline;
+    try
+    {
+        if (!m_still.active) stillEnter(width, height);
+        m_still.kept = keep;
+        m_editorCamera = camera;
+        if (camera.rawOutput)
+        {
+            // Forward, because the deferred resolve lights the G-buffer.
+            m_rawCapture = true;
+            m_rawSrgb    = camera.rawSrgb;
+            m_bloomEnabled = m_ssaoEnabled = m_ssrEnabled = false;
+            m_giEnabled = m_giReflEnabled = false;
+            m_aaMethod  = HE::AAMethod::Off;
+            m_renderPath = HE::RenderPath::Forward;
+        }
+
+        // The page's hot slice (Thema 333 step 9: a manager slot is no longer the same thing as a hot array index),
+        // taken before the page's own command buffer is recorded — rvtHotFor may grow the pool, its own device idle.
+        uint32_t hotSlice = 0xFFFFFFFFu;
+        if (page && camera.rvtLayer >= 0 && camera.rvtLayer < 3 && m_rvtPool[camera.rvtLayer].image && camera.rvtSlot >= 0
+            && width == m_rvtPagePx && height == m_rvtPagePx && uint32_t(camera.rvtSlot) < m_rvtSlots)
+        {
+            const uint32_t slot = uint32_t(camera.rvtSlot);
+            if (camera.rvtLayer == 0)
+            {
+                // A new picture of this page: an encode of the old one is stale, a cold page is hot again.
+                ++m_rvtSlotVer[slot];
+                m_rvtSlotPainted[slot] = m_rvtRealFrames;
+            }
+            hotSlice = rvtHotFor(slot);
+            // Only clear the cold flag once a hot slice actually backs the slot — if the pool is full,
+            // the slot's BC7 data is still the last-known-good page and must stay readable.
+            if (camera.rvtLayer == 0 && hotSlice != 0xFFFFFFFFu && m_rvtSlotCold[slot])
+            {
+                m_rvtSlotCold[slot] = 0;
+                ++m_rvtStateVer;
+            }
+        }
+        // A kept page layer is not waited for: it rotates to the next frame slot (see m_rvtPending).
+        if (pipe)
+        {
+            if (m_rvtPending >= k_maxFramesInFlight) { deviceWaitIdle(); rvtDrainPending(); }
+            if (m_rvtPending == 0) m_rvtBaseFrame = m_currentFrame;
+            m_currentFrame = (m_rvtBaseFrame + m_rvtPending) % k_maxFramesInFlight;
+            rotated = true;
+        }
+        // Same order as the top of Render(): drop the caches for assets edited
+        // since the last frame (own device idle inside), then start the frame's
+        // per-pass flags from zero — m_giRanThisFrame left over from the live
+        // frame would decide this frame's aoWanted.
+        m_wallTime = static_cast<float>(SDL_GetTicks()) * 0.001f;
+        processPendingInvalidations();
+        m_ssaoRanThisFrame = false;
+        m_giRanThisFrame   = false;
+        m_ssrRanThisFrame  = false;
+        m_ssrResultView    = VK_NULL_HANDLE;
+        m_statDraws = m_statTris = m_statVisible = m_statTotal = 0;
+        // This frame's sun before DrawViewportFrame's first extraction, as in Render().
+        m_extractor.setDayNight(m_environment.dayNightCycle, m_environment.timeOfDay,
+                                m_environment.sunColor, m_environment.sunIntensity,
+                                m_environment.moonColor, m_environment.moonIntensity,
+                                m_environment.cloudCoverage);
+        // The same one-walk scope as Render(): DrawViewportFrame's passes extract on their own.
+        RenderExtractor::FrameScope extractOncePerFrame(m_extractor);
+
+        if (m_viewportImage && m_viewportFramebuffer && m_viewportW == width && m_viewportH == height)
+        {
+            VkCommandBufferAllocateInfo cbai{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+            cbai.commandPool        = m_cmdPool;
+            cbai.level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+            cbai.commandBufferCount = 1;
+            VkCommandBuffer cmd = VK_NULL_HANDLE;
+            if (vkAllocateCommandBuffers(m_device, &cbai, &cmd) == VK_SUCCESS && cmd)
+            {
+                // A virtual texture page (Thema 333) goes into its pool slice on the GPU and nothing is read back.
+                const bool pageOk = page && camera.rvtLayer >= 0 && camera.rvtLayer < 3 && m_rvtPool[camera.rvtLayer].image
+                                 && hotSlice != 0xFFFFFFFFu && width == m_rvtPagePx && height == m_rvtPagePx;
+                VkCommandBufferBeginInfo cbbi{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+                cbbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+                vkBeginCommandBuffer(cmd, &cbbi);
+                DrawViewportFrame(cmd);
+                // A packed layer (Thema 333 step 10, HE_RVT_PACK) cannot take vkCmdCopyImage — the format changes — so
+                // a tiny fullscreen draw (rvtPackPage) takes its place. It always waits synchronously (see the header's
+                // member comment), so a packed page never joins the m_rvtPendingCmds pipeline below.
+                const bool packed = pageOk && m_rvtPack && camera.rvtLayer > 0;
+                bool packOk = true; // only packed can fail it; set false in the pipeline-unavailable branch below
+                if (pageOk && !packed)
+                {
+                    // The copy rides in the frame's own buffer: one submit, one wait.
+                    const VkImage dst = m_rvtPool[camera.rvtLayer].image;
+                    const uint32_t slot = hotSlice;
+                    VkImageMemoryBarrier b[2]{};
+                    for (VkImageMemoryBarrier& x : b)
+                    {
+                        x.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+                        x.srcQueueFamilyIndex = x.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                    }
+                    b[0].image = m_viewportImage;
+                    b[0].oldLayout = m_viewportLayout; b[0].newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+                    b[0].srcAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+                    b[0].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+                    b[0].subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+                    b[1].image = dst;
+                    b[1].oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL; b[1].newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+                    b[1].srcAccessMask = VK_ACCESS_SHADER_READ_BIT; b[1].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+                    b[1].subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, m_rvtAlloc };
+                    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 2, b);
+                    VkImageCopy region{};
+                    region.srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+                    region.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, slot, 1 };
+                    region.extent = { width, height, 1 };
+                    vkCmdCopyImage(cmd, m_viewportImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+                    b[0].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL; b[0].newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                    b[0].srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT; b[0].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+                    b[1].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL; b[1].newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                    b[1].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT; b[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+                    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 2, b);
+                    m_viewportLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                }
+                else if (packed && ensureRvtPackPipeline())
+                {
+                    const VkImage dst = m_rvtPool[camera.rvtLayer].image;
+                    if (m_viewportLayout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+                    {
+                        VkImageMemoryBarrier b{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+                        b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                        b.image = m_viewportImage; b.oldLayout = m_viewportLayout; b.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                        b.srcAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT; b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+                        b.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+                        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &b);
+                        m_viewportLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                    }
+                    rvtPackPage(cmd, m_viewportImage, camera.rvtLayer, dst, hotSlice, width);
+                }
+                else if (packed)
+                {
+                    packOk = false;
+                    HE_LOG_WARN(RHI, "VulkanRenderer: RVT page pack unavailable, slot %u layer %d not written this paint",
+                                uint32_t(camera.rvtSlot), camera.rvtLayer);
+                }
+                vkEndCommandBuffer(cmd);
+
+                VkSubmitInfo si{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
+                si.commandBufferCount = 1;
+                si.pCommandBuffers    = &cmd;
+                submitGraphics(si, VK_NULL_HANDLE);
+                if (pipe && !packed)
+                {
+                    // Not waited for: the buffer is freed with the slots used up or the close.
+                    m_rvtPendingCmds.push_back(cmd);
+                    ++m_rvtPending;
+                }
+                else
+                {
+                    vkQueueWaitIdle(m_graphicsQueue);
+                    vkFreeCommandBuffers(m_device, m_cmdPool, 1, &cmd);
+                }
+
+                if (page)
+                {
+                    rgba.clear();
+                    ok = pageOk && packOk;
+                }
+                else
+                {
+                    // CaptureViewport waits for the GPU and maps a staging buffer; no
+                    // world → the cleared target, honestly black, which is what the
+                    // viewport would show too.
+                    uint32_t gotW = 0, gotH = 0;
+                    ok = CaptureViewport(rgba, gotW, gotH) && gotW == width && gotH == height;
+                }
+            }
+        }
+    }
+    catch (const std::exception& e)
+    {
+        // vkCheck throws; a request too large to allocate must not take the live
+        // viewport down with it — fall through to the give-back below.
+        HE_LOG_ERROR(RHI, "VulkanRenderer::RenderSceneImage failed: %s", e.what());
+        ok = false;
+    }
+
+    if (rotated) m_currentFrame = m_rvtBaseFrame;   // the real frames and the next call see the slot they expect
+    if (!keep || !ok) stillLeave();
     if (!ok) rgba.clear();
     return ok;
 }
@@ -7347,7 +8738,9 @@ void VulkanRenderer::EncodeShadowMap(VkCommandBuffer cmd, float aspect)
     // still render their atlas (mirrors Metal/GL/D3D).
     const bool wantCsm   = m_renderWorld.shadow.enabled;
     const bool wantLocal = m_renderWorld.shadow.localLayerCount > 0 && m_localShadowImage != VK_NULL_HANDLE;
-    if ((!wantCsm && !wantLocal) || m_renderWorld.objects.empty()) { ensureSampledLayout(); return; }
+    // The tile landscape's ground casts too: a scene of nothing but ground still has shadow maps to fill.
+    const bool ground = m_landscapeProvider && !m_landscapeFailed;
+    if ((!wantCsm && !wantLocal) || (m_renderWorld.objects.empty() && !ground)) { ensureSampledLayout(); return; }
     refineObjectBounds();
 
     // ── Cascade frame constants (mirrors GL's shadowFrame / D3D11) ─────────
@@ -7401,8 +8794,18 @@ void VulkanRenderer::EncodeShadowMap(VkCommandBuffer cmd, float aspect)
     m_frameCull.prepareShadowViews(m_culler, m_renderWorld, m_extractor.fullExtractCount(),
                                    m_shadowViews.data(), static_cast<size_t>(nCascades + nLocalViews),
                                    "VkShadowViews");
+    // The ground's patches for every view, asked for and uploaded BEFORE a pass is open (an upload may make images). The provider
+    // culls for the view's own matrix; the level of detail stays the camera's.
+    m_landscapeShadowFrames.clear();
+    if (ground)
+    {
+        m_landscapeShadowFrames.resize(static_cast<size_t>(nCascades + nLocalViews));
+        for (int v = 0; v < nCascades + nLocalViews; ++v)
+            landscapePassFrame(HE::kVulkanClipFix * m_shadowViews[static_cast<size_t>(v)].viewProj, m_landscapeShadowFrames[static_cast<size_t>(v)]);
+    }
     auto drawDepthLayer = [&](uint32_t size, const ShadowViewCpu& view, const glm::mat4& clip)
     {
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_shadowPipeline);   // the ground's draw below leaves its own bound
         VkViewport vp{ 0.0f, 0.0f, (float)size, (float)size, 0.0f, 1.0f };
         VkRect2D   sc{ { 0, 0 }, { size, size } };
         vkCmdSetViewport(cmd, 0, 1, &vp);
@@ -7438,6 +8841,10 @@ void VulkanRenderer::EncodeShadowMap(VkCommandBuffer cmd, float aspect)
                 vkCmdDrawIndexed(cmd, m.indexCount, 1, 0, 0, 0);
             });
         }
+        // The tile landscape's ground into the same layer, with the same bias (still set: it is dynamic state).
+        const size_t vi = static_cast<size_t>(&view - m_shadowViews.data());
+        if (vi < m_landscapeShadowFrames.size())
+            landscapeDepth(cmd, m_shadowPass, size, size, m_landscapeShadowFrames[vi], clip);
     };
 
     // One depth render per cascade into its own array layer. Each cascade
@@ -8233,6 +9640,8 @@ bool VulkanRenderer::uploadTextureImage(const TextureAsset* tex,
                                         bool asArray, bool honourSrgb)
 {
     image = VK_NULL_HANDLE; memory = VK_NULL_HANDLE; view = VK_NULL_HANDLE;
+    // Bytes an earlier upload released come back from the pak (see releaseCpuPixels below).
+    if (tex && tex->data.empty() && m_contentManager) tex = m_contentManager->restoreCpuPixels(tex->id);
     if (!tex || tex->data.empty() || tex->channels != 4 || tex->width == 0 || tex->height == 0)
         return false;
     const uint32_t width  = static_cast<uint32_t>(tex->width);
@@ -8389,6 +9798,10 @@ bool VulkanRenderer::uploadTextureImage(const TextureAsset* tex,
                              0, 0, nullptr, 0, nullptr, 1, &bar);
     }
     noteUpload(false, total, t0);
+    // stageUpload memcpy'd the whole chain into the staging ring (or a staging buffer of its
+    // own) before it returned, and the recorded copy reads that, never tex->data: the CPU copy
+    // of a block-compressed texture is dead weight now (ContentManager::releaseCpuPixels).
+    if (m_contentManager) m_contentManager->releaseCpuPixels(tex->id);
     return true;
 }
 
@@ -8794,6 +10207,100 @@ uint32_t VulkanRenderer::pushSceneMaterial(const void* data, size_t bytes)
     return m_sceneMatOffset;
 }
 
+// ── World-scale landscape (Thema 326, step 2 part B) ────────────────────────────────────────────────
+// Asks the application's provider for the frame of the camera this scene pass rasterises, starts the landscape on first use and has the frame's
+// uploads recorded into the upload batch (a command buffer of its own, submitted before the frame's: a copy cannot be recorded inside the scene's
+// render pass). A frame the runtime built has to be executed whether or not the scene has objects: the runtime counts its uploads as done.
+void VulkanRenderer::landscapeBegin(uint32_t /*width*/, uint32_t /*height*/)
+{
+    m_landscapeFrameLive = false;
+    if (!m_landscapeProvider || m_landscapeFailed) return;
+    m_landscapeFrame = HE::LandscapeRenderFrame{};
+    // The matrix the scene draws are rasterised with: Vulkan clip space (y down, depth 0..1), jittered on a TAA frame. Unlike D3D and Metal, whose scene
+    // passes rasterise the plain GL matrix, this backend's depth is the real 0..1 depth, so the landscape needs no near-plane caveat.
+    m_landscapeViewProj = taaJittered(HE::kVulkanClipFix * m_renderWorld.camera.projection * m_renderWorld.camera.view);
+    m_landscapeProvider(glm::dmat4(m_landscapeViewProj), /*zeroToOne=*/true, m_landscapeFrame);
+    if (!m_landscapeFrame.active || !landscapeEnsure()) return;
+    m_landscape->upload(m_landscapeFrame);
+    m_landscapeFrameLive = true;
+}
+
+bool VulkanRenderer::landscapePassFrame(const glm::mat4& clip, HE::LandscapeRenderFrame& frame)
+{
+    frame = HE::LandscapeRenderFrame{};
+    if (!m_landscapeProvider || m_landscapeFailed) return false;
+    // Asked even with the passes switched off: the provider hands over the tiles that arrived, and they must reach the atlas.
+    m_landscapeProvider(glm::dmat4(clip), /*zeroToOne=*/true, frame);
+    if (!frame.active || !landscapeEnsure()) return false;
+    m_landscape->upload(frame);
+    if (!HE::landscapePassesOn()) frame.patches.clear();
+    return !frame.patches.empty();
+}
+
+void VulkanRenderer::landscapeDepth(VkCommandBuffer cmd, VkRenderPass pass, uint32_t width, uint32_t height, const HE::LandscapeRenderFrame& frame,
+                                    const glm::mat4& clip)
+{
+    if (!m_landscape || !m_landscape->ready() || frame.patches.empty()) return;
+    m_landscape->drawDepth(cmd, pass, VkExtent2D{ width, height }, m_currentFrame, frame, clip);
+    m_statDraws += static_cast<uint32_t>(m_landscape->stats().drawCalls);
+}
+
+bool VulkanRenderer::landscapeEnsure()
+{
+    if (m_landscapeFailed) return false;
+    if (!m_landscape) m_landscape = std::make_unique<HE::VulkanLandscape>();
+    if (!m_landscape->ready())
+    {
+        HE::VulkanLandscape::Env env;
+        env.device = m_device;
+        env.framesInFlight = k_maxFramesInFlight;
+        VkPhysicalDeviceProperties props{};
+        vkGetPhysicalDeviceProperties(m_physDevice, &props);
+        env.maxImageArrayLayers = props.limits.maxImageArrayLayers;
+        env.arraySampler = m_albedoSampler;
+        env.whiteArray = m_whiteArrayView;
+        env.findMemoryType = [this](uint32_t bits, VkMemoryPropertyFlags f) { return findMemoryType(bits, f); };
+        env.uploadCmd = [this]() { return uploadCmd(); };
+        env.stage = [this](const void* d, VkDeviceSize n, VkBuffer& b, VkDeviceSize& o) { return stageUpload(d, n, b, o); };
+        env.flush = [this]() { flushUploads(); };
+        env.waitIdle = [this]() { deviceWaitIdle(); };
+        env.createPipeline = [this](const VkGraphicsPipelineCreateInfo& ci, VkPipeline& out) { return createGraphicsPipelines(1, &ci, nullptr, &out); };
+        std::string err;
+        if (!m_landscape->init(env, &err))
+        {
+            HE_LOG_WARN(RHI, "VulkanRenderer: the world-scale landscape is off: %s", err.c_str());
+            m_landscapeFailed = true;
+            m_landscape.reset();
+            return false;
+        }
+    }
+    return true;
+}
+
+// Records the patches into the scene pass that is open on `cmd`. The caller restores whatever pipeline and set it needs afterwards.
+void VulkanRenderer::landscapeDraw(VkCommandBuffer cmd, uint32_t width, uint32_t height, bool hdr)
+{
+    if (!m_landscapeFrameLive || !m_landscape || !m_landscape->ready() || !m_landscapeFrame.world) return;
+    HE::VulkanLandscape::Shading sh;
+    // The sun the lit shaders use: the scene's dominant directional light (colour x intensity), else a neutral one.
+    sh.sunDir = glm::normalize(m_renderWorld.sunDirection);
+    sh.ambient = m_renderWorld.ambient;
+    for (const LightData& l : m_renderWorld.lights)
+        if (l.type == static_cast<uint8_t>(HE::LightType::Directional)) { sh.sunColor = l.color * l.intensity; break; }
+    // The texture group's arrays (the world-UV ground), resolved like a material's texture array (resolveGraphTexture forgets a miss per content
+    // epoch, so one that arrives after the first frame is picked up); not loaded (yet) = null = flat colours.
+    const HE::LandscapeRenderStatic& w = *m_landscapeFrame.world;
+    if (!w.albedoArrayPath.empty())
+    {
+        sh.albedoArray = resolveGraphTexture(HE::UUID{}, w.albedoArrayPath, true);
+        if (sh.albedoArray && !w.normalArrayPath.empty()) sh.normalArray = resolveGraphTexture(HE::UUID{}, w.normalArrayPath, true);
+        if (sh.albedoArray && !w.maskArrayPath.empty())   sh.maskArray   = resolveGraphTexture(HE::UUID{}, w.maskArrayPath, true);
+    }
+    const VkRenderPass pass = hdr && m_postFxSceneRP ? m_postFxSceneRP : m_renderPass;
+    m_landscape->draw(cmd, pass, VkExtent2D{ width, height }, m_currentFrame, m_landscapeFrame, m_landscapeViewProj, sh);
+    m_statDraws += static_cast<uint32_t>(m_landscape->stats().drawCalls);
+}
+
 void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t height, bool hdr)
 {
     if (!m_world || m_scenePipeline == VK_NULL_HANDLE || width == 0 || height == 0) return;
@@ -8814,7 +10321,26 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
     // call every UI pass below sees an empty list and draws nothing.
     m_extractor.extractUI(*m_world, static_cast<float>(width), static_cast<float>(height),
                           m_renderWorld);
-
+    // A virtual texture page (RenderSceneImage with rvtSlot >= 0): the layer's view material replaces every object's own,
+    // after the walk. Section lists would override it; terrain has none.
+    if (m_editorCamera.rvtMaterial != HE::UUID{})
+        for (RenderObject& o : m_renderWorld.objects)
+        {
+            o.materialAssetId = m_editorCamera.rvtMaterial;
+            o.sections.clear();
+        }
+    // The landscape drawn from the virtual texture (SetRvtLandscape): its terrain chunks take the consumer material, and not
+    // the object's own parameter block (laid out for the old material; it would overwrite RvtVolumeA/B).
+    else if (!m_rvtSwaps.empty() && m_rvtPool[0].view)
+        for (RenderObject& o : m_renderWorld.objects)
+            if (o.terrainChunk)
+                if (const auto sw = m_rvtSwaps.find(o.terrainEntity); sw != m_rvtSwaps.end() && o.materialAssetId == sw->second.landscapeMat
+                    && !m_rvtNear.keeps(o))   // the native near view keeps the chunk's own material
+                {
+                    o.materialAssetId = sw->second.consumerMat;
+                    o.paramOverride.clear();
+                    o.sections.clear();
+                }
 
     // Sky is independent of scene geometry — draw it before any early returns so it
     // always renders even when the scene is empty or fully culled (otherwise the
@@ -8829,9 +10355,15 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
         drawSky(cmd, width, height, hdr);
     }
 
+    // World-scale landscape (Thema 326): asked HERE, before the early returns below, and its uploads recorded at once; drawn in the scene pass
+    // (below), or right here on the two paths that leave before it.
+    landscapeBegin(width, height);
+
     // Trails live in their own per-frame band list, not in `objects`, so a scene
     // that has nothing BUT a trail still has something to draw past here.
-    if (m_renderWorld.objects.empty() && m_renderWorld.ribbonBatches.empty()) return;
+    // (With a tile landscape the frame goes on without objects: its ground is drawn by the material path further down, which needs
+    // this frame's lighting block and descriptor pool, both made below.)
+    if (m_renderWorld.objects.empty() && m_renderWorld.ribbonBatches.empty() && !m_landscapeFrameLive) return;
 
     refineObjectBounds();
     // PBR scalars per object, per material slot and per skinned object, each from
@@ -8842,7 +10374,7 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
     cullCameraObjects();
     m_statTotal   = static_cast<uint32_t>(m_renderWorld.objects.size());
     m_statVisible = static_cast<uint32_t>(m_sortedIndices.size());
-    if (m_sortedIndices.empty() && m_renderWorld.ribbonBatches.empty()) return;
+    if (m_sortedIndices.empty() && m_renderWorld.ribbonBatches.empty() && !m_landscapeFrameLive) return;
 
     if (m_renderGraph.empty())
     {
@@ -8943,13 +10475,17 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
         f.cameraFwd     = glm::vec4(m_cascadeCamFwd, 1.0f / float(std::max(m_shadowSize, 1u)));
         f.shadowBias    = glm::vec4(m_shadowSettings.slopeBias, m_shadowSettings.minBias, 0.0f, 0.0f);
         f.shadowEnabled = glm::ivec4(m_shadowRenderedThisFrame ? 1 : 0,
-                                     m_debugShadowCascades ? 1 : 0, 0, 0);
+                                     m_debugShadowCascades ? 1 : 0,
+                                     UnlitViewActive() ? 1 : 0, 0);
         static_assert(sizeof(f.localShadowVP) / sizeof(f.localShadowVP[0]) == kLocalShadowLayers,
                       "Frame UBO local atlas array must match kLocalShadowLayers");
         static_assert(kLocalShadowLayers == ShadowData::kMaxLocalShadowLayers,
                       "Vulkan local atlas layer count must match the extractor's");
         f.sunDir        = glm::vec4(m_renderWorld.sunDirection, 0.0f);
-        f.fog           = glm::vec4(m_environment.fogDensity, m_environment.fogHeightFalloff, 0.0f, 0.0f);
+        // Volume mode (Thema 225): the full-screen Apply pass fogs the opaque scene, so the
+        // built-in shader's own analytic fog must not stack on it - density 0 from this fill site.
+        f.fog           = glm::vec4((m_fogFrameActive && hdr) ? 0.0f : m_environment.fogDensity,
+                                    m_environment.fogHeightFalloff, 0.0f, 0.0f);
         // viewport.z == 1 iff runSSAO() completed this frame (blurRT holds valid data).
         // Using m_ssaoRanThisFrame (not just m_ssaoReady) ensures we never sample stale
         // blurRT in non-HDR paths or when SSAO was skipped due to an empty scene.
@@ -9113,6 +10649,27 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
         lit.camPos[0] = m_renderWorld.camera.position.x;
         lit.camPos[1] = m_renderWorld.camera.position.y;
         lit.camPos[2] = m_renderWorld.camera.position.z;
+        // Viewport view mode (v3.2): Unlit/Wireframe hand heLitP's base colour
+        // back untouched — graph materials, the deferred resolve (rl copies
+        // frameMatLight) and the forward replay all read this. Mirrors GL/Metal/D3D.
+        lit.viewMode[0] = UnlitViewActive() ? 1.0f : 0.0f;
+        lit.viewMode[1] = m_viewMode == HE::ViewMode::RvtDebug ? 1.0f : 0.0f;   // RVT debug view (RvtLookup.h)
+        // Volumetric fog (Thema 225 step 5, plan §2.5): fogVol.x = 1 hands the opaque fog to the
+        // Apply pass (heApplyFog is a no-op), .w = 1 says binding 34 holds the integrated volume
+        // on THIS frame (heApplyFogT reads it). fogViewProj is the PLAIN Vulkan clip matrix: its
+        // y-down NDC already addresses the volume's row 0 = top (see the block comment above
+        // createFogPipelines). Zero on every other frame, so the analytic fog runs unchanged.
+        if (m_fogFrameActive && hdr)
+        {
+            lit.fogVol[0] = 1.0f;
+            lit.fogVol[1] = m_fogFrame.distance;
+            lit.fogVol[2] = m_fogFrame.sliceC;
+            lit.fogVol[3] = m_fogIntegratedTex.view ? 1.0f : 0.0f;
+            lit.fogVolGrid[0] = static_cast<float>(m_fogFrame.grid.x);
+            lit.fogVolGrid[1] = static_cast<float>(m_fogFrame.grid.y);
+            lit.fogVolGrid[2] = static_cast<float>(m_fogFrame.grid.z);
+            std::memcpy(lit.fogViewProj, &m_fogViewProjMat[0][0], sizeof(lit.fogViewProj));
+        }
         if (m_matLightBuf[m_currentFrame].mapped)
             std::memcpy(m_matLightBuf[m_currentFrame].mapped, &lit, sizeof(lit));
         frameMatLight = lit;
@@ -9246,6 +10803,12 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
         // of a material resolves it and every later draw of the frame reuses the result.
         struct MatResolved { bool ok = false; uint64_t hash = 0; std::string frag, vertBody; };
         std::unordered_map<HE::UUID, MatResolved> matFwdMemo, matGbMemo;
+        // The tile landscape drawn with its material goes through this same lambda (one place writes a material's set): while
+        // `lsDraw` is set, the draw call names the landscape's material, the pipeline is its landscape variant, the set gets the
+        // landscape's rows as well, and the patches are drawn instead of a mesh. `lsDrawn` says it happened.
+        const HE::LandscapeRenderFrame* lsDraw = nullptr;
+        HE::VulkanLandscape::MaterialImages lsImages;
+        bool lsDrawn = false;
         auto drawDCVk = [&](const DrawCall& dc) {
             // A trail carries no mesh asset — its geometry sits in this frame's
             // ribbon pool, looked up by the DrawCall that was synthesised for it.
@@ -9327,11 +10890,14 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                         const std::string& gbVertBody = gbIt->second.vertBody;
                         if (gbOk)
                         {
-                            matPipe = GetOrBuildMaterialPipeline(gbHash, gbFrag, gbVertBody, nullptr,
-                                                                 true, false, /*gbuffer=*/true);
+                            // The ground (lsDraw): the same tail behind the landscape's vertex stage.
+                            matPipe = lsDraw ? GetOrBuildLandscapeMaterialPipeline(gbHash, gbFrag, true, /*gbuffer=*/true)
+                                             : GetOrBuildMaterialPipeline(gbHash, gbFrag, gbVertBody, nullptr,
+                                                                          true, false, /*gbuffer=*/true);
                         }
                         if (matPipe == VK_NULL_HANDLE)
                         {
+                            if (lsDraw) return;   // the ground is drawn forward after the resolve then, never a mesh
                             deferredForwardDCs.push_back(&dc);
                             return;
                         }
@@ -9340,6 +10906,8 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                                                                      true, false, /*gbuffer=*/true,
                                                                      /*instanced=*/true);
                     }
+                    else if (lsDraw)
+                        matPipe = GetOrBuildLandscapeMaterialPipeline(matHash, matFrag, hdr);
                     else
                     {
                         matPipe = GetOrBuildMaterialPipeline(matHash, matFrag, matVertBody,
@@ -9448,10 +11016,10 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                                         + static_cast<size_t>(i) * k_matSlotStride, &ub, sizeof(ub));
 
                             // HeParams (16 vec4 = 64 floats = 256 B) into ring slot i, zero-padded.
-                            float padded[64] = { 0.0f };
+                            float padded[HE::kMatParamFloats] = { 0.0f };
                             if (params)
                                 std::memcpy(padded, params->data(),
-                                            std::min(params->size(), size_t(64)) * sizeof(float));
+                                            std::min(params->size(), size_t(HE::kMatParamFloats)) * sizeof(float));
                             std::memcpy(static_cast<uint8_t*>(m_matParBuf[m_currentFrame].mapped)
                                         + static_cast<size_t>(i) * k_matSlotStride, padded, sizeof(padded));
 
@@ -9465,7 +11033,7 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                             VkDescriptorBufferInfo lightBI{ m_matLightBuf[m_currentFrame].buf, 0,
                                                             sizeof(HE::MaterialShaderLibrary::Lighting) };
                             VkDescriptorBufferInfo objBI  { m_matObjBuf[m_currentFrame].buf, 0, 176 };
-                            VkDescriptorBufferInfo parBI  { m_matParBuf[m_currentFrame].buf, 0, 256 };
+                            VkDescriptorBufferInfo parBI  { m_matParBuf[m_currentFrame].buf, 0, HE::kMatParamBytes };
                             // heTex0 = the material's base texture: an override material's texture
                             // wins (A2), else the mesh's baked texture (A1), else the white default —
                             // matching the built-in path's texture selection + matTextured flag.
@@ -9481,7 +11049,7 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                             VkDescriptorImageInfo texPII[HE::kMatMaxGraphTextures];
                             for (int k = 0; k < HE::kMatMaxGraphTextures; ++k)
                                 texPII[k] = { m_albedoSampler, heTexP[k], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
-                            VkWriteDescriptorSet w[HE::vkmat::kBindingCount]{};
+                            VkWriteDescriptorSet w[HE::vkmat::kBindingCount + 10]{};   // + the landscape's rows (lsDraw)
                             auto wr = [&](int idx, uint32_t binding, VkDescriptorType type,
                                           const VkDescriptorBufferInfo* bi, const VkDescriptorImageInfo* ii) {
                                 w[idx].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -9551,9 +11119,13 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                             // Linear-CLAMP like GL/Metal's cube sampler; the repeat
                             // address mode of m_albedoSampler is moot on a cube, but the
                             // SSAO sampler is the clamp one this backend already has.
+                            // GI reflections on: the real-sky cube instead (aurora, stars, clouds) -
+                            // transparent water never reaches the GI trace, so this lookup is its only sky.
+                            const bool realSky = m_giReflEnabled && m_skyReflValid && m_skyReflCubeView && m_skyReflSampler;
                             VkDescriptorImageInfo skyII{
-                                m_skyEnvValid ? (m_ssaoSampler ? m_ssaoSampler : m_albedoSampler) : m_albedoSampler,
-                                m_skyEnvValid ? m_skyEnvView : m_whiteCubeView,
+                                realSky ? m_skyReflSampler
+                                        : (m_skyEnvValid ? (m_ssaoSampler ? m_ssaoSampler : m_albedoSampler) : m_albedoSampler),
+                                realSky ? m_skyReflCubeView : (m_skyEnvValid ? m_skyEnvView : m_whiteCubeView),
                                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
                             wr(15, 15, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &skyII);
                             // heAO (16): this frame's blurred SSAO — the image the
@@ -9602,14 +11174,50 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                             // linear-CLAMP like D3D11's s0 (a [0,1] weight field; a
                             // repeating sampler would bleed the far edge's paint in).
                             // Only when the layout has the row (m_matLandscapeWeights).
-                            static_assert(HE::vkmat::kPreClusterBindingCount == 22,
-                                          "fixed writes w[0..20] + w[21] heLandscapeWeights, one per non-cluster row");
-                            uint32_t nWrites = HE::vkmat::kPreClusterBindingCount - 1;
+                            static_assert(HE::vkmat::kPreClusterBindingCount == 23,
+                                          "fixed writes w[0..20] + w[21] heFogVolume + w[22] heLandscapeWeights, one per non-cluster row");
+                            // heFogVolume (34, Thema 225 step 5): the integrated volume on a frame whose
+                            // Inject/Integrate ran (fogVol.w = 1 below), the 1x1x1 dummy otherwise - a
+                            // Translucent material's SPIR-V uses the binding statically, and a 3D sampler
+                            // needs a 3D view. Only when the layout has the row (m_matFogVolume).
+                            const bool fogVolBound = m_fogFrameActive && hdr && m_fogIntegratedTex.view;
+                            const VkDescriptorImageInfo fogII{ m_fogLinearSampler ? m_fogLinearSampler : m_albedoSampler,
+                                fogVolBound ? m_fogIntegratedTex.view : m_fogDummy.view,
+                                fogVolBound ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+                            uint32_t nWrites = HE::vkmat::kPreClusterBindingCount - 2;
+                            if (m_matFogVolume && m_fogDummy.view)
+                                wr(static_cast<int>(nWrites++), HE::vkmat::kFogVolumeBinding,
+                                   VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &fogII);
                             VkDescriptorImageInfo weightsII{ m_ssaoSampler ? m_ssaoSampler : m_albedoSampler,
                                                              heWeights, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
                             if (m_matLandscapeWeights)
                                 wr(static_cast<int>(nWrites++), HE::vkmat::kLandscapeWeightsBinding,
                                    VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &weightsII);
+                            // The consumer's page table and the pool (Thema 333, bindings 40..43): only a draw whose material
+                            // owns a table writes them — no other pipeline statically uses these rows.
+                            VkDescriptorImageInfo rvtII[HE::vkmat::kRvtBindingCount]{};
+                            // The cold (BC7) arrays, step 9: bindings 44..46, only where the layout has them (m_matRvtCold,
+                            // which CreateRvtPool already made sure have a real 1-slice image — Vulkan has no null-but-
+                            // valid descriptor without VK_EXT_robustness2, unlike D3D12's null SRV).
+                            VkDescriptorImageInfo rvtColdII[HE::vkmat::kRvtColdBindingCount]{};
+                            if (m_matRvt && m_rvtPool[0].view && !m_rvtTables.empty())
+                                if (const auto tb = m_rvtTables.find(dc.materialAssetId); tb != m_rvtTables.end() && tb->second.img.view)
+                                {
+                                    rvtII[0] = { m_rvtSampler, tb->second.img.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+                                    for (uint32_t k = 0; k < 3; ++k)
+                                        rvtII[1 + k] = { m_rvtSampler, m_rvtPool[k].view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+                                    for (uint32_t k = 0; k < HE::vkmat::kRvtBindingCount; ++k)
+                                        wr(static_cast<int>(nWrites++), HE::vkmat::kRvtFirstBinding + k,
+                                           VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &rvtII[k]);
+                                    if (m_matRvtCold && m_rvtCold[0].view)
+                                    {
+                                        for (uint32_t k = 0; k < 3; ++k)
+                                            rvtColdII[k] = { m_rvtSampler, m_rvtCold[k].view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+                                        for (uint32_t k = 0; k < HE::vkmat::kRvtColdBindingCount; ++k)
+                                            wr(static_cast<int>(nWrites++), HE::vkmat::kRvtColdFirstBinding + k,
+                                               VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &rvtColdII[k]);
+                                    }
+                                }
                             VkDescriptorBufferInfo clusterBI[3]{};
                             if (m_clusterReady)
                             {
@@ -9624,6 +11232,23 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                                     clusterBI[c] = { cbs[c]->buf, 0, VK_WHOLE_SIZE };
                                     wr(static_cast<int>(nWrites++), cbind[c],
                                        VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &clusterBI[c], nullptr);
+                                }
+                            }
+                            // The landscape's rows (m_lsMatSetLayout): its numbers, the slot table, the tile and coarse
+                            // weight pages for the fragment, the tile and coarse heights for the vertex stage. Nearest,
+                            // every one: they are read with texelFetch.
+                            VkDescriptorImageInfo lsII[9]{};
+                            if (lsDraw)
+                            {
+                                const VkImageView lsViews[9] = { lsImages.table, lsImages.weights[0], lsImages.weights[1], lsImages.weights[2],
+                                                                 lsImages.coarseWeights[0], lsImages.coarseWeights[1], lsImages.coarseWeights[2],
+                                                                 lsImages.heights, lsImages.coarseHeights };
+                                static const uint32_t lsBind[9] = { 51, 52, 53, 54, 55, 56, 57, 59, 60 };
+                                wr(static_cast<int>(nWrites++), 50, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &lsImages.globals, nullptr);
+                                for (int k = 0; k < 9; ++k)
+                                {
+                                    lsII[k] = { VK_NULL_HANDLE, lsViews[k], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+                                    wr(static_cast<int>(nWrites++), lsBind[k], VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, nullptr, &lsII[k]);
                                 }
                             }
                             // Key = everything the writes name (FNV-1a over binding, type and the
@@ -9656,7 +11281,7 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                                 VkDescriptorSetAllocateInfo dsai{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
                                 dsai.descriptorPool     = m_matPool[m_currentFrame];
                                 dsai.descriptorSetCount = 1;
-                                dsai.pSetLayouts        = &m_matSetLayout;
+                                dsai.pSetLayouts        = lsDraw ? &m_lsMatSetLayout : &m_matSetLayout;
                                 if (vkAllocateDescriptorSets(m_device, &dsai, &set) != VK_SUCCESS) return false;
                                 for (uint32_t k = 0; k < nWrites; ++k) w[k].dstSet = set;
                                 vkUpdateDescriptorSets(m_device, nWrites, w, 0, nullptr);
@@ -9668,10 +11293,24 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                             const uint32_t dynOffsets[HE::vkmat::kDynamicOffsetCount] = {
                                 static_cast<uint32_t>(slot), static_cast<uint32_t>(slot), static_cast<uint32_t>(slot) };
                             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                                    m_matPipelineLayout, 0, 1, &set,
+                                                    lsDraw ? m_lsMatPipelineLayout : m_matPipelineLayout, 0, 1, &set,
                                                     HE::vkmat::kDynamicOffsetCount, dynOffsets);
                             return true;
                         };
+                        if (lsDraw)
+                        {
+                            // The landscape's patches with the material's set and its landscape pipeline, then the scene state
+                            // back as after every material draw (see below).
+                            if (bindMatSlot(matPipe, viewProj, glm::mat4(1.0f)))
+                            {
+                                m_landscape->drawPatches(cmd, m_lsMatPipelineLayout, *lsDraw);
+                                lsDrawn = true;
+                            }
+                            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, activeMatScenePipe);
+                            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_scenePipelineLayout, 0, 1,
+                                                    &m_frameUBO[m_currentFrame].set, 1, &m_sceneMatOffset);
+                            return;
+                        }
                         auto drawMatInstance = [&](const glm::mat4& model) {
                             if (!bindMatSlot(matPipe, viewProj * model, model)) return;
                             vkCmdDrawIndexed(cmd, range.count, 1, range.start, 0, 0);
@@ -9717,6 +11356,7 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                     }
                 }
             }
+            if (lsDraw) return;   // no material pipeline for the landscape: the caller draws its fixed blend, never a mesh
             // Base color: an explicit MaterialComponent override (dc.materialAssetId), once its
             // material is loaded, fully replaces the mesh's baked texture — even to flat.
             VkDescriptorSet albedoSet = m.albedoSet;             // baked (A1); null → flat
@@ -9814,6 +11454,60 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                 drawOne(dc.transform);
         };
 
+        // The tile landscape's ground through its material (drawDCVk with lsDraw): `gbuffer` = into the G-buffer pass that is
+        // open, with the material's G-buffer tail; else lit, forward. False when it has no material or no variant builds.
+        bool groundInGBuffer = false;
+        auto drawGroundMaterial = [&](bool gbuffer) -> bool
+        {
+            // A virtual texture page of meshes: the ground stays out of it (and so does the fixed blend).
+            const bool page = m_editorCamera.rvtSlot >= 0;
+            if (page && !m_editorCamera.rvtTileGround) return true;
+            if (!(m_landscapeFrameLive && m_landscapeFrame.materialId != HE::UUID{} && m_lsMatPipelineLayout != VK_NULL_HANDLE && m_matReady
+                  && m_contentManager))
+                return false;
+            // The texture group's material is named by no entity: loaded from its path once if nothing has.
+            if (!m_landscapeFrame.materialPath.empty() && m_landscapeFrame.materialId != m_landscapeMaterialLoadTried
+                && !m_contentManager->getMaterial(m_landscapeFrame.materialId))
+            {
+                m_landscapeMaterialLoadTried = m_landscapeFrame.materialId;
+                if (!m_contentManager->resolveMaterialRef(m_landscapeFrame.materialId, m_landscapeFrame.materialPath))
+                    m_contentManager->loadAsset(m_landscapeFrame.materialPath);
+            }
+            if (!m_landscape->materialImages(m_currentFrame, m_landscapeFrame, m_landscapeViewProj, lsImages)) return false;
+            const bool gb = gbufferPass;
+            gbufferPass = gbuffer;
+            const auto drawWith = [&](const HE::UUID& material, const HE::LandscapeRenderFrame& frame) -> bool
+            {
+                if (frame.patches.empty()) return false;
+                DrawCall lsDC{};
+                lsDC.materialAssetId = material;
+                lsDraw = &frame;
+                lsDrawn = false;
+                drawDCVk(lsDC);
+                lsDraw = nullptr;
+                return lsDrawn;
+            };
+            // What is drawn: on a page of the ground (rvtTileGround) the layer's view; else the extractor's derived material
+            // where the landscape's own cannot be drawn (RenderWorld::tileLandscapeMaterial), else the landscape's own.
+            const HE::UUID own = page ? m_editorCamera.rvtMaterial
+                               : m_renderWorld.tileLandscapeMaterial != HE::UUID{} ? m_renderWorld.tileLandscapeMaterial : m_landscapeFrame.materialId;
+            // Under a virtual texture (SetRvtTileGround) the patches inside its rectangle are drawn with the consumer, which
+            // reads the pages; when the consumer's variant does not build they go back to the ground's own material.
+            HE::LandscapeRenderFrame rest = m_landscapeFrame, paged = m_landscapeFrame;
+            paged.patches.clear();
+            bool any = false;
+            if (!page && m_tileRvtConsumer != HE::UUID{} && m_rvtPool[0].view && m_rvtTables.count(m_tileRvtConsumer))
+            {
+                HE::splitRvtTilePatches(rest, m_tileRvtMin, m_tileRvtMax, m_tileRvtNearM, paged.patches);
+                if (drawWith(m_tileRvtConsumer, paged)) any = true;
+                else rest.patches.insert(rest.patches.end(), paged.patches.begin(), paged.patches.end());
+            }
+            if (drawWith(own, rest)) any = true;
+            gbufferPass = gb;
+            lsDrawn = any;
+            return any;
+        };
+
         // Decals into GB0 when this frame is deferred and the variant built;
         // otherwise the forward decal over the lit colour, as before.
         const bool gbDecals = deferred && !m_renderWorld.decals.empty() && EnsureDecalPipelines()
@@ -9857,6 +11551,9 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_scenePipelineLayout,
                                     0, 1, &m_frameUBO[m_currentFrame].set, 1, &m_sceneMatOffset);
             for (const DrawCall* dc : opaqueDCs) drawDCVk(*dc);
+            // The tile landscape's ground into the G-buffer with its material's G-buffer tail (Thema 326), so the resolve lights
+            // it with everything else; without a variant it is drawn forward after the resolve, as before.
+            if (HE::landscapePassesOn()) groundInGBuffer = drawGroundMaterial(true);
             gbufferPass        = false;
             activeMatScenePipe = hdr && m_scenePipelineHDR ? m_scenePipelineHDR : m_scenePipeline;
             vkCmdEndRenderPass(cmd); // GB0..3 → SHADER_READ_ONLY (finalLayout)
@@ -9970,9 +11667,10 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                     localShadows ? m_shadowSampler   : m_albedoSampler,
                     localShadows ? m_localShadowView : m_whiteArrayView,
                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+                const bool realSky = m_giReflEnabled && m_skyReflValid && m_skyReflCubeView && m_skyReflSampler;
                 const VkDescriptorImageInfo skyII{
-                    m_skyEnvValid ? clampSampler  : m_albedoSampler,
-                    m_skyEnvValid ? m_skyEnvView  : m_whiteCubeView,
+                    realSky ? m_skyReflSampler  : (m_skyEnvValid ? clampSampler : m_albedoSampler),
+                    realSky ? m_skyReflCubeView : (m_skyEnvValid ? m_skyEnvView : m_whiteCubeView),
                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
                 const VkDescriptorImageInfo aoII{
                     m_ssaoRanThisFrame ? m_ssaoSampler     : m_albedoSampler,
@@ -10075,6 +11773,20 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
             // Forward replay: graph materials without a G-buffer variant, lit by
             // their own forward shader against the G-buffer depth (test + write).
             for (const DrawCall* dc : deferredForwardDCs) drawDCVk(*dc);
+        }
+
+        // World-scale landscape (Thema 326): opaque, depth-tested and depth-writing into the open scene pass: after the forward opaque draws, or on a
+        // deferred frame after the lighting resolve and the forward replay (the pass is m_hdrLoadRP, compatible with the HDR scene pass the pipeline
+        // was made for). Binds its own pipeline and set 0, so the scene state is restored right after.
+        if (m_landscapeFrameLive)
+        {
+            // With its material when the frame names one and the variant builds (lit, shadowed and fogged by the material's own
+            // fragment, through drawDCVk above); else the landscape's fixed blend. On a deferred frame the G-buffer pass has drawn
+            // it already and the resolve has lit it (groundInGBuffer).
+            if (!groundInGBuffer && !drawGroundMaterial(false)) landscapeDraw(cmd, width, height, hdr);
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, activeMatScenePipe);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_scenePipelineLayout,
+                                    0, 1, &m_frameUBO[m_currentFrame].set, 1, &m_sceneMatOffset);
         }
 
         // Screen-space decals: after the opaque geometry (which is what the depth
@@ -10200,6 +11912,21 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
             // Restore scene pipeline and set=0 binding for any subsequent work.
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                 hdr && m_scenePipelineHDR ? m_scenePipelineHDR : m_scenePipeline);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_scenePipelineLayout,
+                                    0, 1, &m_frameUBO[m_currentFrame].set, 1, &m_sceneMatOffset);
+        }
+
+        // ── Volumetric fog Apply (Thema 225): the seam between "opaque + sky" and "transparent".
+        // The HDR pass ends here (forward: m_postFxSceneRP; deferred: m_hdrLoadRP already), the
+        // full-screen Apply runs on m_hdrView against the sampled scene depth, and the pass resumes
+        // as m_hdrLoadRP (colour + depth LOAD) for the translucent tail. Only on a frame whose
+        // Inject/Integrate ran - mode 0 never takes this branch, so its pass structure is untouched.
+        if (m_fogFrameActive && hdr)
+        {
+            vkCmdEndRenderPass(cmd);
+            encodeFogApplyAndReopen(cmd, width, height);
+            // Back to the scene pipeline + set 0 for the tail (the Apply pass bound its own).
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, activeMatScenePipe);
             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_scenePipelineLayout,
                                     0, 1, &m_frameUBO[m_currentFrame].set, 1, &m_sceneMatOffset);
         }
@@ -10660,8 +12387,9 @@ void VulkanRenderer::destroySkyPipeline()
 
 void VulkanRenderer::drawSky(VkCommandBuffer cmd, uint32_t /*width*/, uint32_t /*height*/, bool hdr)
 {
+    // The sky's rays from the camera's rotation alone (HE::SkyViewProj): the translation lost them far from the origin.
     drawSkyFrom(cmd, hdr,
-                taaJittered(HE::kVulkanClipFix * m_renderWorld.camera.projection * m_renderWorld.camera.view),
+                taaJittered(HE::kVulkanClipFix * HE::SkyViewProj(m_renderWorld.camera.projection, m_renderWorld.camera.view)),
                 m_renderWorld.sunDirection, m_renderWorld.camera.position, m_wallTime, m_environment);
 }
 
@@ -12511,6 +14239,7 @@ void VulkanRenderer::createGiHwPipelines()
         bindOf(6, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER),
         bindOf(7, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR),
         bindOf(8, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE),
+        bindOf(9, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &m_giPointSampler),   // uHf: the tile landscape's height clipmap
     }, m_giShadowHwDSL);
     // gi_probe_hw.comp: SW bindings 0-5 + TLAS at 7 (6 intentionally unused).
     ok = ok && makeDSL({
@@ -12562,7 +14291,7 @@ void VulkanRenderer::createGiHwPipelines()
     {
         VkDescriptorPoolSize ps[5] = {
             { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             k_maxFramesInFlight * 6 },
-            { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,     k_maxFramesInFlight * 2 },
+            { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,     k_maxFramesInFlight * 3 }, // shadow gPos + gNorm + the height clipmap
             { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,              k_maxFramesInFlight * 4 }, // shadow raw+local, probe irr+vis
             { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,             k_maxFramesInFlight * 2 },
             { VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, k_maxFramesInFlight * 2 },
@@ -12951,7 +14680,11 @@ void VulkanRenderer::runGi(VkCommandBuffer cmd, uint32_t w, uint32_t h)
     shadowUbo.sunDirRadius = glm::vec4(towardLight, glm::radians(m_giLightRadius));
     // The software kernel's own instance list (without the terrain chunks) while the height field stands in for them.
     const bool sepOn = !useHw && m_giShadowSep;
-    const bool hfOn  = sepOn && m_giHfActive && m_giHfView && !m_renderWorld.heightfields.empty();
+    // The height field answers for a TerrainComponent's chunks where they were left out of the list (sepOn), and for the
+    // tile landscape's clipmap on EITHER kernel: its ground is no mesh, it is in no list and in no TLAS. (With `sepOn`
+    // alone in this condition the clipmap never occluded anything: its two lists are the same one.)
+    const bool hfTile = !m_renderWorld.heightfields.empty() && m_renderWorld.heightfields[0].key == kLandscapeGiHeightfieldKey;
+    const bool hfOn  = (sepOn || hfTile) && m_giHfActive && m_giHfView && !m_renderWorld.heightfields.empty();
     shadowUbo.frame        = glm::vec4(m_giFrameSeed, float(gw), float(gh),
                                        float(sepOn ? m_giShadowInstanceCount : m_giInstanceCount));
     {
@@ -13059,9 +14792,9 @@ void VulkanRenderer::runGi(VkCommandBuffer cmd, uint32_t w, uint32_t h)
         if (useHw) wTlas(shadowSet, 7);
         VkDescriptorImageInfo localSI{ VK_NULL_HANDLE, m_giLocalMask.view, VK_IMAGE_LAYOUT_GENERAL };
         wImg(shadowSet, 8, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &localSI);
-        // Binding 9 exists on the software kernel's layout only; off, any valid float view fills it (never fetched).
+        // Binding 9, on both kernels' layouts; off, any valid float view fills it (never fetched).
         VkDescriptorImageInfo hfSI{ VK_NULL_HANDLE, hfOn ? m_giHfView : m_giGBufPos.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
-        if (!useHw) wImg(shadowSet, 9, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &hfSI);
+        wImg(shadowSet, 9, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &hfSI);
         // Temporal set: gPos, raw (GENERAL), history[prev], UBO.
         VkDescriptorImageInfo rawSamp{ VK_NULL_HANDLE, m_giRaw.view, VK_IMAGE_LAYOUT_GENERAL };
         VkDescriptorImageInfo histBI { VK_NULL_HANDLE, m_giHist[prevIdx].view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
@@ -13109,6 +14842,10 @@ void VulkanRenderer::runGi(VkCommandBuffer cmd, uint32_t w, uint32_t h)
     gRPBI.renderArea.extent = { gw, gh };
     gRPBI.clearValueCount   = 3;
     gRPBI.pClearValues      = clears;
+    // The tile landscape's ground for this pass (Thema 326), asked for and uploaded before the pass is open: its pixels get a
+    // position and a normal, so the shadow rays start from them and the ground takes the ray-traced sun shadow like a mesh.
+    HE::LandscapeRenderFrame giGroundFrame;
+    const bool giGround = landscapePassFrame(vp, giGroundFrame) && m_landscape && m_landscape->ready();
     vkCmdBeginRenderPass(cmd, &gRPBI, VK_SUBPASS_CONTENTS_INLINE);
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_giGBufPipe);
     VkViewport vvp{ 0, 0, float(gw), float(gh), 0, 1 };
@@ -13152,6 +14889,8 @@ void VulkanRenderer::runGi(VkCommandBuffer cmd, uint32_t w, uint32_t h)
             vkCmdDrawIndexed(cmd, gm.indexCount, 1, 0, 0, 0);
         });
     }
+    if (giGround)
+        m_landscape->drawDepth(cmd, m_giGBufRP, VkExtent2D{ gw, gh }, m_currentFrame, giGroundFrame, vp, nullptr, /*giGBuf=*/true);
     vkCmdEndRenderPass(cmd); // colors → SHADER_READ_ONLY (dep covers COMPUTE too)
 
     // ── 2-6. Shadow mask + DDGI probe update: diffuse GI only. A reflections-
@@ -13418,6 +15157,7 @@ void VulkanRenderer::createGiReflPipelines()
     if (!reflCS || !fsVS || !blurFS || !mixFS)
     {
         HE_LOG_WARN(RHI, "%s", "VulkanRenderer: GI reflection shaders missing — reflections disabled");
+        m_giReflWhyNot = "The reflection shaders (gi_refl*.spv) are missing from the Shaders folder.";
         destroyModules();
         return;
     }
@@ -13749,7 +15489,14 @@ bool VulkanRenderer::runGiReflections(VkCommandBuffer cmd, bool probesValid, boo
 {
     createGiReflPipelines();
     m_giReflReady = false;
-    if (!m_giReflPipe || !m_giReflBlurPipe || !m_giReflMixPipe) return false;
+    if (!m_giReflPipe || !m_giReflBlurPipe || !m_giReflMixPipe)
+    {
+        // createGiReflPipelines already logged which step failed; the shader-missing case
+        // wrote its own text. Anything else gets the general one.
+        if (m_giReflWhyNot.empty())
+            m_giReflWhyNot = "The reflection pipelines could not be created on this GPU/driver (see HorizonEngine.log).";
+        return false;
+    }
     ensureGiReflTargets();
     if (!m_giReflRaw.img || !m_giNodeBuf.buf || !m_giTriBuf.buf || m_giInstanceCount == 0) return false;
 
@@ -14763,12 +16510,13 @@ void VulkanRenderer::runSSAO(VkCommandBuffer cmd, uint32_t w, uint32_t h,
     const float aspect = w > 0 && h > 0 ? float(w) / float(h) : 1.0f;
     m_extractor.setContentManager(m_contentManager);
     m_extractor.extract(*m_world, m_renderWorld, aspect, &m_editorCamera);
-    if (m_renderWorld.objects.empty()) return;
+    const bool groundScene = m_landscapeProvider && !m_landscapeFailed;   // a scene of ground alone still has occlusion to find
+    if (m_renderWorld.objects.empty() && !groundScene) return;
 
     refineObjectBounds();
 
     cullCameraObjects();
-    if (m_sortedIndices.empty()) return;
+    if (m_sortedIndices.empty() && !groundScene) return;
 
     const glm::mat4 view     = m_renderWorld.camera.view;
     const glm::mat4 proj     = m_renderWorld.camera.projection;
@@ -14818,6 +16566,12 @@ void VulkanRenderer::runSSAO(VkCommandBuffer cmd, uint32_t w, uint32_t h,
     posRPBI.renderArea.extent = { w, h };
     posRPBI.clearValueCount   = reflMrt ? 4u : 2u;
     posRPBI.pClearValues      = posClear;
+    // The ground's patches for this camera, asked for and uploaded before the pass is open.
+    HE::LandscapeRenderFrame ssaoGroundFrame;
+    // NOT PROVEN: on MoltenVK the patches are drawn here (the pipeline builds, 140-200 patches a frame) and the witness still
+    // reads 0 px of occlusion on the ground, in a capture whose forward frame also draws the test box black. So it is off on
+    // macOS and on with a real Vulkan driver, where it can be judged (HE::landscapeVkSsaoOn; Windows handoff, section 8).
+    const bool ssaoGround = HE::landscapeVkSsaoOn() && landscapePassFrame(vp, ssaoGroundFrame) && m_landscape && m_landscape->ready();
     vkCmdBeginRenderPass(cmd, &posRPBI, VK_SUBPASS_CONTENTS_INLINE);
 
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -14954,6 +16708,12 @@ void VulkanRenderer::runSSAO(VkCommandBuffer cmd, uint32_t w, uint32_t h,
             drawOne(obj.transform);
         }
     }
+    // The tile landscape's ground: its view-space position into the same target, so occlusion sees it (and what stands on it
+    // is occluded by it). With reflections on the pass is the three-target reflection pre-pass and the ground brings its
+    // three-target stage.
+    if (ssaoGround)
+        m_landscape->drawDepth(cmd, reflMrt ? m_reflPrepassRP : m_ssaoPosRenderPass, VkExtent2D{ w, h }, m_currentFrame, ssaoGroundFrame, vp,
+                               &view, false, nullptr, /*viewPosMrt=*/reflMrt);
     vkCmdEndRenderPass(cmd);
     // posRT transitions to SHADER_READ_ONLY via renderpass finalLayout.
 
@@ -16910,4 +18670,685 @@ IRenderer::FrameGpuStats VulkanRenderer::GetFrameGpuStats() const
     s.visibleObjects = m_statVisible;
     s.totalObjects   = m_statTotal;
     return s;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Volumetric fog (docs/volumetric-fog-plan.md, Thema 225 step 5)
+//
+// Vulkan twin of MetalRenderer::EncodeFogVolume / EncodeFogApplyAndReopen. The kernels are
+// FogVolumeShaderSource.h's GLSL 450, compiled to SPIR-V as they stand
+// (MaterialShaderLibrary::fogInject/fogIntegrate/fogApply(Backend::SpirV), canonical set 0
+// bindings, no pins). Three descriptor-set layouts below mirror exactly what the SPIR-V uses
+// statically (spirv-cross --reflect of the three modules); the inject kernel pulls in the
+// WHOLE lighting preamble, so it declares all 13 of the preamble's samplers and the unused
+// ones (GI masks, AO, probes, SSR, GI reflections, cloud shadow) get the white defaults.
+//
+// Clip conventions — derived, not copied from GL (whose four bugs were all here):
+//   * The scene is rasterised with kVulkanClipFix * P * V: NDC y points DOWN, depth 0..1.
+//   * The shared kernels build NDC as (2u-1, 1-2v, d), i.e. y UP with v = 0 at the top of the
+//     image, exactly Metal's convention, and Vulkan's frag coord also has y = 0 at the top.
+//     kZeroToOneDepthClipFix is flipY * kVulkanClipFix (y up, same 0..1 depth), so the
+//     kernels get inverse(kZeroToOneDepthClipFix * P * V) and, for the history reprojection,
+//     the previous frame's matrix of the same form. Depth needs no remap (already 0..1).
+//   * heApplyFogT (material code) maps uv = clip.xy / clip.w * 0.5 + 0.5 and reads the rows
+//     the kernels wrote with row 0 at the TOP: with Vulkan's y-down NDC that is the PLAIN
+//     kVulkanClipFix * P * V, neither Metal's extra flip nor GL's identity-on-y-up.
+// ─────────────────────────────────────────────────────────────────────────────
+
+bool VulkanRenderer::createFogImage3D(uint32_t w, uint32_t h, uint32_t d, VkFormat fmt,
+                                      VkImageUsageFlags usage, FogImage3D& out)
+{
+    VkImageCreateInfo ici{ VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+    ici.imageType     = VK_IMAGE_TYPE_3D;
+    ici.format        = fmt;
+    ici.extent        = { w, h, d };
+    ici.mipLevels     = 1;
+    ici.arrayLayers   = 1;
+    ici.samples       = VK_SAMPLE_COUNT_1_BIT;
+    ici.tiling        = VK_IMAGE_TILING_OPTIMAL;
+    ici.usage         = usage;
+    ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    if (vkCreateImage(m_device, &ici, nullptr, &out.img) != VK_SUCCESS) { out = {}; return false; }
+    VkMemoryRequirements req{};
+    vkGetImageMemoryRequirements(m_device, out.img, &req);
+    VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+    mai.allocationSize  = req.size;
+    mai.memoryTypeIndex = findMemoryType(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    if (vkAllocateMemory(m_device, &mai, nullptr, &out.mem) != VK_SUCCESS) { destroyFogImage3D(out); return false; }
+    vkBindImageMemory(m_device, out.img, out.mem, 0);
+    VkImageViewCreateInfo vci{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+    vci.image            = out.img;
+    vci.viewType         = VK_IMAGE_VIEW_TYPE_3D;
+    vci.format           = fmt;
+    vci.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+    if (vkCreateImageView(m_device, &vci, nullptr, &out.view) != VK_SUCCESS) { destroyFogImage3D(out); return false; }
+    return true;
+}
+
+void VulkanRenderer::destroyFogImage3D(FogImage3D& im)
+{
+    if (im.view) vkDestroyImageView(m_device, im.view, nullptr);
+    if (im.img)  vkDestroyImage(m_device, im.img, nullptr);
+    if (im.mem)  vkFreeMemory(m_device, im.mem, nullptr);
+    im = {};
+}
+
+void VulkanRenderer::destroyFogTargets()
+{
+    destroyFogImage3D(m_fogInjectTex[0]);
+    destroyFogImage3D(m_fogInjectTex[1]);
+    destroyFogImage3D(m_fogIntegratedTex);
+    m_fogGridAlloc = glm::ivec3(0);
+    m_fogHistValid = false;
+}
+
+void VulkanRenderer::destroyFogResources()
+{
+    if (!m_device) return;
+    destroyFogTargets();
+    destroyFogImage3D(m_fogNoise);  // (m_fogDummy belongs to the material resources: createFogDummy)
+    for (VkPipeline* p : { &m_fogInjectPipe, &m_fogIntegratePipe, &m_fogApplyPipe })
+        if (*p) { vkDestroyPipeline(m_device, *p, nullptr); *p = VK_NULL_HANDLE; }
+    for (VkPipelineLayout* p : { &m_fogInjectPL, &m_fogIntegratePL, &m_fogApplyPL })
+        if (*p) { vkDestroyPipelineLayout(m_device, *p, nullptr); *p = VK_NULL_HANDLE; }
+    if (m_fogPool) { vkDestroyDescriptorPool(m_device, m_fogPool, nullptr); m_fogPool = VK_NULL_HANDLE; }
+    for (uint32_t f = 0; f < 2; ++f) m_fogInjectSet[f] = m_fogIntegrateSet[f] = m_fogApplySet[f] = VK_NULL_HANDLE;
+    for (VkDescriptorSetLayout* l : { &m_fogInjectDSL, &m_fogIntegrateDSL, &m_fogApplyDSL })
+        if (*l) { vkDestroyDescriptorSetLayout(m_device, *l, nullptr); *l = VK_NULL_HANDLE; }
+    for (VkSampler* s : { &m_fogLinearSampler, &m_fogNoiseSampler })
+        if (*s) { vkDestroySampler(m_device, *s, nullptr); *s = VK_NULL_HANDLE; }
+    for (uint32_t f = 0; f < 2; ++f)
+        for (MatFrameBuf* mb : { &m_fogVolBuf[f], &m_fogLightBuf[f] })
+        {
+            if (mb->mapped) vkUnmapMemory(m_device, mb->mem);
+            if (mb->buf)    vkDestroyBuffer(m_device, mb->buf, nullptr);
+            if (mb->mem)    vkFreeMemory(m_device, mb->mem, nullptr);
+            *mb = {};
+        }
+    m_fogReady = false;
+    m_fogFrameActive = false;
+    m_fogPipelinesTried = false;
+}
+
+// Built once at Initialize, EAGERLY: MakeFogVolumeData's `enabled` gate depends on
+// setVolumetricFogCapable being truthful before the first fog frame (a lazy build would wait
+// for a request that `enabled == false` never makes). A failure at any step leaves
+// supportsVolumetricFog false and the analytic fog running, as if this step never existed.
+bool VulkanRenderer::createFogPipelines()
+{
+    if (m_fogPipelinesTried) return m_fogReady;
+    m_fogPipelinesTried = true;
+#if !defined(HE_HAVE_SHADERC)
+    return false;
+#else
+    using Backend = HE::MaterialShaderLibrary::Backend;
+    auto fail = [&](const char* why) -> bool {
+        HE_LOG_WARN(RHI, "%s", (std::string("VulkanRenderer: volumetric fog off — ") + why).c_str());
+        destroyFogResources();
+        m_fogPipelinesTried = true;
+        return false;
+    };
+    // Row 34 must be in the material layout (else heApplyFogT's SPIR-V names a missing
+    // binding), and Apply needs the colour-only LOAD pass of the underwater fog plus the
+    // sampled-depth route; the scene's HDR LOAD pass is what the transparent tail resumes in.
+    if (!m_matReady || !m_matFogVolume) return fail("material layout without heFogVolume (binding 34)");
+    if (!m_underwaterFogRP || !m_hdrLoadRP) return fail("Apply render passes missing");
+    if (!m_whiteAlbedoView || !m_whiteArrayView || !m_whiteCubeView || !m_albedoSampler)
+        return fail("white default images missing");
+    {
+        VkPhysicalDeviceProperties props{};
+        vkGetPhysicalDeviceProperties(m_physDevice, &props);
+        // The inject kernel is 8 x 8 x 4 = 256 invocations; the spec minimum is only 128.
+        if (props.limits.maxComputeWorkGroupInvocations < 256 || props.limits.maxComputeWorkGroupSize[0] < 8
+            || props.limits.maxComputeWorkGroupSize[1] < 8 || props.limits.maxComputeWorkGroupSize[2] < 4)
+            return fail("compute work-group limit below 8x8x4");
+        if (props.limits.maxPerStageDescriptorSamplers < 14 || props.limits.maxPerStageDescriptorStorageImages < 1)
+            return fail("per-stage descriptor limits too small");
+    }
+
+    const auto& vs = m_matShaderLib.fullscreenVertex(Backend::SpirV);
+    const auto& fi = m_matShaderLib.fogInject(Backend::SpirV);
+    const auto& fg = m_matShaderLib.fogIntegrate(Backend::SpirV);
+    const auto& fa = m_matShaderLib.fogApply(Backend::SpirV);
+    if (!(vs.ok && fi.ok && fg.ok && fa.ok) || vs.spirv.empty() || fi.spirv.empty()
+        || fg.spirv.empty() || fa.spirv.empty())
+        return fail((std::string("shader compile failed\n") + vs.log + fi.log + fg.log + fa.log).c_str());
+
+    // ── Descriptor-set layouts: the VulkanMaterialLayout.h tables, which he_tests holds each
+    //    module's statically used descriptors against (test_fog_volume.cpp) ──
+    static_assert(static_cast<uint32_t>(VK_SHADER_STAGE_COMPUTE_BIT) == HE::vkmat::kStageCompute, "vkmat stage bits are Vulkan's");
+    constexpr VkDescriptorType kUbo = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    constexpr VkDescriptorType kCis = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    constexpr VkDescriptorType kImg = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    constexpr VkDescriptorType kSto = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    auto makeDSL = [&](const HE::vkmat::FogBinding* table, uint32_t n, VkDescriptorSetLayout& out) -> bool {
+        std::vector<VkDescriptorSetLayoutBinding> v(n);
+        for (uint32_t i = 0; i < n; ++i)
+        {
+            VkDescriptorType t = kUbo;
+            switch (table[i].kind)
+            {
+            case HE::vkmat::FogDesc::Ubo:          t = kUbo; break;
+            case HE::vkmat::FogDesc::Cis:          t = kCis; break;
+            case HE::vkmat::FogDesc::SampledImage: t = kImg; break;
+            case HE::vkmat::FogDesc::StorageImage: t = kSto; break;
+            }
+            v[i] = {};
+            v[i].binding = table[i].binding; v[i].descriptorType = t; v[i].descriptorCount = 1;
+            v[i].stageFlags = table[i].stages;
+        }
+        VkDescriptorSetLayoutCreateInfo ci{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
+        ci.bindingCount = n;
+        ci.pBindings    = v.data();
+        return vkCreateDescriptorSetLayout(m_device, &ci, nullptr, &out) == VK_SUCCESS;
+    };
+    if (!makeDSL(HE::vkmat::kFogInjectBindings,    HE::vkmat::kFogInjectBindingCount,    m_fogInjectDSL)
+     || !makeDSL(HE::vkmat::kFogIntegrateBindings, HE::vkmat::kFogIntegrateBindingCount, m_fogIntegrateDSL)
+     || !makeDSL(HE::vkmat::kFogApplyBindings,     HE::vkmat::kFogApplyBindingCount,     m_fogApplyDSL))
+        return fail("descriptor-set layout creation failed");
+    auto makePL = [&](VkDescriptorSetLayout dsl, VkPipelineLayout& out) -> bool {
+        VkPipelineLayoutCreateInfo ci{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+        ci.setLayoutCount = 1; ci.pSetLayouts = &dsl;
+        return vkCreatePipelineLayout(m_device, &ci, nullptr, &out) == VK_SUCCESS;
+    };
+    if (!makePL(m_fogInjectDSL, m_fogInjectPL) || !makePL(m_fogIntegrateDSL, m_fogIntegratePL)
+        || !makePL(m_fogApplyDSL, m_fogApplyPL))
+        return fail("pipeline layout creation failed");
+
+    // ── Pool: 3 sets per frame slot, rewritten every frame ──
+    {
+        using HE::vkmat::fogCountOf;
+        using HE::vkmat::FogDesc;
+        auto perFrame = [&](FogDesc k) {
+            return fogCountOf(HE::vkmat::kFogInjectBindings,    HE::vkmat::kFogInjectBindingCount,    k)
+                 + fogCountOf(HE::vkmat::kFogIntegrateBindings, HE::vkmat::kFogIntegrateBindingCount, k)
+                 + fogCountOf(HE::vkmat::kFogApplyBindings,     HE::vkmat::kFogApplyBindingCount,     k);
+        };
+        VkDescriptorPoolSize ps[4] = {
+            { kCis, 2 * perFrame(FogDesc::Cis) },          { kUbo, 2 * perFrame(FogDesc::Ubo) },
+            { kImg, 2 * perFrame(FogDesc::SampledImage) }, { kSto, 2 * perFrame(FogDesc::StorageImage) },
+        };
+        VkDescriptorPoolCreateInfo dpci{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
+        dpci.maxSets = 6; dpci.poolSizeCount = 4; dpci.pPoolSizes = ps;
+        if (vkCreateDescriptorPool(m_device, &dpci, nullptr, &m_fogPool) != VK_SUCCESS)
+            return fail("descriptor pool failed");
+        for (uint32_t f = 0; f < 2; ++f)
+        {
+            VkDescriptorSetLayout ls[3] = { m_fogInjectDSL, m_fogIntegrateDSL, m_fogApplyDSL };
+            VkDescriptorSet ss[3]{};
+            VkDescriptorSetAllocateInfo dsai{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
+            dsai.descriptorPool = m_fogPool; dsai.descriptorSetCount = 3; dsai.pSetLayouts = ls;
+            if (vkAllocateDescriptorSets(m_device, &dsai, ss) != VK_SUCCESS) return fail("descriptor sets failed");
+            m_fogInjectSet[f] = ss[0]; m_fogIntegrateSet[f] = ss[1]; m_fogApplySet[f] = ss[2];
+        }
+    }
+
+    // ── UBOs (host-visible, mapped for good, one per frame slot) ──
+    auto makeBuf = [&](VkDeviceSize size, MatFrameBuf& mb) -> bool {
+        VkBufferCreateInfo bci{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+        bci.size = size; bci.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+        if (vkCreateBuffer(m_device, &bci, nullptr, &mb.buf) != VK_SUCCESS) return false;
+        VkMemoryRequirements req{}; vkGetBufferMemoryRequirements(m_device, mb.buf, &req);
+        VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+        mai.allocationSize  = req.size;
+        mai.memoryTypeIndex = findMemoryType(req.memoryTypeBits,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        if (vkAllocateMemory(m_device, &mai, nullptr, &mb.mem) != VK_SUCCESS) return false;
+        vkBindBufferMemory(m_device, mb.buf, mb.mem, 0);
+        return vkMapMemory(m_device, mb.mem, 0, size, 0, &mb.mapped) == VK_SUCCESS;
+    };
+    for (uint32_t f = 0; f < 2; ++f)
+        if (!makeBuf(sizeof(HE::FogVolumeConstants), m_fogVolBuf[f])
+            || !makeBuf(sizeof(HE::MaterialShaderLibrary::Lighting), m_fogLightBuf[f]))
+            return fail("UBO allocation failed");
+
+    // ── Samplers ──
+    {
+        VkSamplerCreateInfo sci{ VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
+        sci.magFilter = sci.minFilter = VK_FILTER_LINEAR;
+        sci.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+        sci.addressModeU = sci.addressModeV = sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        if (vkCreateSampler(m_device, &sci, nullptr, &m_fogLinearSampler) != VK_SUCCESS) return fail("sampler failed");
+        sci.addressModeU = sci.addressModeV = sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT; // the bake tiles
+        if (vkCreateSampler(m_device, &sci, nullptr, &m_fogNoiseSampler) != VK_SUCCESS) return fail("sampler failed");
+    }
+
+    // ── One-shot uploads: the 64^3 noise (the fog's OWN volume, as on Metal and GL: one tap per
+    //    froxel against the sky's 256^3 would thrash the cache) and the 1x1x1 dummy bound at
+    //    binding 34 on every frame without the volume. ──
+    constexpr uint32_t kN = 64;
+    if (!createFogImage3D(kN, kN, kN, VK_FORMAT_R16G16_UNORM,
+                          VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, m_fogNoise))
+        return fail("noise volume allocation failed");
+    {
+        const std::vector<uint16_t> noise = HE::BuildSkyNoise3D(static_cast<int>(kN));
+        const VkDeviceSize dataSize = static_cast<VkDeviceSize>(kN) * kN * kN * 4; // RG16
+        VkBuffer stageBuf = VK_NULL_HANDLE; VkDeviceMemory stageMem = VK_NULL_HANDLE;
+        VkBufferCreateInfo bci{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+        bci.size = dataSize; bci.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+        bool ok = noise.size() * sizeof(uint16_t) >= dataSize
+               && vkCreateBuffer(m_device, &bci, nullptr, &stageBuf) == VK_SUCCESS;
+        if (ok)
+        {
+            VkMemoryRequirements mr{}; vkGetBufferMemoryRequirements(m_device, stageBuf, &mr);
+            VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+            mai.allocationSize  = mr.size;
+            mai.memoryTypeIndex = findMemoryType(mr.memoryTypeBits,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+            ok = vkAllocateMemory(m_device, &mai, nullptr, &stageMem) == VK_SUCCESS;
+            void* ptr = nullptr;
+            if (ok) { vkBindBufferMemory(m_device, stageBuf, stageMem, 0);
+                      ok = vkMapMemory(m_device, stageMem, 0, dataSize, 0, &ptr) == VK_SUCCESS; }
+            if (ok) { std::memcpy(ptr, noise.data(), static_cast<size_t>(dataSize)); vkUnmapMemory(m_device, stageMem); }
+        }
+        if (ok)
+        {
+            VkCommandBufferAllocateInfo cbai{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+            cbai.commandPool = m_cmdPool; cbai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY; cbai.commandBufferCount = 1;
+            VkCommandBuffer oneCB = VK_NULL_HANDLE;
+            vkAllocateCommandBuffers(m_device, &cbai, &oneCB);
+            VkCommandBufferBeginInfo bi{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+            bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+            vkBeginCommandBuffer(oneCB, &bi);
+            auto bar = [&](VkImage img, VkImageLayout from, VkImageLayout to, VkAccessFlags sa, VkAccessFlags da,
+                           VkPipelineStageFlags ss, VkPipelineStageFlags ds) {
+                VkImageMemoryBarrier b{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+                b.oldLayout = from; b.newLayout = to;
+                b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                b.image = img; b.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+                b.srcAccessMask = sa; b.dstAccessMask = da;
+                vkCmdPipelineBarrier(oneCB, ss, ds, 0, 0, nullptr, 0, nullptr, 1, &b);
+            };
+            const VkPipelineStageFlags kShaderStages = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+            bar(m_fogNoise.img, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                0, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+            VkBufferImageCopy region{};
+            region.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+            region.imageExtent      = { kN, kN, kN };
+            vkCmdCopyBufferToImage(oneCB, stageBuf, m_fogNoise.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+            bar(m_fogNoise.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, kShaderStages);
+            vkEndCommandBuffer(oneCB);
+            VkSubmitInfo si{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
+            si.commandBufferCount = 1; si.pCommandBuffers = &oneCB;
+            submitGraphics(si, VK_NULL_HANDLE);
+            vkQueueWaitIdle(m_graphicsQueue);
+            vkFreeCommandBuffers(m_device, m_cmdPool, 1, &oneCB);
+        }
+        if (stageBuf) vkDestroyBuffer(m_device, stageBuf, nullptr);
+        if (stageMem) vkFreeMemory(m_device, stageMem, nullptr);
+        if (!ok) return fail("noise upload failed");
+    }
+
+    // ── Pipelines ──
+    auto makeModule = [&](const std::vector<uint32_t>& spv) -> VkShaderModule {
+        VkShaderModuleCreateInfo ci{ VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO };
+        ci.codeSize = spv.size() * sizeof(uint32_t); ci.pCode = spv.data();
+        VkShaderModule mod = VK_NULL_HANDLE;
+        return vkCreateShaderModule(m_device, &ci, nullptr, &mod) == VK_SUCCESS ? mod : VK_NULL_HANDLE;
+    };
+    VkShaderModule icm = makeModule(fi.spirv), gcm = makeModule(fg.spirv);
+    VkShaderModule avm = makeModule(vs.spirv), afm = makeModule(fa.spirv);
+    auto makeCompute = [&](VkShaderModule m, VkPipelineLayout pl, VkPipeline& out) -> bool {
+        if (!m) return false;
+        VkComputePipelineCreateInfo cpi{ VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO };
+        cpi.stage.sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        cpi.stage.stage  = VK_SHADER_STAGE_COMPUTE_BIT;
+        cpi.stage.module = m;
+        cpi.stage.pName  = "main";
+        cpi.layout       = pl;
+        return createComputePipelines(1, &cpi, nullptr, &out) == VK_SUCCESS;
+    };
+    bool pipesOk = makeCompute(icm, m_fogInjectPL, m_fogInjectPipe) && makeCompute(gcm, m_fogIntegratePL, m_fogIntegratePipe);
+    if (pipesOk && avm && afm)
+    {
+        VkPipelineShaderStageCreateInfo st[2]{};
+        st[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        st[0].stage = VK_SHADER_STAGE_VERTEX_BIT;   st[0].module = avm; st[0].pName = "main";
+        st[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        st[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT; st[1].module = afm; st[1].pName = "main";
+        VkPipelineVertexInputStateCreateInfo vi{ VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
+        VkPipelineInputAssemblyStateCreateInfo ia{ VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO };
+        ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+        VkPipelineViewportStateCreateInfo vp{ VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO };
+        vp.viewportCount = 1; vp.scissorCount = 1;
+        VkPipelineRasterizationStateCreateInfo rs{ VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO };
+        rs.polygonMode = VK_POLYGON_MODE_FILL; rs.cullMode = VK_CULL_MODE_NONE;
+        rs.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE; rs.lineWidth = 1.0f;
+        VkPipelineMultisampleStateCreateInfo ms{ VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO };
+        ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+        // rgb' = rgb + dst.rgb * src.a (src.rgb = Lv + Tv*Lf, src.a = Tv*Tf): C*T + L. The
+        // alpha channel of the HDR target is left alone (ZERO / ONE), as on Metal and GL.
+        VkPipelineColorBlendAttachmentState cba{};
+        cba.blendEnable = VK_TRUE;
+        cba.srcColorBlendFactor = VK_BLEND_FACTOR_ONE;  cba.dstColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+        cba.srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO; cba.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+        cba.colorBlendOp = cba.alphaBlendOp = VK_BLEND_OP_ADD;
+        cba.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+        VkPipelineColorBlendStateCreateInfo cb{ VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO };
+        cb.attachmentCount = 1; cb.pAttachments = &cba;
+        VkDynamicState dynStates[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+        VkPipelineDynamicStateCreateInfo dyn{ VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO };
+        dyn.dynamicStateCount = 2; dyn.pDynamicStates = dynStates;
+        VkGraphicsPipelineCreateInfo pci{ VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO };
+        pci.stageCount = 2; pci.pStages = st;
+        pci.pVertexInputState = &vi; pci.pInputAssemblyState = &ia;
+        pci.pViewportState = &vp; pci.pRasterizationState = &rs;
+        pci.pMultisampleState = &ms; pci.pColorBlendState = &cb;
+        pci.pDynamicState = &dyn; pci.layout = m_fogApplyPL;
+        pci.renderPass = m_underwaterFogRP; pci.subpass = 0;   // colour-only RGBA16F, LOAD / STORE
+        pipesOk = createGraphicsPipelines(1, &pci, nullptr, &m_fogApplyPipe) == VK_SUCCESS;
+    }
+    else pipesOk = false;
+    for (VkShaderModule m : { icm, gcm, avm, afm }) if (m) vkDestroyShaderModule(m_device, m, nullptr);
+    if (!pipesOk) return fail("pipeline creation failed");
+
+    m_fogReady = true;
+    HE_LOG_INFO(RHI, "%s", "VulkanRenderer: volumetric fog ready (Inject/Integrate compute, Apply onto the HDR target)");
+    return true;
+#endif
+}
+
+bool VulkanRenderer::ensureFogTargets(const glm::ivec3& grid)
+{
+    if (m_fogIntegratedTex.view && grid == m_fogGridAlloc) return true;
+    // A grid change (first frame, aspect, quality) is rare; the old volumes may still be read by
+    // frames in flight, so drain the GPU before freeing them.
+    if (m_fogIntegratedTex.img || m_fogInjectTex[0].img) deviceWaitIdle();
+    destroyFogTargets();
+    const VkImageUsageFlags usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    const uint32_t gx = static_cast<uint32_t>(std::max(1, grid.x)), gy = static_cast<uint32_t>(std::max(1, grid.y)),
+                   gz = static_cast<uint32_t>(std::max(1, grid.z));
+    if (!createFogImage3D(gx, gy, gz, VK_FORMAT_R16G16B16A16_SFLOAT, usage, m_fogInjectTex[0])
+     || !createFogImage3D(gx, gy, gz, VK_FORMAT_R16G16B16A16_SFLOAT, usage, m_fogInjectTex[1])
+     || !createFogImage3D(gx, gy, gz, VK_FORMAT_R16G16B16A16_SFLOAT, usage, m_fogIntegratedTex))
+    {
+        HE_LOG_WARN(RHI, "%s", "VulkanRenderer: volumetric fog volumes could not be allocated");
+        destroyFogTargets();
+        return false;
+    }
+    // All three live in GENERAL for good: legal for the storage write and the sampled read.
+    VkCommandBufferAllocateInfo cbai{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+    cbai.commandPool = m_cmdPool; cbai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY; cbai.commandBufferCount = 1;
+    VkCommandBuffer oneCB = VK_NULL_HANDLE;
+    vkAllocateCommandBuffers(m_device, &cbai, &oneCB);
+    VkCommandBufferBeginInfo bi{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(oneCB, &bi);
+    for (VkImage img : { m_fogInjectTex[0].img, m_fogInjectTex[1].img, m_fogIntegratedTex.img })
+    {
+        VkImageMemoryBarrier b{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+        b.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED; b.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+        b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b.image = img; b.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+        b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        vkCmdPipelineBarrier(oneCB, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+            0, 0, nullptr, 0, nullptr, 1, &b);
+    }
+    vkEndCommandBuffer(oneCB);
+    VkSubmitInfo si{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
+    si.commandBufferCount = 1; si.pCommandBuffers = &oneCB;
+    submitGraphics(si, VK_NULL_HANDLE);
+    vkQueueWaitIdle(m_graphicsQueue);
+    vkFreeCommandBuffers(m_device, m_cmdPool, 1, &oneCB);
+    m_fogGridAlloc = grid;
+    m_fogHistValid = false; // a new grid has no history to reproject from
+    return true;
+}
+
+// Inject + Integrate. Recorded OUTSIDE any render pass, after the shadow maps, the local
+// atlas and the sky cube of this frame are current (DrawViewportFrame), before the scene
+// pass opens. Sets m_fogFrameActive; DrawScene's Apply split and the material fill read it.
+void VulkanRenderer::encodeFogVolume(VkCommandBuffer cmd)
+{
+    m_fogFrameActive = false;
+#if defined(HE_HAVE_SHADERC)
+    if (!m_fogReady || !m_world || !m_renderWorld.fogVolume.enabled) return;
+    // Apply (DrawScene) needs the LOAD pass, the colour-only framebuffer and the sampled depth:
+    // without any of them the whole feature stays off for this frame rather than half running.
+    if (!m_hdrLoadRP || !m_underwaterFogFB || !m_viewportDepthImage || !m_viewportDepthView || !m_hdrFB) return;
+    const HE::FogVolumeData fd = m_renderWorld.fogVolume;
+    if (!ensureFogTargets(fd.grid) || !m_fogIntegratedTex.view) return;
+    const uint32_t f = m_currentFrame;
+
+    // ── Time, history validity, wind drift (HE_SKY_TIME pins the clock: fixed 60 Hz steps) ──
+    const bool pinned = [] { const char* v = std::getenv("HE_SKY_TIME"); return v && *v; }();
+    const double now  = pinned ? (m_fogFrameIndex / 60.0)
+                               : std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    float dt = (m_fogLastTime > 0.0 || pinned) ? static_cast<float>(now - m_fogLastTime) : 0.0f;
+    if (pinned && m_fogFrameIndex == 0) dt = 0.0f;
+    m_fogLastTime = now;
+    const CameraData& cam = m_renderWorld.camera;
+    // The Vulkan clip the scene rasterised with (unjittered), and its y-up twin the kernels
+    // want (see the block comment above): kZeroToOneDepthClipFix = flipY * kVulkanClipFix.
+    const glm::mat4 viewProjVk = HE::kVulkanClipFix * cam.projection * cam.view;
+    const glm::mat4 viewProjUp = HE::kZeroToOneDepthClipFix * cam.projection * cam.view;
+    const glm::mat4 invViewProj = glm::inverse(viewProjUp);
+    const glm::vec3 camFwd = -glm::normalize(glm::vec3(glm::inverse(cam.view)[2]));
+    const float focal = cam.projection[1][1];
+    const bool historyOk = m_fogHistValid && dt > 0.0f && dt < 0.5f
+                        && glm::distance(cam.position, m_fogPrevCam) < 10.0f
+                        && std::abs(focal - m_fogPrevFocal) < 1e-4f * std::max(1.0f, std::abs(focal));
+    const IRenderer::EnvironmentSettings& env = GetEnvironment();
+    const float rad = glm::radians(env.windDirection);
+    m_fogNoiseOffset += glm::vec3(std::sin(rad), 0.0f, -std::cos(rad)) * std::max(env.windSpeed, 0.0f) * dt * 0.5f;
+    m_fogNoiseTime   += dt;
+
+    HE::FogVolumeTemporalState ts;
+    ts.jitter01     = HE::fogJitter(m_fogFrameIndex);
+    ts.historyAlpha = historyOk ? HE::fogHistoryAlpha(dt) : 1.0f;
+    ts.historyValid = historyOk;
+    ts.frameIndex   = m_fogFrameIndex;
+    ts.noiseOffset  = m_fogNoiseOffset;
+    ts.noiseTime    = m_fogNoiseTime;
+    const HE::FogVolumeConstants fc = HE::FillFogVolumeConstants(
+        fd, invViewProj, m_fogPrevViewProj, cam.position, camFwd, ts, 0.0f);
+    std::memcpy(m_fogVolBuf[f].mapped, &fc, sizeof(fc));
+
+    // ── HeLighting for the kernel's shadow / light functions: the lights and the CSM / local
+    //    atlas matrices exactly as a surface fragment of this frame sees them. DrawScene's own
+    //    fill lives inside the scene pass (and zeroes the CSM on GI frames), hence a second one. ──
+    {
+        HE::MaterialShaderLibrary::Lighting lit{};
+        glm::vec3 sunDir, sunColor;
+        m_renderWorld.dominantDirectionalLight(sunDir, sunColor);
+        lit.sunDir[0] = sunDir.x; lit.sunDir[1] = sunDir.y; lit.sunDir[2] = sunDir.z;
+        lit.sunColor[0] = sunColor.r; lit.sunColor[1] = sunColor.g; lit.sunColor[2] = sunColor.b;
+        const bool localShadows = m_localShadowLayerCount > 0 && m_localShadowView != VK_NULL_HANDLE;
+        HE::FillMaterialLightWindow(m_renderWorld, lit, /*localShadowsActive=*/localShadows);
+        if (localShadows)
+            for (int v = 0; v < m_localShadowLayerCount && v < kLocalShadowLayers; ++v)
+                std::memcpy(lit.localShadowVP[v], &m_localShadowClip[v][0][0], 16 * sizeof(float));
+        if (m_shadowRenderedThisFrame && m_shadowView && m_shadowLayoutValid)
+        {
+            const int nCascades = static_cast<int>(m_cascadeSplits.w);
+            for (int c = 0; c < nCascades && c < kCsmCascades; ++c)
+                std::memcpy(lit.csmVP[c], &m_cascadeClip[c][0][0], 16 * sizeof(float));
+            lit.csmSplits[0] = m_cascadeSplits.x; lit.csmSplits[1] = m_cascadeSplits.y;
+            lit.csmSplits[2] = m_cascadeSplits.z; lit.csmSplits[3] = m_cascadeSplits.w;
+            lit.camFwd[0] = m_cascadeCamFwd.x; lit.camFwd[1] = m_cascadeCamFwd.y; lit.camFwd[2] = m_cascadeCamFwd.z;
+            lit.shadowBias[0] = m_shadowSettings.slopeBias;
+            lit.shadowBias[1] = m_shadowSettings.minBias;
+        }
+        lit.fog[2] = m_skyEnvValid ? 1.0f : 0.0f;       // heSkyEnv is the baked cube (else heLight.ambient)
+        lit.ambient[0] = m_renderWorld.ambient.r; lit.ambient[1] = m_renderWorld.ambient.g; lit.ambient[2] = m_renderWorld.ambient.b;
+        lit.camPos[0] = cam.position.x; lit.camPos[1] = cam.position.y; lit.camPos[2] = cam.position.z;
+        std::memcpy(m_fogLightBuf[f].mapped, &lit, sizeof(lit));
+    }
+
+    // ── Descriptors (this slot's fence was waited on in Render(): free to rewrite) ──
+    const int cur = 1 - m_fogHist;
+    const VkSampler clampSampler = m_ssaoSampler ? m_ssaoSampler : m_albedoSampler;
+    const bool localShadowsOn = m_localShadowLayerCount > 0 && m_localShadowView != VK_NULL_HANDLE;
+    const VkDescriptorImageInfo whiteII{ m_albedoSampler, m_whiteAlbedoView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+    const VkDescriptorImageInfo csmII{
+        (m_shadowView && m_shadowLayoutValid) ? m_shadowSampler : m_albedoSampler,
+        (m_shadowView && m_shadowLayoutValid) ? m_shadowView    : m_whiteArrayView,
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+    const VkDescriptorImageInfo localII{
+        localShadowsOn ? m_shadowSampler   : m_albedoSampler,
+        localShadowsOn ? m_localShadowView : m_whiteArrayView,
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+    const VkDescriptorImageInfo skyII{
+        m_skyEnvValid ? clampSampler : m_albedoSampler,
+        m_skyEnvValid ? m_skyEnvView : m_whiteCubeView,
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+    const VkDescriptorImageInfo noiseII{ m_fogNoiseSampler, m_fogNoise.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+    const VkDescriptorImageInfo histII{ m_fogLinearSampler, m_fogInjectTex[m_fogHist].view, VK_IMAGE_LAYOUT_GENERAL };
+    const VkDescriptorImageInfo outII{ VK_NULL_HANDLE, m_fogInjectTex[cur].view, VK_IMAGE_LAYOUT_GENERAL };
+    const VkDescriptorImageInfo injII{ VK_NULL_HANDLE, m_fogInjectTex[cur].view, VK_IMAGE_LAYOUT_GENERAL };
+    const VkDescriptorImageInfo intII{ VK_NULL_HANDLE, m_fogIntegratedTex.view, VK_IMAGE_LAYOUT_GENERAL };
+    const VkDescriptorBufferInfo lightBI{ m_fogLightBuf[f].buf, 0, sizeof(HE::MaterialShaderLibrary::Lighting) };
+    const VkDescriptorBufferInfo volBI{ m_fogVolBuf[f].buf, 0, sizeof(HE::FogVolumeConstants) };
+    {
+        std::vector<VkWriteDescriptorSet> w;
+        w.reserve(24);
+        auto wr = [&](VkDescriptorSet set, uint32_t binding, VkDescriptorType type,
+                      const VkDescriptorBufferInfo* bi, const VkDescriptorImageInfo* ii) {
+            VkWriteDescriptorSet x{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+            x.dstSet = set; x.dstBinding = binding; x.descriptorCount = 1; x.descriptorType = type;
+            x.pBufferInfo = bi; x.pImageInfo = ii;
+            w.push_back(x);
+        };
+        constexpr VkDescriptorType kUbo = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        constexpr VkDescriptorType kCis = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        const VkDescriptorSet is = m_fogInjectSet[f];
+        wr(is, 0, kUbo, &lightBI, nullptr);
+        for (uint32_t b : { 10u, 11u, 16u, 17u, 18u, 31u, 32u, 33u }) // GI masks, AO, probes, SSR, GI refl, cloud shadow: unused here
+            wr(is, b, kCis, nullptr, &whiteII);
+        wr(is, 12, kCis, nullptr, &csmII);
+        wr(is, 13, kCis, nullptr, &localII);
+        wr(is, 15, kCis, nullptr, &skyII);
+        wr(is, 35, kCis, nullptr, &noiseII);
+        wr(is, 36, kUbo, &volBI, nullptr);
+        wr(is, 37, kCis, nullptr, &histII);
+        wr(is, 38, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, nullptr, &outII);
+        const VkDescriptorSet gs = m_fogIntegrateSet[f];
+        wr(gs, 36, kUbo, &volBI, nullptr);
+        wr(gs, 37, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, nullptr, &injII);
+        wr(gs, 38, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, nullptr, &intII);
+        vkUpdateDescriptorSets(m_device, static_cast<uint32_t>(w.size()), w.data(), 0, nullptr);
+    }
+
+    // ── Passes ──
+    auto memBarrier = [&](VkPipelineStageFlags ss, VkAccessFlags sa, VkPipelineStageFlags ds, VkAccessFlags da) {
+        VkMemoryBarrier mb{ VK_STRUCTURE_TYPE_MEMORY_BARRIER };
+        mb.srcAccessMask = sa; mb.dstAccessMask = da;
+        vkCmdPipelineBarrier(cmd, ss, ds, 0, 1, &mb, 0, nullptr, 0, nullptr);
+    };
+    // Everything before: the shadow passes (depth writes), the sky-cube transfer, last frame's
+    // fog reads and writes -> the inject kernel's reads and writes.
+    memBarrier(VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_MEMORY_WRITE_BIT,
+               VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_fogInjectPipe);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_fogInjectPL, 0, 1, &m_fogInjectSet[f], 0, nullptr);
+    vkCmdDispatch(cmd, (static_cast<uint32_t>(fd.grid.x) + 7u) / 8u, (static_cast<uint32_t>(fd.grid.y) + 7u) / 8u,
+                  (static_cast<uint32_t>(fd.grid.z) + 3u) / 4u);
+    memBarrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
+               VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_fogIntegratePipe);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_fogIntegratePL, 0, 1, &m_fogIntegrateSet[f], 0, nullptr);
+    vkCmdDispatch(cmd, (static_cast<uint32_t>(fd.grid.x) + 7u) / 8u, (static_cast<uint32_t>(fd.grid.y) + 7u) / 8u, 1u);
+    // The integrated volume: read by Apply and by every translucent material's fragment shader.
+    memBarrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
+               VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
+
+    m_fogHist         = cur;
+    m_fogHistValid    = true;
+    m_fogPrevViewProj = viewProjUp;
+    m_fogPrevCam      = cam.position;
+    m_fogPrevFocal    = focal;
+    ++m_fogFrameIndex;
+    m_fogFrame        = fd;
+    m_fogViewProjMat  = viewProjVk;
+    m_fogFrameActive  = true;
+    static bool s_fogLogged = false; // the runtime witness (he_vk_imagetests.py: required at fogMode 1, forbidden at 0)
+    if (!s_fogLogged)
+    {
+        s_fogLogged = true;
+        HE_LOG_INFO(RHI, "VulkanRenderer: volumetric fog frame (grid %dx%dx%d, range %.0f m, %s)",
+                    fd.grid.x, fd.grid.y, fd.grid.z, fd.distance, fd.parity ? "parity" : "full");
+    }
+#else
+    (void)cmd;
+#endif
+}
+
+// Apply: the full-screen pass onto m_hdrView between the opaque scene + sky and the transparent
+// tail. DrawScene ended the HDR render pass just before calling this; the scene depth is still
+// DEPTH_STENCIL_ATTACHMENT_OPTIMAL (both HDR passes store it and keep that layout), flipped to
+// SHADER_READ_ONLY around the draw exactly like the underwater fog does. Then the transparent
+// tail resumes in m_hdrLoadRP (colour and depth LOAD) on the same framebuffer.
+void VulkanRenderer::encodeFogApplyAndReopen(VkCommandBuffer cmd, uint32_t w, uint32_t h)
+{
+    const uint32_t f = m_currentFrame;
+    auto depthBarrier = [&](VkImageLayout from, VkImageLayout to, VkAccessFlags sa, VkAccessFlags da,
+                            VkPipelineStageFlags ss, VkPipelineStageFlags ds) {
+        VkImageMemoryBarrier b{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+        b.oldLayout = from; b.newLayout = to;
+        b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b.image = m_viewportDepthImage;
+        b.subresourceRange = { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1 };
+        b.srcAccessMask = sa; b.dstAccessMask = da;
+        vkCmdPipelineBarrier(cmd, ss, ds, 0, 0, nullptr, 0, nullptr, 1, &b);
+    };
+    depthBarrier(VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                 VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
+                 VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+
+    // The set: the integrated volume, the sky cube (the far field's colour), the constants and
+    // the depth. Rewritten per frame (this slot's earlier use is long finished).
+    const VkSampler clampSampler = m_ssaoSampler ? m_ssaoSampler : m_albedoSampler;
+    const VkDescriptorImageInfo volII{ m_fogLinearSampler, m_fogIntegratedTex.view, VK_IMAGE_LAYOUT_GENERAL };
+    const VkDescriptorImageInfo skyII{
+        m_skyEnvValid ? clampSampler : m_albedoSampler,
+        m_skyEnvValid ? m_skyEnvView : m_whiteCubeView,
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+    const VkDescriptorImageInfo depthII{ VK_NULL_HANDLE, m_viewportDepthView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+    const VkDescriptorBufferInfo volBI{ m_fogVolBuf[f].buf, 0, sizeof(HE::FogVolumeConstants) };
+    VkWriteDescriptorSet wr[4]{};
+    for (VkWriteDescriptorSet& x : wr) { x.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; x.dstSet = m_fogApplySet[f]; x.descriptorCount = 1; }
+    wr[0].dstBinding = 15; wr[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; wr[0].pImageInfo = &skyII;
+    wr[1].dstBinding = 34; wr[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; wr[1].pImageInfo = &volII;
+    wr[2].dstBinding = 36; wr[2].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;         wr[2].pBufferInfo = &volBI;
+    wr[3].dstBinding = 39; wr[3].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;          wr[3].pImageInfo = &depthII;
+    vkUpdateDescriptorSets(m_device, 4, wr, 0, nullptr);
+
+    VkRenderPassBeginInfo bi{ VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
+    bi.renderPass = m_underwaterFogRP; bi.framebuffer = m_underwaterFogFB;
+    bi.renderArea.extent = { w, h };
+    vkCmdBeginRenderPass(cmd, &bi, VK_SUBPASS_CONTENTS_INLINE);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_fogApplyPipe);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_fogApplyPL, 0, 1, &m_fogApplySet[f], 0, nullptr);
+    const VkViewport vp{ 0.0f, 0.0f, static_cast<float>(w), static_cast<float>(h), 0.0f, 1.0f };
+    const VkRect2D   sc{ { 0, 0 }, { w, h } };
+    vkCmdSetViewport(cmd, 0, 1, &vp);
+    vkCmdSetScissor(cmd, 0, 1, &sc);
+    vkCmdDraw(cmd, 3, 1, 0, 0);
+    vkCmdEndRenderPass(cmd);
+
+    depthBarrier(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                 VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                 VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT);
+    // m_hdrLoadRP's own dependency must equal m_postFxSceneRP's (see createDeferredPipelines), so
+    // it cannot order this pass' colour writes before its LOADs: one explicit barrier does, the
+    // same one the deferred branch of DrawScene puts between its passes.
+    {
+        VkMemoryBarrier mb{ VK_STRUCTURE_TYPE_MEMORY_BARRIER };
+        mb.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+        mb.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
+                         | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+        vkCmdPipelineBarrier(cmd,
+            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT
+                | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+            0, 1, &mb, 0, nullptr, 0, nullptr);
+    }
+    VkRenderPassBeginInfo hbi{ VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
+    hbi.renderPass = m_hdrLoadRP; hbi.framebuffer = m_hdrFB;
+    hbi.renderArea.extent = { w, h };
+    vkCmdBeginRenderPass(cmd, &hbi, VK_SUBPASS_CONTENTS_INLINE);
+    vkCmdSetViewport(cmd, 0, 1, &vp);
+    vkCmdSetScissor(cmd, 0, 1, &sc);
 }

@@ -1,5 +1,6 @@
 #include "HorizonRendering/RenderExtractor.h"
 #include <cstdint>
+#include <MaterialGraph/MaterialParamLimits.h> // kMatParamFloats
 #include <cstdlib>
 #include "HorizonRendering/RenderWorld.h"
 #include "HorizonRendering/RenderConstants.h"   // kShadowMapResolution
@@ -8,9 +9,11 @@
 #include <SDL3/SDL_timer.h>
 #include <Renderer/IRenderer.h>
 #include <HorizonScene/HorizonWorld.h>
+#include <HorizonScene/RvtLandscape.h>            // tileGroundKey / tileGroundGraph
 #include <HorizonScene/EnvironmentPush.h>   // the ONE EnvironmentComponent → settings map
 #include <HorizonScene/Components/EnvironmentComponent.h>
 #include <HorizonScene/TransformHierarchy.h>
+#include <HorizonScene/CookedStatic.h>           // flat rows of the static meshes (entity cooking)
 #include <HorizonScene/EntityActive.h>            // the "Active" switch, inherited down the tree
 #include <HorizonScene/Components/TransformComponent.h>
 #include <HorizonScene/Components/MeshComponent.h>
@@ -26,7 +29,12 @@
 #include <HorizonScene/Components/WeatherComponent.h>
 #include <HorizonScene/Components/FoliageComponent.h>
 #include <HorizonScene/Components/TerrainComponent.h>       // landscape layer weightmap
+#include <HorizonScene/Components/LandscapeWorldComponent.h> // the tile landscape's GI entry
+#include <MaterialGraph/AutoLandscapeMaterial.h>
+#include <MaterialGraph/MaterialGraph.h>
+#include <MaterialGraph/RvtSplit.h>
 #include <HorizonScene/Components/TerrainChunkComponent.h>  // chunk → parent landscape
+#include <HorizonScene/LandscapeRuntime.h>                  // GI height clipmap of a tile landscape
 #include <HorizonScene/WaterQuery.h>                         // queryUnderwaterCamera's WaterIndex
 #include <HorizonScene/Components/RopeComponent.h>
 #include <HorizonScene/Components/TrailComponent.h>
@@ -79,13 +87,13 @@ void windWaterParams(const MaterialAsset& ma, const MaterialComponent* mc,
 {
 	if (block.empty())
 	{
-		block.assign(64, 0.0f);
-		const size_t n = std::min(ma.shaderParamData.size(), size_t(64));
+		block.assign(HE::kMatParamFloats, 0.0f);
+		const size_t n = std::min(ma.shaderParamData.size(), size_t(HE::kMatParamFloats));
 		std::copy(ma.shaderParamData.begin(), ma.shaderParamData.begin() + n, block.begin());
 	}
 	static const char* const kKnobs[3] = { "WaveA", "WaveB", "WaveC" };
 	for (const char* knob : kKnobs)
-		for (size_t k = 0; k < ma.graphParamNames.size() && k < 16; ++k)
+		for (size_t k = 0; k < ma.graphParamNames.size() && k < size_t(HE::kMatMaxParams); ++k)
 		{
 			if (ma.graphParamNames[k] != knob) continue;
 			bool authored = false;
@@ -302,6 +310,13 @@ void windWaterParams(const MaterialAsset& ma, const MaterialComponent* mc,
 		return out;
 	}
 
+	// The material the chosen LOD level carries of its own (the baked far landscape, LODLevel::materialId), or none.
+	HE::UUID lodLevelMaterial(const LODComponent& lc)
+	{
+		if (lc.current == LODComponent::kRefined || lc.current == 0 || lc.current >= lc.levels.size()) return {};
+		return lc.levels[lc.current].materialId;
+	}
+
 	// The LOD0 mesh's section table when the entity's LOD picked ANOTHER asset
 	// to draw this frame — empty when the drawn mesh is LOD0 itself, there is
 	// no LODComponent, or LOD0 is not resident. A copy, for the pointer reason
@@ -318,13 +333,110 @@ void windWaterParams(const MaterialAsset& ma, const MaterialComponent* mc,
 		return HE::meshSectionsOf(*m0);
 	}
 
+	// The mesh's object-space box, INVALID (= never culled) for a mesh registered without one. Require a
+	// real, non-degenerate box: a mesh registered without a computed AABB leaves boundsMin==boundsMax=={0,0,0}
+	// — "valid" but a zero-volume point, and culling against it drops the object the moment its pivot exits
+	// the view.
+	HE::AABB localBoundsOf(const StaticMeshAsset& m)
+	{
+		HE::AABB b;
+		b.min = { m.boundsMin[0], m.boundsMin[1], m.boundsMin[2] };
+		b.max = { m.boundsMax[0], m.boundsMax[1], m.boundsMax[2] };
+		return (b.isValid() && b.max != b.min) ? b : HE::AABB{};
+	}
+
+	// Settles a LOD row of the cooked block (CookedStatic::lodFirst): what the walk builds for EACH level,
+	// resolved once, so the fast path indexes the table by LODSystem's live choice. Serial: resolving a
+	// slot may load an asset, which moves every mesh pointer, so each level is looked up fresh.
+	//   Ready   every level is a resident one-section mesh that draws whole (the walk gives each an empty
+	//           section list), the table holds the level's mesh, whole-draw material and world bounds.
+	//   Pending a level is not resident yet: the walk draws it as it is and the next frame tries again.
+	//   Walk    never fast: a level with several sections or no mesh id, a refined / stitched copy hooked in.
+	// The caller has ruled out per-entity params, terrain chunks and the engine water.
+	HE::CookedStatic::State settleLodRow(entt::registry& reg, HE::CookedStatic& c, int32_t row, entt::entity e,
+	                                     const LODComponent& lod, HE::UUID drawn, const MaterialComponent* matComp,
+	                                     const glm::mat4& world, ContentManager& cm,
+	                                     std::unordered_set<std::string>& missing)
+	{
+		using State = HE::CookedStatic::State;
+		const size_t n = lod.levels.size();
+		if (n > 255 || lod.refinedMeshId != HE::UUID{} || lod.stitchedMeshId != HE::UUID{}) return State::Walk;
+		// The level table slot, once per row: a retry (a level not resident yet) or a content change
+		// rewrites it in place.
+		if (c.lodFirst[row] < 0 || c.lodCount[row] != n)
+		{
+			c.lodFirst[row] = static_cast<int32_t>(c.levelMeshId.size());
+			c.lodCount[row] = static_cast<uint8_t>(n);
+			c.levelMeshId.resize(c.levelMeshId.size() + n);
+			c.levelMaterialId.resize(c.levelMaterialId.size() + n);
+			c.levelBounds.resize(c.levelBounds.size() + n);
+		}
+		const size_t first = static_cast<size_t>(c.lodFirst[row]);
+		bool drawnIsLevel = false;
+		for (size_t i = 0; i < n; ++i)
+		{
+			const HE::UUID id = lod.levels[i].meshId;
+			if (id == HE::UUID{}) return State::Walk;
+			const StaticMeshAsset* m = cm.getStaticMesh(id);
+			if (!m) return State::Pending;
+			if (m->sections.size() > 1) return State::Walk;
+			const HE::AABB local = localBoundsOf(*m);
+			std::vector<MeshSection> table = m->sections;   // `m` is dead once the slots resolve
+			HE::UUID whole;
+			if (!resolveEntitySlots(std::move(table), lod0SectionsOf(reg, e, id, cm), matComp, cm, missing, whole).empty())
+				return State::Walk;
+			c.levelMeshId[first + i]     = id;
+			c.levelMaterialId[first + i] = whole;
+			c.levelBounds[first + i]     = local.isValid() ? local.transformed(world) : HE::AABB{};
+			drawnIsLevel |= id == drawn;
+		}
+		// The entity draws a mesh that is none of its levels (LODSystem has not picked one yet, or something else
+		// owns the mesh id): the fast path would never match it, so the row is walked rather than re-settled each frame.
+		return drawnIsLevel ? State::Ready : State::Walk;
+	}
+
 	// ── Renderables ─────────────────────────────────────────────────────────
 	// Two-phase build: sequential ECS read (no EnTT concurrency guarantees), then
 	// parallel AABB/transform computation (pure math, no registry access).
 	// KEEP THE PHASES APART: every registry / ContentManager read belongs in the
 	// gather loop, the parallel_for must stay pure maths over `items`.
+	// `cooked` (null = off) is the static-mesh block (HorizonScene/CookedStatic.h): its settled rows
+	// are copied in phase 2, in the same slot the walk would give them, instead of being rebuilt.
+	// The material the TILE landscape's ground is drawn with (RenderWorld::tileLandscapeMaterial). The landscape's own material
+	// cannot be it in two cases, and then a derived asset is made (once, and again when what it is made from changes):
+	//   * its graph reads a Runtime Virtual Texture. The tile ground has no pages (the RVT driver paints a TerrainComponent's), and a
+	//     read without a page is a flat grey, not the material: the derived graph is the one RVT OFF draws (matInlineRvt).
+	//   * the landscape entity overrides parameters. A mesh draw carries the merged block per draw; the ground's draw has no such
+	//     thing, so the values go into the derived graph's parameter nodes (the asset's own current values first, then the entity's).
+	// Needs the graph: a packaged material (graph stripped) is returned as it is.
+	HE::UUID tileGroundMaterial(ContentManager& cm, const HE::UUID& source, const MaterialComponent* mc)
+	{
+		static struct { HE::UUID source; uint64_t key = 0; HE::UUID derived; } cache;   // a scene has one tile landscape
+		const MaterialAsset* ma = cm.getMaterial(source);
+		if (!ma) return source;
+		const bool rvt = ma->customShaderFragGlsl.find("heRvtSample(") != std::string::npos;
+		const bool overridden = mc && !mc->paramOverrides.empty();
+		if ((!rvt && !overridden) || ma->nodeGraphJson.empty()) return source;
+		const uint64_t key = HE::landscape::tileGroundKey(cm, source, mc);
+		if (cache.source == source && cache.key == key && cm.getMaterial(cache.derived)) return cache.derived;
+
+		HE::MaterialGraph g;
+		if (!HE::landscape::tileGroundGraph(cm, source, mc, g)) return source;
+		g = HE::matInlineRvt(g);
+		MaterialAsset a;
+		a.type = HE::AssetType::Material;
+		a.name = "TileLandscapeGround";
+		a.nodeGraphJson = HE::materialGraphToJson(g);
+		if (cache.derived != HE::UUID{} && cm.getMaterial(cache.derived)) cm.replaceMaterial(cache.derived, std::move(a));
+		else cache.derived = cm.registerMaterial(std::move(a));
+		cm.regenerateMaterialFromGraph(cache.derived);
+		cache.source = source;
+		cache.key = key;
+		return cache.derived;
+	}
+
 	void extractMeshes(entt::registry& reg, RenderWorld& out, ContentManager* contentManager,
-	                   std::unordered_set<std::string>& sectionMaterialMissing)
+	                   std::unordered_set<std::string>& sectionMaterialMissing, HE::CookedStatic* cooked)
 	{
 
 		// ── Landscape table (GI reflection paint sampling) ───────────────────
@@ -357,8 +469,9 @@ void windWaterParams(const MaterialAsset& ma, const MaterialComponent* mc,
 			HE::GiLandscape ls;
 			ls.worldToLocal = glm::inverse(ttf.worldMatrix);
 			ls.invSize      = { 1.0f / std::max(tc.sizeX, 1e-4f), 1.0f / std::max(tc.sizeZ, 1e-4f) };
-			ls.uvTiling     = tc.uvTiling > 0.0f ? tc.uvTiling : 1.0f;
+			ls.uvTiling     = tc.effectiveUvTiling();   // what the chunk meshes carry (TerrainComponent::uvTilingBuilt)
 			ls.weightmapId  = tc.weightmapTextureId;
+			ls.terrainEntity = static_cast<uint32_t>(te);
 			HE::UUID    autoTexId{};   // auto material's albedo array, resolved below
 			std::string autoTexPath;
 			if (contentManager)
@@ -415,6 +528,46 @@ void windWaterParams(const MaterialAsset& ma, const MaterialComponent* mc,
 			out.landscapes.push_back(ls);
 		}
 
+		// The TILE landscape's entry (LandscapeWorldComponent): its ground is no mesh entity, the GI kernels reach it through the
+		// height clipmap a backend puts into its ray structure. With an Auto Landscape material (its own, else its texture group's)
+		// a hit on it is coloured like a hit on a TerrainComponent's auto landscape: grass, dirt, rock and snow by slope and height,
+		// from the means of the material's own albedo array. Another material: no entry, the backend's flat ground colour.
+		out.tileLandscapeIndex = -1;
+		out.tileLandscapeMaterial = HE::UUID{};
+		if (contentManager)
+			for (auto [le, lw] : reg.view<LandscapeWorldComponent>().each())
+			{
+				if (!lw.enabled || lw.pack.empty()) continue;
+				const auto* lmat = reg.try_get<MaterialComponent>(le);
+				HE::UUID mid = lmat ? lmat->materialAssetId : HE::UUID{};
+				if (mid == HE::UUID{} && lw.textureGroup >= 0 && lw.textureGroup < HE::kAutoLandscapeGroupCount)
+					mid = HE::autoLandscapeGroup(static_cast<HE::AutoLandscapeGroupId>(lw.textureGroup)).materialId;
+				const MaterialAsset* ma = mid != HE::UUID{} ? contentManager->getMaterial(mid) : nullptr;
+				if (!ma) break;   // not loaded yet (the renderer loads the group's on its first frame)
+				// What the ground is DRAWN with (may register an asset, which moves `ma`: fetched again below).
+				out.tileLandscapeMaterial = tileGroundMaterial(*contentManager, mid, lmat);
+				ma = contentManager->getMaterial(mid);
+				if (!ma) break;
+				HE::GiLandscape ls;
+				ls.terrainEntity = static_cast<uint32_t>(le);
+				auto ov = [lmat](const std::string& name, float& v) {
+					if (lmat)
+						for (const auto& o : lmat->paramOverrides)
+							if (o.name == name) { v = o.value[0]; return true; }
+					return false;
+				};
+				const int slot = HE::giAutoLandscapeParams(*ma, ov, ls, puddleScale);
+				if (slot < 0 || ls.layerCount != HE::kGiLandAuto) break;
+				// Copied out: resolving may loadAsset, which moves `ma`.
+				const HE::UUID texId = static_cast<size_t>(slot) < ma->graphTextureIds.size() ? ma->graphTextureIds[slot] : HE::UUID{};
+				const std::string texPath = static_cast<size_t>(slot) < ma->graphTexturePaths.size() ? ma->graphTexturePaths[slot] : std::string{};
+				const TextureAsset* arr = contentManager->resolveTextureRef(texId, texPath);
+				if (!arr || !HE::giAutoLandscapeSliceMeans(*arr, ls)) break;
+				out.tileLandscapeIndex = static_cast<int32_t>(out.landscapes.size());
+				out.landscapes.push_back(ls);
+				break;
+			}
+
 		auto meshView = reg.view<TransformComponent, MeshComponent>();
 		// The entities in the order the view hands them out, which is the order of out.objects.
 		std::vector<entt::entity> ents;
@@ -450,6 +603,7 @@ void windWaterParams(const MaterialAsset& ma, const MaterialComponent* mc,
 		{
 			std::vector<uint32_t> keep;          // indices into `ents` of the entities that draw
 			std::vector<uint32_t> needSections;  // out.objects slots of the multi-section / foreign-LOD0 ones
+			std::vector<uint32_t> settleLod;     // out.objects slots of the cooked LOD rows to settle (serial)
 			size_t                first = 0;     // slot of keep[0]
 		};
 		std::vector<Block> blocks(nBlocks);
@@ -482,6 +636,47 @@ void windWaterParams(const MaterialAsset& ma, const MaterialComponent* mc,
 				const entt::entity e    = ents[blk.keep[j]];
 				const size_t       slot = blk.first + j;
 				RenderObject&      obj  = out.objects[slot];
+				// A settled row of the cooked block: its object is what the full path below wrote
+				// the first time, so it is copied, not rebuilt. (visible / Active were decided in phase 1.)
+				const int32_t row = cooked ? cooked->rowOf(e) : -1;
+				if (row >= 0 && cooked->state[row] == HE::CookedStatic::State::Ready)
+				{
+					const HE::UUID* meshId = &cooked->meshId[row];
+					const HE::UUID* matId  = &cooked->materialId[row];
+					const HE::AABB* bounds = &cooked->worldBounds[row];
+					bool            hit    = true;
+					if (const int32_t first = cooked->lodFirst[row]; first >= 0)
+					{
+						// A LOD row: LODSystem already picked the level (lod.current, with its hysteresis) and
+						// wrote that mesh into the entity, so the row only looks up what that level builds.
+						// A different mesh than the level's (a swap nothing reported) is walked and re-settled.
+						hit = false;
+						if (lodPool && lodPool->contains(e))
+						{
+							const uint8_t cur = lodPool->get(e).current;
+							const size_t  at  = static_cast<size_t>(first) + cur;
+							if (cur < cooked->lodCount[row] && meshView.get<MeshComponent>(e).meshAssetId == cooked->levelMeshId[at])
+							{
+								meshId = &cooked->levelMeshId[at];
+								matId  = &cooked->levelMaterialId[at];
+								bounds = &cooked->levelBounds[at];
+								hit    = true;
+							}
+						}
+					}
+					if (hit)
+					{
+						obj.meshAssetId     = *meshId;
+						obj.materialAssetId = *matId;
+						obj.transform       = cooked->world[row];
+						obj.worldBounds     = *bounds;
+						obj.entityId        = static_cast<uint32_t>(e);
+						obj.lod             = cooked->lod[row];
+						obj.castsShadow     = cooked->castsShadow[row] != 0;
+						obj.receivesShadow  = cooked->receivesShadow[row] != 0;
+						continue;
+					}
+				}
 				auto [t, mesh] = meshView.get<TransformComponent, MeshComponent>(e);
 				obj.meshAssetId    = mesh.meshAssetId;
 				obj.transform      = t.worldMatrix;
@@ -499,11 +694,11 @@ void windWaterParams(const MaterialAsset& ma, const MaterialComponent* mc,
 					if (!matComp->paramOverrides.empty() && contentManager)
 						if (const MaterialAsset* ma = contentManager->getMaterial(matId))
 						{
-							std::vector<float> block(64, 0.0f); // 16 vec4 slots
-							const size_t n = std::min(ma->shaderParamData.size(), size_t(64));
+							std::vector<float> block(HE::kMatParamFloats, 0.0f); // kMatMaxParams vec4 slots
+							const size_t n = std::min(ma->shaderParamData.size(), size_t(HE::kMatParamFloats));
 							std::copy(ma->shaderParamData.begin(), ma->shaderParamData.begin() + n, block.begin());
 							for (const auto& ov : matComp->paramOverrides)
-								for (size_t k = 0; k < ma->graphParamNames.size() && k < 16; ++k)
+								for (size_t k = 0; k < ma->graphParamNames.size() && k < size_t(HE::kMatMaxParams); ++k)
 									if (ma->graphParamNames[k] == ov.name)
 									{
 										for (int c = 0; c < 4; ++c) block[k * 4 + c] = ov.value[c];
@@ -517,6 +712,17 @@ void windWaterParams(const MaterialAsset& ma, const MaterialComponent* mc,
 						if (const MaterialAsset* ma = contentManager->getMaterial(matId))
 							windWaterParams(*ma, matComp, windDir, windSpd, obj.paramOverride);
 				}
+				// A far LOD level that carries a material of its own (the baked far landscape) is drawn with it,
+				// whatever the entity's material is, while that level is the chosen one.
+				if (lodPool && lodPool->contains(e))
+				{
+					const HE::UUID levelMat = lodLevelMaterial(lodPool->get(e));
+					if (levelMat != HE::UUID{})
+					{
+						matId = levelMat;
+						obj.paramOverride.clear();
+					}
+				}
 				// Terrain chunk → its parent landscape's painted layer weightmap, so a
 				// Landscape Layer Blend material samples the right terrain's paint. Read
 				// from the PARENT: the weights belong to the landscape, the chunks are
@@ -524,6 +730,7 @@ void windWaterParams(const MaterialAsset& ma, const MaterialComponent* mc,
 				if (const auto* chunk = (anyChunk && chunkPool->contains(e)) ? &chunkPool->get(e) : nullptr)
 				{
 					obj.terrainChunk = true;
+					obj.terrainEntity = static_cast<uint32_t>(chunk->terrain);
 					if (creg.valid(chunk->terrain) && terrainPool && terrainPool->contains(chunk->terrain))
 					{
 						const TerrainComponent& pt = terrainPool->get(chunk->terrain);
@@ -552,13 +759,7 @@ void windWaterParams(const MaterialAsset& ma, const MaterialComponent* mc,
 				else if (contentManager)
 					if (const StaticMeshAsset* m = contentManager->getStaticMesh(mesh.meshAssetId))
 					{
-						HE::AABB b;
-						b.min = { m->boundsMin[0], m->boundsMin[1], m->boundsMin[2] };
-						b.max = { m->boundsMax[0], m->boundsMax[1], m->boundsMax[2] };
-						// Require a real, non-degenerate box. A mesh registered without a computed
-						// AABB leaves boundsMin==boundsMax=={0,0,0} — "valid" but a zero-volume point,
-						// and culling against it drops the object the moment its pivot exits the view.
-						if (b.isValid() && b.max != b.min) local = b;
+						local = localBoundsOf(*m);
 						if (m->sections.size() <= 1) { memoSlot.id = mesh.meshAssetId; memoSlot.bounds = local; memoSlot.valid = true; }
 						// A one-section mesh with no other LOD0 to map its slot through needs no table:
 						// resolveEntitySlots answers it with an empty list and the whole draw's material
@@ -575,6 +776,40 @@ void windWaterParams(const MaterialAsset& ma, const MaterialComponent* mc,
 				else if (kind == Kind::Sections) blk.needSections.push_back(static_cast<uint32_t>(slot));
 				obj.materialAssetId = matId;
 				obj.worldBounds     = local.isValid() ? local.transformed(t.worldMatrix) : HE::AABB{};
+				// Settle the entity's row (each entity is in one block, so a row has one writer).
+				// Not resolved yet (mesh not resident) stays Pending and is walked again next frame. A final
+				// one-section result with nothing that varies per frame is kept; the rest is walked for good:
+				// own params, the engine water's wind-driven ones, and terrain chunks (landscapeIndex points
+				// into this frame's out.landscapes).
+				// A LOD row is settled for all its levels at once in phase 3, whatever level this frame drew.
+				const bool lodRow = lodComp && lodComp->levels.size() > 1;
+				if (row >= 0 && (kind != Kind::Unresolved || lodRow))
+				{
+					const bool steady = !obj.terrainChunk && !(matComp && !matComp->paramOverrides.empty())
+					                 && matId != HE::kEngineWaterMaterialId;
+					const bool fixed = kind == Kind::OneSection && steady && !lodRow;
+					if (lodRow && steady && contentManager)
+					{
+						// Walk is settleLodRow's final verdict: not settled again (each settle copies the sections) until
+						// an un-cook, a rebuild or a content change sends the row back to Pending.
+						if (cooked->state[row] != HE::CookedStatic::State::Walk)
+						{
+							cooked->state[row] = HE::CookedStatic::State::Pending;
+							blk.settleLod.push_back(static_cast<uint32_t>(slot));
+						}
+					}
+					else cooked->state[row] = fixed ? HE::CookedStatic::State::Ready : HE::CookedStatic::State::Walk;
+					if (fixed)
+					{
+						cooked->meshId[row]         = obj.meshAssetId;
+						cooked->materialId[row]     = obj.materialAssetId;
+						cooked->world[row]          = obj.transform;
+						cooked->worldBounds[row]    = obj.worldBounds;
+						cooked->lod[row]            = obj.lod;
+						cooked->castsShadow[row]    = obj.castsShadow ? 1 : 0;
+						cooked->receivesShadow[row] = obj.receivesShadow ? 1 : 0;
+					}
+				}
 			}
 		}, "ExtractMeshes", 1);
 
@@ -598,7 +833,81 @@ void windWaterParams(const MaterialAsset& ma, const MaterialComponent* mc,
 				// The param block was merged for the whole-mesh material; a whole draw that a slot
 				// override redirected elsewhere draws that material plain.
 				if (matComp && obj.materialAssetId != matComp->materialAssetId) obj.paramOverride.clear();
+				// resolveEntitySlots answers with the ENTITY's material, which drops the level's own one the gather
+				// loop chose: a far level (a mesh that is not LOD0) always comes through here. A level material is a
+				// whole-mesh draw.
+				if (const auto* lodc = reg.try_get<LODComponent>(e))
+					if (const HE::UUID levelMat = lodLevelMaterial(*lodc); levelMat != HE::UUID{})
+					{
+						obj.materialAssetId = levelMat;
+						obj.sections.clear();
+						obj.paramOverride.clear();
+					}
 			}
+
+		// The cooked LOD rows, after their objects are final: every level's object is resolved and kept, the
+		// row goes Ready (or Walk / stays Pending, see settleLodRow). Serial, in slot order.
+		for (const Block& blk : blocks)
+			for (const uint32_t slot : blk.settleLod)
+			{
+				const RenderObject&      obj     = out.objects[slot];
+				const entt::entity       e       = static_cast<entt::entity>(obj.entityId);
+				const int32_t            row     = cooked->rowOf(e);
+				const MaterialComponent* matComp = (matPool && matPool->contains(e)) ? &matPool->get(e) : nullptr;
+				const auto state = settleLodRow(reg, *cooked, row, e, lodPool->get(e), obj.meshAssetId, matComp, obj.transform,
+				                                *contentManager, sectionMaterialMissing);
+				cooked->state[row] = state;
+				if (state == HE::CookedStatic::State::Ready)
+				{
+					cooked->world[row]          = obj.transform;
+					cooked->lod[row]            = obj.lod;
+					cooked->castsShadow[row]    = obj.castsShadow ? 1 : 0;
+					cooked->receivesShadow[row] = obj.receivesShadow ? 1 : 0;
+				}
+			}
+	}
+
+	// ── GI height clipmap of a tile landscape (Thema 326, step 4) ─────────────
+	// The TerrainComponent loop above pushes AT MOST one entry already (a scene is documented to carry
+	// either a TerrainComponent or a tile landscape, never both as GI casters); every GI-heightfield
+	// backend (GL, Vulkan, D3D11) turns its whole shadow-heightfield path off the moment
+	// RenderWorld::heightfields holds more than one, so this never adds a second.
+	// kLandscapeGiHeightfieldKey itself lives in RenderWorld.h, next to GiHeightfield: the GI
+	// reflection kernels' CPU-side binding code (OpenGLRenderer.cpp) needs the same sentinel to
+	// gate their tile-landscape-only ray-march branch.
+	void extractLandscapeGiHeightfield(HorizonWorld& world, RenderWorld& out)
+	{
+		// Also called for a frame that reuses its walk (extract(), the reuse branch), which keeps the list: the entry is
+		// brought up to date instead of outliving the runtime, the switch and a new version of the clipmap. Nothing is copied
+		// while it is current.
+		const HE::LandscapeRuntime* lr = world.landscapeRuntime();
+		// HE_LANDSCAPE_PASSES=0, the A/B switch of landscape_gpu_check: the ground in the scene pass alone.
+		const bool want = HE::landscapePassesOn() && lr && lr->giHeightfield().active();
+		const auto old = std::find_if(out.heightfields.begin(), out.heightfields.end(),
+		                              [](const GiHeightfield& h) { return h.key == kLandscapeGiHeightfieldKey; });
+		if (old != out.heightfields.end())
+		{
+			if (want && old->version == lr->giHeightfield().version) return;
+			out.heightfields.erase(old);
+		}
+		if (!want || !out.heightfields.empty()) return;
+		const HE::LandscapeGiHeightfield& g = lr->giHeightfield();
+		GiHeightfield hf;
+		hf.data    = g.data;
+		hf.res     = g.res;
+		hf.version = g.version;
+		hf.key     = kLandscapeGiHeightfieldKey;
+		// The clipmap's local space is centred on its window, same as a TerrainComponent's (see
+		// LandscapeTileTerrain.h): a pure translation to the window's centre, origin-relative.
+		// y: the clipmap's heights are ABSOLUTE metres, so local y = relative y + origin.y (a floating origin that is not at
+		// height 0 would otherwise put the whole field origin.y too high).
+		const glm::vec3 centreRel(static_cast<float>(g.centreAbsolute.x - world.origin().x), static_cast<float>(-world.origin().y),
+		                          static_cast<float>(g.centreAbsolute.z - world.origin().z));
+		glm::mat4 worldMatrix(1.0f);
+		worldMatrix[3] = glm::vec4(centreRel, 1.0f);
+		hf.worldToLocal = glm::inverse(worldMatrix);
+		hf.size = { g.sizeX, g.sizeZ };
+		out.heightfields.push_back(std::move(hf));
 	}
 
 	// ── ParticleGraph particles ────────────────────────────────────────────────
@@ -1458,10 +1767,31 @@ float fogWaterlineBand(float signedDepth)
 	return 1.0f - t * t * (3.0f - 2.0f * t);
 }
 
+FogVolumeData ExtractFogVolumeData(HorizonWorld& world, bool backendSupportsVolumetricFog,
+                                   bool cameraUnderwater, float aspectWidthOverHeight,
+                                   float shadowDistance)
+{
+	// First Sky entity wins, like the puddleAmount walk above; a world with none
+	// keeps the default (disabled) component, so MakeFogVolumeData sees fogMode 0.
+	EnvironmentComponent ec{};
+	for (auto [ee, e] : world.registry().view<EnvironmentComponent>().each()) { ec = e; break; }
+	// dt = 0: this is a read of the current state, not a tick — must not advance
+	// timeOfDay (see makeWorldPreviewEnvironment's identical reasoning above).
+	const IRenderer::EnvironmentSettings settings = makeEnvironmentSettings(ec, 0.0f);
+	return MakeFogVolumeData(settings, backendSupportsVolumetricFog, cameraUnderwater,
+	                         aspectWidthOverHeight, shadowDistance);
+}
+
 } // namespace HE
 
 // Out-of-line on purpose (see the header): the one definition the DLL exports.
-RenderExtractor::RenderExtractor()  = default;
+RenderExtractor::RenderExtractor()
+{
+	// HE_COOK_STATIC=1: the same-binary A/B switch for the cooked block (off by default until a write to
+	// a cooked entity un-cooks it; today such a write would render stale).
+	const char* v = std::getenv("HE_COOK_STATIC");
+	m_cookStatic  = v && v[0] == '1';
+}
 RenderExtractor::~RenderExtractor() = default;
 
 void RenderExtractor::setContentManager(ContentManager* cm)
@@ -1591,6 +1921,7 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 			assignLocalShadowLayers(out);
 			m_frameAspect = aspectRatio;
 		}
+		extractLandscapeGiHeightfield(world, out);   // not part of the frame key: the runtime's clipmap arrives from a job
 		++m_reusedExtracts;
 		return;
 	}
@@ -1604,9 +1935,26 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 	{ HE_PROFILE_SCOPE_N("Extract::transforms"); extractTransforms(world, reg); }
 	extractCamera(reg, out, aspectRatio, editorCam);
 	out.underwaterCamera = HE::queryUnderwaterCamera(world, out.camera.position, renderWaveClock());
+	// Volumetric fog: the Sky entity's settings gated on the backend's capability and the
+	// camera being dry (the underwater pass owns the view under water). Read once per walk.
+	out.fogVolume = HE::ExtractFogVolumeData(world, m_fogCapable, out.underwaterCamera.wet,
+	                                         aspectRatio, m_shadowDistance);
 	// Renderables. Everything that ends up in out.objects must run before the
 	// shadow fit below, which fits its frustum around their union.
-	{ HE_PROFILE_SCOPE_N("Extract::meshes"); extractMeshes(reg, out, m_contentManager, m_sectionMaterialMissing); }
+	// The cooked block follows the structure epoch (the same number the frame key holds, so a reused
+	// walk and the block can never disagree about which entities exist) and the content epoch.
+	HE::CookedStatic* cooked = nullptr;
+	// HE_COOK_STATIC=1, or a world loaded from a scene exported with the project's cooking setting on.
+	const HE::CookedStatic* packedCook = reg.ctx().find<HE::CookedStatic>();
+	if (m_cookStatic || (packedCook && packedCook->enabled))
+	{
+		HE::refreshCookedStatic(reg, world.structureEpoch());
+		cooked = &HE::cookedStaticOf(reg);
+		cooked->syncContent(m_contentManager, m_sectionMaterialEpoch);
+	}
+	{ HE_PROFILE_SCOPE_N("Extract::meshes"); extractMeshes(reg, out, m_contentManager, m_sectionMaterialMissing, cooked); }
+	extractLandscapeGiHeightfield(world, out);
+	out.worldOrigin = world.origin();
 	extractParticleBatches(reg, out);
 	extractPrecipitation(reg, out);
 	if (!m_foliageLod) m_foliageLod = std::make_unique<HE::FoliageLodMemory>();
@@ -1773,7 +2121,7 @@ void RenderExtractor::extractUI(HorizonWorld& world, float vpWidth, float vpHeig
 {
 	out.uiObjects.clear();
 	if (windowId == 0)
-		UISystem::extract(world, vpWidth, vpHeight, out.uiObjects);
+		UISystem::extract(world, vpWidth, vpHeight, out.uiObjects, m_contentManager);
 	// Live widgets (WidgetManager) append after the sorted entity UI, so they
 	// always draw on top of it; internally sorted by (zOrder, layer, depth).
 	world.widgets().extract(windowId, vpWidth, vpHeight, out.uiObjects);

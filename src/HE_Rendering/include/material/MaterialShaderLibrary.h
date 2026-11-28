@@ -9,7 +9,9 @@
 
 #include <Types/Enums.h> // HE::RendererBackend (precompiledFor)
 #include <Types/UUID.h>
+#include <array>
 #include <cstdint>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -153,6 +155,10 @@ public:
         //       (heApplyFog checks it too). Only the scene-pass fill sites set
         //       it (Metal FillMaterialLighting, GL fillMatLight); the zero every
         //       preview/thumbnail/UI site leaves keeps them shaded.
+        //   y = 1 → the RVT debug view (ViewMode::RvtDebug, RVT 2.0 step 5):
+        //       heRvtSample (RvtLookup.h) returns a page-map colour instead of the
+        //       ground. Metal and OpenGL fill it; D3D11/D3D12/Vulkan leave 0 (not
+        //       verified there), where the mode is just an unfilled flag.
         float viewMode[4]     = {};
         // Clustered forward lighting (append-only, v3.3, Thema 117): the gate and
         // grid of the CLUSTERED fragment variant (fragmentClustered). Exactly
@@ -188,8 +194,36 @@ public:
         float waterRipples[4]     = {};
         float waterRippleA[16][4] = {};
         float waterRippleB[16][4] = {};
+        // Volumetric fog (append-only, v3.6, docs/volumetric-fog-plan.md §2.5, Thema 225):
+        //   fogVol     : x = 1 → the froxel volume owns the fog this frame (heApplyFog and the
+        //                deferred reflection transmittance mirror turn into no-ops: the full-screen
+        //                Apply pass fogs the opaque scene + sky instead), y = D (volume range, m),
+        //                z = c (slice distribution constant, m), w = 1 → heFogVolume (binding 34)
+        //                holds the integrated volume on THIS encoder (heApplyFogT reads it)
+        //   fogVolGrid : xyz = grid size (w unused)
+        //   fogViewProj: world → clip, unjittered, with the y flip pre-baked so that
+        //                uv = clip.xy / clip.w * 0.5 + 0.5 addresses the froxel grid directly;
+        //                clip.w is the planar view depth the slices are distributed over
+        // Every fill site that never calls the Metal volume path (previews, UI, GL, D3D11,
+        // D3D12, Vulkan until their steps) leaves all of it 0: the analytic fog runs unchanged.
+        float fogVol[4]       = {};
+        float fogVolGrid[4]   = {};
+        float fogViewProj[16] = {};
+        // worldOrigin: xyz = the world's floating origin (HorizonWorld::origin), so that position + worldOrigin is the ABSOLUTE
+        // position. A material's World Position (and its world-space noise) is that sum: its texturing then stays on the ground
+        // when the origin is rebased, instead of moving with it. Lighting keeps the origin-relative vWorldPos. Filled for every
+        // backend by FillMaterialLightWindow (RenderWorld::worldOrigin); 0 where the world has no floating origin.
+        float worldOrigin[4]  = {};
     };
+    // Metal's setFragmentBytes caps at 4 KiB; the lighting block rides it on every material draw.
+    static_assert(sizeof(Lighting) <= 4096, "HeLighting outgrew Metal's setBytes limit");
     static constexpr int kMetalLightingBufferIndex = 1; // fragment [[buffer(1)]]
+    // The froxel fog volume (preamble binding 34, heFogVolume) → fragment TEXTURE 17: the next
+    // free texture index after the cloud-shadow map's 16 (Metal allows 31). Read with texelFetch
+    // through an inline constexpr sampler (kMaterialMslOptions), so it costs no sampler slot.
+    // Bound by MetalRenderer::BindMaterialPreambleSlots on every encoder that draws a
+    // material pipeline (a 3D dummy when the volume is off — Metal validates the texture TYPE).
+    static constexpr int kMetalFogVolumeTextureIndex = 17;
     // Clustered variant's light lists (fragmentClustered): GLSL bindings 24/25/26
     // (light array, grid, index list — the same three the clustered deferred
     // resolve reads) → Metal fragment buffers 4/5/6, HLSL t24/t25/t26.
@@ -211,6 +245,22 @@ public:
     static constexpr int kGlClusterLightsSsboBinding = 4;
     static constexpr int kGlClusterGridSsboBinding   = 5;
     static constexpr int kGlClusterIndexSsboBinding  = 6;
+    // The froxel fog volume (preamble binding 34, heFogVolume) on GL → texture UNIT 21
+    // (glUniform1i by name, GLSL410 has no layout(binding=)). The material fragment's
+    // existing GL units run 0-20 (heTex0/heTexP0-3, GI/CSM/shadow/landscape/sky/AO/DDGI/
+    // reflection/cloud-shadow, see OpenGLRenderer::GetOrBuildMaterialProgram's setupProgram
+    // lambda) — 21 is the next free one.
+    static constexpr int kGlFogVolumeTextureUnit = 21;
+
+    // RVT cold pages on Vulkan (Thema 333 step 9): unlike D3D11/D3D12 (texelFetch/Load costs no live sampler, SRV
+    // t-registers are plentiful), a GLSL sampler2DArray is ONE combined-image-sampler descriptor in Vulkan no matter how
+    // the shader reads it, so the three cold arrays are three more fragment-stage samplers on top of hot RVT's four
+    // (VulkanMaterialLayout.h: rvtFit 21 -> rvtColdFit 24). VulkanRenderer calls this once, after checking the device's
+    // actual maxPerStageDescriptorSamplers/SampledImages and deciding whether its descriptor set layout can hold the cold
+    // rows at all — fragment()'s SpirV path leaves the cold branch out of the SPIR-V when it cannot, so the compiled
+    // shader never statically references a binding its layout lacks (an invalid pipeline otherwise). D3D11/D3D12/Metal
+    // are never gated by this: it only ever narrows the Vulkan path.
+    static void SetRvtColdVulkanFits(bool fits) { s_rvtColdVulkanFits = fits; }
 
     struct Compiled
     {
@@ -450,6 +500,12 @@ public:
     // samplers are the ones the resolve leaves free (it declares neither heTex0
     // nor heTexP0..3); s7 is the one register still unused.
     static constexpr int kHlslResolveUboReg      = 4;
+    // The tile landscape's material variant on D3D (landscapeVertex / landscapeFragment, Backend::HLSL): the registers the
+    // renderer binds the landscape's data at for a material draw. b12 LsGlobals, b13 LsPatch (the layout of the GLSL blocks, which
+    // is HE::vkls::Globals / PatchPush, NOT the fixed blend's d3dls structs); t47 tile heights, t48 slot table, t49 coarse
+    // heights (vertex stage; the slot table in both), t50..t52 the tile weight pages, t53..t55 the coarse ones. No sampler.
+    static constexpr uint32_t kHlslLandscapeGlobalsReg = 12;
+    static constexpr uint32_t kHlslLandscapeFirstSrv   = 47;
     static constexpr int kHlslResolveGB0Reg      = 27;
     static constexpr int kHlslResolveGB1Reg      = 28;
     static constexpr int kHlslResolveGB2Reg      = 29;
@@ -536,18 +592,99 @@ public:
     // vNormal = +Z, vWorldPos = (screen px, 0) — sane defaults for UI shading.
     const Compiled& uiVertex(Backend backend);
 
+    // ── The tile landscape as a material's geometry (Thema 326) ──────────────────────────────────────────────────────────────
+    // landscapeVertex: the patch vertex stage of HorizonRendering/LandscapeShaderSource.h (same heights, same CDLOD morph, so the same
+    // seams) writing the four varyings every material fragment reads: vNormal from the height lattice, vUV = the position in the
+    // landscape's render window (0..1), vWorldPos origin-relative. No vertex buffer: the grid position is gl_VertexIndex.
+    // GLSL bindings (set 0): 50 LsGlobals (shared with the fragment), 58 LsPatch, 59 tile heights, 51 slot table (shared), 60 coarse
+    // heights; on Metal vertex buffers 20/21 and vertex textures 20-22, which is where MetalLandscape binds them for its own shader.
+    const Compiled& landscapeVertex(Backend backend);
+    // landscapeFragment: a material's fragment whose layer weights come from the tile atlas. The material's text reads ONE 2D
+    // heLandscapeWeights over the whole landscape; here those reads go through the slot table to a tile's weight slices, or to the
+    // coarse world's where the tile is not in the atlas (landscapeFragmentSource). The text handed in is the material's own and is
+    // not changed, so what is baked into an asset stays what it was. GLSL bindings (set 0): 50 LsGlobals, 51 slot table, 52-54 tile
+    // weight pages, 55-57 coarse weight pages; on Metal fragment buffer 20 and textures 13 (the weightmap's, which this variant does
+    // not have) and 25-30, none of them with a sampler slot.
+    const Compiled& landscapeFragment(uint64_t sourceHash, const std::string& glsl, Backend backend, bool clustered);
+    // `patchAsPushConstant`: LsPatch as a push-constant block instead of the uniform block at 58 (the SPIR-V form: Vulkan pushes it).
+    static std::string landscapeVertexSource(bool patchAsPushConstant = false);
+    // `separateImages`: the landscape's images as textures without a sampler (the SPIR-V form; the vertex source's push-constant
+    // form has them too). A Vulkan set then holds them as SAMPLED_IMAGE descriptors, which do not count as samplers.
+    // `filtered`: the weight pages are read with one linear sample where the footprint is the fragment's own tile's (the
+    // backend's samplers on bindings 52-57 are linear, clamped), instead of four fetches. Not with `separateImages`.
+    static std::string landscapeFragmentSource(const std::string& glsl, bool separateImages = false, bool filtered = false);
+
+    // ── Volumetric fog kernels (Thema 225, docs/volumetric-fog-plan.md §10) ──────────────
+    // GLSL-450 sources in src/material/FogVolumeShaderSource.h, cross-compiled like every
+    // other pass here. Metal, GL and Vulkan (Backend::SpirV: compute + fragment, canonical
+    // bindings, no pins; steps 3-5); D3D is step 6: any other
+    // backend gets a Compiled with ok == false and a log saying so, which is the cue to
+    // keep the analytic fog. fogInject / fogIntegrate are COMPUTE kernels (Metal compute
+    // functions named main0), fogApply a fragment shader that pairs with fullscreenVertex().
+    // Metal pins — inject: HeLighting buffer 1, HeFogVol buffer 0, CSM 11, local atlas 12,
+    // sky env 14, cloud shadow texture 16 (inline sampler), noise 3, history 4, output
+    // image 5. Integrate: HeFogVol buffer 0, injected volume texture 0, integrated image 1.
+    // Apply: HeFogVol buffer 0, integrated volume 0 (+ sampler 0), sky env 1 (+ sampler 1),
+    // scene depth texture 2 (fetched, no sampler).
+    // GL (step 4): fragment-shaped siblings, one fullscreen quad per Z slice
+    // instead of one compute dispatch (GL 4.1 core has no compute) — see
+    // FogVolumeShaderSource.h's kInjectMainGL/kIntegrateMainGL/kApplySourceGL.
+    // Resources bind by NAME (OpenGLRenderer), never by the binding numbers the
+    // Vulkan-GLSL parse requires syntactically.
+    const Compiled& fogInject(Backend backend);
+    const Compiled& fogIntegrate(Backend backend);
+    const Compiled& fogApply(Backend backend);
+    // The assembled GLSL, for tests that compile it through glslang directly.
+    static std::string fogInjectGlsl();
+    static std::string fogIntegrateGlsl();
+    static std::string fogApplyGlsl();
+    static std::string fogInjectGlslGL();
+    static std::string fogIntegrateGlslGL();
+    static std::string fogApplyGlslGL();
+
+    // Vulkan only: does the material descriptor set carry row 34 (heFogVolume)? Default yes.
+    // VulkanRenderer turns it off BEFORE the first compile on a device whose per-stage
+    // sampler limit cannot hold the 18th fragment sampler (HE::vkmat::fogVolumeFit); the
+    // materials then compile without HE_FOG_VOLUME and keep the analytic fog. A pak's
+    // baked blobs come from a default library, i.e. with the row.
+    void setSpirvFogVolume(bool on) { m_spirvFogVolume = on; }
+    bool spirvFogVolume() const { return m_spirvFogVolume; }
+
+    // D3D11/D3D12 only (Thema 225 step 8): does the material preamble carry row 34
+    // (heFogVolume) for Backend::HLSL? Default off — a backend turns it on only once
+    // its Inject/Integrate/Apply dispatch and t34 binding are wired (D3D11Renderer::
+    // EnsureFogVolumePipelines); D3D11 and D3D12 each own their own MaterialShaderLibrary
+    // instance, so one backend's switch never affects the other's HLSL compiles.
+    void setHlslFogVolume(bool on) { m_hlslFogVolume = on; }
+    bool hlslFogVolume() const { return m_hlslFogVolume; }
+
     void clear() { m_vertCache.clear(); m_fragCache.clear(); m_cvertCache.clear();
                    m_uiVertCache.clear(); m_resolveCache.clear(); m_resolveTileCache.clear();
                    m_ssrCache.clear(); m_decalCache.clear(); m_fsVertCache.clear();
-                   m_reflPrepassCache.clear(); m_tessCache.clear(); }
+                   m_reflPrepassCache.clear(); m_fogCache.clear(); m_tessCache.clear(); }
 
 private:
+    bool m_spirvFogVolume = true;
+    bool m_hlslFogVolume  = false;
     const Compiled& fragmentVariant(uint64_t sourceHash, const std::string& glsl, Backend backend,
-                                    bool clustered);
+                                    bool clustered, bool landscape = false);
+
+    // SetRvtColdVulkanFits above; conservative default so a renderer that never calls it (D3D11/D3D12/Metal — this flag
+    // only narrows the Vulkan SpirV path) never risks compiling a shader that statically references a binding its
+    // descriptor layout lacks.
+    static inline bool s_rvtColdVulkanFits = false;
 
     std::unordered_map<int, Compiled>      m_vertCache;  // key = (int)backend (+0x100 instanced)
     std::unordered_map<uint64_t, Compiled> m_fragCache;  // key = mix(sourceHash, backend, clustered)
     std::unordered_map<uint64_t, Compiled> m_cvertCache; // key = mix(bodyHash, backend, instanced)
+    // The resolve* functions run for every draw of every frame and used to hash the whole shader text each time (tens of KB,
+    // the largest CPU item of a G-buffer pass). The hash is kept per material and text kind with a copy of the text it was
+    // taken from: an equal text (size + memcmp, an order of magnitude cheaper than hashing) reuses it, any change rehashes.
+    // No version counter is needed, so a writer that replaces the text without telling anyone is still seen.
+    struct HashedText { std::string text; uint64_t hash = 0; };
+    mutable std::mutex m_textHashLock;
+    mutable std::unordered_map<UUID, std::array<HashedText, 3>> m_textHashes;   // [0] fragment, [1] G-buffer fragment, [2] WPO vertex
+    uint64_t textHash(const UUID& materialId, int kind, const std::string& text) const;
     std::unordered_map<int, Compiled>      m_uiVertCache; // key = (int)backend
     std::unordered_map<int, Compiled>      m_resolveCache; // key = (int)backend (+64 clustered)
     std::unordered_map<int, Compiled>      m_resolveTileCache; // key = (int)backend (+64 clustered)
@@ -557,6 +694,7 @@ private:
     // Own map, not a fifth slot in m_ssrCache: that key space is backend*4 and
     // full, and a collision there hands a caller someone else's shader while
     // still reporting ok.
+    std::unordered_map<int, Compiled>      m_fogCache;         // key = (int)backend*4 + (0 inject / 1 integrate / 2 apply)
     std::unordered_map<int, Compiled>      m_reflPrepassCache; // key = (int)backend*2 + (0 vertex / 1 fragment); 0x100 + backend = instanced vertex
     std::unordered_map<uint64_t, Compiled> m_tessCache;   // key = mix(dispHash, backend, control/eval)
 };

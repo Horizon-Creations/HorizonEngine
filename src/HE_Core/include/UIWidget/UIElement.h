@@ -840,6 +840,10 @@ public:
     virtual bool hasMaterialSlot() const { return false; }
     // Types that draw a quad the user may want a picture on.
     virtual bool hasTextureSlot() const { return false; }
+    // Does this element's picture change with the manager's clock alone (an
+    // indeterminate progress bar, an Image playing a sprite sheet)? While one
+    // is visible an event-driven application keeps asking for frames.
+    virtual bool movesWithTime() const { return false; }
 
     // ── Does this type have a SURFACE to style? ──────────────────────────────
     // True for the types whose FIRST quad covers their whole rect — a
@@ -1049,6 +1053,16 @@ HE_API std::unique_ptr<UIElement> makeUIElement(UIWidgetType type);
 HE_API const std::vector<UIWidgetType>& uiWidgetTypeRegistry();
 HE_API const char* uiWidgetTypeName(UIWidgetType t);
 HE_API UIWidgetType uiWidgetTypeFromName(const std::string& s);
+
+// Control classes: an element type as the class of a HorizonCode reference
+// ("ui:Text"), so a Ref from Get Element — or a variable of that class — lists
+// the type's properties as Get/Set (Ref) members. The prefix keeps these keys
+// apart from asset paths, which is what every other class key is.
+HE_API std::string uiClassKey(UIWidgetType t);
+HE_API bool uiClassFromKey(const std::string& key, UIWidgetType& out);
+// Every property an element of the type has (its own first, then the shared
+// ones) — read off a default-constructed element, so it needs no instance.
+HE_API std::vector<UIPropDesc> uiClassProperties(UIWidgetType t);
 
 // Slot alignment ⇄ its on-disk name ("Fill", "Left", "Center", "Right" /
 // "Fill", "Top", "Center", "Bottom"). Unknown reads as Fill.

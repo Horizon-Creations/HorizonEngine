@@ -213,6 +213,11 @@ struct ExportProfile
 	// (bitmask of 1u << HE::RendererBackend). Default = Metal | OpenGL (the runtime-
 	// consumed backends). 0 → shaders cross-compile at runtime as before.
 	uint32_t shaderBackends = (1u << 4) | (1u << 0); // Metal | OpenGL
+	// true (default): the backends above are ignored and the pak carries the variants of the
+	// ONE backend the shipped game runs (the project's Render Defaults backend, else the
+	// platform default; GameBackendRules.h shaderBackendMaskFor). A profile saved before this
+	// field existed keeps its explicit set unless that set is the old Metal | OpenGL default.
+	bool autoShaderBackends = true;
 	// Compile HorizonCode graphs to native C++ in the packaged build (needs
 	// cmake + a C++ toolchain on the exporting machine).
 	bool compileHorizonCode = false;
@@ -229,6 +234,34 @@ struct ExportProfile
 	// 0 Fast (what every export did), 1 Balanced, 2 High — how hard the encoder
 	// works, whichever format Auto chose. See Hpak::PackSettings::textureQuality.
 	int textureQuality = 0;
+	// Block-compress texture ARRAYS (the Auto landscape albedo/normal/mask arrays, ~110 MB
+	// each as RGBA8) like every other texture. On by default; off ships them as RGBA8.
+	// See Hpak::PackSettings::cookTextureArrays.
+	bool compressTextureArrays = true;
+	// Bake textures onto static meshes whose materials are plain PBR texture sets (the
+	// per-mesh switches in the Mesh Viewer decide how). On by default; needs onlyReferenced.
+	// See Hpak::PackSettings::bakeMeshTextures.
+	bool bakeMeshTextures = true;
+	// Bake the look of every Auto Landscape for its far LOD levels (HorizonScene/LandscapeHlod.h): the export
+	// photographs each chunk in three small textures, so far terrain draws a plain texture lookup instead of the
+	// landscape's material graph. On by default; farLandscapeBudgetMB caps what the textures may cost cooked
+	// (the pictures get coarser, down to 16 px a chunk, until they fit). Needs the Metal renderer for now.
+	bool bakeFarLandscape = true;
+	int  farLandscapeBudgetMB = 512;
+	// A tile landscape's pack ships beside the pak; with this on, the static meshes of the scene's streaming cells are baked into
+	// distant proxies and appended to the shipped copy (HorizonScene/LandscapeExport.h). The project's own pack is never changed.
+	bool bakeCellHlod = true;
+	// Bake the base of every landscape whose material has an RVT Write / Read pair (HorizonScene/RvtBaseBake.h): the pages the
+	// game would paint from the material's layers at run time come out of the pak as three textures instead. A game that edits
+	// the ground (sculpt, paint) leaves them for the material's own graphs. rvtBaseBudgetMB caps what they cost cooked.
+	bool bakeRvtBase = true;
+	int  rvtBaseBudgetMB = 256;
+	// Pack only the assets the game reaches (the startup scene, the scenes something loads,
+	// scripts, the manifest, the engine's own needs) and leave out the rest. On by default.
+	// `alwaysIncludePatterns` are globs on the addressed path (like excludePatterns) that
+	// count as reached: for what a script builds a path for at run time.
+	bool onlyReferenced = true;
+	std::vector<std::string> alwaysIncludePatterns;
 };
 
 // The two seeded defaults for projects that have no profiles yet (also used by
@@ -275,12 +308,12 @@ struct ProjectData
 	// physics; the packaged build gets ProjectConfig::appMode and draws only when
 	// something changed. Persisted as ".heproj \"appProject\"".
 	bool appProject = false;
-	// advancedShaderEffects: may this project author MATERIALS (the node graphs
-	// that give a widget a custom shader, "Schicht 1" in the plan)? Off is the
-	// same kind of HARD restriction as scriptLanguage above: the Content Browser
-	// hides the material creators, the material editor stays shut, widgets offer
-	// no material slot, and the packaged runtime can be built without a shader
-	// compiler. Default TRUE, because every project that predates the flag has
+	// advancedShaderEffects: does this project ship a GPU renderer? Off is the
+	// same kind of HARD restriction as scriptLanguage above: the packaged runtime
+	// is the software renderer, built without a shader compiler, and materials
+	// (the node graphs that give a widget a custom look, "Schicht 1" in the plan)
+	// are limited to the nodes it runs itself — HE::matCpuSupports, which is
+	// exactly what the material editor's add menu then offers. Default TRUE, because every project that predates the flag has
 	// them and a game always does.
 	bool advancedShaderEffects = true;
 

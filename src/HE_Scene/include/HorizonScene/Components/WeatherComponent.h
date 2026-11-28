@@ -45,6 +45,14 @@ struct WeatherPreset
     PrecipType precipType    = PrecipType::None;
     float      wetness       = 0.0f;   // 0..1 surface wetness (Phase 4, reserved)
     bool       lightning     = false;  // storm lightning enabled (Phase 3)
+    // Volumetric fog (Thema 225, docs/volumetric-fog-plan.md §11). They drive
+    // EnvironmentComponent::fogBankDensity / fogNoiseAmount and so only show with
+    // fogMode 1 on a backend that renders the volume; in fogMode 0 they are written
+    // but unread. fogBank is the ground bank's extinction (1/m, scaled by intensity);
+    // fogNoise is the 3D-noise share, 0.5 = EnvironmentComponent's default (intensity
+    // 0 lands back on it, like windSpeed lands on 1).
+    float      fogBank       = 0.0f;
+    float      fogNoise      = 0.5f;
 };
 
 // Built-in preset table + a display name for each kind (defined in WeatherSystem.cpp).
@@ -115,6 +123,8 @@ struct WeatherComponent
     float      fromRain       = 0.0f;
     float      fromSnow       = 0.0f;
     float      fromWetness    = 0.0f;
+    float      fromFogBank    = 0.0f;
+    float      fromFogNoise   = 0.5f;
 
     // Last value the weather wrote into each EnvironmentComponent field. If the live
     // env value has drifted from this (the user moved a slider) the weather stops
@@ -128,6 +138,8 @@ struct WeatherComponent
     float      lastSnow    = -999.0f;
     float      lastWetness = -999.0f;
     float      lastThunder = -999.0f;
+    float      lastFogBank  = -999.0f;
+    float      lastFogNoise = -999.0f;
 
     // Current blended output written into the EnvironmentComponent + precipitation.
     float      curCloudCoverage = 0.0f;

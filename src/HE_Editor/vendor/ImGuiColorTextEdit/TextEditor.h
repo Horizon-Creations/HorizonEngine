@@ -40,6 +40,7 @@ public:
 	inline void SetShowWhitespacesEnabled(bool aValue) { mShowWhitespaces = aValue; }
 	inline bool IsShowWhitespacesEnabled() const { return mShowWhitespaces; }
 	inline void SetShowLineNumbersEnabled(bool aValue) { mShowLineNumbers = aValue; }
+	inline void SetScrollPastEndEnabled(bool aValue) { mScrollPastEnd = aValue; }   // HE-PATCH(scroll-past-end)
 	inline bool IsShowLineNumbersEnabled() const { return mShowLineNumbers; }
 	inline void SetShortTabsEnabled(bool aValue) { mShortTabs = aValue; }
 	inline bool IsShortTabsEnabled() const { return mShortTabs; }
@@ -413,6 +414,7 @@ private:
 	bool mAutoIndent = true;
 	bool mShowWhitespaces = true;
 	bool mShowLineNumbers = true;
+	bool mScrollPastEnd = true;   // HE-PATCH(scroll-past-end)
 	bool mShortTabs = false;
 
 	int mSetViewAtLine = -1;

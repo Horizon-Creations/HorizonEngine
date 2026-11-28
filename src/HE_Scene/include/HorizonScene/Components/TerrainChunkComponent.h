@@ -2,6 +2,7 @@
 #include <entt/entt.hpp>
 #include <Types/UUID.h>
 #include "WaterSurfaceComponent.h"
+#include "LandscapeProxyComponent.h"
 #include <cstdint>
 
 // Marks a runtime-generated terrain chunk entity. Chunk entities are children of
@@ -20,6 +21,11 @@ struct TerrainChunkComponent {
     // tessActive = the mesh is filled and hooked in as LODComponent::refinedMeshId.
     HE::UUID     tessMeshId{};
     bool         tessActive = false;
+    // Runtime: the TrailField version of this chunk's rectangle its refined mesh was built with (~0 = built without
+    // looking, e.g. by a sculpt rebuild) and the tick of that build, so a track under the camera rebuilds at a few Hz.
+    uint64_t     trailVersion = ~0ull;
+    uint32_t     trailTick    = 0;
+    bool         trailHas     = false;   // the refined mesh carries trail geometry
 
     // Stitched copy of the drawn level (TerrainSystem::stitchSeams): its edges
     // follow a coarser neighbour so the seam has no step. Registered once per
@@ -31,15 +37,15 @@ struct TerrainChunkComponent {
 
 namespace HE
 {
-    // Everything a landscape generates for itself: its chunk entities and its water
-    // surfaces. None of them is saved, listed, replicated or picked on its own —
+    // Everything a landscape generates for itself: its chunk entities, its water
+    // surfaces and the proxies of a tile landscape (LandscapeProxyComponent). None of them is saved, listed, replicated or picked on its own —
     // the TerrainComponent (heights, paint, water field) is the source of truth and
     // TerrainSystem recreates the rest. One predicate so that a new kind of
     // generated child is added HERE and not forgotten at the ten places that have
     // to skip it (serializer, outliner, replication, picking, …).
     inline bool isTerrainGenerated(const entt::registry& reg, entt::entity e)
     {
-        return reg.all_of<TerrainChunkComponent>(e) || reg.all_of<WaterSurfaceComponent>(e);
+        return reg.all_of<TerrainChunkComponent>(e) || reg.all_of<WaterSurfaceComponent>(e) || reg.all_of<LandscapeProxyComponent>(e);
     }
 
     // The landscape a generated child belongs to, or entt::null.

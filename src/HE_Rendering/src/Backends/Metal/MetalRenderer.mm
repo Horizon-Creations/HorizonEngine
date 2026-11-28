@@ -1,3 +1,11 @@
+#include <atomic>
+#include <condition_variable>
+#include <deque>
+#include <memory>
+#include <mutex>
+#include <thread>
+#include <ContentManager/BlockEncode.h>
+#include <chrono>
 #include "Backends/Metal/MetalRenderer.h"
 #include <Window/Window.h>
 #include <ContentManager/ContentManager.h>
@@ -14,9 +22,11 @@
 #include <HorizonRendering/SkyEnvBake.h>      // shared CPU sky bake for the IBL ambient cubemap
 #include <JobSystem/JobSystem.h>              // parallel_for — the bake is per-row parallel
 #include <HorizonRendering/SkyFrameParams.h>  // HE::SkyFrameParams / BuildSkyFrameParams (folds in CloudWindVector)
+#include <chrono>
 #include <HorizonRendering/SkyNoise3D.h>      // HE::BuildSkyNoise3D
 #include <HorizonRendering/SsaoKernel.h>      // HE::BuildSSAOKernel / BuildSSAONoise
 #include <MaterialGraph/MaterialGraph.h> // kMatMaxGraphTextures
+#include <MaterialGraph/RvtLookup.h>     // kRvtFeedbackSlots
 #include <HorizonRendering/GiInstanceSurface.h> // shared GI-hit surface resolution
 #include <HorizonRendering/GraphTextureMisses.h> // graph-texture misses forgotten per content epoch
 #include <Renderer/UIFont.h>             // shared baked UI font atlas
@@ -30,6 +40,7 @@
 #include <vector>
 #include <algorithm>
 #include <fstream> // HE_DUMP_* headless capture writes PNG/PPM dumps straight to disk
+
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp> // glm::lookAt / glm::perspective (preview cameras)
 #include <glm/gtc/type_ptr.hpp>         // glm::make_mat4 (skeletal-preview bone overlay)
@@ -83,6 +94,25 @@ void attachPassTimer(MTLRenderPassDescriptor* d, id<MTLCounterSampleBuffer> sb, 
 // Half-timers for a MULTI-encoder pass (SSAO = pos/occlusion/blur; Bloom =
 // bright + N blur): start sampled on the FIRST encoder, end on the LAST, so the
 // pair spans the whole feature.
+// A font atlas with its mip chain (HE::uiFontMips — the levels every backend
+// uploads and the software rasterizer samples, so small text matches).
+static id<MTLTexture> makeUIFontAtlas(id<MTLDevice> device, const HE::BakedUIFont& f)
+{
+	const std::vector<HE::UIFontMipLevel>& mips = HE::uiFontMips(f);
+	MTLTextureDescriptor* d = [MTLTextureDescriptor
+		texture2DDescriptorWithPixelFormat:MTLPixelFormatR8Unorm
+		                             width:f.atlasW height:f.atlasH mipmapped:!mips.empty()];
+	d.mipmapLevelCount = 1 + mips.size();
+	d.usage = MTLTextureUsageShaderRead; d.storageMode = MTLStorageModeShared;
+	id<MTLTexture> tex = [device newTextureWithDescriptor:d];
+	[tex replaceRegion:MTLRegionMake2D(0, 0, f.atlasW, f.atlasH)
+	       mipmapLevel:0 withBytes:f.pixels.data() bytesPerRow:f.atlasW];
+	for (size_t i = 0; i < mips.size(); ++i)
+		[tex replaceRegion:MTLRegionMake2D(0, 0, mips[i].w, mips[i].h)
+		       mipmapLevel:i + 1 withBytes:mips[i].px.data() bytesPerRow:mips[i].w];
+	return tex;
+}
+
 API_AVAILABLE(macos(11.0))
 void attachPassStart(MTLRenderPassDescriptor* d, id<MTLCounterSampleBuffer> sb, NSUInteger slot)
 {
@@ -1073,6 +1103,13 @@ fragment float4 tonemapFragment(TMOut in [[stage_in]],
 {
 	constexpr sampler s(filter::linear, address::clamp_to_edge);
 	float3 c = hdr.sample(s, in.uv).rgb;
+	if (params.x < 0.0)   // raw capture (EditorCameraOverride::rawOutput): the material's colour, untouched
+	{
+		c = clamp(c, 0.0, 1.0);
+		if (params.x < -1.5)   // rawSrgb: the exact sRGB curve, for a picture that becomes an sRGB texture
+			c = select(1.055 * pow(c, float3(1.0 / 2.4)) - 0.055, c * 12.92, c <= 0.0031308);
+		return float4(c, 1.0);
+	}
 	c += bloom.sample(s, in.uv).rgb * params.y;
 	c *= params.x;
 	c = aces(c);
@@ -1458,13 +1495,18 @@ fragment float4 uiFragment(UIVert in [[stage_in]],
                            texture2d<float> atlas [[texture(0)]])
 {
     if (shape.x > 0.5 && shape.x < 1.5) {
-        constexpr sampler s(filter::linear);
-        float a = atlas.sample(s, in.uv).r;
+        // Trilinear: the atlas carries its mips (HE::uiFontMips), and small
+        // text reads the level its size, biased by HE::kUIFontLodBias (-1), as
+        // on GL and in the software path.
+        constexpr sampler s(filter::linear, mip_filter::linear);
+        float a = atlas.sample(s, in.uv, bias(-1.0)).r;
         return float4(color.rgb, color.a * a);
     }
     if (shape.x > 1.5) {
+        // 3 = "Pixelated": nearest, and no mip filter, so the base level's texel.
         constexpr sampler s(filter::linear);
-        float4 t = atlas.sample(s, in.uv);
+        constexpr sampler sn(filter::nearest);
+        float4 t = shape.x > 2.5 ? atlas.sample(sn, in.uv) : atlas.sample(s, in.uv);
         float4 c = float4(color.rgb * t.rgb, color.a * t.a);
         if (shape.y <= 0.0) return c;
         // A rounded image is the same SDF the solid path uses, applied to the
@@ -2862,6 +2904,7 @@ struct GIReflParams {
 	float4 gridCounts;      // xyz = probes per axis, w = probesPerRow
 	float4 extra;           // x = glossy cone jitter on (quality 2), y = mesh data valid (true hit normals), z = SW instance count, w = max bounces (1-4)
 	float4 land;            // x = landscape count (painted-terrain table), y = rays per pixel (quality tier), z = skyEnv is the baked sky cube (primary misses read it)
+	float4 rvt;             // x = radians per screen pixel, y = feedback phase (frame & 63), z = HE_GI_RVT_MAP (page-map colours), w = feedback on
 };
 
 // P4 (HW only): tier-2 argument buffer of per-unique-BLAS mesh pointers —
@@ -2881,6 +2924,8 @@ struct GILand {
 	float4   autoWet;  // auto: rgb puddle colour, a puddle share of flat ground
 	float4   autoSlope;// auto: Rock Slope, Rock Blend, Dirt Amount, Puddle Max Slope
 	float4   autoSnow; // auto: Snow Height, Snow Blend, Snow Max Slope
+	float4   rvtA;     // drawn from the RVT: the consumer's RvtVolumeA (origin xz, extent, texel metres at mip 0)
+	float4   rvtB;     // RvtVolumeB (page px, border + 256 * volume, pages per side at mip 0, mip count; w = 0: not from pages)
 };
 
 constant int kGIProbeOctSize = 8; // must match MetalRenderer::kGIProbeOctSize
@@ -2913,12 +2958,73 @@ static float3 giAutoLandAlbedo(const device GILand& L, float3 pos, float3 n)
 // slope and height instead (hitN = the world normal facing the ray).
 // Returns false when this instance is not a landscape (caller keeps its flat
 // per-instance albedo).
+// A landscape drawn from the Runtime Virtual Texture: the hit's colour from the pages (the real ground, textures and all)
+// instead of the means. RvtLookup.h's page math, nearest page at the mip whose texel matches `footprint` (metres the
+// reflected pixel covers there); the table already points a missing page at its nearest coarser one.
+// rvtP = GIReflParams::rvt (y = feedback phase, z = HE_GI_RVT_MAP, w = feedback on). A feedback lane reports the page it
+// wants into the frame's feedback table, like a rasterized pixel (RvtLookup.h), so ground seen only in a mirror gets its
+// fine pages too.
+// How far one pixel's footprint stretches in world XZ where the ray meets the surface, the rasterizer's largest XZ
+// derivative: 1/cos of the incidence along the in-surface ray direction, times that direction's XZ share (a cliff hit
+// from above stretches upwards, not across the ground), never below the unstretched side.
+static float giRvtStretch(float3 rd, float3 n)
+{
+	const float  c  = max(abs(dot(rd, n)), 0.1);
+	const float3 t  = rd - n * dot(rd, n);
+	const float  lt = length(t);
+	return max((lt > 1e-4 ? length(t.xz) / lt : 1.0) / c, 1.0);
+}
+static bool giRvtAlbedo(const device GILand& L, texture2d<uint> table, texture2d_array<float> hot,
+                        texture2d_array<float> cold, float3 hitPos, float footprint, thread float3& albedoOut,
+                        float4 rvtP, device uint* rvtFb, bool fbLane)
+{
+	if (L.rvtB.w < 0.5) return false;
+	const float2 uv = (hitPos.xz - L.rvtA.xy) / max(L.rvtA.z, 1e-3);
+	if (uv.x < 0.0 || uv.y < 0.0 || uv.x >= 1.0 || uv.y >= 1.0) return false;
+	const int mipCount = max(int(L.rvtB.w + 0.5), 1);
+	const int pps0     = max(int(L.rvtB.z + 0.5), 1);
+	const int mip = clamp(int(floor(log2(max(footprint / max(L.rvtA.w, 1e-4), 1.0)))), 0, mipCount - 1);
+	const int pps = max(pps0 >> mip, 1);
+	const uint2 pg = uint2(clamp(int2(uv * float(pps)), int2(0), int2(pps - 1)));
+	if (fbLane && rvtP.w > 0.5)
+	{
+		const uint key = (uint(L.rvtB.y / 256.0) << 27) | (uint(mip) << 22) | (pg.x << 11) | pg.y;
+		rvtFb[((key ^ (uint(rvtP.y) * 40503u)) * 2654435761u) >> 20] = key;
+	}
+	const uint e = table.read(pg, uint(mip)).r;
+	if (e == 0xFFFFFFFFu) { if (rvtP.z > 0.5) { albedoOut = float3(0.0); return true; } return false; }
+	const uint slot = e & 0x7FFFFFu;
+	const int  eff  = int((e >> 24) & 0x3Fu);   // bit 30: the debug view's stale mark
+	const int  ppsE = max(pps0 >> eff, 1);
+	if (rvtP.z > 0.5)
+	{
+		// The page map in the mirror (RvtLookup.h's colours): hue = the mip shown, dark stripes = a coarser page stands in.
+		const float hue = fract(0.33 + float(eff) * 0.13);
+		float3 dc = saturate(abs(fract(hue + float3(0.0, 2.0 / 3.0, 1.0 / 3.0)) * 6.0 - 3.0) - 1.0);
+		const float pageM = max(L.rvtA.z, 1e-3) / float(ppsE);
+		if (eff > mip && fmod(floor((hitPos.x + hitPos.z) / max(pageM * 0.0625, 1e-3)), 2.0) < 1.0) dc *= 0.35;
+		albedoOut = dc;
+		return true;
+	}
+	const float2 g  = uv * float(ppsE);
+	const float ps = L.rvtB.x, bd = fmod(L.rvtB.y, 256.0);
+	const float2 tuv = (bd + (g - floor(g)) * ps) / (ps + 2.0 * bd);
+	constexpr sampler s(coord::normalized, address::clamp_to_edge, filter::linear);
+	albedoOut = (e & 0x800000u) != 0u ? cold.sample(s, tuv, slot, level(0.0)).rgb
+	                                  : hot.sample(s, tuv, slot, level(0.0)).rgb;
+	return true;
+}
+
 static bool giLandscapeAlbedo(const device GILand* lands, int li, int landCount,
                               array<texture2d<float>, 4> weightTex,
-                              float3 hitPos, float3 hitN, thread float3& albedoOut)
+                              float3 hitPos, float3 hitN, thread float3& albedoOut,
+                              array<texture2d<uint>, 4> rvtTables, texture2d_array<float> rvtHot,
+                              texture2d_array<float> rvtCold, float footprint,
+                              float4 rvtP, device uint* rvtFb, bool fbLane)
 {
 	if (li < 0 || li >= landCount || li >= 4) return false;
 	const device GILand& L = lands[li];
+	if (giRvtAlbedo(L, rvtTables[li], rvtHot, rvtCold, hitPos, footprint, albedoOut, rvtP, rvtFb, fbLane)) return true;
 	if (L.cfg.w < -0.5) { albedoOut = giAutoLandAlbedo(L, hitPos, hitN); return true; }
 	const int layers = int(L.cfg.w);
 	if (layers <= 0) return false;
@@ -3049,7 +3155,11 @@ kernel void giReflRay(uint2 gid [[thread_position_in_grid]],
                       const device uint* instanceMesh             [[buffer(4)]],
                       const device GILand* lands                  [[buffer(5)]],
                       const device int* instanceLand              [[buffer(6)]],
-                      array<texture2d<float>, 4> landWeights      [[texture(9)]])
+                      array<texture2d<float>, 4> landWeights      [[texture(9)]],
+                      array<texture2d<uint>, 4>  rvtTables        [[texture(13)]],
+                      texture2d_array<float>     rvtHot           [[texture(17)]],
+                      texture2d_array<float>     rvtCold          [[texture(18)]],
+                      device uint*               rvtFb            [[buffer(7)]])
 {
 	if (float(gid.x) >= P.texSize.x || float(gid.y) >= P.texSize.y) return;
 	// Nearest sampling: interpolated oct-encoded normals / depths at geometry
@@ -3181,6 +3291,7 @@ kernel void giReflRay(uint2 gid [[thread_position_in_grid]],
 					if (dot(hitN, rd) > 0.0) hitN = -hitN; // face the incoming ray (two-sided)
 				}
 			}
+			bool rvtMapHit = false;
 			// Landscape hit: replace the flat per-instance tint with the paint at
 			// THIS point, or a red ridge on a green hillside mirrors as one
 			// averaged colour (auto material: its slope/height masks — the reason
@@ -3188,9 +3299,21 @@ kernel void giReflRay(uint2 gid [[thread_position_in_grid]],
 			// there is a guess). Non-landscape hits leave `albedo` untouched.
 			{
 				float3 painted;
+				// Metres one SCREEN pixel covers at the hit, seen through the mirror (camera -> mirror -> hit at the
+				// camera's own pixel angle, stretched by the grazing angle like the rasterizer's largest derivative;
+				// widened by the lobe, GGX alpha = rough^2: a mirror adds nothing): the RVT mip the rasterizer would
+				// pick for that ground seen directly, whatever resolution the reflection traces at.
+				const float footprint = (length(Pw - P.camPos.xyz) + dist) * P.rvt.x * giRvtStretch(rd, hitN)
+				                      + dist * rough * rough;
+				const uint ph = uint(P.rvt.y);
+				const bool fbLane = ((gid.x + ph) & 3u) == 0u && ((gid.y + (ph >> 2)) & 3u) == 0u;
 				if (giLandscapeAlbedo(lands, instanceLand[instId], int(P.land.x),
-				                      landWeights, hitPos, hitN, painted))
+				                      landWeights, hitPos, hitN, painted, rvtTables, rvtHot, rvtCold, footprint,
+				                      P.rvt, rvtFb, fbLane))
+				{
 					albedo = painted;
+					rvtMapHit = P.rvt.z > 0.5;
+				}
 			}
 
 			// Direct sun at the hit: one hard occlusion ray. Skipped when the
@@ -3224,6 +3347,7 @@ kernel void giReflRay(uint2 gid [[thread_position_in_grid]],
 				field = giReflField(giIrr, P, hitPos, hitN, fieldW);
 			if (fieldW > 1e-4) Lsurf += albedo * field * P.sunDirRadius.w;
 			else               Lsurf += albedo * P.skyAmbient.rgb;
+			if (rvtMapHit) Lsurf = albedo;   // HE_GI_RVT_MAP: the page map is a colour key, shown unlit
 
 			// Confidence (first hit — deeper bounces ride on the primary hit's):
 			// the roughness cutoff, plus a fade only in the LAST QUARTER of the
@@ -3342,6 +3466,8 @@ struct GILand {
 	float4   autoWet;
 	float4   autoSlope;
 	float4   autoSnow;
+	float4   rvtA;     // as the HW kernel's GILand: RvtVolumeA / RvtVolumeB of a landscape drawn from the RVT
+	float4   rvtB;
 };
 
 // Auto landscape material at a hit — copy of the HW kernel's giAutoLandAlbedo
@@ -3365,12 +3491,73 @@ static float3 giAutoLandAlbedo(const device GILand& L, float3 pos, float3 n)
 // Albedo of a landscape hit sampled at the PAINT — see the HW kernel's copy for
 // why the hit POSITION is enough to recover the UV; an auto landscape follows
 // the hit's slope and height. false = not a landscape.
+// A landscape drawn from the Runtime Virtual Texture: the hit's colour from the pages (the real ground, textures and all)
+// instead of the means. RvtLookup.h's page math, nearest page at the mip whose texel matches `footprint` (metres the
+// reflected pixel covers there); the table already points a missing page at its nearest coarser one.
+// rvtP = GIReflParams::rvt (y = feedback phase, z = HE_GI_RVT_MAP, w = feedback on). A feedback lane reports the page it
+// wants into the frame's feedback table, like a rasterized pixel (RvtLookup.h), so ground seen only in a mirror gets its
+// fine pages too.
+// How far one pixel's footprint stretches in world XZ where the ray meets the surface, the rasterizer's largest XZ
+// derivative: 1/cos of the incidence along the in-surface ray direction, times that direction's XZ share (a cliff hit
+// from above stretches upwards, not across the ground), never below the unstretched side.
+static float giRvtStretch(float3 rd, float3 n)
+{
+	const float  c  = max(abs(dot(rd, n)), 0.1);
+	const float3 t  = rd - n * dot(rd, n);
+	const float  lt = length(t);
+	return max((lt > 1e-4 ? length(t.xz) / lt : 1.0) / c, 1.0);
+}
+static bool giRvtAlbedo(const device GILand& L, texture2d<uint> table, texture2d_array<float> hot,
+                        texture2d_array<float> cold, float3 hitPos, float footprint, thread float3& albedoOut,
+                        float4 rvtP, device uint* rvtFb, bool fbLane)
+{
+	if (L.rvtB.w < 0.5) return false;
+	const float2 uv = (hitPos.xz - L.rvtA.xy) / max(L.rvtA.z, 1e-3);
+	if (uv.x < 0.0 || uv.y < 0.0 || uv.x >= 1.0 || uv.y >= 1.0) return false;
+	const int mipCount = max(int(L.rvtB.w + 0.5), 1);
+	const int pps0     = max(int(L.rvtB.z + 0.5), 1);
+	const int mip = clamp(int(floor(log2(max(footprint / max(L.rvtA.w, 1e-4), 1.0)))), 0, mipCount - 1);
+	const int pps = max(pps0 >> mip, 1);
+	const uint2 pg = uint2(clamp(int2(uv * float(pps)), int2(0), int2(pps - 1)));
+	if (fbLane && rvtP.w > 0.5)
+	{
+		const uint key = (uint(L.rvtB.y / 256.0) << 27) | (uint(mip) << 22) | (pg.x << 11) | pg.y;
+		rvtFb[((key ^ (uint(rvtP.y) * 40503u)) * 2654435761u) >> 20] = key;
+	}
+	const uint e = table.read(pg, uint(mip)).r;
+	if (e == 0xFFFFFFFFu) { if (rvtP.z > 0.5) { albedoOut = float3(0.0); return true; } return false; }
+	const uint slot = e & 0x7FFFFFu;
+	const int  eff  = int((e >> 24) & 0x3Fu);   // bit 30: the debug view's stale mark
+	const int  ppsE = max(pps0 >> eff, 1);
+	if (rvtP.z > 0.5)
+	{
+		// The page map in the mirror (RvtLookup.h's colours): hue = the mip shown, dark stripes = a coarser page stands in.
+		const float hue = fract(0.33 + float(eff) * 0.13);
+		float3 dc = saturate(abs(fract(hue + float3(0.0, 2.0 / 3.0, 1.0 / 3.0)) * 6.0 - 3.0) - 1.0);
+		const float pageM = max(L.rvtA.z, 1e-3) / float(ppsE);
+		if (eff > mip && fmod(floor((hitPos.x + hitPos.z) / max(pageM * 0.0625, 1e-3)), 2.0) < 1.0) dc *= 0.35;
+		albedoOut = dc;
+		return true;
+	}
+	const float2 g  = uv * float(ppsE);
+	const float ps = L.rvtB.x, bd = fmod(L.rvtB.y, 256.0);
+	const float2 tuv = (bd + (g - floor(g)) * ps) / (ps + 2.0 * bd);
+	constexpr sampler s(coord::normalized, address::clamp_to_edge, filter::linear);
+	albedoOut = (e & 0x800000u) != 0u ? cold.sample(s, tuv, slot, level(0.0)).rgb
+	                                  : hot.sample(s, tuv, slot, level(0.0)).rgb;
+	return true;
+}
+
 static bool giLandscapeAlbedo(const device GILand* lands, int li, int landCount,
                               array<texture2d<float>, 4> weightTex,
-                              float3 hitPos, float3 hitN, thread float3& albedoOut)
+                              float3 hitPos, float3 hitN, thread float3& albedoOut,
+                              array<texture2d<uint>, 4> rvtTables, texture2d_array<float> rvtHot,
+                              texture2d_array<float> rvtCold, float footprint,
+                              float4 rvtP, device uint* rvtFb, bool fbLane)
 {
 	if (li < 0 || li >= landCount || li >= 4) return false;
 	const device GILand& L = lands[li];
+	if (giRvtAlbedo(L, rvtTables[li], rvtHot, rvtCold, hitPos, footprint, albedoOut, rvtP, rvtFb, fbLane)) return true;
 	if (L.cfg.w < -0.5) { albedoOut = giAutoLandAlbedo(L, hitPos, hitN); return true; }
 	const int layers = int(L.cfg.w);
 	if (layers <= 0) return false;
@@ -3769,6 +3956,7 @@ struct GIReflParams {
 	float4 gridCounts;
 	float4 extra;           // x = glossy jitter on, y = (HW-only, unused), z = instance count, w = max bounces
 	float4 land;            // x = landscape count (painted-terrain table), y = rays per pixel (quality tier), z = skyEnv is the baked sky cube
+	float4 rvt;             // x = radians per screen pixel, y = feedback phase, z = HE_GI_RVT_MAP, w = feedback on
 };
 
 // Closest hit that also reports WHICH triangle was hit (global index into the
@@ -3895,7 +4083,11 @@ kernel void giReflRaySw(uint2 gid [[thread_position_in_grid]],
                         const device GiInst* insts [[buffer(2)]],
                         constant GIReflParams& P    [[buffer(3)]],
                         const device GILand* lands  [[buffer(4)]],
-                        array<texture2d<float>, 4> landWeights [[texture(9)]])
+                        array<texture2d<float>, 4> landWeights [[texture(9)]],
+                        array<texture2d<uint>, 4>  rvtTables   [[texture(13)]],
+                        texture2d_array<float>     rvtHot      [[texture(17)]],
+                        texture2d_array<float>     rvtCold     [[texture(18)]],
+                        device uint*               rvtFb       [[buffer(7)]])
 {
 	if (float(gid.x) >= P.texSize.x || float(gid.y) >= P.texSize.y) return;
 	constexpr sampler smp(coord::normalized, address::clamp_to_edge, filter::nearest);
@@ -3978,13 +4170,23 @@ kernel void giReflRaySw(uint2 gid [[thread_position_in_grid]],
 					if (dot(hitN, rd) > 0.0) hitN = -hitN;
 				}
 			}
+			bool rvtMapHit = false;
 			// Landscape hit → the paint at THIS point, not the terrain-wide mean
 			// (auto material: its slope/height masks, hence after hitN).
 			{
 				float3 painted;
+				// The screen pixel's footprint through the mirror (see giReflRay).
+				const float footprint = (length(Pw - P.camPos.xyz) + dist) * P.rvt.x * giRvtStretch(rd, hitN)
+				                      + dist * rough * rough;
+				const uint ph = uint(P.rvt.y);
+				const bool fbLane = ((gid.x + ph) & 3u) == 0u && ((gid.y + (ph >> 2)) & 3u) == 0u;
 				if (giLandscapeAlbedo(lands, insts[hitInst].offsets.z, int(P.land.x),
-				                      landWeights, hitPos, hitN, painted))
+				                      landWeights, hitPos, hitN, painted, rvtTables, rvtHot, rvtCold, footprint,
+				                      P.rvt, rvtFb, fbLane))
+				{
 					albedo = painted;
+					rvtMapHit = P.rvt.z > 0.5;
+				}
 			}
 			// Occlusion ray skipped when the sun term is black anyway (night) —
 			// same shortcut as the HW kernel.
@@ -4000,6 +4202,7 @@ kernel void giReflRaySw(uint2 gid [[thread_position_in_grid]],
 				field = giReflFieldSw(giIrr, P, hitPos, hitN, fieldW);
 			if (fieldW > 1e-4) Lsurf += albedo * field * P.sunDirRadius.w;
 			else               Lsurf += albedo * P.skyAmbient.rgb;
+			if (rvtMapHit) Lsurf = albedo;   // HE_GI_RVT_MAP: the page map is a colour key, shown unlit
 			if (b == 0) // range-edge fade only — see the HW kernel
 				conf = roughFade * (1.0 - smoothstep(max(P.camPos.w, 1.0) * 0.75,
 				                                     max(P.camPos.w, 1.0), dist));
@@ -4095,6 +4298,8 @@ struct SkyParams {
 	float4 star;          // x = starSize, y = starSizeVariation, z = starDensity, w = starGlow
 	float4 star2;         // x = starTwinkle, y = cloudQuality, z = low-res-cloud flag, w = rainAmount
 	float4 neb2;          // x = nebulaCoverage (0 none .. 1 whole band)
+	float4 drift;         // xyz = where the wind has carried the clouds so far (HE::CloudDrift), w = dome cloud height multiplier
+	float4 shape;         // x = cloudType (Realistic 3D layer: 0 mixed, 1 flat, 2 towering, 3 stratocumulus, 4 cumulonimbus)
 };
 
 vertex SkyOut skyVertex(uint vid [[vertex_id]])
@@ -4287,7 +4492,8 @@ float3 starField(float3 dir, float3 cdir, float3 sunDir, float time, float milky
 		core = core * core;
 		float  halo  = exp(-(d * d) / (sigma * sigma * 3.5)) * sz * sz * 0.14 * starGlow;
 		float  win   = smoothstep(1.0, 0.6, d);
-		float  shape = (core * 1.8 + halo) * win;
+		float  aaE   = min(1.0, (radius * radius) / (sigma * sigma)); // energy-conserving AA floor (see kSkyFS starField)
+		float  shape = (core * 1.8 + halo) * win * aaE;
 		float  mag   = (0.4 + 0.6 * smoothstep(thresh, 1.0, present)) * mix(0.8, 2.6, sz);
 		float  twa     = clamp(starTwinkle, 0.0, 1.0);
 		float  twPhase = starHash(cell + 23.5) * 6.2831;
@@ -4464,9 +4670,9 @@ float3 overcastBand(float3 baseSky, float gap, float3 dir, float3 sunDir, float3
 	return baseSky * outT + overcastDeck(dir, sunDir, sunColor, cloudTint, deckXZ) * gap;
 }
 // Where a dome-model ray meets the layer plane, in noise units (mirrors the GL domeDeckXZ()).
-float2 domeDeckXZ(float3 dir, float3 wind, float time)
+float2 domeDeckXZ(float3 dir, float3 wind, float4 drift, float time)
 {
-	return dir.xz / max(dir.y, 0.004) * (1.8 * kCloudScale * 0.5) + wind.xz * time * (kCloudScale * 0.5);
+	return dir.xz / max(dir.y, 0.004) * (1.8 * kCloudScale * 0.5 * drift.w) + drift.xz * (kCloudScale * 0.5);
 }
 // Worley (cellular) lookup from the noise volume's G channel — bright at the cell
 // feature points. fBm of it is the billowy cumulus shape. The bake already tiles,
@@ -4502,12 +4708,12 @@ float cloudHeightGrad(float y)
 // analytic function of pos.y, so test it FIRST and bail with zero texture fetches
 // when the sample is outside the slab (matters most for the sun light-march, whose
 // samples step up out of the slab toward the sun). Mirrors the GL cloudDensity.
-float cloudDensity(float3 pos, float time, float coverage, float3 wind,
+float cloudDensity(float3 pos, float time, float coverage, float3 wind, float4 drift,
                    texture3d<float> noiseTex, sampler noiseSamp)
 {
 	float hgrad = cloudHeightGrad(pos.y);
 	if (hgrad <= 0.0) return 0.0;                                  // outside slab → no fetches
-	float3 p      = pos * kCloudScale + wind * time;
+	float3 p      = pos * (kCloudScale * drift.w) + drift.xyz;
 	float  morph  = time * 0.030;                                 // slow forming/dissolving
 	float  perlin = starFbm3(p + float3(0.0, morph, 0.0), 4, noiseTex, noiseSamp); // coverage
 	float  billow = worleyFbm(p * 0.9 + float3(morph, 0.0, 0.0), noiseTex, noiseSamp); // fine cauliflower
@@ -4518,12 +4724,12 @@ float cloudDensity(float3 pos, float time, float coverage, float3 wind,
 // Density for the sun light-march. Slightly fewer octaves than the view density
 // (shadows are lower-frequency); the slab-height test bails with zero fetches when
 // the sun-ward sample steps out of the slab.
-float cloudShadowDensity(float3 pos, float time, float coverage, float3 wind,
+float cloudShadowDensity(float3 pos, float time, float coverage, float3 wind, float4 drift,
                          texture3d<float> noiseTex, sampler noiseSamp)
 {
 	float hgrad = cloudHeightGrad(pos.y);
 	if (hgrad <= 0.0) return 0.0;
-	float3 p      = pos * kCloudScale + wind * time;
+	float3 p      = pos * (kCloudScale * drift.w) + drift.xyz;
 	float  morph  = time * 0.030;
 	float  perlin = starFbm3(p + float3(0.0, morph, 0.0), 3, noiseTex, noiseSamp);
 	float  billow = worleyNoise3(p * 0.9 + float3(morph, 0.0, 0.0), noiseTex, noiseSamp) * 0.7
@@ -4532,8 +4738,8 @@ float cloudShadowDensity(float3 pos, float time, float coverage, float3 wind,
 	float  lo     = cloudLo(coverage);
 	return smoothstep(lo, lo + 0.13, base) * hgrad;
 }
-float3 applyClouds(float3 baseSky, float3 dir, float3 sunDir, float time, float coverage, float3 sunColor, float3 wind,
-                   float3 cloudTint, float densityMul, float quality,
+float3 applyClouds(float3 baseSky, float3 dir, float3 sunDir, float time, float coverage, float3 sunColor, float3 wind, float4 drift,
+                   float3 cloudTint, float densityMul, float quality, bool lowRes,
                    texture3d<float> noiseTex, sampler noiseSamp, thread float& outT)
 {
 	outT = 1.0;
@@ -4547,14 +4753,18 @@ float3 applyClouds(float3 baseSky, float3 dir, float3 sunDir, float time, float 
 	{
 		// Overcast: the deck runs on to the horizon instead of stopping short of it.
 		return overcastBand(baseSky, ov * smoothstep(-0.01, 0.01, dir.y), dir, sunDir, sunColor,
-		                    cloudTint, domeDeckXZ(dir, wind, time), outT);
+		                    cloudTint, domeDeckXZ(dir, wind, drift, time), outT);
 	}
 
 	// Quality (perf knob, star2.y): 0 Low, 1 Med, 2 High. High == the original
 	// step counts; Med/Low trade horizon detail for frames.
-	int qBaseN  = (quality < 0.5) ? 8  : (quality < 1.5 ? 12 : 16);
-	int qMaxN   = (quality < 0.5) ? 18 : (quality < 1.5 ? 32 : 64);
-	int qShadow = (quality < 0.5) ? 1  : (quality < 1.5 ? 2  : 3);
+	// lowRes == the quarter-res pre-pass fill (cloudsDomeLT): its output gets
+	// bilinearly upsampled, so demote one tier — see applyClouds3DReal (GL mirror:
+	// SkyShaderSource.h, docs/auto-lod-gpu-capture-stutter-2026-11-08.md).
+	const float effQ = lowRes ? max(quality - 1.0, 0.0) : quality;
+	int qBaseN  = (effQ < 0.5) ? 8  : (effQ < 1.5 ? 12 : 16);
+	int qMaxN   = (effQ < 0.5) ? 18 : (effQ < 1.5 ? 32 : 64);
+	int qShadow = (effQ < 0.5) ? 1  : (effQ < 1.5 ? 2  : 3);
 
 	// Fade the whole cloud layer out into the horizon haze (wider so the grazing band
 	// melts into the haze instead of showing undersampling speckle). Applied after
@@ -4609,7 +4819,7 @@ float3 applyClouds(float3 baseSky, float3 dir, float3 sunDir, float time, float 
 		// baked volume, 67 % of slab samples ARE cloud there and worleyFbm peaks at
 		// 0.87, so the billow term alone reaches lo. The per-step cost at such
 		// coverage is the light-march below, not this gate (perf audit, Thema 103).
-		float3 pp     = pos * kCloudScale + wind * time;
+		float3 pp     = pos * (kCloudScale * drift.w) + drift.xyz;
 		float  morph  = time * 0.030;
 		float  perlin = starFbm3(pp + float3(0.0, morph, 0.0), 4, noiseTex, noiseSamp);
 		if (perlin * 0.5 + 0.55 < lo) continue;
@@ -4621,7 +4831,7 @@ float3 applyClouds(float3 baseSky, float3 dir, float3 sunDir, float time, float 
 			// scaled by 3/qShadow so fewer steps don't brighten the clouds).
 			float shadow = 0.0;
 			for (int j = 1; j <= qShadow; ++j)
-				shadow += cloudShadowDensity(pos + sunDir * (float(j) * 0.25), time, coverage, wind, noiseTex, noiseSamp);
+				shadow += cloudShadowDensity(pos + sunDir * (float(j) * 0.25), time, coverage, wind, drift, noiseTex, noiseSamp);
 			float sun    = exp(-shadow * 1.7 * (3.0 / float(qShadow)));
 			float powder = 1.0 - exp(-dens * 3.0); // dark soft edges (powder effect)
 			float lit    = sun * powder;
@@ -4670,7 +4880,7 @@ float3 applyClouds(float3 baseSky, float3 dir, float3 sunDir, float time, float 
 	float gap = max((1.0 - horizon) * ov, smoothstep(0.95, 1.0, coverage));
 	if (gap > 0.0)
 	{
-		L += T * gap * overcastDeck(dir, sunDir, sunColor, cloudTint, domeDeckXZ(dir, wind, time));
+		L += T * gap * overcastDeck(dir, sunDir, sunColor, cloudTint, domeDeckXZ(dir, wind, drift, time));
 		T *= 1.0 - gap;
 	}
 	outT = T;
@@ -4680,6 +4890,33 @@ float3 applyClouds(float3 baseSky, float3 dir, float3 sunDir, float time, float 
 // Interleaved-gradient noise — blue-noise-like screen-space dither for raymarch
 // ray-start jitter (shared by applyClouds3D + applyAurora3D). Mirrors GL skyIgn().
 float skyIgn(float2 p) { return fract(52.9829189 * fract(0.06711056 * p.x + 0.00583715 * p.y)); }
+// Blue-noise ray-start jitter for the Realistic cloud march. Mirrors GL skyBlueDither() - change one, change both.
+constant float kSkyBlue16[256] = {
+	0.63086, 0.25977, 0.01367, 0.43555, 0.75586, 0.66992, 0.22070, 0.83398, 0.55664, 0.06445, 0.47852, 0.22852, 0.53711, 0.15430, 0.98633, 0.33008,
+	0.86133, 0.38867, 0.17383, 0.59961, 0.99414, 0.49805, 0.10352, 0.41602, 0.27148, 0.62695, 0.93164, 0.31445, 0.90039, 0.43164, 0.20117, 0.74414,
+	0.52148, 0.68555, 0.92383, 0.78711, 0.32227, 0.14258, 0.87305, 0.74023, 0.95117, 0.16602, 0.38086, 0.68164, 0.08008, 0.83008, 0.58008, 0.04102,
+	0.13477, 0.29883, 0.09961, 0.46680, 0.24414, 0.63867, 0.35742, 0.04883, 0.51367, 0.80664, 0.59180, 0.75977, 0.26367, 0.47070, 0.36133, 0.94727,
+	0.42383, 0.82227, 0.56445, 0.72070, 0.02539, 0.91211, 0.57617, 0.70117, 0.45898, 0.21289, 0.00977, 0.12305, 0.96289, 0.64648, 0.77539, 0.24023,
+	0.88477, 0.65820, 0.20898, 0.97070, 0.39648, 0.79492, 0.18555, 0.28320, 0.97461, 0.33398, 0.84180, 0.41211, 0.50977, 0.18164, 0.09570, 0.60352,
+	0.01758, 0.48633, 0.34961, 0.08398, 0.52930, 0.85352, 0.42773, 0.06836, 0.77148, 0.64258, 0.54883, 0.87695, 0.28711, 0.68945, 0.92773, 0.32617,
+	0.73242, 0.86914, 0.15820, 0.69727, 0.25586, 0.61914, 0.11523, 0.50195, 0.91992, 0.24805, 0.14648, 0.72461, 0.03320, 0.38477, 0.80273, 0.53320,
+	0.27930, 0.95898, 0.58398, 0.44727, 0.90430, 0.31836, 0.75195, 0.67383, 0.36914, 0.05664, 0.48242, 0.61133, 0.99805, 0.45117, 0.11914, 0.19727,
+	0.07617, 0.40430, 0.76367, 0.03711, 0.82617, 0.21680, 0.99023, 0.16992, 0.56836, 0.88867, 0.78320, 0.20508, 0.33789, 0.83789, 0.57227, 0.67773,
+	0.81055, 0.30664, 0.63477, 0.13867, 0.37695, 0.55273, 0.00586, 0.46289, 0.81836, 0.29492, 0.40820, 0.09180, 0.66211, 0.25195, 0.89648, 0.47461,
+	0.97852, 0.52539, 0.23242, 0.91602, 0.49023, 0.73633, 0.65039, 0.34180, 0.10742, 0.69336, 0.95508, 0.54102, 0.74805, 0.16211, 0.00195, 0.36523,
+	0.17773, 0.05273, 0.84961, 0.70898, 0.08789, 0.26758, 0.85742, 0.93555, 0.23633, 0.59570, 0.04492, 0.84570, 0.43945, 0.94336, 0.62305, 0.71680,
+	0.77930, 0.44336, 0.34570, 0.58789, 0.96680, 0.41992, 0.15039, 0.51758, 0.76758, 0.39258, 0.18945, 0.27539, 0.50586, 0.11133, 0.30273, 0.56055,
+	0.93945, 0.12695, 0.66602, 0.29102, 0.19336, 0.79883, 0.61523, 0.02930, 0.45508, 0.98242, 0.65430, 0.35352, 0.79102, 0.88086, 0.40039, 0.22461,
+	0.49414, 0.81445, 0.89258, 0.54492, 0.06055, 0.37305, 0.90820, 0.31055, 0.71289, 0.13086, 0.86523, 0.72852, 0.02148, 0.60742, 0.70508, 0.07227
+};
+float skyBlueDither(float2 p)
+{
+	int2 q = int2(p);
+	int2 t = q >> 4;
+	int  h = (t.x * 73856093) ^ (t.y * 19349663);
+	int2 r = (q + int2(h & 15, (h >> 4) & 15)) & 15;
+	return kSkyBlue16[r.x + r.y * 16];
+}
 
 // Coverage value-noise fBm with DISTANCE OCTAVE-LOD: the two highest-frequency octaves
 // fade to zero far away (farW: 1 near → 0 far) so distant coarsely-stepped clouds keep
@@ -4714,12 +4951,12 @@ constant float kCloudRefAltitude = 200.0;
 constant float kCloudElevFloor   = 0.06;   // was clamp((cloudH-50)/2500) — grew with altitude
 // Where a 3D-mode view ray meets the middle of the cloud slab, in the deck's noise units
 // (mirrors the GL deck3DXZ()); unbounded in distance so the deck runs on to the horizon.
-float2 deck3DXZ(float3 camPos, float3 dir, float cloudH, float3 wind, float time)
+float2 deck3DXZ(float3 camPos, float3 dir, float cloudH, float3 wind, float4 drift, float time)
 {
 	float midY = max(cloudH, 1.0) + kCloudRefAltitude * 0.75;
 	float t    = abs(midY - camPos.y) / max(abs(dir.y), 0.004);
 	float2 xz  = camPos.xz + dir.xz * t;
-	return xz * (1.6 / kCloudRefAltitude * 0.5) + wind.xz * time * 0.5;
+	return xz * (1.6 / kCloudRefAltitude * 0.5) + drift.xz * 0.5;
 }
 
 // ── Cloud slab intersection ──────────────────────────────────────────────────
@@ -4752,6 +4989,18 @@ bool cloudSlabRange(float3 camPos, float3 dir, float baseY, float topY, float ma
 	return tFar > tNear;
 }
 
+// Cloud type of the Realistic layer (EnvironmentSettings::cloudType), carried in drift.w of the Realistic entry points:
+// x = cell-size factor on the weather-map frequency, y = lowest tower height (fraction of the slab), z = tower height
+// factor, w = tower cap (1e9 = none). Type 0 multiplies by one throughout. Mirror of the GLSL cloudShapeParams.
+float4 cloudShapeParams(float4 drift)
+{
+	int t = int(drift.w + 0.5);
+	if (t == 1) return float4(1.55, 0.16, 0.62, 0.60);
+	if (t == 2) return float4(0.85, 0.50, 1.15, 1.00);
+	if (t == 3) return float4(1.25, 0.10, 0.45, 0.45);
+	if (t == 4) return float4(0.50, 0.80, 1.35, 1.00);
+	return float4(1.0, 0.28, 1.0, 1.0);   // a tower never reaches the slab's flat top: the crowns are domes
+}
 // ── Shared cloud shape field ─────────────────────────────────────────────────
 // Coarse density (presence × vertical profile × billow erosion, no fine octave)
 // of the 3D cloud slab at a world position. ONE shape model for the realistic
@@ -4767,13 +5016,12 @@ bool cloudSlabRange(float3 camPos, float3 dir, float baseY, float topY, float ma
 //     drift. evo scales all evolution SPEEDS (0 = frozen shapes, drift only).
 // (The classic VIEW march below stays untouched/byte-identical — it does not
 // call this; only the classic shadow map shares the classic branch here.)
-float cloudFieldDensity(float3 pos, float baseY, float thick, float nscale, float lo,
-                        float time, float3 wind, float fluff, float style, float evo,
-                        texture3d<float> noiseTex, sampler noiseSamp)
+// The weather-map half of the Realistic field: where clouds are (cover) and how tall they tower (macro). Smooth
+// along a view ray, so the view march evaluates it at every Kth step and interpolates; the sun march and the
+// cloud-shadow map call cloudFieldDensity, which evaluates it exactly. Mirror of the Metal cloudColumnReal.
+float2 cloudColumnReal(float3 pos, float baseY, float thick, float nscale, float time, float3 wind, float4 drift, float evo, texture3d<float> noiseTex, sampler noiseSamp)
 {
 	float hf = clamp((pos.y - baseY) / thick, 0.0, 1.0);
-	if (style > 0.5)
-	{
 		// Wind shear: tops lean downwind. World-space offset before noise
 		// scaling; strength follows the actual wind speed (|wind| is per-sec).
 		float wlen = length(wind.xz);
@@ -4785,7 +5033,7 @@ float cloudFieldDensity(float3 pos, float baseY, float thick, float nscale, floa
 		// camera-relative in Y, and sampling the columns at baseY made the
 		// whole cloud PATTERN morph when the camera climbed — and the ground
 		// shadows with it. The 3D body/erosion below still vary with height.
-		float3 npc = float3(pos.x, 0.0, pos.z) * (nscale * 0.55) + wind * time;
+		float3 npc = (float3(pos.x, 0.0, pos.z) * (nscale * 0.55) + drift.xyz) * cloudShapeParams(drift).x;   // cell size of the cloud type
 		npc.y += 37.0; // fixed weather-map slice (wind is horizontal; evolution scrolls y at sample time)
 		// DOMAIN WARP: bend the column field with a low-frequency vector noise
 		// so cells stop reading as same-sized round balls — outlines become
@@ -4815,18 +5063,37 @@ float cloudFieldDensity(float3 pos, float baseY, float thick, float nscale, floa
 		// env is intermediate, and the carve erosion below then has no volume
 		// to sculpt — the clouds stay smooth balls with rough skin. The wide
 		// band gives the erosion a thick rind to cut real lobes out of.
+	return float2(cover, macro);
+}
+// The 3D half: from the column's cover/macro to the density (envelope, body lumps, erosion, mist skirt).
+float cloudBodyReal(float3 pos, float baseY, float thick, float nscale, float lo, float time, float3 wind, float4 drift, float fluff, float evo, float2 col, texture3d<float> noiseTex, sampler noiseSamp)
+{
+	float hfu = (pos.y - baseY) / thick;               // unclamped: below the nominal base it is negative
+	float hf  = clamp(hfu, 0.0, 1.0);
+		// Wind shear: tops lean downwind. World-space offset before noise
+		// scaling; strength follows the actual wind speed (|wind| is per-sec).
+		float wlen = length(wind.xz);
+		if (wlen > 1e-5)
+			pos.xz += wind.xz * ((hf * hf * (0.35 / nscale) * min(wlen * 40.0, 1.0)) / wlen);
+	float cover = col.x;
+	float macro = col.y;
 		float pres = smoothstep(lo - 0.05, lo + 0.30, cover);
 		if (pres <= 0.0) return 0.0;
 		// Tower height varies per formation (macro): some stay flat banks,
 		// others billow into towers — not one uniform dome height.
-		float towerTop = mix(0.28, 1.0, smoothstep(lo, lo + 0.30, cover))
-		               * mix(0.55, 1.25, macro);
-		float rise  = smoothstep(0.0, 0.06, hf);               // FLAT base
+		float4 shp     = cloudShapeParams(drift);
+		float towerTop = min(mix(shp.y, 1.0, smoothstep(lo, lo + 0.30, cover))
+		                     * mix(0.55, 1.25, macro) * shp.z, shp.w);
+		// The base is flat but not one plane: it rides up and down with the formation (macro, +-0.10 thick) and rises over
+		// a soft 0.10 instead of a razor 0.06, so an underside is a soft ragged edge and not a cut. The march starts
+		// below the nominal base to let it show (applyClouds3DReal).
+		float baseShift = (macro - 0.5) * 0.20;
+		float rise  = smoothstep(0.0, 0.10, hfu - baseShift);
 		float crown = 1.0 - smoothstep(towerTop * 0.55, towerTop, hf);
 		if (crown <= 0.0) return 0.0;
 		// 3D body: rounded interior lumps inside the column envelope. Fuller
 		// where the column is strong, broken toward the formation edges.
-		float3 np   = pos * nscale + wind * time;
+		float3 np   = pos * nscale + drift.xyz;
 		float body  = cloudCoverFbm(np + float3(0.0, time * 0.02 * evo, 0.0), 1.0, noiseTex, noiseSamp);
 		float bodyD = smoothstep(0.30, 0.60, body + pres * 0.10);
 		float env   = pres * rise * crown * bodyD;             // smooth envelope 0..1
@@ -4843,17 +5110,25 @@ float cloudFieldDensity(float3 pos, float baseY, float thick, float nscale, floa
 		                              noiseTex, noiseSamp) * 0.62
 		             + worleyNoise3(np * 2.4 + float3(3.0, -time * 0.06 * evo, 0.0),
 		                            noiseTex, noiseSamp) * 0.38;
-		float carve  = billow * mix(0.55, 0.85, fluff);
+		float carve  = billow * (mix(0.55, 0.85, fluff) + 0.22 * (1.0 - smoothstep(0.0, 0.30, hfu - baseShift)));   // ragged underside
 		float x      = (env - carve) / max(1.0 - carve, 1e-3);
 		// MIST SKIRT: a low-density veil in the zone the carve just cut away —
 		// it hugs every lobe as a soft evaporating fringe, so the crisp cores
 		// keep their shape but the outline stops being knife-sharp.
 		float mist = 0.17 * smoothstep(-0.40, 0.0, min(x, 0.0)) * rise;
 		return clamp(max(x, 0.0) + mist, 0.0, 1.0);
-	}
+}
+float cloudFieldDensity(float3 pos, float baseY, float thick, float nscale, float lo,
+                        float time, float3 wind, float4 drift, float fluff, float style, float evo,
+                        texture3d<float> noiseTex, sampler noiseSamp)
+{
+	float hf = clamp((pos.y - baseY) / thick, 0.0, 1.0);
+	if (style > 0.5)
+		return cloudBodyReal(pos, baseY, thick, nscale, lo, time, wind, drift, fluff, evo,
+		                     cloudColumnReal(pos, baseY, thick, nscale, time, wind, drift, evo, noiseTex, noiseSamp), noiseTex, noiseSamp);
 	// Classic branch — MUST stay term-for-term the cloud-shadow map's original
 	// formula (the ground shadows of classic scenes must not change).
-	float3 np = pos * nscale + wind * time;
+	float3 np = pos * nscale + drift.xyz;
 	float cover = cloudCoverFbm(np + float3(0.0, time * 0.03, 0.0), 1.0, noiseTex, noiseSamp);
 	float pres  = smoothstep(lo, lo + 0.26, cover);
 	if (pres <= 0.0) return 0.0;
@@ -4876,8 +5151,9 @@ float cloudFieldDensity(float3 pos, float baseY, float thick, float nscale, floa
 // moves. Noise frequency scales with cloudH so angular cloud size is height-invariant.
 // fragCoord = SkyOut.position.xy (gl_FragCoord equivalent). Mirrors the GL applyClouds3D().
 float3 applyClouds3D(float3 baseSky, float3 dir, float3 camPos, float3 sunDir, float time,
-                     float coverage, float3 sunColor, float3 wind, float cloudH,
-                     float cloudFluffiness, float cloudDensity, float quality, float3 cloudTint, float2 fragCoord,
+                     float coverage, float3 sunColor, float3 wind, float4 drift, float cloudH,
+                     float cloudFluffiness, float cloudDensity, float quality, bool lowRes,
+                     float3 cloudTint, float2 fragCoord,
                      texture3d<float> noiseTex, sampler noiseSamp, thread float& outT)
 {
 	outT = 1.0;
@@ -4886,10 +5162,12 @@ float3 applyClouds3D(float3 baseSky, float3 dir, float3 camPos, float3 sunDir, f
 	sunDir = normalize(sunDir);
 	const float ov = overcastAmount(coverage);
 	// Quality (perf knob, star2.y): 0 Low, 1 Med, 2 High. High == original counts.
-	float qStepF  = (quality < 0.5) ? 0.40 : (quality < 1.5 ? 0.30 : 0.22); // larger → fewer steps
-	float qMinN   = (quality < 0.5) ? 12.0 : (quality < 1.5 ? 18.0 : 24.0);
-	float qMaxN   = (quality < 0.5) ? 40.0 : (quality < 1.5 ? 72.0 : 128.0);
-	int   qShadow = (quality < 0.5) ? 1    : (quality < 1.5 ? 2    : 3);
+	// lowRes == the quarter-res pre-pass fill — demote one tier, see applyClouds3DReal.
+	const float effQ = lowRes ? max(quality - 1.0, 0.0) : quality;
+	float qStepF  = (effQ < 0.5) ? 0.40 : (effQ < 1.5 ? 0.30 : 0.22); // larger → fewer steps
+	float qMinN   = (effQ < 0.5) ? 12.0 : (effQ < 1.5 ? 18.0 : 24.0);
+	float qMaxN   = (effQ < 0.5) ? 40.0 : (effQ < 1.5 ? 72.0 : 128.0);
+	int   qShadow = (effQ < 0.5) ? 1    : (effQ < 1.5 ? 2    : 3);
 
 	cloudH      = max(cloudH, 1.0);
 	float thick = kCloudRefAltitude * 1.5;                   // TALL slab so cumuli can billow upward (3D)
@@ -4898,7 +5176,7 @@ float3 applyClouds3D(float3 baseSky, float3 dir, float3 camPos, float3 sunDir, f
 	float tNear, tFar;
 	if (!cloudSlabRange(camPos, dir, baseY, baseY + thick, maxDist, tNear, tFar))
 		return overcastBand(baseSky, ov * smoothstep(-0.01, 0.01, dir.y), dir, sunDir, sunColor,
-		                    cloudTint, deck3DXZ(camPos, dir, cloudH, wind, time), outT);   // a missed ray is still under the deck
+		                    cloudTint, deck3DXZ(camPos, dir, cloudH, wind, drift, time), outT);   // a missed ray is still under the deck
 
 	int   N  = int(clamp((tFar - tNear) / (thick * qStepF), qMinN, qMaxN));
 	float ds = (tFar - tNear) / float(N);
@@ -4926,7 +5204,7 @@ float3 applyClouds3D(float3 baseSky, float3 dir, float3 camPos, float3 sunDir, f
 		float  t   = tNear + (float(i) + jitter) * ds;
 		float3 pos = camPos + dir * t;            // WORLD position → parallax
 		float  hf  = clamp((pos.y - baseY) / thick, 0.0, 1.0);
-		float3 np  = pos * nscale + wind * time;
+		float3 np  = pos * nscale + drift.xyz;
 		float  detailFade = 1.0 - smoothstep(maxDist * 0.10, maxDist * 0.40, t);
 		float  cover = cloudCoverFbm(np + float3(0.0, time * 0.03, 0.0), detailFade, noiseTex, noiseSamp);
 		float  pres  = smoothstep(lo, lo + mix(0.42, 0.20, detailFade), cover);
@@ -4956,7 +5234,7 @@ float3 applyClouds3D(float3 baseSky, float3 dir, float3 camPos, float3 sunDir, f
 				float  shf = clamp((sp.y - baseY) / thick, 0.0, 1.0);
 				float  shg = smoothstep(0.0, 0.25, shf) * (1.0 - smoothstep(0.6, 1.0, shf));
 				if (shg <= 0.0) continue;
-				float3 snp = sp * nscale + wind * time;
+				float3 snp = sp * nscale + drift.xyz;
 				float  p2  = starFbm3(snp + float3(0.0, time * 0.03, 0.0), 3, noiseTex, noiseSamp);
 				float  b2  = worleyNoise3(snp * 0.9 + float3(time * 0.03, 0.0, 0.0), noiseTex, noiseSamp) * 0.7
 				           + worleyNoise3(snp * 1.8, noiseTex, noiseSamp) * 0.3;
@@ -5007,7 +5285,7 @@ float3 applyClouds3D(float3 baseSky, float3 dir, float3 camPos, float3 sunDir, f
 	float gap = max((1.0 - horizon) * ov, smoothstep(0.95, 1.0, coverage));
 	if (gap > 0.0)
 	{
-		L += T * gap * overcastDeck(dir, sunDir, sunColor, cloudTint, deck3DXZ(camPos, dir, cloudH, wind, time));
+		L += T * gap * overcastDeck(dir, sunDir, sunColor, cloudTint, deck3DXZ(camPos, dir, cloudH, wind, drift, time));
 		T *= 1.0 - gap;
 	}
 	outT = T;
@@ -5028,9 +5306,9 @@ float3 applyClouds3D(float3 baseSky, float3 dir, float3 camPos, float3 sunDir, f
 //  * deeper blue-grey shading for the bellies, near-white sunlit tops, and a
 //    strong forward lobe for the silver lining around the sun.
 float3 applyClouds3DReal(float3 baseSky, float3 dir, float3 camPos, float3 sunDir, float time,
-                         float coverage, float3 sunColor, float3 wind, float cloudH,
-                         float cloudFluffiness, float cloudDensity, float quality, float3 cloudTint,
-                         float interSh, float evo, float2 fragCoord,
+                         float coverage, float3 sunColor, float3 wind, float4 drift, float cloudH,
+                         float cloudFluffiness, float cloudDensity, float quality, bool lowRes,
+                         float3 cloudTint, float interSh, float evo, float2 fragCoord,
                          texture3d<float> noiseTex, sampler noiseSamp, thread float& outT)
 {
 	outT = 1.0;
@@ -5040,10 +5318,31 @@ float3 applyClouds3DReal(float3 baseSky, float3 dir, float3 camPos, float3 sunDi
 	const float ov = overcastAmount(coverage);
 	// Slightly higher minimum step count than classic: the sharper silhouettes
 	// show the IGN dither earlier than the soft classic bodies do.
-	float qStepF  = (quality < 0.5) ? 0.40 : (quality < 1.5 ? 0.28 : 0.20);
-	float qMinN   = (quality < 0.5) ? 14.0 : (quality < 1.5 ? 26.0 : 32.0);
-	float qMaxN   = (quality < 0.5) ? 44.0 : (quality < 1.5 ? 80.0 : 128.0);
-	int   qShadow = (quality < 0.5) ? 3    : (quality < 1.5 ? 4    : 6);
+	// lowRes == the quarter-res pre-pass fill (clouds3DLT): its (L, T) output gets
+	// bilinearly upsampled and composited, so the extra detail a full tier buys is
+	// invisible there — demote one tier (High→Med, Med→Low, Low unchanged) ONLY for
+	// that fill. The inline full-res march (every backend without the low-res buffer,
+	// and the main composite when the feature is off) is untouched — same mirror in
+	// SkyShaderSource.h (uCloudPrepass). Was the single biggest GPU block measured
+	// (6.46 ms, docs/auto-lod-gpu-capture-stutter-2026-11-08.md).
+	const float effQ = lowRes ? max(quality - 1.0, 0.0) : quality;
+	float qStepF  = (effQ < 0.5) ? 0.40 : (effQ < 1.5 ? 0.28 : 0.20);
+	float qMinN   = (effQ < 0.5) ? 14.0 : (effQ < 1.5 ? 26.0 : 32.0);
+	float qMaxN   = (effQ < 0.5) ? 44.0 : (effQ < 1.5 ? 80.0 : 128.0);
+	int   qShadow = (effQ < 0.5) ? 3    : (effQ < 1.5 ? 3    : 6);
+
+	// Medium marches the sun in 3 steps instead of 4 and reaches as far by growing the step faster (2.6 instead of 1.85):
+	// 15, 54, 155 units against 15, 43, 92, 175. The step is the biggest cost of the Realistic clouds.
+	float stGrow = (effQ >= 0.5 && effQ < 1.5 && interSh >= 0.5) ? 2.6 : 1.85;   // without inter-shadows: own body only, as before
+	// The weather map (the column half of the field) is smooth along a ray: evaluate it on every Kth step and interpolate
+	// in between (Low 4, Medium 3, High exact). Empty space costs one column test per step, so this is where Medium spent
+	// almost half of its time (docs/clouds-2-0-cost-and-fine-detail-2026-10-29.md).
+	int qColEvery = (effQ < 0.5) ? 4 : (effQ < 1.5 ? 3 : 1);
+	float qSkipA = (effQ >= 1.5) ? 0.0 : 0.04;   // opacity below which a step skips the sun march (High: never)
+	// Adaptive march: coarse steps through empty space, a finer step (this fraction of ds) through the surface layer of a
+	// cloud near the camera, where the lumps are. Low 0.5, Medium 0.34, High 0.25.
+	float qFineF = (effQ < 0.5) ? 0.5 : (effQ < 1.5 ? 0.34 : 0.25);
+
 	if (interSh < 0.5) qShadow = min(qShadow, 3); // short march: own body only
 
 	cloudH      = max(cloudH, 1.0);
@@ -5051,13 +5350,17 @@ float3 applyClouds3DReal(float3 baseSky, float3 dir, float3 camPos, float3 sunDi
 	float baseY = cloudH;                         // ABSOLUTE world altitude of the deck
 	float maxDist = cloudH * 60.0;
 	float tNear, tFar;
-	if (!cloudSlabRange(camPos, dir, baseY, baseY + thick, maxDist, tNear, tFar))
+	if (!cloudSlabRange(camPos, dir, baseY - 0.12 * thick, baseY + thick, maxDist, tNear, tFar))
 		return overcastBand(baseSky, ov * smoothstep(-0.01, 0.01, dir.y), dir, sunDir, sunColor,
-		                    cloudTint, deck3DXZ(camPos, dir, cloudH, wind, time), outT);   // a missed ray is still under the deck
+		                    cloudTint, deck3DXZ(camPos, dir, cloudH, wind, drift, time), outT);   // a missed ray is still under the deck
 
 	int   N  = int(clamp((tFar - tNear) / (thick * qStepF), qMinN, qMaxN));
 	float ds = (tFar - tNear) / float(N);
-	float jitter = skyIgn(fragCoord);
+	// The weather map varies over ~100 units; interpolating it across more than ~35 horizontal units per anchor smears it into
+	// horizontal streaks on grazing rays. So the anchor spacing is capped by how far a step moves sideways: steep views keep
+	// the full interval, a ray near the horizon evaluates every step.
+	qColEvery = min(qColEvery, max(1, int(35.0 / max(ds * length(dir.xz), 1.0))));
+	float jitter = skyBlueDither(fragCoord);
 
 	float sunY  = clamp(sunDir.y, -0.3, 1.0);
 	float day   = smoothstep(-0.10, 0.10, sunY);
@@ -5077,26 +5380,98 @@ float3 applyClouds3DReal(float3 baseSky, float3 dir, float3 camPos, float3 sunDi
 	float densMul   = clamp(cloudDensity, 0.0, 3.0);
 	float lo        = cloudLo(coverage);
 
+	// Skylight on the belly: the sky behind the ray (blue overhead, hazy toward the horizon) instead of one
+	// fixed blue-grey, so a cloud low on the horizon is lit by the bright haze and one overhead by the deep blue.
+	float3 skyAmb = mix(float3(0.30, 0.35, 0.46), baseSky * 0.85, 0.5);
+	// A closed deck is lit evenly from above: brighter and greyer, not the deep blue of a clear sky.
+	skyAmb = mix(skyAmb, float3(dot(skyAmb, float3(0.3333))), 0.6 * ov) * (1.0 + 0.45 * ov);
+
 	float  T = 1.0;
 	float3 L = float3(0.0);
-	for (int i = 0; i < N; ++i)
+	float tAcc = 0.0;   // opacity-weighted mean distance of what the pixel sees: where the visible surface is
+	float wAcc = 0.0;
+	float2 colA = float2(0.0);
+	float2 colB = float2(0.0);
+	// Explicit march position: the step length changes between coarse and fine samples.
+	int   NM       = int(float(N) * 1.6) + 4;
+	float dsFine   = ds * qFineF;
+	float tFineMax = maxDist * 0.12;
+	float tCur     = tNear + jitter * ds;
+	bool  fine     = false;
+	int   emptyRun = 0;
+	bool  usedFine = false;   // a fine segment happened: the surface is resolved, so its lit lumps get stronger
+	float tCol0 = 0.0, tCol1 = -1.0;
+	for (int i = 0; i < NM; ++i)
 	{
-		float  t   = tNear + (float(i) + jitter) * ds;
+		float  t   = tCur;
+		if (t > tFar) break;
 		float3 pos = camPos + dir * t;
 		float  hf  = clamp((pos.y - baseY) / thick, 0.0, 1.0);
 		float  detailFade = 1.0 - smoothstep(maxDist * 0.10, maxDist * 0.40, t);
-		float dens = cloudFieldDensity(pos, baseY, thick, nscale, lo, time, wind,
-		                               fluff, 1.0, evo, noiseTex, noiseSamp);
+		float2 col;
+		// The weather map is smooth along a ray: anchors every qColEvery coarse steps, interpolated by distance; fine
+		// samples (inside a cloud) read it exactly.
+		if (qColEvery <= 1 || fine)
+			col = cloudColumnReal(pos, baseY, thick, nscale, time, wind, drift, evo, noiseTex, noiseSamp);
+		else
+		{
+			if (t > tCol1)
+			{
+				if (tCol1 >= 0.0 && t - tCol1 < 1.01 * ds)   // the next anchor interval starts where the last ended: reuse its far end
+				{
+					tCol0 = tCol1;
+					colA  = colB;
+				}
+				else
+				{
+					tCol0 = t;
+					colA  = cloudColumnReal(pos, baseY, thick, nscale, time, wind, drift, evo, noiseTex, noiseSamp);
+				}
+				tCol1 = tCol0 + float(qColEvery) * ds;
+				colB  = cloudColumnReal(camPos + dir * tCol1, baseY, thick, nscale, time, wind, drift, evo, noiseTex, noiseSamp);
+			}
+			col = mix(colA, colB, clamp((t - tCol0) / (tCol1 - tCol0), 0.0, 1.0));
+		}
+		float dens = cloudBodyReal(pos, baseY, thick, nscale, lo, time, wind, drift, fluff, evo, col, noiseTex, noiseSamp);
+		// Mode update. Entering: the first coarse sample of a cloud near the camera (and while the ray is still mostly clear)
+		// re-marches that interval with fine samples; the interval centred on t starts half a coarse step back. Leaving: two
+		// empty fine samples, or the ray went opaque (the inside of a cloud needs no resolution).
+		float dsCur = fine ? dsFine : ds;
+		if (!fine && dens > 0.01 && t < tFineMax && T > 0.4)
+		{
+			fine = true; usedFine = true; emptyRun = 0;
+			tCur = t - 0.5 * ds + 0.5 * dsFine;
+			continue;
+		}
+		if (fine) emptyRun = (dens <= 0.002) ? emptyRun + 1 : 0;
+		bool fineNext = fine && emptyRun < 2 && T > 0.4;
+		tCur = t + 0.5 * (dsCur + (fineNext ? dsFine : ds));
+		fine = fineNext;
 		if (dens <= 0.002) continue;
 		// Fine cauliflower octave, boiling upward with the convection. Bites
 		// hardest at the silhouette (low density) so the outline breaks into
 		// crisp lobes while the core stays solid.
-		float3 np    = pos * nscale + wind * time;
+		float3 np    = pos * nscale + drift.xyz;
 		float  bfine = worleyNoise3(np * 2.6 + float3(0.0, -time * 0.10 * evo, 5.0),
 		                            noiseTex, noiseSamp);
 		float  fineW = (0.50 + 0.35 * fluff) * detailFade
 		             * (1.0 - 0.45 * clamp(dens * 2.5, 0.0, 1.0));
 		dens *= mix(1.0, smoothstep(0.15, 0.55, bfine), fineW);
+		// Fine lumps on the surface layer: two curl-warped Worley octaves (cells ~70 and ~35 units), only on the skin of a
+		// cloud near the camera and only in fine mode, where the sample spacing is finer than the cells. They carve the
+		// remaining density like the coarse erosion, so the outline breaks into lumps on lumps.
+		if (fine)
+		{
+			float skin  = 1.0 - smoothstep(0.25, 0.75, dens);
+			float nearW = 1.0 - smoothstep(maxDist * 0.02, maxDist * 0.10, t);
+			if (skin * nearW > 0.0)
+			{
+				float3 q = (pos * nscale + drift.xyz) * 9.0 + float3(0.0, -time * 0.12 * evo, 11.0);
+				float3 warp = float3(starNoise3(q * 0.5 + 3.0, noiseTex, noiseSamp), starNoise3(q * 0.5 + 7.0, noiseTex, noiseSamp), starNoise3(q * 0.5 + 13.0, noiseTex, noiseSamp)) - 0.5;
+				float fl = worleyNoise3(q + warp * 0.9, noiseTex, noiseSamp) * 0.6 + worleyNoise3(q * 2.0 + warp * 0.9 + 5.0, noiseTex, noiseSamp) * 0.4;
+				dens *= mix(1.0, smoothstep(0.15, 0.75, fl), 0.75 * skin * nearW);
+			}
+		}
 		dens *= smoothstep(0.0, 0.05, dens); // kill only true dust — the mist skirt stays
 		if (dens <= 0.002) continue;
 
@@ -5104,69 +5479,99 @@ float3 applyClouds3DReal(float3 baseSky, float3 dir, float3 camPos, float3 sunDi
 		// cauliflower lobe shades its neighbour (per-lobe relief), the
 		// exponential tail reaches ~0.5 thick (3 steps, own body) or ~2.3 thick
 		// (6 steps — interShadows: neighbouring towers darken this cloud).
-		float od = 0.0;
+		float distFade     = 1.0 - smoothstep(maxDist * 0.5, maxDist, t);
+		float opticalDepth = dens * (dsCur / thick) * 12.0 * distFade * densMul * (1.0 + 2.0 * ov);
+		float a = 1.0 - exp(-opticalDepth);
+		// A thin wisp (a < qSkipA: the skirt and the ragged underside) hardly shows, so it skips the sun march and takes a
+		// typical light (High never skips).
+		float sun = 0.8;
+		if (a >= qSkipA)
 		{
-			float  st = thick * 0.05;
-			float3 sp = pos;
-			for (int j = 0; j < qShadow; ++j)
+			float od = 0.0;
 			{
-				sp += sunDir * st;
-				float shf = (sp.y - baseY) / thick;
-				if (shf > 1.35) break;                 // left the slab upward
-				od += cloudFieldDensity(sp, baseY, thick, nscale, lo, time, wind,
-				                        fluff, 1.0, evo, noiseTex, noiseSamp) * (st / thick) * 10.0;
-				st *= 1.85;
+				float  st = thick * 0.05;
+				float3 sp = pos;
+				for (int j = 0; j < qShadow; ++j)
+				{
+					sp += sunDir * st;
+					float shf = (sp.y - baseY) / thick;
+					if (shf > 1.35) break;                 // left the slab upward
+					od += cloudFieldDensity(sp, baseY, thick, nscale, lo, time, wind, drift,
+					                        fluff, 1.0, evo, noiseTex, noiseSamp) * (st / thick) * 10.0;
+					st *= stGrow;
+				}
 			}
+			// Normalized multi-scatter (Wrenninge): Σ aⁱ·exp(-od·k·bⁱ) / Σ aⁱ —
+			// normalized so od = 0 → exactly 1 (unnormalized it would overbrighten
+			// the tops by 1.75× and burn out before the tonemap).
+			float ms = 0.0, wsum = 0.0, aa = 1.0, bb = 1.0;
+			for (int o = 0; o < 3; ++o)
+			{
+				ms += aa * exp(-od * 5.5 * bb);
+				wsum += aa;
+				aa *= 0.5; bb *= 0.35;
+			}
+			sun = ms / wsum;
 		}
-		// Normalized multi-scatter (Wrenninge): Σ aⁱ·exp(-od·k·bⁱ) / Σ aⁱ —
-		// normalized so od = 0 → exactly 1 (unnormalized it would overbrighten
-		// the tops by 1.75× and burn out before the tonemap).
-		float ms = 0.0, wsum = 0.0, aa = 1.0, bb = 1.0;
-		for (int o = 0; o < 3; ++o)
-		{
-			ms += aa * exp(-od * 5.5 * bb);
-			wsum += aa;
-			aa *= 0.5; bb *= 0.35;
-		}
-		float sun    = ms / wsum;
 		float powder = 1.0 - exp(-dens * mix(3.5, 5.0, fluff));
 		// Powder FLOOR: the thin mist skirt must read as luminous sunlit haze,
 		// not as grey soot — darkness should come from the sun march (od), not
 		// from low local density.
-		float lit    = sun * mix(0.55, 1.0, powder);
+		float lit    = pow(sun, 1.15) * mix(0.50, 1.0, powder);   // sharper: the shadowed side falls off faster
 		// Blue-grey skylit belly → near-white sunlit top; night/dusk logic kept
 		// from classic so the clouds enter and leave sunset with the sky.
-		float3 dayCol   = mix(float3(0.30, 0.35, 0.46), sunColor * 1.30, lit);
+		float3 dayCol   = mix(skyAmb, sunColor * 1.45, lit);
 		float3 nightCol = mix(float3(0.015, 0.018, 0.035), float3(0.13, 0.15, 0.24), lit);
 		float3 cloudCol = mix(nightCol, dayCol, day);
 		float3 duskTop  = sunColor * float3(1.5, 0.85, 0.42);
 		cloudCol = mix(cloudCol, duskTop, dusk * (0.35 + 0.65 * lit));
 		cloudCol += baseSky * ((1.0 - day) * (0.30 + 0.50 * lit));
 		cloudCol += sunColor * mix(float3(1.0), float3(1.25, 0.78, 0.42), dusk)
-		          * (phase * sun * 0.9 * max(day, dusk));
+		          * (phase * sun * 1.15 * max(day, dusk));
 		// Flat dark base → bright crown. Milder than classic's 0.30..1.32 ramp —
 		// the sun march already carries most of the vertical contrast.
-		cloudCol *= mix(0.45, 1.15, smoothstep(0.0, 0.55, hf));
+		cloudCol *= mix(0.40, 1.22, smoothstep(0.0, 0.60, hf));
 		cloudCol += float3(0.06, 0.09, 0.15) * ((1.0 - hf) * day * 0.20); // sky bounce under the base
 		cloudCol *= cloudTint;
 		if (ov > 0.0)   // overcast: lighter and darker masses so a closed deck still reads as clouds
 			cloudCol *= mix(1.0, mix(0.60, 1.30, smoothstep(0.30, 0.68,
-			                cloudCoverFbm(pos * nscale * 0.35 + wind * time, 0.0, noiseTex, noiseSamp))), ov);
-		float hazeFar = smoothstep(maxDist * 0.35, maxDist, t);
-		cloudCol = mix(cloudCol, baseSky, hazeFar * 0.6);
+			                cloudCoverFbm(pos * nscale * 0.35 + drift.xyz, 0.0, noiseTex, noiseSamp))), ov);
+		// Aerial perspective: extinction along the ray (Beer), not a late linear ramp, so a far cloud recedes into the haze
+		// colour of its own direction instead of standing sharp until it hits the grazing-angle fade.
+		float hazeFar = 1.0 - exp(-t / (maxDist * 0.20));
+		cloudCol = mix(cloudCol, baseSky, hazeFar * 0.9);
 
-		float distFade     = 1.0 - smoothstep(maxDist * 0.5, maxDist, t);
-		float opticalDepth = dens * (ds / thick) * 12.0 * distFade * densMul * (1.0 + 2.0 * ov);
-		float a = 1.0 - exp(-opticalDepth);
+		tAcc += T * a * t;
+		wAcc += T * a;
 		L += T * a * cloudCol;
 		T *= 1.0 - a;
 		if (T < 0.02) break;
+	}
+	// Surface detail, once per pixel: the march steps are coarser than any lump worth drawing, so lumps cannot live in the
+	// density. Instead the lighting of the visible surface (opacity-weighted mean distance) is modulated by a small lump
+	// field: sun-facing slopes brighter, hollows darker. Three fetches per pixel, only up close (far lumps would alias),
+	// no dependence on the step size or the dither. See docs/clouds-2-0-cost-and-fine-detail-2026-10-29.md.
+	if (wAcc > 0.02)
+	{
+		float tS   = tAcc / wAcc;
+		float fade = 1.0 - smoothstep(maxDist * 0.02, maxDist * 0.12, tS);
+		if (fade > 0.0)
+		{
+			float3 q    = ((camPos + dir * tS) * nscale + drift.xyz) * 6.5 + float3(0.0, -time * 0.12 * evo, 4.0);
+			float d0  = worleyNoise3(q, noiseTex, noiseSamp);
+			float dS  = worleyNoise3(q + sunDir * 0.35, noiseTex, noiseSamp);
+			float d1  = worleyNoise3(q * 2.3 + 9.0, noiseTex, noiseSamp);
+			float relief = (d0 - dS) * 3.0;                      // the slope toward the sun: lit side brighter
+			float lump   = (d0 * 0.65 + d1 * 0.35) - 0.5;        // crowns bright, hollows dark
+			float strength = fade * (1.0 - T) * (usedFine ? 1.6 : 1.0);
+			L *= clamp(1.0 + strength * (0.35 * relief + 0.50 * lump), 0.4, 1.8);
+		}
 	}
 	// Grazing-angle fade, symmetric in |dir.y|: near-horizontal rays cross an
 	// enormous stretch of slab and would otherwise pile into a hard wall of
 	// cloud at the horizon. abs() so it works looking DOWN from above the deck
 	// exactly as it always did looking up from below.
-	float horizon = smoothstep(elevFloor, elevFloor + 0.14, abs(dir.y));
+	float horizon = smoothstep(elevFloor, elevFloor + 0.09, abs(dir.y));   // narrower than classic: the aerial perspective already melts far slab into the haze
 	T = 1.0 - (1.0 - T) * horizon;
 	L *= horizon;
 	// Overcast: the deck stands in where the horizon fade cleared it, and at full coverage
@@ -5174,7 +5579,7 @@ float3 applyClouds3DReal(float3 baseSky, float3 dir, float3 camPos, float3 sunDi
 	float gap = max((1.0 - horizon) * ov, smoothstep(0.95, 1.0, coverage));
 	if (gap > 0.0)
 	{
-		L += T * gap * overcastDeck(dir, sunDir, sunColor, cloudTint, deck3DXZ(camPos, dir, cloudH, wind, time));
+		L += T * gap * overcastDeck(dir, sunDir, sunColor, cloudTint, deck3DXZ(camPos, dir, cloudH, wind, drift, time));
 		T *= 1.0 - gap;
 	}
 	outT = T;
@@ -5205,6 +5610,7 @@ fragment float4 cloudShadowFragment(SkyOut in [[stage_in]],
 	if (coverage <= 0.0) return float4(1.0);
 	float time    = p.params.z;
 	float3 wind   = p.wind.xyz;
+	float4 drift  = p.drift;
 	float cloudH  = max(p.cloud.x, 1.0);
 	float thick   = cloudH * 1.5;
 	float baseY   = cloudH;   // ABSOLUTE deck altitude — same slab the view march uses
@@ -5235,7 +5641,7 @@ fragment float4 cloudShadowFragment(SkyOut in [[stage_in]],
 		for (int i = 0; i < MD; ++i)
 		{
 			float3 dp = float3(dxz.x, domeMid, dxz.y) + sd * (d0 + (float(i) + 0.5) * dds);
-			dens += cloudShadowDensity(dp, time, coverage, wind, noiseTex, noiseSamp);
+			dens += cloudShadowDensity(dp, time, coverage, wind, drift, noiseTex, noiseSamp);
 		}
 		return float4(exp(-dens * dds * 7.0 * densMul));
 	}
@@ -5253,7 +5659,7 @@ fragment float4 cloudShadowFragment(SkyOut in [[stage_in]],
 	{
 		float3 pos = float3(xz.x, midY, xz.y) + sd * (t0 + (float(i) + 0.5) * ds);
 		// Same optical-depth normalisation as the view march (ds/thick * 7).
-		od += cloudFieldDensity(pos, baseY, thick, nscale, lo, time, wind, fluff,
+		od += cloudFieldDensity(pos, baseY, thick, nscale, lo, time, wind, float4(drift.xyz, p.shape.x), fluff,
 		                        p.neb2.y, p.neb2.w, noiseTex, noiseSamp)
 		    * (ds / thick) * 7.0 * densMul;
 	}
@@ -5776,7 +6182,7 @@ float3 contrails(float3 baseSky, float3 dir, float3 sunDir, float amount, float 
 
 // Thin high cirrus — fibrous mare's-tail streaks on a high horizontal sheet, drifted by
 // wind, day-gated, gold/pink at low sun. Mirrors the GL cirrus().
-float3 cirrus(float3 baseSky, float3 dir, float3 sunDir, float3 sunColor, float amount, float seed, float time, float2 windXZ)
+float3 cirrus(float3 baseSky, float3 dir, float3 sunDir, float3 sunColor, float amount, float seed, float time, float2 driftXZ)
 {
 	if (amount <= 0.0) return baseSky;
 	dir    = normalize(dir);
@@ -5787,7 +6193,7 @@ float3 cirrus(float3 baseSky, float3 dir, float3 sunDir, float3 sunColor, float 
 	if (day <= 0.0) return baseSky;
 	float dusk = smoothstep(-0.06, 0.05, sunY) * (1.0 - smoothstep(0.05, 0.28, sunY));
 	float2 so = float2(seed * 13.1, seed * 7.3);
-	float2 P  = dir.xz / (dir.y + 0.12) + windXZ * time * 0.5 + so;
+	float2 P  = dir.xz / (dir.y + 0.12) + driftXZ * 0.5 + so;
 	float2 q  = P * float2(0.30, 3.0);                    // strong anisotropy → long fibres
 	q += float2(0.12, 0.95) * (cirrusFbm(q * 0.5 + so) - 0.5); // bend straight strands
 	float baseN = cirrusFbm(q * 1.15);
@@ -5908,16 +6314,16 @@ float3 sunDisk(float3 dir, float3 sunDir)
 // baseSky for its aerial-perspective haze, so it uses skyColor(dir) and recovers
 // L = composited − baseSky*T (exact, since applyClouds3D returns baseSky*T + L).
 float4 cloudsDomeLT(float3 dir, float3 sunDir, float time, float coverage, float3 sunColor,
-                    float3 wind, float3 cloudTint, float densityMul, float quality,
+                    float3 wind, float4 drift, float3 cloudTint, float densityMul, float quality,
                     texture3d<float> noiseTex, sampler noiseSamp)
 {
 	float T = 1.0;
-	float3 L = applyClouds(float3(0.0), dir, sunDir, time, coverage, sunColor, wind,
-	                       cloudTint, densityMul, quality, noiseTex, noiseSamp, T);
+	float3 L = applyClouds(float3(0.0), dir, sunDir, time, coverage, sunColor, wind, drift,
+	                       cloudTint, densityMul, quality, /*lowRes=*/true, noiseTex, noiseSamp, T);
 	return float4(L, T);
 }
 float4 clouds3DLT(float3 dir, float3 camPos, float3 sunDir, float time, float coverage,
-                  float3 sunColor, float3 wind, float cloudH, float cloudFluffiness,
+                  float3 sunColor, float3 wind, float4 drift, float cloudH, float cloudFluffiness,
                   float cloudDensity, float quality, float3 cloudTint, float2 fragCoord,
                   float style, float interSh, float evo,
                   texture3d<float> noiseTex, sampler noiseSamp)
@@ -5925,11 +6331,11 @@ float4 clouds3DLT(float3 dir, float3 camPos, float3 sunDir, float time, float co
 	float3 hazeSky = skyColor(dir, sunDir);   // aerial-perspective reference (quarter-res ok)
 	float  T = 1.0;
 	float3 comp = (style > 0.5)
-		? applyClouds3DReal(hazeSky, dir, camPos, sunDir, time, coverage, sunColor, wind,
-		                    cloudH, cloudFluffiness, cloudDensity, quality, cloudTint,
+		? applyClouds3DReal(hazeSky, dir, camPos, sunDir, time, coverage, sunColor, wind, drift,
+		                    cloudH, cloudFluffiness, cloudDensity, quality, /*lowRes=*/true, cloudTint,
 		                    interSh, evo, fragCoord, noiseTex, noiseSamp, T)
-		: applyClouds3D(hazeSky, dir, camPos, sunDir, time, coverage, sunColor, wind,
-		                cloudH, cloudFluffiness, cloudDensity, quality, cloudTint,
+		: applyClouds3D(hazeSky, dir, camPos, sunDir, time, coverage, sunColor, wind, drift,
+		                cloudH, cloudFluffiness, cloudDensity, quality, /*lowRes=*/true, cloudTint,
 		                fragCoord, noiseTex, noiseSamp, T);
 	return float4(comp - hazeSky * T, T);     // recover L
 }
@@ -5946,10 +6352,10 @@ fragment float4 cloudFragment(SkyOut in [[stage_in]],
 	float3 dir = normalize(wp1.xyz / wp1.w - wp0.xyz / wp0.w);
 	if (p.cameraPos.w > 0.5)
 		return clouds3DLT(dir, p.cameraPos.xyz, p.sunDir.xyz, p.params.z, p.params.y,
-		                  p.sunColor.xyz, p.wind.xyz, p.cloud.x, p.cloud.z, p.cloud.y,
+		                  p.sunColor.xyz, p.wind.xyz, float4(p.drift.xyz, p.shape.x), p.cloud.x, p.cloud.z, p.cloud.y,
 		                  p.star2.y, p.cloudTint.xyz, in.position.xy,
 		                  p.neb2.y, p.neb2.z, p.neb2.w, noiseTex, noiseSamp);
-	return cloudsDomeLT(dir, p.sunDir.xyz, p.params.z, p.params.y, p.sunColor.xyz, p.wind.xyz,
+	return cloudsDomeLT(dir, p.sunDir.xyz, p.params.z, p.params.y, p.sunColor.xyz, p.wind.xyz, p.drift,
 	                    p.cloudTint.xyz, p.cloud.y, p.star2.y, noiseTex, noiseSamp);
 }
 
@@ -5957,14 +6363,14 @@ fragment float4 cloudFragment(SkyOut in [[stage_in]],
 // passes along a single direction d (1 = clear sky, 0 = blocked by cloud). Mirrors the
 // dome cloud's perlin coverage gate (applyClouds) with the Worley billow approximated by
 // its mean, so shafts line up with the visible dome clouds for a fraction of the cost.
-float godrayClear(float3 d, float time, float coverage, float3 wind,
+float godrayClear(float3 d, float time, float coverage, float3 wind, float4 drift,
                   texture3d<float> noiseTex, sampler noiseSamp)
 {
 	d = normalize(d);
 	if (d.y < 0.05) return 1.0;                       // toward the horizon → no cloud slab hit
 	float  s   = kCloudBase / max(d.y, 1e-3);
 	float3 pos = d * s;
-	float3 pp  = pos * kCloudScale + wind * time;
+	float3 pp  = pos * (kCloudScale * drift.w) + drift.xyz;
 	float  perlin = starFbm3(pp + float3(0.0, time * 0.030, 0.0), 4, noiseTex, noiseSamp);
 	float  lo   = cloudLo(coverage); // same threshold as applyClouds
 	float  dens = smoothstep(lo, lo + 0.10, perlin * 0.5 + 0.275); // billow≈0.5 mean (sharper gap/cloud edge)
@@ -5976,7 +6382,7 @@ float godrayClear(float3 d, float time, float coverage, float3 wind,
 // sun by day, and only when there is partial cloud cover (overcast or clear = no shafts).
 // Additive, sun-coloured. Mirrors the GL crepuscular().
 float3 crepuscular(float3 dir, float3 sunDir, float3 sunColor, float time,
-                   float coverage, float3 wind, float strength,
+                   float coverage, float3 wind, float4 drift, float strength,
                    texture3d<float> noiseTex, sampler noiseSamp)
 {
 	if (strength <= 0.0) return float3(0.0);
@@ -5993,7 +6399,7 @@ float3 crepuscular(float3 dir, float3 sunDir, float3 sunColor, float time,
 	for (int i = 0; i < GN; ++i)
 	{
 		d = normalize(mix(d, sunDir, 0.12));                     // step toward the sun
-		light += godrayClear(d, time, coverage, wind, noiseTex, noiseSamp);
+		light += godrayClear(d, time, coverage, wind, drift, noiseTex, noiseSamp);
 	}
 	light /= float(GN);
 	float cone  = pow(clamp(ct, 0.0, 1.0), 2.0);                 // falloff away from the sun (extends shaft reach)
@@ -6158,7 +6564,7 @@ fragment float4 skyFragment(SkyOut in [[stage_in]],
 		col += celestial * celestialVeil;
 	}
 	// High thin layers first, then the cumulus clouds in front so lower clouds occlude them.
-	col = cirrus(col, dir, p.sunDir.xyz, p.sunColor.xyz, p.cloudTint.w, p.cirrus.x, p.params.z, p.wind.xz);
+	col = cirrus(col, dir, p.sunDir.xyz, p.sunColor.xyz, p.cloudTint.w, p.cirrus.x, p.params.z, p.drift.xz);
 	col = contrails(col, dir, p.sunDir.xyz, p.cloud.w, p.params.y);
 	col += rainbow(dir, p.sunDir.xyz, p.star2.w);   // rain + sun → spectral arc (clouds occlude it below)
 	col += moonCorona(dir, p.sunDir.xyz, p.sunDir.w > 0.5, p.sunColor.w) * celestialVeil; // subtle phase-shaped glow ring around the moon
@@ -6183,23 +6589,23 @@ fragment float4 skyFragment(SkyOut in [[stage_in]],
 		// are occluded by the transmittance instead of being painted onto the
 		// cloud bodies. L = comp − atmoBase·T recovers the clouds' own light.
 		float3 comp = applyClouds3DReal(atmoBase, dir, p.cameraPos.xyz, p.sunDir.xyz, p.params.z,
-		                                p.params.y, p.sunColor.xyz, p.wind.xyz, p.cloud.x, p.cloud.z,
-		                                p.cloud.y, p.star2.y, p.cloudTint.xyz, p.neb2.z, p.neb2.w,
+		                                p.params.y, p.sunColor.xyz, p.wind.xyz, float4(p.drift.xyz, p.shape.x), p.cloud.x, p.cloud.z,
+		                                p.cloud.y, p.star2.y, /*lowRes=*/false, p.cloudTint.xyz, p.neb2.z, p.neb2.w,
 		                                in.position.xy, noiseTex, noiseSamp, cloudT);
 		col = col * cloudT + (comp - atmoBase * cloudT);
 	}
 	else if (p.cameraPos.w > 0.5)
 		col = applyClouds3D(col, dir, p.cameraPos.xyz, p.sunDir.xyz, p.params.z, p.params.y,
-		                    p.sunColor.xyz, p.wind.xyz, p.cloud.x, p.cloud.z, p.cloud.y, p.star2.y,
-		                    p.cloudTint.xyz, in.position.xy, noiseTex, noiseSamp, cloudT);
+		                    p.sunColor.xyz, p.wind.xyz, p.drift, p.cloud.x, p.cloud.z, p.cloud.y, p.star2.y,
+		                    /*lowRes=*/false, p.cloudTint.xyz, in.position.xy, noiseTex, noiseSamp, cloudT);
 	else
-		col = applyClouds(col, dir, p.sunDir.xyz, p.params.z, p.params.y, p.sunColor.xyz, p.wind.xyz,
-		                  p.cloudTint.xyz, p.cloud.y, p.star2.y, noiseTex, noiseSamp, cloudT);
+		col = applyClouds(col, dir, p.sunDir.xyz, p.params.z, p.params.y, p.sunColor.xyz, p.wind.xyz, p.drift,
+		                  p.cloudTint.xyz, p.cloud.y, p.star2.y, /*lowRes=*/false, noiseTex, noiseSamp, cloudT);
 	// Re-add the sun, steeply occluded by cloud opacity so a solid cloud fully hides it.
 	col += (sunGlareCol + sunBodyCol) * pow(cloudT, 2.5);
 	// God-rays: sun shafts through cloud gaps. Scaled by cloudT so a cloud directly in
 	// front dims the shaft (you see the rays in the clear air, not painted over the cloud).
-	col += crepuscular(dir, p.sunDir.xyz, p.sunColor.xyz, p.params.z, p.params.y, p.wind.xyz,
+	col += crepuscular(dir, p.sunDir.xyz, p.sunColor.xyz, p.params.z, p.params.y, p.wind.xyz, p.drift,
 	                   p.nebulaColor3.w, noiseTex, noiseSamp) * cloudT;
 	col += p.wind.w * float3(0.85, 0.90, 1.0); // lightning lights up the sky/clouds
 	return float4(col, 1.0);
@@ -6229,7 +6635,7 @@ float2 atmoRaySphere(float3 ro, float3 rd, float R)
 	float b = dot(ro, rd);
 	float c = dot(ro, ro) - R * R;
 	float d = b * b - c;
-	if (d < 0.0) return float2(-1.0e9, -1.0e9);
+	if (d < 0.0) return float2(-1.0e9, -1.0);   // a tower never reaches the slab's flat top: the crowns are domes
 	d = sqrt(d);
 	return float2(-b - d, -b + d);
 }
@@ -6621,8 +7027,9 @@ struct GIReflParamsCPU
 	glm::vec4 gridCounts;   // xyz = probes per axis, w = probesPerRow
 	glm::vec4 extra;        // x = glossy jitter on, y = mesh data valid, z = SW instance count, w = max bounces
 	glm::vec4 land;         // x = landscape count (capped at kGiMaxLandscapes), y = rays per pixel, z = sky cube baked (EncodeSkyReflCube
+	glm::vec4 rvt;          // x = radians per screen pixel, y = feedback phase, z = HE_GI_RVT_MAP, w = feedback on
 };
-static_assert(sizeof(GIReflParamsCPU) == 2 * 64 + 9 * 16, "must match the MSL GIReflParams layout");
+static_assert(sizeof(GIReflParamsCPU) == 2 * 64 + 10 * 16, "must match the MSL GIReflParams layout");
 struct GITemporalParamsCPU
 {
 	glm::mat4 prevViewProj;
@@ -6646,7 +7053,7 @@ struct GIProbeParamsCPU
 };
 static_assert(sizeof(GIProbeParamsCPU) == (6 + 24) * 16, "GIProbeParamsCPU must match the MSL GIProbeParams layout");
 
-// The MSL SkyParams twin (mat4 + 17×float4, with the byte-layout static_assert) is
+// The MSL SkyParams twin (mat4 + 19×float4, with the byte-layout static_assert) is
 // HE::SkyFrameParams in <HorizonRendering/SkyFrameParams.h>, and the one
 // EnvironmentSettings → sky-constants translation is HE::BuildSkyFrameParams.
 // The GL-clip → Metal-clip depth remap (0..1) is HE::kMetalClipFix in
@@ -6666,6 +7073,9 @@ void MetalRenderer::Initialize(HE::Window* window)
 		throw std::runtime_error("MetalRenderer: MTLCreateSystemDefaultDevice failed");
 	m_device = (void*)CFBridgingRetain(device);
 	EnsureRaytracingSupport();
+#if defined(HE_HAVE_SHADERC)
+	m_extractor.setVolumetricFogCapable(true); // RenderWorld::fogVolume.enabled may now be true
+#endif
 
 	id<MTLCommandQueue> queue = [device newCommandQueue];
 	if (!queue)
@@ -6866,6 +7276,22 @@ void MetalRenderer::Shutdown()
 	m_giProbeCount        = 0;
 	m_giProbeUpdateCursor = 0;
 	if (m_tonemapPipeline)      { CFBridgingRelease(m_tonemapPipeline);      m_tonemapPipeline = nullptr; }
+	// Builds still running: close the box so a handler that fires from here on releases its
+	// own result, and let go of what already landed in it.
+	if (m_matMailbox)
+	{
+		std::lock_guard<std::mutex> lk(m_matMailbox->mtx);
+		m_matMailbox->closed = true;
+		for (MatPipelineDone& d : m_matMailbox->done)
+		{
+			if (d.pso)  CFBridgingRelease(d.pso);
+			if (d.desc) CFBridgingRelease(d.desc);
+		}
+		m_matMailbox->done.clear();
+	}
+	m_matMailbox.reset();
+	m_materialPipelinePending.clear();
+	m_matBuildScheduled = m_matBuildFinished = 0;
 	for (auto& [k, pso] : m_materialPipelineCache) if (pso) CFBridgingRelease(pso);
 	m_materialPipelineCache.clear();
 	for (auto& [k, pso] : m_particlePipelineCache) if (pso) CFBridgingRelease(pso);
@@ -6885,6 +7311,12 @@ void MetalRenderer::Shutdown()
 	if (m_thumbUIDepthTex)     { CFBridgingRelease(m_thumbUIDepthTex);     m_thumbUIDepthTex = nullptr; }
 	m_thumbSize = 0;
 	m_thumbUISize = 0;
+	for (UIPreviewTarget& t : m_uiPreview)
+	{
+		if (t.color) CFBridgingRelease(t.color);
+		if (t.depth) CFBridgingRelease(t.depth);
+		t = UIPreviewTarget{};
+	}
 	// World-preview targets (RenderWorldPreview), every slot; their pipelines
 	// are the skeletal / mesh preview's, released with those.
 	for (WorldPreviewTarget& wp : m_worldPreview)
@@ -6908,6 +7340,18 @@ void MetalRenderer::Shutdown()
 	m_uiFontAtlases.clear();
 	for (auto& [k, pso] : m_uiMaterialPipelines) if (pso) CFBridgingRelease(pso);
 	m_uiMaterialPipelines.clear();
+	for (auto& [k, pso] : m_landscapeMaterialPipelines) if (pso) CFBridgingRelease(pso);
+	m_landscapeMaterialPipelines.clear();
+	for (int k = 0; k < kLandscapePassKinds; ++k)
+	{
+		if (m_landscapePassPipeline[k]) { CFBridgingRelease(m_landscapePassPipeline[k]); m_landscapePassPipeline[k] = nullptr; }
+		m_landscapePassTried[k] = false;
+	}
+	if (m_giLandMesh.blas)      CFBridgingRelease(m_giLandMesh.blas);
+	if (m_giLandMesh.vertexBuf) CFBridgingRelease(m_giLandMesh.vertexBuf);
+	if (m_giLandMesh.indexBuf)  CFBridgingRelease(m_giLandMesh.indexBuf);
+	m_giLandMesh = GpuMesh{};
+	m_giLandMeshVersion = 0;
 	if (m_uiBackdrop) { CFBridgingRelease(m_uiBackdrop); m_uiBackdrop = nullptr; }
 	m_uiBackdropW = m_uiBackdropH = 0;
 	if (m_bloomBrightPipeline)  { CFBridgingRelease(m_bloomBrightPipeline);  m_bloomBrightPipeline = nullptr; }
@@ -6918,6 +7362,7 @@ void MetalRenderer::Shutdown()
 	if (m_mbVelocityPipeline)   { CFBridgingRelease(m_mbVelocityPipeline);   m_mbVelocityPipeline = nullptr; }
 	if (m_mbBlurPipeline)       { CFBridgingRelease(m_mbBlurPipeline);       m_mbBlurPipeline = nullptr; }
 	m_mbHasPrev = false;
+	m_landscape.shutdown();
 	if (m_skyPipeline)          { CFBridgingRelease(m_skyPipeline);          m_skyPipeline = nullptr; }
 	if (m_skyReflPipeline)      { CFBridgingRelease(m_skyReflPipeline);      m_skyReflPipeline = nullptr; }
 	if (m_skyReflCube)          { CFBridgingRelease(m_skyReflCube);          m_skyReflCube = nullptr; }
@@ -6925,10 +7370,21 @@ void MetalRenderer::Shutdown()
 	if (m_cloudPipeline)        { CFBridgingRelease(m_cloudPipeline);        m_cloudPipeline = nullptr; }
 	if (m_cloudShadowPipeline)  { CFBridgingRelease(m_cloudShadowPipeline);  m_cloudShadowPipeline = nullptr; }
 	DestroyCloudShadowTarget();
+	DestroyFogTargets();
+	if (m_fogInjectPipe)    { CFBridgingRelease(m_fogInjectPipe);    m_fogInjectPipe = nullptr; }
+	if (m_fogIntegratePipe) { CFBridgingRelease(m_fogIntegratePipe); m_fogIntegratePipe = nullptr; }
+	if (m_fogApplyPipe)     { CFBridgingRelease(m_fogApplyPipe);     m_fogApplyPipe = nullptr; }
+	if (m_fogDummy3D)       { CFBridgingRelease(m_fogDummy3D);       m_fogDummy3D = nullptr; }
+	if (m_fogNoise)         { CFBridgingRelease(m_fogNoise);         m_fogNoise = nullptr; }
+	if (m_fogSceneEncoder)  { CFBridgingRelease(m_fogSceneEncoder);  m_fogSceneEncoder = nullptr; }
+	m_fogTried = false;
 	if (m_skyLutPipeline)       { CFBridgingRelease(m_skyLutPipeline);       m_skyLutPipeline = nullptr; }
 	DestroySkyViewLut();
 	if (m_moonTexture)         { CFBridgingRelease(m_moonTexture);          m_moonTexture = nullptr; }
 	if (m_dummyTexture)    { CFBridgingRelease(m_dummyTexture);    m_dummyTexture = nullptr; }
+	DestroyRvtPool();
+	DrainRetiredTextures();
+	if (m_rvtDummyTable)   { CFBridgingRelease(m_rvtDummyTable);   m_rvtDummyTable = nullptr; }
 	if (m_whiteArrayTexture) { CFBridgingRelease(m_whiteArrayTexture); m_whiteArrayTexture = nullptr; }
 	if (m_linearSampler)   { CFBridgingRelease(m_linearSampler);   m_linearSampler = nullptr; }
 	if (m_materialSampler) { CFBridgingRelease(m_materialSampler); m_materialSampler = nullptr; }
@@ -7324,7 +7780,10 @@ void MetalRenderer::CollectRibbonDraws(std::vector<TPDraw>& out, const glm::mat4
 						gtexPaths.push_back(i < ma->graphTexturePaths.size() ? ma->graphTexturePaths[i] : std::string{});
 					}
 				}
-				t.pipeline = GetOrBuildMaterialPipeline(shKey, shFrag, shVert, pre, /*blend=*/true);
+				bool pend = false;
+				t.pipeline = GetOrBuildMaterialPipeline(shKey, shFrag, shVert, pre, /*blend=*/true,
+				                                        false, false, &pend);
+				if (pend) continue; // compiling: the trail appears with its material
 				t.wpo      = !shVert.empty();
 				for (size_t i = 0; i < gtexIds.size(); ++i)
 					t.gtex[t.gtexCount++] = ResolveGraphTexture(gtexIds[i], gtexPaths[i], (gtexArr >> i) & 1u);
@@ -7725,6 +8184,31 @@ void MetalRenderer::CreateScenePipeline()
 		[dummyArr replaceRegion:MTLRegionMake2D(0, 0, 1, 1) mipmapLevel:0 slice:0
 		              withBytes:&white bytesPerRow:4 bytesPerImage:4];
 		m_whiteArrayTexture = (void*)CFBridgingRetain(dummyArr);
+		// The page table's stand-in (RVT, Thema 333): one entry, "no page" (0xFFFFFFFF), so a lookup that runs before the first
+		// table lands shows the neutral colours.
+		MTLTextureDescriptor* dummyTblDesc = [MTLTextureDescriptor
+			texture2DDescriptorWithPixelFormat:MTLPixelFormatR32Uint width:1 height:1 mipmapped:NO];
+		dummyTblDesc.usage       = MTLTextureUsageShaderRead;
+		dummyTblDesc.storageMode = MTLStorageModeShared;
+		id<MTLTexture> dummyTbl = [device newTextureWithDescriptor:dummyTblDesc];
+		[dummyTbl replaceRegion:MTLRegionMake2D(0, 0, 1, 1) mipmapLevel:0 withBytes:&white bytesPerRow:4];
+		m_rvtDummyTable = (void*)CFBridgingRetain(dummyTbl);
+		// Its texture3d twin for the froxel fog volume's slot (fragment texture 17): Metal
+		// validates the texture TYPE, and heApplyFogT's volume is a 3D texture. (S = 0, T = 1:
+		// "no fog" if anything ever did read it.)
+		{
+			MTLTextureDescriptor* d3 = [[MTLTextureDescriptor alloc] init];
+			d3.textureType = MTLTextureType3D;
+			d3.pixelFormat = MTLPixelFormatRGBA16Float;
+			d3.width = 1; d3.height = 1; d3.depth = 1;
+			d3.usage       = MTLTextureUsageShaderRead;
+			d3.storageMode = MTLStorageModeShared;
+			id<MTLTexture> dummy3 = [device newTextureWithDescriptor:d3];
+			const uint16_t clear[4] = { 0, 0, 0, 0x3C00 }; // half 0, 0, 0, 1.0
+			[dummy3 replaceRegion:MTLRegionMake3D(0, 0, 0, 1, 1, 1) mipmapLevel:0 slice:0
+			            withBytes:clear bytesPerRow:8 bytesPerImage:8];
+			m_fogDummy3D = (void*)CFBridgingRetain(dummy3);
+		}
 
 		MTLSamplerDescriptor* sampDesc = [[MTLSamplerDescriptor alloc] init];
 		sampDesc.minFilter = MTLSamplerMinMagFilterLinear;
@@ -7740,7 +8224,9 @@ void MetalRenderer::CreateScenePipeline()
 		// 3D noise volume the sky's starFbm3/worleyFbm sample (clouds + nebula), built
 		// once on the CPU. RG16Unorm (R=value noise, G=Worley billows) + linear +
 		// repeat so it tiles seamlessly.
-		constexpr int kNoiseN = 256;
+		// 256³ in Release, 64³ in Debug like every other backend (this one used to bake 256³ even in
+		// Debug, which is what made a Debug probe take half an hour in power-saving mode).
+		const int kNoiseN = HE::SkyNoise3DResolution();
 		const std::vector<uint16_t> noise = HE::BuildSkyNoise3D(kNoiseN);
 		MTLTextureDescriptor* noiseDesc = [[MTLTextureDescriptor alloc] init];
 		noiseDesc.textureType = MTLTextureType3D;
@@ -7770,20 +8256,7 @@ void MetalRenderer::CreateScenePipeline()
 			const HE::BakedUIFont& uiFont = HE::sharedUIFont();
 			if (uiFont.ok)
 			{
-				MTLTextureDescriptor* fontDesc = [MTLTextureDescriptor
-					texture2DDescriptorWithPixelFormat:MTLPixelFormatR8Unorm
-					                              width:HE::BakedUIFont::kWidth
-					                             height:HE::BakedUIFont::kHeight
-					                          mipmapped:NO];
-				fontDesc.usage       = MTLTextureUsageShaderRead;
-				fontDesc.storageMode = MTLStorageModeShared;
-				id<MTLTexture> fontTex = [device newTextureWithDescriptor:fontDesc];
-				[fontTex replaceRegion:MTLRegionMake2D(0, 0, HE::BakedUIFont::kWidth,
-				                                       HE::BakedUIFont::kHeight)
-				           mipmapLevel:0
-				             withBytes:uiFont.pixels.data()
-				           bytesPerRow:HE::BakedUIFont::kWidth];
-				m_uiFontTexture = (void*)CFBridgingRetain(fontTex);
+				m_uiFontTexture = (void*)CFBridgingRetain(makeUIFontAtlas(device, uiFont));
 			}
 		}
 
@@ -8039,6 +8512,7 @@ void MetalRenderer::ExtractFrame(float aspect)
 	                        env.cloudCoverage);
 	m_extractor.setContentManager(m_contentManager);
 	m_extractor.extract(*m_world, m_renderWorld, aspect, &m_editorCamera);
+	ApplyRvtSwaps();
 }
 
 void MetalRenderer::RefineObjectBounds()
@@ -8139,7 +8613,8 @@ void MetalRenderer::EncodeShadowMap(void* cmdBufPtr, float aspect)
 	                    && m_giIrradianceAtlas && m_giVisibilityAtlas;
 	const bool wantCsm   = m_renderWorld.shadow.enabled && !giOwnsSun;
 	const bool wantLocal = m_renderWorld.shadow.localLayerCount > 0 && m_localShadowTex;
-	if ((!wantCsm && !wantLocal) || m_renderWorld.objects.empty()) return;
+	// Nothing to cast: no objects, and no tile landscape either (its ground casts into every layer, below).
+	if ((!wantCsm && !wantLocal) || (m_renderWorld.objects.empty() && !m_landscapeProvider)) return;
 	RefineObjectBounds();
 	const int cascades    = wantCsm ? std::clamp(m_renderWorld.shadow.cascadeCount, 1, kCsmCascades) : 0;
 	const int localLayers = wantLocal
@@ -8347,6 +8822,8 @@ void MetalRenderer::EncodeShadowMap(void* cmdBufPtr, float aspect)
 					         indexBufferOffset:0];
 				}, "ShadowLoop", /*serial=*/true);
 			}
+			// The tile landscape casts into every layer: the ground shadows itself and what stands on it.
+			EncodeLandscapePass((__bridge void*)enc, HE::kMetalClipFix * sv.viewProj, /*shadow*/ 0);
 			[enc endEncoding];
 		};
 
@@ -8585,9 +9062,10 @@ void MetalRenderer::EncodeGISwAccelBuild()
 // Rebuilt per frame: it is a handful of 192-byte entries, and the weightmap
 // TEXTURES come from the same UUID-keyed cache the raster path uses (uploaded
 // once, re-uploaded only when the paint changes).
-int MetalRenderer::BuildGILandscapeTable(std::vector<void*>& outWeightTex)
+int MetalRenderer::BuildGILandscapeTable(std::vector<void*>& outWeightTex, std::vector<void*>* outRvtTables)
 {
 	outWeightTex.clear();
+	if (outRvtTables) outRvtTables->clear();
 	RetireGIObject(m_giLandBuf); m_giLandBuf = nullptr;
 	if (m_renderWorld.landscapes.empty() || !m_device) return 0;
 
@@ -8612,8 +9090,39 @@ int MetalRenderer::BuildGILandscapeTable(std::vector<void*>& outWeightTex)
 		g.autoWet   = ls.autoWet;
 		g.autoSlope = ls.autoSlope;
 		g.autoSnow  = ls.autoSnow;
+		// Drawn from the RVT right now: the hit reads the pages (RvtLookup.h's math, in giRvtAlbedo). The volume's two
+		// vectors are the consumer material's own parameters, the table the one SetRvtPageTable keeps for it.
+		void* rvtTable = nullptr;
+		if (outRvtTables && m_rvtPool[0] && m_contentManager)
+			if (const auto sw = m_rvtSwaps.find(ls.terrainEntity); sw != m_rvtSwaps.end())
+				if (const auto t = m_rvtTables.find(sw->second.consumerMat); t != m_rvtTables.end() && t->second.tex)
+					if (const MaterialAsset* cm = m_contentManager->getMaterial(sw->second.consumerMat))
+					{
+						// The volume vectors: "RvtVolumeA/B" in the driver's own consumer, "RVT <name> Volume A/B" in a
+						// material's live part behind its RVT Read node (RVT 2.0, matRvtVolumeParamName).
+						const auto slotOf = [&](char which) -> int {
+							const std::string own = std::string("RvtVolume") + which, tail = std::string(" Volume ") + which;
+							for (size_t k = 0; k < cm->graphParamNames.size(); ++k)
+							{
+								const std::string& n = cm->graphParamNames[k];
+								if (n == own || (n.rfind("RVT ", 0) == 0 && n.size() > tail.size()
+								                 && n.compare(n.size() - tail.size(), tail.size(), tail) == 0))
+									return static_cast<int>(k);
+							}
+							return -1;
+						};
+						const int a = slotOf('A'), b = slotOf('B');
+						if (a >= 0 && b >= 0 && cm->shaderParamData.size() >= size_t(std::max(a, b) + 1) * 4)
+						{
+							const float* d = cm->shaderParamData.data();
+							g.rvtA = glm::vec4(d[a * 4], d[a * 4 + 1], d[a * 4 + 2], d[a * 4 + 3]);
+							g.rvtB = glm::vec4(d[b * 4], d[b * 4 + 1], d[b * 4 + 2], d[b * 4 + 3]);
+							rvtTable = t->second.tex;
+						}
+					}
 		gpu.push_back(g);
 		outWeightTex.push_back(wm);
+		if (outRvtTables) outRvtTables->push_back(rvtTable);
 	}
 	if (gpu.empty()) return 0;
 	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
@@ -8756,6 +9265,68 @@ void MetalRenderer::EncodeGIAccelBuild(void* cmdBufPtr, float aspect)
 			instanceBaseColor.push_back(glm::vec4(albedo, metallic));
 			instanceBaseColor.push_back(glm::vec4(emissive, roughness));
 			instanceLandIndex.push_back(obj.landscapeIndex); // paint sampling at the hit
+		}
+		// The tile landscape's ground: its GI height clipmap (the 2 km around the camera, RenderExtractor's
+		// extractLandscapeGiHeightfield) as one more instance, so rays hit it: the ground shadows itself and what stands behind
+		// it, and light bounces off it. A mesh of at most 513 x 513 vertices, made again when the clipmap is another one.
+		for (const GiHeightfield& hf : m_renderWorld.heightfields)
+		{
+			if (hf.key != kLandscapeGiHeightfieldKey || !hf.data || hf.res < 2 || hf.data->size() < static_cast<size_t>(hf.res) * hf.res) continue;
+			if (const char* e = std::getenv("HE_LANDSCAPE_PASSES"); e && *e == '0') break;   // the A/B switch of EncodeLandscapePass
+			if (m_giLandMeshVersion != hf.version || !m_giLandMesh.vertexBuf)
+			{
+				const uint32_t stride = std::max(1u, (hf.res - 1 + 511) / 512), n = (hf.res - 1) / stride + 1;
+				const float sx = hf.size.x / static_cast<float>(n - 1), sz = hf.size.y / static_cast<float>(n - 1);
+				const auto hAt = [&](uint32_t i, uint32_t j) {
+					return (*hf.data)[static_cast<size_t>(std::min(j * stride, hf.res - 1)) * hf.res + std::min(i * stride, hf.res - 1)];
+				};
+				std::vector<float> v(static_cast<size_t>(n) * n * 8);
+				for (uint32_t j = 0; j < n; ++j)
+					for (uint32_t i = 0; i < n; ++i)
+					{
+						float* o = &v[(static_cast<size_t>(j) * n + i) * 8];
+						o[0] = -0.5f * hf.size.x + static_cast<float>(i) * sx;   // local space is centred on the clipmap's window
+						o[1] = hAt(i, j);
+						o[2] = -0.5f * hf.size.y + static_cast<float>(j) * sz;
+						const glm::vec3 nrm = glm::normalize(glm::vec3(hAt(i > 0 ? i - 1 : i, j) - hAt(std::min(i + 1, n - 1), j), 2.0f * sx,
+						                                               hAt(i, j > 0 ? j - 1 : j) - hAt(i, std::min(j + 1, n - 1))));
+						o[3] = nrm.x; o[4] = nrm.y; o[5] = nrm.z;
+						o[6] = o[7] = 0.0f;
+					}
+				std::vector<uint32_t> idx;
+				idx.reserve(static_cast<size_t>(n - 1) * (n - 1) * 6);
+				for (uint32_t j = 0; j + 1 < n; ++j)
+					for (uint32_t i = 0; i + 1 < n; ++i)
+					{
+						const uint32_t a = j * n + i, b = a + 1, c = a + n, d = c + 1;
+						idx.insert(idx.end(), { a, c, b, b, c, d });
+					}
+				RetireGIObject(m_giLandMesh.blas);        // frames in flight still trace the old one
+				RetireGIObject(m_giLandMesh.vertexBuf);
+				RetireGIObject(m_giLandMesh.indexBuf);
+				m_giLandMesh = GpuMesh{};
+				m_giLandMesh.vertexBuf = (void*)CFBridgingRetain([device newBufferWithBytes:v.data() length:v.size() * sizeof(float) options:MTLResourceStorageModeShared]);
+				m_giLandMesh.indexBuf  = (void*)CFBridgingRetain([device newBufferWithBytes:idx.data() length:idx.size() * sizeof(uint32_t) options:MTLResourceStorageModeShared]);
+				m_giLandMesh.indexCount = static_cast<int>(idx.size());
+				m_giLandMesh.blas = BuildBLAS(m_giLandMesh);
+				m_giLandMeshVersion = hf.version;
+			}
+			if (!m_giLandMesh.blas) break;
+			const glm::mat4 toWorld = glm::inverse(hf.worldToLocal);
+			instanceBlasIndex.push_back(static_cast<uint32_t>(uniqueBlas.size()));
+			uniqueBlas.push_back((__bridge id<MTLAccelerationStructure>)m_giLandMesh.blas);
+			uniqueMeshBufs.emplace_back((__bridge id<MTLBuffer>)m_giLandMesh.vertexBuf, (__bridge id<MTLBuffer>)m_giLandMesh.indexBuf);
+			instanceTransform.push_back(toWorld);
+			// What a hit shows: with an Auto Landscape material the kernels colour it per hit from slope and height, as on a
+			// TerrainComponent's chunk (RenderWorld::tileLandscapeIndex); this flat colour is for any other material.
+			// The probes' diffuse bounce takes the flat colour either way: the material's ground mean when there is an entry.
+			const int32_t land = m_renderWorld.tileLandscapeIndex;
+			const glm::vec3 flat = land >= 0 && static_cast<size_t>(land) < m_renderWorld.landscapes.size()
+			                     ? glm::vec3(m_renderWorld.landscapes[static_cast<size_t>(land)].layerColor[0]) : glm::vec3(0.30f, 0.33f, 0.24f);
+			instanceBaseColor.push_back(glm::vec4(flat, 0.0f));
+			instanceBaseColor.push_back(glm::vec4(0.0f, 0.0f, 0.0f, 1.0f));
+			instanceLandIndex.push_back(land);
+			break;
 		}
 		if (uniqueBlas.empty()) return;
 
@@ -9157,6 +9728,8 @@ void MetalRenderer::EncodeGIShadowRays(void* cmdBufPtr, int width, int height)
 				                  indexType:MTLIndexTypeUInt32 indexBuffer:ibuf indexBufferOffset:0];
 			}
 		}
+		// The tile landscape's ground is geometry like the meshes: without it here its pixels would have no shadow value at all.
+		EncodeLandscapePass((__bridge void*)genc, viewProjRaster, /*GI pre-pass*/ 1);
 		[genc endEncoding];
 
 		// ── 2. Ray-traced occlusion (compute) — HW intersection_query against
@@ -9489,6 +10062,11 @@ void MetalRenderer::EncodeGIProbeUpdate(void* cmdBufPtr)
 // retained id<MTLTexture>, or nullptr when unusable / this GPU can't sample the
 // shipped format. Defined below; forward-declared so the mesh uploads can share it.
 static void* uploadMetalTexture(id<MTLDevice> device, const TextureAsset* tex, bool honourSrgb = true);
+// The upload every call site below goes through: brings back bytes an earlier upload released,
+// uploads, and lets the content manager free a block-compressed texture's CPU copy (the shipped
+// game holds each texture once; see ContentManager::releaseCpuPixels). Defined after both uploaders.
+static void* uploadMetalTextureReleasing(ContentManager* cm, id<MTLDevice> device, const TextureAsset* tex,
+                                         bool honourSrgb = true, bool arrayPath = false);
 
 const MetalRenderer::GpuMesh* MetalRenderer::ResolveMesh(const HE::UUID& assetId)
 {
@@ -9561,7 +10139,8 @@ const MetalRenderer::GpuMesh* MetalRenderer::ResolveMesh(const HE::UUID& assetId
 		const std::string texPath0 = mat->texturePaths.empty() ? std::string{} : mat->texturePaths[0];
 		// RGBA8 + cooked ASTC/BC7/BC3 via the shared uploader (skips a block format
 		// this GPU can't sample — e.g. BC on Apple Silicon, ASTC on Intel).
-		mesh.texture = uploadMetalTexture(device, m_contentManager->resolveTextureRef(texId0, texPath0));
+		mesh.texture = uploadMetalTextureReleasing(m_contentManager, device,
+			m_contentManager->resolveTextureRef(texId0, texPath0));
 	}
 
 	HE_LOG_INFO(RHI, "%s",
@@ -9649,7 +10228,8 @@ MetalRenderer::ResolveSkeletalMesh(const HE::UUID& assetId)
 		const std::string texPath0 = mat->texturePaths.empty() ? std::string{} : mat->texturePaths[0];
 		// RGBA8 + cooked ASTC/BC7/BC3 via the shared uploader (skips a block format
 		// this GPU can't sample — e.g. BC on Apple Silicon, ASTC on Intel).
-		mesh.texture = uploadMetalTexture(device, m_contentManager->resolveTextureRef(texId0, texPath0));
+		mesh.texture = uploadMetalTextureReleasing(m_contentManager, device,
+			m_contentManager->resolveTextureRef(texId0, texPath0));
 	}
 
 	return &m_skeletalMeshCache.emplace(assetId, mesh).first->second;
@@ -9768,7 +10348,7 @@ bool MetalRenderer::ResolveMaterialTexture(const HE::UUID& materialId, void*& ou
 
 	const HE::UUID    texId0   = mat->textureIds.empty()   ? HE::UUID{}    : mat->textureIds[0];
 	const std::string texPath0 = mat->texturePaths.empty() ? std::string{} : mat->texturePaths[0];
-	void* retained = uploadMetalTexture((__bridge id<MTLDevice>)m_device,
+	void* retained = uploadMetalTextureReleasing(m_contentManager, (__bridge id<MTLDevice>)m_device,
 		m_contentManager->resolveTextureRef(texId0, texPath0));
 
 	m_materialTexCache.emplace(materialId, retained);
@@ -9819,6 +10399,17 @@ static void* uploadMetalTextureArray(id<MTLDevice> device, const TextureAsset* t
 	return (void*)CFBridgingRetain(texture);
 }
 
+static void* uploadMetalTextureReleasing(ContentManager* cm, id<MTLDevice> device, const TextureAsset* tex,
+                                         bool honourSrgb, bool arrayPath)
+{
+	// An earlier upload of this asset (another cache, a flushed one) may have freed its bytes.
+	if (cm && tex && tex->data.empty()) tex = cm->restoreCpuPixels(tex->id);
+	void* uploaded = arrayPath ? uploadMetalTextureArray(device, tex) : uploadMetalTexture(device, tex, honourSrgb);
+	// replaceRegion copied the bytes into the GPU texture, so the CPU copy is dead weight now.
+	if (cm && tex && uploaded) cm->releaseCpuPixels(tex->id);
+	return uploaded;
+}
+
 // Resolve a node-graph project texture (UUID for packed assets, path for loose editor
 // assets) to a retained id<MTLTexture>, cached by a stable key. nullptr if not loadable.
 //
@@ -9836,11 +10427,17 @@ void* MetalRenderer::ResolveGraphTexture(const HE::UUID& texId, const std::strin
 	// EngineContent download landing after this first ask (Thema 210).
 	HE::forgetGraphTextureMisses(m_graphTexCache, m_graphTexMissEpoch, m_contentManager->contentEpoch(),
 	                             [](void* tex) { return tex == nullptr; });
+	if (array)   // the idle release of big arrays (EvictIdleGraphArrays): who used it last, a normal frame or a page frame
+	{
+		const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+		GraphTexUse& u = m_graphTexUse[key];
+		(m_editorCamera.rvtMaterial != HE::UUID{} ? u.page : u.normal) = now;
+	}
 	if (auto it = m_graphTexCache.find(key); it != m_graphTexCache.end())
 		return it->second ? it->second : (array ? m_whiteArrayTexture : nullptr);
 	const TextureAsset* asset = m_contentManager->resolveTextureRef(texId, path);
-	void* retained = array ? uploadMetalTextureArray((__bridge id<MTLDevice>)m_device, asset)
-	                       : uploadMetalTexture((__bridge id<MTLDevice>)m_device, asset);
+	void* retained = uploadMetalTextureReleasing(m_contentManager, (__bridge id<MTLDevice>)m_device, asset,
+	                                             /*honourSrgb=*/true, /*arrayPath=*/array);
 	m_graphTexCache.emplace(key, retained);
 	return retained ? retained : (array ? m_whiteArrayTexture : nullptr);
 }
@@ -9858,7 +10455,7 @@ void* MetalRenderer::ResolveUITexture(const HE::UUID& texId, const std::string& 
 		? (std::to_string(texId.hi) + ":" + std::to_string(texId.lo)) : path;
 	if (key.empty() || !m_contentManager) return nullptr;
 	if (auto it = m_uiTexCache.find(key); it != m_uiTexCache.end()) return it->second;
-	void* retained = uploadMetalTexture((__bridge id<MTLDevice>)m_device,
+	void* retained = uploadMetalTextureReleasing(m_contentManager, (__bridge id<MTLDevice>)m_device,
 		m_contentManager->resolveTextureRef(texId, path), /*honourSrgb=*/false);
 	m_uiTexCache.emplace(key, retained);
 	return retained;
@@ -9909,6 +10506,7 @@ void MetalRenderer::InvalidateTexture(const HE::UUID& textureId)
 
 void MetalRenderer::WarmupMaterials(const std::vector<HE::UUID>& materialIds)
 {
+	HE_PROFILE_SCOPE_N("Metal::WarmupMaterials");
 	// Build each custom-shader material's pipeline state NOW so the first draw
 	// doesn't stall on cross-compile + PSO creation inside the encoder loop. The
 	// Metal device is always available; cache hits are cheap; built-in-PBR
@@ -9920,31 +10518,35 @@ void MetalRenderer::WarmupMaterials(const std::vector<HE::UUID>& materialIds)
 		std::string shVert;
 		if (!ResolveMaterialShader(id, shKey, shFrag, shVert)) continue;
 		if (m_materialPipelineCache.find(shKey) != m_materialPipelineCache.end()) continue; // warm
+		if (m_materialPipelinePending.count(shKey)) continue;                               // already building
 		const MaterialShaderVariant* pre = nullptr;
 		if (const MaterialAsset* ma = m_contentManager ? m_contentManager->getMaterial(id) : nullptr)
 			for (const auto& var : ma->precompiledShaders)
 				if (var.backend == static_cast<uint8_t>(HE::RendererBackend::Metal)) { pre = &var; break; }
-		if (GetOrBuildMaterialPipeline(shKey, shFrag, shVert, pre)) ++built;
+		// Each build starts in the background and counts as soon as it is started.
+		bool pend = false;
+		if (GetOrBuildMaterialPipeline(shKey, shFrag, shVert, pre, false, false, false, &pend) || pend) ++built;
 		// EncodeScene builds the alpha-blended twin of every graph material on its
 		// first draw, whatever the material's opacity (see there): its own MSL
 		// libraries and PSO, ~0.4-0.7 s on an E-core. Without it here the first
 		// two frames after a scene open stalled in Metal::EncodeScene even with
 		// every material warmed (Thema 153 Schritt 5: the editor light icons).
-		if (GetOrBuildMaterialPipeline(shKey, shFrag, shVert, pre, /*blend=*/true)) ++built;
+		if (GetOrBuildMaterialPipeline(shKey, shFrag, shVert, pre, /*blend=*/true, false, false, &pend) || pend) ++built;
 		// Deferred path active → also warm the G-buffer variant so the first
 		// deferred frame doesn't hitch on its cross-compile.
 		if (m_renderPath == HE::RenderPath::Deferred)
 		{
 			uint64_t gbKey; std::string gbFrag, gbVert;
 			if (ResolveMaterialShaderGB(id, gbKey, gbFrag, gbVert)
-			    && GetOrBuildMaterialPipeline(gbKey, gbFrag, gbVert, nullptr,
-			                                  /*blend=*/false, /*gbuffer=*/true))
+			    && (GetOrBuildMaterialPipeline(gbKey, gbFrag, gbVert, pre,
+			                                   /*blend=*/false, /*gbuffer=*/true, false, &pend) || pend))
 				++built;
 		}
 	}
 	if (built > 0)
 		HE_LOG_INFO(RHI, "%s",
-			("MetalRenderer: warmed up " + std::to_string(built) + " material pipeline(s)").c_str());
+			("MetalRenderer: warmed up " + std::to_string(built) + " material pipeline(s)"
+			 + (m_materialPipelinePending.empty() ? "" : ", building in the background")).c_str());
 }
 
 // Encode one material-graph preview primitive into an already-open encoder. Split
@@ -10078,18 +10680,18 @@ bool MetalRenderer::EncodeMaterialPreview(void* renderEncoder, const HE::UUID& m
 	if (!shVert.empty())
 	{
 		[enc setVertexBytes:&lit length:sizeof(lit) atIndex:2];
-		float vpad[64] = { 0 };
+		float vpad[HE::kMatParamFloats] = { 0 };
 		if (ma && !ma->shaderParamData.empty())
 			std::memcpy(vpad, ma->shaderParamData.data(),
-			            std::min(ma->shaderParamData.size(), size_t(64)) * sizeof(float));
+			            std::min(ma->shaderParamData.size(), size_t(HE::kMatParamFloats)) * sizeof(float));
 		[enc setVertexBytes:vpad length:sizeof(vpad) atIndex:3];
 	}
 
 	if (ma && !ma->shaderParamData.empty())
 	{
-		float padded[64] = { 0 };
+		float padded[HE::kMatParamFloats] = { 0 };
 		std::memcpy(padded, ma->shaderParamData.data(),
-		            std::min(ma->shaderParamData.size(), size_t(64)) * sizeof(float));
+		            std::min(ma->shaderParamData.size(), size_t(HE::kMatParamFloats)) * sizeof(float));
 		[enc setFragmentBytes:padded length:sizeof(padded) atIndex:2];
 	}
 	// The scene's material PSO declares the whole lighting preamble (GI masks,
@@ -10548,6 +11150,99 @@ bool MetalRenderer::RenderWidgetThumbnail(const std::vector<UIRenderObject>& uiO
 	for (size_t i = 0; i < outRgba8.size(); i += 4)
 		std::swap(outRgba8[i], outRgba8[i + 2]);   // BGRA → RGBA
 	return true;
+}
+
+void* MetalRenderer::RenderUIPreview(const std::vector<UIRenderObject>& uiObjects,
+                                     uint32_t width, uint32_t height,
+                                     const glm::vec4& clear, uint32_t slot)
+{
+	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+	id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)m_commandQueue;
+	if (!device || !queue || !m_uiPipeline) return nullptr;
+	const int W = std::clamp(static_cast<int>(width),  1, 8192);
+	const int H = std::clamp(static_cast<int>(height), 1, 8192);
+	UIPreviewTarget& t = m_uiPreview[std::min<uint32_t>(slot, IRenderer::kUIPreviewSlots - 1)];
+	if (!t.color || t.w != W || t.h != H)
+	{
+		if (t.color) CFBridgingRelease(t.color);
+		if (t.depth) CFBridgingRelease(t.depth);
+		MTLTextureDescriptor* cd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:kSwapchainFormat
+			width:W height:H mipmapped:NO];
+		cd.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+		cd.storageMode = MTLStorageModePrivate;
+		t.color = (void*)CFBridgingRetain([device newTextureWithDescriptor:cd]);
+		MTLTextureDescriptor* dd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:kDepthFormat
+			width:W height:H mipmapped:NO];
+		dd.usage = MTLTextureUsageRenderTarget; dd.storageMode = MTLStorageModePrivate;
+		t.depth = (void*)CFBridgingRetain([device newTextureWithDescriptor:dd]);
+		t.w = W; t.h = H;
+	}
+	if (!t.color || !t.depth) return nullptr;
+
+	@autoreleasepool
+	{
+		MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];
+		rp.colorAttachments[0].texture     = (__bridge id<MTLTexture>)t.color;
+		rp.colorAttachments[0].loadAction  = MTLLoadActionClear;
+		rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+		rp.colorAttachments[0].clearColor  = MTLClearColorMake(clear.r, clear.g, clear.b, 1.0);
+		rp.depthAttachment.texture     = (__bridge id<MTLTexture>)t.depth;
+		rp.depthAttachment.loadAction  = MTLLoadActionClear;
+		rp.depthAttachment.storeAction = MTLStoreActionDontCare;
+		rp.depthAttachment.clearDepth  = 1.0;
+
+		// Committed on the same queue ahead of the frame that shows it, so the
+		// ImGui pass sampling the target runs after this — no wait, no readback.
+		id<MTLCommandBuffer> cb = [queue commandBuffer];
+		id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
+		// The list EncodeUIPass reads is borrowed for one pass, as the
+		// thumbnail and the secondary windows do; cmdBuf and the pass go in so
+		// a Backdrop material can cut the pass and snapshot what is behind it.
+		std::vector<UIRenderObject> saved;
+		saved.swap(m_renderWorld.uiObjects);
+		m_renderWorld.uiObjects = uiObjects;
+		enc = (__bridge id<MTLRenderCommandEncoder>)
+			EncodeUIPass((__bridge void*)enc, W, H, (__bridge void*)cb, (__bridge void*)rp);
+		m_renderWorld.uiObjects.swap(saved);
+		[enc endEncoding];
+
+		// HE_UIPREVIEW_DUMP=<file.ppm>: read the target back once (headless proof;
+		// the editor's UITEST hook calls this with the witness sheet).
+		const char* dump = std::getenv("HE_UIPREVIEW_DUMP");
+		id<MTLTexture> staging = nil;
+		if (dump && *dump)
+		{
+			MTLTextureDescriptor* sd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:kSwapchainFormat
+				width:W height:H mipmapped:NO];
+			sd.storageMode = MTLStorageModeManaged; sd.usage = MTLTextureUsageShaderRead;
+			staging = [device newTextureWithDescriptor:sd];
+			id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+			[blit copyFromTexture:(__bridge id<MTLTexture>)t.color
+			          sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0)
+			           sourceSize:MTLSizeMake(W, H, 1) toTexture:staging destinationSlice:0
+			     destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)];
+			[blit synchronizeResource:staging];
+			[blit endEncoding];
+		}
+		[cb commit];
+		if (staging)
+		{
+			[cb waitUntilCompleted];
+			std::vector<uint8_t> px((size_t)W * H * 4);
+			[staging getBytes:px.data() bytesPerRow:W * 4
+			       fromRegion:MTLRegionMake2D(0, 0, W, H) mipmapLevel:0];
+			if (std::ofstream f(dump, std::ios::binary); f)
+			{
+				f << "P6\n" << W << " " << H << "\n255\n";
+				for (size_t i = 0; i < px.size(); i += 4)
+				{
+					const char rgb[3] = { (char)px[i + 2], (char)px[i + 1], (char)px[i] };   // BGRA
+					f.write(rgb, 3);
+				}
+			}
+		}
+	}
+	return t.color;
 }
 
 bool MetalRenderer::RenderAssetThumbnail(ContentManager& cm, ThumbnailKind kind,
@@ -11625,6 +12320,24 @@ bool MetalRenderer::CaptureViewport(std::vector<uint8_t>& rgba, uint32_t& width,
 	}
 }
 
+// The copy of a finished page into a two-channel layer: the viewport target is BGRA8 and a blit cannot change the format.
+// mode 1 = normal (x, z), mode 2 = surface (R, G). Exact: an 8-bit value goes through a float and back unchanged.
+static const char* kRvtPackMSL = R"MSL(
+#include <metal_stdlib>
+
+using namespace metal;
+kernel void rvtPack(texture2d<float, access::read> src [[texture(0)]],
+                    texture2d_array<float, access::write> dst [[texture(1)]],
+                    constant uint4& p [[buffer(0)]],
+                    uint2 gid [[thread_position_in_grid]])
+{
+	if (gid.x >= p.x || gid.y >= p.x) return;
+	const float4 c = src.read(gid);
+	dst.write(float4(p.z == 1u ? float2(c.x, c.z) : float2(c.x, c.y), 0.0, 1.0), gid, p.y);
+}
+)MSL";
+
+
 // ─── One still from somebody else's camera ────────────────────────────────────
 // The contract is in IRenderer.h. How it is kept here: the live viewport's two
 // textures are SET ASIDE (not retired — they are handed straight back), so
@@ -11658,6 +12371,23 @@ bool MetalRenderer::RenderSceneImage(const EditorCameraOverride& camera, uint32_
 	m_viewportReqH  = height;
 	m_editorCamera  = camera;
 	m_captureOnly   = true;
+	// A raw capture is the materials' own colour: every effect that would change it is off for this frame
+	// and back afterwards (members the frame reads, saved by value like the camera above).
+	const bool  liveRaw     = m_rawCapture;
+	const bool  liveBloom   = m_bloomEnabled, liveSsao = m_ssaoEnabled, liveDof = m_dofEnabled;
+	const bool  liveMb      = m_mbEnabled, liveSsr = m_ssrEnabled, liveGi = m_giEnabled, liveGiRefl = m_giReflEnabled;
+	const float liveScale   = m_renderScale;
+	const HE::RenderPath livePath = m_renderPath;
+	const bool liveSrgb = m_rawSrgb;
+	if (camera.rawOutput)
+	{
+		m_rawCapture = true;
+		m_rawSrgb    = camera.rawSrgb;
+		m_bloomEnabled = m_ssaoEnabled = m_dofEnabled = m_mbEnabled = m_ssrEnabled = false;
+		m_giEnabled = m_giReflEnabled = false;
+		m_renderScale = 1.0f;
+		m_renderPath  = HE::RenderPath::Forward;
+	}
 	// TAA history is one camera's past. The screenshot must not blend against
 	// the viewport's (a request at exactly the viewport's size would reuse the
 	// targets, so the resize rule alone does not cover it), and the viewport
@@ -11670,7 +12400,80 @@ bool MetalRenderer::RenderSceneImage(const EditorCameraOverride& camera, uint32_
 	// A minimised window makes EncodeFrame return before it draws anything;
 	// m_viewportColor is then still null and CaptureViewport says so.
 	uint32_t   gotW = 0, gotH = 0;
-	const bool ok   = CaptureViewport(rgba, gotW, gotH) && gotW == width && gotH == height;
+	bool       ok   = false;
+	if (camera.rvtSlot >= 0)
+	{
+		// A virtual texture page (Thema 333): the finished picture goes, on the GPU and without a readback, into its pool
+		// slice. Same pixel format on both sides (BGRA8Unorm) and top-row-first on both: a plain copy, no flip, no swizzle.
+		// The copy rides the queue behind the frame that drew the picture, so nothing waits here.
+		rgba.clear();
+		uint32_t hotSlice = 0xFFFFFFFFu;
+		ok = camera.rvtLayer >= 0 && camera.rvtLayer < 3 && m_rvtPool[camera.rvtLayer]
+		  && uint32_t(camera.rvtSlot) < m_rvtSlots && width == m_rvtPagePx && height == m_rvtPagePx && m_viewportColor;
+		if (ok)
+		{
+			const uint32_t slot = uint32_t(camera.rvtSlot);
+			hotSlice = RvtHotFor(slot);
+			ok = hotSlice != 0xFFFFFFFFu;
+			if (ok && camera.rvtLayer == 0)
+			{
+				// A new picture of this page: an encode of the old one is stale, a cold page is hot again, its age starts over.
+				++m_rvtSlotVer[slot];
+				m_rvtSlotPainted[slot] = m_rvtRealFrames;
+				if (m_rvtSlotCold[slot]) { m_rvtSlotCold[slot] = 0; ++m_rvtStateVer; }
+			}
+		}
+		if (ok)
+		{
+			id<MTLTexture> src = (__bridge id<MTLTexture>)m_viewportColor;
+			id<MTLTexture> dst = (__bridge id<MTLTexture>)m_rvtPool[camera.rvtLayer];
+			const bool packed = m_rvtPack && camera.rvtLayer > 0;
+			ok = src.width == width && src.height == height && (packed || src.pixelFormat == dst.pixelFormat);
+			if (ok && packed)
+			{
+				if (!m_rvtPackPso)
+				{
+					NSError* err = nil;
+					id<MTLDevice> dev = (__bridge id<MTLDevice>)m_device;
+					id<MTLLibrary> lib = [dev newLibraryWithSource:[NSString stringWithUTF8String:kRvtPackMSL] options:nil error:&err];
+					id<MTLFunction> fn = lib ? [lib newFunctionWithName:@"rvtPack"] : nil;
+					id<MTLComputePipelineState> pso = fn ? [dev newComputePipelineStateWithFunction:fn error:&err] : nil;
+					if (pso) m_rvtPackPso = (void*)CFBridgingRetain(pso);
+					else     HE_LOG_ERROR(RHI, "%s", "MetalRenderer: the RVT page pack kernel failed to build");
+				}
+				ok = m_rvtPackPso != nullptr;
+				if (ok)
+				{
+					id<MTLCommandBuffer>         cb  = [(__bridge id<MTLCommandQueue>)m_commandQueue commandBuffer];
+					id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+					const uint32_t args[4] = { width, hotSlice, uint32_t(camera.rvtLayer == 1 ? 1 : 2), 0 };
+					[enc setComputePipelineState:(__bridge id<MTLComputePipelineState>)m_rvtPackPso];
+					[enc setTexture:src atIndex:0];
+					[enc setTexture:dst atIndex:1];
+					[enc setBytes:args length:sizeof(args) atIndex:0];
+					[enc dispatchThreadgroups:MTLSizeMake((width + 7) / 8, (height + 7) / 8, 1) threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
+					[enc endEncoding];
+					[cb commit];
+				}
+			}
+			else if (ok)
+			{
+				id<MTLCommandBuffer>      cb   = [(__bridge id<MTLCommandQueue>)m_commandQueue commandBuffer];
+				id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+				[blit copyFromTexture:src sourceSlice:0 sourceLevel:0
+				         sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(width, height, 1)
+				            toTexture:dst destinationSlice:NSUInteger(hotSlice) destinationLevel:0
+				    destinationOrigin:MTLOriginMake(0, 0, 0)];
+				[blit endEncoding];
+				[cb commit];
+			}
+		}
+	}
+	else
+		ok = CaptureViewport(rgba, gotW, gotH) && gotW == width && gotH == height;
+	if (camera.rvtSlot >= 0 && !ok)
+		HE_LOG_WARN(RHI, "MetalRenderer: RVT page for slot %d layer %d failed (pool %u of %u slices, page %u px, picture %ux%u)",
+		            camera.rvtSlot, camera.rvtLayer, m_rvtAllocSlots, m_rvtSlots, m_rvtPagePx, width, height);
 
 	// The screenshot pair goes the retired way (the command buffer that drew it
 	// is complete — CaptureViewport waited — but the convention is one release
@@ -11682,10 +12485,732 @@ bool MetalRenderer::RenderSceneImage(const EditorCameraOverride& camera, uint32_
 	m_viewportReqH  = liveReqH;
 	m_editorCamera  = liveCam;
 	m_captureOnly   = false;
+	m_rawCapture    = liveRaw;
+	m_rawSrgb       = liveSrgb;
+	m_bloomEnabled = liveBloom; m_ssaoEnabled = liveSsao; m_dofEnabled = liveDof;
+	m_mbEnabled = liveMb; m_ssrEnabled = liveSsr; m_giEnabled = liveGi; m_giReflEnabled = liveGiRefl;
+	m_renderScale = liveScale;
+	m_renderPath  = livePath;
 	m_taaHistoryValid = false;
 
 	if (!ok) rgba.clear();
 	return ok;
+}
+
+// ─── Runtime Virtual Texture (Thema 333, docs/rvt-design-2026-11-04.md) ────────────────────────────────────
+// The contract is in IRenderer.h; D3D11's is the reference (D3D11Renderer.cpp), OpenGL's the closest sibling. What is Metal's own:
+//  * the HOT pool is BGRA8Unorm, the format of the viewport target a page is drawn into, so a page goes in with a blit; the
+//    albedo array is READ through an sRGB view of the same memory (texelFetch then returns linear, like the other backends);
+//  * the fragment stage is at the 16-sampler cap: the resources are textures 18..24 with no sampler (MaterialShaderLibrary
+//    pins them and gives them inline constexpr samplers; texture 17 is heFogVolume's);
+//  * Metal is top-row-first like the pool, so no flip (GL's blit flips);
+//  * the hot arrays start with a few slices and grow (new arrays, a GPU copy, the old ones retired) with the pages in use, and
+//    a page that has not been painted for HE_RVT_COLD_AFTER real frames (default 120) is read back, encoded to ASTC 4x4 on a
+//    worker thread and kept in the COLD arrays (a quarter of the bytes), its hot slice freed; the table entry then carries bit 23.
+//    A page painted again goes back to a hot slice. The hot arrays shrink when most of their slices are free.
+static bool AllocRvtArrays(id<MTLDevice> device, uint32_t slices, uint32_t pagePx, bool pack, void* out[3], void** outSrgb)
+{
+	for (int layer = 0; layer < 3; ++layer)
+	{
+		const bool rg = pack && layer > 0;   // normal (x, z) and surface (R, G) in two channels
+		MTLTextureDescriptor* d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:(rg ? MTLPixelFormatRG8Unorm : kSwapchainFormat)
+		                                                                             width:pagePx height:pagePx mipmapped:NO];
+		d.textureType = MTLTextureType2DArray;
+		d.arrayLength = slices;
+		d.usage       = MTLTextureUsageShaderRead | (rg ? MTLTextureUsageShaderWrite : MTLTextureUsagePixelFormatView);
+		d.storageMode = MTLStorageModePrivate;
+		id<MTLTexture> t = [device newTextureWithDescriptor:d];
+		if (!t) { for (int k = 0; k < layer; ++k) { CFBridgingRelease(out[k]); out[k] = nullptr; } return false; }
+		out[layer] = (void*)CFBridgingRetain(t);
+	}
+	id<MTLTexture> srgb = [(__bridge id<MTLTexture>)out[0] newTextureViewWithPixelFormat:MTLPixelFormatBGRA8Unorm_sRGB];
+	if (!srgb) { for (int k = 0; k < 3; ++k) { CFBridgingRelease(out[k]); out[k] = nullptr; } return false; }
+	*outSrgb = (void*)CFBridgingRetain(srgb);
+	return true;
+}
+
+// The encoder thread, and the readbacks that are still on their way to it.
+struct MetalRenderer::RvtColdWork
+{
+	struct Todo   { uint32_t slot, ver; std::vector<uint8_t> rgba[3]; };
+	struct Done   { uint32_t slot, ver; std::vector<uint8_t> blocks[3]; };
+	struct Flight { uint32_t slot, ver; void* buffer; std::shared_ptr<std::atomic<bool>> ready; };   // buffer: retained id<MTLBuffer>, 3 pages of BGRA
+	std::mutex              mutex;
+	std::condition_variable cv;
+	std::deque<Todo>        todo;
+	std::deque<Done>        done;
+	std::vector<Flight>     flights;
+	std::thread             worker;
+	bool                    quit = false;
+	uint32_t                pagePx = 0;
+
+	void start(uint32_t px)
+	{
+		pagePx = px;
+		worker = std::thread([this] {
+			for (;;)
+			{
+				Todo job;
+				{
+					std::unique_lock<std::mutex> lock(mutex);
+					// Idle for a few seconds: give the encoder's tables back (an ASTC context is tens of MB), the next page makes new ones.
+					if (!cv.wait_for(lock, std::chrono::seconds(3), [this] { return quit || !todo.empty(); }))
+					{
+						lock.unlock();
+						HE::releaseBlockEncoderCache();
+						lock.lock();
+						cv.wait(lock, [this] { return quit || !todo.empty(); });
+					}
+					if (quit) return;
+					job = std::move(todo.front());
+					todo.pop_front();
+				}
+				Done out; out.slot = job.slot; out.ver = job.ver;
+				bool ok = true;
+				for (int layer = 0; layer < 3 && ok; ++layer)
+					ok = HE::encodeBlocks(HE::BlockFormat::Astc4x4, job.rgba[layer].data(), pagePx, pagePx, /*srgb=*/false, /*quality=*/0, out.blocks[layer]);   // one encoder context for all three layers (an astcenc context is ~10 MB): the albedo bytes are sRGB-encoded either way, the sRGB format decodes them
+				if (!ok) out.blocks[0].clear();   // an empty result: the page stays hot
+				std::lock_guard<std::mutex> lock(mutex);
+				done.push_back(std::move(out));
+			}
+		});
+	}
+	void stop()
+	{
+		{ std::lock_guard<std::mutex> lock(mutex); quit = true; }
+		cv.notify_all();
+		if (worker.joinable()) worker.join();
+		for (Flight& f : flights) if (f.buffer) CFBridgingRelease(f.buffer);
+		flights.clear();
+	}
+};
+
+uint32_t MetalRenderer::RvtLayerChannels(int layer) const
+{
+	if (!m_rvtPack) return 0xFu;
+	return layer == 1 ? 0x5u : layer == 2 ? 0x3u : 0xFu;   // normal: R and B (x, z); surface: R and G; albedo: all
+}
+
+bool MetalRenderer::CreateRvtPool(uint32_t slots, uint32_t pagePx)
+{
+	DestroyRvtPool();
+	if (!m_device || slots == 0 || slots > 2048 || pagePx < 8 || pagePx > 1024 || (pagePx & 3u)) return false;
+	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+	static const uint32_t startSlots = [] { const char* e = std::getenv("HE_RVT_POOL_START"); return e && *e ? uint32_t(std::max(1, std::atoi(e))) : 64u; }();
+	const uint32_t alloc = std::min(slots, startSlots);
+	static const bool packWanted = [] { const char* e = std::getenv("HE_RVT_PACK"); return !(e && *e == '0'); }();
+	m_rvtPack = packWanted;
+	if (!AllocRvtArrays(device, alloc, pagePx, m_rvtPack, m_rvtPool, &m_rvtPoolAlbedoSrgb)) { DestroyRvtPool(); return false; }
+	m_rvtSlots      = slots;
+	m_rvtAllocSlots = alloc;
+	m_rvtPagePx     = pagePx;
+	m_rvtSlotHot.assign(slots, -1);
+	m_rvtSlotCold.assign(slots, 0);
+	m_rvtSlotBusy.assign(slots, 0);
+	m_rvtSlotVer.assign(slots, 0);
+	m_rvtSlotPainted.assign(slots, 0);
+	m_rvtHotFree.clear();
+	for (uint32_t i = alloc; i-- > 0;) m_rvtHotFree.push_back(i);   // pop_back hands out the lowest first
+	// The cold pool: Apple GPU (ASTC), the encoder in this build, not switched off.
+	static const bool coldWanted = [] { const char* e = std::getenv("HE_RVT_COLD"); return !(e && *e == '0'); }();
+	m_rvtColdOn = false;
+	if (coldWanted && [device supportsFamily:MTLGPUFamilyApple2])
+	{
+		std::vector<uint8_t> probe(16 * 16 * 4, 128), blocks;
+		m_rvtColdOn = HE::encodeBlocks(HE::BlockFormat::Astc4x4, probe.data(), 16, 16, false, 0, blocks);
+	}
+	HE_LOG_INFO(RHI, "MetalRenderer: RVT pool up to %u pages of %u px, %u hot slices allocated now (%.0f MB of %.0f MB at full size), cold ASTC pool %s (starts at %s hot pages in use), layers %s; device now holds %.0f MB of %.0f MB recommended",
+	            slots, pagePx, alloc, double(alloc) * pagePx * pagePx * (m_rvtPack ? 8.0 : 12.0) / (1024.0 * 1024.0),
+	            double(slots) * pagePx * pagePx * (m_rvtPack ? 8.0 : 12.0) / (1024.0 * 1024.0), m_rvtColdOn ? "on" : "off", std::getenv("HE_RVT_COLD_MIN") ? std::getenv("HE_RVT_COLD_MIN") : "256", m_rvtPack ? "RGBA8 + RG8 + RG8" : "RGBA8 x 3",
+	            double(device.currentAllocatedSize) / (1024.0 * 1024.0),
+	            double(device.recommendedMaxWorkingSetSize) / (1024.0 * 1024.0));
+	return true;
+}
+
+bool MetalRenderer::GrowRvtPool(uint32_t needHot)
+{
+	if (needHot <= m_rvtAllocSlots) return true;
+	if (needHot > m_rvtSlots || !m_device || !m_commandQueue) return false;
+	const uint32_t grown = std::min(m_rvtSlots, std::max((needHot + 31u) & ~31u, m_rvtAllocSlots + m_rvtAllocSlots / 2));
+	void* nt[3] = { nullptr, nullptr, nullptr };
+	void* nSrgb = nullptr;
+	if (!AllocRvtArrays((__bridge id<MTLDevice>)m_device, grown, m_rvtPagePx, m_rvtPack, nt, &nSrgb)) return false;
+	// What the old arrays hold goes across on the GPU, queued ahead of the page copy that asked for the growth.
+	id<MTLCommandBuffer>      cb   = [(__bridge id<MTLCommandQueue>)m_commandQueue commandBuffer];
+	id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+	for (int layer = 0; layer < 3; ++layer)
+		[blit copyFromTexture:(__bridge id<MTLTexture>)m_rvtPool[layer] sourceSlice:0 sourceLevel:0
+		            toTexture:(__bridge id<MTLTexture>)nt[layer] destinationSlice:0 destinationLevel:0
+		           sliceCount:m_rvtAllocSlots levelCount:1];
+	[blit endEncoding];
+	[cb commit];
+	RetireTexture(m_rvtPoolAlbedoSrgb);
+	for (int layer = 0; layer < 3; ++layer) { RetireTexture(m_rvtPool[layer]); m_rvtPool[layer] = nt[layer]; }
+	m_rvtPoolAlbedoSrgb = nSrgb;
+	for (uint32_t i = grown; i-- > m_rvtAllocSlots;) m_rvtHotFree.push_back(i);
+	HE_LOG_INFO(RHI, "MetalRenderer: RVT hot pool grew %u -> %u of %u pages (%.0f MB)", m_rvtAllocSlots, grown, m_rvtSlots,
+	            double(grown) * m_rvtPagePx * m_rvtPagePx * (m_rvtPack ? 8.0 : 12.0) / (1024.0 * 1024.0));
+	m_rvtAllocSlots = grown;
+	return true;
+}
+
+uint32_t MetalRenderer::RvtHotFor(uint32_t slot)
+{
+	if (m_rvtSlotHot[slot] >= 0) return uint32_t(m_rvtSlotHot[slot]);
+	if (m_rvtHotFree.empty() && !GrowRvtPool(m_rvtAllocSlots + 1)) return 0xFFFFFFFFu;
+	const uint32_t hot = m_rvtHotFree.back();
+	m_rvtHotFree.pop_back();
+	m_rvtSlotHot[slot] = int32_t(hot);
+	++m_rvtStateVer;
+	return hot;
+}
+
+bool MetalRenderer::GrowRvtCold(uint32_t needSlices)
+{
+	if (needSlices <= m_rvtColdAlloc) return true;
+	if (needSlices > m_rvtSlots || !m_device || !m_commandQueue) return false;
+	const uint32_t grown = std::min(m_rvtSlots, std::max((needSlices + 31u) & ~31u, m_rvtColdAlloc + m_rvtColdAlloc / 2));
+	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+	void* nt[3] = { nullptr, nullptr, nullptr };
+	for (int layer = 0; layer < 3; ++layer)
+	{
+		MTLTextureDescriptor* d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:(layer == 0 ? MTLPixelFormatASTC_4x4_sRGB : MTLPixelFormatASTC_4x4_LDR)
+		                                                                             width:m_rvtPagePx height:m_rvtPagePx mipmapped:NO];
+		d.textureType = MTLTextureType2DArray;
+		d.arrayLength = grown;
+		d.usage       = MTLTextureUsageShaderRead;
+		d.storageMode = MTLStorageModeShared;   // unified memory: the encoded blocks are written in place
+		id<MTLTexture> t = [device newTextureWithDescriptor:d];
+		if (!t) { for (int k = 0; k < layer; ++k) CFBridgingRelease(nt[k]); return false; }
+		nt[layer] = (void*)CFBridgingRetain(t);
+	}
+	if (m_rvtColdAlloc > 0)
+	{
+		id<MTLCommandBuffer>      cb   = [(__bridge id<MTLCommandQueue>)m_commandQueue commandBuffer];
+		id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+		for (int layer = 0; layer < 3; ++layer)
+			[blit copyFromTexture:(__bridge id<MTLTexture>)m_rvtCold[layer] sourceSlice:0 sourceLevel:0
+			            toTexture:(__bridge id<MTLTexture>)nt[layer] destinationSlice:0 destinationLevel:0
+			           sliceCount:m_rvtColdAlloc levelCount:1];
+		[blit endEncoding];
+		[cb commit];
+	}
+	for (int layer = 0; layer < 3; ++layer) { RetireTexture(m_rvtCold[layer]); m_rvtCold[layer] = nt[layer]; }
+	m_rvtColdAlloc = grown;
+	return true;
+}
+
+void MetalRenderer::StopRvtColdWork()
+{
+	if (!m_rvtWork) return;
+	m_rvtWork->stop();
+	delete m_rvtWork;
+	m_rvtWork = nullptr;
+}
+
+void MetalRenderer::DestroyRvtPool()
+{
+	StopRvtColdWork();
+	m_rvtSwaps.clear();   // the pool the consumers read is gone: draw the landscapes themselves again
+	// The GPU may still be reading these in a frame in flight: retire, do not release.
+	for (auto& kv : m_rvtTables) RetireRvtTable(kv.second);
+	m_rvtTables.clear();
+	RetireTexture(m_rvtPoolAlbedoSrgb); m_rvtPoolAlbedoSrgb = nullptr;
+	for (void*& t : m_rvtPool) { RetireTexture(t); t = nullptr; }
+	for (void*& t : m_rvtCold) { RetireTexture(t); t = nullptr; }
+	m_rvtColdAlloc = 0;
+	m_rvtColdOn = false;
+	if (m_rvtPackPso) { CFBridgingRelease(m_rvtPackPso); m_rvtPackPso = nullptr; }
+	m_rvtSlots = m_rvtAllocSlots = m_rvtPagePx = 0;
+	m_rvtSlotHot.clear(); m_rvtSlotCold.clear(); m_rvtSlotBusy.clear(); m_rvtSlotVer.clear(); m_rvtSlotPainted.clear(); m_rvtHotFree.clear();
+}
+
+void MetalRenderer::SetRvtLandscape(uint32_t terrainEntity, const HE::UUID& landscapeMaterial, const HE::UUID& consumerMaterial)
+{
+	if (consumerMaterial == HE::UUID{}) m_rvtSwaps.erase(terrainEntity);
+	else                               m_rvtSwaps[terrainEntity] = { landscapeMaterial, consumerMaterial };
+	HE_LOG_INFO(RHI, "MetalRenderer: RVT swap %s; device now holds %.0f MB", consumerMaterial == HE::UUID{} ? "off" : "on",
+	            double(((__bridge id<MTLDevice>)m_device).currentAllocatedSize) / (1024.0 * 1024.0));
+}
+
+void MetalRenderer::SetRvtNearChunks(uint32_t terrainEntity, const std::vector<uint32_t>& chunkEntities)
+{
+	m_rvtNear.set(terrainEntity, chunkEntities);
+}
+
+// The feedback ring: buffers the GPU writes in a frame and the completion handler harvests. Shared so a handler that runs
+// after the renderer is gone touches nothing of it (the same rule as the GPU timer's state).
+struct MetalRenderer::RvtFeedbackShared
+{
+	std::mutex             lock;
+	std::vector<uint32_t>  keys;          // harvested, not yet read (ReadRvtFeedback)
+	std::vector<id<MTLBuffer>> ring;      // 3 buffers: one per frame in flight
+	std::vector<uint8_t>   busy;          // per ring buffer: bound to a frame that has not completed
+	id<MTLBuffer>          sink = nil;    // bound when every ring buffer is busy: written, never read
+};
+
+void* MetalRenderer::RvtFeedbackBindTarget()
+{
+	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+	if (!m_rvtFb && device)
+	{
+		m_rvtFb = std::make_shared<RvtFeedbackShared>();
+		const NSUInteger bytes = HE::kRvtFeedbackSlots * sizeof(uint32_t);
+		for (int i = 0; i < 3; ++i)
+		{
+			id<MTLBuffer> b = [device newBufferWithLength:bytes options:MTLResourceStorageModeShared];
+			std::memset(b.contents, 0xFF, bytes);
+			m_rvtFb->ring.push_back(b);
+		}
+		m_rvtFb->busy.assign(3, 0);
+		m_rvtFb->sink = [device newBufferWithLength:bytes options:MTLResourceStorageModePrivate];
+	}
+	if (m_rvtFbCurrent) return m_rvtFbCurrent;
+	return m_rvtFb ? (__bridge void*)m_rvtFb->sink : nullptr;
+}
+
+void MetalRenderer::BeginRvtFeedbackFrame()
+{
+	m_rvtFbPhase = (m_rvtFbPhase + 1) & 63u;
+	m_rvtFbCurrent = nullptr;
+	m_rvtFbCurrentIdx = -1;
+	if (!RvtFeedbackBindTarget()) return;
+	std::lock_guard<std::mutex> g(m_rvtFb->lock);
+	for (int i = 0; i < int(m_rvtFb->ring.size()); ++i)
+		if (!m_rvtFb->busy[size_t(i)]) { m_rvtFb->busy[size_t(i)] = 1; m_rvtFbCurrentIdx = i; break; }
+	m_rvtFbCurrent = (__bridge void*)(m_rvtFbCurrentIdx >= 0 ? m_rvtFb->ring[size_t(m_rvtFbCurrentIdx)] : m_rvtFb->sink);
+}
+
+void MetalRenderer::EndRvtFeedbackFrame(void* cmdBufPtr)
+{
+	if (!m_rvtFb || m_rvtFbCurrentIdx < 0) return;
+	id<MTLCommandBuffer> cb = (__bridge id<MTLCommandBuffer>)cmdBufPtr;
+	std::shared_ptr<RvtFeedbackShared> fb = m_rvtFb;
+	const int idx = m_rvtFbCurrentIdx;
+	m_rvtFbCurrentIdx = -1;
+	if (!cb) { std::lock_guard<std::mutex> g(fb->lock); fb->busy[size_t(idx)] = 0; return; }
+	[cb addCompletedHandler:^(id<MTLCommandBuffer>) {
+		std::lock_guard<std::mutex> g(fb->lock);
+		uint32_t* p = static_cast<uint32_t*>(fb->ring[size_t(idx)].contents);
+		size_t got = 0;
+		for (uint32_t i = 0; i < HE::kRvtFeedbackSlots; ++i)
+			if (p[i] != 0xFFFFFFFFu) { fb->keys.push_back(p[i]); p[i] = 0xFFFFFFFFu; ++got; }
+		if (std::getenv("HE_RVT_FEEDBACK_DEBUG")) HE_LOG_INFO(RHI, "MetalRenderer: RVT feedback harvested %zu key(s) from ring %d", got, idx);
+		if (fb->keys.size() > 65536) fb->keys.erase(fb->keys.begin(), fb->keys.end() - 65536);   // nobody reads: stay bounded
+		fb->busy[size_t(idx)] = 0;
+	}];
+}
+
+bool MetalRenderer::ReadRvtFeedback(std::vector<uint32_t>& keys)
+{
+	static const bool on = [] { const char* e = std::getenv("HE_RVT_FEEDBACK"); return !(e && *e == '0'); }();
+	if (!on || !m_rvtFb) return on && m_rvtPool[0] != nullptr;
+	std::lock_guard<std::mutex> g(m_rvtFb->lock);
+	keys.insert(keys.end(), m_rvtFb->keys.begin(), m_rvtFb->keys.end());
+	m_rvtFb->keys.clear();
+	return true;
+}
+
+void MetalRenderer::ReleaseRvtConsumer(const HE::UUID& consumerMaterial)
+{
+	for (auto it = m_rvtSwaps.begin(); it != m_rvtSwaps.end();)
+		it = it->second.consumerMat == consumerMaterial ? m_rvtSwaps.erase(it) : std::next(it);
+	const auto t = m_rvtTables.find(consumerMaterial);
+	if (t == m_rvtTables.end()) return;
+	RetireRvtTable(t->second);
+	m_rvtTables.erase(t);
+	HE_LOG_INFO(RHI, "MetalRenderer: RVT consumer released; device now holds %.0f MB",
+	            double(((__bridge id<MTLDevice>)m_device).currentAllocatedSize) / (1024.0 * 1024.0));
+}
+
+// The table the shader reads: the manager's entries (slot | effective mip << 24) with each slot turned into "which array, which
+// slice": a hot page is its hot slice, a cold page is bit 23 plus its slot (the cold arrays are indexed by slot). A NEW texture per
+// upload, the old one retired (kept three frames): a frame in flight may still be reading the table it was encoded with, and a
+// replaceRegion into that texture would show it half old, half new. An upload happens only when a page came, went or changed
+// temperature, at most once a real frame (UpdateRvtCold, step 4). A table can be large: 2048^2 entries plus mips (21 MB) for a
+// 100 km volume. A replaceRegion of that rearranged it into the GPU's tiled layout on the CPU (most of a 50 ms frame while the
+// camera flew over the 100 km Catania, sample 27.11.): the entries are written into a shared buffer instead and the GPU copies them
+// into a private texture, on the queue ahead of every frame that reads it.
+void MetalRenderer::RetireRvtTable(RvtTable& t)
+{
+	for (int i = 0; i < kRvtTableRing; ++i) { RetireTexture(t.ring[i]); t.ring[i] = nullptr; }
+	RetireTexture(t.staging);   // (any retained object: the buffer goes the same way)
+	t.staging = nullptr;
+	t.stagingDone.reset();
+	t.tex = nullptr;
+	t.ringNext = 0;
+}
+
+void MetalRenderer::UploadRvtTable(RvtTable& t)
+{
+	if (t.src.empty() || !m_device || !m_commandQueue) return;
+	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+	size_t total = 0;
+	for (const auto& m : t.src) total += m.size();
+	// The next ring entry: written 4 uploads after it was last current. Uploads come at most once a real frame and a texture is
+	// released 3 real frames after it is retired (AgeRetiredTextures), so no frame in flight reads it, nor its buffer's last copy.
+	// A table of another shape starts a new ring. Allocating 21 MB twice an upload cost as much as the upload (kernel calls, sample).
+	const int slot = t.ringNext;
+	t.ringNext = (t.ringNext + 1) % kRvtTableRing;
+	id<MTLTexture> nt = (__bridge id<MTLTexture>)t.ring[slot];
+	if (nt && (nt.width != t.side || nt.mipmapLevelCount != t.src.size())) { RetireRvtTable(t); return UploadRvtTable(t); }
+	if (!nt)
+	{
+		MTLTextureDescriptor* d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR32Uint
+		                                                                             width:t.side height:t.side mipmapped:NO];
+		d.mipmapLevelCount = t.src.size();
+		d.usage            = MTLTextureUsageShaderRead;
+		d.storageMode      = MTLStorageModePrivate;
+		nt = [device newTextureWithDescriptor:d];
+		if (!nt) return;
+		t.ring[slot] = (void*)CFBridgingRetain(nt);
+	}
+	id<MTLBuffer> staging = (__bridge id<MTLBuffer>)t.staging;
+	if (!staging || staging.length < total * 4 || !t.stagingDone || !t.stagingDone->load())
+	{
+		RetireTexture(t.staging);   // the GPU may still copy from it: released frames later
+		staging = [device newBufferWithLength:total * 4 options:MTLResourceStorageModeShared];
+		t.staging = staging ? (void*)CFBridgingRetain(staging) : nullptr;
+	}
+	if (!staging) return;
+	t.stagingDone = std::make_shared<std::atomic<bool>>(false);
+	// What a slot reads as, once per slot (not per entry): its hot slice, cold (bit 23 + slot), or nothing.
+	std::vector<uint32_t> slotMap(m_rvtSlots, 0xFFFFFFFFu);
+	for (uint32_t s = 0; s < m_rvtSlots; ++s)
+		slotMap[s] = m_rvtSlotCold[s] ? (0x800000u | s) : m_rvtSlotHot[s] >= 0 ? uint32_t(m_rvtSlotHot[s]) : 0xFFFFFFFFu;
+	uint32_t* out = static_cast<uint32_t*>(staging.contents);
+	id<MTLCommandBuffer>      cb   = [(__bridge id<MTLCommandQueue>)m_commandQueue commandBuffer];
+	id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+	size_t offset = 0;
+	for (size_t m = 0; m < t.src.size(); ++m)
+	{
+		const std::vector<uint32_t>& in = t.src[m];
+		uint32_t* o = out + offset;
+		for (size_t i = 0; i < in.size(); ++i)
+		{
+			const uint32_t e = in[i];
+			const uint32_t slot = e & 0xFFFFFFu;
+			const uint32_t to = (e == 0xFFFFFFFFu || slot >= m_rvtSlots) ? 0xFFFFFFFFu : slotMap[slot];
+			o[i] = to == 0xFFFFFFFFu ? to : ((e >> 24) << 24) | to;   // never painted here: no page
+		}
+		const NSUInteger ms = t.side >> m;
+		[blit copyFromBuffer:staging sourceOffset:offset * 4 sourceBytesPerRow:ms * 4 sourceBytesPerImage:ms * ms * 4
+		          sourceSize:MTLSizeMake(ms, ms, 1) toTexture:nt destinationSlice:0 destinationLevel:m destinationOrigin:MTLOriginMake(0, 0, 0)];
+		offset += in.size();
+	}
+	[blit endEncoding];
+	std::shared_ptr<std::atomic<bool>> done = t.stagingDone;
+	[cb addCompletedHandler:^(id<MTLCommandBuffer>) { done->store(true); }];
+	[cb commit];
+	t.tex = t.ring[slot];   // owned by the ring
+	t.stateVer = m_rvtStateVer;
+	t.dirty = false;
+}
+
+bool MetalRenderer::SetRvtPageTable(const HE::UUID& consumerMaterial, const std::vector<std::vector<uint32_t>>& mips)
+{
+	if (!m_rvtSlots || !m_device || mips.empty() || mips.size() > 12) return false;
+	uint32_t side = 1;
+	while (uint64_t(side) * side < mips[0].size()) ++side;
+	if (uint64_t(side) * side != mips[0].size() || (side & (side - 1)) != 0 || side > 4096) return false;   // a power of two
+	for (size_t m = 0; m < mips.size(); ++m)
+	{
+		const uint32_t ms = side >> m;
+		if (ms == 0 || mips[m].size() != size_t(ms) * ms) return false;
+	}
+	RvtTable& t = m_rvtTables[consumerMaterial];
+	const bool reshaped = !t.tex || t.side != side || t.mips != mips.size();
+	t.src   = mips;
+	t.side  = side;
+	t.mips  = static_cast<uint32_t>(mips.size());
+	// A new or reshaped table now (the caller checks it exists); a changed one by the next real frame, once however often it is set.
+	if (reshaped) UploadRvtTable(t);
+	else          t.dirty = true;
+	if (!t.tex) { RetireRvtTable(t); m_rvtTables.erase(consumerMaterial); return false; }
+	if (reshaped)
+		HE_LOG_INFO(RHI, "MetalRenderer: RVT page table %ux%u, %zu mips; device now holds %.0f MB",
+		            side, side, mips.size(), double(((__bridge id<MTLDevice>)m_device).currentAllocatedSize) / (1024.0 * 1024.0));
+	return true;
+}
+
+bool MetalRenderer::ReadbackRvtPageTable(const HE::UUID& consumerMaterial, std::vector<std::vector<uint32_t>>& mips)
+{
+	const auto found = m_rvtTables.find(consumerMaterial);
+	if (found == m_rvtTables.end() || !found->second.tex) return false;
+	mips = found->second.src;   // the manager's form: what the witness compares against (the shader's form is rewritten per slot)
+	return true;
+}
+
+bool MetalRenderer::ReadbackRvtSlot(int layer, uint32_t slot, std::vector<uint8_t>& rgba)
+{
+	// A cold page lives as ASTC blocks only: the witnesses read pages straight after painting them, hot.
+	if (layer < 0 || layer >= 3 || !m_rvtPool[layer] || slot >= m_rvtSlots || m_rvtSlotHot[slot] < 0 || !m_device || !m_commandQueue) return false;
+	@autoreleasepool
+	{
+		const NSUInteger px = m_rvtPagePx;
+		id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+		// A private pool cannot be read on the CPU: blit the slice into a managed staging texture (CaptureViewport's way).
+		const bool rg = m_rvtPack && layer > 0;
+		MTLTextureDescriptor* desc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:(rg ? MTLPixelFormatRG8Unorm : kSwapchainFormat)
+		                                                                                width:px height:px mipmapped:NO];
+		desc.storageMode = MTLStorageModeManaged;
+		desc.usage       = MTLTextureUsageShaderRead;
+		id<MTLTexture> staging = [device newTextureWithDescriptor:desc];
+		if (!staging) return false;
+		id<MTLCommandBuffer>      cb   = [(__bridge id<MTLCommandQueue>)m_commandQueue commandBuffer];
+		id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+		[blit copyFromTexture:(__bridge id<MTLTexture>)m_rvtPool[layer] sourceSlice:NSUInteger(m_rvtSlotHot[slot]) sourceLevel:0
+		         sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(px, px, 1)
+		            toTexture:staging destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)];
+		[blit synchronizeTexture:staging slice:0 level:0];
+		[blit endEncoding];
+		[cb commit];
+		[cb waitUntilCompleted];
+		if (rg)
+		{
+			// Two channels in the pool: normal (x, z) comes back as R and B, the surface as R and G, the rest zero (RvtLayerChannels).
+			std::vector<uint8_t> two(size_t(px) * px * 2);
+			[staging getBytes:two.data() bytesPerRow:px * 2 fromRegion:MTLRegionMake2D(0, 0, px, px) mipmapLevel:0];
+			rgba.assign(size_t(px) * px * 4, 0);
+			for (size_t i = 0; i < size_t(px) * px; ++i)
+			{
+				rgba[i * 4 + 0] = two[i * 2 + 0];
+				rgba[i * 4 + (layer == 1 ? 2 : 1)] = two[i * 2 + 1];
+				rgba[i * 4 + 3] = 255;
+			}
+			return true;
+		}
+		std::vector<uint8_t> bgra(size_t(px) * px * 4);
+		[staging getBytes:bgra.data() bytesPerRow:px * 4 fromRegion:MTLRegionMake2D(0, 0, px, px) mipmapLevel:0];
+		rgba.resize(bgra.size());
+		for (size_t i = 0; i < size_t(px) * px; ++i)   // the stored bytes, in the RGBA order the contract promises
+		{
+			rgba[i * 4 + 0] = bgra[i * 4 + 2];
+			rgba[i * 4 + 1] = bgra[i * 4 + 1];
+			rgba[i * 4 + 2] = bgra[i * 4 + 0];
+			rgba[i * 4 + 3] = bgra[i * 4 + 3];
+		}
+		return true;
+	}
+}
+
+// Once per frame (EncodeFrame, before the draws): real frames also age the pages.
+void MetalRenderer::UpdateRvtCold(bool realFrame)
+{
+	if (!m_rvtSlots || !m_rvtPool[0]) return;
+	if (realFrame) ++m_rvtRealFrames;
+	const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+	// Compressing pays only for a big working set: a page saves ~160 KB, and the encoder (astcenc's tables, its thread) costs
+	// ~40 MB of CPU memory the moment it exists (measured: Malloc Small, not given back). Below HE_RVT_COLD_MIN hot pages (default 256, about 55 MB of hot pool)
+	// nothing is compressed and the encoder is never started.
+	static const uint32_t coldMin = [] { const char* e = std::getenv("HE_RVT_COLD_MIN"); return e && *e ? uint32_t(std::max(0, std::atoi(e))) : 256u; }();
+	if (m_rvtColdOn && !m_rvtWork && realFrame && m_rvtAllocSlots - uint32_t(m_rvtHotFree.size()) >= coldMin)
+	{
+		m_rvtWork = new RvtColdWork();
+		m_rvtWork->start(m_rvtPagePx);
+		HE_LOG_INFO(RHI, "MetalRenderer: RVT cold pool: %u hot pages in use, compressing the pages that stand still", m_rvtAllocSlots - uint32_t(m_rvtHotFree.size()));
+	}
+	if (m_rvtColdOn && m_rvtWork && realFrame)
+	{
+		static const uint64_t coldAfter = [] { const char* e = std::getenv("HE_RVT_COLD_AFTER"); return e && *e ? uint64_t(std::max(1, std::atoi(e))) : 120ull; }();
+		RvtColdWork& w = *m_rvtWork;
+		const size_t px = m_rvtPagePx, pageBytes = px * px * 4;
+		// What a page's three layers are in the readback buffer: BGRA (4 B per texel) each, or BGRA + two RG8 (the packed pool).
+		const size_t layerBytes[3] = { px * px * 4, px * px * (m_rvtPack ? 2u : 4u), px * px * (m_rvtPack ? 2u : 4u) };
+		const size_t layerOffset[3] = { 0, layerBytes[0], layerBytes[0] + layerBytes[1] };
+		const size_t bufferBytes = layerOffset[2] + layerBytes[2];
+
+		// 1. Encodes that came back: the page goes cold if it was not painted again meanwhile.
+		std::deque<RvtColdWork::Done> finished;
+		{ std::lock_guard<std::mutex> lock(w.mutex); finished.swap(w.done); }
+		for (RvtColdWork::Done& d : finished)
+		{
+			m_rvtSlotBusy[d.slot] = 0;
+			if (d.blocks[0].empty() || d.ver != m_rvtSlotVer[d.slot] || m_rvtSlotHot[d.slot] < 0 || m_rvtSlotCold[d.slot]) continue;
+			if (!GrowRvtCold(d.slot + 1)) continue;
+			const size_t bx = (px + 3) / 4, rowBytes = bx * 16, imageBytes = rowBytes * ((px + 3) / 4);
+			for (int layer = 0; layer < 3; ++layer)
+				[(__bridge id<MTLTexture>)m_rvtCold[layer] replaceRegion:MTLRegionMake2D(0, 0, px, px) mipmapLevel:0 slice:d.slot
+				                                               withBytes:d.blocks[layer].data() bytesPerRow:rowBytes bytesPerImage:imageBytes];
+			m_rvtHotFree.push_back(uint32_t(m_rvtSlotHot[d.slot]));
+			m_rvtSlotHot[d.slot] = -1;
+			m_rvtSlotCold[d.slot] = 1;
+			++m_rvtStateVer;
+		}
+
+		// 2. Readbacks the GPU has finished go to the encoder thread.
+		for (auto it = w.flights.begin(); it != w.flights.end();)
+		{
+			if (!it->ready->load()) { ++it; continue; }
+			RvtColdWork::Todo job; job.slot = it->slot; job.ver = it->ver;
+			const uint8_t* bgra = static_cast<const uint8_t*>([(__bridge id<MTLBuffer>)it->buffer contents]);
+			for (int layer = 0; layer < 3; ++layer)
+			{
+				job.rgba[layer].resize(pageBytes);
+				const uint8_t* src = bgra + layerOffset[layer];
+				if (m_rvtPack && layer > 0)   // (x, z) or (R, G) in the first two channels, as the shader's cold branch reads them
+					for (size_t i = 0; i < px * px; ++i)
+					{
+						job.rgba[layer][i * 4 + 0] = src[i * 2 + 0];
+						job.rgba[layer][i * 4 + 1] = src[i * 2 + 1];
+						job.rgba[layer][i * 4 + 2] = 0;
+						job.rgba[layer][i * 4 + 3] = 255;
+					}
+				else
+					for (size_t i = 0; i < px * px; ++i)
+					{
+						job.rgba[layer][i * 4 + 0] = src[i * 4 + 2];
+						job.rgba[layer][i * 4 + 1] = src[i * 4 + 1];
+						job.rgba[layer][i * 4 + 2] = src[i * 4 + 0];
+						job.rgba[layer][i * 4 + 3] = src[i * 4 + 3];
+					}
+			}
+			CFBridgingRelease(it->buffer);
+			{ std::lock_guard<std::mutex> lock(w.mutex); w.todo.push_back(std::move(job)); }
+			w.cv.notify_one();
+			it = w.flights.erase(it);
+		}
+
+		// 3. Pages that have been still long enough: read them back (at most two a frame, six in flight).
+		int started = 0;
+		for (uint32_t slot = 0; slot < m_rvtSlots && started < 2 && w.flights.size() < 6; ++slot)
+		{
+			if (m_rvtSlotHot[slot] < 0 || m_rvtSlotCold[slot] || m_rvtSlotBusy[slot]) continue;
+			if (m_rvtRealFrames - m_rvtSlotPainted[slot] < coldAfter) continue;
+			id<MTLBuffer> buf = [device newBufferWithLength:bufferBytes options:MTLResourceStorageModeShared];
+			if (!buf) break;
+			id<MTLCommandBuffer>      cb   = [(__bridge id<MTLCommandQueue>)m_commandQueue commandBuffer];
+			id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+			for (int layer = 0; layer < 3; ++layer)
+				[blit copyFromTexture:(__bridge id<MTLTexture>)m_rvtPool[layer] sourceSlice:NSUInteger(m_rvtSlotHot[slot]) sourceLevel:0
+				         sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(px, px, 1)
+				             toBuffer:buf destinationOffset:layerOffset[layer] destinationBytesPerRow:layerBytes[layer] / px destinationBytesPerImage:layerBytes[layer]];
+			[blit endEncoding];
+			auto ready = std::make_shared<std::atomic<bool>>(false);
+			[cb addCompletedHandler:^(id<MTLCommandBuffer>) { ready->store(true); }];
+			[cb commit];
+			w.flights.push_back({ slot, m_rvtSlotVer[slot], (void*)CFBridgingRetain(buf), ready });
+			m_rvtSlotBusy[slot] = 1;
+			++started;
+		}
+	}
+
+	// 4. Tables whose entries are out of date (a page changed temperature or got a hot slice). Not in a page's own frame (an RVT
+	// page, the far image's picture): it draws a layer view, never a consumer, so no table is read there. A 100 km volume's table
+	// is 2048^2 entries plus mips (21 MB), and rebuilt for each of up to 24 page renders a frame it was most of the frame while the
+	// camera flew (sample of the editor over Catania, 27.11.). The next real frame uploads it once.
+	const bool pageFrame = !realFrame && (m_editorCamera.rvtSlot >= 0 || m_editorCamera.rvtTileGround);
+	if (!pageFrame)
+		for (auto& kv : m_rvtTables)
+			if (kv.second.stateVer != m_rvtStateVer || kv.second.dirty) UploadRvtTable(kv.second);
+
+	// 5. The hot arrays shrink when most of their slices are free: the used ones move to the front of smaller arrays.
+	if (realFrame && now >= m_rvtNextShrinkAt)
+	{
+		m_rvtNextShrinkAt = now + 2.0;
+		const uint32_t used = m_rvtAllocSlots - uint32_t(m_rvtHotFree.size());
+		const uint32_t want = std::max(16u, (used * 2 + 7u) & ~7u);
+		if (m_rvtColdOn && m_rvtWork && m_rvtAllocSlots > 16 && used * 3 <= m_rvtAllocSlots && want < m_rvtAllocSlots && !(m_rvtWork && !m_rvtWork->flights.empty()))
+		{
+			void* nt[3] = { nullptr, nullptr, nullptr };
+			void* nSrgb = nullptr;
+			if (AllocRvtArrays(device, want, m_rvtPagePx, m_rvtPack, nt, &nSrgb))
+			{
+				id<MTLCommandBuffer>      cb   = [(__bridge id<MTLCommandQueue>)m_commandQueue commandBuffer];
+				id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+				uint32_t next = 0;
+				for (uint32_t slot = 0; slot < m_rvtSlots; ++slot)
+					if (m_rvtSlotHot[slot] >= 0)
+					{
+						for (int layer = 0; layer < 3; ++layer)
+							[blit copyFromTexture:(__bridge id<MTLTexture>)m_rvtPool[layer] sourceSlice:NSUInteger(m_rvtSlotHot[slot]) sourceLevel:0
+							         sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(m_rvtPagePx, m_rvtPagePx, 1)
+							            toTexture:(__bridge id<MTLTexture>)nt[layer] destinationSlice:next destinationLevel:0
+							    destinationOrigin:MTLOriginMake(0, 0, 0)];
+						m_rvtSlotHot[slot] = int32_t(next++);
+					}
+				[blit endEncoding];
+				[cb commit];
+				RetireTexture(m_rvtPoolAlbedoSrgb);
+				for (int layer = 0; layer < 3; ++layer) { RetireTexture(m_rvtPool[layer]); m_rvtPool[layer] = nt[layer]; }
+				m_rvtPoolAlbedoSrgb = nSrgb;
+				m_rvtHotFree.clear();
+				for (uint32_t i = want; i-- > next;) m_rvtHotFree.push_back(i);
+				HE_LOG_INFO(RHI, "MetalRenderer: RVT hot pool shrank %u -> %u slices (%u in use)", m_rvtAllocSlots, want, next);
+				m_rvtAllocSlots = want;
+				++m_rvtStateVer;
+				// A second upload this frame: a fresh ring (the old textures retire), so the ring's once-a-frame turn still holds.
+				for (auto& kv : m_rvtTables) { RetireRvtTable(kv.second); UploadRvtTable(kv.second); }
+			}
+		}
+	}
+
+	// A line every few seconds while the numbers move: how much the cold pool holds and what the hot one costs.
+	if (realFrame && now >= m_rvtNextColdLogAt)
+	{
+		uint32_t cold = 0, hot = 0;
+		for (uint32_t s = 0; s < m_rvtSlots; ++s) { cold += m_rvtSlotCold[s]; hot += m_rvtSlotHot[s] >= 0 ? 1u : 0u; }
+		static uint32_t lastCold = ~0u, lastHot = ~0u;
+		if (cold != lastCold || hot != lastHot)
+		{
+			lastCold = cold; lastHot = hot;
+			m_rvtNextColdLogAt = now + 3.0;
+			const double page = double(m_rvtPagePx) * m_rvtPagePx * (m_rvtPack ? 8.0 : 12.0), blockPage = double((m_rvtPagePx + 3) / 4) * ((m_rvtPagePx + 3) / 4) * 16.0 * 3.0;
+			HE_LOG_INFO(RHI, "MetalRenderer: RVT pages: %u cold (ASTC, %.1f MB allocated), %u hot in %u slices (%.1f MB), a page is %.0f KB hot / %.0f KB cold; device now holds %.0f MB",
+			            cold, double(m_rvtColdAlloc) * blockPage / (1024.0 * 1024.0), hot, m_rvtAllocSlots,
+			            double(m_rvtAllocSlots) * page / (1024.0 * 1024.0), page / 1024.0, blockPage / 1024.0,
+			            double(device.currentAllocatedSize) / (1024.0 * 1024.0));
+		}
+	}
+}
+
+// The consumer's table and the pools on fragment textures 18..24, for a draw whose material owns a table. Every other draw
+// reads the inert defaults BindMaterialPreambleSlots left there (and never looks). Texture 17 is heFogVolume's.
+void MetalRenderer::BindRvtForDraw(void* renderEncoder, const HE::UUID& material)
+{
+	if (m_rvtTables.empty() || !m_rvtPool[0]) return;
+	const auto t = m_rvtTables.find(material);
+	if (t == m_rvtTables.end() || !t->second.tex) return;
+	id<MTLRenderCommandEncoder> enc = (__bridge id<MTLRenderCommandEncoder>)renderEncoder;
+	[enc setFragmentTexture:(__bridge id<MTLTexture>)t->second.tex     atIndex:18];
+	[enc setFragmentTexture:(__bridge id<MTLTexture>)m_rvtPoolAlbedoSrgb atIndex:19];
+	[enc setFragmentTexture:(__bridge id<MTLTexture>)m_rvtPool[1]      atIndex:20];
+	[enc setFragmentTexture:(__bridge id<MTLTexture>)m_rvtPool[2]      atIndex:21];
+	if (void* fb = RvtFeedbackBindTarget())
+		[enc setFragmentBuffer:(__bridge id<MTLBuffer>)fb offset:0 atIndex:kRvtFeedbackBufferIndex];
+	if (m_rvtCold[0])
+		for (int layer = 0; layer < 3; ++layer)
+			[enc setFragmentTexture:(__bridge id<MTLTexture>)m_rvtCold[layer] atIndex:NSUInteger(22 + layer)];
+}
+
+// The landscapes drawn from the virtual texture (SetRvtLandscape): their terrain chunks take the consumer material, and not
+// the object's own parameter block (laid out for the old material; it would overwrite the volume parameters). Done on the
+// renderer's view of the frame after a walk, never in the world; idempotent (a second pass finds the consumer, not the original).
+void MetalRenderer::ApplyRvtSwaps()
+{
+	// A virtual texture page (RenderSceneImage with rvtSlot >= 0): the layer's view material replaces every object's own,
+	// after the walk. Section lists would override it; terrain has none.
+	if (m_editorCamera.rvtMaterial != HE::UUID{})
+	{
+		for (RenderObject& o : m_renderWorld.objects)
+		{
+			o.materialAssetId = m_editorCamera.rvtMaterial;
+			o.sections.clear();
+		}
+		return;
+	}
+	if (m_rvtSwaps.empty() || !m_rvtPool[0]) return;
+	for (RenderObject& o : m_renderWorld.objects)
+		if (o.terrainChunk)
+			if (const auto sw = m_rvtSwaps.find(o.terrainEntity); sw != m_rvtSwaps.end() && o.materialAssetId == sw->second.landscapeMat)
+			{
+				// The native near view: a chunk close to the camera keeps the landscape's own material (SetRvtNearChunks).
+				if (m_rvtNear.keeps(o)) continue;
+				o.materialAssetId = sw->second.consumerMat;
+				o.paramOverride.clear();
+				o.sections.clear();
+			}
 }
 
 void MetalRenderer::RetireTexture(void* texture)
@@ -11693,6 +13218,42 @@ void MetalRenderer::RetireTexture(void* texture)
 	if (!texture) return;
 	// 3 frames: current draw list + Metal's in-flight buffers (triple buffering)
 	m_retiredTextures.push_back({ texture, 3 });
+}
+
+void MetalRenderer::EvictIdleGraphArrays()
+{
+	static const double idleS = [] { const char* e = std::getenv("HE_RVT_ARRAY_IDLE_S"); return e && *e ? std::atof(e) : 20.0; }();
+	// Memory pressure gate: the release costs a reload (~90 ms for the three Mix arrays, one frame, measured) the next time a
+	// page is painted, which in a game is when the player starts to move after standing still. So the arrays go only when the
+	// device is actually short: allocated > HE_RVT_ARRAY_PRESSURE (default 0.6) of recommendedMaxWorkingSetSize. 0 = no gate.
+	static const double pressure = [] { const char* e = std::getenv("HE_RVT_ARRAY_PRESSURE"); return e && *e ? std::atof(e) : 0.6; }();
+	if (idleS <= 0.0 || m_graphTexUse.empty() || !m_rvtPool[0]) return;   // only while a virtual texture pool exists
+	const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+	if (now < m_graphTexEvictAt) return;
+	m_graphTexEvictAt = now + 1.0;
+	if (pressure > 0.0)
+	{
+		id<MTLDevice> dev = (__bridge id<MTLDevice>)m_device;
+		const double budget = double(dev.recommendedMaxWorkingSetSize);
+		if (budget > 0.0 && double(dev.currentAllocatedSize) < pressure * budget) return;
+	}
+	for (auto it = m_graphTexUse.begin(); it != m_graphTexUse.end();)
+	{
+		const auto c = m_graphTexCache.find(it->first);
+		void* tex = c != m_graphTexCache.end() ? c->second : nullptr;
+		const bool idle = now - std::max(it->second.normal, it->second.page) > idleS;
+		if (tex && idle && ((__bridge id<MTLTexture>)tex).allocatedSize >= (64u << 20))
+		{
+			HE_LOG_INFO(RHI, "MetalRenderer: texture array %s idle for %.0f s, released (%.0f MB)", it->first.c_str(), idleS,
+			            double(((__bridge id<MTLTexture>)tex).allocatedSize) / (1024.0 * 1024.0));
+			RetireTexture(tex);
+			m_logAfterArrayRelease = true;
+			m_graphTexCache.erase(c);
+			it = m_graphTexUse.erase(it);
+		}
+		else if (!tex && idle) it = m_graphTexUse.erase(it);
+		else ++it;
+	}
 }
 
 void MetalRenderer::AgeRetiredTextures()
@@ -11703,6 +13264,12 @@ void MetalRenderer::AgeRetiredTextures()
 		{
 			CFBridgingRelease(it->texture);
 			it = m_retiredTextures.erase(it);
+			if (m_logAfterArrayRelease && m_retiredTextures.empty())
+			{
+				m_logAfterArrayRelease = false;
+				HE_LOG_INFO(RHI, "MetalRenderer: released texture arrays are gone; device now holds %.0f MB",
+				            double(((__bridge id<MTLDevice>)m_device).currentAllocatedSize) / (1024.0 * 1024.0));
+			}
 		}
 		else
 			++it;
@@ -12617,6 +14184,357 @@ void MetalRenderer::SetShadowSettings(const ShadowSettings& s)
 	m_extractor.setShadowSettings(s.distance, s.cascadeCount, s.splitLambda, m_shadowSize);
 }
 
+// ─── Volumetric fog (Thema 225, docs/volumetric-fog-plan.md) ─────────────────
+// Three programs from MaterialShaderLibrary::fogInject / fogIntegrate / fogApply (one GLSL
+// source, FogVolumeShaderSource.h): Inject and Integrate are compute dispatches before the
+// scene encoder, Apply is a full-screen pass between the sky and the translucent draws
+// (EncodeScene splits its encoder there). Everything below runs only while the extractor
+// says RenderWorld::fogVolume.enabled — fogMode 0 never reaches it.
+bool MetalRenderer::EnsureFogPipelines()
+{
+	if (m_fogInjectPipe && m_fogIntegratePipe && m_fogApplyPipe) return true;
+	if (m_fogTried) return false;
+	m_fogTried = true;
+#if !defined(HE_HAVE_SHADERC)
+	return false;
+#else
+	@autoreleasepool
+	{
+		id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+		if (!device) return false;
+		using Backend = HE::MaterialShaderLibrary::Backend;
+		const auto& inj = m_matShaderLib.fogInject(Backend::Metal);
+		const auto& itg = m_matShaderLib.fogIntegrate(Backend::Metal);
+		const auto& app = m_matShaderLib.fogApply(Backend::Metal);
+		const auto& vs  = m_matShaderLib.fullscreenVertex(Backend::Metal);
+		if (!(inj.ok && itg.ok && app.ok && vs.ok))
+		{
+			HE_LOG_ERROR(RHI, "%s",
+				(std::string("MetalRenderer: volumetric fog shader cross-compile failed — analytic fog stays\n")
+				 + inj.log + itg.log + app.log + vs.log).c_str());
+			return false;
+		}
+		NSError* err = nil;
+		auto lib = [&](const std::string& src) -> id<MTLLibrary> {
+			if (err) return nil;
+			return [device newLibraryWithSource:[NSString stringWithUTF8String:src.c_str()] options:nil error:&err];
+		};
+		id<MTLLibrary> iLib = lib(inj.source);
+		id<MTLLibrary> gLib = lib(itg.source);
+		id<MTLLibrary> aLib = lib(app.source);
+		id<MTLLibrary> vLib = lib(vs.source);
+		if (!(iLib && gLib && aLib && vLib))
+		{
+			HE_LOG_ERROR(RHI, "MetalRenderer: volumetric fog MSL compile failed: %s",
+			             err ? [[err localizedDescription] UTF8String] : "unknown");
+			return false;
+		}
+		id<MTLFunction> iFn = [iLib newFunctionWithName:@"main0"];
+		id<MTLFunction> gFn = [gLib newFunctionWithName:@"main0"];
+		id<MTLComputePipelineState> iPso = iFn ? [device newComputePipelineStateWithFunction:iFn error:&err] : nil;
+		id<MTLComputePipelineState> gPso = gFn ? [device newComputePipelineStateWithFunction:gFn error:&err] : nil;
+		MTLRenderPipelineDescriptor* ad = [[MTLRenderPipelineDescriptor alloc] init];
+		ad.vertexFunction   = [vLib newFunctionWithName:@"main0"];
+		ad.fragmentFunction = [aLib newFunctionWithName:@"main0"];
+		ad.colorAttachments[0].pixelFormat = kSceneColorFormat;
+		// out.rgb = Lv + Tv*Lf (ONE) and dst * Tv*Tf (SRC_ALPHA) — the plan's §6.3 blend. The
+		// alpha channel keeps the destination: Tv*Tf must not land in hdrColor.a.
+		ad.colorAttachments[0].blendingEnabled             = YES;
+		ad.colorAttachments[0].rgbBlendOperation           = MTLBlendOperationAdd;
+		ad.colorAttachments[0].alphaBlendOperation         = MTLBlendOperationAdd;
+		ad.colorAttachments[0].sourceRGBBlendFactor        = MTLBlendFactorOne;
+		ad.colorAttachments[0].destinationRGBBlendFactor   = MTLBlendFactorSourceAlpha;
+		ad.colorAttachments[0].sourceAlphaBlendFactor      = MTLBlendFactorZero;
+		ad.colorAttachments[0].destinationAlphaBlendFactor = MTLBlendFactorOne;
+		id<MTLRenderPipelineState> aPso = [device newRenderPipelineStateWithDescriptor:ad error:&err];
+		if (!(iPso && gPso && aPso))
+		{
+			HE_LOG_ERROR(RHI, "MetalRenderer: volumetric fog pipeline creation failed: %s",
+			             err ? [[err localizedDescription] UTF8String] : "unknown");
+			return false;
+		}
+		// The fog's own noise volume: the sky generator at 64^3 (1 MB). The sky's 256^3 one (67 MB)
+		// is far too big to sample once per froxel (the inject pass spent two thirds of its time
+		// in those fetches); the sky's bytes are untouched.
+		{
+			constexpr int kN = 64;
+			const std::vector<uint16_t> noise = HE::BuildSkyNoise3D(kN);
+			MTLTextureDescriptor* nd = [[MTLTextureDescriptor alloc] init];
+			nd.textureType = MTLTextureType3D;
+			nd.pixelFormat = MTLPixelFormatRG16Unorm;
+			nd.width = kN; nd.height = kN; nd.depth = kN;
+			nd.usage       = MTLTextureUsageShaderRead;
+			nd.storageMode = MTLStorageModeShared;
+			id<MTLTexture> nt = [device newTextureWithDescriptor:nd];
+			[nt replaceRegion:MTLRegionMake3D(0, 0, 0, kN, kN, kN) mipmapLevel:0 slice:0
+			        withBytes:noise.data() bytesPerRow:kN * 2 * sizeof(uint16_t)
+			    bytesPerImage:kN * kN * 2 * sizeof(uint16_t)];
+			m_fogNoise = nt ? (void*)CFBridgingRetain(nt) : nullptr;
+		}
+		if (!m_fogNoise)
+		{
+			HE_LOG_ERROR(RHI, "%s", "MetalRenderer: volumetric fog noise volume creation failed — analytic fog stays");
+			return false;
+		}
+		m_fogInjectPipe    = (void*)CFBridgingRetain(iPso);
+		m_fogIntegratePipe = (void*)CFBridgingRetain(gPso);
+		m_fogApplyPipe     = (void*)CFBridgingRetain(aPso);
+		HE_LOG_INFO(RHI, "MetalRenderer: volumetric fog pipelines ready (inject max %lu threads, integrate max %lu)",
+		            (unsigned long)iPso.maxTotalThreadsPerThreadgroup,
+		            (unsigned long)gPso.maxTotalThreadsPerThreadgroup);
+		return true;
+	}
+#endif
+}
+
+void MetalRenderer::DestroyFogTargets()
+{
+	for (void*& t : m_fogInject) if (t) { CFBridgingRelease(t); t = nullptr; }
+	if (m_fogIntegrated) { CFBridgingRelease(m_fogIntegrated); m_fogIntegrated = nullptr; }
+	m_fogGrid = glm::ivec3(0);
+	m_fogHistValid = false;
+}
+
+void MetalRenderer::EnsureFogTargets(const glm::ivec3& grid)
+{
+	if (grid == m_fogGrid && m_fogInject[0] && m_fogInject[1] && m_fogIntegrated) return;
+	DestroyFogTargets();
+	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+	if (!device) return;
+	auto make3D = [&]() -> void* {
+		MTLTextureDescriptor* d = [[MTLTextureDescriptor alloc] init];
+		d.textureType = MTLTextureType3D;
+		d.pixelFormat = MTLPixelFormatRGBA16Float;
+		d.width = grid.x; d.height = grid.y; d.depth = grid.z;
+		d.usage       = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+		d.storageMode = MTLStorageModePrivate;
+		id<MTLTexture> t = [device newTextureWithDescriptor:d];
+		return t ? (void*)CFBridgingRetain(t) : nullptr;
+	};
+	m_fogInject[0]  = make3D();
+	m_fogInject[1]  = make3D();
+	m_fogIntegrated = make3D();
+	if (!(m_fogInject[0] && m_fogInject[1] && m_fogIntegrated)) { DestroyFogTargets(); return; }
+	m_fogGrid      = grid;
+	m_fogHistValid = false; // a new grid has no history to reproject from
+}
+
+void MetalRenderer::EncodeFogVolume(void* cmdBufPtr, float aspect)
+{
+	(void)aspect; // the grid comes from the extractor's FogVolumeData (it saw the same aspect)
+	m_fogFrameActive = false;
+	if (!m_world || !m_renderWorld.fogVolume.enabled) return;
+	if (!EnsureFogPipelines() || !m_skyEnvCube) return;
+	const HE::FogVolumeData& fd = m_renderWorld.fogVolume;
+	EnsureFogTargets(fd.grid);
+	if (!m_fogIntegrated) return;
+	// Inject samples the sky cube (the fog colour) and the sun's bake of it: bring it up to
+	// this frame's sun now, EncodeScene's own call later finds it done (same dead band).
+	UpdateSkyEnvCube(m_renderWorld.sunDirection);
+
+	// ── Time, history validity, wind drift ──────────────────────────────────
+	// HE_SKY_TIME pins the clock for the headless A/B captures: a fixed 60 Hz step makes
+	// the history weight and the wind offset deterministic frame to frame.
+	const bool pinned = [] { const char* v = std::getenv("HE_SKY_TIME"); return v && *v; }();
+	const double now  = pinned ? (m_fogFrameIndex / 60.0)
+	                           : std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+	float dt = (m_fogLastTime > 0.0 || pinned) ? static_cast<float>(now - m_fogLastTime) : 0.0f;
+	if (pinned && m_fogFrameIndex == 0) dt = 0.0f;
+	m_fogLastTime = now;
+	const CameraData& cam = m_renderWorld.camera;
+	const glm::mat4 viewProj  = cam.projection * cam.view;
+	const glm::mat4 invViewProj = glm::inverse(viewProj);
+	const glm::vec3 camFwd    = -glm::normalize(glm::vec3(glm::inverse(cam.view)[2]));
+	const float     focal     = cam.projection[1][1];
+	bool historyOk = m_fogHistValid && dt > 0.0f && dt < 0.5f
+	             && glm::distance(cam.position, m_fogPrevCam) < 10.0f
+	             && std::abs(focal - m_fogPrevFocal) < 1e-4f * std::max(1.0f, std::abs(focal));
+	const IRenderer::EnvironmentSettings& env = GetEnvironment();
+	const float rad = glm::radians(env.windDirection);
+	m_fogNoiseOffset += glm::vec3(std::sin(rad), 0.0f, -std::cos(rad)) * std::max(env.windSpeed, 0.0f) * dt * 0.5f;
+	m_fogNoiseTime   += dt;
+
+	HE::FogVolumeTemporalState ts;
+	ts.jitter01     = HE::fogJitter(m_fogFrameIndex);
+	ts.historyAlpha = historyOk ? HE::fogHistoryAlpha(dt) : 1.0f;
+	ts.historyValid = historyOk;
+	ts.frameIndex   = m_fogFrameIndex;
+	ts.noiseOffset  = m_fogNoiseOffset;
+	ts.noiseTime    = m_fogNoiseTime;
+	const HE::FogVolumeConstants fc = HE::FillFogVolumeConstants(
+		fd, invViewProj, m_fogPrevViewProj, cam.position, camFwd, ts, 0.0f);
+
+	// HeLighting for the shadow/light functions the kernel shares with the surfaces. Lights
+	// and the CSM matrices are exactly what a surface fragment of this frame sees.
+	float skyClock = static_cast<float>(SDL_GetTicks()) / 1000.0f;
+	if (const char* ov = std::getenv("HE_SKY_TIME"); ov && *ov) skyClock = static_cast<float>(std::atof(ov));
+	HE::MaterialShaderLibrary::Lighting lit;
+	const bool shadows = m_renderWorld.shadow.enabled && m_shadowDepthTex;
+	FillMaterialLighting(lit, std::max(1, fd.grid.x), std::max(1, fd.grid.y), false, false, shadows, skyClock);
+
+	id<MTLCommandBuffer> cmdBuf = (__bridge id<MTLCommandBuffer>)cmdBufPtr;
+	// HE_FOG_TIMING=1: the pass-cost witness. Inject and Integrate each get a command buffer of
+	// their own, committed and waited on, and the GPU start/end times are logged (median over
+	// the frames so far, every 100th). It stalls the CPU and reads a shadow map that has not
+	// been committed yet, so the picture of such a frame is wrong: a measurement run only.
+	static const bool s_timing = [] { const char* v = std::getenv("HE_FOG_TIMING"); return v && *v && *v != '0'; }();
+	id<MTLCommandBuffer> mainCmdBuf = cmdBuf;
+	static std::vector<double> s_tInject, s_tIntegrate;
+	auto timedBuffer = [&]() { if (s_timing) cmdBuf = [(__bridge id<MTLCommandQueue>)m_commandQueue commandBuffer]; };
+	auto timedFinish = [&](std::vector<double>& acc) {
+		if (!s_timing) return;
+		[cmdBuf commit];
+		[cmdBuf waitUntilCompleted];
+		acc.push_back((cmdBuf.GPUEndTime - cmdBuf.GPUStartTime) * 1000.0);
+		cmdBuf = mainCmdBuf;
+	};
+	const int cur = 1 - m_fogHist;           // written now; m_fogHist holds last frame's result
+	auto computePass = [&](const char* timerName) -> id<MTLComputeCommandEncoder> {
+		MTLComputePassDescriptor* cpd = [MTLComputePassDescriptor computePassDescriptor];
+		if (m_ft.stage && m_ft.sampleBuf)
+		{
+			if (@available(macOS 11.0, *))
+			{
+				const uint32_t base = ftBeginMulti(timerName);
+				if (base != kInvalidSlot)
+				{
+					MTLComputePassSampleBufferAttachmentDescriptor* a = cpd.sampleBufferAttachments[0];
+					a.sampleBuffer              = (__bridge id<MTLCounterSampleBuffer>)m_ft.sampleBuf;
+					a.startOfEncoderSampleIndex = base;
+					a.endOfEncoderSampleIndex   = base + 1;
+				}
+			}
+		}
+		return [cmdBuf computeCommandEncoderWithDescriptor:cpd];
+	};
+	auto tex = [&](void* t) { return (__bridge id<MTLTexture>)t; };
+	id<MTLSamplerState> lin = (__bridge id<MTLSamplerState>)m_linearSampler;
+
+	// ── Inject ──────────────────────────────────────────────────────────────
+	timedBuffer();
+	{
+		id<MTLComputeCommandEncoder> enc = computePass("FogInject");
+		[enc setComputePipelineState:(__bridge id<MTLComputePipelineState>)m_fogInjectPipe];
+		[enc setBytes:&fc  length:sizeof(fc)  atIndex:0];
+		[enc setBytes:&lit length:sizeof(lit) atIndex:HE::MaterialShaderLibrary::kMetalLightingBufferIndex];
+		[enc setTexture:tex(m_shadowDepthTex) atIndex:11];
+		[enc setSamplerState:lin atIndex:11];
+		[enc setTexture:tex(m_localShadowTex ? m_localShadowTex : m_shadowDepthTex) atIndex:12];
+		[enc setSamplerState:lin atIndex:12];
+		[enc setTexture:tex(m_skyEnvCube) atIndex:14];
+		[enc setSamplerState:lin atIndex:14];
+		[enc setTexture:tex(m_cloudShadowTex ? m_cloudShadowTex : m_dummyTexture) atIndex:16];
+		[enc setTexture:tex(m_fogNoise) atIndex:3];
+		[enc setSamplerState:(__bridge id<MTLSamplerState>)m_noiseSampler atIndex:3];
+		[enc setTexture:tex(m_fogInject[m_fogHist]) atIndex:4];
+		[enc setSamplerState:lin atIndex:4];
+		[enc setTexture:tex(m_fogInject[cur]) atIndex:5];
+		const MTLSize tg = MTLSizeMake(8, 4, 2);
+		const MTLSize groups = MTLSizeMake((fd.grid.x + 7) / 8, (fd.grid.y + 3) / 4, (fd.grid.z + 1) / 2);
+		[enc dispatchThreadgroups:groups threadsPerThreadgroup:tg];
+		[enc endEncoding];
+	}
+	timedFinish(s_tInject);
+	// ── Integrate (one thread per column) ───────────────────────────────────
+	timedBuffer();
+	{
+		id<MTLComputeCommandEncoder> enc = computePass("FogIntegrate");
+		[enc setComputePipelineState:(__bridge id<MTLComputePipelineState>)m_fogIntegratePipe];
+		[enc setBytes:&fc length:sizeof(fc) atIndex:0];
+		[enc setTexture:tex(m_fogInject[cur]) atIndex:0];
+		[enc setTexture:tex(m_fogIntegrated)  atIndex:1];
+		const MTLSize tg = MTLSizeMake(8, 8, 1);
+		const MTLSize groups = MTLSizeMake((fd.grid.x + 7) / 8, (fd.grid.y + 7) / 8, 1);
+		[enc dispatchThreadgroups:groups threadsPerThreadgroup:tg];
+		[enc endEncoding];
+	}
+
+	timedFinish(s_tIntegrate);
+	if (s_timing && s_tInject.size() % 100 == 0 && !s_tInject.empty())
+	{
+		auto med = [](std::vector<double> v) { std::sort(v.begin(), v.end()); return v[v.size() / 2]; };
+		HE_LOG_INFO(RHI, "MetalRenderer: HE_FOG_TIMING frames=%zu grid %dx%dx%d inject median %.3f ms, integrate median %.3f ms",
+		            s_tInject.size(), fd.grid.x, fd.grid.y, fd.grid.z, med(s_tInject), med(s_tIntegrate));
+	}
+	m_fogHist         = cur;
+	m_fogHistValid    = true;
+	m_fogPrevViewProj = viewProj;
+	m_fogPrevCam      = cam.position;
+	m_fogPrevFocal    = focal;
+	++m_fogFrameIndex;
+	m_fogFrame        = fd;
+	m_fogViewProjFlip = glm::scale(glm::mat4(1.0f), glm::vec3(1.0f, -1.0f, 1.0f)) * viewProj;
+	m_fogFrameActive  = true;
+	m_fogApplyConstants = fc;
+}
+
+// Ends the scene encoder, runs the Apply pass over the HDR target and opens the encoder
+// the translucent tail continues in. Returns the new encoder (also kept, retained, in
+// m_fogSceneEncoder for EncodeFrame) or null when nothing was split.
+void* MetalRenderer::EncodeFogApplyAndReopen(void* sceneEncoder, void* cmdBufPtr, void* scenePass,
+                                             int width, int height)
+{
+	(void)width; (void)height;
+	if (!m_fogApplyPipe || !m_fogIntegrated || !m_hdrColor || !m_hdrDepth || !m_skyEnvCube) return nullptr;
+	id<MTLCommandBuffer> cmdBuf = (__bridge id<MTLCommandBuffer>)cmdBufPtr;
+	[(__bridge id<MTLRenderCommandEncoder>)sceneEncoder endEncoding];
+
+	// Apply: full-screen, colour only (the depth is a texture here, never an attachment —
+	// the scene encoder that rendered into it is over).
+	{
+		MTLRenderPassDescriptor* p = [MTLRenderPassDescriptor renderPassDescriptor];
+		p.colorAttachments[0].texture     = (__bridge id<MTLTexture>)m_hdrColor;
+		p.colorAttachments[0].loadAction  = MTLLoadActionLoad;
+		p.colorAttachments[0].storeAction = MTLStoreActionStore;
+		ftAttachPass((__bridge void*)p, "FogApply");
+		id<MTLRenderCommandEncoder> enc = [cmdBuf renderCommandEncoderWithDescriptor:p];
+		[enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_fogApplyPipe];
+		[enc setFragmentBytes:&m_fogApplyConstants length:sizeof(m_fogApplyConstants) atIndex:0];
+		[enc setFragmentTexture:(__bridge id<MTLTexture>)m_fogIntegrated atIndex:0];
+		[enc setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:0];
+		[enc setFragmentTexture:(__bridge id<MTLTexture>)m_skyEnvCube atIndex:1];
+		[enc setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:1];
+		[enc setFragmentTexture:(__bridge id<MTLTexture>)m_hdrDepth atIndex:2];
+		[enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+		[enc endEncoding];
+		++m_counters.draws;
+	}
+
+	// Reopen the scene pass: colour and depth Load. The descriptor is the caller's hdrPass,
+	// already consumed by the first encoder, so editing it now only shapes this one.
+	MTLRenderPassDescriptor* sp = (__bridge MTLRenderPassDescriptor*)scenePass;
+	sp.colorAttachments[0].loadAction = MTLLoadActionLoad;
+	sp.depthAttachment.loadAction     = MTLLoadActionLoad;
+	// Back to the usual rule for what must reach memory after the translucents: the fog's
+	// own need for the depth ended with the Apply pass above.
+	sp.depthAttachment.storeAction = (m_dofEnabled || m_mbEnabled || TemporalActive()
+	                                  || underwaterPostWanted(m_renderWorld.underwaterCamera))
+	                                     ? MTLStoreActionStore : MTLStoreActionDontCare;
+	if (m_fogSceneTimerBase != kInvalidSlot)
+		ftAttachEnd((__bridge void*)sp, m_fogSceneTimerBase);   // clears the start sample, keeps the pair's end
+	id<MTLRenderCommandEncoder> reopened = [cmdBuf renderCommandEncoderWithDescriptor:sp];
+	if (m_fogSceneEncoder) CFBridgingRelease(m_fogSceneEncoder);
+	m_fogSceneEncoder = (void*)CFBridgingRetain(reopened);
+	return (__bridge void*)reopened;
+}
+
+// The material lighting block's fog lanes: fogVol.x = 1 turns the opaque heApplyFog (and the
+// deferred reflection transmittance mirror) into no-ops, because the Apply pass owns them;
+// w = 1 says heFogVolume (texture 17) holds this frame's integrated volume, which
+// heApplyFogT (translucent graph materials) reads.
+void MetalRenderer::FillFogLighting(HE::MaterialShaderLibrary::Lighting& lit) const
+{
+	if (!m_fogFrameActive || !m_fogIntegrated) return;
+	lit.fogVol[0] = 1.0f;
+	lit.fogVol[1] = m_fogFrame.distance;
+	lit.fogVol[2] = m_fogFrame.sliceC;
+	lit.fogVol[3] = 1.0f;
+	lit.fogVolGrid[0] = static_cast<float>(m_fogFrame.grid.x);
+	lit.fogVolGrid[1] = static_cast<float>(m_fogFrame.grid.y);
+	lit.fogVolGrid[2] = static_cast<float>(m_fogFrame.grid.z);
+	std::memcpy(lit.fogViewProj, glm::value_ptr(m_fogViewProjFlip), sizeof(lit.fogViewProj));
+}
+
 void MetalRenderer::EnsureSSAOTargets(int width, int height)
 {
 	width  = std::max(1, width);
@@ -12771,10 +14689,11 @@ void MetalRenderer::EncodeSSAO(void* cmdBufPtr, int width, int height)
 	m_extractor.setContentManager(m_contentManager);
 	m_extractor.extract(*m_world, m_renderWorld,
 	                    static_cast<float>(width) / static_cast<float>(height), &m_editorCamera);
-	if (m_renderWorld.objects.empty()) return;
+	// (a tile landscape is geometry too: with one, the pass runs for the ground alone)
+	if (m_renderWorld.objects.empty() && !m_landscapeProvider) return;
 	RefineObjectBounds();
 	CullCameraObjects();
-	if (m_sortedIndices.empty()) return;
+	if (m_sortedIndices.empty() && !m_landscapeProvider) return;
 	}
 
 	EnsureSSAOTargets(width, height);
@@ -12929,6 +14848,8 @@ void MetalRenderer::EncodeSSAO(void* cmdBufPtr, int width, int height)
 				                 indexType:MTLIndexTypeUInt32 indexBuffer:ibuf indexBufferOffset:0];
 			}, "PrepassLoop", /*serial=*/true);
 		}
+		// The tile landscape's ground: occludes and is occluded like the meshes (and feeds the forward reflections' targets).
+		EncodeLandscapePass((__bridge void*)enc, viewProj, mrt ? 3 : 2, view);
 		[enc endEncoding];
 		}
 
@@ -13050,18 +14971,83 @@ void* MetalRenderer::EnsureMaterialArchive()
 // buffer lands at [[buffer(0)]] and Uniforms at [[buffer(1)]] — exactly the bind points
 // the opaque draw loop already uses (verts@0, setVertexBytes u@1) — so it needs no
 // changes to the per-draw binds. Deliberately simple hemispheric lighting (no sky/fog/
+// The PSO descriptor of a material pipeline, shared by the blocking build and the
+// background one. Reads no renderer state (the caller passes the deferred tile flag),
+// so it may run on one of Metal's compiler threads.
+static MTLRenderPipelineDescriptor* MakeMaterialPipelineDescriptor(id<MTLLibrary> vLib, id<MTLLibrary> fLib,
+                                                                   bool gbuffer, bool blend, bool tileMode)
+{
+	MTLRenderPipelineDescriptor* desc = [[MTLRenderPipelineDescriptor alloc] init];
+	desc.vertexFunction   = [vLib newFunctionWithName:@"main0"];
+	desc.fragmentFunction = [fLib newFunctionWithName:@"main0"];
+	if (gbuffer) // deferred variant: the G-buffer targets, never blended
+	{
+		desc.colorAttachments[0].pixelFormat = kGBuf0Format;
+		desc.colorAttachments[1].pixelFormat = kGBufAttrFormat;
+		desc.colorAttachments[2].pixelFormat = kGBufAttrFormat;
+		desc.colorAttachments[3].pixelFormat = MTLPixelFormatR32Float; // NDC depth (P6)
+		if (tileMode)
+		{
+			desc.colorAttachments[4].pixelFormat = kSceneColorFormat;
+			desc.colorAttachments[4].writeMask   = MTLColorWriteMaskNone;
+		}
+	}
+	else
+		desc.colorAttachments[0].pixelFormat = kSceneColorFormat; // same HDR target as m_scenePipeline
+	desc.depthAttachmentPixelFormat      = kDepthFormat;
+	if (blend && !gbuffer) // transparency-pass variant: standard back-to-front alpha blending
+	{
+		desc.colorAttachments[0].blendingEnabled             = YES;
+		desc.colorAttachments[0].sourceRGBBlendFactor        = MTLBlendFactorSourceAlpha;
+		desc.colorAttachments[0].destinationRGBBlendFactor   = MTLBlendFactorOneMinusSourceAlpha;
+		desc.colorAttachments[0].sourceAlphaBlendFactor      = MTLBlendFactorSourceAlpha;
+		desc.colorAttachments[0].destinationAlphaBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
+	}
+	return desc;
+}
+
+// HE_MATERIAL_PIPELINE_ASYNC=0 puts every caller back on the blocking build: for
+// comparing the two in one binary, and as the way out if a driver dislikes the
+// completion-handler path.
+static bool materialPipelineAsyncEnabled()
+{
+	static const bool on = [] {
+		const char* e = std::getenv("HE_MATERIAL_PIPELINE_ASYNC");
+		return !e || std::atoi(e) != 0;
+	}();
+	return on;
+}
+
 // Build (or fetch) a Metal pipeline for a material's custom fragment. The shared
 // MaterialShaderLibrary owns the canonical GLSL, the standard drop-in vertex, and the
 // glslang→SPIRV-Cross cross-compile (so every backend shares them); this function only
 // turns the emitted MSL into an MTLRenderPipelineState. Cached by `key` (fragment source
 // hash); a null result is cached too so a broken shader isn't rebuilt every frame.
+// The Metal variant the pak baked for `materialId`, looked up FRESH: ContentManager's getters
+// point into dense vectors the next load invalidates, so a pointer kept across draws dangles.
+static const MaterialShaderVariant* bakedMetalVariant(const ContentManager* cm, const HE::UUID& materialId)
+{
+	const MaterialAsset* ma = cm ? cm->getMaterial(materialId) : nullptr;
+	if (ma)
+		for (const auto& var : ma->precompiledShaders)
+			if (var.backend == static_cast<uint8_t>(HE::RendererBackend::Metal)) return &var;
+	return nullptr;
+}
+
+// With `pending` the Metal half runs in the background (see the header): null with
+// *pending = true means "not yet", null with *pending = false means "failed".
 void* MetalRenderer::GetOrBuildMaterialPipeline(uint64_t key, const std::string& fragGlsl,
                                                const std::string& vertBody,
                                                const MaterialShaderVariant* precompiled,
-                                               bool blend, bool gbuffer, bool instanced)
+                                               bool blend, bool gbuffer, bool instanced, bool* pending)
 {
-	// The pak bakes no instanced vertex: the caller loops with the plain PSO.
-	if (instanced && precompiled) return nullptr;
+	if (pending) *pending = false;
+	// What the pak baked for the twin asked for (CHUNK_PSHD v4). A twin it did not bake is
+	// not cross-compiled next to a baked plain pair (a packaged build may have no
+	// translator): the G-buffer twin simply cross-compiles, as the deferred path always
+	// could; the instanced one returns null and the caller loops with the plain PSO.
+	if (precompiled && gbuffer && precompiled->fragmentGBuffer.empty()) precompiled = nullptr;
+	if (precompiled && instanced && precompiled->vertexInstanced.empty()) return nullptr;
 	if (blend)   key ^= 0xB1E4DB1E4DB1E4DULL; // blended variant gets its own cache slot
 	if (gbuffer) key ^= 0x6BB0F6BB0F6BB0F6ULL; // deferred G-buffer variant, own cache slot
 	// `key` also keys the fragment cache below: the instanced twin (2e) gets its
@@ -13070,7 +15056,12 @@ void* MetalRenderer::GetOrBuildMaterialPipeline(uint64_t key, const std::string&
 	if (instanced) key ^= 0x1D57A9CEDB0B1E55ULL;
 	if (auto it = m_materialPipelineCache.find(key); it != m_materialPipelineCache.end())
 		return it->second;
+	const bool background = pending && materialPipelineAsyncEnabled();
+	if (background && m_materialPipelinePending.count(key)) { *pending = true; return nullptr; }
 
+	// Only a build is timed, a cache hit returned above. The three phases below are
+	// what a first draw or a warm-up stalls on.
+	HE_PROFILE_SCOPE_N("Metal::MaterialPipelineBuild");
 	using Backend = HE::MaterialShaderLibrary::Backend;
 	std::string vertMSL, fragMSL, log;
 	std::string fragFallbackMSL; // baked plain fragment, if the baked clustered one is rejected
@@ -13081,13 +15072,15 @@ void* MetalRenderer::GetOrBuildMaterialPipeline(uint64_t key, const std::string&
 		// Baked at export time — no runtime cross-compile. Forward PSOs take the
 		// baked clustered twin under the same rule as the cross-compiled path
 		// below (Thema 117); a pak without it keeps the plain window variant.
-		vertMSL = precompiled->vertex; fragMSL = precompiled->fragment;
+		vertMSL = instanced ? precompiled->vertexInstanced : precompiled->vertex;
+		fragMSL = gbuffer   ? precompiled->fragmentGBuffer : precompiled->fragment;
 		if (m_forwardClustered && !gbuffer && !precompiled->fragmentClustered.empty())
 		{
 			// The exporter never bakes a separate clustered vertex for Metal; honour
-			// one anyway, but then the plain fragment no longer pairs with it and
-			// there is no fallback to offer.
-			if (!precompiled->vertexClustered.empty()) vertMSL = precompiled->vertexClustered;
+			// one anyway (not for the instanced twin: it has no clustered form), but
+			// then the plain fragment no longer pairs with it and there is no fallback
+			// to offer.
+			if (!instanced && !precompiled->vertexClustered.empty()) vertMSL = precompiled->vertexClustered;
 			else                                       fragFallbackMSL = fragMSL;
 			fragMSL = precompiled->fragmentClustered;
 			bakedClustered = true;
@@ -13096,6 +15089,7 @@ void* MetalRenderer::GetOrBuildMaterialPipeline(uint64_t key, const std::string&
 	}
 	else
 	{
+		HE_PROFILE_SCOPE_N("Metal::MaterialPipelineBuild::CrossCompile");
 		// WPO materials get the graph-generated vertex; everything else the shared one.
 		// The instanced twin takes the instanced form of either.
 		const uint64_t vh = vertBody.empty() ? 0 : std::hash<std::string>{}(vertBody);
@@ -13121,16 +15115,28 @@ void* MetalRenderer::GetOrBuildMaterialPipeline(uint64_t key, const std::string&
 		ok = v.ok && f->ok;
 	}
 
+	if (ok && background)
+	{
+		StartMaterialPipelineBuild(key, vertMSL, fragMSL, fragFallbackMSL, precompiled != nullptr,
+		                           bakedClustered, blend, gbuffer);
+		*pending = true;
+		return nullptr;
+	}
+
 	void* result = nullptr;
 	if (ok)
 	{
 		id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
 		NSError* err = nil;
-		id<MTLLibrary> vLib = [device newLibraryWithSource:[NSString stringWithUTF8String:vertMSL.c_str()]
-		                                           options:nil error:&err];
-		id<MTLLibrary> fLib = err ? nil
-			: [device newLibraryWithSource:[NSString stringWithUTF8String:fragMSL.c_str()]
-			                       options:nil error:&err];
+		id<MTLLibrary> vLib = nil, fLib = nil;
+		{
+			HE_PROFILE_SCOPE_N("Metal::MaterialPipelineBuild::Libraries");
+			vLib = [device newLibraryWithSource:[NSString stringWithUTF8String:vertMSL.c_str()]
+			                            options:nil error:&err];
+			fLib = err ? nil
+				: [device newLibraryWithSource:[NSString stringWithUTF8String:fragMSL.c_str()]
+				                       options:nil error:&err];
+		}
 		if (vLib && !fLib && !fragFallbackMSL.empty())
 		{
 			// The baked clustered fragment did not compile: the baked plain one
@@ -13145,36 +15151,17 @@ void* MetalRenderer::GetOrBuildMaterialPipeline(uint64_t key, const std::string&
 		}
 		if (precompiled && vLib && fLib)
 			HE_LOG_INFO(RHI, "%s", bakedClustered
-				? "MetalRenderer: material pipeline from a PRECOMPILED variant, clustered"
-				: "MetalRenderer: material pipeline from a PRECOMPILED variant, plain");
+				? (instanced ? "MetalRenderer: material pipeline from a PRECOMPILED variant, clustered, instanced"
+				             : "MetalRenderer: material pipeline from a PRECOMPILED variant, clustered")
+				: gbuffer
+				? (instanced ? "MetalRenderer: material pipeline from a PRECOMPILED variant, G-buffer, instanced"
+				             : "MetalRenderer: material pipeline from a PRECOMPILED variant, G-buffer")
+				: (instanced ? "MetalRenderer: material pipeline from a PRECOMPILED variant, plain, instanced"
+				             : "MetalRenderer: material pipeline from a PRECOMPILED variant, plain"));
 		if (vLib && fLib)
 		{
-			MTLRenderPipelineDescriptor* desc = [[MTLRenderPipelineDescriptor alloc] init];
-			desc.vertexFunction   = [vLib newFunctionWithName:@"main0"];
-			desc.fragmentFunction = [fLib newFunctionWithName:@"main0"];
-			if (gbuffer) // deferred variant: the G-buffer targets, never blended
-			{
-				desc.colorAttachments[0].pixelFormat = kGBuf0Format;
-				desc.colorAttachments[1].pixelFormat = kGBufAttrFormat;
-				desc.colorAttachments[2].pixelFormat = kGBufAttrFormat;
-				desc.colorAttachments[3].pixelFormat = MTLPixelFormatR32Float; // NDC depth (P6)
-				if (m_deferredTileMode)
-				{
-					desc.colorAttachments[4].pixelFormat = kSceneColorFormat;
-					desc.colorAttachments[4].writeMask   = MTLColorWriteMaskNone;
-				}
-			}
-			else
-				desc.colorAttachments[0].pixelFormat = kSceneColorFormat; // same HDR target as m_scenePipeline
-			desc.depthAttachmentPixelFormat      = kDepthFormat;
-			if (blend && !gbuffer) // transparency-pass variant: standard back-to-front alpha blending
-			{
-				desc.colorAttachments[0].blendingEnabled             = YES;
-				desc.colorAttachments[0].sourceRGBBlendFactor        = MTLBlendFactorSourceAlpha;
-				desc.colorAttachments[0].destinationRGBBlendFactor   = MTLBlendFactorOneMinusSourceAlpha;
-				desc.colorAttachments[0].sourceAlphaBlendFactor      = MTLBlendFactorSourceAlpha;
-				desc.colorAttachments[0].destinationAlphaBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
-			}
+			MTLRenderPipelineDescriptor* desc =
+				MakeMaterialPipelineDescriptor(vLib, fLib, gbuffer, blend, m_deferredTileMode);
 			// On-disk pipeline cache: point the descriptor at the binary archive so
 			// Metal reuses previously-compiled functions (fast) when present. Best-
 			// effort — if the function isn't cached, Metal compiles it as usual.
@@ -13184,7 +15171,11 @@ void* MetalRenderer::GetOrBuildMaterialPipeline(uint64_t key, const std::string&
 				arch = (__bridge id<MTLBinaryArchive>)EnsureMaterialArchive();
 				if (arch) desc.binaryArchives = @[arch];
 			}
-			id<MTLRenderPipelineState> pso = [device newRenderPipelineStateWithDescriptor:desc error:&err];
+			id<MTLRenderPipelineState> pso = nil;
+			{
+				HE_PROFILE_SCOPE_N("Metal::MaterialPipelineBuild::Pipeline");
+				pso = [device newRenderPipelineStateWithDescriptor:desc error:&err];
+			}
 			if (pso)
 			{
 				result = (void*)CFBridgingRetain(pso);
@@ -13211,6 +15202,141 @@ void* MetalRenderer::GetOrBuildMaterialPipeline(uint64_t key, const std::string&
 
 	m_materialPipelineCache[key] = result; // cache success AND failure (null)
 	return result;
+}
+
+// The Metal half of a material pipeline build, on Metal's own compiler threads: the two
+// libraries (vertex, then fragment, with the baked-plain retry) and the PSO, chained
+// through their completion handlers. A handler touches nothing of the renderer; it posts
+// into the mailbox, which DrainMaterialPipelines empties on the main thread.
+void MetalRenderer::StartMaterialPipelineBuild(uint64_t key, const std::string& vertMSL,
+                                               const std::string& fragMSL, const std::string& fragFallbackMSL,
+                                               bool precompiled, bool bakedClustered, bool blend, bool gbuffer)
+{
+	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+	if (!m_matMailbox) m_matMailbox = std::make_shared<MatPipelineMailbox>();
+	const std::shared_ptr<MatPipelineMailbox> box = m_matMailbox;
+	const bool tileMode = m_deferredTileMode;
+	id<MTLBinaryArchive> arch = nil;
+	if (@available(macOS 11.0, *)) arch = (__bridge id<MTLBinaryArchive>)EnsureMaterialArchive();
+	NSString* vSrc  = [NSString stringWithUTF8String:vertMSL.c_str()];
+	NSString* fSrc  = [NSString stringWithUTF8String:fragMSL.c_str()];
+	NSString* fbSrc = fragFallbackMSL.empty() ? nil : [NSString stringWithUTF8String:fragFallbackMSL.c_str()];
+	m_materialPipelinePending.insert(key);
+	++m_matBuildScheduled;
+
+	const bool hasArchive = arch != nil;
+	auto post = [box, key, hasArchive](id<MTLRenderPipelineState> pso, MTLRenderPipelineDescriptor* desc,
+	                                   std::string error, std::string warn, std::string info)
+	{
+		MatPipelineDone d;
+		d.key = key; d.error = std::move(error); d.warn = std::move(warn); d.info = std::move(info);
+		if (pso) d.pso = (void*)CFBridgingRetain(pso);
+		if (pso && desc && hasArchive) d.desc = (void*)CFBridgingRetain(desc);
+		std::lock_guard<std::mutex> lk(box->mtx);
+		if (box->closed) // the renderer is gone: nobody will drain this
+		{
+			if (d.pso)  CFBridgingRelease(d.pso);
+			if (d.desc) CFBridgingRelease(d.desc);
+			return;
+		}
+		box->done.push_back(std::move(d));
+	};
+	auto describe = [](NSError* e) -> std::string { return e ? e.localizedDescription.UTF8String : "?"; };
+
+	void (^makePso)(id<MTLLibrary>, id<MTLLibrary>, NSError*, std::string, bool) =
+	^(id<MTLLibrary> vLib, id<MTLLibrary> fLib, NSError* err, std::string warn, bool clusteredBaked)
+	{
+		if (!vLib || !fLib)
+		{
+			post(nil, nil, "MetalRenderer: material pipeline build failed: " + describe(err), std::move(warn), {});
+			return;
+		}
+		MTLRenderPipelineDescriptor* desc = MakeMaterialPipelineDescriptor(vLib, fLib, gbuffer, blend, tileMode);
+		if (@available(macOS 11.0, *)) if (arch) desc.binaryArchives = @[arch];
+		[device newRenderPipelineStateWithDescriptor:desc
+		                           completionHandler:^(id<MTLRenderPipelineState> pso, NSError* perr)
+		{
+			std::string info;
+			if (pso && precompiled)
+				info = clusteredBaked
+					? "MetalRenderer: material pipeline from a PRECOMPILED variant, clustered"
+					: "MetalRenderer: material pipeline from a PRECOMPILED variant, plain";
+			post(pso, desc, pso ? std::string{} : "MetalRenderer: material pipeline build failed: " + describe(perr),
+			     warn, std::move(info));
+		}];
+	};
+
+	[device newLibraryWithSource:vSrc options:nil completionHandler:^(id<MTLLibrary> vLib, NSError* e1)
+	{
+		if (!vLib) { makePso(nil, nil, e1, {}, false); return; }
+		[device newLibraryWithSource:fSrc options:nil completionHandler:^(id<MTLLibrary> fLib, NSError* e2)
+		{
+			if (!fLib && fbSrc)
+			{
+				// The baked clustered fragment did not compile: the baked plain one
+				// still draws the material (8-light window, which stays full).
+				std::string warn = "MetalRenderer: baked clustered material variant rejected, "
+				                   "using the 8-light window: " + describe(e2);
+				[device newLibraryWithSource:fbSrc options:nil completionHandler:^(id<MTLLibrary> fLib2, NSError* e3)
+				{
+					makePso(vLib, fLib2, e3, warn, false);
+				}];
+				return;
+			}
+			makePso(vLib, fLib, e2, {}, bakedClustered);
+		}];
+	}];
+}
+
+// Main thread. Moves what Metal's compiler threads finished into the pipeline cache.
+void MetalRenderer::DrainMaterialPipelines()
+{
+	if (!m_matMailbox) return;
+	std::vector<MatPipelineDone> batch;
+	{
+		std::lock_guard<std::mutex> lk(m_matMailbox->mtx);
+		if (m_matMailbox->done.empty()) return;
+		batch.swap(m_matMailbox->done);
+	}
+	for (MatPipelineDone& d : batch)
+	{
+		m_materialPipelinePending.erase(d.key);
+		++m_matBuildFinished;
+		if (!d.warn.empty()) HE_LOG_WARN(RHI, "%s", d.warn.c_str());
+		if (!d.info.empty()) HE_LOG_INFO(RHI, "%s", d.info.c_str());
+		if (!d.pso)          HE_LOG_ERROR(RHI, "%s", d.error.c_str());
+		// A blocking build of the same key (the material preview) may have got there
+		// first; its pipeline stays, the duplicate goes.
+		auto [it, inserted] = m_materialPipelineCache.try_emplace(d.key, d.pso);
+		if (!inserted)
+		{
+			if (!it->second) it->second = d.pso;
+			else if (d.pso)  CFBridgingRelease(d.pso);
+		}
+		if (d.desc)
+		{
+			if (@available(macOS 11.0, *))
+			{
+				id<MTLBinaryArchive> arch = (__bridge id<MTLBinaryArchive>)m_matBinaryArchive;
+				NSError* aerr = nil;
+				if (arch && [arch addRenderPipelineFunctionsWithDescriptor:(__bridge MTLRenderPipelineDescriptor*)d.desc
+				                                                     error:&aerr]
+				    && !m_matArchivePath.empty())
+					[arch serializeToURL:[NSURL fileURLWithPath:@(m_matArchivePath.c_str())] error:nil];
+			}
+			CFBridgingRelease(d.desc);
+		}
+	}
+	if (m_materialPipelinePending.empty()) { m_matBuildScheduled = 0; m_matBuildFinished = 0; }
+}
+
+IRenderer::ShaderBuildStatus MetalRenderer::PumpShaderBuilds()
+{
+	DrainMaterialPipelines();
+	ShaderBuildStatus s;
+	s.pending = static_cast<int>(m_materialPipelinePending.size());
+	s.total   = m_matBuildScheduled;
+	return s;
 }
 
 // Delegate to the shared, backend-agnostic library (reads the MaterialAsset).
@@ -13310,7 +15436,7 @@ void MetalRenderer::EncodeTonemap(void* renderEncoderPtr, void* sourceHdr, bool 
 		? (__bridge id<MTLTexture>)m_bloomResult
 		: (__bridge id<MTLTexture>)hdr;
 	[enc setFragmentTexture:bloomTex atIndex:1];
-	const simd::float2 params = { 1.0f, bloom ? m_bloomStrength : 0.0f };
+	const simd::float2 params = { m_rawCapture ? (m_rawSrgb ? -2.0f : -1.0f) : 1.0f, bloom ? m_bloomStrength : 0.0f };
 	[enc setFragmentBytes:&params length:sizeof(params) atIndex:0];
 	static const float kNoFlare[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
 	[enc setFragmentBytes:(withBloom ? m_lensFlareParams : kNoFlare)
@@ -13350,7 +15476,7 @@ void MetalRenderer::DestroyLdrTarget()
 // construction: it only ever reads positions.
 void MetalRenderer::EncodeVelocity(void* cmdBufPtr, int width, int height)
 {
-	if (!TemporalActive() || !m_velocityTex || m_sortedIndices.empty()) return;
+	if (!TemporalActive() || !m_velocityTex || (m_sortedIndices.empty() && !m_landscapeProvider)) return;
 	id<MTLCommandBuffer> cmdBuf = (__bridge id<MTLCommandBuffer>)cmdBufPtr;
 
 	MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
@@ -13425,6 +15551,8 @@ void MetalRenderer::EncodeVelocity(void* cmdBufPtr, int width, int height)
 		               indexBuffer:(__bridge id<MTLBuffer>)mesh->indexBuf
 		         indexBufferOffset:0];
 	}
+	// The tile landscape's ground stands still; the camera's own motion is its velocity.
+	EncodeLandscapePass((__bridge void*)enc, viewProjJit, 4, viewProjClean, m_taaPrevViewProj);
 	[enc endEncoding];
 
 	// Advance the history HERE, at the end of the one pass that consumed it —
@@ -13766,14 +15894,7 @@ void* MetalRenderer::UIFontAtlasTexture(uint32_t key)
 	const HE::BakedUIFont* f = HE::UIFontCache::find(key);
 	if (!f || !f->ok) return m_uiFontTexture;
 	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
-	MTLTextureDescriptor* d = [MTLTextureDescriptor
-		texture2DDescriptorWithPixelFormat:MTLPixelFormatR8Unorm
-		                             width:f->atlasW height:f->atlasH mipmapped:NO];
-	d.usage = MTLTextureUsageShaderRead; d.storageMode = MTLStorageModeShared;
-	id<MTLTexture> tex = [device newTextureWithDescriptor:d];
-	[tex replaceRegion:MTLRegionMake2D(0, 0, f->atlasW, f->atlasH)
-	       mipmapLevel:0 withBytes:f->pixels.data() bytesPerRow:f->atlasW];
-	void* stored = (void*)CFBridgingRetain(tex);
+	void* stored = (void*)CFBridgingRetain(makeUIFontAtlas(device, *f));
 	m_uiFontAtlases[key] = stored;
 	return stored;
 }
@@ -13961,8 +16082,8 @@ void* MetalRenderer::EncodeUIPass(void* renderEncoderPtr, int width, int height,
 			if (const MaterialAsset* ma = m_contentManager
 				? m_contentManager->getMaterial(obj.materialAssetId) : nullptr)
 			{
-				float padded[64] = { 0 };
-				const size_t n = std::min(ma->shaderParamData.size(), size_t(64));
+				float padded[HE::kMatParamFloats] = { 0 };
+				const size_t n = std::min(ma->shaderParamData.size(), size_t(HE::kMatParamFloats));
 				std::memcpy(padded, ma->shaderParamData.data(), n * sizeof(float));
 				[enc setFragmentBytes:padded length:sizeof(padded) atIndex:2];
 				const uint32_t arrMask = HE::matGlslTextureArrayMask(ma->customShaderFragGlsl);
@@ -14025,7 +16146,7 @@ void* MetalRenderer::EncodeUIPass(void* renderEncoderPtr, int width, int height,
 		// shape = { mode, maxCornerRadius, rectW, rectH } (see uiFragment): the
 		// maximum is what the "is this rounded at all" fast path asks, the four
 		// radii themselves go in their own slot.
-		const float mode = obj.type == 2 ? 1.0f : (textured ? 2.0f : 0.0f);
+		const float mode = obj.type == 2 ? 1.0f : (textured ? (obj.pixelated ? 3.0f : 2.0f) : 0.0f);
 		const float maxR = std::max(std::max(obj.cornerRadius.x, obj.cornerRadius.y),
 		                            std::max(obj.cornerRadius.z, obj.cornerRadius.w));
 		const simd::float4 shape = { mode, maxR, obj.size.x, obj.size.y };
@@ -14171,21 +16292,28 @@ void MetalRenderer::DestroySkyViewLut()
 // the camera, so a reflection ray that misses the scene returns the sky the
 // viewer sees — clouds and weather included — instead of m_skyEnvCube's
 // cloudless CPU atmosphere. Every frame the reflections trace (clouds drift
-// with the clock); 6 × 128² texels is about a tenth of a 720p sky pass. No
-// low-res cloud composite: that buffer is screen-space, a face is not.
-static constexpr int kSkyReflCubeSize = 128;
+// with the clock); one of the six 256² faces per frame after the first full bake. No
+// low-res cloud composite: that buffer is screen-space, a face is not. A face with full clouds
+// costs ~1.2 ms at 256² and ~2.4 ms at 512² (Catania, M5): 512² with two faces a frame was most
+// of the reflection pass; the sky in a glossy reflection does not need it (2026-11-20).
+static constexpr int kSkyReflCubeSize = 256;
 void MetalRenderer::EncodeSkyReflCube(void* cmdBufPtr)
 {
+	// Once per frame: the deferred frame traces twice (opaque, then the water pre-pass) and the sky is the same for both.
+	// The bake was the bulk of the reflection cost (~2.4 ms a 512² face with full clouds), not the trace.
+	if (m_skyReflThisFrame) return;
+	m_skyReflThisFrame = true;
 	m_skyReflValid = false;
 	static const bool s_off = [] {
 		const char* e = std::getenv("HE_GIREFL_SKY");
 		return e && e[0] == '0';
 	}();
-	if (s_off || !m_skyReflPipeline || !GetEnvironment().skyEnabled) return;
+	if (s_off || !m_skyReflPipeline || !GetEnvironment().skyEnabled) { m_skyReflBaked = false; return; }
 	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
 	if (!device) return;
 	if (!m_skyReflCube)
 	{
+		m_skyReflBaked = false;
 		MTLTextureDescriptor* d = [MTLTextureDescriptor
 			textureCubeDescriptorWithPixelFormat:kSceneColorFormat
 			size:kSkyReflCubeSize mipmapped:NO];
@@ -14198,7 +16326,10 @@ void MetalRenderer::EncodeSkyReflCube(void* cmdBufPtr)
 	if (const char* ov = std::getenv("HE_SKY_TIME"); ov && *ov) skyClock = static_cast<float>(std::atof(ov));
 	const glm::vec3 camPos = m_renderWorld.camera.position;
 	id<MTLCommandBuffer> cmdBuf = (__bridge id<MTLCommandBuffer>)cmdBufPtr;
-	for (int f = 0; f < 6; ++f)
+	// All six faces the first time, then a rotating pair (a face not drawn keeps its picture).
+	const int firstFace = m_skyReflBaked ? m_skyReflPhase * kSkyReflFacesPerFrame : 0;
+	const int endFace   = m_skyReflBaked ? firstFace + kSkyReflFacesPerFrame : 6;
+	for (int f = firstFace; f < endFace; ++f)
 	{
 		MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
 		pass.colorAttachments[0].texture     = (__bridge id<MTLTexture>)m_skyReflCube;
@@ -14212,6 +16343,8 @@ void MetalRenderer::EncodeSkyReflCube(void* cmdBufPtr)
 		[enc endEncoding];
 	}
 	m_skyReflValid = true;
+	m_skyReflPhase = m_skyReflBaked ? (m_skyReflPhase + 1) % (6 / kSkyReflFacesPerFrame) : 0;
+	m_skyReflBaked = true;
 }
 
 void MetalRenderer::UpdateSkyEnvCube(const glm::vec3& sunDir)
@@ -14296,13 +16429,30 @@ void MetalRenderer::BindMaterialPreambleSlots(void* renderEncoder, bool frameSta
 	// gate the samples, so an absent cubemap (nil — legal in Metal, reads zero)
 	// or a dummy AO bind here is inert. The cube slot must NOT get the 2D dummy:
 	// Metal validates the texture TYPE.
-	[encoder setFragmentTexture:(__bridge id<MTLTexture>)m_skyEnvCube atIndex:14];
+	[encoder setFragmentTexture:(__bridge id<MTLTexture>)MaterialSkyCube() atIndex:14];
 	[encoder setFragmentTexture:pick(ssaoActive ? m_ssaoResult : nullptr) atIndex:15];
 	// Cloud-shadow map at texture 16 — TEXTURE only, deliberately no sampler
 	// (both fragmentMain and the material preamble sample it through an inline
 	// constexpr sampler; sampler indices stop at 15). White dummy when the
 	// pass didn't run, and the strength gate is 0 then anyway.
 	[encoder setFragmentTexture:pick(m_cloudShadowTex) atIndex:16];
+	// Froxel fog volume at texture 17 (heFogVolume, preamble binding 34) — TEXTURE only, read
+	// with texelFetch through an inline constexpr sampler like the cloud-shadow map. Only
+	// heApplyFogT (translucent graph materials) reads it, and only where fogVol.w = 1; the
+	// 3D dummy everywhere else, because Metal validates the texture TYPE.
+	[encoder setFragmentTexture:(__bridge id<MTLTexture>)(frameState && m_fogFrameActive && m_fogIntegrated
+	                                                       ? m_fogIntegrated : m_fogDummy3D)
+	                    atIndex:HE::MaterialShaderLibrary::kMetalFogVolumeTextureIndex];
+	// Runtime Virtual Texture (Thema 333): the page table and the three pool arrays of a material with an RvtSample node, at
+	// textures 18..21 with NO sampler (MaterialShaderLibrary pins them to inline constexpr samplers). Inert defaults here, the
+	// real ones per draw (BindRvtForDraw). The array slots get the 2D-ARRAY dummy: Metal validates the texture TYPE.
+	[encoder setFragmentTexture:(__bridge id<MTLTexture>)m_rvtDummyTable atIndex:18];
+	for (int slot = 19; slot <= 24; ++slot)   // 19..21 the hot pool's arrays, 22..24 the cold pool's (step 6j)
+		[encoder setFragmentTexture:(__bridge id<MTLTexture>)m_whiteArrayTexture atIndex:slot];
+	// The lookup's feedback buffer (HE_RVT_FEEDBACK): this frame's, or the sink outside a frame (previews, pages). Every encoder
+	// that may draw a consumer needs one bound: the shader writes it unconditionally.
+	if (void* fb = RvtFeedbackBindTarget())
+		[encoder setFragmentBuffer:(__bridge id<MTLBuffer>)fb offset:0 atIndex:kRvtFeedbackBufferIndex];
 }
 
 void MetalRenderer::EncodeSkinnedObjects(void* renderEncoder, const glm::mat4& viewProj,
@@ -14405,8 +16555,253 @@ void MetalRenderer::EncodeSkinnedObjects(void* renderEncoder, const glm::mat4& v
 	[encoder setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_scenePipeline];
 }
 
+// The forward pipeline that draws the tile landscape's patches with a material: the landscape's vertex stage (same heights and morph as
+// its own shader) and the material's fragment with its layer weights from the tile atlas. Built on first use, on this thread (one
+// compile per material, the fixed blend is not shown in between); a material without a shader, or whose variant does not build, gives
+// null for good and the landscape keeps its fixed blend.
+void* MetalRenderer::GetOrBuildLandscapeMaterialPipeline(const HE::UUID& materialId, bool gbuffer)
+{
+#if defined(HE_HAVE_SHADERC)
+	// `gbuffer`: the material's G-buffer fragment for the deferred pass (attributes, lit by the resolve) instead of its lit one.
+	uint64_t key = 0; std::string fragGlsl, vertBody;
+	if (gbuffer ? !ResolveMaterialShaderGB(materialId, key, fragGlsl, vertBody) : !ResolveMaterialShader(materialId, key, fragGlsl, vertBody)) return nullptr;
+	const bool clustered = m_forwardClustered && !gbuffer;
+	key ^= gbuffer ? 0x7A11E56B0FFE2000ull : clustered ? 0x7A11E5C1A57E12EDull : 0x7A11E5F02A12D000ull;
+	if (auto it = m_landscapeMaterialPipelines.find(key); it != m_landscapeMaterialPipelines.end()) return it->second;
+
+	using Backend = HE::MaterialShaderLibrary::Backend;
+	const auto& v = m_matShaderLib.landscapeVertex(Backend::Metal);
+	const auto& f = m_matShaderLib.landscapeFragment(key, fragGlsl, Backend::Metal, clustered);
+	void* result = nullptr;
+	NSError* err = nil;
+	if (v.ok && f.ok)
+	{
+		id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+		id<MTLLibrary> vLib = [device newLibraryWithSource:[NSString stringWithUTF8String:v.source.c_str()] options:nil error:&err];
+		id<MTLLibrary> fLib = vLib ? [device newLibraryWithSource:[NSString stringWithUTF8String:f.source.c_str()] options:nil error:&err] : nil;
+		if (vLib && fLib)
+			if (id<MTLRenderPipelineState> pso = [device newRenderPipelineStateWithDescriptor:MakeMaterialPipelineDescriptor(vLib, fLib, gbuffer, false, gbuffer && m_deferredTileMode) error:&err])
+				result = (void*)CFBridgingRetain(pso);
+	}
+	if (!result)
+		HE_LOG_WARN(RHI, "MetalRenderer: the landscape keeps its fixed blend, its material's variant did not build: %s%s%s",
+		            v.log.c_str(), f.log.c_str(), err ? err.localizedDescription.UTF8String : "");
+	m_landscapeMaterialPipelines[key] = result;
+	return result;
+#else
+	(void)materialId;
+	return nullptr;
+#endif
+}
+
+bool MetalRenderer::EnsureLandscape()
+{
+	if (m_landscapeFailed) return false;
+	if (m_landscape.ready()) return true;
+	std::string err;
+	if (!m_landscape.init(m_device, static_cast<unsigned long>(kSceneColorFormat), static_cast<unsigned long>(kDepthFormat), &err))
+	{
+		HE_LOG_WARN(RHI, "MetalRenderer: the world-scale landscape is off: %s", err.c_str());
+		m_landscapeFailed = true;
+		return false;
+	}
+	return true;
+}
+
+// The tile landscape in a pass that is not the scene's: a shadow map layer (depth only) or the GI pre-pass (position + normal).
+// `clip` is that pass's matrix with depth 0..1. The provider is asked for THIS view (its patches are the ones this view sees; their
+// levels are the main camera's whatever the view, LandscapeRuntime::buildFrame, so caster and receiver are the same surface), and a
+// frame carries the uploads that were pending when it was asked, so whichever pass comes first in a frame brings the tiles in.
+void MetalRenderer::EncodeLandscapePass(void* renderEncoder, const glm::mat4& clip, int kind, const glm::mat4& aux0, const glm::mat4& aux1)
+{
+	// kind: 0 shadow map layer (depth only), 1 GI pre-pass (position + normal), 2 SSAO position, 3 SSAO position with the forward
+	// reflections' normal and depth beside it, 4 velocity. 0 and 1 hand a matrix with depth 0..1, the others the scene's GL one.
+	if (kind < 0 || kind >= kLandscapePassKinds) return;
+	const bool zeroToOne = kind <= 1;
+	if (!m_landscapeProvider || m_landscapeFailed) return;
+	// HE_LANDSCAPE_PASSES=0: the ground in the scene pass alone, as before (the A/B of landscape_gpu_check; read per call so a
+	// running process can switch).
+	if (const char* e = std::getenv("HE_LANDSCAPE_PASSES"); e && *e == '0') return;
+	// The provider first: a scene without a tile landscape compiles nothing here.
+	HE::LandscapeRenderFrame frame;
+	m_landscapeProvider(glm::dmat4(clip), zeroToOne, frame);
+	if (!frame.active || !EnsureLandscape()) return;
+	void*& pso = m_landscapePassPipeline[kind];
+	bool& tried = m_landscapePassTried[kind];
+	if (!pso && !tried)
+	{
+		tried = true;
+		std::string err;
+		static const char* const kVertex[kLandscapePassKinds]   = { nullptr, nullptr, nullptr, nullptr, "vertexVelocity" };
+		static const char* const kFragment[kLandscapePassKinds] = { nullptr, "fragmentGiGBuf", "fragmentViewPos", "fragmentViewPosMrt", "fragmentVelocity" };
+		static const char* const kWhere[kLandscapePassKinds]    = { "shadow maps", "GI pre-pass", "SSAO pre-pass", "reflection pre-pass", "velocity pass" };
+		const unsigned long f16 = static_cast<unsigned long>(MTLPixelFormatRGBA16Float);
+		const unsigned long colors[kLandscapePassKinds][3] = {
+			{ 0, 0, 0 },
+			{ static_cast<unsigned long>(kGiGBufPosFormat), f16, 0 },
+			{ f16, 0, 0 },
+			{ f16, f16, static_cast<unsigned long>(MTLPixelFormatR32Float) },
+			{ static_cast<unsigned long>(MTLPixelFormatRG16Float), 0, 0 } };
+		static const int kColorCount[kLandscapePassKinds] = { 0, 2, 1, 3, 1 };
+		pso = m_landscape.makePassPipeline(kVertex[kind], kFragment[kind], colors[kind], kColorCount[kind], static_cast<unsigned long>(kDepthFormat), &err);
+		if (!pso) HE_LOG_WARN(RHI, "MetalRenderer: the landscape is not in the %s: %s", kWhere[kind], err.c_str());
+	}
+	if (!pso) frame.patches.clear();   // nothing to draw with, but the frame's uploads are still this frame's: encode() applies them
+	MetalLandscape::Shading sh;
+	sh.passPipeline = pso;
+	sh.passKeepsDepthState = kind == 4;   // velocity tests against the scene's depth and does not write
+	sh.aux0 = aux0;
+	sh.aux1 = aux1;
+	m_landscape.encode(renderEncoder, frame, clip, sh);
+}
+
+// The ground's material, when it has a shader and its landscape variant builds: bound like a mesh draw of that material (parameters,
+// the graph's textures, the virtual texture); the landscape adds its own images. Lighting and the rest of the preamble are the
+// encoder's already. Returns the pipeline to draw the patches with (the lit one, or the G-buffer one for the deferred pass), or null:
+// the fixed blend. Not on a page camera (rvtSlot): that draws the page material on meshes.
+void* MetalRenderer::BindLandscapeMaterial(void* renderEncoder, const HE::LandscapeRenderFrame& frame, bool gbuffer, const HE::UUID* use)
+{
+	void* result = nullptr;
+#if defined(HE_HAVE_SHADERC)
+	// The texture group's material is named by no entity, so nothing may have loaded it: once per id, from its path.
+	if (frame.materialId != HE::UUID{} && !frame.materialPath.empty() && m_contentManager && frame.materialId != m_landscapeMaterialLoadTried
+	    && !m_contentManager->getMaterial(frame.materialId))
+	{
+		m_landscapeMaterialLoadTried = frame.materialId;
+		if (!m_contentManager->resolveMaterialRef(frame.materialId, frame.materialPath)) m_contentManager->loadAsset(frame.materialPath);
+		if (!m_contentManager->getMaterial(frame.materialId))
+			HE_LOG_WARN(RHI, "MetalRenderer: the landscape's material %s is not there; the ground keeps its fixed blend", frame.materialPath.c_str());
+	}
+	// What is drawn: the extractor's derived material where the landscape's own cannot be (RenderWorld::tileLandscapeMaterial).
+	// `use`: the virtual texture's consumer, for the patches it serves. A page of the ground (rvtTileGround): the layer's view.
+	const HE::UUID matId = use ? *use
+	                     : m_editorCamera.rvtSlot >= 0 ? m_editorCamera.rvtMaterial
+	                     : m_renderWorld.tileLandscapeMaterial != HE::UUID{} ? m_renderWorld.tileLandscapeMaterial : frame.materialId;
+	if (matId != HE::UUID{})
+		if (void* pso = GetOrBuildLandscapeMaterialPipeline(matId, gbuffer))
+		{
+			id<MTLRenderCommandEncoder> enc = (__bridge id<MTLRenderCommandEncoder>)renderEncoder;
+			float padded[HE::kMatParamFloats] = { 0 };
+			if (const MaterialAsset* ma = m_contentManager ? m_contentManager->getMaterial(matId) : nullptr)
+			{
+				std::memcpy(padded, ma->shaderParamData.data(), std::min(ma->shaderParamData.size(), size_t(HE::kMatParamFloats)) * sizeof(float));
+				// copied out before the next resolve: a load invalidates the asset pointer
+				const uint32_t arrMask = HE::matGlslTextureArrayMask(ma->customShaderFragGlsl);
+				const std::vector<HE::UUID> ids = ma->graphTextureIds;
+				const std::vector<std::string> paths = ma->graphTexturePaths;
+				const size_t nTex = std::min<size_t>(HE::kMatMaxGraphTextures, std::max(paths.size(), ids.size()));
+				for (size_t i = 0; i < nTex; ++i)
+					if (void* t = ResolveGraphTexture(i < ids.size() ? ids[i] : HE::UUID{}, i < paths.size() ? paths[i] : std::string{}, (arrMask >> i) & 1u))
+					{
+						[enc setFragmentTexture:(__bridge id<MTLTexture>)t atIndex:(i + 1)];
+						[enc setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_materialSampler atIndex:(i + 1)];
+					}
+			}
+			[enc setFragmentBytes:padded length:sizeof(padded) atIndex:2];
+			void* tex0 = nullptr;
+			if (ResolveMaterialTexture(matId, tex0) && tex0) [enc setFragmentTexture:(__bridge id<MTLTexture>)tex0 atIndex:0];
+			BindRvtForDraw(renderEncoder, matId);
+			result = pso;
+		}
+#else
+	(void)renderEncoder; (void)frame; (void)gbuffer;
+#endif
+	return result;
+}
+
+// The ground in the deferred pass: its material's G-buffer fragment, so the resolve lights it with everything else and what reads
+// the G-buffer (ambient occlusion, screen-space reflections, decals) has it. False: not drawn here (no material variant), the
+// scene pass draws it forward as before; the frame's uploads are applied either way.
+bool MetalRenderer::EncodeLandscapeGBuffer(void* renderEncoder, const glm::mat4& viewProj)
+{
+	if (!m_landscapeProvider || m_landscapeFailed) return false;
+	// HE_LANDSCAPE_PASSES=0, landscape_gpu_check's A/B switch as on OpenGL: the ground stays out of the G-buffer and is drawn
+	// forward over the resolved picture. Without it here the G-buffer witness compared two identical frames.
+	if (const char* e = std::getenv("HE_LANDSCAPE_PASSES"); e && *e == '0') return false;
+	HE::LandscapeRenderFrame frame;
+	m_landscapeProvider(glm::dmat4(viewProj), /*zeroToOne=*/false, frame);
+	if (!frame.active || !EnsureLandscape()) return false;
+	MetalLandscape::Shading sh;
+	std::vector<HE::LandscapeRenderPatch> rvtPatches;
+	const bool rvt = TakeRvtTilePatches(frame, /*gbuffer=*/true, rvtPatches);
+	sh.materialPipeline = BindLandscapeMaterial(renderEncoder, frame, /*gbuffer=*/true);
+	const bool drawn = sh.materialPipeline != nullptr;
+	if (!drawn) frame.patches.clear();
+	m_landscape.encode(renderEncoder, frame, viewProj, sh);
+	if (drawn && rvt)
+	{
+		frame.uploads.clear();
+		frame.tableUpdates.clear();
+		frame.patches = std::move(rvtPatches);
+		sh.materialPipeline = BindLandscapeMaterial(renderEncoder, frame, /*gbuffer=*/true, &m_tileRvtConsumer);
+		m_landscape.encode(renderEncoder, frame, viewProj, sh);
+	}
+	return drawn;
+}
+
+bool MetalRenderer::TakeRvtTilePatches(HE::LandscapeRenderFrame& frame, bool gbuffer, std::vector<HE::LandscapeRenderPatch>& inside)
+{
+	if (m_tileRvtConsumer == HE::UUID{} || m_editorCamera.rvtSlot >= 0 || !m_rvtPool[0]) return false;
+	if (const auto t = m_rvtTables.find(m_tileRvtConsumer); t == m_rvtTables.end() || !t->second.tex) return false;
+	if (!GetOrBuildLandscapeMaterialPipeline(m_tileRvtConsumer, gbuffer)) return false;
+	const glm::dvec2 o(frame.uvOrigin.x, frame.uvOrigin.z);   // patch corners are relative to the floating origin
+	const auto mid = std::stable_partition(frame.patches.begin(), frame.patches.end(), [&](const HE::LandscapeRenderPatch& p) {
+		const double x0 = double(p.x0) + o.x, z0 = double(p.z0) + o.y;
+		// The native near view: a patch within reach of the camera keeps the material itself.
+		if (m_tileRvtNearM > 0.0f)
+		{
+			const float dx = std::max({ p.x0 - frame.cameraRel.x, 0.0f, frame.cameraRel.x - (p.x0 + p.size) });
+			const float dz = std::max({ p.z0 - frame.cameraRel.z, 0.0f, frame.cameraRel.z - (p.z0 + p.size) });
+			if (dx * dx + dz * dz < m_tileRvtNearM * m_tileRvtNearM) return true;
+		}
+		return !(x0 >= m_tileRvtMin.x && z0 >= m_tileRvtMin.y && x0 + double(p.size) <= m_tileRvtMax.x && z0 + double(p.size) <= m_tileRvtMax.y);
+	});
+	inside.assign(mid, frame.patches.end());
+	frame.patches.erase(mid, frame.patches.end());
+	return !inside.empty();
+}
+
+void MetalRenderer::EncodeLandscape(void* renderEncoder, const glm::mat4& viewProj, HE::LandscapeRenderFrame& frame)
+{
+	if (!frame.active || !EnsureLandscape()) return;   // asked for at the top of EncodeScene; no landscape in this scene: nothing compiled, nothing drawn
+
+	MetalLandscape::Shading sh;
+	// A virtual texture page of meshes: the ground stays out of it (its uploads are still applied).
+	if (m_editorCamera.rvtSlot >= 0 && !m_editorCamera.rvtTileGround) frame.patches.clear();
+	std::vector<HE::LandscapeRenderPatch> rvtPatches;
+	const bool rvt = TakeRvtTilePatches(frame, /*gbuffer=*/false, rvtPatches);
+	sh.materialPipeline = BindLandscapeMaterial(renderEncoder, frame, /*gbuffer=*/false);
+	sh.sunDir = glm::normalize(m_renderWorld.sunDirection);
+	sh.ambient = m_renderWorld.ambient;
+	for (const LightData& l : m_renderWorld.lights)
+		if (l.type == static_cast<uint8_t>(HE::LightType::Directional)) { sh.sunColor = l.color * l.intensity; break; }
+	if (frame.world && !frame.world->albedoArrayPath.empty())
+	{
+		// The texture group's albedo array (World-UV ground). A missing one resolves to the white array: flat colours then.
+		void* tex = ResolveGraphTexture(HE::UUID{}, frame.world->albedoArrayPath, /*array=*/true);
+		sh.albedoArray = (tex && tex != m_whiteArrayTexture) ? tex : nullptr;
+		const auto optional = [&](const std::string& path) -> void* {
+			if (path.empty()) return nullptr;
+			void* t = ResolveGraphTexture(HE::UUID{}, path, /*array=*/true);
+			return (t && t != m_whiteArrayTexture) ? t : nullptr;
+		};
+		sh.normalArray = optional(frame.world->normalArrayPath);
+		sh.maskArray = optional(frame.world->maskArrayPath);
+	}
+	m_landscape.encode(renderEncoder, frame, viewProj, sh);
+	if (rvt)
+	{
+		frame.uploads.clear();
+		frame.tableUpdates.clear();
+		frame.patches = std::move(rvtPatches);
+		sh.materialPipeline = BindLandscapeMaterial(renderEncoder, frame, /*gbuffer=*/false, &m_tileRvtConsumer);
+		m_landscape.encode(renderEncoder, frame, viewProj, sh);
+	}
+}
+
 void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
-                                MetalDeferredFrame* deferred)
+                                MetalDeferredFrame* deferred,
+                                void* fogCmdBuf, void* fogScenePass)
 {
 	if (!m_world || !m_scenePipeline || width <= 0 || height <= 0)
 		return;
@@ -14422,6 +16817,7 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 	m_extractor.extract(*m_world, m_renderWorld,
 	                    static_cast<float>(width) / static_cast<float>(height),
 	                    &m_editorCamera);
+	ApplyRvtSwaps();
 	m_extractor.extractUI(*m_world, static_cast<float>(width), static_cast<float>(height),
 	                      m_renderWorld);
 
@@ -14443,8 +16839,11 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 	// under test). Normal runs use the wall clock. Mirrors the OpenGL backend.
 	float skyClock = static_cast<float>(SDL_GetTicks()) / 1000.0f;
 	if (const char* ov = std::getenv("HE_SKY_TIME"); ov && *ov) skyClock = static_cast<float>(std::atof(ov));
+	// The sky's rays from the camera's rotation alone (HE::SkyViewProj), on the same jitter grid as the scene.
+	const glm::mat4 skyInvViewProj = glm::inverse(JitteredViewProj(
+		HE::SkyViewProj(m_renderWorld.camera.projection, m_renderWorld.camera.view), width, height));
 	auto drawSky = [&]() {
-		EncodeSky(renderEncoder, glm::inverse(viewProj), sunDir, skyClock,
+		EncodeSky(renderEncoder, skyInvViewProj, sunDir, skyClock,
 		          GetEnvironment(), m_renderWorld.camera.position, /*lowResClouds=*/true,
 		          /*useSkyLut=*/true);
 	};
@@ -14469,7 +16868,12 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 	// are skinned meshes (RenderWorld::skinnedObjects, drawn by
 	// EncodeSkinnedObjects below): a scene of nothing but a character used to
 	// take this sky-only exit and never draw it.
-	const bool onlySky = m_renderWorld.ribbonBatches.empty() && m_renderWorld.skinnedObjects.empty();
+	// A world-scale landscape is drawn by this function too, so a scene of nothing but a landscape is not sky-only. Asked for once, here, with
+	// the matrix the scene pass rasterises with (the plain GL-convention one, see MetalLandscape::encode), so the frustum is a GL one too; a
+	// scene without a landscape gets an inactive frame and the sky-only exits below stay as they were.
+	HE::LandscapeRenderFrame landscapeFrame;
+	if (m_landscapeProvider && !m_landscapeFailed) m_landscapeProvider(glm::dmat4(viewProj), /*zeroToOne=*/false, landscapeFrame);
+	const bool onlySky = m_renderWorld.ribbonBatches.empty() && m_renderWorld.skinnedObjects.empty() && !landscapeFrame.active;
 	if (m_renderWorld.objects.empty() && onlySky)
 	{
 		SamplePoint(renderEncoder, "(scene)");   // anchor
@@ -14597,7 +17001,9 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 	scene.shadowBias    = glm::vec4(m_shadowSettings.slopeBias, m_shadowSettings.minBias, 0.0f, 0.0f);
 	scene.sunDir        = glm::vec4(sunDir, 0.0f);
 	scene.ambient       = glm::vec4(m_renderWorld.ambient, 0.0f);
-	scene.fog           = glm::vec4(GetEnvironment().fogDensity,
+	// Volumetric fog on: the built-in shaders' analytic applyFog() steps aside (density 0)
+	// — the full-screen Apply pass fogs the opaque scene and the sky instead.
+	scene.fog           = glm::vec4(m_fogFrameActive ? 0.0f : GetEnvironment().fogDensity,
 	                                GetEnvironment().fogHeightFalloff, 0.0f, 0.0f);
 	scene.viewport      = glm::vec4(static_cast<float>(width), static_cast<float>(height),
 	                                ssaoActive ? 1.0f : 0.0f, 0.0f);
@@ -14753,9 +17159,9 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 				{
 					[encoder setFragmentBytes:&matLight length:sizeof(matLight)
 					                  atIndex:HE::MaterialShaderLibrary::kMetalLightingBufferIndex];
-					float padded[64] = { 0 };
+					float padded[HE::kMatParamFloats] = { 0 };
 					std::memcpy(padded, t.params.data(),
-					            std::min(t.params.size(), size_t(64)) * sizeof(float));
+					            std::min(t.params.size(), size_t(HE::kMatParamFloats)) * sizeof(float));
 					[encoder setFragmentBytes:padded length:sizeof(padded) atIndex:2];
 					for (int i = 0; i < t.gtexCount; ++i)
 						if (t.gtex[i])
@@ -14822,6 +17228,9 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 		// Instanced twin (Thema 182, 2e): built on the material's first batch, not
 		// on sight. The sources are kept for that; a baked variant has no twin.
 		void*     cMaterialPipelineInst  = nullptr; bool cMaterialInstTried = false;
+		// A pipeline of this material is still compiling in the background: the draw is
+		// skipped (not drawn with the default material) until it lands.
+		bool      cMaterialPending       = false;
 		uint64_t  cShKey = 0; std::string cShFrag, cShVert; bool cShBaked = false;
 		bool      cMaterialWpo           = false;   // custom WPO vertex → vertex-stage binds
 		void*     boundPipeline     = defaultPipeline;
@@ -14850,6 +17259,7 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 				cMaterialPipeline = nullptr;
 				cMaterialPipelineBlend = nullptr;
 				cMaterialPipelineInst = nullptr; cMaterialInstTried = false;
+				cMaterialPending  = false;
 				cMaterialWpo      = false;
 				cMaterialParams   = nullptr;
 				cGraphTexCount    = 0;
@@ -14865,7 +17275,9 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 							for (const auto& var : ma->precompiledShaders)
 								if (var.backend == static_cast<uint8_t>(HE::RendererBackend::Metal)) { pre = &var; break; }
 						cMaterialWpo      = !shVert.empty();
-						cMaterialPipeline = GetOrBuildMaterialPipeline(shKey, shFrag, shVert, pre);
+						bool pendOpaque = false, pendBlend = false;
+						cMaterialPipeline = GetOrBuildMaterialPipeline(shKey, shFrag, shVert, pre,
+						                                               false, false, false, &pendOpaque);
 						cShKey = shKey; cShFrag = shFrag; cShVert = shVert; cShBaked = pre != nullptr;
 						// Translucent-routed materials additionally need the alpha-blended
 						// pipeline variant for the transparency pass. Built unconditionally
@@ -14873,9 +17285,12 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 						// (RenderObject::instanceTint — particle color/alpha-over-life) can
 						// push an otherwise-opaque material's effective alpha below 1 on a
 						// per-draw basis, after this cache-miss-only block has already run.
-						if (cMaterialPipeline)
+						// (Started while the opaque one is still compiling too, so both build side by side.)
+						if (cMaterialPipeline || pendOpaque)
 							cMaterialPipelineBlend =
-								GetOrBuildMaterialPipeline(shKey, shFrag, shVert, pre, /*blend=*/true);
+								GetOrBuildMaterialPipeline(shKey, shFrag, shVert, pre, /*blend=*/true,
+								                           false, false, &pendBlend);
+						cMaterialPending = pendOpaque || pendBlend;
 						if (const MaterialAsset* ma = m_contentManager
 							? m_contentManager->getMaterial(dc.materialAssetId) : nullptr)
 						{
@@ -14895,6 +17310,7 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 				}
 #endif
 			}
+			if (cMaterialPending) continue; // compiling: appears when its pipeline lands
 			u.pbr = glm::vec4(cMetallic, cRoughness, cOpacity, 0.0f);
 
 			// Resolve the mesh; entities without one fall back to the default cube.
@@ -15004,9 +17420,9 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 					// material's shared shaderParamData — never batched, so per-draw.
 					const std::vector<float>& src =
 						!dc.paramOverride.empty() ? dc.paramOverride : *cMaterialParams;
-					float padded[64] = { 0 };
+					float padded[HE::kMatParamFloats] = { 0 };
 					std::memcpy(padded, src.data(),
-					            std::min(src.size(), size_t(64)) * sizeof(float));
+					            std::min(src.size(), size_t(HE::kMatParamFloats)) * sizeof(float));
 					[encoder setFragmentBytes:padded length:sizeof(padded) atIndex:2];
 				}
 				// Node-graph project textures at fragment texture units 1..4 (+ linear
@@ -15035,6 +17451,7 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 						[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:13];
 					}
 				}
+				BindRvtForDraw((__bridge void*)encoder, dc.materialAssetId);
 				[encoder setVertexBuffer:vertexBuf offset:0 atIndex:0];
 				[encoder setVertexBytes:&ui length:sizeof(ui) atIndex:1];
 				// WPO materials read HeLighting (time) + HeParams in the VERTEX stage too
@@ -15042,12 +17459,12 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 				if (cMaterialPipeline && cMaterialWpo)
 				{
 					[encoder setVertexBytes:&matLight length:sizeof(matLight) atIndex:2];
-					float vpad[64] = { 0 };
+					float vpad[HE::kMatParamFloats] = { 0 };
 					const std::vector<float>* vsrc =
 						!dc.paramOverride.empty() ? &dc.paramOverride : cMaterialParams;
 					if (vsrc)
 						std::memcpy(vpad, vsrc->data(),
-						            std::min(vsrc->size(), size_t(64)) * sizeof(float));
+						            std::min(vsrc->size(), size_t(HE::kMatParamFloats)) * sizeof(float));
 					[encoder setVertexBytes:vpad length:sizeof(vpad) atIndex:3];
 				}
 				[encoder setFragmentTexture:texture atIndex:0];
@@ -15084,17 +17501,24 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 			// HE_GRAPH_INSTANCING=0) keeps the per-instance loop below.
 			const bool graphBatch = instCount > 0 && cMaterialPipeline
 			               && metalInstancingEnabled() && RenderSorter::graphInstancingEnabled()
-			               && instCount <= k_maxInstances && !cShBaked
+			               && instCount <= k_maxInstances
 			               && u.pbr.z >= RenderSorter::kOpaqueOpacityThreshold;
+			bool instPending = false;
 			if (graphBatch && !cMaterialInstTried)
 			{
 				cMaterialInstTried = true;
 #if defined(HE_HAVE_SHADERC)
-				cMaterialPipelineInst = GetOrBuildMaterialPipeline(cShKey, cShFrag, cShVert, nullptr,
+				// Baked: the pak's instanced vertex (a null build keeps the loop).
+				cMaterialPipelineInst = GetOrBuildMaterialPipeline(cShKey, cShFrag, cShVert,
+				                                                   cShBaked ? bakedMetalVariant(m_contentManager, dc.materialAssetId) : nullptr,
 				                                                   /*blend=*/false, /*gbuffer=*/false,
-				                                                   /*instanced=*/true);
+				                                                   /*instanced=*/true, &instPending);
+				// Still compiling: this batch is not drawn (a per-instance loop would be
+				// thousands of draws for one frame), and the next batch asks again.
+				if (instPending) cMaterialInstTried = false;
 #endif
 			}
+			if (instPending) continue;
 			if (graphBatch && cMaterialPipelineInst)
 			{
 				void*  instBuf = nullptr;
@@ -15163,9 +17587,30 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 	wire(false);
 	SamplePoint(renderEncoder, "Skinned");
 
+	// World-scale landscape (Thema 326): forward patches into the same target and depth, before the sky fills what they leave.
+	// On a deferred frame the G-buffer pass has drawn the ground already (EncodeLandscapeGBuffer) and the resolve has lit it.
+	const bool groundInGBuffer = m_landscapeInGBuffer;
+	m_landscapeInGBuffer = false;
+	if (!groundInGBuffer) EncodeLandscape(renderEncoder, viewProj, landscapeFrame);
+	SamplePoint(renderEncoder, "Landscape");
+
 	// Sky LAST — fills the background pixels the geometry didn't cover.
 	drawSky();
 	SamplePoint(renderEncoder, "Sky+Clouds");
+
+	// Volumetric fog: the seam between "opaque + sky" and "translucent". Metal cannot read
+	// the depth attachment inside the encoder that renders into it, so the scene encoder is
+	// ended here, the full-screen Apply pass runs on the HDR target (depth as a texture),
+	// and a second encoder (colour + depth Load) carries the translucent draws and the
+	// particles. The tail below already rebinds everything it needs per encoder.
+	if (m_fogFrameActive && fogCmdBuf && fogScenePass)
+	{
+		if (void* reopened = EncodeFogApplyAndReopen(renderEncoder, fogCmdBuf, fogScenePass, width, height))
+		{
+			renderEncoder = reopened;
+			encoder = (__bridge id<MTLRenderCommandEncoder>)reopened; // the drawSky / wire lambdas see this too
+		}
+	}
 
 	// Motion trails join the blended list here rather than getting a pass of
 	// their own: same vertex layout, same sort, same state. Collected AFTER the
@@ -15211,9 +17656,9 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 			{
 				[encoder setFragmentBytes:&matLight length:sizeof(matLight)
 				                  atIndex:HE::MaterialShaderLibrary::kMetalLightingBufferIndex];
-				float padded[64] = { 0 };
+				float padded[HE::kMatParamFloats] = { 0 };
 				std::memcpy(padded, t.params.data(),
-				            std::min(t.params.size(), size_t(64)) * sizeof(float));
+				            std::min(t.params.size(), size_t(HE::kMatParamFloats)) * sizeof(float));
 				[encoder setFragmentBytes:padded length:sizeof(padded) atIndex:2];
 				for (int i = 0; i < t.gtexCount; ++i)
 					if (t.gtex[i])
@@ -15380,6 +17825,10 @@ void MetalRenderer::FillMaterialLighting(HE::MaterialShaderLibrary::Lighting& ma
 	// untouched — graph materials, the deferred resolve and the SSR composite
 	// all read this. Scene-pass fill only; previews keep the zero.
 	matLight.viewMode[0] = UnlitViewActive() ? 1.0f : 0.0f;
+	// y = 1 → the Runtime Virtual Texture lookup (RvtLookup.h) shows its page map instead of the ground (RVT debug view).
+	matLight.viewMode[1] = RvtDebugViewActive() ? 1.0f : 0.0f;
+	matLight.viewMode[2] = float(m_rvtFbPhase);                                 // which pixel of 8x8 reports (HE_RVT_FEEDBACK)
+	FillFogLighting(matLight);
 }
 
 // ─── Clustered lighting build (plan P7) ──────────────────────────────────────
@@ -15556,7 +18005,7 @@ void MetalRenderer::EncodeDeferredResolveTile(void* renderEncoder, int width, in
 	bindTex(m_fwdReflGiTex  ? m_fwdReflGiTex  : m_dummyTexture, 10);
 	bindTex(m_shadowDepthTex, 11);
 	bindTex(m_localShadowTex ? m_localShadowTex : m_shadowDepthTex, 12);
-	bindTex(m_skyEnvCube, 14);
+	bindTex(MaterialSkyCube(), 14);
 	bindTex(ssaoActive ? m_ssaoResult : m_dummyTexture, 15);
 	// Cloud-shadow map: TEXTURE only at 16 — sampler indices stop at 15; the
 	// preamble samples it through an inline constexpr sampler.
@@ -16345,14 +18794,25 @@ void MetalRenderer::EncodeGIReflections(void* cmdBufPtr, int width, int height)
 		// Painted landscapes: the table + one weightmap texture each, so a hit on
 		// a terrain reads the PAINT at that point instead of one averaged colour
 		// for the whole landscape (see GiLandscape.h).
-		std::vector<void*> landTex;
-		const int landCount = BuildGILandscapeTable(landTex);
+		std::vector<void*> landTex, landRvt;
+		const int landCount = BuildGILandscapeTable(landTex, &landRvt);
 		// The real sky (clouds, weather) for rays that miss — see EncodeSkyReflCube.
 		// Baked on this command buffer ahead of the trace encoder below.
 		EncodeSkyReflCube((__bridge void*)cmdBuf);
 		rp.land         = glm::vec4(static_cast<float>(landCount),
 		                            static_cast<float>(rays),
 		                            m_skyReflValid ? 1.0f : 0.0f, 0.0f);
+		// The RVT mip of a landscape hit follows the SCREEN pixel (`height`, not the trace size th), at the camera's own
+		// field of view; hits report the pages they want into this frame's feedback like rasterized pixels.
+		// HE_GI_RVT_MAP=1 (witness): a landscape hit shows the page-map colour of the mip it reads, unlit, in the normal view
+		// (the Virtual Texture view itself draws the scene unlit, so a mirror there shows only its own base colour).
+		// HE_GI_RVT_FEEDBACK=0: the reflections stop asking for pages (A/B against the rasterized pixels alone).
+		static const bool rvtFbOn = [] { const char* e = std::getenv("HE_RVT_FEEDBACK"); const char* g = std::getenv("HE_GI_RVT_FEEDBACK"); return !(e && *e == '0') && !(g && *g == '0'); }();
+		static const bool rvtMapOn = [] { const char* e = std::getenv("HE_GI_RVT_MAP"); return e && *e && *e != '0'; }();
+		void* rvtFb = RvtFeedbackBindTarget();
+		rp.rvt          = glm::vec4(2.0f / (std::max(std::abs(m_renderWorld.camera.projection[1][1]), 1e-4f) * float(std::max(height, 1))),
+		                            float(m_rvtFbPhase), rvtMapOn ? 1.0f : 0.0f,
+		                            (rvtFbOn && rvtFb) ? 1.0f : 0.0f);
 
 		const int curIdx  = m_giReflHistIdx;
 		const int prevIdx = 1 - curIdx;
@@ -16401,6 +18861,8 @@ void MetalRenderer::EncodeGIReflections(void* cmdBufPtr, int width, int height)
 			[enc setBuffer:(__bridge id<MTLBuffer>)(m_giInstanceLandBuf ? m_giInstanceLandBuf
 			                                                           : m_giInstanceColorBuffer)
 			        offset:0 atIndex:6];
+			// RVT feedback (rp.rvt.w = 0 keeps the placeholder unwritten).
+			[enc setBuffer:(__bridge id<MTLBuffer>)(rvtFb ? rvtFb : m_giInstanceColorBuffer) offset:0 atIndex:7];
 			// Every BLAS the TLAS references must be explicitly declared used — Metal
 			// does not auto-track residency through an acceleration structure. The
 			// mesh vertex/index buffers reached through the argument buffer need
@@ -16423,6 +18885,7 @@ void MetalRenderer::EncodeGIReflections(void* cmdBufPtr, int width, int height)
 			[enc setBuffer:(__bridge id<MTLBuffer>)(m_giLandBuf ? m_giLandBuf
 			                                                    : m_giSwInstanceBuf)
 			        offset:0 atIndex:4];
+			[enc setBuffer:(__bridge id<MTLBuffer>)(rvtFb ? rvtFb : m_giSwInstanceBuf) offset:0 atIndex:7];   // RVT feedback
 		}
 		// Weightmap per landscape, slots 9..9+kGiMaxLandscapes-1. Unused slots
 		// take the 1x1 dummy: the pipeline declares the whole array, and an
@@ -16431,6 +18894,13 @@ void MetalRenderer::EncodeGIReflections(void* cmdBufPtr, int width, int height)
 			[enc setTexture:(__bridge id<MTLTexture>)(i < (int)landTex.size() && landTex[i]
 			                                          ? landTex[i] : m_dummyTexture)
 			        atIndex:9 + i];
+		// A landscape drawn from the RVT: its page table at 13..16 and the pool's albedo (hot sRGB view, cold ASTC) at
+		// 17/18, so a hit reads the real ground (giRvtAlbedo). Typed dummies where there is none (Metal checks the type).
+		for (int i = 0; i < HE::kGiMaxLandscapes; ++i)
+			[enc setTexture:(__bridge id<MTLTexture>)(i < (int)landRvt.size() && landRvt[i] ? landRvt[i] : m_rvtDummyTable)
+			        atIndex:13 + i];
+		[enc setTexture:(__bridge id<MTLTexture>)(m_rvtPoolAlbedoSrgb ? m_rvtPoolAlbedoSrgb : m_whiteArrayTexture) atIndex:17];
+		[enc setTexture:(__bridge id<MTLTexture>)(m_rvtCold[0] ? m_rvtCold[0] : m_whiteArrayTexture) atIndex:18];
 		const MTLSize tgSize  = MTLSizeMake(8, 8, 1);
 		const MTLSize tgCount = MTLSizeMake(static_cast<NSUInteger>((tw + 7) / 8),
 		                                    static_cast<NSUInteger>((th + 7) / 8), 1);
@@ -16587,6 +19057,7 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 	m_extractor.extract(*m_world, m_renderWorld,
 	                    static_cast<float>(width) / static_cast<float>(height),
 	                    &m_editorCamera);
+	ApplyRvtSwaps();
 
 	// Rasterised with this frame's subpixel jitter when TAA is on (no-op
 	// otherwise). The clean matrix stays available for the velocity pass, which
@@ -16594,12 +19065,15 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 	const glm::mat4 viewProj = JitteredViewProj(
 		m_renderWorld.camera.projection * m_renderWorld.camera.view, width, height);
 
-	if (m_renderWorld.objects.empty()) return;
+	// A tile landscape is geometry too: with one, the pass runs for the ground alone.
+	const bool land = m_landscapeProvider && !m_landscapeFailed;
+	m_landscapeInGBuffer = false;
+	if (m_renderWorld.objects.empty() && !land) return;
 
 	RefineObjectBounds();
 
 	CullCameraObjects();
-	if (m_sortedIndices.empty()) return;
+	if (m_sortedIndices.empty() && !land) return;
 
 	void* const defaultPipeline = m_gbufferPipeline;
 	[encoder setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)defaultPipeline];
@@ -16627,16 +19101,25 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 		matLight.ambient[0]  = am.r;          matLight.ambient[1]  = am.g;          matLight.ambient[2]  = am.b;
 		matLight.giParams[0] = static_cast<float>(width);
 		matLight.giParams[1] = static_cast<float>(height);
+		// The floating origin: a graph's World Position is evaluated HERE on the deferred path (FillMaterialLightWindow, which
+		// sets it for the lit passes, is not called for this reduced block).
+		matLight.worldOrigin[0] = static_cast<float>(m_renderWorld.worldOrigin.x);
+		matLight.worldOrigin[1] = static_cast<float>(m_renderWorld.worldOrigin.y);
+		matLight.worldOrigin[2] = static_cast<float>(m_renderWorld.worldOrigin.z);
 		// Specular AA (A6): the G-buffer IS a geometry pass, so graph materials
 		// widen the roughness they store here — the resolve could not, its normal
 		// is already an encoded texel.
 		matLight.specAA[0] = m_specularAA ? m_specularAAStrength : 0.0f;
 		matLight.specAA[1] = 1.0f;
+		matLight.viewMode[2] = float(m_rvtFbPhase);   // the feedback's pixel of each 8x8 cell (HE_RVT_FEEDBACK)
 		// The G-buffer's WPO vertex stage reads this block too: without the wind
 		// the deferred path would draw every Wind Sway material standing still.
 		HE::FillMaterialWind(GetEnvironment(), matLight);
 		HE::FillMaterialWeather(GetEnvironment(), matLight); // Weather node + the generic wet/snow response
 		HE::FillMaterialWater(GetWaterRipples(), matLight);  // Water Ripple node, same rings as the forward pass
+		// The RVT debug view (viewMode.y) is read by the lookup in THIS pass: the G-buffer's base colour is the page map, the
+		// resolve (unlit, viewMode.x) hands it to the screen.
+		matLight.viewMode[1] = RvtDebugViewActive() ? 1.0f : 0.0f;
 	}
 	[encoder setFragmentBytes:&matLight length:sizeof(matLight)
 	                  atIndex:HE::MaterialShaderLibrary::kMetalLightingBufferIndex];
@@ -16677,6 +19160,7 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 		void*     cMaterialPipelineGB    = nullptr; // G-buffer PSO (this pass)
 		// Instanced twin of the G-buffer PSO (2e), built on the first batch.
 		void*     cMaterialPipelineGBInst = nullptr; bool cMaterialGBInstTried = false;
+		bool      cMaterialPending       = false;   // a pipeline of this material is compiling: skip the draw
 		uint64_t  cGbKey = 0; std::string cGbFrag, cGbVert;
 		bool      cMaterialWpo           = false;
 		bool      cMaterialCustom        = false;   // material HAS a custom shader at all
@@ -16701,6 +19185,7 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 				cMaterialPipelineBlend = nullptr;
 				cMaterialPipelineGB = nullptr;
 				cMaterialPipelineGBInst = nullptr; cMaterialGBInstTried = false;
+				cMaterialPending  = false;
 				cMaterialWpo      = false;
 				cMaterialCustom   = false;
 				cMaterialParams   = nullptr;
@@ -16719,19 +19204,23 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 						cMaterialWpo      = !shVert.empty();
 						// Forward PSOs still needed: blended for the transparency
 						// replay, opaque for the forward-routed fallback.
-						cMaterialPipeline = GetOrBuildMaterialPipeline(shKey, shFrag, shVert, pre);
-						if (cMaterialPipeline)
+						bool pendFwd = false, pendBlend = false, pendGB = false;
+						cMaterialPipeline = GetOrBuildMaterialPipeline(shKey, shFrag, shVert, pre,
+						                                               false, false, false, &pendFwd);
+						if (cMaterialPipeline || pendFwd)
 							cMaterialPipelineBlend =
-								GetOrBuildMaterialPipeline(shKey, shFrag, shVert, pre, /*blend=*/true);
-						// G-buffer variant — always runtime cross-compiled (baked
-						// packs carry no G-buffer MSL yet), never blended.
+								GetOrBuildMaterialPipeline(shKey, shFrag, shVert, pre, /*blend=*/true,
+								                           false, false, &pendBlend);
+						// G-buffer variant — the baked one when the pak carries it
+						// (CHUNK_PSHD v4), else cross-compiled at load; never blended.
 						uint64_t gbKey; std::string gbFrag, gbVert;
 						if (ResolveMaterialShaderGB(dc.materialAssetId, gbKey, gbFrag, gbVert))
 						{
 							cMaterialPipelineGB = GetOrBuildMaterialPipeline(
-								gbKey, gbFrag, gbVert, nullptr, /*blend=*/false, /*gbuffer=*/true);
+								gbKey, gbFrag, gbVert, pre, /*blend=*/false, /*gbuffer=*/true, false, &pendGB);
 							cGbKey = gbKey; cGbFrag = std::move(gbFrag); cGbVert = std::move(gbVert);
 						}
+						cMaterialPending = pendFwd || pendBlend || pendGB;
 						if (const MaterialAsset* ma = m_contentManager
 							? m_contentManager->getMaterial(dc.materialAssetId) : nullptr)
 						{
@@ -16750,6 +19239,7 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 				}
 #endif
 			}
+			if (cMaterialPending) continue; // compiling: appears when its pipelines land
 			u.pbr = glm::vec4(cMetallic, cRoughness, cOpacity, 0.0f);
 
 			bool meshWasResolved = false;
@@ -16849,9 +19339,9 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 				{
 					const std::vector<float>& src =
 						!dc.paramOverride.empty() ? dc.paramOverride : *cMaterialParams;
-					float padded[64] = { 0 };
+					float padded[HE::kMatParamFloats] = { 0 };
 					std::memcpy(padded, src.data(),
-					            std::min(src.size(), size_t(64)) * sizeof(float));
+					            std::min(src.size(), size_t(HE::kMatParamFloats)) * sizeof(float));
 					[encoder setFragmentBytes:padded length:sizeof(padded) atIndex:2];
 				}
 				if (cMaterialPipelineGB)
@@ -16874,18 +19364,19 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 						[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:13];
 					}
 				}
+				BindRvtForDraw((__bridge void*)encoder, dc.materialAssetId);
 				[encoder setVertexBuffer:vertexBuf offset:0 atIndex:0];
 				[encoder setVertexBytes:&ui length:sizeof(ui) atIndex:1];
 #if defined(HE_HAVE_SHADERC)
 				if (cMaterialPipelineGB && cMaterialWpo)
 				{
 					[encoder setVertexBytes:&matLight length:sizeof(matLight) atIndex:2];
-					float vpad[64] = { 0 };
+					float vpad[HE::kMatParamFloats] = { 0 };
 					const std::vector<float>* vsrc =
 						!dc.paramOverride.empty() ? &dc.paramOverride : cMaterialParams;
 					if (vsrc)
 						std::memcpy(vpad, vsrc->data(),
-						            std::min(vsrc->size(), size_t(64)) * sizeof(float));
+						            std::min(vsrc->size(), size_t(HE::kMatParamFloats)) * sizeof(float));
 					[encoder setVertexBytes:vpad length:sizeof(vpad) atIndex:3];
 				}
 #endif
@@ -16920,20 +19411,25 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 			// ...which since 2e has an instanced twin: a graph-material batch with
 			// a G-buffer PSO draws once through drawInstance's binds. Built on the
 			// first batch; null (failed build, HE_GRAPH_INSTANCING=0) keeps the loop.
-			// The G-buffer PSO is always runtime cross-compiled, so no baked check.
+			// A pak that baked no G-buffer / instanced twin builds none here (null keeps the loop).
 			const bool graphBatch = instCount > 0 && cMaterialPipelineGB
 			               && metalInstancingEnabled() && RenderSorter::graphInstancingEnabled()
 			               && instCount <= k_maxInstances
 			               && u.pbr.z >= RenderSorter::kOpaqueOpacityThreshold;
+			bool instPending = false;
 			if (graphBatch && !cMaterialGBInstTried)
 			{
 				cMaterialGBInstTried = true;
 #if defined(HE_HAVE_SHADERC)
-				cMaterialPipelineGBInst = GetOrBuildMaterialPipeline(cGbKey, cGbFrag, cGbVert, nullptr,
+				cMaterialPipelineGBInst = GetOrBuildMaterialPipeline(cGbKey, cGbFrag, cGbVert,
+				                                                     bakedMetalVariant(m_contentManager, dc.materialAssetId),
 				                                                     /*blend=*/false, /*gbuffer=*/true,
-				                                                     /*instanced=*/true);
+				                                                     /*instanced=*/true, &instPending);
+				// Still compiling: this batch is not drawn, the next one asks again.
+				if (instPending) cMaterialGBInstTried = false;
 #endif
 			}
+			if (instPending) continue;
 			if (graphBatch && cMaterialPipelineGBInst)
 			{
 				void*  instBuf = nullptr;
@@ -16985,6 +19481,8 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 				dc.forEachInstance([&](const glm::mat4& t) { drawInstance(t); });
 		}
 	});
+	// The tile landscape's ground, last (its own pipeline and depth state; nothing of this pass draws after it).
+	if (land && m_editorCamera.rvtSlot < 0) m_landscapeInGBuffer = EncodeLandscapeGBuffer(renderEncoder, viewProj);
 	if (wire) [encoder setTriangleFillMode:MTLTriangleFillModeFill];
 }
 
@@ -16992,6 +19490,7 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 {
 	@autoreleasepool
 	{
+		DrainMaterialPipelines(); // background pipeline builds that finished since the last frame
 		// Every pass below re-extracts (shadow, GI, SSAO, G-buffer, scene) so
 		// their draw sets and cascade fits agree. Inside this scope the world
 		// does not change, so the extractor walks it once and answers the rest
@@ -17018,7 +19517,9 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 			{
 				AgeRetiredTextures();
 				AgeRetiredGIObjects();
+				EvictIdleGraphArrays();
 			}
+			UpdateRvtCold(!m_captureOnly);   // tables in step with the pages' temperature, cold pages harvested (real frames age them)
 
 			// Project shadow resolution changed (SetShadowSettings): swap the
 			// cascade depth array here, before any pass of this frame touches
@@ -17111,6 +19612,8 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 		// closed and handed to the last command buffer's completion just before
 		// the commit below. No path between here and there returns early.
 		m_uploadRing->beginFrame();
+		BeginRvtFeedbackFrame();   // this frame's feedback buffer, harvested by its completion (EndRvtFeedbackFrame below)
+		m_skyReflThisFrame = false;   // EncodeSkyReflCube bakes at most once per frame
 
 		// ── Per-pass GPU timing setup (only while a profiler capture records) ──
 		// Builds one over-allocated counter sample buffer for this frame; the major
@@ -17224,7 +19727,13 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 		// EncodeGIShadowRays further down can reuse the same offscreen-viewport-or-
 		// window sizing without recomputing it — harmless (== pw/ph) when !isPrimary.
 		int shW = pw, shH = ph;
-		if (isPrimary)
+		m_fogFrameActive = false;   // EncodeFogVolume turns it on for a primary frame that runs the volume
+		// The scene's GPU work (extract, shadows, GI, G-buffer, post, offscreen tonemap) only when somebody sees the result: an
+		// offscreen viewport the editor did not show this frame (SetSceneVisible(false), another tab in front) keeps its last
+		// image, and the swapchain below still draws the UI. Direct-to-window (the game) always renders, and so does a capture
+		// (RenderSceneImage: screenshots, thumbnails, RVT pages), which is asked for exactly because somebody wants the picture.
+		const bool sceneWork = isPrimary && (m_captureOnly || !(m_sceneHidden && m_viewportReqW > 0 && m_viewportReqH > 0));
+		if (sceneWork)
 		{
 			// Shadow cascades MUST be fit with the SAME aspect the scene pass uses
 			// (below), else render≠sample cascade matrices → shadow swimming.
@@ -17244,6 +19753,13 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 				ExtractFrame(shadowAspect);
 				if (m_world) RefineObjectBounds();
 			}
+			// A raw capture (RenderSceneImage with rawOutput: an RVT page, the far image's picture, a far-landscape tile) is the
+			// materials' unlit colour: no light reaches it, so the passes that only feed the lighting are skipped. An RVT driver
+			// paints up to 8 pages x 3 layers a frame, and each used to render the sun's cascades of the whole landscape, the cloud
+			// shadow, the sky LUT and the fog volume again: 20 ms of a frame in flight over the 100 km Catania (profiler, 27.11.).
+			// What they leave in their textures is the last real frame's, which the raw frame does not read.
+			const bool lit = !m_rawCapture;
+			if (lit)
 			{
 				HE_PROFILE_SCOPE_N("Metal::EncodeShadowMap");
 				EncodeShadowMap((__bridge void*)cmdBuf, shadowAspect);
@@ -17251,6 +19767,7 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 			// Cloud-shadow map: rendered before the G-buffer/scene passes (both
 			// sample it at texture 16). Uses the frame's walk (ExtractFrame above:
 			// dominant light + camera).
+			if (lit)
 			{
 				HE_PROFILE_SCOPE_N("Metal::EncodeCloudShadow");
 				EncodeCloudShadow((__bridge void*)cmdBuf);
@@ -17259,16 +19776,26 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 			// the frame's walk (ExtractFrame above); a frame without a world has none
 			// and it is last frame's, and EncodeSky falls back to the per-pixel integral
 			// whenever the LUT's sun doesn't match the one it draws with.
+			if (lit)
 			{
 				HE_PROFILE_SCOPE_N("Metal::EncodeSkyViewLut");
 				EncodeSkyViewLut((__bridge void*)cmdBuf, m_renderWorld.sunDirection);
+			}
+			// Volumetric fog (Thema 225): Inject + Integrate once the shadow maps, the cloud
+			// shadow and the sky cube of this frame exist. fogMode 0 (the default) costs one
+			// bool read here and nothing else, anywhere.
+			if (lit)
+			{
+				HE_PROFILE_SCOPE_N("Metal::EncodeFogVolume");
+				EncodeFogVolume((__bridge void*)cmdBuf, shadowAspect);
 			}
 		}
 
 		// Step the GPU weather-particle pool once per frame (primary only), before the
 		// scene render encoder reads it. Metal tracks the compute→vertex dependency on
 		// the shared buffer within this command buffer. No-op when the path is disabled.
-		if (isPrimary)
+		// Not for a capture: a picture asked for in between (RVT pages, up to 24 a frame) would step the pool each time.
+		if (sceneWork && !m_captureOnly)
 			SimulateGpuParticles((__bridge void*)cmdBuf);
 		flushPass("GIAccel");   // detailed: commit the Shadow (+ particle sim) command buffer
 
@@ -17279,7 +19806,7 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 		// scene pass — EncodeGIShadowRays rasterizes its G-buffer with THIS
 		// extraction's camera, and a mismatched aspect misaligns the shadow mask
 		// against the scene pass's screen-space sampling.
-		if (isPrimary)
+		if (sceneWork)
 			EncodeGIAccelBuild((__bridge void*)cmdBuf,
 			                   shH > 0 ? static_cast<float>(shW) / static_cast<float>(shH) : 1.0f);
 		flushPass("GIShadow");   // detailed: commit the GIAccel command buffer (empty if GI off)
@@ -17291,7 +19818,7 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 		// what the scene pass will use (offscreen-viewport-or-window sizing),
 		// computed above for the CSM cascade fit. No-op (early return) unless GI
 		// is enabled/supported and EncodeGIAccelBuild actually built a TLAS.
-		if (isPrimary)
+		if (sceneWork)
 			EncodeGIShadowRays((__bridge void*)cmdBuf, std::max(1, shW / 2), std::max(1, shH / 2));
 		flushPass("GIProbes");   // detailed: commit the GIShadow command buffer (empty if GI off)
 
@@ -17300,12 +19827,12 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 		// unless GI is enabled/supported/has a built TLAS; lazily builds the probe
 		// grid + atlases on first call. Replaces AO + flat/IBL ambient in
 		// fragmentMain when active — see EncodeScene's giActive gate below.
-		if (isPrimary)
+		if (sceneWork)
 			EncodeGIProbeUpdate((__bridge void*)cmdBuf);
 		flushPass("SSAO");   // detailed: commit the GIProbes command buffer (empty if GI off)
 
 		const bool offscreen = isPrimary && m_viewportReqW > 0 && m_viewportReqH > 0;
-		if (isPrimary)
+		if (sceneWork)
 		{
 			// Output size (what the user sees) vs. RENDER size (what the scene is
 			// rasterized at). Render scale (A4) separates the two: everything
@@ -17439,6 +19966,9 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 
 			if (deferredActive)
 			{
+				// Detailed capture: the deferred block gets its own buckets (it used to be counted as "SSAO", which then held
+				// the G-buffer, the resolve and the reflections too).
+				flushPass("GBuffer");
 				EnsureGBufferTargets(sceneW, sceneH);
 				MTLRenderPassDescriptor* gbPass = [MTLRenderPassDescriptor renderPassDescriptor];
 				id<MTLTexture> gbTex[4] = { (__bridge id<MTLTexture>)m_gbColor0,
@@ -17502,6 +20032,7 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 				// Screen-space motion, straight after the pass whose depth it
 				// tests against (A2). Only runs when TAA is the active mode.
 				EncodeVelocity((__bridge void*)cmdBuf, sceneW, sceneH);
+				flushPass("Reflections");   // detailed: commit the G-buffer (+ decals, tile resolve, velocity)
 
 				// Reflections: the GI compute trace fills m_giReflTex first,
 				// then the shared composite (SSR trace + additive env-specular
@@ -17510,7 +20041,9 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 				if (deferredTile && (m_ssrFrameActive || m_giReflFrameActive))
 				{
 					EncodeGIReflections((__bridge void*)cmdBuf, sceneW, sceneH);
+					flushPass("SSRComposite");   // detailed: commit the GI reflection trace
 					EncodeSSRPasses((__bridge void*)cmdBuf, sceneW, sceneH);
+					flushPass("WaterRefl");      // detailed: commit the SSR trace + composite
 					// The forward tail (water and every other translucent graph material) is
 					// not in the G-buffer, so the composite above never touched it and slots
 					// 9/10 stayed empty: the water mirrored only the flat sky cube. Its
@@ -17597,8 +20130,11 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 			// (Thema 185) samples it as well: without this term a camera under water
 			// with DoF, motion blur and TAA all off (the defaults) read a flat depth
 			// texture, and the pass painted the whole frame as one depth.
+			// The volumetric fog's Apply pass reads it as a texture right after the sky, and
+			// the encoder that holds it ends there: it has to reach memory when the fog runs.
 			hdrPass.depthAttachment.storeAction = (m_dofEnabled || m_mbEnabled || TemporalActive()
-			                                       || underwaterPostWanted(m_renderWorld.underwaterCamera))
+			                                       || underwaterPostWanted(m_renderWorld.underwaterCamera)
+			                                       || m_fogFrameActive)
 			                                          ? MTLStoreActionStore
 			                                          : MTLStoreActionDontCare;
 			hdrPass.depthAttachment.clearDepth  = 1.0;
@@ -17614,14 +20150,24 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 			// capture start, the fix is: when m_ft.draw is active, DON'T attach this
 			// "Scene" stage pair — instead derive the Scene total from the first/last
 			// draw-boundary points in the completion handler (it becomes approx too).
-			ftAttachPass((__bridge void*)hdrPass, "Scene");
+			// With the fog on, the scene pass is TWO encoders (split after the sky): the pair
+			// spans both — start on this one, end on the reopened one — so "Scene" stays
+			// comparable to a fog-off capture; the Apply pass is its own "FogApply" row.
+			if (m_fogFrameActive)
+			{
+				m_fogSceneTimerBase = ftBeginMulti("Scene");
+				ftAttachStart((__bridge void*)hdrPass, m_fogSceneTimerBase);
+			}
+			else
+				ftAttachPass((__bridge void*)hdrPass, "Scene");
 
 			// Low-res clouds: raymarch the clouds into the quarter-res buffer BEFORE the
 			// scene encoder (its own pass), rendered from THIS frame's camera (extracted in
 			// the block below). The sky pass then upsamples + composites it 1:1.
 			{
 				const IRenderer::EnvironmentSettings& cenv = GetEnvironment();
-				if (cenv.lowResClouds && cenv.cloudCoverage > 0.0f && m_cloudPipeline)
+				// (not for a raw capture: no sky in an unlit material picture, and the pre-pass would raymarch per RVT page)
+				if (cenv.lowResClouds && cenv.cloudCoverage > 0.0f && m_cloudPipeline && !m_rawCapture)
 				{
 					// Render the pre-pass with THIS frame's camera — like the GL backend. The
 					// shadow/SSAO extracts above are skippable, so extract explicitly here to make
@@ -17638,17 +20184,19 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 					m_extractor.extract(*m_world, m_renderWorld,
 					                    static_cast<float>(sceneW) / static_cast<float>(std::max(1, sceneH)),
 					                    &m_editorCamera);
+					ApplyRvtSwaps();
 					m_prepassViewProj = m_renderWorld.camera.projection * m_renderWorld.camera.view;
 					// The sky's clock, HE_SKY_TIME included (EncodeScene's drawSky): on the wall
 					// clock alone the pinned A/B captures drew the low-res clouds at another
 					// moment of their drift than the sky they are composited into.
 					float cloudClock = static_cast<float>(SDL_GetTicks()) / 1000.0f;
 					if (const char* ov = std::getenv("HE_SKY_TIME"); ov && *ov) cloudClock = static_cast<float>(std::atof(ov));
-					EncodeCloudPrepass((__bridge void*)cmdBuf, glm::inverse(m_prepassViewProj),
+					EncodeCloudPrepass((__bridge void*)cmdBuf,
+						glm::inverse(HE::SkyViewProj(m_renderWorld.camera.projection, m_renderWorld.camera.view)),
 						m_renderWorld.sunDirection, cloudClock,
 						std::max(1, sceneW / 2), std::max(1, sceneH / 2));
 				}
-				else if (m_cloudColor) DestroyCloudTarget(); // freed when toggled off
+				else if (m_cloudColor && !m_rawCapture) DestroyCloudTarget(); // freed when toggled off (a raw capture keeps it)
 			}
 
 			id<MTLRenderCommandEncoder> sceneEncoder =
@@ -17656,7 +20204,14 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 			{
 				HE_PROFILE_SCOPE_N("Metal::EncodeScene");
 				EncodeScene((__bridge void*)sceneEncoder, sceneW, sceneH,
-				            deferredActive ? &deferredFrame : nullptr);
+				            deferredActive ? &deferredFrame : nullptr,
+				            m_fogFrameActive ? (__bridge void*)cmdBuf : nullptr,
+				            m_fogFrameActive ? (__bridge void*)hdrPass : nullptr);
+				// The fog split ended the first encoder: the translucent tail and everything
+				// after it (debug lines, endEncoding) belong to the one it reopened.
+				if (m_fogSceneEncoder)
+					sceneEncoder = (id<MTLRenderCommandEncoder>)CFBridgingRelease(m_fogSceneEncoder);
+				m_fogSceneEncoder = nullptr;
 			}
 			// Debug lines on top of the opaque scene, still in the HDR pass.
 			if (!m_debugLines.empty())
@@ -17887,11 +20442,36 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 
 			// ── In-Game UI ──────────────────────────────────────────────────
 			if (isPrimary && !offscreen)
+			{
+				// Objects whose material pipeline is still compiling are not drawn; say so,
+				// bottom left, until the last build lands. The editor shows its own hint over
+				// the viewport (it renders offscreen), so this is the packaged game only.
+				const size_t uiObjectsBefore = m_renderWorld.uiObjects.size();
+				if (!m_materialPipelinePending.empty())
+				{
+					const int total = m_matBuildScheduled, left = static_cast<int>(m_materialPipelinePending.size());
+					const std::string text = "Compiling shaders  " + std::to_string(total - left) + " / " + std::to_string(total);
+					const float sz = 18.0f;
+					const glm::vec2 textSize = HE::measureUIText(text, sz, 0.0f, HE::UITextLayout{});
+					const glm::vec2 box(textSize.x + 24.0f, sz + 14.0f);
+					const glm::vec2 at(16.0f, static_cast<float>(ph) - box.y - 16.0f);
+					UIRenderObject card;
+					card.position = at; card.size = box;
+					card.color = { 0.05f, 0.04f, 0.04f, 0.75f };
+					card.cornerRadius = { 6.0f, 6.0f, 6.0f, 6.0f };
+					card.layer = 1 << 20;
+					m_renderWorld.uiObjects.push_back(card);
+					HE::emitUITextGlyphs(text, at + glm::vec2(12.0f, 0.0f), glm::vec2(box.x - 12.0f, box.y), sz,
+					                     { 0.95f, 0.93f, 0.88f, 1.0f }, (1 << 20) + 1, /*centerH=*/false,
+					                     m_renderWorld.uiObjects);
+				}
 				// May hand back a SECOND encoder (a Backdrop material cuts the
 				// pass in two) — the overlay below has to use that one.
 				encoder = (__bridge id<MTLRenderCommandEncoder>)
 					EncodeUIPass((__bridge void*)encoder, pw, ph,
 					             (__bridge void*)cmdBuf, (__bridge void*)pass);
+				m_renderWorld.uiObjects.resize(uiObjectsBefore);
+			}
 
 			// ── Overlay (ImGui) ─────────────────────────────────────────────
 			if (isPrimary && m_overlayCallback)
@@ -17922,6 +20502,8 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 			if (!ticket.empty())
 				[cmdBuf addCompletedHandler:^(id<MTLCommandBuffer>) { ring->release(ticket); }];
 		}
+		EndRvtFeedbackFrame((__bridge void*)cmdBuf);
+		m_rvtFbCurrent = nullptr;   // outside the frame the sink is bound (a page or a preview must not write a harvested buffer)
 
 		// Publish GPU timing once the buffer completes (background thread). All
 		// captured state is by-value / shared_ptr so it outlives the renderer if it
@@ -18432,6 +21014,18 @@ IRenderer::Capabilities MetalRenderer::GetCapabilities() const
 	// The deferred resolve shader is generated from the shared lighting preamble
 	// at runtime — no cross-compiler, no deferred path.
 	c.supportsDeferredRendering  = true;
+	c.supportsRawCapture         = true;   // RenderSceneImage's rawOutput (kTonemapMSL)
+	c.landscapeCoarseRevision    = true;   // MetalLandscape.mm: new coarse and far images, the atlas stays
+#if defined(HE_HAVE_SHADERC)
+	c.landscapeMaterial          = true;   // EncodeLandscape: the ground's material draws the patches
+	c.landscapeRvt               = true;   // SetRvtTileGround, rvtTileGround pages
+	c.landscapePassMask          = kLandscapePassAll;
+	c.landscapePasses            = true;// EncodeLandscapePass / EncodeLandscapeGBuffer / the ground's mesh in the ray structure
+#endif
+#if defined(HE_HAVE_SHADERC)
+	// A page is that raw capture blitted into the pool; the consumer is a graph material (MSL from the cross-compiler).
+	c.supportsRvt                = m_device != nullptr;
+#endif
 	// SSR: deferred tile mode traces the stored G-buffer lag-free; every other
 	// Metal configuration (forward, or non-Apple GPUs' two-pass deferred falls
 	// back to forward SSR too once the path is forward) runs the Option-A
@@ -18440,6 +21034,10 @@ IRenderer::Capabilities MetalRenderer::GetCapabilities() const
 	// Ray-traced GI reflections: tile-deferred AND forward (same kernels, fed
 	// from the pre-pass); the SW-BVH kernel covers devices without HW RT.
 	c.supportsGIReflections = true;
+	// Volumetric fog (Thema 225): Inject/Integrate/Apply are cross-compiled from the one
+	// GLSL source at runtime, so like the deferred resolve this needs the shader compiler.
+	// A pipeline that then fails to build keeps the analytic fog (EnsureFogPipelines).
+	c.supportsVolumetricFog = true;
 	// TAA needs a velocity buffer. The velocity pass is material-agnostic and
 	// depth-tests against whichever depth the opaque geometry left — G-buffer
 	// or HDR scene pass — so it runs on BOTH render paths (since 16.09.2026;

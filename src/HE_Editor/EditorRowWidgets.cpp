@@ -7,6 +7,7 @@
                               // + the window's WorkRect, which is what moves a
                               // SeparatorText's rule short of a trailing button
 
+#include <algorithm>
 #include <cctype>
 #include <cfloat>
 #include <cstdarg>
@@ -67,6 +68,21 @@ bool dangerButton(const char* label, const ImVec2& size)
 	                    ImVec4(0.60f, 0.20f, 0.20f, 1.0f),
 	                    ImVec4(0.72f, 0.26f, 0.26f, 1.0f),
 	                    ImVec4(0.52f, 0.16f, 0.16f, 1.0f));
+}
+
+bool removeButton(const char* label, const ImVec2& size)
+{
+	// The in-panel "take this out": the red text and wash of dangerSmallButton at
+	// full button height. Filled red stays for the confirm inside a dialog, so a
+	// row's Remove never outweighs the primary action beside it.
+	ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(0.95f, 0.48f, 0.45f, 1.0f));
+	ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.60f, 0.20f, 0.20f, 0.20f));
+	ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.66f, 0.23f, 0.23f, 0.32f));
+	ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.52f, 0.16f, 0.16f, 0.50f));
+	const bool pressed = ImGui::Button(label, size);
+	ImGui::PopStyleColor(4);
+	helpForLabel(label);
+	return pressed;
 }
 
 bool addButton(const char* id, const char* tooltip)
@@ -251,8 +267,13 @@ float inlineLabelWidth()
 // from "Speed##ab"), print only the part before "##", stretch the control to the
 // panel. `body` submits the control and is the LAST item, which is what the
 // callers' undo tracking keys off.
+// A single number reads fine in a short field; stretched across a wide page it
+// is a long empty bar with "1280" in the middle. Drags and typed numbers stop
+// here, sliders and text keep the full width.
+constexpr float kNumberMaxWidth = 200.0f;
+
 template <typename F>
-bool row(const char* label, F&& body)
+bool row(const char* label, F&& body, float maxWidth = 0.0f)
 {
 	ImGui::PushID(label);
 	const bool inlineLabel = labelCell(label);
@@ -275,7 +296,10 @@ bool row(const char* label, F&& body)
 		ImGui::SameLine();
 		ImGui::TextDisabled("(mixed)");
 	}
-	ImGui::SetNextItemWidth(-FLT_MIN);
+	if (maxWidth > 0.0f && ImGui::GetContentRegionAvail().x > maxWidth)
+		ImGui::SetNextItemWidth(maxWidth);
+	else
+		ImGui::SetNextItemWidth(-FLT_MIN);
 	const bool changed = body();
 	// After the control, so the LAST item is still the caller's — nothing here
 	// submits an item, and the tooltip itself is drawn at the end of the frame
@@ -346,7 +370,7 @@ bool sliderInt(const char* label, int* v, int min, int max, const char* fmt)
 bool dragFloat(const char* label, float* v, float speed, float min, float max, const char* fmt)
 {
 	const char* f = mixedMask(label) ? kMixedFmt : fmt;
-	return row(label, [&]{ return ImGui::DragFloat("##v", v, speed, min, max, f); });
+	return row(label, [&]{ return ImGui::DragFloat("##v", v, speed, min, max, f); }, kNumberMaxWidth);
 }
 
 bool dragFloat2(const char* label, float* v, float speed, float min, float max, const char* fmt)
@@ -367,15 +391,20 @@ bool dragFloat4(const char* label, float* v, float speed, float min, float max, 
 	return row(label, [&]{ return axisDragN("##v", v, 4, speed, min, max, fmt, m); });
 }
 
+bool axisDrag(const char* id, float* v, int n, float speed, float min, float max, const char* fmt)
+{
+	return axisDragN(id, v, n, speed, min, max, fmt);
+}
+
 bool dragInt(const char* label, int* v, float speed, int min, int max)
 {
 	const char* f = mixedMask(label) ? kMixedFmt : "%d";
-	return row(label, [&]{ return ImGui::DragInt("##v", v, speed, min, max, f); });
+	return row(label, [&]{ return ImGui::DragInt("##v", v, speed, min, max, f); }, kNumberMaxWidth);
 }
 
 bool inputInt(const char* label, int* v)
 {
-	return row(label, [&]{ return ImGui::InputInt("##v", v, 0, 0); });
+	return row(label, [&]{ return ImGui::InputInt("##v", v, 0, 0); }, kNumberMaxWidth);
 }
 
 namespace
@@ -425,7 +454,21 @@ bool comboZ(const char* label, int* v, const char* itemsSeparatedByZeros)
 
 bool colorEdit3(const char* label, float* rgb, ImGuiColorEditFlags flags)
 {
-	return row(label, [&]{ return ImGui::ColorEdit3("##v", rgb, flags); });
+	if (!mixedMask(label))
+		return row(label, [&]{ return ImGui::ColorEdit3("##v", rgb, flags); });
+	// Mixed: the swatch alone, marked "—" like a drag's mixed parts, rather than
+	// three numbers that read as everyone's. It is the active entity's colour
+	// underneath, so the picker still starts there and the edit lands on all.
+	return row(label, [&]{
+		const bool changed = ImGui::ColorEdit3("##v", rgb, flags | ImGuiColorEditFlags_NoInputs);
+		const ImVec2 mn = ImGui::GetItemRectMin(), mx = ImGui::GetItemRectMax();
+		const ImVec2 ts = ImGui::CalcTextSize(kMixedFmt);
+		const ImVec2 at(std::floor((mn.x + mx.x - ts.x) * 0.5f), std::floor((mn.y + mx.y - ts.y) * 0.5f));
+		ImDrawList* dl = ImGui::GetWindowDrawList();
+		dl->AddText(ImVec2(at.x + 1.0f, at.y + 1.0f), IM_COL32(0, 0, 0, 200), kMixedFmt);
+		dl->AddText(at, IM_COL32(255, 255, 255, 255), kMixedFmt);
+		return changed;
+	});
 }
 
 bool colorEdit4(const char* label, float* rgba, ImGuiColorEditFlags flags)
@@ -519,7 +562,10 @@ void hint(const char* fmt, ...)
 	// window width minus a fixed inset and ignores the current indent, so an
 	// indented hint still ran off the side).
 	ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
-	ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x);
+	// Capped, too: a sentence across a 900 px page is hard to follow back to
+	// the start of the next line, so a wide page wraps every hint at one width.
+	constexpr float kReadableWidth = 680.0f;
+	ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + std::min(ImGui::GetContentRegionAvail().x, kReadableWidth));
 	va_list args;
 	va_start(args, fmt);
 	ImGui::TextV(fmt, args);
@@ -601,7 +647,17 @@ void helpMarker(const char* key)
 	const HE::Ed::Help::Entry* e = HE::Ed::Help::findKey(key ? key : "");
 	if (!e) return;
 	ImGui::SameLine(0.0f, 4.0f);
-	ImGui::TextDisabled("(?)");
+	// A circled "?" (as the material editor's parameter rows): the text "(?)"
+	// read as stray punctuation after a heading.
+	const float h = ImGui::GetTextLineHeight();
+	ImGui::Dummy(ImVec2(h, h));
+	const ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
+	const ImVec2 c((a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f);
+	const ImU32  fg = ImGui::GetColorU32(ImGui::IsItemHovered() ? ImGuiCol_Text : ImGuiCol_TextDisabled);
+	const float  fs = ImGui::GetFontSize() * 0.8f;
+	ImDrawList*  dl = ImGui::GetWindowDrawList();
+	dl->AddCircle(c, h * 0.40f, fg, 0, 1.4f);
+	dl->AddText(ImGui::GetFont(), fs, ImVec2(c.x - ImGui::CalcTextSize("?").x * 0.4f, c.y - fs * 0.5f), fg, "?");
 	queueIfHovered(e);
 }
 

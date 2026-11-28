@@ -3,6 +3,7 @@
 #include <HorizonRendering/GiBvh.h>
 
 #include <glm/glm.hpp>
+#include <algorithm>
 #include <cmath>
 #include <random>
 #include <vector>

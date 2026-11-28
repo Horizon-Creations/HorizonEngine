@@ -117,6 +117,9 @@ public:
         // Source control through the team server (topic 199): a ticket for one
         // sync connection to `project` (HE::Net::ScClient).
         ScTicket = 20,
+        // A notice for one member's editors (the task board's "Anna assigned
+        // you …"), carried as a Notice event; the server never reads it.
+        Notify = 21,
     };
     enum class Result : std::uint8_t {
         Ok = 0, BadRequest = 1, InvalidName = 2, InvalidPassword = 3, MemberExists = 4,
@@ -133,6 +136,8 @@ public:
         // A save moved a team project's head (to every connection of the team,
         // the saver's own included).
         ScHead = 9,
+        // A NOTIFY for us: `member` sent it, `payload` is what it said.
+        Notice = 10,
     };
 
     // Largest picture side the server keeps (and the editor sends).
@@ -188,6 +193,8 @@ public:
         // ScHead: the project, its new revision; `member` saved it.
         std::string   project;
         std::uint64_t rev = 0;
+        // Notice: the sender's payload (`member` is the sender).
+        std::string   payload;
     };
 
     // Starts connecting and logs in (or creates the team, whose first admin
@@ -286,6 +293,13 @@ public:
     // False once the server refused LIST_PROFILES as unknown (it predates
     // profiles); true before that is known.
     bool          profilesSupported() const { return m_profilesSupported; }
+    // A notice for every editor `member` is signed in with (Event Notice there).
+    // NotOnline: nobody to give it to; it is not kept. Returns 0 without asking
+    // for a payload over kMaxNoticePayload.
+    std::uint32_t notify(const std::string& member, const std::string& payload, ReplyFn done = {});
+    static constexpr std::size_t kMaxNoticePayload = 8192;
+    // False once the server refused NOTIFY as unknown (it predates notices).
+    bool          noticesSupported() const { return m_noticesSupported; }
 
     // ── Helpers ──
     // The SecureTransport join secret of a team session, derived from its
@@ -379,6 +393,7 @@ private:
     std::deque<std::string>        m_avatarQueue;   // lower-cased names to fetch
     std::size_t                    m_avatarFetches = 0;
     bool                           m_profilesSupported = true;
+    bool                           m_noticesSupported = true;
     // Callbacks are collected and run after the frame is applied, so a callback
     // that issues a request (or closes us) never re-enters the frame loop.
     std::vector<std::pair<ReplyFn, Reply>> m_ready;

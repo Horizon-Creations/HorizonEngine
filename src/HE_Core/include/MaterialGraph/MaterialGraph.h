@@ -18,7 +18,9 @@
 // model, tests exercise codegen headlessly.
 #pragma once
 
+#include <MaterialGraph/MaterialParamLimits.h>   // kMatMaxParams, kMatParamFloats, kMatParamBytes
 #include <Types/Defines.h> // HE_API — HorizonCore.dll uses explicit exports on Windows
+#include <Types/UUID.h>
 #include <cstdint>
 #include <functional>
 #include <map>
@@ -246,6 +248,52 @@ enum class MatNodeType : uint8_t
     //   outputs: Value (as FBM Noise), dX and dY (the derivative of Value along UV·Scale,
     //            what (FBM(q + h·x) − FBM(q)) / h tends to as h shrinks)
     FbmGrad,
+
+    // ── v19: the landscape's foliage set (Thema 327, Schritt 3) ──
+    // A METADATA node, like the layer list of a Landscape Layer Blend: no pins, nothing
+    // is emitted. s = the LandscapeFoliageLayer asset the material names for its terrain
+    // (matFoliageSetIdToString; empty = none) → MaterialAsset::foliageSetId, which the
+    // Landscape tool's Apply reads. It shades nothing and spawns nothing, so assigning
+    // or changing the set never changes the shader text (no recompile, same pipeline).
+    // The generator finds it by SCANNING the graph, not by walking from the Output: a
+    // node without outputs is never reached by the demand-driven emit.
+    LandscapeFoliage,
+
+    // ── v20: mixed texture groups (Thema 233) ──
+    // No inputs. Reads the landscape weightmap's third page (layers 8..11 = the shares of
+    // texture group 0..3, TerrainPaint::enableGroupMix) at the fragment's terrain UV and
+    // picks the TWO strongest groups: A = index of the strongest (0..3), B = index of the
+    // second, Mix = A's weight in the pair (sA / (sA + sB), 1 where only one group has any).
+    // The indices feed a texture array's Slice pin, so the material reads two groups' slices
+    // per fragment instead of four. A map with no third page, or no shares at all, is group 0.
+    LandscapeGroupPick,
+
+    // ── v21: Runtime Virtual Texture read (Thema 333, MaterialGraph/RvtLookup.h) ──
+    // The painted landscape material, read back from the page pool instead of being computed:
+    // looks the fragment's world XZ up in the volume's page table and filters the three layers by
+    // hand (texelFetch only, no sampler). Inputs: the volume's two parameter vectors A and B (see
+    // RvtLookup.h; normally Param Vector4 nodes the engine fills). Outputs: Base Color, world Normal,
+    // AO, Roughness, and Valid (0 where there is nothing to show). Engine-internal: the editor palette
+    // does not list it, and only a backend with Capabilities::supportsRvt can draw a material that has it.
+    RvtSample,
+
+    // ── v22: RVT 2.0, the Runtime Virtual Texture as a material feature (Thema 335) ──
+    // A pair of nodes that name one virtual texture (`s` = its name) and cut the material in two:
+    // everything BEFORE the Write node is painted once into the page pool, everything AFTER the Read
+    // node runs live per pixel. MaterialGraph/RvtSplit.h cuts the graph (one unlit page shader per
+    // connected Write input) and hashes what a page depends on. Engine-internal until the global RVT
+    // switch and the page driver exist (the editor palette does not list them yet).
+    //
+    // RvtWrite: a sink with no outputs, so the demand-driven emit never reaches it (like Landscape
+    // Foliage); the split finds it by scanning. Inputs Base Color, Normal, Roughness, AO, and the
+    // optional Specular, Height, Mask. p[0] = texels per metre of mip 0 (0 = the volume's own
+    // setting), p[1] = layer occupancy bitmask for the page driver (bit k = input k is stored;
+    // 0 = every connected input).
+    RvtWrite,
+    // RvtRead: no inputs. Outputs Base Color, Normal, Roughness, AO and Valid (0 where no page is
+    // resident yet). Emits the shared heRvtSample lookup of RvtLookup.h, whose two volume vectors
+    // are engine-filled parameters named by matRvtVolumeParamName.
+    RvtRead,
 };
 
 // True for every node whose `s` is a texture path sampled through a heTexP slot
@@ -280,11 +328,12 @@ inline bool matNodeIsBombing(MatNodeType t)
 }
 
 // Layers a single Landscape Layer Blend node can hold — one RGBA8 weightmap
-// channel each, over two pages of four (TerrainComponent::layerWeights /
-// layerWeights2). Both pages travel in ONE texture, side by side, so the eight
-// layers cost the same single heLandscapeWeights binding and sampler as four
-// did — the SM 5.0 / Metal sampler budget is full (MaterialShaderLibrary).
-inline constexpr int kMatMaxLandscapeLayers = 8;
+// channel each, over three pages of four (TerrainComponent::layerWeights /
+// layerWeights2 / layerWeights3). The pages travel in ONE texture, side by side
+// (1:1, 2:1 or 3:1 by the texture's own size), so the twelve layers cost the same
+// single heLandscapeWeights binding and sampler as four did — the SM 5.0 / Metal
+// sampler budget is full (MaterialShaderLibrary).
+inline constexpr int kMatMaxLandscapeLayers = 12;
 
 // How many per-layer colours the CPU fold persists for the GI bounce
 // (MaterialAsset::approxLayerColor, the MTRL tail, GiLandscape::layerColor).
@@ -296,6 +345,12 @@ inline constexpr int kMatApproxLayerColors = 4;
 // Split a LandscapeLayerBlend node's `s` into its layer names (newline separated,
 // blanks dropped, capped at kMatMaxLandscapeLayers). Empty → one "Layer 1".
 HE_API std::vector<std::string> matLandscapeLayerNames(const std::string& s);
+
+// A Landscape Foliage node keeps its asset as a UUID in `s` (the packer rewrites only the
+// refs it knows, so a path would dangle in a pak): 32 hex digits, hi then lo, "" for none.
+// The parser takes upper or lower case and nothing else; malformed text is {} (= none).
+HE_API std::string matFoliageSetIdToString(const HE::UUID& id);
+HE_API HE::UUID    matFoliageSetIdFromString(const std::string& s);
 
 // Material blend modes (Output node p[1]; → MaterialAsset::blendMode). They change which
 // Output pins are meaningful — see matOutputPins:
@@ -574,6 +629,10 @@ struct MatShaderGen
     // material — not the terrain — is the single source of truth for what a layer
     // means. Empty for every ordinary material.
     std::vector<std::string> layerNames;
+    // The LandscapeFoliageLayer asset a Landscape Foliage node names (→ MaterialAsset::
+    // foliageSetId); {} = none. Found by a scan of the top-level graph, lowest node id
+    // wins when a graph holds more than one. Never touches the generated GLSL.
+    HE::UUID foliageSetId{};
 };
 
 // Max project textures a single material graph may sample (fixed so the per-backend
@@ -604,14 +663,6 @@ HE_API bool matSplitDisplacement(const std::string& disp, MatTessSettings& tess,
 // edited.
 HE_API bool matGlslUsesTime(const std::string& glsl);
 
-// Exposed parameters a single material graph may declare — the length of the
-// HeParams UBO array (`uniform HeParams { vec4 v[kMatMaxParams]; }`, emitted by
-// generateFragment and mirrored in MaterialShaderLibrary's WPO preamble).
-// A graph with MORE distinct parameter names bakes the surplus ones as literal
-// constants instead of indexing the UBO: the layout used to be clamped only
-// AFTER emission, so the generated shader kept reading heParams.v[16] and up —
-// out of bounds in the declared array.
-inline constexpr int kMatMaxParams = 16;
 
 // Generate shader + parameter layout. Always succeeds (unconnected inputs fall back to
 // pin defaults; a missing Output node yields a magenta error shader; recursive function

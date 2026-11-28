@@ -81,6 +81,11 @@ public:
     // the run above reports differences with, and the one the designer uses
     // to tell whether somebody edited a value it had put on the canvas.
     static bool samePropValue(const HE::UIPropValue& a, const HE::UIPropValue& b);
+    // One element's asset paths resolved the way a live widget resolves them:
+    // texture id and source size and font atlas key written onto the element,
+    // the material's id returned (UUID{} = none). What the designer uses to
+    // draw a tree no manager owns through the same renderer path.
+    static HE::UUID resolveElementAssets(ContentManager& content, HE::UIElement& e);
 
     void destroyWidget(int id);
     void showWidget(int id);

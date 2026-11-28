@@ -179,7 +179,8 @@ namespace
 		float       nextW = 0.0f;   // the slot it is cut to
 	};
 
-	Layout layoutFor(const Summary& s, float maxWidth)
+	// `anyTasks`: with nothing open, a board of finished tasks says so, an empty one does not.
+	Layout layoutFor(const Summary& s, float maxWidth, bool anyTasks)
 	{
 		Layout l;
 		l.lineH = ImGui::GetTextLineHeight();
@@ -188,7 +189,7 @@ namespace
 		if (maxWidth < l.box) return l;
 
 		char buf[96];
-		if (s.open == 0)     std::snprintf(buf, sizeof(buf), "No open tasks");
+		if (s.open == 0)     std::snprintf(buf, sizeof(buf), anyTasks ? "All done" : "No open tasks");
 		else if (s.mine > 0) std::snprintf(buf, sizeof(buf), "%d open \xC2\xB7 %d mine", s.open, s.mine);
 		else                 std::snprintf(buf, sizeof(buf), "%d open", s.open);
 		auto fits = [&](const char* text) {
@@ -295,7 +296,7 @@ namespace
 
 			const std::string title = titleOf(*t);
 			const char* tag = t->isDone() ? nullptr
-			                : t->status == TaskStatus::InProgress ? "In Progress"
+			                : t->status == TaskStatus::InProgress ? "In progress"
 			                : t->status == TaskStatus::Blocked    ? "Blocked" : nullptr;
 			const float tagW = tag ? ImGui::CalcTextSize(tag).x + 8.0f : 0.0f;
 			const float tx0 = a.x + 9.0f, tx1 = std::max(tx0, z.x - 4.0f - tagW);
@@ -325,7 +326,7 @@ float DrawFooter(AppContext& ctx, float maxWidth)
 	if (!b) { if (s_open) closeList(); return 0.0f; }
 
 	const Summary s = summarize(*b, TaskBoardPanel::author());
-	const Layout  l = layoutFor(s, maxWidth);
+	const Layout  l = layoutFor(s, maxWidth, !b->tasks.empty());
 	if (l.width <= 0.0f) return 0.0f;   // the list, if open, closes: no anchor this frame
 
 	// One hit box for the whole widget, one text line tall.
@@ -440,7 +441,7 @@ bool DrawOverlay(AppContext& ctx)
 
 		if (s_rows.empty())
 			ImGui::TextDisabled(b->tasks.empty()
-				? "No tasks yet. Open the Task Board to add one."
+				? "No tasks yet. Open the Planner to add one."
 				: "Everything is done.");
 		else
 			titled = drawRows(*b, tick, tickDone);
@@ -448,7 +449,7 @@ bool DrawOverlay(AppContext& ctx)
 			ImGui::TextDisabled("+%d more on the board", s_more);
 
 		ImGui::Separator();
-		if (EditorWidgets::button("Open Task Board")) openPanel = true;
+		if (EditorWidgets::button("Open Planner")) openPanel = true;
 
 		s_listRect  = rectOf(ImGui::GetWindowPos(),
 		                     ImVec2(ImGui::GetWindowPos().x + ImGui::GetWindowSize().x,

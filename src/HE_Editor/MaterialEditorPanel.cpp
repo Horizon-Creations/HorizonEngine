@@ -11,6 +11,7 @@
 #include "GraphEditor.h"                        // shared node-graph canvas frontend
 #include "HcEditorUtil.h"                       // asset dropdowns (texture picker)
 #include <MaterialGraph/MaterialGraph.h>
+#include <MaterialGraph/MatCpuEval.h>
 #include <HorizonScene/SceneSystems.h>          // who else references a mesh (scene refs)
 #include <material/MaterialShaderLibrary.h> // inline compile check (canvas error banner)
 #include <ContentManager/ContentManager.h>
@@ -110,6 +111,10 @@ struct State
 	std::string name;                // filename for the header
 	bool        isFunction = false;  // editing a MaterialFunction asset (FnInput/FnOutput mode)
 	std::string relPath;             // content-root-relative path of this asset
+	// Advanced Shader Effects off: whether the software renderer can run this
+	// graph, re-asked whenever the graph's JSON changes (cpuCheckJson).
+	std::string cpuCheckJson;
+	std::string cpuCheckError;       // empty = every node runs on the CPU
 };
 AssetPanelState<State> s_states;
 
@@ -129,6 +134,34 @@ const HE::MaterialGraph* loadFunctionGraph(AppContext& ctx, const std::string& r
 	if (!fn->nodeGraphJson.empty() && !HE::materialGraphFromJson(fn->nodeGraphJson, g))
 		return nullptr;
 	return &(s_fnGraphCache[relPath] = std::move(g));
+}
+
+// Advanced Shader Effects off: the project ships on the software renderer,
+// which runs a widget material's graph itself (HE::MatCpuProgram) and knows
+// only the widget node set. The add menu offers exactly that set, and the
+// toolbar says whether the graph as it stands runs there.
+bool cpuNodesOnly(AppContext& ctx)
+{
+	// The export's rule (BackendRules::forExport): only an APPLICATION with the
+	// switch off ships the software renderer; a game always has a GPU one.
+	return ctx.projectManager && ctx.projectManager->currentProject().appProject &&
+	       !ctx.projectManager->currentProject().advancedShaderEffects;
+}
+
+// Why the software renderer cannot run this graph, or "" when it can. A
+// function is asked node by node (it has no Output to compile from).
+std::string cpuRefusal(const State& st, AppContext& ctx)
+{
+	if (st.isFunction)
+	{
+		for (const MatGraphNode& n : st.graph.nodes)
+			if (!HE::matCpuSupports(n.type)) return HE::matNodeDesc(n.type).name;
+		return {};
+	}
+	HE::MatCpuProgram program;
+	std::string error;
+	const HE::MatFunctionLoader loader = [&ctx](const std::string& path) { return loadFunctionGraph(ctx, path); };
+	return program.compile(st.graph, loader, nullptr, &error) ? std::string() : error;
 }
 
 // Node width used to size the inline value widgets (kept in sync with the shared
@@ -239,6 +272,7 @@ void regenerateMaterial(State& st, AppContext& ctx)
 	// binds these on loose materials; packing bakes them to graphTextureIds (MTLU).
 	mat->graphTexturePaths = gen.textures;
 	mat->graphLayerNames   = gen.layerNames;   // landscape paint layers
+	mat->foliageSetId      = gen.foliageSetId; // landscape foliage set (metadata node)
 	mat->blendMode            = gen.blendMode;
 	mat->domain               = gen.domain;
 	mat->customShaderVertGlsl = gen.vertexBody; // WPO vertex body ("" = standard vertex)
@@ -516,6 +550,15 @@ State& stateFor(const std::string& path, AppContext& ctx)
 			// No graph yet (fresh material, or one with only a hand-written shader):
 			// start from the default. Nothing is written until the first edit.
 			st.graph = MaterialGraph::makeDefault();
+			// On the software renderer a material is a widget's: User Interface,
+			// unlit — the domain the CPU runs.
+			if (cpuNodesOnly(ctx))
+				for (MatGraphNode& n : st.graph.nodes)
+					if (n.type == MatNodeType::Output)
+					{
+						n.p[0] = 0.0f;
+						n.p[3] = static_cast<float>(HE::MatDomain::UserInterface);
+					}
 		}
 		if (!st.isInstance) st.lastGlsl = HE::generateFragmentGlsl(st.graph);
 	}
@@ -530,6 +573,47 @@ State& stateFor(const std::string& path, AppContext& ctx)
 // The one copy lives with the canvas that defines the zoom.
 using GraphEditor::pushWidgetScale;
 using GraphEditor::popWidgetScale;
+
+// A parameter's NAME in the side panel: editable, but drawn as the label it is.
+// A framed box per name read as one more button beside the real ones.
+static void paramNameField(std::string& name)
+{
+	ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
+	ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0.0f, ImGui::GetStyle().FramePadding.y));
+	ImGui::InputText("##name", &name);
+	ImGui::PopStyleVar();
+	ImGui::PopStyleColor();
+}
+
+// Small square glyph buttons for a parameter row: "more" (three dots, the
+// metadata popup) and a "?" mark that only carries a tooltip. The text ".." and
+// "(?)" they replace read as stray punctuation after the value.
+static bool paramGlyph(const char* id, bool help)
+{
+	const float  h = ImGui::GetFrameHeight();
+	const ImVec2 size(h, h);
+	const bool   pressed = help ? (ImGui::Dummy(size), false) : ImGui::InvisibleButton(id, size);
+	const ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
+	const ImVec2 c((a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f);
+	const bool   hov = ImGui::IsItemHovered();
+	ImDrawList*  dl = ImGui::GetWindowDrawList();
+	const ImU32  fg = ImGui::GetColorU32(hov ? ImGuiCol_Text : ImGuiCol_TextDisabled);
+	if (help)
+	{
+		const float r = h * 0.30f;
+		dl->AddCircle(c, r, fg, 0, 1.4f);
+		const ImVec2 ts = ImGui::CalcTextSize("?");
+		const float  fs = ImGui::GetFontSize() * 0.8f;
+		dl->AddText(ImGui::GetFont(), fs, ImVec2(c.x - ts.x * 0.4f, c.y - fs * 0.5f), fg, "?");
+	}
+	else
+	{
+		if (hov) dl->AddRectFilled(a, b, ImGui::GetColorU32(ImGuiCol_ButtonHovered), ImGui::GetStyle().FrameRounding);
+		for (int k = -1; k <= 1; ++k)
+			dl->AddCircleFilled(ImVec2(c.x + k * h * 0.2f, c.y), 1.6f, fg);
+	}
+	return pressed;
+}
 
 // Inline parameter widgets for a node; returns true when an edit was COMMITTED
 // (deactivated-after-edit), so constant drags don't rebuild the pipeline every frame.
@@ -599,7 +683,7 @@ bool nodeParamWidgets(MatGraphNode& n, float scale = 1.0f, bool drawName = true,
 				committed = true;
 			}
 			if (static_cast<int>(names.size()) >= HE::kMatMaxLandscapeLayers)
-				ImGui::TextDisabled("8 layers max (two RGBA weightmap pages)");
+				ImGui::TextDisabled("12 layers max (three RGBA weightmap pages)");
 			// Rebuild `s`. The link surgery below happens ONLY for an explicit ×:
 			// this runs every frame while the user types, and clearing a name
 			// field to retype it (select-all, delete) makes
@@ -712,7 +796,7 @@ bool nodeParamWidgets(MatGraphNode& n, float scale = 1.0f, bool drawName = true,
 			ImGui::TextWrapped("%s", label.c_str());
 			ImGui::PopStyleColor();
 			if (!n.s.empty() && EditorWidgets::dangerSmallButton("Clear")) { n.s.clear(); committed = true; }
-			ImGui::TextDisabled("(drop, or right-click → Set Texture)");
+			ImGui::TextDisabled("(drop, or right-click » Set Texture)");
 			break;
 		}
 		case MatNodeType::Output:
@@ -749,7 +833,7 @@ bool nodeParamWidgets(MatGraphNode& n, float scale = 1.0f, bool drawName = true,
 		case MatNodeType::ParamFloat:
 			if (drawName) {
 				ImGui::SetNextItemWidth((kNodeW - 24.0f) * scale);
-				ImGui::InputText("##name", &n.s);
+				paramNameField(n.s);
 				committed |= ImGui::IsItemDeactivatedAfterEdit();
 			}
 			ImGui::SetNextItemWidth((kNodeW - 24.0f) * scale);
@@ -763,7 +847,7 @@ bool nodeParamWidgets(MatGraphNode& n, float scale = 1.0f, bool drawName = true,
 		case MatNodeType::ParamColor:
 			if (drawName) {
 				ImGui::SetNextItemWidth((kNodeW - 24.0f) * scale);
-				ImGui::InputText("##name", &n.s);
+				paramNameField(n.s);
 				committed |= ImGui::IsItemDeactivatedAfterEdit();
 			}
 			ImGui::SetNextItemWidth((kNodeW - 24.0f) * scale);
@@ -775,7 +859,7 @@ bool nodeParamWidgets(MatGraphNode& n, float scale = 1.0f, bool drawName = true,
 		{
 			if (drawName) {
 				ImGui::SetNextItemWidth((kNodeW - 24.0f) * scale);
-				ImGui::InputText("##name", &n.s);
+				paramNameField(n.s);
 				committed |= ImGui::IsItemDeactivatedAfterEdit();
 			}
 			static const char* kTypes[] = { "Float", "Vec2", "Vec3", "Vec4" };
@@ -794,7 +878,7 @@ bool nodeParamWidgets(MatGraphNode& n, float scale = 1.0f, bool drawName = true,
 		case MatNodeType::ParamVec2:
 			if (drawName) {
 				ImGui::SetNextItemWidth((kNodeW - 24.0f) * scale);
-				ImGui::InputText("##name", &n.s);
+				paramNameField(n.s);
 				committed |= ImGui::IsItemDeactivatedAfterEdit();
 			}
 			ImGui::SetNextItemWidth((kNodeW - 24.0f) * scale);
@@ -804,7 +888,7 @@ bool nodeParamWidgets(MatGraphNode& n, float scale = 1.0f, bool drawName = true,
 		case MatNodeType::ParamVec4:
 			if (drawName) {
 				ImGui::SetNextItemWidth((kNodeW - 24.0f) * scale);
-				ImGui::InputText("##name", &n.s);
+				paramNameField(n.s);
 				committed |= ImGui::IsItemDeactivatedAfterEdit();
 			}
 			ImGui::SetNextItemWidth((kNodeW - 24.0f) * scale);
@@ -815,7 +899,7 @@ bool nodeParamWidgets(MatGraphNode& n, float scale = 1.0f, bool drawName = true,
 		{
 			if (drawName) {
 				ImGui::SetNextItemWidth((kNodeW - 24.0f) * scale);
-				ImGui::InputText("##name", &n.s);
+				paramNameField(n.s);
 				committed |= ImGui::IsItemDeactivatedAfterEdit();
 			}
 			bool on = n.p[0] > 0.5f;
@@ -865,6 +949,8 @@ float nodeValueHeight(const MatGraphNode& n)
 {
 	const MatNodeType type = n.type;
 	const HE::MatNodeDesc& d = HE::matNodeDesc(type);
+	if (type == MatNodeType::LandscapeFoliage) return 30.0f;      // the asset slot
+	if (type == MatNodeType::Output) return 52.0f;                // Lit toggle + domain combo
 	if (d.paramCount == 0 && !isTextureNode(type)) return 0.0f;
 	if (HE::matNodeIsBombing(type))                                // Rot/Blend/Seed (+Strength) + filename
 		return 44.0f + 26.0f * static_cast<float>(d.paramCount);
@@ -954,11 +1040,12 @@ bool drawParamConstPanel(MaterialGraph& graph)
 				// The hand-written tooltip this used to carry is now the help
 				// entry — two tooltips for one button, one drawn inline and one at
 				// the end of the frame, is what having both would mean.
-				if (EditorWidgets::smallButton("..")) ImGui::OpenPopup("##pmeta");
+				if (paramGlyph("##pmetabtn", false)) ImGui::OpenPopup("##pmeta");
+				EditorWidgets::helpForLabel("..");
 				if (!n->tooltip.empty())
 				{
-					ImGui::SameLine();
-					ImGui::TextDisabled("(?)");
+					ImGui::SameLine(0.0f, 0.0f);
+					paramGlyph("##ptip", true);
 					// The author of the material wrote this hint, so it is a sentence
 					// of unknown length, and a tooltip window sizes itself to its
 					// widest line. SetTooltip on such a string produces a strip of
@@ -1029,10 +1116,16 @@ bool drawParamConstPanel(MaterialGraph& graph)
 		if (!params.empty()) ImGui::Spacing();
 		ImGui::TextDisabled("Constants (baked into the shader)");
 		ImGui::Separator();
+		// The node's own name, else its type numbered: two rows that both read
+		// "Color" did not say which node each one edits.
+		std::unordered_map<int, int> seen;
 		for (MatGraphNode* n : consts)
 		{
 			ImGui::PushID(n->id);
-			ImGui::TextUnformatted(HE::matNodeDesc(n->type).name);
+			const int nth = ++seen[static_cast<int>(n->type)];
+			const std::string label = !n->s.empty() ? n->s
+				: std::string(HE::matNodeDesc(n->type).name) + " " + std::to_string(nth);
+			ImGui::TextUnformatted(label.c_str());
 			ImGui::SameLine(90.0f);
 			committed |= nodeParamWidgets(*n, 1.0f, true, &graph);
 			ImGui::PopID();
@@ -1216,6 +1309,36 @@ void drawMaterialCanvas(State& st, AppContext& ctx, bool assetOk,
 				structuralEdit = true; // texture list changed → regenerate
 			}
 		}
+		// Landscape Foliage: a metadata node with no pins, so its one control is the
+		// slot for the LandscapeFoliageLayer it names. Click it for a picker over
+		// every foliage set in the project, or drop one from the Content Browser. The
+		// node keeps the asset's UUID in `s` (matFoliageSetIdToString), so a rename or
+		// move of the file never breaks the link. The shader text does not change when
+		// the set does; the structural edit only re-reads the material's metadata.
+		if (n->type == MatNodeType::LandscapeFoliage)
+		{
+			ImGui::SetCursorScreenPos(bodyMin);
+			pushWidgetScale(zoom);
+			HE::UUID setId = HE::matFoliageSetIdFromString(n->s);
+			// A set saved with the material is not necessarily resident (it may still be
+			// on the EngineContent server): ask for it once so the slot can show its name.
+			if (setId != HE::UUID{} && ctx.contentManager && !ctx.contentManager->getLandscapeFoliageLayer(setId))
+			{
+				static std::unordered_set<HE::UUID> s_asked;
+				if (s_asked.insert(setId).second) ctx.contentManager->loadAssetAsync(setId);
+			}
+			const std::string slotId = "foliageset" + std::to_string(n->id);
+			if (EditorWidgets::assetDropSlot(ctx, nullptr, setId, HE::AssetType::LandscapeFoliageLayer,
+			                                 slotId.c_str(), "(pick a foliage set)", "landscape foliage layer",
+			                                 /*showClear=*/true, /*undo=*/false, "Material Node/Foliage Set")
+			    != EditorWidgets::SlotAction::None)
+			{
+				n->s = HE::matFoliageSetIdToString(setId);
+				structuralEdit = true; // regenerate → MaterialAsset::foliageSetId
+			}
+			popWidgetScale();
+			return;
+		}
 		// Align the name field with the value widgets below it: both sit at the
 		// child window's content-left (= bodyMin.x). Flowed widgets reset to that
 		// X on each line break, so the name must use the same X (not an extra
@@ -1356,19 +1479,17 @@ void drawMaterialCanvas(State& st, AppContext& ctx, bool assetOk,
 	};
 
 	// ── Per-node preview highlight: cyan halo + dot on the previewed node. ──
-	m.drawFront = [&st, &ctx](ImDrawList* dl, ImVec2 origin, ImVec2 pan, float zoom)
+	// `m` is drawn below in this same function, so the reference outlives the call.
+	m.drawFront = [&st, &m](ImDrawList* dl, ImVec2 origin, ImVec2 pan, float zoom)
 	{
 		if (st.previewNodeId == 0) return;
 		const MatGraphNode* n = st.graph.findNode(st.previewNodeId);
 		if (!n) return;
-		// Match the shared canvas box height (title + pin rows + body, in graph units).
-		const std::vector<GraphEditor::Pin> pins = matNodePins(ctx, *n);
-		int left = 0, right = 0;
-		for (const auto& p : pins) (p.input ? left : right)++;
+		// The canvas' own box: nodes are as wide as their content now.
+		const ImVec2 gs = GraphEditor::nodeLayout(m, st.previewNodeId).size;
 		const ImVec2 p(origin.x + pan.x + n->x * zoom, origin.y + pan.y + n->y * zoom);
-		const float bodyH = matNodeBodyHeight(*n);
-		const float h = (GraphEditor::kTitleH + std::max(left, right) * GraphEditor::kRowH + bodyH + 6.0f) * zoom;
-		const float w = GraphEditor::kNodeW * zoom;
+		const float h = gs.y * zoom;
+		const float w = gs.x * zoom;
 		dl->AddRect(p, ImVec2(p.x + w, p.y + h), IM_COL32(80, 200, 255, 220), 5.0f, 0, 2.0f);
 		dl->AddCircleFilled(ImVec2(p.x + w - 2.0f * zoom, p.y - 2.0f * zoom), 5.0f * zoom, IM_COL32(80, 200, 255, 255));
 	};
@@ -1477,11 +1598,17 @@ void drawMaterialCanvas(State& st, AppContext& ctx, bool assetOk,
 			"Math", "Logic", "Channels", "Landscape", "Function",
 		};
 		// True when this node type belongs in the menu at all.
+		const bool cpuOnly = cpuNodesOnly(ctx);
 		auto listed = [&](const HE::MatNodeDesc& d) {
+			if (cpuOnly && !HE::matCpuSupports(d.type)) return false;
 			// Exactly one material Output; FunctionCall comes from the list below.
 			if (d.type == MatNodeType::Output || d.type == MatNodeType::FunctionCall) return false;
 			const bool fnInterface = d.type == MatNodeType::FnInput || d.type == MatNodeType::FnOutput;
 			if (fnInterface && !st.isFunction) return false;
+			if (d.type == MatNodeType::RvtSample) return false;   // engine-internal (Thema 333): the runtime fills its inputs
+			// RVT 2.0 (Thema 335): the graph cut exists, the page driver and the global RVT switch do not yet, so a
+			// placed pair would only draw an empty pool. Listed once those steps land.
+			if (d.type == MatNodeType::RvtWrite || d.type == MatNodeType::RvtRead) return false;
 			return matches(d.name, d.category);
 		};
 		const char* lastCat = "";
@@ -1523,6 +1650,14 @@ void drawMaterialCanvas(State& st, AppContext& ctx, bool assetOk,
 				const std::string fnName = std::filesystem::path(fn->path).stem().string();
 				if (!matches(fnName.c_str(), "Function")) continue;
 				if (st.isFunction && fn->path == st.relPath) continue; // no direct self-call
+				// Only what the software renderer runs, when that is what ships.
+				if (cpuOnly)
+				{
+					HE::MaterialGraph fg;
+					bool runs = HE::materialGraphFromJson(fn->nodeGraphJson, fg);
+					for (const MatGraphNode& n : fg.nodes) runs = runs && HE::matCpuSupports(n.type);
+					if (!runs) continue;
+				}
 				if (!headerShown)
 				{
 					if (*lastCat) ImGui::Spacing();
@@ -2183,8 +2318,8 @@ bool drawInstanceOverridePanel(AppContext& ctx, State& st, MaterialAsset& inst)
 			ImGui::TextUnformatted(nm.empty() ? "param" : nm.c_str());
 			if (i < inst.graphParamTooltips.size() && !inst.graphParamTooltips[i].empty())
 			{
-				ImGui::SameLine();
-				ImGui::TextDisabled("(?)");
+				ImGui::SameLine(0.0f, 0.0f);
+				paramGlyph("##ptip", true);
 				// Same author-written sentence as on the master's parameter rows,
 				// the same fixed wrap column and the same asked-as-a-question
 				// BeginTooltip, so the two read alike in every respect.
@@ -2359,7 +2494,8 @@ void render(AppContext& ctx, const std::string& assetPath,
 			const int bmCur = std::clamp(static_cast<int>(outN->p[1]), 0, 2);
 
 			bar.group();
-			if (bar.item("##blend", T::iconEye, kBlend[bmCur], false, true,
+			// Not the eye: in the widget designer the eye is the state preview.
+			if (bar.item("##blend", T::iconCircle, kBlend[bmCur], false, true,
 			             "Opaque: solid (no Opacity pin)\n"
 			             "Masked: OpacityMask pin — fragments below Clip discard\n"
 			             "Translucent: Opacity pin — sorted alpha-blend pass"))
@@ -2481,6 +2617,26 @@ void render(AppContext& ctx, const std::string& assetPath,
 				s_openAssetRequest = ctx.contentManager->resolveAbsolutePath(
 					mat->parentMaterialPath);
 			}
+			bar.endGroup();
+		}
+
+		// The software renderer's verdict on the graph as it stands.
+		if (cpuNodesOnly(ctx) && !st.isInstance)
+		{
+			const std::string json = HE::materialGraphToJson(st.graph);
+			if (json != st.cpuCheckJson)
+			{
+				st.cpuCheckJson  = json;
+				st.cpuCheckError = cpuRefusal(st, ctx);
+			}
+			bar.group();
+			if (st.cpuCheckError.empty())
+				bar.item("##cpu", T::iconCheck, "Software", false, true,
+				         "Every node runs on the software renderer this project ships with");
+			else
+				bar.itemTinted("##cpu", T::iconWarning, "Software", T::kWarn, true,
+				               ("The software renderer cannot run " + st.cpuCheckError +
+				                " — a widget with this material draws its plain surface").c_str());
 			bar.endGroup();
 		}
 

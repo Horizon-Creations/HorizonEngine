@@ -64,7 +64,7 @@ bool outline(const char* name, float time, bool dimmed)
 	const float pulse = dimmed ? 0.22f
 	                           : 0.45f + 0.35f * (0.5f + 0.5f * std::sin(time * 3.2f));
 	const ImVec4 col = dimmed ? ImVec4(0.45f, 0.85f, 0.55f, pulse)   // already done
-	                          : ImVec4(0.45f, 0.72f, 1.00f, pulse);
+	                          : ImVec4(0.89f, 0.64f, 0.23f, pulse);   // the brand amber (AccentHi)
 	ImDrawList* dl = ImGui::GetForegroundDrawList(vp);
 	// Inset by half the stroke so the rectangle sits ON the panel edge instead
 	// of half outside it (which reads as covering the neighbouring panel).

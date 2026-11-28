@@ -270,8 +270,8 @@ std::vector<uint8_t> HpakReader::readEntry(const HE::UUID& id, const uint8_t key
     return readEntry(id, key, {}, nullptr);
 }
 
-std::vector<uint8_t> HpakReader::readEntry(const HE::UUID& id, const uint8_t key[32],
-                                           const std::function<bool()>& stop, bool* stopped) const
+std::vector<uint8_t> HpakReader::decodeStored(const HE::UUID& id, StoredEntry&& s, const uint8_t key[32],
+                                              const std::function<bool()>& stop, bool* stopped)
 {
     if (stopped) *stopped = false;
     const auto stopNow = [&]
@@ -280,9 +280,6 @@ std::vector<uint8_t> HpakReader::readEntry(const HE::UUID& id, const uint8_t key
         if (stopped) *stopped = true;
         return true;
     };
-    std::vector<uint8_t> raw;
-    const EntryMeta* e = readStoredBytes(id, raw, stop, stopped);
-    if (!e) return {};
 
     // Reserved entry flags this build cannot honour. kFlagUsesDict says the payload
     // was compressed against a shared zstd dictionary; this reader decodes without
@@ -292,21 +289,21 @@ std::vector<uint8_t> HpakReader::readEntry(const HE::UUID& id, const uint8_t key
     // flag that changes how the bytes must be read is how corrupt assets reach the
     // engine. (Supporting them means a real dictionary/framing section in the
     // format, not clearing this check.)
-    if (e->flags & (Hpak::kFlagUsesDict | Hpak::kFlagBlockFramed))
+    if (s.flags & (Hpak::kFlagUsesDict | Hpak::kFlagBlockFramed))
     {
         HE_LOG_ERROR(Pak, "Package entry %016llx%016llx uses features this build cannot "
                           "decode (flags 0x%x: %s%s)",
                      static_cast<unsigned long long>(id.hi),
-                     static_cast<unsigned long long>(id.lo), e->flags,
-                     (e->flags & Hpak::kFlagUsesDict)     ? "shared dictionary " : "",
-                     (e->flags & Hpak::kFlagBlockFramed)  ? "block framing"      : "");
+                     static_cast<unsigned long long>(id.lo), s.flags,
+                     (s.flags & Hpak::kFlagUsesDict)     ? "shared dictionary " : "",
+                     (s.flags & Hpak::kFlagBlockFramed)  ? "block framing"      : "");
         return {};
     }
 
     // Step 1: decrypt (AES-256-GCM; order matches write: compress → encrypt).
     // The auth tag makes a wrong key / tampered pak fail here rather than
     // silently yielding garbage.
-    if (e->flags & Hpak::kFlagEncrypted)
+    if (s.flags & Hpak::kFlagEncrypted)
     {
         if (!key)
         {
@@ -316,7 +313,7 @@ std::vector<uint8_t> HpakReader::readEntry(const HE::UUID& id, const uint8_t key
             return {};                       // encrypted entry needs a key
         }
         std::vector<uint8_t> pt;
-        if (!Hpak::aesGcmDecrypt(key, e->nonce, raw.data(), raw.size(), pt))
+        if (!Hpak::aesGcmDecrypt(key, s.nonce, s.data.data(), s.data.size(), pt))
         {
             HE_LOG_ERROR(Pak, "Package entry %016llx%016llx failed to decrypt — wrong key, "
                               "tampered data, or no crypto backend in this build",
@@ -324,31 +321,31 @@ std::vector<uint8_t> HpakReader::readEntry(const HE::UUID& id, const uint8_t key
                          static_cast<unsigned long long>(id.lo));
             return {};                        // wrong key / tampered / no backend
         }
-        raw = std::move(pt);
+        s.data = std::move(pt);
         if (stopNow()) return {};
     }
 
     // Step 2: decompress by codec
-    switch (static_cast<Hpak::Codec>(e->codec))
+    switch (static_cast<Hpak::Codec>(s.codec))
     {
     case Hpak::Codec::Store:
-        return raw;
+        return std::move(s.data);
 
     case Hpak::Codec::LZ4:
     {
 #ifdef HE_HAVE_LZ4
-        if (e->origSize == 0) return {};
-        std::vector<uint8_t> out(e->origSize);
+        if (s.origSize == 0) return {};
+        std::vector<uint8_t> out(s.origSize);
         const int result = LZ4_decompress_safe(
-            reinterpret_cast<const char*>(raw.data()),
+            reinterpret_cast<const char*>(s.data.data()),
             reinterpret_cast<char*>(out.data()),
-            static_cast<int>(raw.size()),
-            static_cast<int>(e->origSize));
-        if (result != static_cast<int>(e->origSize))
+            static_cast<int>(s.data.size()),
+            static_cast<int>(s.origSize));
+        if (result != static_cast<int>(s.origSize))
         {
             HE_LOG_ERROR(Pak, "LZ4 decode of entry %016llx%016llx produced %d byte(s), "
                               "expected %u", static_cast<unsigned long long>(id.hi),
-                         static_cast<unsigned long long>(id.lo), result, e->origSize);
+                         static_cast<unsigned long long>(id.lo), result, s.origSize);
             return {};
         }
         return out;
@@ -361,18 +358,18 @@ std::vector<uint8_t> HpakReader::readEntry(const HE::UUID& id, const uint8_t key
     case Hpak::Codec::Zstd:
     {
 #ifdef HE_HAVE_ZSTD
-        if (e->origSize == 0) return {};
-        std::vector<uint8_t> out(e->origSize);
+        if (s.origSize == 0) return {};
+        std::vector<uint8_t> out(s.origSize);
         size_t result = 0;
         if (!stop)
-            result = ZSTD_decompress(out.data(), out.size(), raw.data(), raw.size());
+            result = ZSTD_decompress(out.data(), out.size(), s.data.data(), s.data.size());
         else
         {
             // Stoppable: the same decode in 4 MiB output windows. Ends like
             // ZSTD_decompress does, every frame complete and nothing left over.
             std::unique_ptr<ZSTD_DCtx, size_t (*)(ZSTD_DCtx*)> dctx(ZSTD_createDCtx(), ZSTD_freeDCtx);
             if (!dctx) return {};
-            ZSTD_inBuffer in{ raw.data(), raw.size(), 0 };
+            ZSTD_inBuffer in{ s.data.data(), s.data.size(), 0 };
             size_t pending = 1;   // last return of decompressStream: 0 = frame complete
             constexpr size_t kWindow = size_t(4) << 20;
             while (result < out.size() || in.pos < in.size)
@@ -388,7 +385,7 @@ std::vector<uint8_t> HpakReader::readEntry(const HE::UUID& id, const uint8_t key
             // A frame cut short, or input left over that did not fit.
             if (!ZSTD_isError(result) && (pending != 0 || in.pos != in.size)) result = 0;
         }
-        if (ZSTD_isError(result) || result != e->origSize)
+        if (ZSTD_isError(result) || result != s.origSize)
         {
             HE_LOG_ERROR(Pak, "zstd decode of entry %016llx%016llx failed: %s",
                          static_cast<unsigned long long>(id.hi),
@@ -406,6 +403,28 @@ std::vector<uint8_t> HpakReader::readEntry(const HE::UUID& id, const uint8_t key
     }
     HE_LOG_ERROR(Pak, "Package entry %016llx%016llx uses unknown codec %u",
                  static_cast<unsigned long long>(id.hi),
-                 static_cast<unsigned long long>(id.lo), static_cast<unsigned>(e->codec));
+                 static_cast<unsigned long long>(id.lo), static_cast<unsigned>(s.codec));
     return {};
+}
+
+bool HpakReader::readStoredStoppable(const HE::UUID& id, StoredEntry& out,
+                                     const std::function<bool()>& stop, bool* stopped) const
+{
+    if (stopped) *stopped = false;
+    const EntryMeta* e = readStoredBytes(id, out.data, stop, stopped);
+    if (!e) return false;
+    out.origSize    = e->origSize;
+    out.contentHash = 0;   // decode path: the bytes were verified above, nobody re-packs them
+    out.codec       = e->codec;
+    out.flags       = e->flags;
+    std::memcpy(out.nonce, e->nonce, sizeof(out.nonce));
+    return true;
+}
+
+std::vector<uint8_t> HpakReader::readEntry(const HE::UUID& id, const uint8_t key[32],
+                                           const std::function<bool()>& stop, bool* stopped) const
+{
+    StoredEntry stored;
+    if (!readStoredStoppable(id, stored, stop, stopped)) return {};
+    return decodeStored(id, std::move(stored), key, stop, stopped);
 }

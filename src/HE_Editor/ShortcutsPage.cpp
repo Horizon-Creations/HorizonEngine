@@ -139,13 +139,21 @@ void draw()
 		if (a.nativeOnMac && !isDefault(a.id))
 		{
 			ImGui::SameLine();
-			ImGui::TextDisabled("(%s stays on the menu)", chordLabel(a.defaultChord).c_str());
+			ImGui::TextDisabled("(%s still works from the menu bar)", chordLabel(a.defaultChord).c_str());
 		}
 #endif
+		// A clash said in words on the row, not only as red text with a tooltip.
+		const std::vector<const Action*> clash = conflicts(a.id);
+		if (!clash.empty())
+		{
+			std::string who;
+			for (const Action* o : clash) { if (!who.empty()) who += ", "; who += o->label; }
+			// Under the name: beside it, a long name squeezed it into a column of fragments.
+			ImGui::TextColored(HE::Ed::Theme::Bad, "Clashes with %s", who.c_str());
+		}
 
 		ImGui::TableSetColumnIndex(1);
 		const bool capturing = (s_captureId == a.id);
-		const std::vector<const Action*> clash = conflicts(a.id);
 		std::string text = capturing ? std::string("Press keys\xe2\x80\xa6") : label(a.id);
 		if (text.empty()) text = "(none)";
 		if (capturing)    ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::AccentBright);

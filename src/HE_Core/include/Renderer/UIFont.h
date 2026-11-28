@@ -137,6 +137,22 @@ HE_API std::uint32_t uiFontScripts();
 // The engine-wide default UI font (Roboto Condensed Bold), baked lazily.
 HE_API const BakedUIFont& sharedUIFont();
 
+// An atlas's mip chain: each level the one before box-filtered to half size,
+// down to 1x1 (level 1 first). Text drawn smaller than the atlas was baked —
+// 9 px from a 64 px bake is seven texels per pixel — reads these, the way an
+// image reads its mips. ONE chain for every backend: the GPUs upload exactly
+// these levels and the software rasterizer samples them, so small text looks
+// the same everywhere. Built on first use, cached per atlas, rebuilt when the
+// atlas was re-baked. Thread-safe.
+struct UIFontMipLevel { std::vector<std::uint8_t> px; int w = 0, h = 0; };
+HE_API const std::vector<UIFontMipLevel>& uiFontMips(const BakedUIFont& font);
+// The mip level small text reads, shifted this much towards the sharper level.
+// Measured against 4x-supersampled text (test_software_raster): 0 is a box
+// filter too wide for strokes one texel thin and comes out soft; -1 keeps the
+// strokes even and crisp (9 px mean error 20 against 51 with no mips at all).
+// The GL and Metal glyph samplers spell the same number.
+inline constexpr float kUIFontLodBias = -1.0f;
+
 // The same font baked at an arbitrary pixel size, for callers that draw it at a
 // FIXED small size and would otherwise scale the 64 px shared atlas down — which
 // is where text turns mushy. Not cached: this is for the handful of one-off

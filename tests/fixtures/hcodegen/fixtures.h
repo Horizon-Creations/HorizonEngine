@@ -438,6 +438,18 @@ inline HE::hccg::ClassSource fxCoerce()
         // Anything else on a Vec3 pin → the null vector, like every mismatch.
         setFromDefault("v3FromFloat", PT::Vec3, Value::ofFloat(9.0f));
     }
+
+    // A number wired into a Bool pin. connect refuses that wire now (a Bool wants
+    // a comparison, as in Blueprint), but graphs saved before keep it: links are
+    // restored without re-checking, so it is pushed here the way a load does —
+    // and both sides still read it as "not zero".
+    {
+        const int evL = f.event("LegacyWire");
+        const int lit = f.constF(2.5f);
+        const int sl = f.setVar("bOut", PT::Bool);
+        f.g.links.push_back({ lit, f.pinBase(lit, 3), sl, f.pinBase(sl, 2) });
+        f.exec(evL, sl);
+    }
     return f.done("coerce_matrix");
 }
 
@@ -1032,6 +1044,33 @@ inline HE::hccg::ClassSource fxWidgetProps()
     f.exec(sCopy, show);
     const int hide = f.op(NT::HideSelf);
     f.exec(show, hide);
+
+    // The same properties through an element REFERENCE (Get Element → Get/Set
+    // (Ref)): the compiled side has no fast path for a control class, so both
+    // go through the runtime's getExternal/setExternal and the same bindings.
+    f.var("viaRef", PT::String);
+    f.var("opRef", PT::Float);
+    const auto elemRef = [&](int elem) {
+        Node ge; ge.type = NT::GetElement; ge.elem = elem; ge.className = "ui:Text";
+        return f.add(ge);
+    };
+    Node sx; sx.type = NT::SetExternal; sx.s = "opacity"; sx.propType = PT::Float;
+    sx.pinDefaults[1] = Value::ofFloat(0.25f);
+    const int setRef = f.add(sx);
+    f.data(elemRef(3), 0, setRef, 0);
+    f.exec(hide, setRef);
+    Node gx; gx.type = NT::GetExternal; gx.s = "text"; gx.propType = PT::String;
+    const int getRef = f.add(gx);
+    f.data(elemRef(4), 0, getRef, 0);
+    const int sVia = f.setVar("viaRef", PT::String);
+    f.data(getRef, 0, sVia, 0);
+    f.exec(setRef, sVia);
+    Node gx2; gx2.type = NT::GetExternal; gx2.s = "opacity"; gx2.propType = PT::Float;
+    const int getOpRef = f.add(gx2);
+    f.data(elemRef(3), 0, getOpRef, 0);
+    const int sOp = f.setVar("opRef", PT::Float);
+    f.data(getOpRef, 0, sOp, 0);
+    f.exec(sVia, sOp);
     return f.done("widget_props");
 }
 

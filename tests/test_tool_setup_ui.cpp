@@ -405,7 +405,7 @@ TEST_CASE("Tool setup: a failed install says why and offers Retry")
 	CHECK(state(bits, Tool::Compiler) == RowState::Failed);
 	dump(bits, "tool-setup-failed");
 
-	// Retry and Show Log take the place of Install; Retry (the left one) starts it again.
+	// Retry takes the place (and the look) of Install and starts it again.
 	const auto buttons = column(bits, 8.0f + 28.0f + 394.0f + 30.0f);
 	REQUIRE(buttons.size() >= 1);
 	clickAt(bits, buttons[0].second);

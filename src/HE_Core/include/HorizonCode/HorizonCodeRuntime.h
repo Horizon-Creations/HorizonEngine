@@ -94,6 +94,19 @@ public:
     // caller's container reallocating can't dangle execution) and seeds the
     // instance's private variable store from the graph's declared defaults.
     InstanceId add(Graph graph, HostBindings bindings = {}, ClassIdentity cls = {});
+
+    // ── Element references (Get Element) ─────────────────────────────────────
+    // A Ref to one element of a running widget: the handle Get/Set (Ref) read
+    // and write that element's properties through, the same nodes that reach a
+    // class's public variables. The high bit keeps the handle space apart from
+    // instance ids (which count up from 1), so no element handle can ever name
+    // an instance. Stable per (owner, element) — two Get Elements of one label
+    // compare equal — and it reads as null once the owner is gone.
+    static constexpr InstanceId kElementRefBit = 0x80000000u;
+    static bool isElementRef(InstanceId h) { return (h & kElementRefBit) != 0; }
+    // 0 when `owner` is not a live instance.
+    InstanceId elementRef(InstanceId owner, int elem);
+
     // The same, for a class with an inheritance chain: one graph per class,
     // ROOT FIRST, the class itself last. `add` is this with a single level.
     InstanceId addLevels(std::vector<Graph> levels, HostBindings bindings = {},
@@ -875,6 +888,16 @@ private:
     std::unordered_map<InstanceId, std::unordered_map<EventId, std::vector<InstanceId>>> m_listeners;
     InstanceId m_next         = 1;
     InstanceId m_gameInstance = 0;
+    // Element handles (see elementRef): slot i is handle kElementRefBit | (i+1).
+    // shortcut: never shrinks, not even on clear() — a cleared table would let a
+    // stale handle name some later element; it grows by one per (widget instance,
+    // element) a graph actually asked for. Recycle with a generation tag if a
+    // game ever spawns widgets by the hundred thousand.
+    struct ElementSlot { InstanceId owner; int elem; };
+    std::vector<ElementSlot> m_elementSlots;
+    std::unordered_map<uint64_t, InstanceId> m_elementHandles;
+    // The slot behind a handle, or null (not an element handle, or its owner is gone).
+    const ElementSlot* elementSlot(InstanceId h) const;
     // Which classes have already had their "Create Widget without a Show
     // Widget" hint printed (see widgetCreatorsWithoutShow). Keyed by class, not
     // by instance: a class spawned two hundred times has one thing wrong with

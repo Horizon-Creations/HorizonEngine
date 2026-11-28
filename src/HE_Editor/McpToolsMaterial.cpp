@@ -6,6 +6,7 @@
 #include <ContentManager/Assets.h>
 #include <ContentManager/ContentManager.h>
 #include <MaterialGraph/MaterialGraph.h>
+#include <MaterialGraph/MatCpuEval.h>
 
 #include <algorithm>
 #include <array>
@@ -685,6 +686,11 @@ const char* nodeTypeName(HE::MatNodeType t)
 	case T::Sun:                 return "Sun";
 	case T::FbmGrad:             return "FbmGrad";
 	case T::LandscapeLayerBlend: return "LandscapeLayerBlend";
+	case T::LandscapeFoliage:    return "LandscapeFoliage";
+	case T::LandscapeGroupPick:  return "LandscapeGroupPick";
+	case T::RvtSample:           return "RvtSample";
+	case T::RvtWrite:            return "RvtWrite";
+	case T::RvtRead:             return "RvtRead";
 	case T::ElementSize:         return "ElementSize";
 	case T::ElementUV:           return "ElementUV";
 	case T::RoundedRectSDF:      return "RoundedRectSDF";
@@ -963,6 +969,9 @@ json nodeJson(const HE::MaterialGraph& g, const HE::MatGraphNode& n, int blendMo
 		break;
 	case HE::MatNodeType::LandscapeLayerBlend:
 		j["layers"] = layerScratch;
+		break;
+	case HE::MatNodeType::LandscapeFoliage:
+		j["foliageSet"] = n.s;
 		break;
 	case HE::MatNodeType::StaticSwitch:
 		j["switchName"]    = n.s;
@@ -1303,9 +1312,9 @@ bool nodeTypeByName(const std::string& name, HE::MatNodeType& out)
 }
 
 // Why a MASTER's add menu would not offer this type, or nullptr when it would.
-// The same three exclusions MaterialEditorPanel's `listed` makes, minus
-// FunctionCall, which the panel offers through its function list and this
-// interface offers through 's'.
+// The same exclusions MaterialEditorPanel's `listed` makes, minus FunctionCall,
+// which the panel offers through its function list and this interface offers
+// through 's'.
 const char* masterTypeRefusal(HE::MatNodeType t)
 {
 	switch (t)
@@ -1319,6 +1328,10 @@ const char* masterTypeRefusal(HE::MatNodeType t)
 		return "Function Input / Function Output are the interface of a material "
 		       "FUNCTION; on a material they would be pins of nothing, and the "
 		       "Material Editor's add menu does not offer them here either.";
+	case HE::MatNodeType::RvtSample:
+		return "RvtSample is engine-internal (Thema 333): the runtime landscape path "
+		       "wires its inputs itself when it builds a virtual-texture consumer "
+		       "material, and the Material Editor's add menu does not offer it either.";
 	default:
 		return nullptr;
 	}
@@ -1553,6 +1566,11 @@ void addNodeTypes(McpToolRegistry& registry, ContentManager& content,
 			if (d.type == HE::MatNodeType::Output) continue;
 			const bool fnOnly = isFunctionOnly(d.type);
 			if (filtered && fnOnly && !forFunction) continue;
+			// RvtSample is engine-internal on every asset (Thema 333), same as the
+			// panel's add menu; unlike FnInput/FnOutput this holds for a function too.
+			if (filtered && d.type == HE::MatNodeType::RvtSample) continue;
+			// Advanced Shader Effects off: only what the software renderer runs.
+			if (h->cpuNodesOnly && h->cpuNodesOnly() && !HE::matCpuSupports(d.type)) continue;
 			const char* enumName = nodeTypeName(d.type);
 			if (!matches({ enumName, d.name, d.category })) continue;
 
@@ -1586,6 +1604,12 @@ void addNodeTypes(McpToolRegistry& registry, ContentManager& content,
 			case HE::MatNodeType::LandscapeLayerBlend:
 				j["dynamicPins"] = true;
 				j["requires"]    = "s = layer names, one per line; one input pin per name.";
+				break;
+			case HE::MatNodeType::LandscapeFoliage:
+				j["requires"]    = "s = the UUID of a LandscapeFoliageLayer asset as 32 hex digits "
+				                   "(hi then lo), or empty for none. No pins; it shades nothing and "
+				                   "spawns nothing, it only names the foliage set of this landscape "
+				                   "material.";
 				break;
 			case HE::MatNodeType::TextureSample:
 			case HE::MatNodeType::NormalMapSample:
@@ -1750,6 +1774,12 @@ void addAddNode(McpToolRegistry& registry, ContentManager& content,
 			return ToolResult::fail("refused_by_policy",
 				"'" + typeName + "' is not offered by this material's add menu, so it "
 				"is not inserted here either. " + why);
+		if (h->cpuNodesOnly && h->cpuNodesOnly() && !HE::matCpuSupports(nt))
+			return ToolResult::fail("refused_by_policy",
+				"'" + typeName + "' needs a GPU, and this project has Advanced Shader "
+				"Effects off: it ships on the software renderer, which runs a widget "
+				"material's graph itself and only knows the widget node set. "
+				"material_node_types lists that set for this project.");
 		const HE::MatNodeDesc& desc = HE::matNodeDesc(nt);
 
 		// ── The payloads, checked before the graph is touched ────────────────
@@ -3312,14 +3342,6 @@ ToolResult createGate(const McpMaterialHooks& h)
 			"Play-in-editor is running. Creating an asset now would register it in "
 			"the content manager the running session draws from, so it is refused "
 			"rather than half-applied. Ask the user to stop play mode.");
-	// The project's own gate, mirrored: a project without Advanced Shader
-	// Effects has no Material row in the create menu and no "Create Material
-	// Instance" either. MCP must not create what the menu will not offer.
-	if (h.materialsAllowed && !h.materialsAllowed())
-		return ToolResult::fail("invalid_payload",
-			"This project does not author materials — the Content Browser offers "
-			"neither the Material row nor 'Create Material Instance'. The gate is "
-			"the project's Advanced Shader Effects setting.");
 	return ToolResult::ok(json::object());
 }
 
@@ -3564,13 +3586,23 @@ void addCreate(McpToolRegistry& registry, ContentManager& content,
 		const ToolResult gate = createGate(*h);
 		if (gate.isError) return gate;
 
+		// On the software renderer a material is a widget's: the default is the
+		// UI template, and a lit or swaying one (light, wind) is refused — the
+		// CPU runs neither.
+		const bool cpuOnly = h->cpuNodesOnly && h->cpuNodesOnly();
 		const std::string tplName = hasArg(args, "template") ? strArg(args, "template")
-		                                                     : "OpaquePBR";
+		                                                     : (cpuOnly ? "UserInterface" : "OpaquePBR");
 		const MaterialTemplate* tpl = findTemplate(tplName);
 		if (!tpl)
 			return ToolResult::fail("invalid_payload",
 				"'" + tplName + "' is not a material template. The templates are: " +
-				templateNameList() + ". Omit 'template' for OpaquePBR.");
+				templateNameList() + ". Omit 'template' for " +
+				(cpuOnly ? "UserInterface." : "OpaquePBR."));
+		if (cpuOnly && (tpl->lit || tpl->wind))
+			return ToolResult::fail("refused_by_policy",
+				"'" + tplName + "' needs a GPU (lighting or wind), and this project has "
+				"Advanced Shader Effects off: it ships on the software renderer. Use "
+				"'UserInterface' (the default here) or 'Unlit'.");
 
 		const std::string rawPath = strArg(args, "path");
 		if (rawPath.empty())

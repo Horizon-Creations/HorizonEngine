@@ -796,15 +796,17 @@ bool exportPng(const Services& services, const UUID& boardId, const std::filesys
 	for (const Node& n : board->nodes)
 		if (n.type != NodeType::Frame) drawNode(&dl, xf, *services.ws, n, n.rect(), false, false);
 
-	// The rasteriser reads CPU textures: the font atlas is copied, the pictures are already there.
-	std::vector<std::pair<ImTextureID, ImTextureID>> atlases;
-	auto cpuAtlas = [&](ImTextureID id) {
+	// The rasteriser reads CPU textures: the font atlas is copied, the pictures are already there. The atlas is taken
+	// from the command's texture DATA, not its id: drawing at the export's zoom can add glyphs and grow the atlas into
+	// a texture the GPU backend creates only at the next frame's render, whose id is still 0 here (ImDrawCmd::GetTexID()
+	// asserts on exactly that). The pixels are on the CPU either way.
+	std::vector<std::pair<const ImTextureData*, ImTextureID>> atlases;
+	auto cpuAtlas = [&](const ImTextureData* t) -> ImTextureID {
 		for (const auto& [from, to] : atlases)
-			if (from == id) return to;
-		ImTextureID to = id;
-		for (ImTextureData* t : ImGui::GetPlatformIO().Textures)
+			if (from == t) return to;
+		ImTextureID to = ImTextureID_Invalid;
+		if (t->Pixels && t->Width > 0 && t->Height > 0)
 		{
-			if (!t || t->GetTexID() != id || !t->Pixels || t->Width <= 0 || t->Height <= 0) continue;
 			const size_t count = static_cast<size_t>(t->Width) * static_cast<size_t>(t->Height);
 			std::vector<std::uint8_t> rgba(count * 4);
 			for (size_t i = 0; i < count; ++i)
@@ -813,17 +815,12 @@ bool exportPng(const Services& services, const UUID& boardId, const std::filesys
 				else std::memcpy(&rgba[i * 4], &t->Pixels[i * 4], 4);
 			}
 			to = he_ui::registerTexture(rgba.data(), t->Width, t->Height);
-			break;
 		}
-		atlases.emplace_back(id, to);
+		atlases.emplace_back(t, to);
 		return to;
 	};
-	auto isPicture = [&](ImTextureID id) {
-		for (const auto& kv : pictures) if (kv.second.id == id && id) return true;
-		return false;
-	};
 	for (ImDrawCmd& cmd : dl.CmdBuffer)
-		if (!cmd.UserCallback && !isPicture(cmd.GetTexID())) cmd.TexRef = ImTextureRef(cpuAtlas(cmd.GetTexID()));
+		if (!cmd.UserCallback && cmd.TexRef._TexData) cmd.TexRef = ImTextureRef(cpuAtlas(cmd.TexRef._TexData));   // a picture is a plain id already
 
 	ImDrawData data;
 	data.Valid = true;
@@ -840,7 +837,7 @@ bool exportPng(const Services& services, const UUID& boardId, const std::filesys
 	blitTexts(img, texts);
 	data.CmdLists.clear();   // dl is ours; the data does not own it
 
-	for (const auto& [from, to] : atlases) if (to != from) he_ui::unregisterTexture(to);
+	for (const auto& [from, to] : atlases) if (to != ImTextureID_Invalid) he_ui::unregisterTexture(to);
 	for (auto& kv : pictures) if (kv.second.id) he_ui::unregisterTexture(kv.second.id);
 	s_exportTex = nullptr;
 	S = savedServices;
@@ -1047,7 +1044,7 @@ void acceptDrops(const Services& services, const UUID& boardId, ImVec2 origin, c
 	}
 }
 
-void applyViewButtons(ViewState& view, ImVec2 size, Board* board, bool zoomIn, bool zoomOut, bool fit, bool actual)
+void applyViewButtons(ViewState& view, ImVec2 size, Board* board, bool zoomIn, bool zoomOut, bool fit, bool actual, bool mapOn)
 {
 	if (zoomIn || zoomOut)
 	{
@@ -1061,10 +1058,14 @@ void applyViewButtons(ViewState& view, ImVec2 size, Board* board, bool zoomIn, b
 		Rect2 r;
 		if (board->bounds(r))
 		{
-			const double zoom = std::clamp(std::min(size.x / (r.w + 80.0), size.y / (r.h + 80.0)), kMinZoom, kMaxZoom);
+			// The margin is in screen pixels (a world one shrinks to nothing when zoomed out), and the
+			// cards keep clear of the tool palette on the left (12 + 40 + 12) and the minimap bottom right.
+			const double left = 64.0, top = 24.0, right = 24.0, bottom = mapOn ? 140.0 : 24.0;
+			const double w = std::max(1.0, size.x - left - right), h = std::max(1.0, size.y - top - bottom);
+			const double zoom = std::clamp(std::min(w / std::max(r.w, 1.0), h / std::max(r.h, 1.0)), kMinZoom, kMaxZoom);
 			view.zoom = zoom;
-			view.x = r.x + r.w * 0.5 - size.x * 0.5 / zoom;
-			view.y = r.y + r.h * 0.5 - size.y * 0.5 / zoom;
+			view.x = r.x + r.w * 0.5 - (left + w * 0.5) / zoom;
+			view.y = r.y + r.h * 0.5 - (top + h * 0.5) / zoom;
 		}
 		else view = ViewState{};
 	}
@@ -1861,7 +1862,7 @@ void draw(const Services& services, const UUID& boardId)
 	ImDrawList* dl = ImGui::GetWindowDrawList();
 	dl->PushClipRect(origin, ImVec2(origin.x + size.x, origin.y + size.y), true);
 
-	applyViewButtons(view, size, board, toolbar.zoomIn, toolbar.zoomOut, toolbar.fit, toolbar.actual);
+	applyViewButtons(view, size, board, toolbar.zoomIn, toolbar.zoomOut, toolbar.fit, toolbar.actual, mapOn);
 	// Panning with the middle button, or Space and the left one (the press below asks for it as well).
 	const bool space = ImGui::IsKeyDown(ImGuiKey_Space) && !io.WantTextInput;
 	zoomAndPan(io, origin, view, hovered, editing, space);

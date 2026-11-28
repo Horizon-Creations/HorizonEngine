@@ -373,7 +373,10 @@ void drawRuler(ImDrawList* dl, const HE::Ed::UITimelineView& tv, float top, floa
 			dl->AddLine(ImVec2(hx, top + rulerH * 0.6f), ImVec2(hx, top + rulerH), kRulerHalf);
 		}
 		char lbl[24];
+		// Seconds from 1 s up, as the length field and the cinematic strip
+		// write them; ms only for the ticks below a second.
 		if (step >= 1.0f)        std::snprintf(lbl, sizeof(lbl), "%.0f s", t);
+		else if (t >= 0.9995f)   std::snprintf(lbl, sizeof(lbl), step >= 0.1f ? "%.1f s" : "%.2f s", t);
 		else if (step >= 0.001f) std::snprintf(lbl, sizeof(lbl), "%.0f ms", t * 1000.0f);
 		else                     std::snprintf(lbl, sizeof(lbl), "%.2f ms", t * 1000.0f);
 		dl->AddText(ImVec2(x + 3.0f, top + 2.0f), kRulerText, lbl);

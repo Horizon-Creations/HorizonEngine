@@ -41,6 +41,32 @@ public:
     // presented and the live set comes back untouched.
     bool  RenderSceneImage(const EditorCameraOverride& camera, uint32_t width, uint32_t height,
                            std::vector<uint8_t>& rgba) override;
+    // Runtime Virtual Texture (Thema 333, docs/rvt-design-2026-11-04.md): the page pool, one page table per consumer
+    // material, the per-landscape material swap. A page is RenderSceneImage's frame (raw output) copied into a pool slice.
+    bool  CreateRvtPool(uint32_t slots, uint32_t pagePx) override;
+    void  DestroyRvtPool() override;
+    bool  ReadbackRvtSlot(int layer, uint32_t slot, std::vector<uint8_t>& rgba) override;
+    // HE_RVT_PACK (Thema 333 step 10): the hot pool's normal/surface layers hold two channels, not four. 0xFu once
+    // CreateRvtPool never set it (A/B switch HE_RVT_PACK=0, or before the pool exists).
+    uint32_t RvtLayerChannels(int layer) const override;
+    bool  SetRvtPageTable(const HE::UUID& consumerMaterial, const std::vector<std::vector<uint32_t>>& mips) override;
+    bool  ReadbackRvtPageTable(const HE::UUID& consumerMaterial, std::vector<std::vector<uint32_t>>& mips) override;
+    void  SetRvtLandscape(uint32_t terrainEntity, const HE::UUID& landscapeMaterial, const HE::UUID& consumerMaterial) override;
+    void  SetRvtNearChunks(uint32_t terrainEntity, const std::vector<uint32_t>& chunkEntities) override;
+    // The tile landscape's ground under a virtual texture: the consumer and the absolute XZ rectangle its pages cover
+    // (DrawScene's drawGroundMaterial splits the frame's patches with HE::splitRvtTilePatches).
+    void  SetRvtTileGround(const HE::UUID& consumerMaterial, const glm::dvec2& minXZ, const glm::dvec2& maxXZ, float nativeNearM) override
+    { m_tileRvtConsumer = consumerMaterial; m_tileRvtMin = minXZ; m_tileRvtMax = maxXZ; m_tileRvtNearM = nativeNearM; }
+    HE::UUID   m_tileRvtConsumer{};
+    glm::dvec2 m_tileRvtMin{ 0.0 }, m_tileRvtMax{ 0.0 };
+    float      m_tileRvtNearM = 0.0f;
+    void  ReleaseRvtConsumer(const HE::UUID& consumerMaterial) override;
+    void  BeginRvtPages(uint32_t pagePx) override;
+    void  EndRvtPages() override;
+    // Once per real frame (Render()): ages pages, harvests finished BC7 encodes, synchronously reads back and re-encodes
+    // pages that have stood still (rate-limited: each one is a full GPU flush on this backend), re-uploads page tables
+    // whose entries changed temperature (Thema 333 step 9).
+    void  UpdateRvtCold();
     // An arbitrary world into a per-slot offscreen target (Class Editor, Mesh
     // viewer, secondary Scene viewports) — the GL/Metal contract in IRenderer.h,
     // recorded into its own command list and waited for. Returns the ImGui SRV
@@ -111,7 +137,19 @@ public:
     void* CreateImGuiTexture(const void* rgba8Pixels, int width, int height) override;
     void  DestroyImGuiTexture(void* handle) override;
 
+    // View mode (IRenderer::SetViewMode) as the two questions the passes ask.
+    // Wireframe is drawn unlit — shaded edges say nothing a flat edge does not,
+    // and the flat one reads far better against the sky. Mirrors GL/Metal/D3D11.
+    bool  UnlitViewActive() const
+    {
+        return m_viewMode == HE::ViewMode::Unlit || m_viewMode == HE::ViewMode::Wireframe || m_viewMode == HE::ViewMode::RvtDebug;
+    }
+    bool  WireframeViewActive() const { return m_viewMode == HE::ViewMode::Wireframe; }
+
 private:
+    // A still's set (RenderSceneImage): the live viewport set aside and a fresh one built, then given back (see the .cpp).
+    void  rvtStillEnter(uint32_t w, uint32_t h);
+    void  rvtStillLeave();
     // Extract → cull → sort → RenderGraph → replay into the bound command list.
     void DrawScene(void* cmdList, int width, int height);
     // The offscreen viewport frame, recorded into the open m_impl->cmdList: scene

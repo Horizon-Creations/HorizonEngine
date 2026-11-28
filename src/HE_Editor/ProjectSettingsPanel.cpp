@@ -13,11 +13,13 @@
 #include <Renderer/UIFont.h>             // icon names, the plate colour parser, font scripts
 #include <Physics/CollisionLayers.h>     // the project collision matrix
 #include <Project/ProjectSettings.h>     // Config/ProjectSettings.json
+#include <HorizonScene/RvtLandscape.h>  // the Virtual Texture page: DebugInfo, wanted
 #include <Net/RelayTransport.h>          // Multiplayer > Relay server: the field's parse check
 #include <algorithm>
 #include <cfloat>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <string>
@@ -82,7 +84,7 @@ void commitSettings(AppContext& ctx, ProjectData& p, const char* what)
 // less obvious than "the export" — each page says where its numbers arrive.
 void settingsFileHint(const char* reads)
 {
-	hint("Belongs to the PROJECT: saved in Config/ProjectSettings.json beside the "
+	hint("Belongs to the project: saved in Config/ProjectSettings.json beside the "
 	     ".heproj, and carried into the build you export.");
 	if (reads && *reads)
 	{
@@ -113,30 +115,30 @@ void drawPermissionsPage(AppContext& ctx)
 	}
 	ProjectData& p = ctx.projectManager->currentProject();
 
-	EditorWidgets::hint("These belong to the PROJECT, not to the editor: they are saved in "
+	EditorWidgets::hint("These belong to the project, not to the editor: they are saved in "
 	                    "its .heproj and travel into the application you export. They also "
 	                    "bind scripts you run here, so the preview can never do more than "
 	                    "the shipped app.");
 	ImGui::Spacing();
 
 	bool changed = false;
-	changed |= ImGui::Checkbox("Files outside the project", &p.allowFiles);
+	changed |= EditorWidgets::checkbox("Files outside the project", &p.allowFiles);
 	EditorWidgets::helpForLabel("Files outside the project");
-	ImGui::TextDisabled("Off, a script reads and writes only inside the project's Saved folder.\n"
-	                    "A file the person using the app picks in a dialog is always allowed,\n"
+	EditorWidgets::hint("Off, a script reads and writes only inside the project's Saved folder. "
+	                    "A file the person using the app picks in a dialog is always allowed, "
 	                    "whatever this says — choosing it is the permission.");
 	ImGui::Spacing();
 
-	changed |= ImGui::Checkbox("Run other programs", &p.allowProcesses);
+	changed |= EditorWidgets::checkbox("Run other programs", &p.allowProcesses);
 	EditorWidgets::helpForLabel("Run other programs");
-	ImGui::TextDisabled("Covers Run Program and Open URL. Finding out whether a program is\n"
-	                    "installed needs no permission — that is how a script can tell\n"
+	EditorWidgets::hint("Covers Run Program and Open URL. Finding out whether a program is "
+	                    "installed needs no permission — that is how a script can tell "
 	                    "somebody what it would need.");
 	ImGui::Spacing();
 
-	changed |= ImGui::Checkbox("Network access", &p.allowNetwork);
+	changed |= EditorWidgets::checkbox("Network access", &p.allowNetwork);
 	EditorWidgets::helpForLabel("Network access");
-	ImGui::TextDisabled("Covers HTTP Get and HTTP Post. Off, they start nothing and\n"
+	EditorWidgets::hint("Covers HTTP Get and HTTP Post. Off, they start nothing and "
 	                    "answer ticket 0.");
 
 	if (changed)
@@ -178,9 +180,9 @@ void drawCollisionLayersPage(AppContext& ctx)
 	constexpr int kCount = HE::CollisionLayerConfig::kCount;
 
 	EditorWidgets::hint("A collision layer is a named channel. Every rigid body and every "
-	                    "character sits in one (Details ▸ Collision Layer), and the matrix "
+	                    "character sits in one (Details » Collision Layer), and the matrix "
 	                    "below decides which pairs of channels the simulation lets touch. "
-	                    "Belongs to the PROJECT: saved in its .heproj and carried into the "
+	                    "Belongs to the project: saved in its .heproj and carried into the "
 	                    "build you export.");
 	ImGui::Spacing();
 
@@ -191,24 +193,32 @@ void drawCollisionLayersPage(AppContext& ctx)
 	bool commit = false;
 
 	ImGui::SeparatorText("Names");
-	EditorWidgets::hint("A layer keeps its NUMBER for good — that is what a scene stores — so "
+	EditorWidgets::hint("A layer keeps its number for good — that is what a scene stores — so "
 	                    "renaming one relabels it everywhere and remaps nothing. Leave a name "
 	                    "empty and it reads as \"Layer <n>\".");
 
-	if (ImGui::BeginTable("##collisionlayernames", 2,
+	// Two layers per row: sixteen full-width rows made a page of mostly
+	// "Layer <n>" placeholders, and a name is short anyway.
+	if (ImGui::BeginTable("##collisionlayernames", 4,
 	                      ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_RowBg))
 	{
-		ImGui::TableSetupColumn("##idx", ImGuiTableColumnFlags_WidthFixed,
-		                        ImGui::CalcTextSize("00").x + ImGui::GetStyle().CellPadding.x * 2.0f);
+		const float idxW = ImGui::CalcTextSize("00").x + ImGui::GetStyle().CellPadding.x * 2.0f;
+		ImGui::TableSetupColumn("##idx", ImGuiTableColumnFlags_WidthFixed, idxW);
 		ImGui::TableSetupColumn("##name", ImGuiTableColumnFlags_WidthStretch);
-		for (int i = 0; i < kCount; ++i)
+		ImGui::TableSetupColumn("##idx2", ImGuiTableColumnFlags_WidthFixed, idxW);
+		ImGui::TableSetupColumn("##name2", ImGuiTableColumnFlags_WidthStretch);
+		constexpr int kHalf = (kCount + 1) / 2;
+		for (int n = 0; n < kCount; ++n)
 		{
+			// Column-major, so the left column reads 0..7 and the right 8..15.
+			const int i    = (n % 2 == 0) ? n / 2 : kHalf + n / 2;
+			const int base = (n % 2) * 2;
 			ImGui::PushID(i);
-			ImGui::TableNextRow();
-			ImGui::TableSetColumnIndex(0);
+			if (n % 2 == 0) ImGui::TableNextRow();
+			ImGui::TableSetColumnIndex(base);
 			ImGui::AlignTextToFramePadding();
 			ImGui::TextDisabled("%d", i);
-			ImGui::TableSetColumnIndex(1);
+			ImGui::TableSetColumnIndex(base + 1);
 			ImGui::SetNextItemWidth(-FLT_MIN);
 			// The placeholder shows what an empty name READS BACK AS, which is
 			// not "Layer <n>" for all sixteen: the five presets answer with
@@ -232,7 +242,7 @@ void drawCollisionLayersPage(AppContext& ctx)
 	ImGui::SeparatorText("Matrix");
 	EditorWidgets::hint("Ticked means the pair collides, which is how every project starts. "
 	                    "Clearing a box is what makes a channel pass through another one. "
-	                    "The diagonal is a layer against ITSELF.");
+	                    "The diagonal is a layer against itself.");
 
 	// 17 columns: the row's name plus one per channel. Numbers in the header
 	// rather than names — a sixteen-column grid has no room for words, and the
@@ -341,7 +351,7 @@ void drawApplicationPage(AppContext& ctx)
 	}
 	ProjectData& p = ctx.projectManager->currentProject();
 
-	EditorWidgets::hint("These belong to the PROJECT: saved in its .heproj and written into "
+	EditorWidgets::hint("These belong to the project: saved in its .heproj and written into "
 	                    "the application you export.");
 	ImGui::Spacing();
 
@@ -391,7 +401,7 @@ void drawApplicationPage(AppContext& ctx)
 		glm::vec4 col(0.12f, 0.44f, 0.78f, 1.0f);
 		HE::uiParseRichColor(p.appIconColor, col);
 		float rgb[3] = { col.r, col.g, col.b };
-		if (EditorWidgets::Row::colorEdit3("Plate colour##appiconcolor", rgb))
+		if (EditorWidgets::Row::colorEdit3("Plate color##appiconcolor", rgb))
 		{
 			char hex[8];
 			std::snprintf(hex, sizeof(hex), "#%02x%02x%02x",
@@ -402,15 +412,15 @@ void drawApplicationPage(AppContext& ctx)
 		}
 		commit |= ImGui::IsItemDeactivatedAfterEdit();
 	}
-	EditorWidgets::helpForLabel("Plate colour");
+	EditorWidgets::helpForLabel("Plate color");
 	ImGui::TextDisabled("The icon itself is white on a dark plate and near-black on a light "
-	                    "one, so there is one colour to choose and not two.");
+	                    "one, so there is one color to choose and not two.");
 	ImGui::Spacing();
 
 	// ── …or a picture of the project's own ───────────────────────────────────
 	// Drawn by the shared rows so the Export dialog shows the same thing.
 	commit |= AppMetadataRows::drawIconFileRow(ctx, p);
-	ImGui::TextDisabled("A PNG of yours instead of the generated icon: every size and every\n"
+	EditorWidgets::hint("A PNG of yours instead of the generated icon: every size and every "
 	                    "container is made from it. Leave it empty to keep the generated one.");
 	ImGui::Spacing();
 
@@ -429,7 +439,7 @@ void drawApplicationPage(AppContext& ctx)
 	EditorWidgets::Row::inputText("Bundle identifier##bundleid", &p.bundleId);
 	commit |= ImGui::IsItemDeactivatedAfterEdit();
 	EditorWidgets::helpForLabel("Bundle identifier");
-	ImGui::TextDisabled("Empty derives com.horizonengine.<project>, which is what every\n"
+	EditorWidgets::hint("Empty derives com.horizonengine.<project>, which is what every "
 	                    "export did before this field existed. Set it once you own a domain.");
 	ImGui::Spacing();
 	EditorWidgets::Row::inputText("Version##appversion", &p.appVersion);
@@ -467,7 +477,7 @@ void drawApplicationPage(AppContext& ctx)
 			ImGui::TextColored(ImVec4(1.0f, 0.78f, 0.35f, 1.0f),
 			                   "No built-in icon is called that — the files wear the "
 			                   "application's icon.");
-		if (EditorWidgets::button("Remove")) removeAt = static_cast<int>(i);
+		if (EditorWidgets::removeButton("Remove")) removeAt = static_cast<int>(i);
 		EditorWidgets::helpForLabel("Remove");
 		ImGui::Separator();
 		ImGui::PopID();
@@ -648,7 +658,7 @@ void drawGeneralPage(AppContext& ctx)
 	settingsFileHint(nullptr);
 
 	ImGui::SeparatorText("Name");
-	Row::labelText("Project", "%s", p.name.c_str());
+	Row::labelText("Project name", "%s", p.name.c_str());
 	ImGui::TextDisabled("The .heproj's file name. Shown here, changed in the Project Hub.");
 	ImGui::Spacing();
 
@@ -666,6 +676,15 @@ void drawGeneralPage(AppContext& ctx)
 	// also why they write into p.settings and commit through the same path.
 	ImGui::SeparatorText("Splash");
 	commit |= AppMetadataRows::drawSplashRows(ctx, p, /*compact=*/false);
+	ImGui::Spacing();
+
+	// ── Static entities ──────────────────────────────────────────────────────
+	ImGui::SeparatorText("Performance");
+	commit |= EditorWidgets::checkbox("Cook static entities##cookstatic", &p.settings.game.cookStaticEntities);
+	hint("On export, finds the meshes that never change while the game runs and ships that list "
+	     "with each scene. The game then draws them from a flat block instead of walking every "
+	     "entity each frame. A script, animation or physics body added at run time, or a moved "
+	     "object, hands the entity back to normal handling by itself. The editor is not affected.");
 	ImGui::Spacing();
 
 	// ── Startup scene ────────────────────────────────────────────────────────
@@ -686,11 +705,12 @@ void drawGeneralPage(AppContext& ctx)
 		const char* preview = current.empty() ? "(none)" : current.c_str();
 		// Label above the control like the Row helpers draw theirs; the combo
 		// itself is unlabelled, so the help is asked for by name below.
-		ImGui::TextUnformatted("Scene");
-		ImGui::SameLine();
-		if (EditorWidgets::smallButton("Rescan")) rescanScenes(root);
-		EditorWidgets::helpForLabel("Rescan");
-		ImGui::SetNextItemWidth(-FLT_MIN);
+		// In the label column when the page has one: the name left, the list
+		// in the value column like every other row, Rescan after it.
+		const bool inlineRow = Row::labelCell("Scene");
+		if (!inlineRow) ImGui::TextUnformatted("Scene");
+		const float rescanW = ImGui::CalcTextSize("Rescan").x + ImGui::GetStyle().FramePadding.x * 2.0f;
+		ImGui::SetNextItemWidth(-(rescanW + ImGui::GetStyle().ItemSpacing.x));
 		if (ImGui::BeginCombo("##startupscene", preview))
 		{
 			for (const std::string& s : s_sceneList)
@@ -708,6 +728,9 @@ void drawGeneralPage(AppContext& ctx)
 			ImGui::EndCombo();
 		}
 		EditorWidgets::helpForKey("Project General/Scene");
+		ImGui::SameLine();
+		if (EditorWidgets::button("Rescan")) rescanScenes(root);
+		EditorWidgets::helpForLabel("Rescan");
 		hint("The scene the game opens with, and the one the editor opens on "
 		                    "load. An export profile may name a different one for its build.");
 	}
@@ -733,7 +756,7 @@ void drawRenderDefaultsPage(AppContext& ctx)
 	if (EditorWidgets::checkbox("Use the editor's settings", &r.useEditorSettings))
 		commit = true;
 	hint("On, the packaged build boots with the window and backend this editor's "
-	     "Export dialog says — the way every export has worked so far.\n"
+	     "Export dialog says — the way every export has worked so far. "
 	     "Off, the rows below are the project's answer on every machine: the "
 	     "Export dialog shows them and writes them into the build's config.json. "
 	     "How the game looks (anti-aliasing, bloom, GI…) is on the Quality, "
@@ -742,9 +765,13 @@ void drawRenderDefaultsPage(AppContext& ctx)
 
 	ImGui::BeginDisabled(r.useEditorSettings);
 	ImGui::SeparatorText("Window");
-	Row::inputInt("Width##winw", &r.windowWidth);
+	// Drags, not typed fields: the number centred like every other value on the
+	// page; double-click still types one in.
+	Row::dragInt("Width##winw", &r.windowWidth, 1.0f, HE::ProjectRenderDefaults::kMinWindowEdge,
+	             HE::ProjectRenderDefaults::kMaxWindowEdge);
 	commit |= ImGui::IsItemDeactivatedAfterEdit();
-	Row::inputInt("Height##winh", &r.windowHeight);
+	Row::dragInt("Height##winh", &r.windowHeight, 1.0f, HE::ProjectRenderDefaults::kMinWindowEdge,
+	             HE::ProjectRenderDefaults::kMaxWindowEdge);
 	commit |= ImGui::IsItemDeactivatedAfterEdit();
 	{
 		static const char* const kModes[] = { "Windowed", "Fullscreen", "Borderless" };
@@ -802,8 +829,7 @@ void drawShadowsPage(AppContext& ctx)
 
 	settingsFileHint(nullptr);
 	hint("Read by the renderer as you edit: the viewport follows every change here, "
-	     "and the exported build reads the same file. Metal and OpenGL draw cascades; "
-	     "the other backends still use one whole-scene map and ignore this page.");
+	     "and the exported build reads the same file.");
 
 	bool commit = false;
 	ImGui::SeparatorText("Cascades");
@@ -838,6 +864,134 @@ void drawShadowsPage(AppContext& ctx)
 	                    "much and shadows float away from what casts them (peter-panning).");
 
 	if (commit) commitSettings(ctx, p, "shadow settings");
+}
+
+// ─── World ▸ Virtual Texture ─────────────────────────────────────────────────
+// The landscape's material rendered ONCE into pages of a shared pool and only read afterwards: the shader that paints it
+// runs when something changes (a stroke, a parameter), not every frame. Off by default: a project that never opens this
+// page draws exactly what it drew. Thema 333, docs/rvt-design-2026-11-04.md.
+void drawVirtualTexturePage(AppContext& ctx)
+{
+	HE::Ed::Help::Scope helpScope("Virtual Texture");
+	ProjectData* pp = openProject(ctx);
+	if (!pp) return;
+	ProjectData& p = *pp;
+	HE::ProjectRvtSettings& s = p.settings.rvt;
+
+	settingsFileHint(nullptr);
+	const bool supported = ctx.renderer && ctx.renderer->GetCapabilities().supportsRvt;
+	if (!supported)
+		hint("This graphics backend cannot draw from virtual texture pages (the software renderer does not; "
+		     "OpenGL needs 25 texture units, Vulkan a device that allows 21 samplers per stage). The settings are saved with "
+		     "the project and ignored here: the landscape keeps drawing its own material.");
+	{
+		const char* env = std::getenv("HE_RVT");
+		if (env && *env)
+		{
+			ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.78f, 0.35f, 1.0f));
+			ImGui::TextWrapped("HE_RVT=%s is set in the environment and overrides the global switch.", env);
+			ImGui::PopStyleColor();
+		}
+	}
+
+	bool commit = false;
+	ImGui::SeparatorText("Landscape");
+	hint("On or off is the editor's global switch (Preferences > Display > Runtime Virtual Texture) and, in the game, its "
+	     "config.json; this page is how this project tunes it.");
+	if (EditorWidgets::checkbox("Native near view", &s.nativeNear)) commit = true;
+	hint("Close to the camera the landscape keeps its own material (as sharp as the material is); only chunks farther away "
+	     "than where a finest-level texel covers one pixel are drawn from pages. Costs the full material on the near chunks.");
+	if (EditorWidgets::checkbox("Native near view on tile landscapes", &s.tileNativeNear)) commit = true;
+	hint("The same for a Tile Landscape. Off by default: its patches are 128 m and larger, so far more ground than the near "
+	     "radius leaves the pages.");
+
+	ImGui::SeparatorText("Pool");
+	{
+		static const int kPages[] = { 128, 256, 512, 1024, 2048 };
+		static const char* const kNames[] = { "128 pages  (27 MB)", "256 pages  (54 MB)", "512 pages  (108 MB)",
+		                                      "1024 pages  (216 MB)", "2048 pages  (432 MB)" };
+		int cur = 0;   // below the smallest preset the smallest entry shows
+		for (int i = 0; i < 5; ++i) if (s.poolPages >= kPages[i]) cur = i;   // a hand-edited value shows as the size below it
+		if (Row::combo("Pool size##rvtpool", &cur, kNames, 5))
+		{
+			s.poolPages = kPages[cur];
+			commit = true;
+		}
+	}
+	{
+		static const float kTexel[] = { 0.015625f, 0.03125f, 0.0625f, 0.125f, 0.25f, 0.5f, 1.0f };
+		static const char* const kNames[] = { "1.6 cm  (finest)", "3.1 cm", "6.3 cm", "12.5 cm", "25 cm", "50 cm", "1 m  (coarsest)" };
+		int cur = 0;
+		for (int i = 0; i < 7; ++i) if (s.metersPerTexel >= kTexel[i] * 0.99f) cur = i;
+		if (Row::combo("Texel size##rvttexel", &cur, kNames, 7))
+		{
+			s.metersPerTexel = kTexel[cur];
+			commit = true;
+		}
+	}
+	hint("A change of either rebuilds the pool and repaints every page: pick them once, not while looking at the result.");
+	ImGui::Spacing();
+
+	ImGui::SeparatorText("Streaming");
+	Row::dragFloat("Near radius##rvtnear", &s.nearRadiusM, 1.0f, HE::ProjectRvtSettings::kMinRadius,
+	               HE::ProjectRvtSettings::kMaxRadius, "%.0f m");
+	commit |= ImGui::IsItemDeactivatedAfterEdit();
+	Row::dragFloat("Activation radius##rvtactive", &s.activationRadiusM, 5.0f, HE::ProjectRvtSettings::kMinRadius,
+	               HE::ProjectRvtSettings::kMaxRadius, "%.0f m");
+	commit |= ImGui::IsItemDeactivatedAfterEdit();
+	Row::sliderInt("Pages per frame##rvtbudget", &s.maxPagesPerFrame, HE::ProjectRvtSettings::kMinPagesPerFrame,
+	               HE::ProjectRvtSettings::kMaxPagesPerFrame);
+	commit |= ImGui::IsItemDeactivatedAfterEdit();
+
+	if (commit) commitSettings(ctx, p, "virtual texture settings");
+
+	// ── What the driver is doing right now (a snapshot: nothing here points into it) ──
+	ImGui::Spacing();
+	ImGui::SeparatorText("Status");
+	const HE::landscape::RvtLandscape::DebugInfo d = ctx.rvtDebugInfo ? ctx.rvtDebugInfo() : HE::landscape::RvtLandscape::DebugInfo{};
+	if (!d.running)
+	{
+		ImGui::TextDisabled("%s", supported ? "Not running: the global switch is off, or no landscape is within the activation radius."
+		                                    : "Not running: this backend has no virtual texture.");
+		return;
+	}
+	ImGui::Text("%u of %u landscape(s) drawn from pages", d.activeSegments, d.segments);
+	ImGui::Text("Pool: %u of %u pages in use, %u stale", d.resident, d.poolSlots, d.stale);
+	if (d.starved)
+	{
+		ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.78f, 0.35f, 1.0f));
+		ImGui::TextWrapped("The pool is too small for what the camera sees (%u requests found no free page): raise the pool size "
+		                   "or lower the activation radius.", d.starved);
+		ImGui::PopStyleColor();
+	}
+	ImGui::Text("Last painting: %u page(s) in %.1f ms  (%llu painted in all)", d.lastPagesPainted, d.lastPaintMs,
+	            static_cast<unsigned long long>(d.pagesPaintedTotal));
+
+	if (d.gridSide > 0)
+	{
+		// The finest level of the nearest landscape, one cell a page: dark = not there, green = painted, orange = painted
+		// but stale (a change under it is waiting for the budget).
+		ImGui::Spacing();
+		ImGui::TextDisabled("Pages at the finest level, nearest landscape (%d x %d, %.0f m a page)", d.gridSide, d.gridSide,
+		                    static_cast<double>(d.metersPerPage));
+		const float box  = std::min(ImGui::GetContentRegionAvail().x, 260.0f);
+		const float cell = std::max(1.0f, std::floor(box / float(d.gridSide)));
+		const ImVec2 origin = ImGui::GetCursorScreenPos();
+		const float  side   = cell * float(d.gridSide);
+		ImDrawList* dl = ImGui::GetWindowDrawList();
+		dl->AddRectFilled(origin, ImVec2(origin.x + side, origin.y + side), IM_COL32(28, 30, 36, 255));
+		const float gap = cell > 3.0f ? 1.0f : 0.0f;
+		for (int y = 0; y < d.gridSide; ++y)
+			for (int x = 0; x < d.gridSide; ++x)
+			{
+				const uint8_t v = d.grid[size_t(y) * size_t(d.gridSide) + size_t(x)];
+				if (!v) continue;
+				const ImVec2 a(origin.x + cell * float(x), origin.y + cell * float(y));
+				dl->AddRectFilled(a, ImVec2(a.x + cell - gap, a.y + cell - gap),
+				                  v == 2 ? IM_COL32(236, 150, 50, 255) : IM_COL32(70, 190, 110, 255));
+			}
+		ImGui::Dummy(ImVec2(side, side));
+	}
 }
 
 // ─── Physics ▸ Simulation ────────────────────────────────────────────────────
@@ -943,7 +1097,7 @@ void drawAntiCheatPage(AppContext& ctx)
 	using AC = HE::ProjectAntiCheatSettings;
 	AC& a = p.settings.antiCheat;
 
-	settingsFileHint("Read by the HOST of a session when it starts — the editor's Play as "
+	settingsFileHint("Read by the host of a session when it starts — the editor's Play as "
 	                 "host and the exported build alike. Switched off, the host behaves "
 	                 "exactly as it always has.");
 
@@ -1111,7 +1265,7 @@ void drawAntiCheatPage(AppContext& ctx)
 				EditorWidgets::helpForKey("Anti-Cheat/Rule Level");
 			}
 			ImGui::TableSetColumnIndex(5);
-			if (EditorWidgets::smallButton("\xc3\x97##removerule")) removeAt = i;
+			if (EditorWidgets::removeButton("\xc3\x97##removerule")) removeAt = i;
 			EditorWidgets::helpForKey("Anti-Cheat/Remove rule");
 			ImGui::PopID();
 		}
@@ -1157,7 +1311,7 @@ void drawMultiplayerPage(AppContext& ctx)
 	using MP = HE::ProjectMultiplayerSettings;
 	MP& m = p.settings.multiplayer;
 
-	settingsFileHint("Read when a session STARTS — Play as Host in the editor, a packaged "
+	settingsFileHint("Read when a session starts — Play as Host in the editor, a packaged "
 	                 "game's --host or --join, and the net.host row in a script. A session "
 	                 "already running keeps the numbers it began with.");
 
@@ -1194,7 +1348,7 @@ void drawMultiplayerPage(AppContext& ctx)
 	               MP::kMinWorldExtent, MP::kMaxWorldExtent, "%.0f m");
 	commit |= ImGui::IsItemDeactivatedAfterEdit();
 	hint("Half the width of the area positions are packed for, in metres from "
-	     "the origin. Anything outside it is CLAMPED on the way over the wire, "
+	     "the origin. Anything outside it is clamped on the way over the wire, "
 	     "so it has to contain the playable area comfortably. Larger costs "
 	     "precision, not bytes.");
 	Row::dragFloat("Interpolation delay##mpinterp", &m.interpolationDelaySec, 0.005f,
@@ -1213,7 +1367,7 @@ void drawMultiplayerPage(AppContext& ctx)
 	Row::dragFloat("Correction smoothing##mpsmooth", &m.reconcileSmoothing, 0.5f,
 	               0.0f, MP::kMaxSmoothing, "%.1f /s");
 	commit |= ImGui::IsItemDeactivatedAfterEdit();
-	hint("And how quickly a SMALL disagreement is eased away, as a fraction per "
+	hint("And how quickly a small disagreement is eased away, as a fraction per "
 	     "second. Higher is more accurate and more visible; 0 leaves the error "
 	     "standing until the next one replaces it.");
 	Row::dragInt("Max pending inputs##mppending", &m.maxPendingInputs, 1.0f,
@@ -1293,6 +1447,7 @@ const char* pageTitle(Page page)
 	case Page::Fonts:           return "Fonts";
 	case Page::Permissions:     return "Permissions";
 	case Page::Shadows:         return "Shadows";
+	case Page::VirtualTexture:  return "Virtual Texture";
 	case Page::Simulation:      return "Simulation";
 	case Page::CollisionLayers: return "Collision Layers";
 	case Page::AudioBuses:      return "Audio Buses";
@@ -1304,6 +1459,9 @@ const char* pageTitle(Page page)
 
 void drawPage(AppContext& ctx, Page page)
 {
+	// Names in a column on the left, as in the Details panel: a stacked label
+	// over every field doubled the height of each page.
+	EditorWidgets::Row::InlineLabels labelColumn;
 	switch (page)
 	{
 	case Page::General:         drawGeneralPage(ctx);         break;
@@ -1312,6 +1470,7 @@ void drawPage(AppContext& ctx, Page page)
 	case Page::Fonts:           drawFontsPage(ctx);           break;
 	case Page::Permissions:     drawPermissionsPage(ctx);     break;
 	case Page::Shadows:         drawShadowsPage(ctx);         break;
+	case Page::VirtualTexture:  drawVirtualTexturePage(ctx);  break;
 	case Page::Simulation:      drawSimulationPage(ctx);      break;
 	case Page::CollisionLayers: drawCollisionLayersPage(ctx); break;
 	case Page::AudioBuses:      drawAudioBusesPage(ctx);      break;

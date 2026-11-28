@@ -279,6 +279,9 @@ void signatureInto(const Node& n, NodeSig& s)
         break;
     case T::GetGameInstance: s.dataOuts = { { "Game Instance", P::Ref } }; break;
     case T::GetSelf:         s.dataOuts = { { "Self", P::Ref } };          break;
+    case T::GetElement:
+        s.dataOuts = { { n.s.empty() ? "Element" : n.s.c_str(), P::Ref } };
+        break;
     case T::ConstFloat:  s.dataOuts = { { "", P::Float } };  break;
     case T::ConstBool:   s.dataOuts = { { "", P::Bool } };   break;
     case T::ConstInt:    s.dataOuts = { { "", P::Int } };    break;
@@ -756,6 +759,7 @@ const char* nodeDisplayName(NodeType t)
         case T::CallExternal:   return "Call Function (Ref)";
         case T::GetGameInstance:return "Get Game Instance";
         case T::GetSelf:        return "Get Self";
+        case T::GetElement:     return "Get Element";
         case T::Print:        return "Print";
         case T::FunctionReturn:return "Return";
         case T::EngineCall:   return "Engine Call";
@@ -857,7 +861,7 @@ const char* nodeTooltip(NodeType t)
         case T::GetPropertyOn:
             return "Reads a property of an element of the REFERENCED widget, by the\n"
                    "element's name. Target left unwired means this widget.\n"
-                   "Pure — evaluated whenever the output is used.";
+                   "Pure — evaluated whenever an output is used.";
         case T::SetPropertyOn:
             return "Writes a property of an element of the REFERENCED widget, by the\n"
                    "element's name, when executed. Target left unwired means this\n"
@@ -869,7 +873,7 @@ const char* nodeTooltip(NodeType t)
                    "reroute passes execution straight through. Costs nothing at run time.";
         case T::GetVariable:
             return "Reads a graph variable (persistent per running instance).\n"
-                   "Pure — evaluated whenever the output is used.";
+                   "Pure — evaluated whenever an output is used.";
         case T::SetVariable:
             return "Writes the wired value to a graph variable when executed.";
         case T::ShowSelf:
@@ -940,6 +944,10 @@ const char* nodeTooltip(NodeType t)
         case T::GetSelf:
             return "Outputs a reference to this running instance (e.g. to pass to Bind\n"
                    "Event or store in a variable).";
+        case T::GetElement:
+            return "Outputs a reference to one element of this widget. Drag off it for\n"
+                   "Get/Set of that element's properties (Text, Visible, …), or store\n"
+                   "it in a variable of the element's class. Pure.";
         case T::EngineCall:
             return "Calls an engine API function (transform, input, scene, math, …).\n"
                    "Pins mirror the function's parameters and results.";
@@ -1153,6 +1161,7 @@ const char* nodeCategory(NodeType t)
         case T::CallExternal:
         case T::GetGameInstance:
         case T::GetSelf:
+        case T::GetElement:
         case T::CreateObject:
         case T::DestroyObject:
         case T::GetExternal:
@@ -3118,6 +3127,12 @@ void inferEventDecls(Graph& g)
 bool canConvertPinType(PinType from, PinType to)
 {
     if (from == to) return true;
+    // A number into a Bool pin is not a conversion an author should get without
+    // asking: "is this 0?" belongs on the canvas as a comparison (Blueprint has
+    // the same rule). The other way, Bool into a number, stays — false is 0.
+    // Only NEW wires ask this; a saved one is restored without re-checking and
+    // still reads as "not zero" in both coerce implementations.
+    if (to == P::Bool) return false;
     auto numeric = [](PinType t)
     { return t == P::Float || t == P::Double || t == P::Int || t == P::Bool; };
     if (numeric(from) && numeric(to)) return true;
@@ -4953,6 +4968,7 @@ Value Runner::evalData(const Node& n, int dataOutPin, int depth)
         return coerce(evalInput(n, 1, depth + 1), n.propType); // dataIn 1 = Value (0 = Target)
     case T::GetGameInstance: return m_ctx.getGameInstance ? m_ctx.getGameInstance() : Value::ofRef(0);
     case T::GetSelf:         return m_ctx.getSelf ? m_ctx.getSelf() : Value::ofRef(0);
+    case T::GetElement:      return m_ctx.getElementRef ? m_ctx.getElementRef(n.elem) : Value::ofRef(0);
     case T::CreateWidget:
     case T::CreateObject:
     {

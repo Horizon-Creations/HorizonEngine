@@ -14138,6 +14138,50 @@
        ]
       },
       {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "New to it? Do "
+        },
+        {
+         "h": "#first-graph",
+         "s": "l",
+         "t": "Your First Graph"
+        },
+        {
+         "s": "",
+         "t": " below (five minutes), then read "
+        },
+        {
+         "h": "#reading-nodes",
+         "s": "l",
+         "t": "Reading a Node"
+        },
+        {
+         "s": "",
+         "t": " and "
+        },
+        {
+         "h": "#canvas",
+         "s": "l",
+         "t": "Working on the Canvas"
+        },
+        {
+         "s": "",
+         "t": ". The rest of the page is reference you come back to. The editor also has a guided version: "
+        },
+        {
+         "s": "b",
+         "t": "Help » Interactive Tutorial » HorizonCode"
+        },
+        {
+         "s": "",
+         "t": "."
+        }
+       ]
+      },
+      {
        "alt": "A HorizonCode Class event graph: Construct wired to a function call on the Game Instance",
        "k": "figure",
        "src": "hc_class_graph.jpg"
@@ -14145,8 +14189,1146 @@
      ],
      "eyebrow": "Visual scripting",
      "id": "intro",
-     "text": "HorizonCode is Horizon Engine's visual scripting system — a Blueprint-style node graph you author in the editor, no text required. It is the same idea as the material editor, pointed at gameplay logic instead of shaders: you wire nodes together and the engine runs the graph. Every graph in the project — widget logic, level scripts, the GameInstance, standalone classes — runs on one central runtime, so graphs share state and events and can reference one another. A HorizonCode Class event graph: Construct wired to a function call on the Game Instance",
+     "text": "HorizonCode is Horizon Engine's visual scripting system — a Blueprint-style node graph you author in the editor, no text required. It is the same idea as the material editor, pointed at gameplay logic instead of shaders: you wire nodes together and the engine runs the graph. Every graph in the project — widget logic, level scripts, the GameInstance, standalone classes — runs on one central runtime, so graphs share state and events and can reference one another. New to it? Do Your First Graph below (five minutes), then read Reading a Node and Working on the Canvas. The rest of the page is reference you come back to. The editor also has a guided version: Help » Interactive Tutorial » HorizonCode. A HorizonCode Class event graph: Construct wired to a function call on the Game Instance",
      "title": "What It Is"
+    },
+    {
+     "blocks": [
+      {
+       "k": "lead",
+       "r": [
+        {
+         "s": "",
+         "t": "Print a line when the level starts, then make it wait two seconds. This uses the "
+        },
+        {
+         "s": "b",
+         "t": "Level Script"
+        },
+        {
+         "s": "",
+         "t": ", which every game project has, so you need no asset to begin."
+        }
+       ]
+      },
+      {
+       "items": [
+        [
+         {
+          "s": "b",
+          "t": "Open the graph."
+         },
+         {
+          "s": "",
+          "t": " With a scene open, choose "
+         },
+         {
+          "s": "b",
+          "t": "Window » Level Script"
+         },
+         {
+          "s": "",
+          "t": ". The canvas opens in its own tab. (Application projects have no level; use "
+         },
+         {
+          "s": "b",
+          "t": "Window » Game Instance"
+         },
+         {
+          "s": "",
+          "t": " and its "
+         },
+         {
+          "s": "c",
+          "t": "OnInit"
+         },
+         {
+          "s": "",
+          "t": " event instead.)"
+         }
+        ],
+        [
+         {
+          "s": "b",
+          "t": "Add the event."
+         },
+         {
+          "s": "",
+          "t": " Right-click the empty canvas (or press "
+         },
+         {
+          "s": "c",
+          "t": "Space"
+         },
+         {
+          "s": "",
+          "t": "), type "
+         },
+         {
+          "s": "c",
+          "t": "loaded"
+         },
+         {
+          "s": "",
+          "t": " and pick "
+         },
+         {
+          "s": "b",
+          "t": "OnLevelLoaded"
+         },
+         {
+          "s": "",
+          "t": " from the Events section. An event is where a chain starts; if it says "
+         },
+         {
+          "s": "i",
+          "t": "(added)"
+         },
+         {
+          "s": "",
+          "t": ", the graph already has it."
+         }
+        ],
+        [
+         {
+          "s": "b",
+          "t": "Add a Print."
+         },
+         {
+          "s": "",
+          "t": " Hold "
+         },
+         {
+          "s": "c",
+          "t": "P"
+         },
+         {
+          "s": "",
+          "t": " and click the canvas to the right of the event. A Print node appears."
+         }
+        ],
+        [
+         {
+          "s": "b",
+          "t": "Wire them."
+         },
+         {
+          "s": "",
+          "t": " Drag from the white triangle on the right of "
+         },
+         {
+          "s": "b",
+          "t": "OnLevelLoaded"
+         },
+         {
+          "s": "",
+          "t": " to the white triangle on the left of "
+         },
+         {
+          "s": "b",
+          "t": "Print"
+         },
+         {
+          "s": "",
+          "t": ". You can grab anywhere on a pin's row, its label included. Both triangles fill in: a pin is hollow until a wire is on it."
+         }
+        ],
+        [
+         {
+          "s": "b",
+          "t": "Type the text."
+         },
+         {
+          "s": "",
+          "t": " Click the box on Print's input and type "
+         },
+         {
+          "s": "c",
+          "t": "Hello from the level"
+         },
+         {
+          "s": "",
+          "t": ". An unwired input keeps its value right on the pin."
+         }
+        ],
+        [
+         {
+          "s": "b",
+          "t": "Run it."
+         },
+         {
+          "s": "",
+          "t": " Press Play. The line appears in the "
+         },
+         {
+          "s": "b",
+          "t": "Console"
+         },
+         {
+          "s": "",
+          "t": " ("
+         },
+         {
+          "s": "b",
+          "t": "Window » Console"
+         },
+         {
+          "s": "",
+          "t": "); clicking it takes you back to the Print node that wrote it."
+         }
+        ],
+        [
+         {
+          "s": "b",
+          "t": "Make it wait."
+         },
+         {
+          "s": "",
+          "t": " Start a new wire from the event's exec output and, with the mouse still held over empty canvas, press "
+         },
+         {
+          "s": "c",
+          "t": "D"
+         },
+         {
+          "s": "",
+          "t": ": a Delay appears there, wired to the event (an exec output has one wire, so it replaces the old one). Wire Delay's "
+         },
+         {
+          "s": "b",
+          "t": "Completed"
+         },
+         {
+          "s": "",
+          "t": " to Print, set "
+         },
+         {
+          "s": "b",
+          "t": "Duration"
+         },
+         {
+          "s": "",
+          "t": " to "
+         },
+         {
+          "s": "c",
+          "t": "2"
+         },
+         {
+          "s": "",
+          "t": " and play again. Delay pauses only this chain; the rest of the game carries on."
+         }
+        ]
+       ],
+       "k": "ol"
+      },
+      {
+       "alt": "Result: OnLevelLoaded, then Delay (2 seconds), then Print \"Hello from the level\"",
+       "k": "figure",
+       "src": "hc_result_first_graph.jpg"
+      },
+      {
+       "blocks": [
+        {
+         "k": "p",
+         "r": [
+          {
+           "s": "b",
+           "t": "Where to go next:"
+          },
+          {
+           "s": "",
+           "t": " a graph that belongs to one object (a door, a pickup, the player) is a "
+          },
+          {
+           "s": "b",
+           "t": "HorizonCode Class"
+          },
+          {
+           "s": "",
+           "t": " on an entity — see "
+          },
+          {
+           "h": "#hosts",
+           "s": "l",
+           "t": "The Four Hosts"
+          },
+          {
+           "s": "",
+           "t": ". Everything you just did works the same there, with "
+          },
+          {
+           "s": "c",
+           "t": "BeginPlay"
+          },
+          {
+           "s": "",
+           "t": " instead of "
+          },
+          {
+           "s": "c",
+           "t": "OnLevelLoaded"
+          },
+          {
+           "s": "",
+           "t": "."
+          }
+         ]
+        }
+       ],
+       "k": "callout",
+       "tone": "tip"
+      }
+     ],
+     "eyebrow": "Hands on",
+     "id": "first-graph",
+     "text": "Print a line when the level starts, then make it wait two seconds. This uses the Level Script, which every game project has, so you need no asset to begin. Open the graph. With a scene open, choose Window » Level Script. The canvas opens in its own tab. (Application projects have no level; use Window » Game Instance and its OnInit event instead.) Add the event. Right-click the empty canvas (or press Space), type loaded and pick OnLevelLoaded from the Events section. An event is where a chain starts; if it says (added), the graph already has it. Add a Print. Hold P and click the canvas to the right of the event. A Print node appears. Wire them. Drag from the white triangle on the right of OnLevelLoaded to the white triangle on the left of Print. You can grab anywhere on a pin's row, its label included. Both triangles fill in: a pin is hollow until a wire is on it. Type the text. Click the box on Print's input and type Hello from the level. An unwired input keeps its value right on the pin. Run it. Press Play. The line appears in the Console (Window » Console); clicking it takes you back to the Print node that wrote it. Make it wait. Start a new wire from the event's exec output and, with the mouse still held over empty canvas, press D: a Delay appears there, wired to the event (an exec output has one wire, so it replaces the old one). Wire Delay's Completed to Print, set Duration to 2 and play again. Delay pauses only this chain; the rest of the game carries on. Result: OnLevelLoaded, then Delay (2 seconds), then Print \"Hello from the level\" Where to go next: a graph that belongs to one object (a door, a pickup, the player) is a HorizonCode Class on an entity — see The Four Hosts. Everything you just did works the same there, with BeginPlay instead of OnLevelLoaded.",
+     "title": "Your First Graph"
+    },
+    {
+     "blocks": [
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "Inputs are on the left, outputs on the right, one pin per row. "
+        },
+        {
+         "s": "b",
+         "t": "Exec pins"
+        },
+        {
+         "s": "",
+         "t": " (white triangles) sit in the top row and decide "
+        },
+        {
+         "s": "i",
+         "t": "when"
+        },
+        {
+         "s": "",
+         "t": " a node runs; "
+        },
+        {
+         "s": "b",
+         "t": "data pins"
+        },
+        {
+         "s": "",
+         "t": " (coloured circles, one colour per type) carry "
+        },
+        {
+         "s": "i",
+         "t": "values"
+        },
+        {
+         "s": "",
+         "t": ". A pin is drawn "
+        },
+        {
+         "s": "b",
+         "t": "hollow"
+        },
+        {
+         "s": "",
+         "t": " until a wire is on it and "
+        },
+        {
+         "s": "b",
+         "t": "filled"
+        },
+        {
+         "s": "",
+         "t": " once one is, so an unconnected input is visible at a glance. Array pins are a small 2×2 grid, set pins three dots, map pins two halves (key colour left, value colour right)."
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "A node with exec pins "
+        },
+        {
+         "s": "i",
+         "t": "does"
+        },
+        {
+         "s": "",
+         "t": " something and runs once each time a wire reaches it. A node without them is "
+        },
+        {
+         "s": "b",
+         "t": "pure"
+        },
+        {
+         "s": "",
+         "t": ": it only computes a value, and runs whenever a node downstream needs that value. Pure nodes are drawn smaller, in one of three shapes:"
+        }
+       ]
+      },
+      {
+       "head": [
+        [
+         {
+          "s": "",
+          "t": "Shape"
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "Looks like"
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "Used for"
+         }
+        ]
+       ],
+       "k": "table",
+       "rows": [
+        [
+         [
+          {
+           "s": "b",
+           "t": "Framed"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Coloured header with the title, rows below."
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Every node with exec pins, and pure nodes with an editor on the node (Color, Transform)."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "b",
+           "t": "Compact"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Tinted body, small title strip on top."
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Pure calls such as "
+          },
+          {
+           "s": "i",
+           "t": "Get World Position"
+          },
+          {
+           "s": "",
+           "t": " or "
+          },
+          {
+           "s": "i",
+           "t": "Array Get"
+          },
+          {
+           "s": "",
+           "t": "."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "b",
+           "t": "Operator"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "No title: the symbol ("
+          },
+          {
+           "s": "c",
+           "t": "+"
+          },
+          {
+           "s": "",
+           "t": ", "
+          },
+          {
+           "s": "c",
+           "t": ">"
+          },
+          {
+           "s": "",
+           "t": ", "
+          },
+          {
+           "s": "c",
+           "t": "AND"
+          },
+          {
+           "s": "",
+           "t": ") in the middle, inputs left, result right."
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Math and logic: Add, Subtract, Multiply, Divide, Greater, Less, Equals, And, Or, Not. Hover the node for its name."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "b",
+           "t": "Pill"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "A single row: the value's name and its pin."
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Getters whose output says it all, such as "
+          },
+          {
+           "s": "i",
+           "t": "Get Self"
+          },
+          {
+           "s": "",
+           "t": "."
+          }
+         ]
+        ]
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "The header colour is the node's category (Events red, Flow grey, and so on). Hovering a node shows what it does and what each pin means; "
+        },
+        {
+         "s": "c",
+         "t": "F1"
+        },
+        {
+         "s": "",
+         "t": " on a hovered node opens its page in the "
+        },
+        {
+         "h": "horizoncode-nodes.html",
+         "s": "l",
+         "t": "Node Reference"
+        },
+        {
+         "s": "",
+         "t": ". A red halo marks a node the compiler rejected, an amber one that fades marks a node that just ran."
+        }
+       ]
+      },
+      {
+       "alt": "Framed nodes with exec pins, compact pure nodes, operator chips for plus, greater-than and NOT, and a Self pill; hollow pins are unwired",
+       "k": "figure",
+       "src": "hc_node_shapes.jpg"
+      }
+     ],
+     "eyebrow": "Anatomy",
+     "id": "reading-nodes",
+     "text": "Inputs are on the left, outputs on the right, one pin per row. Exec pins (white triangles) sit in the top row and decide when a node runs; data pins (coloured circles, one colour per type) carry values. A pin is drawn hollow until a wire is on it and filled once one is, so an unconnected input is visible at a glance. Array pins are a small 2×2 grid, set pins three dots, map pins two halves (key colour left, value colour right). A node with exec pins does something and runs once each time a wire reaches it. A node without them is pure: it only computes a value, and runs whenever a node downstream needs that value. Pure nodes are drawn smaller, in one of three shapes: Shape Looks like Used for Framed Coloured header with the title, rows below. Every node with exec pins, and pure nodes with an editor on the node (Color, Transform). Compact Tinted body, small title strip on top. Pure calls such as Get World Position or Array Get. Operator No title: the symbol (+, >, AND) in the middle, inputs left, result right. Math and logic: Add, Subtract, Multiply, Divide, Greater, Less, Equals, And, Or, Not. Hover the node for its name. Pill A single row: the value's name and its pin. Getters whose output says it all, such as Get Self. The header colour is the node's category (Events red, Flow grey, and so on). Hovering a node shows what it does and what each pin means; F1 on a hovered node opens its page in the Node Reference. A red halo marks a node the compiler rejected, an amber one that fades marks a node that just ran. Framed nodes with exec pins, compact pure nodes, operator chips for plus, greater-than and NOT, and a Self pill; hollow pins are unwired",
+     "title": "Reading a Node"
+    },
+    {
+     "blocks": [
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "HorizonCode, materials, particle systems and animator state machines share one canvas, so these gestures work in all of them (the quick-spawn keys are HorizonCode only)."
+        }
+       ]
+      },
+      {
+       "head": [
+        [
+         {
+          "s": "",
+          "t": "To"
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "Do"
+         }
+        ]
+       ],
+       "k": "table",
+       "rows": [
+        [
+         [
+          {
+           "s": "",
+           "t": "Add a node"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Right-click empty canvas, or press "
+          },
+          {
+           "s": "c",
+           "t": "Space"
+          },
+          {
+           "s": "",
+           "t": ", and type to search."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "",
+           "t": "Add a node already wired"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Drag a wire off a pin and let go on empty canvas: the menu lists only nodes that fit that pin."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "",
+           "t": "Connect"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Drag from an output to an input. The whole pin row, label included, is the target, not just the dot."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "",
+           "t": "Move a wire"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Click a connected input and drag the wire to another pin; let go on empty canvas to remove it."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "",
+           "t": "Cut all wires on a pin"
+          }
+         ],
+         [
+          {
+           "s": "c",
+           "t": "Alt"
+          },
+          {
+           "s": "",
+           "t": "+click the pin."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "",
+           "t": "Bend a wire"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Double-click it to insert a reroute knot, or hold "
+          },
+          {
+           "s": "c",
+           "t": "R"
+          },
+          {
+           "s": "",
+           "t": " and click."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "",
+           "t": "Select"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Click a node; drag on empty canvas for a box; "
+          },
+          {
+           "s": "c",
+           "t": "Shift"
+          },
+          {
+           "s": "",
+           "t": " adds; "
+          },
+          {
+           "s": "c",
+           "t": "Ctrl/Cmd+A"
+          },
+          {
+           "s": "",
+           "t": " selects all."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "",
+           "t": "Copy, cut, paste, duplicate"
+          }
+         ],
+         [
+          {
+           "s": "c",
+           "t": "Ctrl/Cmd+C"
+          },
+          {
+           "s": "",
+           "t": ", "
+          },
+          {
+           "s": "c",
+           "t": "X"
+          },
+          {
+           "s": "",
+           "t": ", "
+          },
+          {
+           "s": "c",
+           "t": "V"
+          },
+          {
+           "s": "",
+           "t": " (pastes at the mouse), "
+          },
+          {
+           "s": "c",
+           "t": "D"
+          },
+          {
+           "s": "",
+           "t": "."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "",
+           "t": "Delete"
+          }
+         ],
+         [
+          {
+           "s": "c",
+           "t": "Delete"
+          },
+          {
+           "s": "",
+           "t": " (Backspace does not, so a stray key in a text box cannot remove nodes)."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "",
+           "t": "Pan and zoom"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Right- or middle-drag pans, the wheel zooms. On a trackpad: two-finger swipe pans, pinch zooms."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "",
+           "t": "Frame"
+          }
+         ],
+         [
+          {
+           "s": "c",
+           "t": "F"
+          },
+          {
+           "s": "",
+           "t": " frames the selection (or everything), "
+          },
+          {
+           "s": "c",
+           "t": "Home"
+          },
+          {
+           "s": "",
+           "t": " the whole graph."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "",
+           "t": "Straighten wires"
+          }
+         ],
+         [
+          {
+           "s": "c",
+           "t": "Q"
+          },
+          {
+           "s": "",
+           "t": "."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "",
+           "t": "Group with a comment"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Add menu » "
+          },
+          {
+           "s": "b",
+           "t": "Comment Box"
+          },
+          {
+           "s": "",
+           "t": ", or right-click a node » "
+          },
+          {
+           "s": "b",
+           "t": "Wrap Selection in Comment"
+          },
+          {
+           "s": "",
+           "t": "."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "",
+           "t": "Use a variable"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Drag it from the list on the left onto the canvas and pick Get or Set; or "
+          },
+          {
+           "s": "c",
+           "t": "G"
+          },
+          {
+           "s": "",
+           "t": " (Get) / "
+          },
+          {
+           "s": "c",
+           "t": "Shift+G"
+          },
+          {
+           "s": "",
+           "t": " (Set) for a picker."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "",
+           "t": "Call the engine"
+          }
+         ],
+         [
+          {
+           "s": "c",
+           "t": "E"
+          },
+          {
+           "s": "",
+           "t": " opens the engine API picker."
+          }
+         ]
+        ]
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "b",
+         "t": "Quick spawn:"
+        },
+        {
+         "s": "",
+         "t": " hold a key and click empty canvas to drop a node there. Pressing the key while dragging a wire drops it already connected."
+        }
+       ]
+      },
+      {
+       "head": [
+        [
+         {
+          "s": "",
+          "t": "Key"
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "Node"
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "Key"
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "Node"
+         }
+        ]
+       ],
+       "k": "table",
+       "rows": [
+        [
+         [
+          {
+           "s": "c",
+           "t": "B"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Branch"
+          }
+         ],
+         [
+          {
+           "s": "c",
+           "t": "O"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Do Once"
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "S"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Sequence"
+          }
+         ],
+         [
+          {
+           "s": "c",
+           "t": "P"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Print"
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "D"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Delay"
+          }
+         ],
+         [
+          {
+           "s": "c",
+           "t": "V"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Is Valid"
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "F"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "For Each"
+          }
+         ],
+         [
+          {
+           "s": "c",
+           "t": "N"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Not"
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "R"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Reroute"
+          }
+         ],
+         [],
+         []
+        ]
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "Holding "
+        },
+        {
+         "s": "c",
+         "t": "Ctrl"
+        },
+        {
+         "s": "",
+         "t": ", "
+        },
+        {
+         "s": "c",
+         "t": "Cmd"
+        },
+        {
+         "s": "",
+         "t": " or "
+        },
+        {
+         "s": "c",
+         "t": "Alt"
+        },
+        {
+         "s": "",
+         "t": " cancels quick spawn, so "
+        },
+        {
+         "s": "c",
+         "t": "Ctrl/Cmd+D"
+        },
+        {
+         "s": "",
+         "t": " stays Duplicate. Zoomed far out (below about half size), pin labels and value boxes are hidden because they would be unreadable; titles, pins and wires stay."
+        }
+       ]
+      }
+     ],
+     "eyebrow": "Hands on",
+     "id": "canvas",
+     "text": "HorizonCode, materials, particle systems and animator state machines share one canvas, so these gestures work in all of them (the quick-spawn keys are HorizonCode only). To Do Add a node Right-click empty canvas, or press Space, and type to search. Add a node already wired Drag a wire off a pin and let go on empty canvas: the menu lists only nodes that fit that pin. Connect Drag from an output to an input. The whole pin row, label included, is the target, not just the dot. Move a wire Click a connected input and drag the wire to another pin; let go on empty canvas to remove it. Cut all wires on a pin Alt+click the pin. Bend a wire Double-click it to insert a reroute knot, or hold R and click. Select Click a node; drag on empty canvas for a box; Shift adds; Ctrl/Cmd+A selects all. Copy, cut, paste, duplicate Ctrl/Cmd+C, X, V (pastes at the mouse), D. Delete Delete (Backspace does not, so a stray key in a text box cannot remove nodes). Pan and zoom Right- or middle-drag pans, the wheel zooms. On a trackpad: two-finger swipe pans, pinch zooms. Frame F frames the selection (or everything), Home the whole graph. Straighten wires Q. Group with a comment Add menu » Comment Box, or right-click a node » Wrap Selection in Comment. Use a variable Drag it from the list on the left onto the canvas and pick Get or Set; or G (Get) / Shift+G (Set) for a picker. Call the engine E opens the engine API picker. Quick spawn: hold a key and click empty canvas to drop a node there. Pressing the key while dragging a wire drops it already connected. Key Node Key Node B Branch O Do Once S Sequence P Print D Delay V Is Valid F For Each N Not R Reroute   Holding Ctrl, Cmd or Alt cancels quick spawn, so Ctrl/Cmd+D stays Duplicate. Zoomed far out (below about half size), pin labels and value boxes are hidden because they would be unreadable; titles, pins and wires stay.",
+     "title": "Working on the Canvas"
     },
     {
      "blocks": [
@@ -14196,7 +15378,16 @@
        "r": [
         {
          "s": "",
-         "t": "The canvas is the same one the material editor uses: right-click (or drag a wire into empty space) for the searchable add-menu, pan with the right mouse button, box-select with the left, zoom with the wheel. Bool/Int/Float/String inputs accept inline values directly on unwired pins."
+         "t": "Bool, Int, Float and String inputs take a value right on the pin while nothing is wired to them; a wire replaces that value. How to add, wire and arrange nodes is in "
+        },
+        {
+         "h": "#canvas",
+         "s": "l",
+         "t": "Working on the Canvas"
+        },
+        {
+         "s": "",
+         "t": "."
         }
        ]
       },
@@ -14228,7 +15419,7 @@
      ],
      "eyebrow": "Mechanics",
      "id": "graphs",
-     "text": "A graph is built from nodes connected by two kinds of wire. Execution links (white) define control flow — they run in order from an event. Data links are typed (Float, Bool, Int, String, Vec2, Color, Transform, or an object Reference) and are evaluated on demand when a node needs a value. Nothing runs until an event fires from the host — a button click, the frame tick, a level loading, an input action. The canvas is the same one the material editor uses: right-click (or drag a wire into empty space) for the searchable add-menu, pan with the right mouse button, box-select with the left, zoom with the wheel. Bool/Int/Float/String inputs accept inline values directly on unwired pins. With Preferences » Feedback » Success Sound on, dragging makes short, quiet sounds: a blip when a wire or a variable is picked up, a light tick over a pin it would connect to and a muted one over a pin it would not, a snap when it lands and a falling blip when the drop is cancelled or refused. Each sound plays once per event, never per frame, and moving a node stays silent. Drag and Drop Sound switches them off on their own; volume and mute are shared with the other feedback sounds.",
+     "text": "A graph is built from nodes connected by two kinds of wire. Execution links (white) define control flow — they run in order from an event. Data links are typed (Float, Bool, Int, String, Vec2, Color, Transform, or an object Reference) and are evaluated on demand when a node needs a value. Nothing runs until an event fires from the host — a button click, the frame tick, a level loading, an input action. Bool, Int, Float and String inputs take a value right on the pin while nothing is wired to them; a wire replaces that value. How to add, wire and arrange nodes is in Working on the Canvas. With Preferences » Feedback » Success Sound on, dragging makes short, quiet sounds: a blip when a wire or a variable is picked up, a light tick over a pin it would connect to and a muted one over a pin it would not, a snap when it lands and a falling blip when the drop is cancelled or refused. Each sound plays once per event, never per frame, and moving a node stays silent. Drag and Drop Sound switches them off on their own; volume and mute are shared with the other feedback sounds.",
      "title": "How a Graph Works"
     },
     {
@@ -14296,7 +15487,7 @@
           },
           {
            "s": "c",
-           "t": "View » Game Instance"
+           "t": "Window » Game Instance"
           },
           {
            "s": "",
@@ -14334,11 +15525,11 @@
           },
           {
            "s": "c",
-           "t": "View » Level Script"
+           "t": "Window » Level Script"
           },
           {
            "s": "",
-           "t": "."
+           "t": " (game projects only)."
           }
          ]
         ],
@@ -14353,14 +15544,6 @@
           {
            "s": "",
            "t": "Each UI Widget's logic — "
-          },
-          {
-           "s": "c",
-           "t": "PreConstruct"
-          },
-          {
-           "s": "",
-           "t": ", "
           },
           {
            "s": "c",
@@ -14427,11 +15610,184 @@
           },
           {
            "s": "",
-           "t": "."
+           "t": ", or put on an entity (see below)."
           }
          ]
         ]
        ]
+      },
+      {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
+         "t": "A class on an entity"
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "Most gameplay lives in classes that sit on an entity: a door, a pickup, an enemy. In a HorizonCode project:"
+        }
+       ]
+      },
+      {
+       "items": [
+        [
+         {
+          "s": "b",
+          "t": "Create the class."
+         },
+         {
+          "s": "",
+          "t": " Right-click in the Content Browser » "
+         },
+         {
+          "s": "b",
+          "t": "Create Asset » Gameplay » Entity"
+         },
+         {
+          "s": "",
+          "t": ". (A plain "
+         },
+         {
+          "s": "b",
+          "t": "HorizonCode Class"
+         },
+         {
+          "s": "",
+          "t": " has no world events; it is for objects you create with "
+         },
+         {
+          "s": "c",
+          "t": "Create Object"
+         },
+         {
+          "s": "",
+          "t": ".)"
+         }
+        ],
+        [
+         {
+          "s": "b",
+          "t": "Attach it."
+         },
+         {
+          "s": "",
+          "t": " Select the entity in the scene, "
+         },
+         {
+          "s": "b",
+          "t": "Add Component » Gameplay » Script"
+         },
+         {
+          "s": "",
+          "t": ", and pick the class in the "
+         },
+         {
+          "s": "b",
+          "t": "Class"
+         },
+         {
+          "s": "",
+          "t": " field."
+         }
+        ],
+        [
+         {
+          "s": "b",
+          "t": "Write the logic."
+         },
+         {
+          "s": "",
+          "t": " Double-click the class to open it and switch the tab to "
+         },
+         {
+          "s": "b",
+          "t": "Code"
+         },
+         {
+          "s": "",
+          "t": ". An Entity class gets "
+         },
+         {
+          "s": "c",
+          "t": "BeginPlay"
+         },
+         {
+          "s": "",
+          "t": ", "
+         },
+         {
+          "s": "c",
+          "t": "Tick"
+         },
+         {
+          "s": "",
+          "t": " (with the frame's delta time), the physics contacts ("
+         },
+         {
+          "s": "c",
+          "t": "OnBeginOverlap"
+         },
+         {
+          "s": "",
+          "t": ", "
+         },
+         {
+          "s": "c",
+          "t": "OnEndOverlap"
+         },
+         {
+          "s": "",
+          "t": ", "
+         },
+         {
+          "s": "c",
+          "t": "OnHit"
+         },
+         {
+          "s": "",
+          "t": ", "
+         },
+         {
+          "s": "c",
+          "t": "OnHitEnd"
+         },
+         {
+          "s": "",
+          "t": ") and the animation notifies. Its "
+         },
+         {
+          "s": "b",
+          "t": "Get Owning Entity"
+         },
+         {
+          "s": "",
+          "t": " node is the entity it sits on; an empty "
+         },
+         {
+          "s": "i",
+          "t": "entity"
+         },
+         {
+          "s": "",
+          "t": " pin on an engine call means that entity too (the pin shows "
+         },
+         {
+          "s": "i",
+          "t": "Self"
+         },
+         {
+          "s": "",
+          "t": ")."
+         }
+        ]
+       ],
+       "k": "ol"
       },
       {
        "alt": "The Level Script editor with OnLevelLoaded and OnLevelUnloaded events",
@@ -14441,7 +15797,7 @@
      ],
      "eyebrow": "Where graphs live",
      "id": "hosts",
-     "text": "Host Lifetime · events Game Instance One app-wide class that outlives scene changes — OnInit (before anything loads), OnShutdown, OnWindowFocusChanged. Reachable from anywhere via Get Game Instance. Open it under View » Game Instance. Level Script One graph per scene, saved inside the scene — OnLevelLoaded, OnLevelUnloaded. Open it under View » Level Script. Widget graph Each UI Widget's logic — PreConstruct, Construct, Destruct, Tick and one event per element interaction. UI -> HorizonCode Class A standalone, reusable class asset — Construct, Destruct plus the custom events it declares. Instantiated with Create Object. The Level Script editor with OnLevelLoaded and OnLevelUnloaded events",
+     "text": "Host Lifetime · events Game Instance One app-wide class that outlives scene changes — OnInit (before anything loads), OnShutdown, OnWindowFocusChanged. Reachable from anywhere via Get Game Instance. Open it under Window » Game Instance. Level Script One graph per scene, saved inside the scene — OnLevelLoaded, OnLevelUnloaded. Open it under Window » Level Script (game projects only). Widget graph Each UI Widget's logic — Construct, Destruct, Tick and one event per element interaction. UI -> HorizonCode Class A standalone, reusable class asset — Construct, Destruct plus the custom events it declares. Instantiated with Create Object, or put on an entity (see below). A class on an entity Most gameplay lives in classes that sit on an entity: a door, a pickup, an enemy. In a HorizonCode project: Create the class. Right-click in the Content Browser » Create Asset » Gameplay » Entity. (A plain HorizonCode Class has no world events; it is for objects you create with Create Object.) Attach it. Select the entity in the scene, Add Component » Gameplay » Script, and pick the class in the Class field. Write the logic. Double-click the class to open it and switch the tab to Code. An Entity class gets BeginPlay, Tick (with the frame's delta time), the physics contacts (OnBeginOverlap, OnEndOverlap, OnHit, OnHitEnd) and the animation notifies. Its Get Owning Entity node is the entity it sits on; an empty entity pin on an engine call means that entity too (the pin shows Self). The Level Script editor with OnLevelLoaded and OnLevelUnloaded events",
      "title": "The Four Hosts"
     },
     {
@@ -14522,6 +15878,178 @@
        "k": "ul"
       },
       {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
+         "t": "Making them"
+        }
+       ]
+      },
+      {
+       "items": [
+        [
+         {
+          "s": "b",
+          "t": "Variable:"
+         },
+         {
+          "s": "",
+          "t": " the "
+         },
+         {
+          "s": "c",
+          "t": "+"
+         },
+         {
+          "s": "",
+          "t": " next to "
+         },
+         {
+          "s": "b",
+          "t": "Variables"
+         },
+         {
+          "s": "",
+          "t": " in the left column. Select it to set "
+         },
+         {
+          "s": "b",
+          "t": "Name"
+         },
+         {
+          "s": "",
+          "t": ", "
+         },
+         {
+          "s": "b",
+          "t": "Type"
+         },
+         {
+          "s": "",
+          "t": ", "
+         },
+         {
+          "s": "b",
+          "t": "Access"
+         },
+         {
+          "s": "",
+          "t": " (Public / Private), "
+         },
+         {
+          "s": "b",
+          "t": "Container"
+         },
+         {
+          "s": "",
+          "t": " (single value, array, set or map) and its "
+         },
+         {
+          "s": "b",
+          "t": "Default"
+         },
+         {
+          "s": "",
+          "t": ". Drag it onto the canvas for a Get or Set node."
+         }
+        ],
+        [
+         {
+          "s": "b",
+          "t": "Function:"
+         },
+         {
+          "s": "",
+          "t": " the "
+         },
+         {
+          "s": "c",
+          "t": "+"
+         },
+         {
+          "s": "",
+          "t": " next to "
+         },
+         {
+          "s": "b",
+          "t": "Functions"
+         },
+         {
+          "s": "",
+          "t": ". It opens in its own tab with an entry node and a Return node. Select the entry node to name it, set its "
+         },
+         {
+          "s": "b",
+          "t": "Access"
+         },
+         {
+          "s": "",
+          "t": ", and add "
+         },
+         {
+          "s": "b",
+          "t": "Inputs"
+         },
+         {
+          "s": "",
+          "t": " and "
+         },
+         {
+          "s": "b",
+          "t": "Outputs"
+         },
+         {
+          "s": "",
+          "t": " (each a name and a type). Variables only that function needs go under "
+         },
+         {
+          "s": "b",
+          "t": "Local Variables"
+         },
+         {
+          "s": "",
+          "t": "."
+         }
+        ],
+        [
+         {
+          "s": "b",
+          "t": "Custom event:"
+         },
+         {
+          "s": "",
+          "t": " the "
+         },
+         {
+          "s": "c",
+          "t": "+"
+         },
+         {
+          "s": "",
+          "t": " next to "
+         },
+         {
+          "s": "b",
+          "t": "Events"
+         },
+         {
+          "s": "",
+          "t": " declares an event this class raises; "
+         },
+         {
+          "s": "b",
+          "t": "Custom Event"
+         },
+         {
+          "s": "",
+          "t": " in the add menu handles one."
+         }
+        ]
+       ],
+       "k": "ul"
+      },
+      {
        "alt": "A function graph with typed inputs and outputs, Branch, variable access and Return nodes",
        "k": "figure",
        "src": "hc_function_graph.jpg"
@@ -14529,8 +16057,352 @@
      ],
      "eyebrow": "Structure",
      "id": "functions",
-     "text": "Variables — named, typed, persistent state (single values or arrays), listed on the left of the graph editor with Get/Set nodes. Private to their graph unless marked public; each running instance gets its own copy, seeded from the declared defaults. Functions — reusable sub-graphs with typed inputs and outputs and an access modifier: public functions can be called across a class boundary — from another graph, or from Lua/Python via callWidgetFunction; private ones stay internal. Events — the entry points the host raises; a graph can also declare its own and emit them to listeners. A function graph with typed inputs and outputs, Branch, variable access and Return nodes",
+     "text": "Variables — named, typed, persistent state (single values or arrays), listed on the left of the graph editor with Get/Set nodes. Private to their graph unless marked public; each running instance gets its own copy, seeded from the declared defaults. Functions — reusable sub-graphs with typed inputs and outputs and an access modifier: public functions can be called across a class boundary — from another graph, or from Lua/Python via callWidgetFunction; private ones stay internal. Events — the entry points the host raises; a graph can also declare its own and emit them to listeners. Making them Variable: the + next to Variables in the left column. Select it to set Name, Type, Access (Public / Private), Container (single value, array, set or map) and its Default. Drag it onto the canvas for a Get or Set node. Function: the + next to Functions. It opens in its own tab with an entry node and a Return node. Select the entry node to name it, set its Access, and add Inputs and Outputs (each a name and a type). Variables only that function needs go under Local Variables. Custom event: the + next to Events declares an event this class raises; Custom Event in the add menu handles one. A function graph with typed inputs and outputs, Branch, variable access and Return nodes",
      "title": "Variables & Functions"
+    },
+    {
+     "blocks": [
+      {
+       "k": "lead",
+       "r": [
+        {
+         "s": "",
+         "t": "Four patterns most gameplay is built from. Each is a few nodes; the arrows read \"wire this exec output to that exec input\"."
+        }
+       ]
+      },
+      {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
+         "t": "Something happens once when the player walks in"
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "An "
+        },
+        {
+         "s": "b",
+         "t": "Entity"
+        },
+        {
+         "s": "",
+         "t": " class on an entity whose collider is a trigger: "
+        },
+        {
+         "s": "c",
+         "t": "OnBeginOverlap"
+        },
+        {
+         "s": "",
+         "t": " -> "
+        },
+        {
+         "s": "b",
+         "t": "Do Once"
+        },
+        {
+         "s": "",
+         "t": " ("
+        },
+        {
+         "s": "c",
+         "t": "O"
+        },
+        {
+         "s": "",
+         "t": ") -> "
+        },
+        {
+         "s": "b",
+         "t": "Print"
+        },
+        {
+         "s": "",
+         "t": ". The overlap event's output is the other entity, so you can check "
+        },
+        {
+         "s": "i",
+         "t": "who"
+        },
+        {
+         "s": "",
+         "t": " walked in before acting. Do Once lets the chain through the first time only."
+        }
+       ]
+      },
+      {
+       "alt": "Result: OnBeginOverlap, then Do Once, then Print",
+       "k": "figure",
+       "src": "hc_result_once.jpg"
+      },
+      {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
+         "t": "Choose between two paths"
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "Add a Bool variable "
+        },
+        {
+         "s": "c",
+         "t": "IsOpen"
+        },
+        {
+         "s": "",
+         "t": ". From any exec chain -> "
+        },
+        {
+         "s": "b",
+         "t": "Branch"
+        },
+        {
+         "s": "",
+         "t": " ("
+        },
+        {
+         "s": "c",
+         "t": "B"
+        },
+        {
+         "s": "",
+         "t": "); drag "
+        },
+        {
+         "s": "c",
+         "t": "IsOpen"
+        },
+        {
+         "s": "",
+         "t": " onto the canvas as Get and wire it into Branch's "
+        },
+        {
+         "s": "b",
+         "t": "Cond"
+        },
+        {
+         "s": "",
+         "t": ". "
+        },
+        {
+         "s": "b",
+         "t": "True"
+        },
+        {
+         "s": "",
+         "t": " and "
+        },
+        {
+         "s": "b",
+         "t": "False"
+        },
+        {
+         "s": "",
+         "t": " each continue their own chain. Leave "
+        },
+        {
+         "s": "b",
+         "t": "Cond"
+        },
+        {
+         "s": "",
+         "t": " unwired and the checkbox on the pin decides."
+        }
+       ]
+      },
+      {
+       "alt": "Result: BeginPlay into a Branch on IsOpen; True prints one line, False another",
+       "k": "figure",
+       "src": "hc_result_branch.jpg"
+      },
+      {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
+         "t": "Count something"
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "Add a Float variable "
+        },
+        {
+         "s": "c",
+         "t": "Score"
+        },
+        {
+         "s": "",
+         "t": ". In the chain where points are scored -> "
+        },
+        {
+         "s": "b",
+         "t": "Set Score"
+        },
+        {
+         "s": "",
+         "t": "; feed its value from an "
+        },
+        {
+         "s": "b",
+         "t": "Add"
+        },
+        {
+         "s": "",
+         "t": " ("
+        },
+        {
+         "s": "c",
+         "t": "+"
+        },
+        {
+         "s": "",
+         "t": ") whose first input is "
+        },
+        {
+         "s": "b",
+         "t": "Get Score"
+        },
+        {
+         "s": "",
+         "t": " and whose second you type as "
+        },
+        {
+         "s": "c",
+         "t": "1"
+        },
+        {
+         "s": "",
+         "t": ". The arithmetic nodes work on Float. Each instance of the class keeps its own "
+        },
+        {
+         "s": "c",
+         "t": "Score"
+        },
+        {
+         "s": "",
+         "t": "; make it "
+        },
+        {
+         "s": "i",
+         "t": "Public"
+        },
+        {
+         "s": "",
+         "t": " if other graphs should read it."
+        }
+       ]
+      },
+      {
+       "alt": "Result: Set Score fed by Score plus 1",
+       "k": "figure",
+       "src": "hc_result_count.jpg"
+      },
+      {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
+         "t": "React to a key"
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "Create an Input Action asset (say "
+        },
+        {
+         "s": "c",
+         "t": "Jump"
+        },
+        {
+         "s": "",
+         "t": ") and map it to a key. In a "
+        },
+        {
+         "s": "b",
+         "t": "Player Character"
+        },
+        {
+         "s": "",
+         "t": " or "
+        },
+        {
+         "s": "b",
+         "t": "Player Controller"
+        },
+        {
+         "s": "",
+         "t": " class the add menu has an "
+        },
+        {
+         "s": "b",
+         "t": "Input"
+        },
+        {
+         "s": "",
+         "t": " section with one node per action: "
+        },
+        {
+         "s": "b",
+         "t": "Jump"
+        },
+        {
+         "s": "",
+         "t": " has "
+        },
+        {
+         "s": "b",
+         "t": "Pressed"
+        },
+        {
+         "s": "",
+         "t": " and "
+        },
+        {
+         "s": "b",
+         "t": "Released"
+        },
+        {
+         "s": "",
+         "t": " outputs (an axis action gives its value instead). Wire "
+        },
+        {
+         "s": "b",
+         "t": "Pressed"
+        },
+        {
+         "s": "",
+         "t": " to whatever the key should do."
+        }
+       ]
+      }
+     ],
+     "eyebrow": "Patterns",
+     "id": "recipes",
+     "text": "Four patterns most gameplay is built from. Each is a few nodes; the arrows read \"wire this exec output to that exec input\". Something happens once when the player walks in An Entity class on an entity whose collider is a trigger: OnBeginOverlap -> Do Once (O) -> Print. The overlap event's output is the other entity, so you can check who walked in before acting. Do Once lets the chain through the first time only. Result: OnBeginOverlap, then Do Once, then Print Choose between two paths Add a Bool variable IsOpen. From any exec chain -> Branch (B); drag IsOpen onto the canvas as Get and wire it into Branch's Cond. True and False each continue their own chain. Leave Cond unwired and the checkbox on the pin decides. Result: BeginPlay into a Branch on IsOpen; True prints one line, False another Count something Add a Float variable Score. In the chain where points are scored -> Set Score; feed its value from an Add (+) whose first input is Get Score and whose second you type as 1. The arithmetic nodes work on Float. Each instance of the class keeps its own Score; make it Public if other graphs should read it. Result: Set Score fed by Score plus 1 React to a key Create an Input Action asset (say Jump) and map it to a key. In a Player Character or Player Controller class the add menu has an Input section with one node per action: Jump has Pressed and Released outputs (an axis action gives its value instead). Wire Pressed to whatever the key should do.",
+     "title": "Small Recipes"
     },
     {
      "blocks": [
@@ -14575,12 +16447,12 @@
         ],
         [
          {
-          "s": "c",
-          "t": "Call Function (Ref)"
+          "s": "b",
+          "t": "Members by name"
          },
          {
           "s": "",
-          "t": " — call a "
+          "t": " — drag off a reference and its type's "
          },
          {
           "s": "i",
@@ -14588,15 +16460,31 @@
          },
          {
           "s": "",
-          "t": " function on a referenced instance; "
+          "t": " functions ("
          },
          {
           "s": "c",
-          "t": "Get/Set (Ref)"
+          "t": "Call …"
          },
          {
           "s": "",
-          "t": " reads or writes its public variables."
+          "t": ") and variables ("
+         },
+         {
+          "s": "c",
+          "t": "Get …"
+         },
+         {
+          "s": "",
+          "t": " / "
+         },
+         {
+          "s": "c",
+          "t": "Set …"
+         },
+         {
+          "s": "",
+          "t": ") are listed by name, already wired. A reference whose type is not known lists every type in the project and the engine."
          }
         ],
         [
@@ -14627,11 +16515,156 @@
         ]
        ],
        "k": "ul"
+      },
+      {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
+         "t": "Reading another object's variables"
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "Give a variable the type of a class ("
+        },
+        {
+         "s": "b",
+         "t": "Type » Objects"
+        },
+        {
+         "s": "",
+         "t": ") and store a reference in it, from "
+        },
+        {
+         "s": "c",
+         "t": "Create Object"
+        },
+        {
+         "s": "",
+         "t": ", a "
+        },
+        {
+         "s": "c",
+         "t": "Cast"
+        },
+        {
+         "s": "",
+         "t": " or an event argument. Drag off its Get node: the menu lists that class's "
+        },
+        {
+         "s": "i",
+         "t": "public"
+        },
+        {
+         "s": "",
+         "t": " variables as "
+        },
+        {
+         "s": "b",
+         "t": "Get"
+        },
+        {
+         "s": "",
+         "t": "/"
+        },
+        {
+         "s": "b",
+         "t": "Set"
+        },
+        {
+         "s": "",
+         "t": " and its public functions as "
+        },
+        {
+         "s": "b",
+         "t": "Call"
+        },
+        {
+         "s": "",
+         "t": ", already wired to the reference. Private members are not offered."
+        }
+       ]
+      },
+      {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
+         "t": "Widget elements are objects too"
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "In a widget graph every element (a label, a button, a slider) can be taken as a reference: right-click » "
+        },
+        {
+         "s": "b",
+         "t": "Elements » Get Label1"
+        },
+        {
+         "s": "",
+         "t": ", or drop the element from the hierarchy and pick "
+        },
+        {
+         "s": "b",
+         "t": "Reference"
+        },
+        {
+         "s": "",
+         "t": ". Drag off that reference and the menu lists the element type's properties — "
+        },
+        {
+         "s": "b",
+         "t": "Get Text"
+        },
+        {
+         "s": "",
+         "t": ", "
+        },
+        {
+         "s": "b",
+         "t": "Set Text"
+        },
+        {
+         "s": "",
+         "t": ", "
+        },
+        {
+         "s": "b",
+         "t": "Get Visible"
+        },
+        {
+         "s": "",
+         "t": " and so on — the same way a class lists its variables. Get is pure; Set runs when the exec wire reaches it. A variable can hold such a reference: its type is under "
+        },
+        {
+         "s": "b",
+         "t": "Type » Controls"
+        },
+        {
+         "s": "",
+         "t": " (Text, Button, …), and dragging off it lists the same properties."
+        }
+       ]
+      },
+      {
+       "alt": "Result: Construct sets the Text of Label1 to Hello, through the element's reference",
+       "k": "figure",
+       "src": "hc_result_element.jpg"
       }
      ],
      "eyebrow": "Composition",
      "id": "communication",
-     "text": "Because there is a single runtime, a graph can hold a reference to another running class and delegate to it, event-dispatcher style: Bind Event — subscribe to another class's event through a reference; when it fires, your matching event runs. Emit Event — broadcast an event to everyone bound to this class. Call Function (Ref) — call a public function on a referenced instance; Get/Set (Ref) reads or writes its public variables. Get Game Instance / Get Self — the references you feed into the nodes above; Is Valid guards references that may have been destroyed.",
+     "text": "Because there is a single runtime, a graph can hold a reference to another running class and delegate to it, event-dispatcher style: Bind Event — subscribe to another class's event through a reference; when it fires, your matching event runs. Emit Event — broadcast an event to everyone bound to this class. Members by name — drag off a reference and its type's public functions (Call …) and variables (Get … / Set …) are listed by name, already wired. A reference whose type is not known lists every type in the project and the engine. Get Game Instance / Get Self — the references you feed into the nodes above; Is Valid guards references that may have been destroyed. Reading another object's variables Give a variable the type of a class (Type » Objects) and store a reference in it, from Create Object, a Cast or an event argument. Drag off its Get node: the menu lists that class's public variables as Get/Set and its public functions as Call, already wired to the reference. Private members are not offered. Widget elements are objects too In a widget graph every element (a label, a button, a slider) can be taken as a reference: right-click » Elements » Get Label1, or drop the element from the hierarchy and pick Reference. Drag off that reference and the menu lists the element type's properties — Get Text, Set Text, Get Visible and so on — the same way a class lists its variables. Get is pure; Set runs when the exec wire reaches it. A variable can hold such a reference: its type is under Type » Controls (Text, Button, …), and dragging off it lists the same properties. Result: Construct sets the Text of Label1 to Hello, through the element's reference",
      "title": "Talking Between Graphs"
     },
     {
@@ -14737,7 +16770,7 @@
         },
         {
          "s": "",
-         "t": " node that reaches every engine subsystem — entity, transform, physics, camera, environment, audio, scene streaming, save games and more (19 groups, ~220 functions; the Environment group alone exposes every sky and weather field as a get/set pair). Widget graphs add Get/Set Property for every element property."
+         "t": " node that reaches every engine subsystem — entity, transform, physics, camera, environment, audio, scene streaming, save games and more (42 groups, 582 functions; the Environment group alone exposes every sky and weather field as a get/set pair). Widget graphs add Get/Set Property for every element property."
         }
        ]
       },
@@ -14772,7 +16805,7 @@
      ],
      "eyebrow": "Toolbox",
      "id": "palette",
-     "text": "The searchable palette groups nodes by category: Events, Flow (Branch, Sequence, For Each, Delay, Do Once, Flip Flop), Variables, Literals, Math, Logic, Strings, Arrays, Widgets, Objects & References, Debug, and the single generic Engine Call node that reaches every engine subsystem — entity, transform, physics, camera, environment, audio, scene streaming, save games and more (19 groups, ~220 functions; the Environment group alone exposes every sky and weather field as a get/set pair). Widget graphs add Get/Set Property for every element property. Full reference: every built-in node and the complete Engine Call catalogue live on the HorizonCode Node Reference page.",
+     "text": "The searchable palette groups nodes by category: Events, Flow (Branch, Sequence, For Each, Delay, Do Once, Flip Flop), Variables, Literals, Math, Logic, Strings, Arrays, Widgets, Objects & References, Debug, and the single generic Engine Call node that reaches every engine subsystem — entity, transform, physics, camera, environment, audio, scene streaming, save games and more (42 groups, 582 functions; the Environment group alone exposes every sky and weather field as a get/set pair). Widget graphs add Get/Set Property for every element property. Full reference: every built-in node and the complete Engine Call catalogue live on the HorizonCode Node Reference page.",
      "title": "The Node Palette"
     },
     {
@@ -15061,7 +17094,7 @@
        "r": [
         {
          "s": "b",
-         "t": "View » Watch"
+         "t": "Window » Watch"
         },
         {
          "s": "",
@@ -15117,8 +17150,227 @@
      ],
      "eyebrow": "Stop and look",
      "id": "debugging",
-     "text": "A running graph shows itself: every exec node that runs gets an amber halo that fades out over a moment, so during play the graph lights up along its chain. A breakpoint turns that glance into a stop — execution halts on one node, the world freezes, and the Watch window shows what the run is holding. Breakpoints Right-click a node in any HorizonCode graph and choose Add Breakpoint. A red dot appears on the left edge of the node’s header, the gutter mark every text debugger uses. Only nodes the interpreter can stop at offer the item — nodes with an exec pin and the entries (Event, Input Action, Function Entry). A pure node is read, never run, so there is nothing to stop on. Remove Breakpoint takes one off; Remove All Breakpoints clears every graph in the project at once. Breakpoints are saved per project in Saved/Breakpoints.json next to the thumbnails and the autosave, not in the asset — so they survive an editor restart but never travel with a class into source control, a collaboration session or a packaged build. Renaming or moving a class asset leaves its breakpoints behind. The stop The next time a play session reaches a breakpoint, the run stops before the node executes. The world tick freezes (physics, scripts, animation, the other graphs), the graph opens on the node and frames it in yellow — a program counter, not a fading halo — and the Watch window opens by itself. In an application project, whose interface runs without a play session, the stopped run simply waits while the editor stays live. The viewport’s transport well carries on from there. Continue (the Pause button, which reads as Continue while something is stopped) runs the stopped node, the rest of its chain and whatever loop it stopped inside, then lets the world tick again; the next breakpoint stops it again. Step Node runs exactly the stopped node and stops at the next one — into a called function, out to the caller, wherever the next node is. When the chain simply ends, the run is over and the world goes on. Step (one frame) lets a stopped run finish first: one frame means one whole frame, scripts included. Stopping play drops every stopped run. Break on Next Node, in the Watch window while nothing is stopped, is a pause that lands on a node instead of between frames: the very next exec node any graph runs stops as if it had a breakpoint, once. Disarm it there if nothing comes. The Watch window View » Watch shows what a stopped run is holding, in sections: the event’s argument, the function the run is inside of with its inputs and locals (the innermost frame first), the object’s variables, and the values the nodes before the stop produced. Every row is name, type and value; a filter narrows them, the row menu copies a value or the whole row, and Go to Node jumps back to the yellow frame. When two instances of one class are stopped on the same breakpoint, a run picker chooses which one to look at — Step Node always acts on the first. While nothing is stopped, the window shows the Game Instance’s variables live. From the Console back to the node Every line a graph writes to the Console — a Print, a warning, a runtime error — remembers the node that wrote it. Click the line and the graph opens on that node. A runtime error opens the Console by itself the first time it happens in a play session; Lua and Python errors name their script and line the same way. Interpreted only. Breakpoints, the halo and the Watch window belong to the interpreter that runs graphs in the editor. A class compiled to C++ for a packaged build (see below) runs as native code and never stops.",
+     "text": "A running graph shows itself: every exec node that runs gets an amber halo that fades out over a moment, so during play the graph lights up along its chain. A breakpoint turns that glance into a stop — execution halts on one node, the world freezes, and the Watch window shows what the run is holding. Breakpoints Right-click a node in any HorizonCode graph and choose Add Breakpoint. A red dot appears on the left edge of the node’s header, the gutter mark every text debugger uses. Only nodes the interpreter can stop at offer the item — nodes with an exec pin and the entries (Event, Input Action, Function Entry). A pure node is read, never run, so there is nothing to stop on. Remove Breakpoint takes one off; Remove All Breakpoints clears every graph in the project at once. Breakpoints are saved per project in Saved/Breakpoints.json next to the thumbnails and the autosave, not in the asset — so they survive an editor restart but never travel with a class into source control, a collaboration session or a packaged build. Renaming or moving a class asset leaves its breakpoints behind. The stop The next time a play session reaches a breakpoint, the run stops before the node executes. The world tick freezes (physics, scripts, animation, the other graphs), the graph opens on the node and frames it in yellow — a program counter, not a fading halo — and the Watch window opens by itself. In an application project, whose interface runs without a play session, the stopped run simply waits while the editor stays live. The viewport’s transport well carries on from there. Continue (the Pause button, which reads as Continue while something is stopped) runs the stopped node, the rest of its chain and whatever loop it stopped inside, then lets the world tick again; the next breakpoint stops it again. Step Node runs exactly the stopped node and stops at the next one — into a called function, out to the caller, wherever the next node is. When the chain simply ends, the run is over and the world goes on. Step (one frame) lets a stopped run finish first: one frame means one whole frame, scripts included. Stopping play drops every stopped run. Break on Next Node, in the Watch window while nothing is stopped, is a pause that lands on a node instead of between frames: the very next exec node any graph runs stops as if it had a breakpoint, once. Disarm it there if nothing comes. The Watch window Window » Watch shows what a stopped run is holding, in sections: the event’s argument, the function the run is inside of with its inputs and locals (the innermost frame first), the object’s variables, and the values the nodes before the stop produced. Every row is name, type and value; a filter narrows them, the row menu copies a value or the whole row, and Go to Node jumps back to the yellow frame. When two instances of one class are stopped on the same breakpoint, a run picker chooses which one to look at — Step Node always acts on the first. While nothing is stopped, the window shows the Game Instance’s variables live. From the Console back to the node Every line a graph writes to the Console — a Print, a warning, a runtime error — remembers the node that wrote it. Click the line and the graph opens on that node. A runtime error opens the Console by itself the first time it happens in a play session; Lua and Python errors name their script and line the same way. Interpreted only. Breakpoints, the halo and the Watch window belong to the interpreter that runs graphs in the editor. A class compiled to C++ for a packaged build (see below) runs as native code and never stops.",
      "title": "Debugging a Graph"
+    },
+    {
+     "blocks": [
+      {
+       "head": [
+        [
+         {
+          "s": "",
+          "t": "You see"
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "Usually because"
+         }
+        ]
+       ],
+       "k": "table",
+       "rows": [
+        [
+         [
+          {
+           "s": "",
+           "t": "Nothing happens at all"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "The chain does not start at an event, or an exec wire is missing in the middle (look for a hollow white triangle). For a class: the entity's "
+          },
+          {
+           "s": "b",
+           "t": "Script"
+          },
+          {
+           "s": "",
+           "t": " component does not name it in "
+          },
+          {
+           "s": "b",
+           "t": "Class"
+          },
+          {
+           "s": "",
+           "t": ", or it is a plain HorizonCode Class, which has no "
+          },
+          {
+           "s": "c",
+           "t": "BeginPlay"
+          },
+          {
+           "s": "",
+           "t": "."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "",
+           "t": "An event is greyed out in the add menu"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "It is already in the graph (the menu marks it "
+          },
+          {
+           "s": "i",
+           "t": "added"
+          },
+          {
+           "s": "",
+           "t": "); each event exists once. Events are not offered inside a function's tab."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "",
+           "t": "A value is different every time it is read"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Pure nodes run on each read. Store the value in a variable once (Set) and read the variable."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "",
+           "t": "Another graph cannot see a variable or function"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "It is "
+          },
+          {
+           "s": "i",
+           "t": "Private"
+          },
+          {
+           "s": "",
+           "t": ". Set "
+          },
+          {
+           "s": "b",
+           "t": "Access"
+          },
+          {
+           "s": "",
+           "t": " to Public."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "",
+           "t": "Calls through a reference stop working"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "The object was destroyed. Guard the reference with "
+          },
+          {
+           "s": "b",
+           "t": "Is Valid"
+          },
+          {
+           "s": "",
+           "t": " ("
+          },
+          {
+           "s": "c",
+           "t": "V"
+          },
+          {
+           "s": "",
+           "t": ")."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "",
+           "t": "A node has a red halo after Compile"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "That node cannot be translated to C++. The graph still runs, interpreted; "
+          },
+          {
+           "s": "b",
+           "t": "Show node"
+          },
+          {
+           "s": "",
+           "t": " on the Compile strip jumps to it."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "",
+           "t": "Labels and value boxes vanished"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "You zoomed out below about half size. Zoom in."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "",
+           "t": "Backspace does not delete a node"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "On purpose. Use "
+          },
+          {
+           "s": "c",
+           "t": "Delete"
+          },
+          {
+           "s": "",
+           "t": "."
+          }
+         ]
+        ]
+       ]
+      }
+     ],
+     "eyebrow": "When it does nothing",
+     "id": "pitfalls",
+     "text": "You see Usually because Nothing happens at all The chain does not start at an event, or an exec wire is missing in the middle (look for a hollow white triangle). For a class: the entity's Script component does not name it in Class, or it is a plain HorizonCode Class, which has no BeginPlay. An event is greyed out in the add menu It is already in the graph (the menu marks it added); each event exists once. Events are not offered inside a function's tab. A value is different every time it is read Pure nodes run on each read. Store the value in a variable once (Set) and read the variable. Another graph cannot see a variable or function It is Private. Set Access to Public. Calls through a reference stop working The object was destroyed. Guard the reference with Is Valid (V). A node has a red halo after Compile That node cannot be translated to C++. The graph still runs, interpreted; Show node on the Compile strip jumps to it. Labels and value boxes vanished You zoomed out below about half size. Zoom in. Backspace does not delete a node On purpose. Use Delete.",
+     "title": "Common Pitfalls"
     },
     {
      "blocks": [
@@ -17329,6 +19581,16 @@
         [
          {
           "s": "b",
+          "t": "Volumetric fog"
+         },
+         {
+          "s": "",
+          "t": " — set Fog Mode to Volumetric for a real 3D fog volume (a froxel grid in front of the camera) instead of the flat per-pixel blend: sun and light shafts, shadows inside the fog, drifting 3D noise, and a ground-hugging fog bank with its own base height and thickness. Quality sets the grid size, Volume Distance how far it reaches before the Density fog takes over, Anisotropy how strongly it glows toward the sun. A Sky you add starts on Volumetric (it draws nothing until Density or Bank Density is above 0); scenes saved before it stay on Analytic. It runs on Metal, OpenGL and Vulkan; on Direct3D 11/12 and the software renderer the Density fog stands in, and the camera underwater hands over to the underwater effect."
+         }
+        ],
+        [
+         {
+          "s": "b",
           "t": "Rain / Snow / Wetness"
          },
          {
@@ -17418,7 +19680,7 @@
      ],
      "eyebrow": "Above",
      "id": "sky",
-     "text": "The sky is fully procedural — atmosphere, sun, moon, stars, clouds, aurora — and doubles as the scene's image-based light source. All of it lives on the Sky entity's Environment component, edited in the Details panel and scriptable at runtime through the env API group (every field has a get/set). Procedural daytime sky with volumetric clouds Day-night cycle A time-of-day clock slider (0.25 = sunrise, 0.5 = noon, 0.75 = sunset) with optional Auto-Advance and a configurable full-day length. The sun and moon arcs, their colours and brightness, the moon phase (eight named phases, with an optional automatic lunar cycle over N days) all follow the clock. Clouds Coverage-driven procedural clouds with two modes — Sky-dome (default) and 3D volumetric (parallax), where clouds are anchored in world space and parallax as you move (with a tunable cloud height). Quality presets (Low / Medium / High), an optional quarter-resolution cloud pass for performance, plus Density, Fluffiness, Tint and wind direction/speed. Separate Cirrus and Contrail layers add high-altitude detail. Sunset sky Sun effects, fog & precipitation God rays — crepuscular rays through broken cloud; Lens flare — camera artifact overlay. Atmospheric fog — density plus a ground-hugging height falloff; distant geometry picks up aerial perspective. Rain / Snow / Wetness — precipitation amounts spawn particles, wetness darkens the ground and snow whitens it (usually driven by the Weather system). Night sky Night sky with stars, Milky Way and nebula Stars — brightness, colour, density, size and variation, glow, twinkle. Milky Way band and night-only shooting stars. Nebula — three-colour procedural nebula with quality presets and a seed. Aurora — intensity, base and top colours, height and fragmentation.",
+     "text": "The sky is fully procedural — atmosphere, sun, moon, stars, clouds, aurora — and doubles as the scene's image-based light source. All of it lives on the Sky entity's Environment component, edited in the Details panel and scriptable at runtime through the env API group (every field has a get/set). Procedural daytime sky with volumetric clouds Day-night cycle A time-of-day clock slider (0.25 = sunrise, 0.5 = noon, 0.75 = sunset) with optional Auto-Advance and a configurable full-day length. The sun and moon arcs, their colours and brightness, the moon phase (eight named phases, with an optional automatic lunar cycle over N days) all follow the clock. Clouds Coverage-driven procedural clouds with two modes — Sky-dome (default) and 3D volumetric (parallax), where clouds are anchored in world space and parallax as you move (with a tunable cloud height). Quality presets (Low / Medium / High), an optional quarter-resolution cloud pass for performance, plus Density, Fluffiness, Tint and wind direction/speed. Separate Cirrus and Contrail layers add high-altitude detail. Sunset sky Sun effects, fog & precipitation God rays — crepuscular rays through broken cloud; Lens flare — camera artifact overlay. Atmospheric fog — density plus a ground-hugging height falloff; distant geometry picks up aerial perspective. Volumetric fog  — set Fog Mode to Volumetric for a real 3D fog volume (a froxel grid in front of the camera) instead of the flat per-pixel blend: sun and light shafts, shadows inside the fog, drifting 3D noise, and a ground-hugging fog bank with its own base height and thickness. Quality sets the grid size, Volume Distance how far it reaches before the Density fog takes over, Anisotropy how strongly it glows toward the sun. A Sky you add starts on Volumetric (it draws nothing until Density or Bank Density is above 0); scenes saved before it stay on Analytic. It runs on Metal, OpenGL and Vulkan; on Direct3D 11/12 and the software renderer the Density fog stands in, and the camera underwater hands over to the underwater effect. Rain / Snow / Wetness — precipitation amounts spawn particles, wetness darkens the ground and snow whitens it (usually driven by the Weather system). Night sky Night sky with stars, Milky Way and nebula Stars — brightness, colour, density, size and variation, glow, twinkle. Milky Way band and night-only shooting stars. Nebula — three-colour procedural nebula with quality presets and a seed. Aurora — intensity, base and top colours, height and fragmentation.",
      "title": "Sky & Atmosphere"
     },
     {
@@ -17516,6 +19778,16 @@
         ],
         [
          {
+          "s": "b",
+          "t": "Fog"
+         },
+         {
+          "s": "",
+          "t": " — Foggy sets the Density fog and, with Fog Mode on Volumetric, a thick ground bank with wispy noise; Rain and Storm add a faint bank. Intensity scales them. Move Bank Density or Noise Amount yourself and the weather leaves that value alone until the next preset pick."
+         }
+        ],
+        [
+         {
           "s": "",
           "t": "Environment sliders stay live — once you hand-tune a field, the weather stops owning it."
          }
@@ -17559,7 +19831,7 @@
      ],
      "eyebrow": "Dynamic",
      "id": "weather",
-     "text": "The Weather entity blends between built-in presets — Clear, Cloudy, Overcast, Foggy, Rain, Storm, Snow — and writes cloud coverage, fog, wind, precipitation and wetness into the Environment over a configurable transition time. An Auto-Cycle mode wanders between weathers on its own. Intensity scales the active preset; Transition sets the blend duration. Precipitation — camera-following rain and snow particle pools (with per-type particle caps) that collide with the ground; on capable backends the simulation runs entirely on the GPU. Storm adds lightning flashes; each one is followed by thunder, later and quieter the farther away it struck. Sound — the weather makes its own noise: rain, wind, snow and storm beds that fade in and out with the weather, and a thunder roll after each strike. The sounds ship with the engine (Engine » Audio » Weather in the Content Browser), so a project needs no files of its own and no script starts or fades anything. The Weather component's Sound section switches it off, sets the volume and the mixer bus, and has a slot for each sound to swap in your own; an empty slot plays the engine's. In the editor viewport outside Play the sounds follow Preferences » Effects » Weather Sounds in Edit Mode. Environment sliders stay live — once you hand-tune a field, the weather stops owning it. Scripts can drive weather directly via env.setCloudCoverage, env.setFogDensity, env.setWindSpeed and friends.",
+     "text": "The Weather entity blends between built-in presets — Clear, Cloudy, Overcast, Foggy, Rain, Storm, Snow — and writes cloud coverage, fog, wind, precipitation and wetness into the Environment over a configurable transition time. An Auto-Cycle mode wanders between weathers on its own. Intensity scales the active preset; Transition sets the blend duration. Precipitation — camera-following rain and snow particle pools (with per-type particle caps) that collide with the ground; on capable backends the simulation runs entirely on the GPU. Storm adds lightning flashes; each one is followed by thunder, later and quieter the farther away it struck. Sound — the weather makes its own noise: rain, wind, snow and storm beds that fade in and out with the weather, and a thunder roll after each strike. The sounds ship with the engine (Engine » Audio » Weather in the Content Browser), so a project needs no files of its own and no script starts or fades anything. The Weather component's Sound section switches it off, sets the volume and the mixer bus, and has a slot for each sound to swap in your own; an empty slot plays the engine's. In the editor viewport outside Play the sounds follow Preferences » Effects » Weather Sounds in Edit Mode. Fog  — Foggy sets the Density fog and, with Fog Mode on Volumetric, a thick ground bank with wispy noise; Rain and Storm add a faint bank. Intensity scales them. Move Bank Density or Noise Amount yourself and the weather leaves that value alone until the next preset pick. Environment sliders stay live — once you hand-tune a field, the weather stops owning it. Scripts can drive weather directly via env.setCloudCoverage, env.setFogDensity, env.setWindSpeed and friends.",
      "title": "Weather"
     },
     {

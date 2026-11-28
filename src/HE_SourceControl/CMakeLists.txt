@@ -21,6 +21,7 @@ add_library(HorizonSourceControl SHARED
 	src/GitHubTokenStore.cpp
 	src/GitService.cpp
 	src/TeamSyncService.cpp
+	src/TextMerge.cpp
 )
 
 # HorizonCore for HE::Proc (the subprocess runner) and the engine log.

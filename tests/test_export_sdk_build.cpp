@@ -388,6 +388,31 @@ TEST_CASE("installBuiltGame swaps the executable and the SDK's engine libraries 
     CHECK_FALSE(HE::ExportSdk::installBuiltGame(sdk, built, {}).empty());
 }
 
+// An app runtime (AppBasic: the software renderer alone) is chosen for its
+// engine. Installing the compiled game over it swaps the executable only; the
+// runtime's libraries stay, and an SDK library it does not carry is added.
+TEST_CASE("installBuiltGame keeps an app runtime's engine and swaps only the game")
+{
+    TempDir t;
+    HE::ExportSdk::GameSdk sdk;
+    sdk.root    = t.path / "sdk";
+    sdk.profile = "dev";
+    touchFile(sdk.root / "lib" / "dev" / "libHorizonEngine.dylib", "sdk-full-engine");
+    touchFile(sdk.root / "lib" / "dev" / "libExtra.dylib", "sdk-extra");
+    const fs::path built = t.path / "build" / "HorizonGame";
+    touchFile(built, "compiled-game");
+    const fs::path exe = t.path / "export" / "Notes";
+    touchFile(exe, "prebuilt-game");
+    touchFile(exe.parent_path() / "HorizonEngine" / "libHorizonEngine.dylib", "appbasic-engine");
+
+    std::vector<std::string> copied;
+    CHECK(HE::ExportSdk::installBuiltGame(sdk, built, exe, &copied, /*keepRuntimeEngine=*/true).empty());
+    CHECK(readFile(exe) == "compiled-game");
+    CHECK(readFile(exe.parent_path() / "HorizonEngine" / "libHorizonEngine.dylib") == "appbasic-engine");
+    CHECK(readFile(exe.parent_path() / "HorizonEngine" / "libExtra.dylib") == "sdk-extra");
+    CHECK(copied.size() == 2);   // the game and the one library the runtime lacked
+}
+
 // Thema 211 step 10: an export with data/ and HorizonEngine/ beside a renamed
 // executable gets the engine libraries into HorizonEngine/, and the configuration
 // is read from data/.

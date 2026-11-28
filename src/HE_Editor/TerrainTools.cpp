@@ -6,16 +6,20 @@
 #include "EditorHelp.h"                  // "New Landscape/" and "Landscape/" scopes
 #include "EditorWidgets.h"               // asset drop slot + WrapText (text wraps, never runs off)
 #include "NotificationStore.h"           // failures go to the footer bell, not to red text
+#include "LandscapeFarBake.h"            // Setup ▸ Far Landscape
 #include <HorizonScene/HorizonScene.h>
 #include <HorizonScene/TerrainPaint.h>   // landscape layer brush
 #include <HorizonScene/FoliagePaint.h>   // foliage density-mask brush
 #include <HorizonScene/TerrainHeightmap.h> // greyscale heightmap → heights
 #include <HorizonScene/TerrainGenerate.h>  // Mountain: a formation grown in a dragged area
+#include "SplineEdit.h"                    // Mountain: its paths as spline entities
 #include <HorizonScene/WaterBrush.h>       // Water: a stroke into the landscape's water field
 #include <HorizonScene/WaterLake.h>        // Water: "To Lake" on a painted pond
 #include <HorizonRendering/RenderWorld.h>
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
+#include <MaterialGraph/AutoLandscapeMaterial.h>   // texture groups (Thema 233)
+#include <HorizonScene/LayerMeshPresets.h>        // the group's layer meshes (Thema 233 step 4)
 #include <Types/Enums.h>
 #include <Diagnostics/Logger.h>
 #include <glm/gtc/type_ptr.hpp>
@@ -31,6 +35,7 @@
 #include <optional>
 #include <random>                        // Mountain's "New Seed"
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #ifdef HE_IMGUI_ENABLED
@@ -48,6 +53,10 @@ static TerrainTool s_terrainTool     = TerrainTool::Raise;
 // node (MaterialAsset::graphLayerNames) — the material defines what a layer is.
 static bool        s_landscapePaint  = false;
 static int         s_paintLayer      = 0;
+// Which texture group a Paint stroke leans the texel toward (Thema 233): an
+// AutoLandscapeGroupId. Only meaningful while the terrain mixes groups
+// (TerrainComponent::groupMix); otherwise the stroke is a plain layer paint.
+static int         s_activeGroup = 0;
 // Landscape FOLIAGE mode: the same brush paints a foliage layer's density
 // mask (FoliageLayer::densityMask) — Grow raises it toward the target
 // density, Erase pulls it to 0, which is how an exclusion area (a yard, a
@@ -87,6 +96,11 @@ static float       s_brushStrength   = 5.0f;
 // per stroke step at 60 Hz. 1 = the layer is taken over completely at once.
 static float       s_paintStrength   = 1.0f;
 static bool        s_brushWasDown    = false;   // tracks LMB edge for undo
+// Layer painting: where the last dab of the running stroke landed (terrain-local), so a
+// frame can fill the way from there to the pointer.
+static float       s_paintLastX      = 0.0f;
+static float       s_paintLastZ      = 0.0f;
+static bool        s_paintHaveLast   = false;
 // Stroke-scoped state, captured on the LMB-down edge (see the sculpt block):
 static float       s_flattenTarget   = 0.0f;    // Flatten: height to pull toward
 static glm::vec3   s_rampStartWS{};             // Ramp: world-space start of the gradient
@@ -98,7 +112,10 @@ static bool        s_rampValid       = false;   // Ramp: a start point was captu
 // work. Radius/Falloff/Strength above do not apply to it; it has its own form.
 enum class MountainShape { Rectangle, Circle };
 static MountainShape           s_mountainShape = MountainShape::Rectangle;
-static TerrainGenerate::Params s_mountain;      // Max Height, Falloff, Roughness, Octaves, Frequency, Seed
+// Max Height, Falloff, Roughness, Octaves, Frequency, Seed, and the Shape and Paths rows. The tool starts with ridges and
+// some erosion on (a mountain, not a noise bump); TerrainGenerate's own defaults stay the plain shape for scripts and old calls.
+static TerrainGenerate::Params s_mountain = [] { TerrainGenerate::Params p; p.ridges = 0.6f; p.erosion = 0.4f; return p; }();
+static bool        s_mountainSplines = true;    // Mountain: every path it cuts also becomes a spline entity
 static glm::vec3   s_areaStartWS{};             // Mountain: world-space point where the drag began
 static glm::vec3   s_areaEndWS{};               // Mountain: last ground point the drag reached
 static bool        s_areaValid       = false;   // Mountain: the drag began on the ground
@@ -112,6 +129,7 @@ static HE::UUID          s_newHeightmapTex;             // a texture asset, or .
 static std::string       s_newHeightmapFile;            // ... a file off the disk (16-bit PNG, .r16)
 static bool              s_newHmFlipZ    = false;
 static bool              s_newHmAdoptRes = false;
+static bool              s_createFormFramed = false;    // the camera was put on the create grid this visit
 // The file dialog's result slot for the form (separate from the Heightmap block's, which
 // belongs to an existing landscape). SDL calls back from the dialog, this frame or later.
 static std::string       s_newPickPath;
@@ -233,15 +251,259 @@ namespace
 		return clicked;
 	}
 
+	// Bind the terrain to texture group `g`: its landscape material goes into the
+	// terrain's MaterialComponent, nothing else is touched (the weightmap is shared by
+	// every group). The engine material is loaded first, by path, because the Content
+	// Browser is not the only way to reach it. No-op on the group the terrain already has.
+	void assignTextureGroup(AppContext& ctx, MaterialComponent& tmat, const HE::AutoLandscapeGroup& g)
+	{
+		if (tmat.materialAssetId == g.materialId) return;
+		if (ctx.contentManager) ctx.contentManager->loadAsset(g.materialPath);
+		if (ctx.undoSys) ctx.undoSys->snapshotNow("Texture Group");
+		tmat.materialAssetId = g.materialId;
+		tmat.dirty = true;   // TerrainSystem pushes it to the chunks
+		if (ctx.renderer) ctx.renderer->InvalidateMaterial(g.materialId);
+	}
+
+	// The group a terrain is: its material's, or with the mix on the one it was before (the material
+	// is the mix material then and names none). -1 for a custom material.
+	int terrainGroup(const TerrainComponent& tc, const MaterialComponent& mat)
+	{
+		if (tc.groupMix) return tc.baseGroup;
+		return HE::autoLandscapeGroupOfMaterial(mat.materialAssetId);
+	}
+
+	// Mix on: the terrain draws with the mix material, which reads all four groups' shares; off:
+	// back to its group's own. One undo snapshot, taken by the caller before it changes the terrain.
+	void bindMixMaterial(AppContext& ctx, MaterialComponent& tmat, const TerrainComponent& tc)
+	{
+		const HE::UUID target = tc.groupMix
+			? HE::kAutoLandscapeMixMaterialId
+			: HE::kAutoLandscapeGroups[std::clamp(tc.baseGroup, 0, HE::kAutoLandscapeGroupCount - 1)].materialId;
+		if (tmat.materialAssetId == target) return;
+		if (ctx.contentManager)
+			ctx.contentManager->loadAsset(tc.groupMix ? HE::kAutoLandscapeMixMaterialPath
+			                                          : HE::autoLandscapeGroup(static_cast<HE::AutoLandscapeGroupId>(
+			                                                std::clamp(tc.baseGroup, 0, HE::kAutoLandscapeGroupCount - 1))).materialPath);
+		tmat.materialAssetId = target;
+		tmat.dirty = true;
+		if (ctx.renderer) ctx.renderer->InvalidateMaterial(target);
+	}
+
+	// Give the terrain a foliage layer for every mesh kind of group `g` it does not scatter yet
+	// (a layer counts as having the kind when its level-0 mesh is the kind's). Only ever adds:
+	// the layers the author made or tuned stay as they are, and a layer without a mesh (the one
+	// a new component starts with) is filled first, since it scatters nothing. The layers come
+	// from the preset with the group's row, so rock stands where THAT group's material shows it.
+	// Returns how many kinds were added.
+	int applyGroupMeshes(AppContext& ctx, entt::registry& reg, entt::entity terrain, const HE::AutoLandscapeGroup& g)
+	{
+		const HE::LayerMeshSet set = HE::layerMeshKindsOfGroup(g.id);
+		auto* folc = reg.try_get<FoliageComponent>(terrain);
+		const auto has = [&](HE::LayerMeshKind k) {
+			if (!folc) return false;
+			for (const FoliageLayer& l : folc->layers) if (l.meshAssetId == HE::layerMeshLevel0(k)) return true;
+			return false;
+		};
+		int missing = 0;
+		for (int i = 0; i < set.count; ++i) missing += has(set.kinds[i]) ? 0 : 1;
+		if (missing == 0) return 0;
+
+		if (ctx.undoSys) ctx.undoSys->snapshotNow("Apply Group Meshes");
+		if (!folc) folc = &reg.emplace<FoliageComponent>(terrain, FoliageComponent{});
+		int added = 0;
+		for (int i = 0; i < set.count; ++i)
+		{
+			const HE::LayerMeshKind kind = set.kinds[i];
+			if (has(kind)) continue;
+			FoliageLayer* layer = nullptr;
+			for (FoliageLayer& l : folc->layers) if (l.meshAssetId == HE::UUID{}) { layer = &l; break; }
+			if (!layer) layer = folc->addLayer();
+			if (!layer) break;                                  // kMaxLayers: the rest stays unadded
+			HE::applyLayerMeshPreset(*layer, kind, g.id);
+			// The meshes are engine FILES that nothing loads on its own (see the Inspector's preset).
+			for (int lv = 0; lv < HE::layerMeshLevelCount(kind) && ctx.contentManager; ++lv)
+				if (!ctx.contentManager->ensureResident(HE::layerMeshLevelId(kind, lv))
+				    && ctx.contentManager->loadAsset(HE::layerMeshLevelPath(kind, lv)) != HE::layerMeshLevelId(kind, lv))
+					HE_LOG_WARN(Editor, "Foliage: the engine mesh %s is not available \xe2\x80\x94 the layer draws the fallback mesh",
+					            HE::layerMeshLevelPath(kind, lv).c_str());
+			++added;
+		}
+		return added;
+	}
+
+	// Materialize the LandscapeFoliageLayerAsset `set` (UUID `setId`) into the terrain's
+	// foliage layers (design doc §4, Thema 327): one `FoliageLayer` per entry, tagged with
+	// {setId, entry index} so a re-apply finds its own layers again. A tagged layer's
+	// asset-owned fields (mesh, material, LODs, rules, density, scale, flags) are refreshed
+	// every call; `seed`, `densityMask` and `visible` are the editor's own and are never
+	// touched. A layer nobody tagged — hand-added, or from a different asset/entry — is
+	// never read or written, so this never clobbers what the author tuned (the same
+	// add-only promise `applyGroupMeshes` makes, plus update). Spawning itself stays
+	// FoliageSystem's: this only sets the fields it already scatters from and flags the
+	// layer dirty, so the next `FoliageSystem::update()` (not this call) does the actual
+	// per-frame work — no placement work happens here. Returns how many entries were
+	// added or refreshed.
+	int applyFoliageSet(AppContext& ctx, entt::registry& reg, entt::entity terrain,
+	                     HE::UUID setId, const LandscapeFoliageLayerAsset& set)
+	{
+		if (set.entries.empty()) return 0;
+		auto* folc = reg.try_get<FoliageComponent>(terrain);
+
+		if (ctx.undoSys) ctx.undoSys->snapshotNow("Apply Foliage");
+		if (!folc) folc = &reg.emplace<FoliageComponent>(terrain, FoliageComponent{});
+
+		int touched = 0;
+		for (size_t i = 0; i < set.entries.size(); ++i)
+		{
+			const LandscapeFoliageEntry& e = set.entries[i];
+			FoliageLayer* layer = nullptr;
+			for (FoliageLayer& l : folc->layers)
+				if (l.sourceAssetId == setId && l.sourceEntry == static_cast<int>(i)) { layer = &l; break; }
+			if (!layer)
+			{
+				// Reuse an empty, untagged layer first (the one a fresh component starts
+				// with), same precedent as applyGroupMeshes; otherwise grow the list. A
+				// layer only qualifies as that pristine starter, never one the author
+				// began hand-tuning (named it, painted a mask, set a rule, added a LOD)
+				// before picking a mesh — meshAssetId=={} alone is not proof of that,
+				// so every other sign of hand-tuning is checked too: the slope and
+				// height rules, density, seed, scale range, draw/shadow distances,
+				// bucket size, the shadow/AO switches, LOD hysteresis and visibility.
+				// All compared bit for bit against FoliageLayer{}: this starter has
+				// never been written, so there is nothing to be "close" to. This runs
+				// before the write block below, which sets density/scale itself.
+				const FoliageLayer pristine{};
+				for (FoliageLayer& l : folc->layers)
+					if (l.meshAssetId == HE::UUID{} && l.materialAssetId == HE::UUID{} &&
+					    l.sourceAssetId == HE::UUID{} && l.name.empty() && l.densityMask.empty() &&
+					    l.lods.empty() && l.weightLayer == -1 &&
+					    l.slopeMin == pristine.slopeMin && l.slopeMax == pristine.slopeMax &&
+					    l.heightMin == pristine.heightMin && l.heightMax == pristine.heightMax &&
+					    l.density == pristine.density && l.seed == pristine.seed &&
+					    l.minScale == pristine.minScale && l.maxScale == pristine.maxScale &&
+					    l.drawDistance == pristine.drawDistance && l.bucketSize == pristine.bucketSize &&
+					    l.castsShadow == pristine.castsShadow && l.contributesAO == pristine.contributesAO &&
+					    l.shadowDistance == pristine.shadowDistance && l.lodHysteresis == pristine.lodHysteresis &&
+					    l.visible == pristine.visible) { layer = &l; break; }
+				if (!layer) layer = folc->addLayer();
+				if (!layer) break;                                  // kMaxLayers: the rest stays unapplied
+				layer->sourceAssetId = setId;
+				layer->sourceEntry   = static_cast<int>(i);
+			}
+
+			// The asset is loaded leniently (ContentManager only logs
+			// validateLandscapeFoliageLayer's problems, it never rejects or fixes them —
+			// LandscapeFoliageLayerJson.cpp), so a hand-edited or stale file can still
+			// carry a negative density, an inverted min/max or slope range, or an
+			// unordered LOD list. Clamp every numeric field to what FoliageSystem and the
+			// scatter actually expect instead of handing it garbage.
+			auto positive = [](float v, float fallback) { return (std::isfinite(v) && v > 0.0f) ? v : fallback; };
+			auto nonNeg    = [](float v, float fallback) { return (std::isfinite(v) && v >= 0.0f) ? v : fallback; };
+
+			layer->name            = e.name;
+			layer->meshAssetId     = e.meshAssetId;
+			layer->materialAssetId = e.materialAssetId;
+			{
+				const float density = e.density * set.densityScale;   // a product: validate it, not the factors
+				layer->density = (std::isfinite(density) && density > 0.0f) ? density : 0.0f;
+			}
+			{
+				float minS = positive(e.minScale, FoliageLayer{}.minScale);
+				float maxS = positive(e.maxScale, FoliageLayer{}.maxScale);
+				if (minS > maxS) std::swap(minS, maxS);
+				layer->minScale = minS;
+				layer->maxScale = maxS;
+			}
+			layer->drawDistance    = positive(e.drawDistance, FoliageLayer{}.drawDistance);
+			layer->bucketSize      = positive(e.bucketSize, FoliageLayer{}.bucketSize);
+			layer->castsShadow     = e.castsShadow;
+			layer->contributesAO   = e.contributesAO;
+			layer->shadowDistance  = nonNeg(e.shadowDistance, 0.0f);
+			layer->lodHysteresis   = nonNeg(e.lodHysteresis, 0.0f);
+			{
+				float slopeMin = std::isfinite(e.slopeMin) ? std::clamp(e.slopeMin, 0.0f, 1.0f) : 0.0f;
+				float slopeMax = std::isfinite(e.slopeMax) ? std::clamp(e.slopeMax, 0.0f, 1.0f) : 1.0f;
+				if (slopeMin > slopeMax) std::swap(slopeMin, slopeMax);
+				layer->slopeMin = slopeMin;
+				layer->slopeMax = slopeMax;
+			}
+			{
+				float heightMin = std::isfinite(e.heightMin) ? e.heightMin : -FoliageLayer::kNoHeightLimit;
+				float heightMax = std::isfinite(e.heightMax) ? e.heightMax :  FoliageLayer::kNoHeightLimit;
+				if (heightMin > heightMax) std::swap(heightMin, heightMax);
+				layer->heightMin = heightMin;
+				layer->heightMax = heightMax;
+			}
+			// Out of range = no paint rule, the same leniency SceneSerializer gives a
+			// hand-edited scene (a set authored against more terrain channels than this
+			// landscape has).
+			layer->weightLayer     = (e.paintLayer >= 0 && e.paintLayer < kTerrainMaxLayers) ? e.paintLayer : -1;
+			layer->lods.clear();
+			for (const LandscapeFoliageLod& lod : e.lods)
+			{
+				FoliageLod fl;
+				fl.meshAssetId     = lod.meshAssetId;
+				fl.materialAssetId = lod.materialAssetId;
+				fl.distance        = nonNeg(lod.distance, 0.0f);
+				fl.density         = std::isfinite(lod.density) ? std::clamp(lod.density, 0.0f, 1.0f) : 1.0f;
+				layer->lods.push_back(fl);
+			}
+			// A level boundary only makes sense as a staircase out from the camera
+			// (FoliageComponent.h's own description of what a LOD level is); an asset
+			// entry's list is not guaranteed to arrive in that order.
+			std::sort(layer->lods.begin(), layer->lods.end(),
+			          [](const FoliageLod& a, const FoliageLod& b) { return a.distance < b.distance; });
+			layer->dirty = true;   // mesh/density/rules changed → re-scatter
+
+			// The entry's meshes and materials are project or EngineContent FILES like the
+			// group presets' (§7: only fetched on Apply, not a streamed material dependency).
+			if (ctx.contentManager)
+			{
+				if (e.meshAssetId != HE::UUID{} && !ctx.contentManager->ensureResident(e.meshAssetId))
+					ctx.contentManager->loadAssetAsync(e.meshAssetId);
+				if (e.materialAssetId != HE::UUID{} && !ctx.contentManager->ensureResident(e.materialAssetId))
+					ctx.contentManager->loadAssetAsync(e.materialAssetId);
+				for (const LandscapeFoliageLod& lod : e.lods)
+				{
+					if (lod.meshAssetId != HE::UUID{} && !ctx.contentManager->ensureResident(lod.meshAssetId))
+						ctx.contentManager->loadAssetAsync(lod.meshAssetId);
+					if (lod.materialAssetId != HE::UUID{} && !ctx.contentManager->ensureResident(lod.materialAssetId))
+						ctx.contentManager->loadAssetAsync(lod.materialAssetId);
+				}
+			}
+			++touched;
+		}
+		return touched;
+	}
+
 	// The name on the left, the control filling the rest - ImGui itself puts a label to
 	// the right of a control, which in a docked column is where it gets cut off.
 	float labelColumn() { return ImGui::GetFontSize() * 6.4f; }
 	void  rowLabel(const char* label)
 	{
+		// The shared label column when the panel is wide enough for one, so a
+		// row of ours and an asset slot (which lays itself out by Row's column)
+		// start their values on the same vertical line.
+		{
+			EditorWidgets::Row::InlineLabels column;
+			if (EditorWidgets::Row::labelCell(label))
+			{
+				ImGui::SetNextItemWidth(-FLT_MIN);
+				return;
+			}
+		}
 		ImGui::AlignTextToFramePadding();
 		ImGui::TextUnformatted(label);
 		ImGui::SameLine(labelColumn());
 		ImGui::SetNextItemWidth(-FLT_MIN);
+	}
+	// A switch in the same column: its name on the left like rowLabel's rows,
+	// not to the right of the box where ImGui puts it.
+	bool rowCheckbox(const char* label, bool* v)
+	{
+		EditorWidgets::Row::InlineLabels column;
+		return EditorWidgets::checkbox(label, v);
 	}
 
 	// A line of dim text that wraps at the panel's edge.
@@ -316,7 +578,8 @@ namespace
 		dl->AddConvexPolyFilled(pts, 4, (col & 0x00FFFFFFu) | 0x44000000u);
 		dl->AddPolyline(pts, 4, col, 0, 2.0f);
 		char cap[96];
-		std::snprintf(cap, sizeof(cap), "Radius %.0f m + Falloff %.0f m = %.0f m across", R, F, R + F);
+		// R + F is the outer RADIUS; "across" is the diameter.
+		std::snprintf(cap, sizeof(cap), "Radius %.0f m + Falloff %.0f m: %.0f m across", R, F, 2.0f * (R + F));
 		dl->AddText(ImVec2(p.x + 8.0f, p.y + 2.0f), ImGui::GetColorU32(ImGuiCol_TextDisabled), cap);
 	}
 #endif
@@ -451,7 +714,13 @@ void sculptInViewport(AppContext& ctx, const RenderWorld& sceneSnapshot,
 							p = rayOrigin + t * rayDir;
 							if (converged) break;
 						}
-						if (t > 0.0f)
+						// Only over the landscape (and a brush radius around it, so an
+						// edge can still be worked from outside): the base plane goes on
+						// for ever, and the cursor used to draw on it wherever the mouse
+						// was, a "ground" far larger than the landscape.
+						const float lx = p.x - terrainWorldPos.x, lz = p.z - terrainWorldPos.z;
+						if (t > 0.0f && std::abs(lx) <= tcHalfX + s_brushRadius &&
+						                std::abs(lz) <= tcHalfZ + s_brushRadius)
 						{
 							hitWS  = p;
 							hasHit = true;
@@ -737,9 +1006,44 @@ void sculptInViewport(AppContext& ctx, const RenderWorld& sceneSnapshot,
 					const float s01    = std::clamp(s_paintStrength, 0.0f, 1.0f);
 					const float amount = s01 >= 1.0f ? 1.0f
 						: 1.0f - std::pow(1.0f - s01, static_cast<float>(dt) * 60.0f);
-					TerrainPaint::paint(tc, lx, lz, invert ? 0 : s_paintLayer,
-					                    s_brushRadius, s_falloffRadius, amount);
+					// Ctrl+drag restores the base layer AND hands the texel back to the
+					// terrain's own group regardless of the group picked — "paint the auto
+					// choice back" always means the terrain's own ground. paintInGroup's
+					// group write is a no-op while the terrain does not mix groups.
+					int ownGroup = -1;
+					if (const auto* mc = terrainReg.try_get<MaterialComponent>(terrainEnt))
+						ownGroup = terrainGroup(tc, *mc);
+					const int layer = invert ? 0 : s_paintLayer;
+					const int group = invert ? ownGroup : s_activeGroup;
+					// One dab per frame leaves dots once the pointer moves further than the brush
+					// is wide between two frames (a quick drag at editor frame rates, on a big
+					// landscape a few metres of mouse are tens of metres of ground). So the
+					// path from the last frame's hit to this one is filled with dabs a half
+					// radius apart. They share the frame's strength: a point the brush crosses
+					// is met by about 2 * outer / spacing of them, so each takes the share of
+					// it that adds up to roughly two frames' worth, the way a held brush does.
+					const float outer   = s_brushRadius + s_falloffRadius;
+					const float spacing = std::max(0.5f * s_brushRadius, 0.25f);
+					if (s_paintHaveLast && outer > 0.0f)
+					{
+						const float dx = lx - s_paintLastX, dz = lz - s_paintLastZ;
+						const float dist = std::sqrt(dx * dx + dz * dz);
+						const int   n    = std::min(static_cast<int>(dist / spacing), 256);
+						const float dabAmount = amount >= 1.0f ? 1.0f
+							: 1.0f - std::pow(1.0f - amount, std::min(1.0f, spacing / outer));
+						for (int i = 1; i <= n; ++i)
+						{
+							const float t = static_cast<float>(i) / static_cast<float>(n + 1);
+							TerrainPaint::paintInGroup(tc, s_paintLastX + dx * t, s_paintLastZ + dz * t,
+							                           layer, group, s_brushRadius, s_falloffRadius, dabAmount);
+						}
+					}
+					TerrainPaint::paintInGroup(tc, lx, lz, layer, group,
+					                           s_brushRadius, s_falloffRadius, amount);
+					s_paintLastX = lx; s_paintLastZ = lz; s_paintHaveLast = true;
 				}
+				else
+					s_paintHaveLast = false;   // released, or off the ground: the next press starts a new stroke
 			}
 			// ── Foliage mode: the layer's density mask ────────────
 			// Same brush, same hit, a third target: the mask of the
@@ -853,8 +1157,19 @@ void sculptInViewport(AppContext& ctx, const RenderWorld& sceneSnapshot,
 							if (ctx.contentManager)
 								TerrainSystem::updateTerrains(*ctx.world, *ctx.contentManager,
 								                              ctx.renderer);
-							HE_LOG_INFO(Editor, "Mountain generated: %u vertices, peak %+.1f m",
-							            res.changed, res.peakAdded);
+							// Its paths as splines, inside the same undo step: a
+							// fence, a road or a script can follow the trail.
+							if (s_mountainSplines && ctx.world)
+								for (const std::vector<TerrainGenerate::PathPoint>& line : res.paths)
+								{
+									std::vector<glm::vec3> pts;
+									pts.reserve(line.size());
+									for (const TerrainGenerate::PathPoint& pt : line)
+										pts.push_back(glm::vec3(terrainWorldPos) + glm::vec3(pt.x, pt.y, pt.z));
+									SplineEdit::createFromPoints(*ctx.world, pts, "Mountain Path");
+								}
+							HE_LOG_INFO(Editor, "Mountain generated: %u vertices, peak %+.1f m, %zu path(s)",
+							            res.changed, res.peakAdded, res.paths.size());
 						}
 					}
 				}
@@ -1140,7 +1455,7 @@ void renderPanel(AppContext& ctx)
         if (!s_newHeightmapFile.empty())
         {
             ImGui::TextWrapped("File: %s", s_newHeightmapFile.c_str());
-            if (EditorWidgets::smallButton("Remove File")) s_newHeightmapFile.clear();
+            if (EditorWidgets::dangerSmallButton("Remove File")) s_newHeightmapFile.clear();
         }
         else if (EditorWidgets::button("Choose File..."))
         {
@@ -1272,11 +1587,28 @@ void renderPanel(AppContext& ctx)
 
             ctx.world->markHierarchyDirty();
             ctx.selection.set(e);
+            // The new landscape in view, wherever the camera was: it sits at the
+            // origin, and a camera left kilometres away showed nothing at all.
+            if (ctx.editorCamera)
+                ctx.editorCamera->frameArea(glm::vec3(0.0f, tc.heightScale * 0.25f, 0.0f),
+                                            tc.sizeX * 0.5f, tc.sizeZ * 0.5f);
             HE_LOG_INFO(Editor, "%s", "Editor: created Terrain entity");
+        }
+
+        // The create grid in view once per visit of the form, if the camera is far
+        // from it (more than four times the grid's size): the green preview at the
+        // origin is the whole point of this form.
+        if (!s_createFormFramed && ctx.editorCamera)
+        {
+            const float extent = std::max(np.sizeX, np.sizeZ);
+            if (glm::length(ctx.editorCamera->position()) > 4.0f * extent + 50.0f)
+                ctx.editorCamera->frameArea(glm::vec3(0.0f), np.sizeX * 0.5f, np.sizeZ * 0.5f);
+            s_createFormFramed = true;
         }
     }
     else
     {
+        s_createFormFramed = false;   // the next empty world frames its grid again
         // Everything below is drawn once a landscape exists. Layout, top to bottom:
         //   a card with the landscape's size and material
         //   Sculpt | Paint | Foliage | Setup, one segmented control
@@ -1398,7 +1730,7 @@ void renderPanel(AppContext& ctx)
                 }
                 if (!builtIn && lmat)
                 {
-                    if (EditorWidgets::smallButton("Reset to Engine Default##lsmat"))
+                    if (EditorWidgets::button("Reset to Engine Default##lsmat"))
                     {
                         if (ctx.undoSys) ctx.undoSys->snapshotNow();
                         tmat->materialAssetId = HE::kDefaultTerrainMaterialId;
@@ -1408,19 +1740,120 @@ void renderPanel(AppContext& ctx)
                 else
                     dimText("Drag a material from the Content Browser.");
 
+                // ── Texture group ────────────────────────────────────────
+                // The group IS the landscape material (Thema 233): picking one assigns that
+                // group's material and nothing else. The weightmap is one set per terrain whose
+                // channel k means the same role in every group, so every painted weight survives
+                // the switch; only what the channels look like (and are called) changes.
+                sectionLabel("Texture Group");
+                {
+                    SegCell cells[HE::kAutoLandscapeGroupCount];
+                    std::string ids[HE::kAutoLandscapeGroupCount];
+                    for (int i = 0; i < HE::kAutoLandscapeGroupCount; ++i)
+                    {
+                        ids[i]   = std::string("##lsGroup") + HE::kAutoLandscapeGroups[i].name;
+                        cells[i] = { ids[i].c_str(), HE::kAutoLandscapeGroups[i].name,
+                                     "Landscape/Texture Group", nullptr, true };
+                    }
+                    const int pick = segmented(cells, HE::kAutoLandscapeGroupCount,
+                                               HE::kAutoLandscapeGroupCount,
+                                               terrainGroup(tc, *tmat));
+                    if (pick >= 0)
+                    {
+                        // While the mix is on the material is the mix material: the pick only moves
+                        // the group every unpainted spot starts as.
+                        if (tc.groupMix) { if (ctx.undoSys) ctx.undoSys->snapshotNow("Texture Group"); tc.baseGroup = pick; }
+                        else assignTextureGroup(ctx, *tmat, HE::kAutoLandscapeGroups[pick]);
+                    }
+
+                    // The group's procedural layer meshes (ferns in the Forest, tall grass in the
+                    // Grassland, ...). Switching the group never touches the foliage layers; this
+                    // adds the ones the group offers and the landscape lacks.
+                    const int cur = terrainGroup(tc, *tmat);
+                    ImGui::BeginDisabled(cur < 0);
+                    if (EditorWidgets::button("Apply Group Meshes", ImVec2(-FLT_MIN, 0.0f)) && cur >= 0)
+                    {
+                        const int added = applyGroupMeshes(ctx, reg, terrainEnt, HE::kAutoLandscapeGroups[cur]);
+                        if (added > 0) ctx.world->markHierarchyDirty();
+                    }
+                    ImGui::EndDisabled();
+                    EditorWidgets::helpForLabel("Apply Group Meshes");
+
+                    // ── Mix groups (Thema 233) ──────────────────────────────
+                    // Turns the layers 8..11 into the four groups' shares so the Paint tab can
+                    // paint any group on this terrain; the group above stays the base every
+                    // texel starts as. Off again drops the shares (the look returns to the group).
+                    sectionLabel("Mix Groups");
+                    {
+                        bool mix = tc.groupMix;
+                        ImGui::BeginDisabled(cur < 0);
+                        if (rowCheckbox("Mix Texture Groups", &mix))
+                        {
+                            if (ctx.undoSys) ctx.undoSys->snapshotNow("Mix Groups");
+                            if (mix) TerrainPaint::enableGroupMix(tc, cur);
+                            else     TerrainPaint::disableGroupMix(tc);
+                            bindMixMaterial(ctx, *tmat, tc);
+                        }
+                        ImGui::EndDisabled();
+                        EditorWidgets::helpForLabel("Mix Texture Groups");
+                    }
+                }
+
+                // ── Foliage set ──────────────────────────────────────────
+                // The material names its LandscapeFoliageLayer by UUID (the Landscape
+                // Foliage node, Thema 327 step 3, MaterialAsset::foliageSetId); this is
+                // the one place that materializes it onto the terrain, same button
+                // precedent as "Apply Group Meshes" above (one undo snapshot, add +
+                // update, never deletes). Only custom materials carry the field today —
+                // the three engine materials still rely on "Apply Group Meshes".
+                if (lmat && lmat->foliageSetId != HE::UUID{})
+                {
+                    const HE::UUID setId = lmat->foliageSetId;
+                    const LandscapeFoliageLayerAsset* foliageSet =
+                        ctx.contentManager ? ctx.contentManager->getLandscapeFoliageLayer(setId) : nullptr;
+                    if (!foliageSet && ctx.contentManager)
+                    {
+                        // Passive pull (design §7): ask once per content epoch, not once
+                        // per process — a set that EngineContent has not pulled yet still
+                        // bumps contentEpoch() when it arrives (noteContentChanged()), and
+                        // that must trigger a retry instead of leaving Apply Foliage
+                        // disabled until the editor restarts. Never ensureResident here —
+                        // it is synchronous and does not start a download of a set that
+                        // still sits on the EngineContent server.
+                        static std::unordered_map<HE::UUID, uint64_t> s_askedAt;
+                        const uint64_t epoch = ctx.contentManager->contentEpoch();
+                        auto it = s_askedAt.find(setId);
+                        if (it == s_askedAt.end() || it->second < epoch)
+                        {
+                            s_askedAt[setId] = epoch;
+                            ctx.contentManager->loadAssetAsync(setId);
+                        }
+                    }
+                    sectionLabel("Foliage Set");
+                    dimText("%s", foliageSet ? foliageSet->name.c_str() : "(fetching the foliage set\xe2\x80\xa6)");
+                    ImGui::BeginDisabled(foliageSet == nullptr);
+                    if (EditorWidgets::button("Apply Foliage", ImVec2(-FLT_MIN, 0.0f)) && foliageSet)
+                    {
+                        const int touched = applyFoliageSet(ctx, reg, terrainEnt, setId, *foliageSet);
+                        if (touched > 0) ctx.world->markHierarchyDirty();
+                    }
+                    ImGui::EndDisabled();
+                    EditorWidgets::helpForLabel("Apply Foliage");
+                }
+
                 // ── Heightmap ────────────────────────────────────────────
                 drawHeightmapBlock(ctx, terrainEnt);
 
                 // ── Resolution ───────────────────────────────────────────
                 // Changing either would throw the painted data away, so they are locked once
-                // anything is painted. Typed fields: 32..2048 on a few hundred pixels of
-                // slider cannot hit 1024 exactly.
+                // anything is painted. Drags (one step per pixel, so 1024 is reachable;
+                // double-click types it), with the number centred like the other values.
                 sectionLabel("Resolution");
                 {
                     int wres = static_cast<int>(tc.weightRes);
                     rowLabel("Weightmap");
                     ImGui::BeginDisabled(!tc.layerWeights.empty());
-                    if (ImGui::InputInt("##weightmap", &wres, 0, 0, ImGuiInputTextFlags_AutoSelectAll))
+                    if (ImGui::DragInt("##weightmap", &wres, 1.0f, 32, 2048))
                         tc.weightRes = static_cast<uint32_t>(std::clamp(wres, 32, 2048));
                     EditorWidgets::helpForLabel("Weightmap##paint");
                     ImGui::EndDisabled();
@@ -1430,12 +1863,13 @@ void renderPanel(AppContext& ctx)
                     int mres = static_cast<int>(fol->maskRes);
                     rowLabel("Foliage mask");
                     ImGui::BeginDisabled(!fol->densityMask.empty());
-                    if (ImGui::InputInt("##foliagemask", &mres, 0, 0, ImGuiInputTextFlags_AutoSelectAll))
+                    if (ImGui::DragInt("##foliagemask", &mres, 1.0f, 32, 2048))
                         fol->maskRes = static_cast<uint32_t>(std::clamp(mres, 32, 2048));
                     EditorWidgets::helpForLabel("Mask##foliage");
                     ImGui::EndDisabled();
                 }
-                dimText("Each locks once something is painted into it.");
+                dimText(fol ? "Each locks once something is painted into it."
+                            : "It locks once something is painted into it.");
 
                 // ── Reset ────────────────────────────────────────────────
                 sectionLabel("Reset");
@@ -1445,7 +1879,7 @@ void renderPanel(AppContext& ctx)
                     if (!firstReset && ImGui::GetContentRegionAvail().x > bw + style.ItemSpacing.x)
                         ImGui::SameLine();
                     firstReset = false;
-                    const bool pressed = EditorWidgets::dangerButton(label);
+                    const bool pressed = EditorWidgets::removeButton(label);
                     EditorWidgets::helpForLabel(label);
                     return pressed;
                 };
@@ -1459,7 +1893,10 @@ void renderPanel(AppContext& ctx)
                 {
                     if (ctx.undoSys) ctx.undoSys->snapshotNow();
                     tc.layerWeights.clear();   // back to "everything is layer 0"
-                    tc.layerWeights2.clear();  // layers 4..7 go with it
+                    tc.layerWeights2.clear();  // layers 4..7 (and any group share) go with it
+                    tc.layerWeights3.clear();  // and layers 8..11
+                    TerrainPaint::disableGroupMix(tc);  // the shares lived in the weights just cleared
+                    bindMixMaterial(ctx, *tmat, tc);
                     tc.weightsDirty = true;
                 }
                 if (fol)
@@ -1477,12 +1914,91 @@ void renderPanel(AppContext& ctx)
                         FoliagePaint::clearMask(*fol);   // back to a uniform scatter
                     }
                 }
+
+                // ── Far landscape ────────────────────────────────────────
+                // The pictures the distant chunks draw with, baked here instead of
+                // only on export (LandscapeFarBake.h). When it runs on its own is
+                // the Preferences setting.
+                sectionLabel("Far Landscape");
+                {
+                    using FB = LandscapeFarBake::State;
+                    const FB fb = LandscapeFarBake::state(ctx);
+                    dimText("%s", fb == FB::UpToDate ? "Baked; the far chunks draw the baked tiles."
+                                : fb == FB::Stale    ? "Changed since the last bake; the far chunks draw the live material."
+                                                     : "Not baked yet; the far chunks draw the live material.");
+                    const int mode = ctx.editorConfig.LandscapeFarBake;
+                    ImGui::BeginDisabled(mode == 0);
+                    if (EditorWidgets::button("Bake Far Landscape"))
+                    {
+                        std::string summary;
+                        const bool ok = LandscapeFarBake::bakeNow(ctx, &summary);
+                        HE::Ed::notify(ok ? HE::Ed::NoteLevel::Info : HE::Ed::NoteLevel::Important,
+                                       ok ? "Far landscape baked" : "The far landscape was not baked", summary);
+                    }
+                    EditorWidgets::helpForLabel("Bake Far Landscape");
+                    ImGui::EndDisabled();
+                    dimText("%s", mode == 0 ? "Off in Preferences: only the export bakes it."
+                                : mode == 2 ? "Automatic: it bakes again a few seconds after the last change."
+                                            : "Manual: bake again after changes (Automatic is in Preferences).");
+                    if (!LandscapeFarBake::lastSummary().empty())
+                        dimText("%s", LandscapeFarBake::lastSummary().c_str());
+                }
             }
             // ═════════════════════════ PAINT ═════════════════════════════
             else if (s_landscapePaint)
             {
-                sectionLabel("Layer");
+                // The list is the material's, so a group switch (or a material with fewer
+                // layers) changes its length: the index is clamped every frame, never kept.
                 s_paintLayer = std::clamp(s_paintLayer, 0, static_cast<int>(layers.size()) - 1);
+
+                // ── Groups (Thema 233) ──────────────────────────────────────
+                // Every texture group is a brush here, all of them on the one landscape. The
+                // first pick of a group other than the terrain's own turns the mix on (Setup
+                // "Mix Texture Groups"); the stroke then marks the texel as the picked group's AND
+                // paints the chosen layer of that group, so "Forest / Mossy Rock" is one pick
+                // of the group and one of the layer below.
+                const int ownGroup = terrainGroup(tc, *tmat);
+                if (ownGroup >= 0)
+                {
+                    SegCell gcells[HE::kAutoLandscapeGroupCount];
+                    std::string gids[HE::kAutoLandscapeGroupCount];
+                    for (int g = 0; g < HE::kAutoLandscapeGroupCount; ++g)
+                    {
+                        gids[g]   = std::string("##lsActive") + HE::kAutoLandscapeGroups[g].name;
+                        gcells[g] = { gids[g].c_str(), HE::kAutoLandscapeGroups[g].name,
+                                      "Landscape/Active Group", nullptr, true };
+                    }
+                    if (!tc.groupMix) s_activeGroup = ownGroup;
+                    sectionLabel("Group");
+                    const int gpick = segmented(gcells, HE::kAutoLandscapeGroupCount,
+                                                HE::kAutoLandscapeGroupCount, s_activeGroup);
+                    if (gpick >= 0)
+                    {
+                        if (gpick != ownGroup && !tc.groupMix)
+                        {
+                            if (ctx.undoSys) ctx.undoSys->snapshotNow("Mix Groups");
+                            TerrainPaint::enableGroupMix(tc, ownGroup);
+                            bindMixMaterial(ctx, *tmat, tc);
+                        }
+                        s_activeGroup = gpick;
+                    }
+                }
+                s_activeGroup = std::clamp(s_activeGroup, 0, HE::kAutoLandscapeGroupCount - 1);
+
+                // Under the group picker, so each heading sits above its own control.
+                sectionLabel("Layer");
+                if (const int grp = HE::autoLandscapeGroupOfMaterial(tmat->materialAssetId); grp >= 0)
+                    dimText("%s group: Auto picks by slope and height, the others paint over it.",
+                            HE::kAutoLandscapeGroups[grp].name);
+
+                // The group's own names for the four role layers (Forest Floor, Roots, ...); Auto
+                // and Puddles are the same in every group.
+                std::vector<std::string> layerNames = layers;
+                const int activeGroup = tc.groupMix ? s_activeGroup : ownGroup;
+                if (activeGroup >= 0)
+                    for (int r = 0; r < HE::kAutoLandscapeRoleCount; ++r)
+                        if (r + 1 < static_cast<int>(layers.size()))
+                            layerNames[static_cast<size_t>(r + 1)] = HE::kAutoLandscapeGroups[activeGroup].roleLabels[r];
                 {
                     // One row per layer: a swatch, the name, the share of the landscape it
                     // covers right now (the mean weight, refreshed with every weightmap upload)
@@ -1515,7 +2031,7 @@ void renderPanel(AppContext& ctx)
                         dl->AddRectFilled(ImVec2(p.x + 6.0f, p.y + 5.0f), ImVec2(p.x + 6.0f + sw, p.y + 5.0f + sw), colr, 4.0f);
                         const float tx = p.x + sw + 16.0f;
                         const float ty = p.y + 4.0f;
-                        dl->AddText(ImVec2(tx, ty), ImGui::GetColorU32(ImGuiCol_Text), layers[i].c_str());
+                        dl->AddText(ImVec2(tx, ty), ImGui::GetColorU32(ImGuiCol_Text), layerNames[i].c_str());
                         char share[16];
                         std::snprintf(share, sizeof(share), "%.0f %%", pct);
                         const float shareW = ImGui::CalcTextSize(share).x;
@@ -1534,16 +2050,19 @@ void renderPanel(AppContext& ctx)
                 }
                 EditorWidgets::helpForLabel("Fill With Layer");
                 ImGui::SameLine();
-                if (EditorWidgets::dangerButton("Clear Paint") && !tc.layerWeights.empty())
+                if (EditorWidgets::removeButton("Clear Paint") && !tc.layerWeights.empty())
                 {
                     if (ctx.undoSys) ctx.undoSys->snapshotNow();
                     tc.layerWeights.clear();   // back to "everything is layer 0"
-                    tc.layerWeights2.clear();  // layers 4..7 go with it
+                    tc.layerWeights2.clear();  // layers 4..7 (and any group share) go with it
+                    tc.layerWeights3.clear();  // and layers 8..11
+                    TerrainPaint::disableGroupMix(tc);  // the shares lived in the weights just cleared
+                    bindMixMaterial(ctx, *tmat, tc);
                     tc.weightsDirty = true;
                 }
                 EditorWidgets::helpForLabel("Clear Paint");
-                dimText("Strength 1 takes a spot over at once; lower builds up the longer you hold. "
-                        "Ctrl+drag paints the base layer back.");
+                // What Ctrl does is the pinned brush block's footer, once for every tab.
+                dimText("Strength 1 takes a spot over at once; lower builds up the longer you hold.");
             }
             // ═════════════════════════ FOLIAGE ═══════════════════════════
             else if (s_landscapeFoliage)
@@ -1616,6 +2135,8 @@ void renderPanel(AppContext& ctx)
                     // What grows: the mesh and material live on the layer, and without a
                     // mesh the brush paints a mask nobody can see.
                     sectionLabel("Layer");
+                    // In the label column, like the Density row under them.
+                    EditorWidgets::Row::InlineLabels slotColumn;
                     if (EditorWidgets::assetDropSlot(ctx, "Mesh", fol->meshAssetId,
                             HE::AssetType::StaticMesh, "folmesh",
                             "(none \xe2\x80\x94 drop a mesh here)", "static mesh",
@@ -1660,7 +2181,6 @@ void renderPanel(AppContext& ctx)
                     else
                         dimText("Instances: %zu (%.0f %% of the landscape)",
                                 fol->cachedInstances.size(), FoliagePaint::coverage(*fol) * 100.0f);
-                    dimText("Ctrl+drag swaps Grow and Erase.");
                 }
             }
             // ═════════════════════════ WATER ═════════════════════════════
@@ -1687,7 +2207,7 @@ void renderPanel(AppContext& ctx)
                 // water that is already there ignores both and goes on at that
                 // water's level.
                 sectionLabel("Level");
-                EditorWidgets::checkbox("From Ground##water", &s_waterFromGround);
+                rowCheckbox("From Ground##water", &s_waterFromGround);
                 EditorWidgets::helpForLabel("From Ground##water");
                 if (s_waterFromGround)
                 {
@@ -1706,7 +2226,7 @@ void renderPanel(AppContext& ctx)
                 // The bed: the ground under the brush goes down to a floor below
                 // the level while you paint, so the pond has a depth.
                 sectionLabel("Ground");
-                EditorWidgets::checkbox("Dig Bed##water", &s_waterDig);
+                rowCheckbox("Dig Bed##water", &s_waterDig);
                 EditorWidgets::helpForLabel("Dig Bed##water");
                 ImGui::BeginDisabled(!s_waterDig);
                 rowLabel("Max Depth");
@@ -1723,19 +2243,18 @@ void renderPanel(AppContext& ctx)
                 s_waterBedRough = std::clamp(s_waterBedRough, 0.0f, 1.0f);
                 dimText("Full depth %.1f m from the shore", s_waterDigDepth / s_waterBedSlope);
                 ImGui::EndDisabled();
-                EditorWidgets::checkbox("Close Bed on Erase##water", &s_waterCloseBed);
+                rowCheckbox("Close Bed on Erase##water", &s_waterCloseBed);
                 EditorWidgets::helpForLabel("Close Bed on Erase##water");
 
                 // The grid the water lives on: cells per side over the whole
-                // landscape. A typed field, like the weightmap's (32..2048 on a few
-                // hundred pixels of slider cannot hit 1024), applied when the field
-                // is left rather than per keystroke - a resample per digit would
-                // blur the shape - as one undo step.
+                // landscape. A drag like the weightmap's, applied when the field is
+                // let go rather than per step - a resample per step would blur the
+                // shape - as one undo step.
                 sectionLabel("Water Grid");
                 {
                     int wres = s_waterResEditing ? s_waterResEdit : static_cast<int>(tc.water.res);
                     rowLabel("Resolution");
-                    if (ImGui::InputInt("##water_res", &wres, 0, 0, ImGuiInputTextFlags_AutoSelectAll))
+                    if (ImGui::DragInt("##water_res", &wres, 1.0f, 32, 2048))
                     {
                         s_waterResEdit    = wres;
                         s_waterResEditing = true;
@@ -1758,18 +2277,18 @@ void renderPanel(AppContext& ctx)
                 // Static Switch "Tessellation"): a landscape-wide switch, like the shore clipping.
                 {
                     bool tess = tc.water.tessellation;
-                    if (EditorWidgets::checkbox("Tessellation##water", &tess))
+                    if (rowCheckbox("Tessellation##water", &tess))
                     {
                         if (ctx.undoSys) ctx.undoSys->snapshotNow("Water Tessellation");
                         tc.water.tessellation = tess;
                     }
                     EditorWidgets::helpForLabel("Tessellation##water");
-                    ImGui::SameLine();
-                    dimText("(per-body height and coast fade: Tessellated Waves, below)");
+                    // Its own line: beside the box it would follow the box's hidden label.
+                    dimText("Per-body height and coast fade: Tessellated Waves, below.");
                 }
 
                 ImGui::Spacing();
-                dimText("LMB drag in the viewport to paint water. Ctrl+drag does the opposite.");
+                dimText("Drag in the viewport to paint water.");
                 if (tc.water.bodies.empty())
                     dimText("No water on this landscape yet.");
                 else
@@ -2081,7 +2600,7 @@ void renderPanel(AppContext& ctx)
                 }
 
                 ImGui::Spacing();
-                if (EditorWidgets::dangerButton("Clear All Water") &&
+                if (EditorWidgets::removeButton("Clear All Water") &&
                     (!tc.water.bodies.empty() || !tc.water.coverage.empty()))
                 {
                     if (ctx.undoSys) ctx.undoSys->snapshotNow("Clear Water");
@@ -2172,6 +2691,50 @@ void renderPanel(AppContext& ctx)
                         EditorWidgets::helpForLabel("New Seed##mountain");
                         ImGui::TreePop();
                     }
+                    // The realistic half of the generator: all at "off" until moved.
+                    if (ImGui::TreeNodeEx("Shape (Ridges, Erosion, Terraces)##mountainshape", ImGuiTreeNodeFlags_DefaultOpen))
+                    {
+                        rowLabel("Ridges");
+                        ImGui::SliderFloat("##mountain_ridges", &s_mountain.ridges, 0.0f, 1.0f, "%.2f");
+                        EditorWidgets::helpForLabel("Ridges##mountain");
+                        rowLabel("Erosion");
+                        ImGui::SliderFloat("##mountain_erosion", &s_mountain.erosion, 0.0f, 1.0f, "%.2f");
+                        EditorWidgets::helpForLabel("Erosion##mountain");
+                        rowLabel("Terraces");
+                        ImGui::SliderInt("##mountain_terraces", &s_mountain.terraces, 0, 32);
+                        EditorWidgets::helpForLabel("Terraces##mountain");
+                        if (s_mountain.terraces > 0)
+                        {
+                            rowLabel("Terrace Sharpness");
+                            ImGui::SliderFloat("##mountain_tsharp", &s_mountain.terraceSharpness, 0.0f, 1.0f, "%.2f");
+                            EditorWidgets::helpForLabel("Terrace Sharpness##mountain");
+                        }
+                        ImGui::TreePop();
+                    }
+                    if (ImGui::TreeNodeEx("Paths##mountainpaths", ImGuiTreeNodeFlags_DefaultOpen))
+                    {
+                        rowLabel("Paths");
+                        ImGui::SliderInt("##mountain_paths", &s_mountain.paths, 0, 8);
+                        EditorWidgets::helpForLabel("Paths##mountain");
+                        if (s_mountain.paths > 0)
+                        {
+                            rowLabel("Path Width");
+                            ImGui::DragFloat("##mountain_pwidth", &s_mountain.pathWidth, 0.1f, 0.5f, 100.0f, "%.1f m");
+                            EditorWidgets::helpForLabel("Path Width##mountain");
+                            rowLabel("Path Max Grade");
+                            ImGui::SliderFloat("##mountain_pgrade", &s_mountain.pathMaxGrade, 0.05f, 1.0f, "%.2f");
+                            EditorWidgets::helpForLabel("Path Max Grade##mountain");
+                            EditorWidgets::checkbox("Create Path Splines##mountain", &s_mountainSplines);
+                        }
+                        ImGui::TreePop();
+                    }
+                    s_mountain.ridges           = std::clamp(s_mountain.ridges, 0.0f, 1.0f);
+                    s_mountain.erosion          = std::clamp(s_mountain.erosion, 0.0f, 1.0f);
+                    s_mountain.terraces         = std::clamp(s_mountain.terraces, 0, 256);
+                    s_mountain.terraceSharpness = std::clamp(s_mountain.terraceSharpness, 0.0f, 1.0f);
+                    s_mountain.paths            = std::clamp(s_mountain.paths, 0, 8);
+                    s_mountain.pathWidth        = std::max(0.5f, s_mountain.pathWidth);
+                    s_mountain.pathMaxGrade     = std::clamp(s_mountain.pathMaxGrade, 0.02f, 2.0f);
                     s_mountain.falloff   = std::max(0.0f, s_mountain.falloff);
                     s_mountain.roughness = std::clamp(s_mountain.roughness, 0.0f, 1.0f);
                     s_mountain.octaves   = std::clamp(s_mountain.octaves, 1, 12);
@@ -2198,7 +2761,7 @@ void renderPanel(AppContext& ctx)
                     dimText("Adds fixed-noise bumps under the brush.");
                     break;
                 default:
-                    dimText("LMB drag in the viewport to sculpt. Ctrl+drag does the opposite.");
+                    dimText("Drag in the viewport to sculpt.");
                     break;
                 }
             }
@@ -2260,7 +2823,7 @@ void renderPanel(AppContext& ctx)
                 }
                 s_brushRadius   = std::max(0.5f, s_brushRadius);
                 s_falloffRadius = std::max(0.0f, s_falloffRadius);
-                dimText("[ ] radius \xc2\xb7 Shift+[ ] falloff \xc2\xb7 Ctrl+drag inverts");
+                dimText("[ ] radius \xc2\xb7 Shift+[ ] falloff \xc2\xb7 Ctrl+drag does the opposite");
                 wrap.reset();
             }
             ImGui::EndChild();
@@ -2378,7 +2941,9 @@ void drawHeightmapBlock(AppContext& ctx, Entity terrain)
 			s_hmStatus = importHeightmapFile(ctx, terrain, s_hmPickPath, s_hmStatusError);
 	}
 
-	ImGui::SeparatorText("Heightmap");
+	// The tab's own caption style, and not "Heightmap": that is the slot's name
+	// on the very next line.
+	sectionLabel("Shape from Image");
 	ImGui::PushID("hmblock");
 	// One scope for both callers: the Details panel draws this under
 	// "Terrain", and the buttons look their help up by label, so without this
@@ -2416,9 +2981,8 @@ void drawHeightmapBlock(AppContext& ctx, Entity terrain)
 			kFilters, 2, nullptr, false);
 	}
 
-	EditorWidgets::checkbox("Flip Z", &s_hmFlipZ);
-	ImGui::SameLine();
-	EditorWidgets::checkbox("Use Image Resolution", &s_hmAdoptRes);
+	rowCheckbox("Flip Z", &s_hmFlipZ);
+	rowCheckbox("Use Image Resolution", &s_hmAdoptRes);
 
 	ImGui::TextDisabled("Black = 0 m, white = Height Scale (%.1f m).", tc->heightScale);
 	ImGui::TextDisabled("Replaces the sculpt; paint and foliage stay.");

@@ -1,10 +1,12 @@
 #pragma once
 #include <cstdint>
 #include <Renderer/IRenderer.h>
+#include <MaterialGraph/MaterialParamLimits.h> // kMatParamFloats / kMatParamBytes
 #include "VulkanShaderManager.h"
 #include "VulkanUploadAlloc.h"
 #include <HorizonRendering/RenderConstants.h>
 #include <HorizonRendering/InstanceArena.h>
+#include <HorizonRendering/RvtNearChunks.h>
 #include <HorizonRendering/RenderWorld.h>
 #include <HorizonRendering/GiHeightfield.h>
 #include <HorizonRendering/RenderExtractor.h>
@@ -22,11 +24,13 @@
 #include <material/MaterialShaderLibrary.h> // A4: shared cross-backend material shader layer
 #include <vulkan/vulkan.h>
 #include <deque>
+#include <functional>
 #include <vector>
 #include <string>
 #include <unordered_map>
 
 struct SDL_Window;
+namespace HE { class VulkanLandscape; }
 struct TextureAsset; // ContentManager/Assets.h (full def included in the .cpp)
 
 class VulkanRenderer : public IRenderer
@@ -79,6 +83,7 @@ public:
 	// this frame renders into — HDR offscreen or swapchain — known) — mirrors GL/Metal.
 	void WarmupMaterials(const std::vector<HE::UUID>& materialIds) override;
 	bool SupportsTessellation() const override { return m_tessSupported; }
+	std::string GIReflectionsInactiveReason() const override { return m_giReflWhyNot; }
 	// Editor texture hot-reload: drop a graph project texture (heTexP slot) so the
 	// next material draw re-uploads it.
 	void InvalidateTexture(const HE::UUID& textureId) override;
@@ -104,6 +109,28 @@ public:
 	// below is the part of Render() this borrows, the swapchain half stays behind.
 	bool  RenderSceneImage(const EditorCameraOverride& camera, uint32_t width, uint32_t height,
 	                       std::vector<uint8_t>& rgba) override;
+	// Runtime Virtual Texture (Thema 333, docs/rvt-design-2026-11-04.md): the page pool, one page table per consumer
+	// material, the per-landscape material swap. A page is RenderSceneImage's raw frame copied into a pool slice.
+	bool  CreateRvtPool(uint32_t slots, uint32_t pagePx) override;
+	void  DestroyRvtPool() override;
+	bool  ReadbackRvtSlot(int layer, uint32_t slot, std::vector<uint8_t>& rgba) override;
+	// HE_RVT_PACK (Thema 333 step 10): the hot pool's normal/surface layers hold two channels, not four. 0xFu once
+	// CreateRvtPool never set it (A/B switch HE_RVT_PACK=0, or before the pool exists).
+	uint32_t RvtLayerChannels(int layer) const override;
+	bool  SetRvtPageTable(const HE::UUID& consumerMaterial, const std::vector<std::vector<uint32_t>>& mips) override;
+	bool  ReadbackRvtPageTable(const HE::UUID& consumerMaterial, std::vector<std::vector<uint32_t>>& mips) override;
+	void  SetRvtLandscape(uint32_t terrainEntity, const HE::UUID& landscapeMaterial, const HE::UUID& consumerMaterial) override;
+	void  SetRvtNearChunks(uint32_t terrainEntity, const std::vector<uint32_t>& chunkEntities) override { m_rvtNear.set(terrainEntity, chunkEntities); }
+	// The tile landscape's ground under a virtual texture: the consumer and the absolute XZ rectangle its pages cover
+	// (DrawScene's drawGroundMaterial splits the frame's patches with HE::splitRvtTilePatches).
+	void  SetRvtTileGround(const HE::UUID& consumerMaterial, const glm::dvec2& minXZ, const glm::dvec2& maxXZ, float nativeNearM) override
+	{ m_tileRvtConsumer = consumerMaterial; m_tileRvtMin = minXZ; m_tileRvtMax = maxXZ; m_tileRvtNearM = nativeNearM; }
+	HE::UUID   m_tileRvtConsumer{};
+	glm::dvec2 m_tileRvtMin{ 0.0 }, m_tileRvtMax{ 0.0 };
+	float      m_tileRvtNearM = 0.0f;
+	void  ReleaseRvtConsumer(const HE::UUID& consumerMaterial) override;
+	void  BeginRvtPages(uint32_t pagePx) override;
+	void  EndRvtPages() override;
 	// An arbitrary world into a per-slot offscreen target (Class Editor, Mesh
 	// viewer, secondary Scene viewports) — the GL/Metal contract in IRenderer.h,
 	// recorded into a one-shot command buffer and waited for. Returns the
@@ -133,6 +160,15 @@ public:
 	// the completed serial reaches that value (Thema 124).
 	uint64_t GetSubmittedFrameSerial() const { return m_submitSerial; }
 	uint64_t GetCompletedFrameSerial();
+
+	// View mode (IRenderer::SetViewMode) as the two questions the passes ask.
+	// Wireframe is drawn unlit — shaded edges say nothing a flat edge does not,
+	// and the flat one reads far better against the sky. Mirrors GL/Metal/D3D11/D3D12.
+	bool  UnlitViewActive() const
+	{
+		return m_viewMode == HE::ViewMode::Unlit || m_viewMode == HE::ViewMode::Wireframe || m_viewMode == HE::ViewMode::RvtDebug;
+	}
+	bool  WireframeViewActive() const { return m_viewMode == HE::ViewMode::Wireframe; }
 
 private:
 	void createInstance();
@@ -477,6 +513,12 @@ private:
 	std::unordered_map<uint64_t, VkPipeline> m_materialPipelines; // key = hash ^ hdr-bit
 	VkDescriptorSetLayout m_matSetLayout      = VK_NULL_HANDLE;
 	VkPipelineLayout      m_matPipelineLayout = VK_NULL_HANDLE;
+	// The tile landscape drawn with a material: the material's set plus the landscape's rows 50-60, and a pipeline layout with
+	// the per-patch push constant (createMaterialResources). Null: the device's fragment stage cannot hold them.
+	VkDescriptorSetLayout m_lsMatSetLayout      = VK_NULL_HANDLE;
+	VkPipelineLayout      m_lsMatPipelineLayout = VK_NULL_HANDLE;
+	VkPipeline GetOrBuildLandscapeMaterialPipeline(uint64_t hash, const std::string& frag, bool hdr, bool gbuffer = false);
+	HE::UUID   m_landscapeMaterialLoadTried{};   // the texture group's material this renderer tried to load from its path
 	VkDescriptorPool      m_matPool[2]        = {};  // per frame; reset whole each frame
 	struct MatFrameBuf { VkBuffer buf = VK_NULL_HANDLE; VkDeviceMemory mem = VK_NULL_HANDLE; void* mapped = nullptr; };
 	MatFrameBuf m_matLightBuf[2];   // HeLighting (64 B, filled once per frame)
@@ -491,6 +533,113 @@ private:
 	// per-stage sampler limit is the spec minimum (VulkanMaterialLayout.h, Thema 143).
 	bool        m_matLandscapeWeights = false;
 	bool        m_matLandscapeWarned  = false; // one-time notice for the fallback above
+	// heFogVolume (binding 34, Thema 225 step 5) is in m_matSetLayout. False only on a device
+	// whose per-stage sampler limit cannot hold the 18th fragment sampler (fogVolumeFit); the
+	// materials then compile without HE_FOG_VOLUME (m_matShaderLib.setSpirvFogVolume(false))
+	// and the volumetric fog stays off (supportsVolumetricFog false).
+	bool        m_matFogVolume        = true;
+	// Runtime Virtual Texture (Thema 333): bindings 40..43 are in m_matSetLayout (VulkanMaterialLayout.h, rvtFit).
+	bool        m_matRvt = false;
+	// Cold pages (step 9): bindings 44..46 are ALSO in m_matSetLayout only when rvtColdFit fits (a sampler2DArray costs
+	// one combined-image-sampler descriptor in Vulkan regardless of how the shader reads it, unlike D3D11/D3D12).
+	bool        m_matRvtCold = false;
+	struct RvtImage { VkImage image = VK_NULL_HANDLE; VkDeviceMemory memory = VK_NULL_HANDLE; VkImageView view = VK_NULL_HANDLE; };
+	RvtImage    m_rvtPool[3];                 // RGBA8 arrays, one slice per pool slot; SHADER_READ_ONLY between copies
+	uint32_t    m_rvtSlots = 0, m_rvtPagePx = 0;   // m_rvtSlots: the manager's ceiling
+	uint32_t    m_rvtAlloc = 0;                    // slices the arrays hold now: they start small and grow with the pages in use
+	bool        rvtGrowPool(uint32_t slot);
+	VkSampler   m_rvtSampler = VK_NULL_HANDLE; // nearest/clamp: the lookup is texelFetch, the descriptor is combined
+	// HE_RVT_PACK (Thema 333 step 10, counterpart of Metal 6k / D3D11/D3D12's step 10): layers 1/2 hold two channels
+	// (VK_FORMAT_R8G8_UNORM) instead of four. A page can't get there with vkCmdCopyImage (the format changes), so a
+	// tiny fullscreen draw reads the just-drawn page (a transient sampled view of the viewport image) and writes the
+	// two kept channels into a transient single-layer view/framebuffer of the destination array's hot slice. Packed
+	// draws always wait synchronously (not through the m_rvtPendingCmds pipeline) — the transient view/framebuffer/
+	// descriptor set this needs must outlive the GPU work, and reusing them across overlapping frames in flight is
+	// not worth the bookkeeping for an admin-rate pass.
+	bool                  m_rvtPack = false;
+	bool                  m_rvtPackTried = false;
+	VkRenderPass          m_rvtPackRP = VK_NULL_HANDLE;
+	VkPipelineLayout      m_rvtPackPipeLayout = VK_NULL_HANDLE;
+	VkPipeline            m_rvtPackPipeline = VK_NULL_HANDLE;
+	VkDescriptorSetLayout m_rvtPackSetLayout = VK_NULL_HANDLE;
+	VkDescriptorPool      m_rvtPackDescPool = VK_NULL_HANDLE;
+	// The previous call's transient destination view/framebuffer (rvtPackPage): destroying them is only safe once the
+	// command buffer that used them has finished on the GPU, which is guaranteed by the time rvtPackPage runs AGAIN
+	// (every packed page waits synchronously before the next one — see rvtPackPage's definition) or DestroyRvtPool
+	// runs (which waits for the device first).
+	VkImageView           m_rvtPackLastView = VK_NULL_HANDLE;
+	VkFramebuffer         m_rvtPackLastFb   = VK_NULL_HANDLE;
+	void rvtPackReleaseTransient();
+	bool ensureRvtPackPipeline();
+	void rvtPackPage(VkCommandBuffer cmd, VkImage srcImage, int layer, VkImage dstImage, uint32_t hotSlice, uint32_t px);
+	struct RvtTable
+	{
+		RvtImage img; uint32_t side = 0, mips = 0;
+		std::vector<std::vector<uint32_t>> src;   // the manager's own form (ReadbackRvtPageTable's answer)
+		uint64_t                            stateVer = 0;
+	};
+	std::unordered_map<HE::UUID, RvtTable> m_rvtTables;   // per consumer material
+	// ── Cold pages (Thema 333 step 9, counterpart of Metal 6j / D3D11/D3D12's identical scheme): a page not repainted
+	// for HE_RVT_COLD_AFTER real frames is read back from its hot slice, BC7-encoded on a worker thread and kept in a
+	// second, slot-indexed image set; its hot slice returns to the free list. Readback is synchronous (rvtOneShot
+	// already waits for the device for any RVT admin op here) and rate-limited to one slot per real frame.
+	RvtImage    m_rvtCold[3];           // BC7_SRGB (albedo) / BC7_UNORM (normal, surface), slice = slot
+	uint32_t    m_rvtColdAlloc = 0;
+	std::vector<int32_t>  m_rvtSlotHot;
+	std::vector<uint8_t>  m_rvtSlotCold;
+	std::vector<uint8_t>  m_rvtSlotBusy;     // a readback or encode of this slot is in flight
+	std::vector<uint32_t> m_rvtSlotVer;
+	std::vector<uint64_t> m_rvtSlotPainted;
+	std::vector<uint32_t> m_rvtHotFree;
+	uint64_t    m_rvtStateVer   = 1;
+	uint64_t    m_rvtRealFrames = 0;
+	bool        m_rvtColdOn     = false;
+	struct RvtColdWork;                 // the encoder thread and its result queue (defined near VulkanRenderer::CreateRvtPool)
+	RvtColdWork* m_rvtWork = nullptr;
+	bool        rvtGrowCold(uint32_t slot);
+	uint32_t    rvtHotFor(uint32_t slot);
+	void        rvtUploadTable(RvtTable& t, bool freshImage = false);
+	void        UpdateRvtCold();
+	struct RvtSwap { HE::UUID landscapeMat, consumerMat; };
+	std::unordered_map<uint32_t, RvtSwap>  m_rvtSwaps;    // per landscape entity
+	HE::RvtNearChunks                      m_rvtNear;     // SetRvtNearChunks: chunks that keep their material
+	bool rvtOneShot(const std::function<void(VkCommandBuffer)>& record);
+	bool rvtMakeImage(VkFormat format, uint32_t w, uint32_t h, uint32_t layers, uint32_t mips, VkImageUsageFlags usage,
+	                  VkImageCreateFlags flags, RvtImage& out);
+	bool rvtMakeView(RvtImage& img, VkFormat format, VkImageViewType type, uint32_t layers, uint32_t mips);
+	void rvtDestroyImage(RvtImage& img);
+	bool rvtMakeBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkBuffer& buf, VkDeviceMemory& mem);
+	// A still's set (RenderSceneImage): the live viewport set aside and a fresh one built at the request's size, then given
+	// back. Normally per call; a bracket (BeginRvtPages) keeps ONE page-size set across the pages of a tick.
+	struct StillSet
+	{
+		bool active = false;     // the still's set is in place and the live one is in the members below
+		bool kept   = false;     // ... and held ACROSS calls by a bracket
+		uint32_t w = 0, h = 0;
+		VkImage        liveImage = VK_NULL_HANDLE;      VkDeviceMemory liveMemory = VK_NULL_HANDLE;    VkImageView liveView = VK_NULL_HANDLE;
+		VkImage        liveDepthImage = VK_NULL_HANDLE; VkDeviceMemory liveDepthMemory = VK_NULL_HANDLE; VkImageView liveDepthView = VK_NULL_HANDLE;
+		VkRenderPass   liveRenderPass = VK_NULL_HANDLE; VkFramebuffer liveFramebuffer = VK_NULL_HANDLE; VkSampler liveSampler = VK_NULL_HANDLE;
+		uint32_t liveW = 0, liveH = 0, liveReqW = 0, liveReqH = 0;
+		VkImageLayout liveLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+		bool liveResChanged = false;
+		EditorCameraOverride liveCam;
+		uint32_t liveDraws = 0, liveTris = 0, liveVisible = 0, liveTotal = 0;
+		bool liveRaw = false, liveSrgb = false, liveBloom = false, liveSsao = false, liveSsr = false, liveGi = false, liveGiRefl = false;
+		HE::AAMethod   liveAa   = HE::AAMethod::Off;
+		HE::RenderPath livePath = HE::RenderPath::Forward;
+	};
+	StillSet m_still;
+	uint32_t m_rvtBracketPx = 0;   // BeginRvtPages: the page size whose set is kept across calls (0 = no bracket open)
+	// Inside a bracket the page layers are submitted WITHOUT waiting, each on its own frame slot (the per-frame rings, the
+	// descriptor pools and the lighting buffers are all indexed by m_currentFrame, which is what lets the real frames overlap):
+	// the k-th unwaited layer runs on slot (m_rvtBaseFrame + k) % 2, the device is waited for once the slots are used up or
+	// the bracket closes, and the command buffers are freed then. One queue runs the lists in the order they were made, so
+	// the shared target set needs nothing.
+	uint32_t m_rvtPending = 0, m_rvtBaseFrame = 0;
+	std::vector<VkCommandBuffer> m_rvtPendingCmds;
+	void rvtDrainPending();
+	void stillEnter(uint32_t w, uint32_t h);
+	void stillLeave();
 	// Displacement pin (Thema 207), GL's scheme: the device feature tessellationShader
 	// (enabled in createDevice; HE_TESSELLATION=0 leaves it off). foldDisplacement folds
 	// the material's displacement body into the shader hash right after resolveShaders
@@ -501,7 +650,7 @@ private:
 	std::unordered_map<uint64_t, std::string> m_tessDispByKey;
 	void        foldDisplacement(const HE::UUID& materialId, uint64_t& hash);
 	static constexpr uint32_t k_matMaxDraws   = 1024;
-	static constexpr uint32_t k_matSlotStride = 256; // 256-B stride/slot for U + HeParams
+	static constexpr uint32_t k_matSlotStride = HE::kMatParamBytes; // stride/slot for U + HeParams (HeParams fills it)
 
 	// ── Deferred render path (Thema 150, docs/deferred-renderer-plan.md §10) ──
 	// The D3D11/D3D12 structure on Vulkan's render-pass model. A deferred frame
@@ -562,6 +711,70 @@ private:
 	void destroyDeferredPipelines();
 	bool ensureGBufferTargets(uint32_t w, uint32_t h);
 	void destroyGBufferTargets();
+
+	// ── Volumetric fog (docs/volumetric-fog-plan.md, Thema 225 step 5) ───────────────────
+	// The Vulkan twin of MetalRenderer::EncodeFogVolume / EncodeFogApplyAndReopen: Inject and
+	// Integrate are COMPUTE passes recorded in DrawViewportFrame before the scene render pass
+	// opens (FogVolumeShaderSource.h's kernels, GLSL 450 straight to SPIR-V, no pins); Apply is a
+	// full-screen pass onto m_hdrView between the opaque scene + sky and the transparent tail
+	// (DrawScene splits the HDR render pass there and reopens it as m_hdrLoadRP); translucent
+	// graph materials read the integrated volume at set 0 binding 34 (heApplyFogT).
+	// The three froxel volumes live in GENERAL for good (storage write and sampled read are both
+	// legal there), so no layout churn on the ping-pong history; the passes are ordered by
+	// memory barriers. Mode 0 never touches any of it except the 1x1x1 dummy bound at 34.
+	struct FogImage3D
+	{
+		VkImage        img  = VK_NULL_HANDLE;
+		VkDeviceMemory mem  = VK_NULL_HANDLE;
+		VkImageView    view = VK_NULL_HANDLE;
+	};
+	bool createFogDummy();       // createMaterialResources: the 1x1x1 volume bound at material binding 34
+	bool createFogPipelines();   // Initialize: layouts, pipelines, noise; true == supportsVolumetricFog
+	void destroyFogResources();
+	bool ensureFogTargets(const glm::ivec3& grid);
+	void destroyFogTargets();
+	bool createFogImage3D(uint32_t w, uint32_t h, uint32_t d, VkFormat fmt, VkImageUsageFlags usage, FogImage3D& out);
+	void destroyFogImage3D(FogImage3D& im);
+	void encodeFogVolume(VkCommandBuffer cmd);                            // Inject + Integrate (compute), sets m_fogFrameActive
+	// Apply: the caller (DrawScene) has ENDED the HDR render pass; this runs the depth flip, the
+	// colour-only Apply pass (m_underwaterFogRP onto m_hdrView) and reopens m_hdrLoadRP on m_hdrFB.
+	void encodeFogApplyAndReopen(VkCommandBuffer cmd, uint32_t w, uint32_t h);
+	bool                  m_fogPipelinesTried = false;
+	bool                  m_fogReady          = false;   // GetCapabilities().supportsVolumetricFog
+	bool                  m_fogFrameActive    = false;   // Inject/Integrate ran THIS frame; reset at the top of DrawViewportFrame
+	HE::FogVolumeData     m_fogFrame;                    // the data that frame used (grid, D, c)
+	glm::mat4             m_fogViewProjMat{ 1.0f };      // Vulkan clip (kVulkanClipFix), unjittered: heApplyFogT's fogViewProj
+	VkDescriptorSetLayout m_fogInjectDSL    = VK_NULL_HANDLE;
+	VkDescriptorSetLayout m_fogIntegrateDSL = VK_NULL_HANDLE;
+	VkDescriptorSetLayout m_fogApplyDSL     = VK_NULL_HANDLE;
+	VkPipelineLayout      m_fogInjectPL     = VK_NULL_HANDLE;
+	VkPipelineLayout      m_fogIntegratePL  = VK_NULL_HANDLE;
+	VkPipelineLayout      m_fogApplyPL      = VK_NULL_HANDLE;
+	VkPipeline            m_fogInjectPipe    = VK_NULL_HANDLE;
+	VkPipeline            m_fogIntegratePipe = VK_NULL_HANDLE;
+	VkPipeline            m_fogApplyPipe     = VK_NULL_HANDLE;
+	VkDescriptorPool      m_fogPool          = VK_NULL_HANDLE;
+	VkDescriptorSet       m_fogInjectSet[2]    = {};   // per frame slot, rewritten each frame
+	VkDescriptorSet       m_fogIntegrateSet[2] = {};
+	VkDescriptorSet       m_fogApplySet[2]     = {};
+	MatFrameBuf           m_fogVolBuf[2];              // HeFogVol (FogVolumeConstants, 288 B)
+	MatFrameBuf           m_fogLightBuf[2];            // the Inject kernel's own HeLighting
+	VkSampler             m_fogLinearSampler = VK_NULL_HANDLE; // linear, clamp: history, integrated volume
+	VkSampler             m_fogNoiseSampler  = VK_NULL_HANDLE; // linear, repeat: the 64^3 noise
+	FogImage3D            m_fogNoise;                  // R16G16_UNORM 64^3, HE::BuildSkyNoise3D(64)
+	FogImage3D            m_fogDummy;                  // 1x1x1 RGBA16F, bound at 34 when the volume is off
+	FogImage3D            m_fogInjectTex[2];           // RGBA16F, ping-pong (rgb = S, a = sigma_t)
+	FogImage3D            m_fogIntegratedTex;          // RGBA16F (L, T) at each slice's far edge
+	glm::ivec3            m_fogGridAlloc{ 0 };
+	int                   m_fogHist          = 0;      // which inject volume holds last frame's result
+	bool                  m_fogHistValid     = false;
+	glm::mat4             m_fogPrevViewProj{ 1.0f };   // unjittered Vulkan clip, last frame
+	glm::vec3             m_fogPrevCam{ 0.0f };
+	float                 m_fogPrevFocal     = 0.0f;
+	double                m_fogLastTime      = 0.0;
+	glm::vec3             m_fogNoiseOffset{ 0.0f };
+	float                 m_fogNoiseTime     = 0.0f;
+	uint32_t              m_fogFrameIndex    = 0;
 
 	// Per-draw material data of the built-in scene shader (32 bytes: baseColor(rgb)+metallic(a)
 	// + roughness + opacity + hasTexture + noShadow), scene set binding 2. That binding is a
@@ -1035,11 +1248,17 @@ private:
 	glm::mat4 m_taaViewProjClean{ 1.0f };  // this frame's, set by DrawScene
 	glm::mat4 m_taaViewProjJit{ 1.0f };
 	glm::mat4 m_taaPrevViewProj{ 1.0f };   // last TAA frame's clean one
+	glm::dvec3 m_taaPrevOrigin{ 0.0 };     // the floating origin it was built for (HE::taaPrevViewProjAt)
+	bool       m_taaPrevOriginKnown = false;
 	std::unordered_map<uint32_t, glm::mat4> m_taaPrevTransforms, m_taaCurTransforms;
 
 	bool   m_postFxReady     = false;
 	float  m_exposure        = 1.0f;
 	bool   m_bloomEnabled    = true;
+	// EditorCameraOverride::rawOutput for the frame RenderSceneImage draws: the tonemap writes the HDR colour
+	// clamped (sRGB-encoded with rawSrgb) instead of exposure + ACES + gamma.
+	bool   m_rawCapture      = false;
+	bool   m_rawSrgb         = false;
 	float  m_bloomStrength   = 0.25f;
 	float  m_bloomThreshold  = 1.0f;
 	float  m_bloomKnee       = 0.1f;
@@ -1107,7 +1326,7 @@ private:
 	// the REAL sky - clouds, weather - drawn around the camera into six 128x128 faces every frame the reflections run.
 	// A reflection ray that hits nothing reads it, so a water surface mirrors the clouds; without it a miss returned
 	// nothing and the material fell back to the cloudless analytic heSkyEnv cube. HE_GIREFL_SKY=0 turns it off.
-	static constexpr int kSkyReflCubeSize = 128;
+	static constexpr int kSkyReflCubeSize = 512;
 	SkyUBO                m_skyReflUBO[2][6];
 	VkRenderPass          m_skyReflRP        = VK_NULL_HANDLE;
 	VkPipeline            m_skyReflPipe      = VK_NULL_HANDLE;
@@ -1749,6 +1968,7 @@ private:
 	int   m_giReflQuality        = 1;
 	bool  m_giReflBlurEnabled    = true;
 	bool  m_giReflPipesTried     = false; // one compile attempt per session
+	std::string m_giReflWhyNot;           // set when that attempt failed (GIReflectionsInactiveReason)
 	bool  m_giReflReady          = false; // m_giReflTex holds this frame's result
 	float m_giReflFrameSeed      = 0.0f;
 	VkDescriptorSetLayout m_giReflDSL   = VK_NULL_HANDLE; // compute: 3 SSBOs + 4 samplers + storage image + UBO
@@ -1920,4 +2140,23 @@ private:
 	FrameGpuStats m_lastGpuStats;                   // newest reaped GPU time
 	// CPU-side per-frame counters (reset in Render, merged by GetFrameGpuStats).
 	uint32_t m_statDraws = 0, m_statTris = 0, m_statVisible = 0, m_statTotal = 0;
+
+	// ── World-scale landscape (Thema 326, step 2 part B) ─────────────────────
+	// DrawScene asks the application's provider (IRenderer::SetLandscapeProvider) once per scene frame, right after the sky and before its early
+	// returns, and has the frame's uploads recorded into the upload batch at once (the runtime counts them as done); the patches are drawn in the
+	// scene pass (forward: after the opaque draws; deferred: after the lighting resolve; and on the early returns).
+	std::unique_ptr<HE::VulkanLandscape> m_landscape;
+	bool                     m_landscapeFailed = false;    // init failed once: not tried again
+	bool                     m_landscapeFrameLive = false; // m_landscapeFrame belongs to the scene frame in progress
+	HE::LandscapeRenderFrame m_landscapeFrame;
+	glm::mat4                m_landscapeViewProj{ 1.0f };  // the matrix the scene rasterises with (kVulkanClipFix, TAA jitter), for the draw
+	void landscapeBegin(uint32_t width, uint32_t height);                                       // ask the provider, init on first use, run the uploads
+	// The ground in the frame's other passes. landscapePassFrame asks the provider for `clip` (Vulkan clip space) and runs the uploads:
+	// outside a render pass. landscapeDepth draws that frame's patches depth-only into the pass open on `cmd`.
+	bool landscapeEnsure();                                                                     // the VulkanLandscape exists and is ready
+	bool landscapePassFrame(const glm::mat4& clip, HE::LandscapeRenderFrame& frame);
+	void landscapeDepth(VkCommandBuffer cmd, VkRenderPass pass, uint32_t width, uint32_t height, const HE::LandscapeRenderFrame& frame,
+	                    const glm::mat4& clip);
+	std::vector<HE::LandscapeRenderFrame> m_landscapeShadowFrames;                              // one a shadow view of this frame
+	void landscapeDraw(VkCommandBuffer cmd, uint32_t width, uint32_t height, bool hdr);         // inside the scene pass
 };

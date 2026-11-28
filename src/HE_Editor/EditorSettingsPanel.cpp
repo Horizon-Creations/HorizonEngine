@@ -330,6 +330,69 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const DrawOptions& o
 #endif
 			ImGui::EndCombo();
 		}
+		// What the renderer the editor RUNS on can do, on this platform: the answers of IRenderer::GetCapabilities, which the
+		// backend gives for the machine it found (a device limit, a pipeline that did not build) and for the platform's
+		// switches. A backend picked above takes effect at the next start; until then this is still the running one.
+		static const std::string running = ctx.backendName;   // the first draw: nothing was picked yet
+#if defined(_WIN32)
+		const char* platform = "Windows";
+#elif defined(__APPLE__)
+		const char* platform = "macOS";
+#else
+		const char* platform = "Linux";
+#endif
+		if (ctx.renderer && ImGui::TreeNode("Renderer Capabilities"))
+		{
+			const IRenderer::Capabilities c = ctx.renderer->GetCapabilities();
+			ImGui::TextDisabled("%s on %s", running.c_str(), platform);
+			if (ctx.backendName != running)
+				ImGui::TextDisabled("%s is picked for the next start; this list is the running renderer's.", ctx.backendName.c_str());
+			const uint32_t mask = c.landscapePasses ? kLandscapePassAll : c.landscapePassMask;
+			const struct { const char* group; const char* name; bool on; } rows[] = {
+				{ "Rendering", "Shadows", c.supportsShadows },
+				{ nullptr, "Post processing", c.supportsPostProcessing },
+				{ nullptr, "HDR", c.supportsHDR },
+				{ nullptr, "Deferred render path", c.supportsDeferredRendering },
+				{ nullptr, "Temporal anti-aliasing", c.supportsTemporalAA },
+				{ nullptr, "MetalFX upscaling", c.supportsMetalFX },
+				{ nullptr, "Screen-space reflections", c.supportsScreenSpaceReflections },
+				{ nullptr, "Volumetric fog", c.supportsVolumetricFog },
+				{ nullptr, "GPU particles", c.supportsGpuParticles },
+				{ "Global illumination", "Ray-traced GI", c.supportsGlobalIllumination },
+				{ nullptr, "GI reflections", c.supportsGIReflections },
+				{ "Landscape", "Runtime Virtual Texture", c.supportsRvt },
+				{ nullptr, "Tile landscape: drawn with its material", c.landscapeMaterial },
+				{ nullptr, "Tile landscape: casts shadows", (mask & kLandscapePassShadow) != 0 },
+				{ nullptr, "Tile landscape: in ambient occlusion", (mask & kLandscapePassSsao) != 0 },
+				{ nullptr, "Tile landscape: in ray-traced GI", (mask & kLandscapePassGi) != 0 },
+				{ nullptr, "Tile landscape: in the G-buffer (deferred)", (mask & kLandscapePassGBuffer) != 0 },
+				{ nullptr, "Tile landscape: motion vectors", (mask & kLandscapePassVelocity) != 0 },
+				{ nullptr, "Tile landscape: Runtime Virtual Texture", c.landscapeRvt },
+				{ nullptr, "Tile landscape: far data swapped in place", c.landscapeCoarseRevision },
+				{ "Editor", "Raw capture (bakes)", c.supportsRawCapture },
+				{ nullptr, "Secondary windows", c.supportsSecondaryWindows },
+			};
+			if (ImGui::BeginTable("##rendercaps", 2, ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_RowBg))
+			{
+				for (const auto& r : rows)
+				{
+					if (r.group)
+					{
+						ImGui::TableNextRow();
+						ImGui::TableNextColumn();
+						ImGui::TextDisabled("%s", r.group);
+					}
+					ImGui::TableNextRow();
+					ImGui::TableNextColumn();
+					ImGui::TextUnformatted(r.name);
+					ImGui::TableNextColumn();
+					if (r.on) ImGui::TextUnformatted("yes");
+					else      ImGui::TextDisabled("no");
+				}
+				ImGui::EndTable();
+			}
+			ImGui::TreePop();
+		}
 	});
 	row("renderpath", "Display", [&]{
 		const bool supported = ctx.renderer && ctx.renderer->GetCapabilities().supportsDeferredRendering;
@@ -345,6 +408,17 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const DrawOptions& o
 	row("occlusion", "Display", [&]{
 		EditorWidgets::checkbox("Occlusion Culling", &cfg.OcclusionCulling);
 		hint("Skip drawing objects hidden behind nearer opaque geometry (OpenGL, Metal).");
+	});
+	row("rvt", "Display", [&]{
+		const bool supported = ctx.renderer && ctx.renderer->GetCapabilities().supportsRvt;
+		ImGui::BeginDisabled(!supported);
+		EditorWidgets::checkbox("Runtime Virtual Texture", &cfg.RuntimeVirtualTextures);
+		ImGui::EndDisabled();
+		if (!supported && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+			ImGui::SetTooltip("This backend cannot hold a virtual texture (needs Capabilities::supportsRvt): "
+			                  "RVT Write nodes are skipped and RVT Read nodes compute directly.");
+		else if (supported)
+			hint("On: RVT Write paints pages, RVT Read reads them. Off: the graph computes directly.");
 	});
 	row("vsync", "Display", [&]{ if (EditorWidgets::checkbox("VSync", &ctx.vsync)) ApplyVSync(ctx); });
 	row("maxfps", "Display", [&]{
@@ -556,6 +630,18 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const DrawOptions& o
 			ImGui::SetTooltip("Needs Metal (Render Path = Deferred) or an OpenGL 4.3 context.");
 		else if (supported)
 			hint("Real scene rays instead of the sky cubemap (hits lit by the GI probes).");
+		// The backend says "available" before it has tried to build the pipelines; when that
+		// fails the checkbox used to do nothing and nothing said why.
+		if (supported && cfg.GIReflectionsEnabled && ctx.renderer)
+		{
+			const std::string why = ctx.renderer->GIReflectionsInactiveReason();
+			if (!why.empty())
+			{
+				ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::Warn);
+				hint("GI reflections are not active: %s", why.c_str());
+				ImGui::PopStyleColor();
+			}
+		}
 	});
 
 	row("gpuparticles", "Effects", [&]{
@@ -947,6 +1033,13 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const DrawOptions& o
 		if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
 			ImGui::SetTooltip("Not implemented — CPU asset data is always kept.");
 	});
+	row("autolodimport", "Content Browser", [&]{
+		EditorWidgets::checkbox("Generate LODs on Import", &cfg.AutoLodOnImport);
+	});
+	row("farbake", "Content Browser", [&]{
+		static const char* kFarBake[] = { "Off", "Manual", "Automatic" };
+		Row::combo("Far Landscape Bake", &cfg.LandscapeFarBake, kFarBake, IM_ARRAYSIZE(kFarBake));
+	});
 	row("cbrefresh", "Content Browser", [&]{
 		Row::inputInt("Refresh Interval (s)", &cfg.ContentBrowserRefreshRate);
 		if (cfg.ContentBrowserRefreshRate < 0) cfg.ContentBrowserRefreshRate = 0;
@@ -1121,6 +1214,7 @@ void requestOpenProjectPage(ProjectSettingsPanel::Page page)
 	case P::Fonts:           target = Page::ProjectFonts;        break;
 	case P::Permissions:     target = Page::ProjectPermissions;  break;
 	case P::Shadows:         target = Page::WorldShadows;        break;
+	case P::VirtualTexture:  target = Page::WorldVirtualTexture; break;
 	case P::Simulation:      target = Page::WorldSimulation;     break;
 	case P::CollisionLayers: target = Page::WorldCollisionLayers; break;
 	case P::AudioBuses:      target = Page::WorldAudioBuses;     break;
@@ -2215,6 +2309,7 @@ constexpr NavItem kProjectItems[] = {
 };
 constexpr NavItem kWorldItems[] = {
 	{ Page::WorldShadows,        "Shadows" },
+	{ Page::WorldVirtualTexture, "Virtual Texture" },
 	{ Page::WorldSimulation,     "Simulation" },
 	{ Page::WorldCollisionLayers, "Collision Layers" },
 	{ Page::WorldAudioBuses,     "Audio Buses" },
@@ -2245,6 +2340,7 @@ bool projectPageOf(Page p, ProjectSettingsPanel::Page& out)
 	case Page::ProjectFonts:        out = P::Fonts;           return true;
 	case Page::ProjectPermissions:  out = P::Permissions;     return true;
 	case Page::WorldShadows:        out = P::Shadows;         return true;
+	case Page::WorldVirtualTexture: out = P::VirtualTexture;  return true;
 	case Page::WorldSimulation:     out = P::Simulation;      return true;
 	case Page::WorldCollisionLayers: out = P::CollisionLayers; return true;
 	case Page::WorldAudioBuses:     out = P::AudioBuses;      return true;
@@ -2280,7 +2376,7 @@ constexpr const char* kInputRows[]          = { "pointerinput" };
 constexpr const char* kProjectDataRows[]    = { "cpucache", "cbrefresh", "autosave" };
 constexpr const char* kEditorRendererRows[] = { "backend", "vsync", "maxfps" };
 constexpr const char* kViewportQualityRows[] = {
-	"renderpath", "occlusion", "aa", "gpuparticles",
+	"renderpath", "occlusion", "rvt", "aa", "gpuparticles",
 	"bloom", "ssao", "dof", "motionblur",
 	"ssr", "gi", "girefl",
 };
@@ -2442,6 +2538,8 @@ void render(AppContext& ctx, const ImVec2& pos, const ImVec2& size)
 			cfg.EditorCameraSpeed = 6.0f;
 			cfg.KeepCPUAssets     = false;
 			cfg.ContentBrowserRefreshRate = 60;
+			cfg.AutoLodOnImport   = false;
+			cfg.LandscapeFarBake  = 1;
 			cfg.AutosaveEnabled     = true;
 			cfg.AutosaveIntervalSec = 60;
 			cfg.RewardsEnabled       = true;

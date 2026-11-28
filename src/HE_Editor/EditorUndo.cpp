@@ -54,6 +54,8 @@ void EditorUndo::pushUndo(Snapshot&& snapshot, std::string label)
 
 void EditorUndo::restore(const Snapshot& snapshot)
 {
+	// Before the ids are recycled: see onWorldReplacing.
+	if (m_onWorldReplacing) m_onWorldReplacing();
 	m_world->clear();
 	SceneSerializer ser;
 	ser.loadFromMemory(*m_world, snapshot);

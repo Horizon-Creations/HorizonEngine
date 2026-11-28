@@ -272,7 +272,7 @@ void runCompileCheck(const HC::Graph& graph, const char* title,
 		HE::Ed::Rewards::post(HE::Ed::Rewards::Moment::CompiledClean);
 		// The line count covers the whole ancestry when there is one — which is
 		// honest: that is what an export builds to make THIS class native.
-		g.compileMsg = "compiles clean — " + std::to_string(lines) + " lines of C++";
+		g.compileMsg = "Compiles clean — " + std::to_string(lines) + " lines of C++";
 		if (!res.warnings.empty())
 			g.compileMsg += " (" + std::to_string(res.warnings.size()) + " warning(s), see log)";
 		for (const auto& w : res.warnings)
@@ -299,12 +299,12 @@ const HGH::MenuOpts kMenus = {
 	/*addExcluded*/   { NT::Event, NT::FunctionEntry, NT::FunctionCall,
 	                    NT::GetVariable, NT::SetVariable,
 	                    NT::GetProperty, NT::SetProperty,
-	                    NT::ShowSelf, NT::HideSelf },
+	                    NT::ShowSelf, NT::HideSelf, NT::GetElement },
 	/*dragExcluded*/  { NT::Event, NT::FunctionEntry, NT::FunctionCall,
 	                    NT::FunctionReturn, NT::GetVariable, NT::SetVariable,
 	                    NT::GetProperty, NT::SetProperty, NT::EngineCall,
 	                    NT::CallExternal, NT::GetExternal, NT::SetExternal,
-	                    NT::BindEvent, NT::ShowSelf, NT::HideSelf },
+	                    NT::BindEvent, NT::ShowSelf, NT::HideSelf, NT::GetElement },
 };
 
 // ── Left sidebar: variables + functions + details ─────────────────────────────
@@ -628,7 +628,7 @@ void drawEventDetails(HC::Graph& graph, ContentManager* content, bool& edited)
 	                    "runs its own Event node of this name.");
 
 	ImGui::Spacing();
-	if (EditorWidgets::dangerButton("Delete Event"))
+	if (EditorWidgets::removeButton("Delete Event"))
 	{
 		const std::string gone = e->name;
 		graph.events.erase(std::remove_if(graph.events.begin(), graph.events.end(),
@@ -925,7 +925,7 @@ void drawVariableDetails(HC::Graph& graph, const std::vector<HC::InheritedVariab
 		edited = true;
 
 	ImGui::Spacing();
-	if (EditorWidgets::dangerButton("Delete Variable"))
+	if (EditorWidgets::removeButton("Delete Variable"))
 	{
 		const std::string gone = v->name;
 		graph.variables.erase(std::remove_if(graph.variables.begin(), graph.variables.end(),
@@ -1747,6 +1747,23 @@ struct ClassState
 	std::string baseClass;
 	HE::UUID    assetId;
 	std::string path;                   // content-relative, the class KEY
+
+	// The class was renamed or moved: its tab is open under a new path now (see
+	// AssetPanelState). The state — graph, edits, undo — stays; what is filed under
+	// the old path does not: the canvas's own view state (zoom, selection) and the
+	// name the tab announces.
+	void onAssetMoved(const std::string& newRel)
+	{
+		if (path.empty() || path == newRel) return;
+		if (auto node = s_graphStates.extract(path); !node.empty())
+		{
+			node.key() = newRel;
+			s_graphStates.insert(std::move(node));
+		}
+		if (g.graphFor == path) g.graphFor = newRel;
+		name = HcEditorUtil::castTargetLabel(newRel);
+		path = newRel;
+	}
 	std::vector<std::string> events;    // event catalog (the base-class chain's)
 	// The project's InputAction assets, offered as their own menu section on a
 	// player class — one entry per action, not two events per action.

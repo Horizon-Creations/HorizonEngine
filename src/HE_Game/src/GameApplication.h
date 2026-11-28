@@ -22,9 +22,14 @@
 #include <HorizonScene/AnimationNotify.h>
 #include <HorizonScene/PhysicsWorld.h>
 #include <HorizonScene/CellRuntime.h>
+#include <HorizonScene/LandscapeRuntime.h>
+#include <HorizonScene/LandscapeHlodProxies.h>
+#include <HorizonScene/LandscapeWorldProxies.h>
+#include <HorizonScene/LandscapeStamps.h>
 #include <HorizonScene/CellScripts.h>
 #include <HorizonScene/FixedStep.h>
 #include <HorizonScene/AudioEngine.h>
+#include <future>
 #include <HorizonScene/WeatherAudio.h>
 #include <HorizonScene/EngineApi.h>   // GameServicesBinding (C++ GameLogic services)
 #include <HorizonScene/AntiCheat/AntiCheatHost.h>   // OnCheatDetected + frame-end responses
@@ -36,6 +41,7 @@ class ScriptContext;
 
 // Game-specific Application: handles the packaged-shipping bootstrap
 // (project.hcfg, encrypted hpak, key derivation, GameLogic.dll loading).
+namespace HE::landscape { class RvtLandscape; }
 class GameApplication : public HE::Application, private HE::ICellHost
 {
 public:
@@ -181,6 +187,8 @@ private:
     // in an exported game while they worked in PIE. Rebuilt on every scene
     // switch, because the bodies belong to the world that is going away.
     std::unique_ptr<PhysicsWorld> m_physicsWorld;
+    // The Runtime Virtual Texture driver of the landscape (Thema 333 step 4). Made while the project setting (or HE_RVT=1) asks for it.
+    std::shared_ptr<HE::landscape::RvtLandscape> m_rvtLandscape;
     float m_physicsAccum = 0.0f;
     // App-level UI: the GameInstance's widgets live here (not in any world), so a
     // HUD created in OnInit exists before the first scene and survives scene
@@ -318,6 +326,11 @@ private:
     std::unordered_map<uint32_t, ScriptEngine::InstanceId> m_scriptInstances; // entity → instance
     UIInputSystem::InputState m_uiInput;   // frame-to-frame UI pointer tracking
     AudioEngine m_audioEngine;             // game-runtime audio (playOnStart + audio.* API)
+    // Opening the output device (ma_engine_init) takes 50-90 ms warm and over a second cold, and
+    // nothing needs it until OnInit hands out the first sounds. It starts in the constructor, in
+    // parallel with SDL, the window and the renderer, and OnInit collects the result. Declared
+    // AFTER the engine: members die in reverse, so the thread is done before the engine goes.
+    std::future<bool> m_audioInit;
     WeatherAudio::State m_weatherAudio;    // rain/wind/snow/storm beds + thunder, driven by the weather
 
     // ── Scene transitions (HE::api::scene requests, executed at frame start) ──
@@ -392,5 +405,18 @@ private:
     }
     HE::CellScriptHosts cellScriptHosts();
     HE::CellRuntime m_cellRuntime{ *this };
+
+    // ── World-scale landscape (Thema 326) ───────────────────────────────────
+    // The scene's LandscapeWorldComponent streams tiles around the camera (HE::LandscapeRuntime); the renderer draws what it hands over
+    // (IRenderer::SetLandscapeProvider, bound once, at the first update after the renderer exists).
+    void updateLandscape(float dt);
+    HE::LandscapeRuntime m_landscape;
+    PhysicsWorld* m_landscapePhysics = nullptr;   // the physics world the landscape gives its ground to (detached BEFORE that world is destroyed)
+    std::string m_landscapeContentRoot;   // ContentManager::contentRoot() last given to m_landscape.setProjectRoot(), to skip repeating it
+    bool m_landscapeNavigation = false;
+    HE::LandscapeHlodProxies m_hlodProxies;         // the baked stand-ins of entity cells that are not built (the pack's HLOD table)
+    HE::LandscapeStampSync    m_landscapeStamps;    // LandscapeStampComponent entities -> the runtime's overlay
+    HE::LandscapeWorldProxies m_landscapeProxies;   // its foliage and water as entities the renderers draw already
+    bool m_landscapeBound = false;
 };
 

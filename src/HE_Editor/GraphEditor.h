@@ -229,7 +229,8 @@ struct Model
     // default). The slot is clipped to this and the node grows to hold it, so a
     // control that is wider than a number box — a dropdown, which has to show a
     // name AND its arrow — asks for the room instead of being cut off in a slot
-    // sized for "1.0".
+    // sized for "1.0". It works the other way too: a checkbox asks for its own
+    // square, so a node is not widened by a number-box slot it does not use.
     std::function<float(int node, int pin)> pinInlineEditorWidth;
     // Decorations drawn behind / in front of the nodes in the canvas transform
     // (comments, preview halos). origin/pan/zoom map graph→screen:
@@ -293,6 +294,12 @@ struct Model
     // not change the graph. Unset = any output↔input pair on another node counts.
     std::function<bool(int outNode, int outPin, int inNode, int inPin)> canConnect;
 
+    // Operator symbol for a compact pure node ("+", ">", "AND"): the node then
+    // drops its title strip and pin labels and draws the symbol large in its
+    // middle, the way Blueprint draws math nodes. Empty (or unset) = the node
+    // keeps its title. Only asked for nodes that are compact anyway.
+    std::function<std::string(int nodeId)> compactTitle;
+
     // Feature flags.
     bool multiSelect = false;
     // Render exec-less, body-less nodes (pure getters / literals) as compact
@@ -306,8 +313,21 @@ struct Model
 // mutated this frame (the host should snapshot/commit for undo).
 bool draw(const char* id, const Model& model, State& state, const ImVec2& size);
 
+// A node's layout in GRAPH units, exactly as draw() lays it out (width fits the
+// content; see measureNode in GraphEditor.cpp). For hosts that draw something
+// around a node — a preview halo — and for tests, instead of re-deriving it.
+struct NodeLayout
+{
+    ImVec2 size;            // the box
+    float  editorX = 0.0f;  // inline-editor column from the left edge (0 = none)
+};
+NodeLayout nodeLayout(const Model& model, int nodeId);
+// Centre of a pin, from the node's top-left, in graph units.
+ImVec2 pinGraphOffset(const Model& model, int nodeId, int pinId, bool input);
+
 // Shared visual constants (exposed so hosts can align their side panels / body
-// widgets to the same metrics).
+// widgets to the same metrics). kNodeW is no longer every node's width, only
+// the width a node with an on-node body never goes below.
 constexpr float kNodeW  = 176.0f;
 constexpr float kTitleH = 24.0f;
 constexpr float kRowH   = 20.0f;
@@ -349,8 +369,15 @@ ImU32 categoryColor(const char* category);
 // making the widgets overflow the shrunken node box; scale those too so a
 // node's widgets track its box. Every node-graph host (material, HorizonCode,
 // particle, animator state machine) draws its on-node widgets inside this pair.
+//
+// Inside a node BODY, draw() has already pushed a zoom-scaled style, and a
+// host's pushWidgetScale there used to scale that again: paddings went with
+// zoom², so a body at 0.6 was cramped and at 1.5 its widgets overflowed. The
+// nesting count makes a call inside a body a no-op.
+inline int& widgetScaleNesting() { static int n = 0; return n; }
 inline void pushWidgetScale(float z)
 {
+    if (widgetScaleNesting()++ > 0) return;
     const ImGuiStyle& s = ImGui::GetStyle();
     const ImVec2 fp = s.FramePadding, is = s.ItemSpacing, iis = s.ItemInnerSpacing;
     const float  fr = s.FrameRounding, gm = s.GrabMinSize;
@@ -361,6 +388,11 @@ inline void pushWidgetScale(float z)
     ImGui::PushStyleVar(ImGuiStyleVar_GrabMinSize,      gm * z);
     ImGui::SetWindowFontScale(z);
 }
-inline void popWidgetScale() { ImGui::SetWindowFontScale(1.0f); ImGui::PopStyleVar(5); }
+inline void popWidgetScale()
+{
+    if (--widgetScaleNesting() > 0) return;
+    ImGui::SetWindowFontScale(1.0f);
+    ImGui::PopStyleVar(5);
+}
 
 } // namespace GraphEditor

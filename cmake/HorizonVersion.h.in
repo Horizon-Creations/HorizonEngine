@@ -14,3 +14,6 @@
 
 // Convenience: e.g.  0.3.0 "Aurora"
 #define HE_VERSION_FULL     HE_VERSION_STRING " \"" HE_VERSION_CODENAME "\""
+
+// Short commit hash of the checkout this build was configured from ("unknown" without git).
+#define HE_GIT_COMMIT       "@HE_GIT_COMMIT@"

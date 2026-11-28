@@ -854,13 +854,13 @@ void DrawProfilerWindow(AppContext& ctx, bool& open)
                     g_ui.haveSelectedFrame = false;
                     ctx.toggleProfilerCapture();
                 }
-                ImGui::TextDisabled("Benchmark = vsync-off multi-frame capture → JSON dump.");
+                ImGui::TextDisabled("Benchmark = vsync-off multi-frame capture » JSON dump.");
 
                 // Single-frame capture: one frame in full detail (forces detailed GPU),
                 // shown in the Frame Detail tab. No dump.
                 if (EditorWidgets::button("Capture Single Frame", ImVec2(-1, 0)))
                     prof.requestSingleFrameCapture();
-                ImGui::TextDisabled("One frame (CPU scopes + counters + GPU) → 'Frame Detail'. Fast unless");
+                ImGui::TextDisabled("One frame (CPU scopes + counters + GPU) » 'Frame Detail'. Fast unless");
                 ImGui::TextDisabled("'Detailed GPU' is ticked (then exclusive per-pass, but that frame is slow).");
             }
 

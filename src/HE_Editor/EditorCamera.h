@@ -1,4 +1,6 @@
 #pragma once
+#include <algorithm>
+#include <cmath>
 #include <glm/glm.hpp>
 #include <Renderer/IRenderer.h>   // EditorCameraOverride
 
@@ -107,6 +109,27 @@ public:
 		m_pitch         = pitchRad;
 		m_pivotDistance = pivotDist > 0.0f ? pivotDist : m_pivotDistance;
 		m_initialised   = true;
+	}
+
+	// A 3/4 look down at a ground rectangle (half extents on X and Z around
+	// `center`), all of it in view: what a new landscape and its create grid get.
+	void      frameArea(const glm::vec3& center, float halfX, float halfZ)
+	{
+		const float r    = std::max(1.0f, std::sqrt(halfX * halfX + halfZ * halfZ));
+		const float dist = std::min(r / std::tan(glm::radians(m_fov * 0.5f)) * 1.2f, m_far * 0.9f);
+		const glm::vec3 dir = glm::normalize(glm::vec3(1.0f, 0.75f, 1.0f));
+		setOrientation(center + dir * dist, -dir);
+		m_pivotDistance = dist;
+		m_initialised   = true;
+	}
+
+	// Back to the first-run view: the 3/4 look at the world origin (see the
+	// member defaults), derived again on the next update.
+	void      resetToDefault()
+	{
+		m_position      = glm::vec3(6.0f, 4.5f, 6.0f);
+		m_pivotDistance = 8.7f;
+		m_initialised   = false;
 	}
 
 	EditorCameraOverride makeOverride() const;

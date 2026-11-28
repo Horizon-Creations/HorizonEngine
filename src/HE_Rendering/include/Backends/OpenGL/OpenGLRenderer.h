@@ -2,9 +2,12 @@
 #include <chrono>
 #include <cstdint>
 #include <Renderer/IRenderer.h>
+#include <MaterialGraph/MaterialParamLimits.h> // kMatParamFloats / kMatParamBytes
 #include "OpenGLShaderManager.h"
+#include "OpenGLLandscape.h"   // the world-scale landscape (Thema 326)
 #include <HorizonRendering/RenderWorld.h>
 #include <HorizonRendering/RenderExtractor.h>
+#include <HorizonRendering/RvtNearChunks.h>
 #include <HorizonRendering/FrameCull.h>
 #include <HorizonRendering/FrustumCuller.h>
 #include <HorizonRendering/OcclusionCuller.h>
@@ -49,6 +52,27 @@ public:
 	void  SetViewportSize(uint32_t width, uint32_t height) override;
 	void* GetViewportTexture() override;
 	bool  CaptureViewport(std::vector<uint8_t>& rgba, uint32_t& width, uint32_t& height) override;
+	// Runtime Virtual Texture (Thema 333, docs/rvt-design-2026-11-04.md): the page pool, one page table per consumer
+	// material, the per-landscape material swap. A page is RenderSceneImage's raw frame blitted (flipped: GL stores the
+	// picture bottom-row-first, the pool top-row-first) into a pool slice.
+	bool  CreateRvtPool(uint32_t slots, uint32_t pagePx) override;
+	void  DestroyRvtPool() override;
+	bool  ReadbackRvtSlot(int layer, uint32_t slot, std::vector<uint8_t>& rgba) override;
+	// HE_RVT_PACK (Thema 333 step 10): the hot pool's normal/surface layers hold two channels, not four. 0xFu once
+	// CreateRvtPool never set it (A/B switch HE_RVT_PACK=0, or before the pool exists).
+	uint32_t RvtLayerChannels(int layer) const override;
+	bool  SetRvtPageTable(const HE::UUID& consumerMaterial, const std::vector<std::vector<uint32_t>>& mips) override;
+	bool  ReadbackRvtPageTable(const HE::UUID& consumerMaterial, std::vector<std::vector<uint32_t>>& mips) override;
+	void  SetRvtLandscape(uint32_t terrainEntity, const HE::UUID& landscapeMaterial, const HE::UUID& consumerMaterial) override;
+	void  SetRvtNearChunks(uint32_t terrainEntity, const std::vector<uint32_t>& chunkEntities) override { m_rvtNear.set(terrainEntity, chunkEntities); }
+	// The tile landscape's ground under a virtual texture: the consumer and the absolute XZ rectangle its pages cover
+	// (DrawLandscape splits the frame's patches with HE::splitRvtTilePatches).
+	void  SetRvtTileGround(const HE::UUID& consumerMaterial, const glm::dvec2& minXZ, const glm::dvec2& maxXZ, float nativeNearM) override
+	{ m_tileRvtConsumer = consumerMaterial; m_tileRvtMin = minXZ; m_tileRvtMax = maxXZ; m_tileRvtNearM = nativeNearM; }
+	HE::UUID   m_tileRvtConsumer{};
+	glm::dvec2 m_tileRvtMin{ 0.0 }, m_tileRvtMax{ 0.0 };
+	float      m_tileRvtNearM = 0.0f;
+	void  ReleaseRvtConsumer(const HE::UUID& consumerMaterial) override;
 	bool  RenderSceneImage(const EditorCameraOverride& camera, uint32_t width, uint32_t height,
 	                       std::vector<uint8_t>& rgba) override;
 	void  InvalidateMaterial(const HE::UUID& materialId) override;
@@ -81,6 +105,9 @@ public:
 	                              uint32_t size, std::vector<uint8_t>& outRgba8) override;
 	bool  RenderWidgetThumbnail(const std::vector<UIRenderObject>& uiObjects,
 	                            uint32_t size, std::vector<uint8_t>& outRgba8) override;
+	void* RenderUIPreview(const std::vector<UIRenderObject>& uiObjects,
+	                      uint32_t width, uint32_t height,
+	                      const glm::vec4& clear, uint32_t slot) override;
 	void  InvalidateMesh    (const HE::UUID& meshId)     override;
 	void  InvalidateTexture (const HE::UUID& textureId)  override;
 	void  SetBloomSettings(const BloomSettings& settings) override;
@@ -102,8 +129,11 @@ public:
 	// and the flat one reads far better against the sky. Mirrors Metal.
 	bool  UnlitViewActive() const
 	{
-		return m_viewMode == HE::ViewMode::Unlit || m_viewMode == HE::ViewMode::Wireframe;
+		// The RVT debug view is drawn unlit too: its page colours must reach the screen as they are.
+		return m_viewMode == HE::ViewMode::Unlit || m_viewMode == HE::ViewMode::Wireframe
+		    || m_viewMode == HE::ViewMode::RvtDebug;
 	}
+	bool  RvtDebugViewActive() const { return m_viewMode == HE::ViewMode::RvtDebug; }
 	bool  WireframeViewActive() const { return m_viewMode == HE::ViewMode::Wireframe; }
 
 	// Multi-window support
@@ -325,7 +355,7 @@ private:
 	// frame), and HeParams rarely changes (upload only when its 64 floats differ from
 	// what the UBO already holds — still correct for per-entity param overrides).
 	bool         m_matLightUploadedThisFrame = false;
-	float        m_lastMatParams[64] = { 0 };
+	float        m_lastMatParams[HE::kMatParamFloats] = { 0 };
 	bool         m_haveMatParams = false;
 
 	// Skeletal-mesh-preview target (RenderSkeletalPreview) — own dedicated FBO,
@@ -393,6 +423,9 @@ private:
 	// editor, so this target only ever holds one thumbnail at a time.
 	unsigned int m_thumbFBO = 0, m_thumbColor = 0, m_thumbDepth = 0;
 	int          m_thumbSize = 0;
+	// RenderUIPreview's targets, one per slot (IRenderer::kUIPreviewSlots).
+	struct UIPreviewTarget { unsigned int fbo = 0, color = 0, depth = 0; int w = 0, h = 0; };
+	UIPreviewTarget m_uiPreview[IRenderer::kUIPreviewSlots];
 	// Unlit-ish mesh program shared by the mesh thumbnails and by materials that
 	// have no node graph (built-in PBR): pos/normal/uv in, fixed sun + ambient
 	// plus a roughness/metallic-driven highlight, so a flat material still reads
@@ -463,6 +496,30 @@ private:
 	// before WarmupMaterials can build a program — and then forward graph-material
 	// programs are GLSL 4.30 from fragmentClustered. macOS (GL 4.1) never gets here.
 	bool         m_forwardClustered = false;
+	// Runtime Virtual Texture (Thema 333): units 22..25 are the table and the three pool arrays (the material programs'
+	// heRvtTable/Albedo/Normal/Surface; unit 21 is heFogVolume's), so a context needs 26 fragment texture units; macOS GL (16) does not have them.
+	// By design OpenGL has no RVT cold/hot tier (no rvtSlotCold logic): the BC7 cold tier exists only on D3D11/D3D12/Vulkan,
+	// Metal has ASTC. Later RVT work (Thema 335) must not assume parity here.
+	bool         m_rvtSupported = false;
+	unsigned int m_rvtPool[3] = { 0, 0, 0 };   // GL_TEXTURE_2D_ARRAY: BaseColor SRGB8_ALPHA8, Normal / Surface RGBA8
+	uint32_t     m_rvtSlots = 0, m_rvtPagePx = 0;   // m_rvtSlots: the manager's ceiling
+	uint32_t     m_rvtAlloc = 0;                    // slices the arrays hold now: they start small and grow with the pages in use
+	bool         rvtGrowPool(uint32_t slot);
+	// HE_RVT_PACK (Thema 333 step 10, counterpart of Metal 6k / D3D11/D3D12/Vulkan's step 10): layers 1/2 hold two
+	// channels (GL_RG8) instead of four. A page can't get there with glBlitFramebuffer (RGBA8 -> RG8 is a different
+	// component count, not a legal blit conversion), so a tiny fullscreen draw takes its place — the same transient
+	// FBO RenderSceneImage already builds for the (unpacked) blit, just drawn into instead of blitted into.
+	bool         m_rvtPack = false;
+	bool         m_rvtPackTried = false;
+	unsigned int m_rvtPackProgram = 0;
+	int          m_uRvtPackTex = -1, m_uRvtPackMode = -1, m_uRvtPackSize = -1;
+	bool         ensureRvtPackPipeline();
+	struct RvtTable { unsigned int tex = 0; uint32_t side = 0, mips = 0; };
+	std::unordered_map<HE::UUID, RvtTable> m_rvtTables;   // per consumer material
+	struct RvtSwap { HE::UUID landscapeMat, consumerMat; };
+	std::unordered_map<uint32_t, RvtSwap>  m_rvtSwaps;    // per landscape entity
+	HE::RvtNearChunks                      m_rvtNear;     // SetRvtNearChunks: chunks that keep their material
+	void         BindRvtForDraw(const HE::UUID& material);
 	unsigned int m_clusterSSBO[3]   = { 0, 0, 0 }; // lights, grid, index list
 	void         CreateClusterSSBOs();
 	void         UploadClusterLists(const HE::ClusterLightBuild& build);
@@ -742,6 +799,8 @@ private:
 	int          m_uSkyAuroraHeight   = -1; // aurora band elevation
 	int          m_uSkyAuroraFragment = -1; // aurora streak fragmentation
 	int          m_uSkyWind        = -1;  // cloud drift vector
+	int          m_uSkyWindDrift   = -1;  // where the wind has carried the clouds (HE::CloudDriftOffset)
+	int          m_uSkyCloudDomeHeight = -1; // how high the sky-dome clouds look (1 = classic)
 	int          m_uSkyNoise       = -1;  // 3D value-noise sampler
 	int          m_uSkyCloudShadowPass   = -1; // 1 = render the cloud-shadow map (transmittance only)
 	int          m_uSkyCloudShadowRegion = -1; // vec4: origin XZ, region size, map size px
@@ -749,6 +808,7 @@ private:
 	int          m_uSkyCloudMode   = -1;  // 0 = sky-dome clouds, 1 = 3D volumetric
 	int          m_uSkyCloudQuality = -1; // cloud raymarch quality: 0 Low, 1 Med, 2 High
 	int          m_uSkyCloudStyle       = -1; // 3D clouds: 0 Classic, 1 Realistic
+	int          m_uSkyCloudType        = -1; // Realistic clouds: 0..4 cell size / height profile
 	int          m_uSkyCloudInterShadows = -1; // 1 = towers darken clouds behind them
 	int          m_uSkyCloudEvolution   = -1; // shape-evolution speed (0 frozen … 2 time-lapse)
 	int          m_uSkyCameraPos   = -1;  // camera world position (3D-cloud parallax)
@@ -815,6 +875,68 @@ private:
 	void CreateTonemapPipeline();
 	void EnsureHDRTarget(int width, int height);
 	void DestroyHDRTarget();
+
+	// ── Volumetric fog (docs/volumetric-fog-plan.md, Thema 225 step 4) ───────
+	// GL 4.1 core has no compute/image-load-store: Inject and Integrate run as
+	// one fullscreen-quad draw PER Z SLICE instead of Metal's single dispatch
+	// (FogVolumeShaderSource.h's kInjectMainGL/kIntegrateMainGL). Apply is a
+	// fragment pass on every backend already. Programs are built once, lazily,
+	// at the first frame that asks (mirrors EnsureDeferredPipelines); a link
+	// failure leaves the capability off and the analytic fog running, forever.
+	bool         m_fogPipelinesTried = false;
+	bool         m_fogPipelinesOk    = false; // GetCapabilities().supportsVolumetricFog
+	unsigned int m_fogInjectProgram    = 0;
+	unsigned int m_fogIntegrateProgram = 0;
+	unsigned int m_fogApplyProgram     = 0;
+	unsigned int m_fogVolUBO   = 0; // HeFogVol block (288 B, FogVolume.h), GL uniform binding point 9
+	unsigned int m_fogLightUBO = 0; // Inject-only HeLighting fill (incl. REAL CSM matrices, like m_resolveLightUBO)
+	// Inject's temporal history: 3D RGBA16F, ping-ponged like Metal's m_fogInject[2].
+	unsigned int m_fogInjectTex[2] = { 0, 0 };
+	unsigned int m_fogInjectFBO    = 0; // one COLOR0, re-targeted per Z layer via glFramebufferTextureLayer
+	// Integrate's running (L, T) state across the N per-slice draws: a 2D
+	// RGBA32F accumulator, ping-ponged (never read AND written by the same
+	// draw — GL 4.1 has no texture barrier). Cleared to the identity (0,0,0,1)
+	// once per frame before slice 0.
+	unsigned int m_fogAccumTex[2] = { 0, 0 };
+	unsigned int m_fogIntegrateFBO = 0; // MRT: attachment 0 = accum[dst] (2D), attachment 1 = m_fogIntegratedTex layer k
+	// The final integrated volume: 3D RGBA16F, what heFogVolume (material unit 21)
+	// and the Apply pass both read. Owns no history of its own — Integrate
+	// rewrites every layer every frame.
+	unsigned int m_fogIntegratedTex = 0;
+	unsigned int m_fogApplyFBO      = 0; // colour-only (m_hdrColor); depth is a TEXTURE input, never an attachment here
+	unsigned int m_fogDummy3D       = 0; // 1x1x1 dummy bound at material unit 21 when the volume is off (never a null sampler)
+	glm::ivec3   m_fogGrid      { 0 };
+	int          m_fogHist      = 0;     // which of m_fogInjectTex[] holds LAST frame's result
+	bool         m_fogHistValid = false;
+	uint32_t     m_fogFrameIndex = 0;
+	glm::vec3    m_fogNoiseOffset { 0.0f };
+	float        m_fogNoiseTime   = 0.0f;
+	double       m_fogLastTime    = 0.0;
+	glm::vec3    m_fogPrevCam     { 0.0f };
+	float        m_fogPrevFocal   = 0.0f;
+	glm::mat4    m_fogPrevViewProj  { 1.0f };
+	glm::mat4    m_fogViewProjFlip  { 1.0f }; // y-flipped viewProj for heApplyFogT (froxel/Metal-style top-left uv)
+	bool         m_fogFrameActive = false;    // this frame actually ran Inject/Integrate — gates Apply + the built-ins' analytic fog
+	HE::FogVolumeData m_fogFrame; // snapshot of what Inject/Integrate ran with, for fillMatLight/Apply
+	bool EnsureFogVolumePipelines();  // builds the 3 programs once; true == supportsVolumetricFog
+	void EnsureFogVolumeTargets(const glm::ivec3& grid);
+	void DestroyFogVolumeTargets();
+	// Inject + Integrate: analog to MetalRenderer::EncodeFogVolume. Sets
+	// m_fogFrameActive and m_fogFrame; no-ops (leaving both false/default) when
+	// the scene's fog isn't in volumetric mode or the pipelines never linked.
+	// Builds its OWN HeLighting fill internally (mirrors Metal's
+	// FillMaterialLighting, a real member function) rather than reusing
+	// DrawScene's fillMatLight lambda — that lambda needs matClustered/
+	// frameClusters/aoActive, all declared later than where this must run
+	// (right after UpdateSkyEnvCube, before the opaque draws), and Inject's
+	// kernel never reads any of the clustered/AO/DDGI fields anyway.
+	// shadows/localShadows/nCascades/cascadeSplits/camFwd are the same values
+	// DrawScene already computed for BindSceneLighting.
+	void RenderFogVolume(int pw, int ph, bool shadows, bool localShadows,
+	                     int nCascades, const glm::vec4& cascadeSplits, const glm::vec3& camFwd);
+	// Apply: full-screen, colour-only blit into m_hdrColor between the sky and
+	// the translucent tail. No-op unless m_fogFrameActive.
+	void RenderFogApply(int pw, int ph);
 
 	// ── Deferred render path (G-buffer + fullscreen lighting resolve) ────────
 	// docs/deferred-renderer-plan.md. MRT FBO: GB0 = SRGB8_ALPHA8 (BaseColor +
@@ -909,6 +1031,8 @@ private:
 	uint32_t     m_taaFrameIndex      = 0;      // drives the Halton sequence
 	glm::vec2    m_taaJitter{0.0f};             // this frame's offset, pixel units (-0.5 … 0.5)
 	glm::mat4    m_taaPrevViewProj{1.0f};       // LAST frame's UNJITTERED view-proj (velocity)
+	glm::dvec3   m_taaPrevOrigin{0.0};          // the floating origin it was built for (HE::taaPrevViewProjAt)
+	bool         m_taaPrevOriginKnown = false;
 	// Per-entity model matrices of the previous frame, so a moving OBJECT under
 	// a still camera reports motion too. Keyed by entity id; swapped per frame.
 	std::unordered_map<uint32_t, glm::mat4> m_taaPrevTransforms;
@@ -1004,6 +1128,10 @@ private:
 	bool         m_specularAA        = true;   // A6 — roughness regularization
 	float        m_specularAAStrength = 1.0f;
 	bool         m_bloomEnabled   = true;
+	// EditorCameraOverride::rawOutput for the frame RenderSceneImage draws: the tonemap writes the HDR colour
+	// clamped (sRGB-encoded with rawSrgb) instead of exposure + ACES + gamma.
+	bool         m_rawCapture     = false;
+	bool         m_rawSrgb        = false;
 	float        m_bloomThreshold = 1.0f;
 	float        m_bloomKnee      = 0.5f;
 	float        m_bloomStrength  = 0.6f;
@@ -1274,6 +1402,19 @@ private:
 	unsigned int m_skyReflCube  = 0;     // GL_TEXTURE_CUBE_MAP RGBA16F, kSkyReflCubeSize²
 	unsigned int m_skyReflFBO   = 0;
 	bool         m_skyReflValid = false; // the cube holds THIS frame's sky
+	// Only kSkyReflFacesPerFrame of the six faces are redrawn per frame (the clouds drift slowly; all six at
+	// 512² cost ~2.5 ms on a 4070 at 1080p), the first frame draws all of them. A face not drawn keeps its picture.
+	// One face of 256² per frame, as on Metal (measured there: 512² x 2 faces was most of the reflection pass).
+	static constexpr int kSkyReflFacesPerFrame = 1;
+	bool         m_skyReflBaked = false; // every face holds a picture
+	int          m_skyReflPhase = 0;     // which pair of faces is next
+	// The cube graph materials bind as heSkyEnv (unit 14). Transparent surfaces (water)
+	// never reach the GI-reflection trace, so their specular lookup is the only place the
+	// real sky (aurora, stars, clouds) can show in them; the CPU-baked m_skyEnvCube has none.
+	unsigned int MaterialSkyCube() const
+	{
+		return (m_giReflEnabled && m_skyReflValid && m_skyReflCube) ? m_skyReflCube : m_skyEnvCube;
+	}
 	void         DispatchGIProbeUpdate();
 
 	static constexpr int   kGIProbeOctSize     = 8;    // octahedral tile size
@@ -1438,4 +1579,26 @@ private:
 	struct RetiredTexture { unsigned int texture; int framesLeft; };
 	std::vector<RetiredTexture> m_retiredTextures;
 	void AgeRetiredTextures();
+
+	// ── World-scale landscape (Thema 326, step 2 part B) ────────────────────
+	// DrawLandscape asks the application's provider (IRenderer::SetLandscapeProvider) for the frame of the camera it is about to render
+	// with and draws it into the bound HDR target, in the opaque pass before the sky; with `gbuffer` into the G-buffer that is bound
+	// (the material's G-buffer tail; nothing when it has none). Returns whether the ground was drawn by its material.
+	bool DrawLandscape(const glm::mat4& viewProj, unsigned int csmLightUbo = 0, bool gbuffer = false);   // csmLightUbo: a lighting block with the sun's cascades, or 0
+	void DrawLandscapeDepth(const glm::mat4& viewProj);   // into the bound depth-only target (a shadow layer)
+	void DrawLandscapeViewPos(const glm::mat4& viewProj, const glm::mat4& view);   // into the SSAO position pre-pass that is bound
+	OpenGLLandscape m_landscape;
+	bool            m_landscapeFailed = false;   // init failed once: not tried again
+	bool            m_landscapeInGBuffer = false; // this frame's G-buffer pass drew the ground: no forward draw after the resolve
+	unsigned int    m_landscapePosProgram = 0;    // DrawLandscapeViewPos: the landscape's vertex stage with a view-position fragment
+	bool            m_landscapePosTried = false;
+	void            DrawLandscapeGiGBuf(const glm::mat4& viewProj);   // into the GI pre-pass's targets that are bound
+	unsigned int    m_landscapeGiProgram = 0;     // DrawLandscapeGiGBuf: the same vertex stage with the GI pre-pass's fragment
+	bool            m_landscapeGiTried = false;
+	void            DrawLandscapeVelocity(const glm::mat4& viewProjJit, const glm::mat4& viewProjNow, const glm::mat4& viewProjPrev);   // into the TAA velocity target that is bound
+	unsigned int    m_landscapeVelProgram = 0;    // DrawLandscapeVelocity: the same vertex stage with the velocity fragment
+	bool            m_landscapeVelTried = false;
+	unsigned int    GetOrBuildLandscapeMaterialProgram(const HE::UUID& materialId, bool gbuffer = false);
+	int             m_maxFragmentSamplers = 0;   // GL_MAX_TEXTURE_IMAGE_UNITS, read at Initialize
+	HE::UUID        m_landscapeMaterialLoadTried{};   // the texture group's material this renderer tried to load from its path
 };

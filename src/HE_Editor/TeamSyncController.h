@@ -23,6 +23,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -63,9 +64,10 @@ public:
 	// project-relative paths written or removed this frame.
 	std::vector<std::string> update(std::uint64_t nowMs, const Project& project, bool playing);
 
-	// A save landed on disk (scene, asset, settings): sync kDebounceMs after
-	// the last update()'s clock, so a run of saves is one revision.
-	void noteSaved();
+	// A save landed on disk (scene, asset, settings): sync `delayMs` after the
+	// last update()'s clock, so a run of saves is one revision. A shorter delay
+	// pending already stays (a scene save is not held back by a planner edit).
+	void noteSaved(std::uint64_t delayMs = kDebounceMs);
 	// "Sync now", with an optional note for the revision.
 	void syncNow(const std::string& message = {});
 	// The project closed: stop, forget.
@@ -90,7 +92,43 @@ public:
 	// One sentence for the panel header and the footer.
 	std::string stateLine() const;
 
+	// ── Conflicts (TeamSyncService::lost) ──
+	// Every one is a notification with a Resolve action (once per conflict and
+	// editor run, withdrawn when it is resolved); Resolve calls this.
+	void setOnResolve(std::function<void(const HE::Sc::TeamSyncService::Lost&)> fn) { m_onResolve = std::move(fn); }
+	// Settles a conflict: `bytes` (the version picked or merged in the conflict
+	// window) replace the project's file and go up as "Resolve <path> (r<rev>)";
+	// null keeps the project's version as it is. False when the file could not be
+	// written (the conflict stays open).
+	bool resolve(const HE::Sc::TeamSyncService::Lost& lost, const std::string* bytes);
+	static std::string conflictKey(const HE::Sc::TeamSyncService::Lost& lost);
+	const std::filesystem::path& projectRoot() const { return m_project.root; }
+	// A live collaboration session runs (restoring a revision would fork it from the peers).
+	bool inSession() const;
+
+	// ── Feature branches ──
+	// Which branch this editor works on is its own choice (Saved/TeamSync/<team>-<project>.branch),
+	// not the project's: the team does not switch with it. "" is the project itself ("main").
+	// The service then runs on the server project "<project>--<branch>".
+	static std::string currentBranch(const std::filesystem::path& root, const std::string& team, const std::string& project);
+	static std::string serverProjectFor(const std::string& project, const std::string& branch)
+	{ return branch.empty() ? project : project + "--" + branch; }
+	const std::string& branch() const { return m_branch; }
+	// Not during a live session or an open first-sync question. A switch first uploads what
+	// is here (to the branch it was made on) and waits for that to settle; only then the folder
+	// becomes exactly the other branch's version (files it does not have are removed).
+	bool canSwitchBranch() const;
+	bool switchBranch(const std::string& name);
+	bool switching() const { return m_switchPending; }
+	// Creates the branch from the head of the project shown now, then switches to it.
+	void createBranch(const std::string& name);
+	// On a branch: back to the project, then the server merges the branch into it.
+	void mergeIntoMain();
+	bool merging() const { return !m_pendingMerge.empty(); }
+
 	static constexpr std::uint64_t kDebounceMs = 1000;
+	// Planner pages write their file at every Enter: their saves are grouped longer.
+	static constexpr std::uint64_t kPlannerDebounceMs = 10'000;
 
 private:
 	void restart(const Project& project);
@@ -111,4 +149,16 @@ private:
 	bool          m_wasClient = false; // a session client last frame
 	bool          m_wasHost   = false;
 	bool          m_wasSignedIn = false;
+	std::function<void(const HE::Sc::TeamSyncService::Lost&)> m_onResolve;
+	std::set<std::string>    m_conflictsPosted;   // conflictKey: notified this run
+	std::vector<std::string> m_localWrites;       // resolve() wrote these: returned by the next update()
+	std::string              m_branch;            // current branch, "" = the project itself
+	bool                     m_mirrorNext = false;   // the next restart mirrors the team's version (a switch)
+	std::string              m_pendingSwitch;     // createBranch: switch once the server made it
+	std::string              m_switchTo;          // made: switch when the service is idle
+	bool                     m_switchPending = false;   // switchBranch asked: upload first, then switch
+	std::string              m_switchTarget;
+	std::int64_t             m_switchAskedUnix = 0;
+	void                     doSwitch(const std::string& name);
+	std::string              m_pendingMerge;      // mergeIntoMain: merge once back on the project
 };

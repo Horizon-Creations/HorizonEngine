@@ -56,6 +56,26 @@ const Runtime::Inst* Runtime::find(InstanceId id) const
     return it != m_insts.end() ? &it->second : nullptr;
 }
 
+InstanceId Runtime::elementRef(InstanceId owner, int elem)
+{
+    if (!owner || !find(owner)) return 0;
+    const uint64_t key = (uint64_t(owner) << 32) | uint32_t(elem);
+    if (auto it = m_elementHandles.find(key); it != m_elementHandles.end()) return it->second;
+    m_elementSlots.push_back({ owner, elem });
+    const InstanceId h = kElementRefBit | InstanceId(m_elementSlots.size());
+    m_elementHandles.emplace(key, h);
+    return h;
+}
+
+const Runtime::ElementSlot* Runtime::elementSlot(InstanceId h) const
+{
+    if (!isElementRef(h)) return nullptr;
+    const size_t i = size_t(h & ~kElementRefBit);
+    if (i == 0 || i > m_elementSlots.size()) return nullptr;
+    const ElementSlot& s = m_elementSlots[i - 1];
+    return find(s.owner) ? &s : nullptr;
+}
+
 InstanceId Runtime::add(Graph graph, HostBindings bindings, ClassIdentity cls)
 {
     std::vector<Graph> one;
@@ -1430,6 +1450,15 @@ Context Runtime::makeContext(InstanceId id, size_t level)
     // Read/write a variable on another instance — only if it's declared public.
     ctx.getExternal = [this](uint32_t target, const std::string& var) -> Value
     {
+        // An element reference: `var` is one of the element's properties, read
+        // through its widget's own binding — the same one Get Property uses.
+        if (isElementRef(target))
+        {
+            const ElementSlot* s = elementSlot(target);
+            if (!s) { hcError("null reference — Get '" + var + "' on a destroyed widget's element"); return {}; }
+            const Inst* o = find(s->owner);
+            return o->host.getProperty ? o->host.getProperty(s->owner, s->elem, var) : Value{};
+        }
         const Inst* i = find(target);
         if (!i) { hcError("null reference — Get '" + var + "' on a null/destroyed object"); return {}; }
         if (i->compiled)
@@ -1447,6 +1476,14 @@ Context Runtime::makeContext(InstanceId id, size_t level)
     };
     ctx.setExternal = [this](uint32_t target, const std::string& var, const Value& val)
     {
+        if (isElementRef(target))
+        {
+            const ElementSlot* s = elementSlot(target);
+            if (!s) { hcError("null reference — Set '" + var + "' on a destroyed widget's element"); return; }
+            const Inst* o = find(s->owner);
+            if (o->host.setProperty) o->host.setProperty(s->owner, s->elem, var, val);
+            return;
+        }
         if (!find(target)) { hcError("null reference — Set '" + var + "' on a null/destroyed object"); return; }
         if (!setPublicVariable(target, var, val))
             hcWarn("variable '" + var + "' not found or not public on the target object");
@@ -1460,6 +1497,7 @@ Context Runtime::makeContext(InstanceId id, size_t level)
         return i ? i->compiled.get() : nullptr;
     };
     ctx.getSelf = [id] { return Value::ofRef(id); };
+    ctx.getElementRef = [this, id](int elem) { return Value::ofRef(elementRef(id, elem)); };
     ctx.getGameInstance = [this] { return Value::ofRef(m_gameInstance); };
     // No lookup for the one reference whose class is fixed at generation time.
     ctx.gameInstanceCompiled = [this] { return m_gameInstanceCompiled; };
@@ -1578,7 +1616,8 @@ Context Runtime::makeContext(InstanceId id, size_t level)
         --m_callDepth;
         return ok;
     };
-    ctx.isValid = [this](uint32_t target) { return find(target) != nullptr; };
+    ctx.isValid = [this](uint32_t target)
+    { return find(target) != nullptr || elementSlot(target) != nullptr; };
     ctx.isA = [this](uint32_t target, const std::string& classKey)
     { return instanceIsA(target, classKey); };
     ctx.getNodeState = [this, id, level](int nodeId) -> Value

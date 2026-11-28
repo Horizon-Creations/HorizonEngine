@@ -78,6 +78,13 @@ struct Reader {
         pos += len;
         return true;
     }
+    bool str16(std::string& s) {
+        std::uint16_t len = 0;
+        if (!u16(len) || pos + len > n) return false;
+        s.assign(reinterpret_cast<const char*>(p + pos), len);
+        pos += len;
+        return true;
+    }
     bool atEnd() const { return pos == n; }
 };
 
@@ -390,6 +397,10 @@ void TeamClient::applyReply(Reply& reply, const std::uint8_t* body, std::size_t 
             m_profilesSupported = false;
             changed();
         }
+        if (reply.op == Op::Notify && reply.result == Result::BadRequest && m_noticesSupported) {
+            HE_LOG_INFO(Net, "Team: the server carries no notices (NOTIFY unknown)");
+            m_noticesSupported = false;
+        }
         return;
     }
     Reader r{ body, n };
@@ -570,6 +581,9 @@ void TeamClient::onEvent(const std::uint8_t* p, std::size_t n) {
             break;
         case EventKind::ScHead:
             ok = r.str(ev.project) && r.u64(ev.rev) && r.str(ev.member);
+            break;
+        case EventKind::Notice:
+            ok = r.str(ev.member) && r.str16(ev.payload);
             break;
         default:
             // A newer server's event: skip it rather than drop the connection.
@@ -786,6 +800,16 @@ std::uint32_t TeamClient::revokeToken(const std::string& token, ReplyFn done) {
 
 std::uint32_t TeamClient::revokeAllTokens(ReplyFn done) {
     return request(Op::RevokeAllTokens, {}, std::move(done));
+}
+
+std::uint32_t TeamClient::notify(const std::string& member, const std::string& payload, ReplyFn done) {
+    if (payload.size() > kMaxNoticePayload) return 0;
+    std::vector<std::uint8_t> f;
+    putStr8(f, member);
+    f.push_back(static_cast<std::uint8_t>(payload.size() >> 8));
+    f.push_back(static_cast<std::uint8_t>(payload.size() & 0xFF));
+    f.insert(f.end(), payload.begin(), payload.end());
+    return request(Op::Notify, std::move(f), std::move(done));
 }
 
 std::uint32_t TeamClient::scTicket(const std::string& project, ReplyFn done) {

@@ -359,9 +359,12 @@ namespace
                             SDL_GetError());
                 throw std::runtime_error("SDL_GL_CreateContext failed: " + std::string(SDL_GetError()));
             }
-            if (!SDL_GL_SetSwapInterval(props.vsync ? 1 : 0))
+            // A window that is never shown has no display to wait for: on macOS the
+            // vsynced swap of a hidden window blocks forever after the first frame.
+            const int swapInterval = (props.vsync && !hiddenWindowRequested()) ? 1 : 0;
+            if (!SDL_GL_SetSwapInterval(swapInterval))
                 HE_LOG_WARN(Window, "SDL_GL_SetSwapInterval(%d) failed: %s — the driver is "
-                                    "overriding vsync", props.vsync ? 1 : 0, SDL_GetError());
+                                    "overriding vsync", swapInterval, SDL_GetError());
             {
                 int major = 0, minor = 0;
                 SDL_GL_GetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, &major);
@@ -464,7 +467,8 @@ namespace
         if (m_api == RendererBackend::OpenGL && m_window && m_glContext)
         {
             SDL_GL_MakeCurrent(m_window, static_cast<SDL_GLContext>(m_glContext));
-            SDL_GL_SetSwapInterval(enabled ? 1 : 0);
+            // Same reason as at creation: never vsync a window that stays hidden.
+            SDL_GL_SetSwapInterval((enabled && !hiddenWindowRequested()) ? 1 : 0);
         }
     }
 

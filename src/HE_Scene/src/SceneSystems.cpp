@@ -1,6 +1,7 @@
 #include "HorizonScene/SceneSystems.h"
 #include <algorithm>
 #include "HorizonScene/TerrainSystem.h"
+#include "HorizonScene/TrailSystem.h"
 #include "HorizonScene/AnimationSystem.h"
 #include "HorizonScene/AnimationBlendSystem.h"
 #include "HorizonScene/AnimationStateMachineSystem.h"
@@ -141,6 +142,8 @@ void SceneSystems::tickWorld(HorizonWorld& world, ContentManager& cm, IRenderer*
     // (if any) and used to each run this same view().each() search themselves.
     const WeatherComponent* weather = nullptr;
     for (auto [e, wc] : world.registry().view<WeatherComponent>().each()) { weather = &wc; break; }
+    // The trodden snow and sand heal with this weather, and the landscape reads them back through a texture.
+    { HE_PROFILE_SCOPE_N("Trails");              TrailSystem::update(world, cm, renderer, cameraPos, dt, weather); }
     if (renderer)
     {
         HE_PROFILE_SCOPE_N("GpuParticleParams");
@@ -159,6 +162,7 @@ void SceneSystems::tickWorld(HorizonWorld& world, ContentManager& cm, IRenderer*
     // The refined terrain level near the camera: it becomes levels[0] of the
     // chunk's LOD chain, so it too has to land before LOD picks.
     { HE_PROFILE_SCOPE_N("TerrainTess");    TerrainSystem::updateTessellation(world, cm, renderer, cameraPos); }
+    { HE_PROFILE_SCOPE_N("LODBind");        LODSystem::bindAssetLevels(world, cm); }
     { HE_PROFILE_SCOPE_N("LOD");            LODSystem::update(world, cameraPos); }
     // Needs the levels LOD just chose (a seam is only mixed once both sides
     // have picked theirs), so it is the one thing that runs after it.

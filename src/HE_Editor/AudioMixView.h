@@ -40,7 +40,10 @@ namespace HE::Ed::AudioMix
 	// — only while it is missing — the asset's own name, so it can be seen and
 	// kept. Returns true when a different bus was picked; `assetBus` is then the
 	// new name ("" = Master). `buses` null = no project open (Master only).
-	bool drawBusCombo(const HE::AudioBusConfig* buses, std::string& assetBus, bool enabled);
+	// `emptyLabel` names the "" entry: Master for a clip, but for a component
+	// that plays a clip "" means the clip's own bus.
+	bool drawBusCombo(const HE::AudioBusConfig* buses, std::string& assetBus, bool enabled,
+	                  const char* emptyLabel = "Master");
 
 	// ── EQ graph ─────────────────────────────────────────────────────────────
 	// Frequency on a log axis from kMinHz to kMaxHz, gain linear in dB over

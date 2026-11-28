@@ -5626,7 +5626,11 @@ const char* ImFontCalcWordWrapPositionEx(ImFont* font, float size, const char* t
         else
         {
             // End span: '.X' unless X is a digit
-            if (prev_type == ImWcharClass_Punct && curr_type != ImWcharClass_Punct && !(c >= '0' && c <= '9')) // FIXME: Digit checks might be removed if allow custom separators (#8503)
+            // HE-PATCH(wrap-dots): no break between a '.' or '"' and a letter,
+            // digit, '_' or '(' — that is a file name or a call ("config.json",
+            // check("Damage")), and ImGui split it in two. Carry on upgrades.
+            const bool he_code_char = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '(';
+            if (prev_type == ImWcharClass_Punct && curr_type != ImWcharClass_Punct && !he_code_char)
             {
                 span_end = s;
                 line_width += span_width + blank_width;

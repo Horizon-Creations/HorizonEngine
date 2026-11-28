@@ -150,6 +150,9 @@ std::string classOfRefSource(const HorizonCode::Graph& g, const HorizonCode::Nod
 	{
 		case NT::GetSelf:         return selfKey;
 		case NT::GetGameInstance: return giKey;
+		// A control class ("ui:Text"): never an asset, so a rename never matches
+		// it and loadClassGraph never finds it — the menus ask for it by prefix.
+		case NT::GetElement:      return src->className;
 		case NT::CreateObject:
 		case NT::CreateWidget:    return src->s;
 		// A Cast to an ENGINE class says nothing about a HorizonCode member: the

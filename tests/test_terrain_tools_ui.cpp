@@ -12,6 +12,7 @@
 #include <HorizonScene/FoliageSystem.h>
 #include <HorizonScene/FoliagePaint.h>
 #include <HorizonScene/Components/FoliageComponent.h>
+#include <HorizonScene/LayerMeshPresets.h>
 #include <HorizonScene/Components/MeshComponent.h>
 #include <HorizonScene/Components/TerrainComponent.h>
 #include <HorizonScene/TerrainMeshGenerator.h>   // terrainHeightAt
@@ -22,17 +23,24 @@
 #include <HorizonScene/Components/TransformComponent.h>
 #include <HorizonRendering/RenderWorld.h>
 #include <ContentManager/DefaultAssets.h>
+#include <ContentManager/ContentManager.h>
+#include <HorizonScene/TerrainPaint.h>
+#include <HorizonScene/Components/MaterialComponent.h>
+#include <MaterialGraph/AutoLandscapeMaterial.h>
 
 #include <imgui.h>
 #include <imgui_internal.h>   // GetHoveredID / FindWindowByName: which item the pointer is on
 #include <glm/gtc/matrix_transform.hpp>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <functional>
 #include <string>
+#include <thread>
 #include <vector>
 
 // ── The Landscape panel's Foliage brush, driven headless ─────────────────────
@@ -1218,3 +1226,919 @@ TEST_CASE("landscape ui: the Water panel's Physics rows set what a body of water
 	clickAt(ctx, wx, wy);
 	CHECK(locate(ctx, panelId("##lsTool0"), wx, wy));
 }
+
+#ifdef HE_EDITOR_DEPS_DIR
+// ── Texture groups: the Setup picker and the Paint list (Thema 233, step 3) ───
+// A group IS the terrain's landscape material. What this asks of the real panel: the picker lists
+// exactly the group table, picking Forest binds Forest's material and moves no weight, the Paint list
+// is then Forest's, and a stroke on one row writes only that channel (normalised to 255) at the centre
+// of the brush and nothing outside it.
+TEST_CASE("landscape ui: the Texture Group picker switches the material only, painting writes the chosen channel")
+{
+	Harness harness;
+	HorizonWorld world;
+	EditorUndo   undo;
+	undo.setWorld(&world);
+	auto& reg = world.registry();
+
+	ContentManager cm(".");
+	cm.setEngineContentRoot((std::filesystem::path(HE_EDITOR_DEPS_DIR) / "EngineContent").string());
+	for (const HE::AutoLandscapeGroup& g : HE::kAutoLandscapeGroups)
+		REQUIRE_MESSAGE(cm.loadAsset(g.materialPath) == g.materialId, g.name);
+
+	const Entity terrain = world.createEntity("Terrain");
+	reg.emplace<TransformComponent>(terrain);
+	TerrainComponent tc;
+	tc.sizeX = 100.0f; tc.sizeZ = 100.0f; tc.seed = 0; tc.weightRes = 64;
+	TerrainPaint::ensureWeightmap(tc);
+	TerrainPaint::paint(tc, 30.0f, 30.0f, 2, 8.0f, 4.0f, 1.0f);   // some paint to keep
+	reg.emplace<TerrainComponent>(terrain, tc);
+	MaterialComponent mc;
+	mc.materialAssetId = HE::kAutoLandscapeMaterialId;              // a scene from before groups
+	reg.emplace<MaterialComponent>(terrain, mc);
+
+	ContextBits bits;
+	AppContext ctx = bits.make(world, undo);
+	ctx.contentManager = &cm;
+	const std::vector<uint8_t> weights0 = tc.layerWeights;
+
+	ImGui::GetIO().AddMousePosEvent(float(W) - 2.0f, float(H) - 2.0f);
+	for (int i = 0; i < 4; ++i) panelFrame(ctx, false);
+
+	// ── Setup: one cell per row of the group table, and nothing else ──
+	float sx = 0.0f, sy = 0.0f;
+	REQUIRE(locate(ctx, panelId("##lsSetup"), sx, sy));
+	clickAt(ctx, sx, sy);
+	float gx[HE::kAutoLandscapeGroupCount], gy[HE::kAutoLandscapeGroupCount];
+	for (int i = 0; i < HE::kAutoLandscapeGroupCount; ++i)
+	{
+		const std::string id = std::string("##lsGroup") + HE::kAutoLandscapeGroups[i].name;
+		REQUIRE_MESSAGE(locate(ctx, panelId(id.c_str()), gx[i], gy[i]), id);
+	}
+	CHECK_FALSE(locate(ctx, panelId("##lsGroupMixed"), sx, sy));    // no "mixed" cell (step 7)
+	he_ui::Image img;
+	ImGui::GetIO().AddMousePosEvent(float(W) - 2.0f, float(H) - 2.0f);
+	for (int i = 0; i < 3; ++i) panelFrame(ctx, false, i == 2 ? &img : nullptr);
+	dump(img, "landscape-group-picker");
+
+	// Clicking the group the terrain already has is nothing: no undo step, no change.
+	const size_t depth0 = undo.undoDepth();
+	clickAt(ctx, gx[0], gy[0]);
+	CHECK(undo.undoDepth() == depth0);
+
+	// ── Forest: the material changes, the weights do not ──
+	clickAt(ctx, gx[1], gy[1]);
+	const HE::AutoLandscapeGroup& forest = HE::autoLandscapeGroup(HE::AutoLandscapeGroupId::Forest);
+	CHECK(reg.get<MaterialComponent>(terrain).materialAssetId == forest.materialId);
+	CHECK(reg.get<MaterialComponent>(terrain).dirty);
+	CHECK(reg.get<TerrainComponent>(terrain).layerWeights == weights0);
+	CHECK(reg.get<TerrainComponent>(terrain).layerWeights2.empty());
+	CHECK(undo.undoDepth() == depth0 + 1);
+
+	// ── Desert, the fourth cell: its own material, the weights still untouched; then back to Forest ──
+	clickAt(ctx, gx[3], gy[3]);
+	CHECK(reg.get<MaterialComponent>(terrain).materialAssetId == HE::autoLandscapeGroup(HE::AutoLandscapeGroupId::Desert).materialId);
+	CHECK(reg.get<TerrainComponent>(terrain).layerWeights == weights0);
+	clickAt(ctx, gx[1], gy[1]);
+	CHECK(reg.get<MaterialComponent>(terrain).materialAssetId == forest.materialId);
+
+	// ── Paint: Forest's list; the stroke writes the row's channel ──
+	REQUIRE(locate(ctx, panelId("##lsPaint"), sx, sy));
+	clickAt(ctx, sx, sy);
+	const MaterialAsset* fm = cm.getMaterial(forest.materialId);
+	REQUIRE(fm);
+	REQUIRE(fm->graphLayerNames.size() == static_cast<size_t>(HE::kAutoLandscapePaintLayerCount));
+	CHECK(fm->graphLayerNames[0] == "Auto");
+	CHECK(fm->graphLayerNames[1] == "Forest Floor");
+	CHECK(fm->graphLayerNames[3] == "Mossy Rock");
+	ImGui::GetIO().AddMousePosEvent(float(W) - 2.0f, float(H) - 2.0f);
+	for (int i = 0; i < 3; ++i) panelFrame(ctx, false, i == 2 ? &img : nullptr);
+	dump(img, "landscape-paint-forest");
+
+	// A row's id: PushID(i) under the body child, then "##layer".
+	auto layerRow = [&](int i, float& x, float& y)
+	{
+		ImGuiWindow* w = ImGui::FindWindowByName(kPanelWindow);
+		REQUIRE(w != nullptr);
+		for (float py = 14.0f; py < float(PH) - 14.0f; py += 4.0f)
+			for (float px = 14.0f; px < float(W) - 14.0f; px += 12.0f)
+			{
+				const ImGuiID hov = idAt(ctx, px, py);
+				for (ImGuiWindow* c : w->DC.ChildWindows)
+					if (c && hov == ImHashStr("##layer", 0, ImHashData(&i, sizeof(i), c->ID)))
+					{ x = px; y = py; return true; }
+			}
+		return false;
+	};
+	float rx = 0.0f, ry = 0.0f;
+	REQUIRE_MESSAGE(layerRow(3, rx, ry), "no 4th row (Mossy Rock) in Forest's paint list");
+	clickAt(ctx, rx, ry);
+
+	const RenderWorld snap = topDownSnapshot(120.0f);
+	const float cx = float(W) * 0.5f, cy = float(H) * 0.5f;
+	viewportFrame(ctx, snap, cx, cy, false);
+	viewportFrame(ctx, snap, cx, cy, false);
+	viewportFrame(ctx, snap, cx, cy, true);
+	viewportFrame(ctx, snap, cx, cy, false);
+
+	const TerrainComponent& painted = reg.get<TerrainComponent>(terrain);
+	REQUIRE(painted.layerWeights.size() == weights0.size());
+	auto texel = [&](const TerrainComponent& t, float lx, float lz, uint8_t* out)
+	{
+		const uint32_t n = t.weightRes;
+		const uint32_t tx = static_cast<uint32_t>(std::lround((lx / t.sizeX + 0.5f) * float(n - 1)));
+		const uint32_t tz = static_cast<uint32_t>(std::lround((lz / t.sizeZ + 0.5f) * float(n - 1)));
+		REQUIRE(TerrainPaint::texelWeights(t, tx, tz, out));
+	};
+	uint8_t centre[kTerrainMaxLayers], was[kTerrainMaxLayers], far[kTerrainMaxLayers], farWas[kTerrainMaxLayers];
+	texel(painted, 0.0f, 0.0f, centre);
+	TerrainComponent before;
+	before.sizeX = before.sizeZ = 100.0f; before.weightRes = 64;
+	before.layerWeights = weights0;
+	texel(before, 0.0f, 0.0f, was);
+	CHECK(centre[3] == 255);                                  // the chosen channel took the centre
+	int sum = 0;
+	for (int k = 0; k < kTerrainMaxLayers; ++k) sum += centre[k];
+	CHECK(sum == 255);                                        // and the texel is still normalised
+	CHECK(was[3] == 0);
+	texel(painted, 30.0f, 30.0f, far);
+	texel(before, 30.0f, 30.0f, farWas);
+	for (int k = 0; k < kTerrainMaxLayers; ++k) CHECK(far[k] == farWas[k]);   // outside the brush nothing moved
+	CHECK(far[2] > 0);                                        // the earlier paint is still there
+
+	// ── Auto (row 0) paints back to the default: a channel-0 stroke takes a texture choice back ──
+	REQUIRE(layerRow(0, rx, ry));
+	clickAt(ctx, rx, ry);
+	viewportFrame(ctx, snap, cx, cy, false);
+	viewportFrame(ctx, snap, cx, cy, true);
+	viewportFrame(ctx, snap, cx, cy, false);
+	texel(reg.get<TerrainComponent>(terrain), 0.0f, 0.0f, centre);
+	CHECK(centre[0] == 255);
+
+	// Back to Sculpt, so the file-static mode does not leak into another test.
+	for (int i = 0; i < 4; ++i) panelFrame(ctx, false);
+	REQUIRE(locate(ctx, panelId("##lsSculpt"), sx, sy));
+	clickAt(ctx, sx, sy);
+}
+TEST_CASE("landscape ui: Apply Group Meshes adds the group's layers, never removes or repeats one")
+{
+	Harness harness;
+	HorizonWorld world;
+	EditorUndo   undo;
+	undo.setWorld(&world);
+	auto& reg = world.registry();
+
+	ContentManager cm(".");
+	cm.setEngineContentRoot((std::filesystem::path(HE_EDITOR_DEPS_DIR) / "EngineContent").string());
+	for (const HE::AutoLandscapeGroup& g : HE::kAutoLandscapeGroups)
+		REQUIRE_MESSAGE(cm.loadAsset(g.materialPath) == g.materialId, g.name);
+
+	const Entity terrain = world.createEntity("Terrain");
+	reg.emplace<TransformComponent>(terrain);
+	TerrainComponent tc;
+	tc.sizeX = 100.0f; tc.sizeZ = 100.0f; tc.seed = 0; tc.weightRes = 64;
+	reg.emplace<TerrainComponent>(terrain, tc);
+	MaterialComponent mc;
+	mc.materialAssetId = HE::autoLandscapeGroup(HE::AutoLandscapeGroupId::Forest).materialId;
+	reg.emplace<MaterialComponent>(terrain, mc);
+	// A layer the author made: it carries a mesh of its own and tuned numbers, and must survive.
+	FoliageComponent fol;
+	fol.layers[0].name = "My Bush";
+	fol.layers[0].meshAssetId = HE::UUID{ 0xABCDEFULL, 0x1ULL };
+	fol.layers[0].density = 0.777f;
+	reg.emplace<FoliageComponent>(terrain, fol);
+
+	ContextBits bits;
+	AppContext ctx = bits.make(world, undo);
+	ctx.contentManager = &cm;
+	ImGui::GetIO().AddMousePosEvent(float(W) - 2.0f, float(H) - 2.0f);
+	for (int i = 0; i < 4; ++i) panelFrame(ctx, false);
+
+	float sx = 0.0f, sy = 0.0f;
+	REQUIRE(locate(ctx, panelId("##lsSetup"), sx, sy));
+	clickAt(ctx, sx, sy);
+	float bx = 0.0f, by = 0.0f;
+	REQUIRE_MESSAGE(locate(ctx, panelId("Apply Group Meshes"), bx, by), "no Apply Group Meshes button in Setup");
+
+	const auto layerNames = [&] {
+		std::vector<std::string> n;
+		for (const FoliageLayer& l : reg.get<FoliageComponent>(terrain).layers) n.push_back(l.name);
+		return n;
+	};
+	const size_t depth0 = undo.undoDepth();
+	clickAt(ctx, bx, by);
+	// Forest's four kinds, after the author's own layer (which is untouched).
+	CHECK(layerNames() == std::vector<std::string>{ "My Bush", "Fern", "Forest Stump", "Fallen Log", "Mossy Rock" });
+	{
+		const FoliageComponent& f = reg.get<FoliageComponent>(terrain);
+		CHECK(f.layers[0].density == 0.777f);
+		CHECK(f.layers[0].meshAssetId == HE::UUID{ 0xABCDEFULL, 0x1ULL });
+		CHECK(f.layers[1].meshAssetId == HE::layerMeshLevel0(HE::LayerMeshKind::Fern));
+		// Forest's row: the Mossy Rock stands from 0.13, not Mountains' 0.15.
+		CHECK(f.layers[4].slopeMin == 0.13f);
+	}
+	CHECK(undo.undoDepth() == depth0 + 1);
+
+	// Again: nothing is missing, so nothing is added and no undo step is spent.
+	clickAt(ctx, bx, by);
+	CHECK(layerNames().size() == 5u);
+	CHECK(undo.undoDepth() == depth0 + 1);
+
+	// Switching the group keeps every layer; Apply then adds that group's kinds beside them.
+	float gx = 0.0f, gy = 0.0f;
+	REQUIRE(locate(ctx, panelId("##lsGroupMountains"), gx, gy));
+	clickAt(ctx, gx, gy);
+	CHECK(reg.get<MaterialComponent>(terrain).materialAssetId == HE::kAutoLandscapeMaterialId);
+	CHECK(layerNames().size() == 5u);
+	clickAt(ctx, bx, by);
+	CHECK(layerNames().size() == 5u + 6u);
+	CHECK(layerNames()[5] == "Grass Tuft");
+	CHECK(reg.get<FoliageComponent>(terrain).layers[0].name == "My Bush");
+}
+
+// Thema 327 step 4: a material with no Landscape Foliage node (every engine group
+// material, and any custom one nobody set the node on) carries no `foliageSetId`,
+// so the button that applies a set must not even offer itself there — there is
+// nothing to apply, and showing a disabled row would just be another thing to
+// explain in a tool nobody is forced to use.
+TEST_CASE("landscape ui: Apply Foliage does not appear for a material with no foliage set")
+{
+	Harness harness;
+	HorizonWorld world;
+	EditorUndo   undo;
+	undo.setWorld(&world);
+	auto& reg = world.registry();
+
+	ContentManager cm(".");
+	cm.setEngineContentRoot((std::filesystem::path(HE_EDITOR_DEPS_DIR) / "EngineContent").string());
+
+	const Entity terrain = world.createEntity("Terrain");
+	reg.emplace<TransformComponent>(terrain);
+	TerrainComponent tc;
+	tc.sizeX = 100.0f; tc.sizeZ = 100.0f; tc.seed = 0; tc.weightRes = 64;
+	reg.emplace<TerrainComponent>(terrain, tc);
+	MaterialComponent mc;
+	mc.materialAssetId = HE::kAutoLandscapeMaterialId;   // the built-in Mountains material: no node
+	reg.emplace<MaterialComponent>(terrain, mc);
+
+	ContextBits bits;
+	AppContext ctx = bits.make(world, undo);
+	ctx.contentManager = &cm;
+	ImGui::GetIO().AddMousePosEvent(float(W) - 2.0f, float(H) - 2.0f);
+	for (int i = 0; i < 4; ++i) panelFrame(ctx, false);
+
+	float sx = 0.0f, sy = 0.0f;
+	REQUIRE(locate(ctx, panelId("##lsSetup"), sx, sy));
+	clickAt(ctx, sx, sy);
+	float bx = 0.0f, by = 0.0f;
+	CHECK_FALSE(locate(ctx, panelId("Apply Foliage"), bx, by));
+}
+
+// Thema 327 step 4: the one place that turns a LandscapeFoliageLayer asset (the
+// Landscape Foliage node's set, step 3) into something that actually scatters.
+// Placeholder meshes stand in for real foliage meshes (a human provides those
+// later, design §0); this proves the WIRING — entries become tagged layers that
+// FoliageSystem scatters exactly like a hand-added one — not any particular mesh.
+TEST_CASE("landscape ui: Apply Foliage materializes a set's entries, tags them, and re-apply "
+          "refreshes them without touching a hand-added layer or what the author tuned on its own")
+{
+	Harness harness;
+	HorizonWorld world;
+	EditorUndo   undo;
+	undo.setWorld(&world);
+	auto& reg = world.registry();
+
+	ContentManager cm(".");
+	cm.setEngineContentRoot((std::filesystem::path(HE_EDITOR_DEPS_DIR) / "EngineContent").string());
+
+	// Placeholder meshes (Thema 163/182's own instancing/pooling needs only a mesh
+	// UUID to scatter against, not a real file — the human supplies real foliage
+	// meshes later, design §0).
+	const HE::UUID tuftMesh{ 0x7001ULL, 0x1ULL };
+	const HE::UUID rockMesh{ 0x7002ULL, 0x1ULL };
+
+	LandscapeFoliageLayerAsset set;
+	set.name = "Test Set";
+	set.densityScale = 2.0f;   // "make this biome sparser/denser" (design §3), applies at Apply time
+	{
+		LandscapeFoliageEntry e;
+		e.name = "Tuft"; e.meshAssetId = tuftMesh; e.density = 0.2f;
+		e.slopeMin = 0.0f; e.slopeMax = 0.5f; e.paintLayer = 1;
+		set.entries.push_back(e);
+	}
+	{
+		LandscapeFoliageEntry e;
+		e.name = "Rock"; e.meshAssetId = rockMesh; e.density = 0.05f;
+		e.slopeMin = 0.4f; e.heightMin = 10.0f; e.paintLayer = 2;
+		set.entries.push_back(e);
+	}
+	const HE::UUID setId = cm.registerLandscapeFoliageLayer(set);
+
+	MaterialAsset mat;
+	mat.foliageSetId = setId;   // as if a Landscape Foliage node named it (step 3)
+	const HE::UUID matId = cm.registerMaterial(mat);
+
+	const Entity terrain = world.createEntity("Terrain");
+	reg.emplace<TransformComponent>(terrain);
+	TerrainComponent tc;
+	tc.sizeX = 100.0f; tc.sizeZ = 100.0f; tc.seed = 0; tc.weightRes = 64;
+	reg.emplace<TerrainComponent>(terrain, tc);
+	MaterialComponent mc;
+	mc.materialAssetId = matId;
+	reg.emplace<MaterialComponent>(terrain, mc);
+	// A layer the author made by hand: no tag, must survive untouched.
+	FoliageComponent fol;
+	fol.layers[0].name = "My Bush";
+	fol.layers[0].meshAssetId = HE::UUID{ 0xABCDEFULL, 0x1ULL };
+	fol.layers[0].density = 0.777f;
+	reg.emplace<FoliageComponent>(terrain, fol);
+
+	ContextBits bits;
+	AppContext ctx = bits.make(world, undo);
+	ctx.contentManager = &cm;
+	ImGui::GetIO().AddMousePosEvent(float(W) - 2.0f, float(H) - 2.0f);
+	for (int i = 0; i < 4; ++i) panelFrame(ctx, false);
+
+	float sx = 0.0f, sy = 0.0f;
+	REQUIRE(locate(ctx, panelId("##lsSetup"), sx, sy));
+	clickAt(ctx, sx, sy);
+	float bx = 0.0f, by = 0.0f;
+	REQUIRE_MESSAGE(locate(ctx, panelId("Apply Foliage"), bx, by), "no Apply Foliage button in Setup");
+
+	const size_t depth0 = undo.undoDepth();
+	clickAt(ctx, bx, by);
+	{
+		const FoliageComponent& f = reg.get<FoliageComponent>(terrain);
+		REQUIRE(f.layers.size() == 3u);
+		CHECK(f.layers[0].name == "My Bush");          // untouched
+		CHECK(f.layers[0].density == 0.777f);
+		CHECK(f.layers[0].sourceAssetId == HE::UUID{});
+		CHECK(f.layers[1].name == "Tuft");
+		CHECK(f.layers[1].sourceAssetId == setId);
+		CHECK(f.layers[1].sourceEntry == 0);
+		CHECK(f.layers[1].meshAssetId == tuftMesh);
+		CHECK(f.layers[1].density == doctest::Approx(0.4f));   // 0.2 * densityScale 2.0
+		CHECK(f.layers[1].slopeMax == 0.5f);
+		CHECK(f.layers[1].weightLayer == 1);
+		CHECK(f.layers[1].dirty);
+		CHECK(f.layers[2].name == "Rock");
+		CHECK(f.layers[2].sourceAssetId == setId);
+		CHECK(f.layers[2].sourceEntry == 1);
+		CHECK(f.layers[2].heightMin == 10.0f);
+		CHECK(f.layers[2].weightLayer == 2);
+	}
+	CHECK(undo.undoDepth() == depth0 + 1);
+
+	// Tune the applied layer by hand (visibility, a painted mask, its own seed) and
+	// edit the set's entry — re-apply must refresh the asset-owned fields and bring
+	// no new layer, but leave the hand-tuned per-scene state exactly as it was.
+	{
+		FoliageComponent& f = reg.get<FoliageComponent>(terrain);
+		f.layers[1].visible = false;
+		f.layers[1].seed = 999;
+		f.layers[1].densityMask.assign(16, 128);
+		f.layers[1].maskRes = 4;
+	}
+	LandscapeFoliageLayerAsset* mutSet = cm.getLandscapeFoliageLayerMutable(setId);
+	REQUIRE(mutSet);
+	mutSet->entries[0].name    = "Tuft v2";
+	mutSet->entries[0].density = 0.3f;
+
+	clickAt(ctx, bx, by);
+	{
+		const FoliageComponent& f = reg.get<FoliageComponent>(terrain);
+		REQUIRE(f.layers.size() == 3u);                // no duplicate, the tag found its layer again
+		CHECK(f.layers[1].name == "Tuft v2");           // asset-owned field refreshed
+		CHECK(f.layers[1].density == doctest::Approx(0.6f));   // 0.3 * densityScale 2.0
+		CHECK(f.layers[1].visible == false);            // the editor's own state, untouched
+		CHECK(f.layers[1].seed == 999);
+		CHECK(f.layers[1].densityMask.size() == 16u);
+		CHECK(f.layers[0].name == "My Bush");           // the hand-added layer, still untouched
+	}
+	CHECK(undo.undoDepth() == depth0 + 2);
+}
+
+// Thema 327 step 7: the review's scenario for the passive pull in the "Foliage
+// Set" row — a material names a set EngineContent has not pulled yet. The first
+// frame's ask is a true no-op (an unknown UUID, step 4's own comment: nothing is
+// in any pak/disk/remote registry for it). The set then "arrives" the way a real
+// sync delivers it: a file appears under the EngineContent root and the editor's
+// own refresh re-indexes it (ContentManager::scanContentDirectory(), which bumps
+// contentEpoch() — the same signal the "##arr" texture-array fix keys on). Before
+// this fix the function-static s_asked set only ever asked once per UUID per
+// process, so a file that arrived after that first ask was never picked up and
+// "Apply Foliage" stayed disabled until the editor restarted.
+TEST_CASE("landscape ui: Apply Foliage recovers once a pending foliage set arrives, "
+          "without an editor restart")
+{
+	Harness harness;
+	HorizonWorld world;
+	EditorUndo   undo;
+	undo.setWorld(&world);
+	auto& reg = world.registry();
+
+	struct TempDir
+	{
+		std::filesystem::path path;
+		explicit TempDir(const char* name)
+		{
+			path = std::filesystem::temp_directory_path() / name;
+			std::error_code ec;
+			std::filesystem::remove_all(path, ec);
+			std::filesystem::create_directories(path);
+		}
+		~TempDir() { std::error_code ec; std::filesystem::remove_all(path, ec); }
+	};
+	TempDir projectRoot("he_test_tt_foliage_pending_project");
+	TempDir engineRoot("he_test_tt_foliage_pending_engine");
+
+	ContentManager cm(projectRoot.path.string());
+	cm.setEngineContentRoot(engineRoot.path.string());
+
+	// As if a Landscape Foliage node (step 3) named a set the editor has not
+	// seen a file for yet — freshly generated, so it cannot collide with a UUID
+	// any other test case asked this same TerrainTools.cpp translation unit
+	// about (the retry map is a function-static, shared by every TEST_CASE in
+	// this binary).
+	const HE::UUID setId = HE::UUID::generate();
+
+	MaterialAsset mat;
+	mat.foliageSetId = setId;
+	const HE::UUID matId = cm.registerMaterial(mat);
+
+	const Entity terrain = world.createEntity("Terrain");
+	reg.emplace<TransformComponent>(terrain);
+	TerrainComponent tc;
+	tc.sizeX = 100.0f; tc.sizeZ = 100.0f; tc.seed = 0; tc.weightRes = 64;
+	reg.emplace<TerrainComponent>(terrain, tc);
+	MaterialComponent mc;
+	mc.materialAssetId = matId;
+	reg.emplace<MaterialComponent>(terrain, mc);
+
+	ContextBits bits;
+	AppContext ctx = bits.make(world, undo);
+	ctx.contentManager = &cm;
+	ImGui::GetIO().AddMousePosEvent(float(W) - 2.0f, float(H) - 2.0f);
+	for (int i = 0; i < 4; ++i) panelFrame(ctx, false);
+
+	float sx = 0.0f, sy = 0.0f;
+	REQUIRE(locate(ctx, panelId("##lsSetup"), sx, sy));
+	clickAt(ctx, sx, sy);
+	float bx = 0.0f, by = 0.0f;
+	REQUIRE_MESSAGE(locate(ctx, panelId("Apply Foliage"), bx, by), "no Apply Foliage button in Setup");
+
+	// Not resident, nothing on disk yet: the ask made inside panelFrame() above
+	// is a clean no-op. Clicking must do nothing.
+	const size_t depth0 = undo.undoDepth();
+	clickAt(ctx, bx, by);
+	CHECK_FALSE(reg.any_of<FoliageComponent>(terrain));
+	CHECK(undo.undoDepth() == depth0);
+	CHECK(cm.getLandscapeFoliageLayer(setId) == nullptr);
+
+	// The set "arrives": EngineContent writes the real file under the engine
+	// content root, and the editor's own refresh re-indexes it — in production
+	// this is what bumps contentEpoch() (ContentManager::scanContentDirectory()).
+	{
+		ContentManager author(engineRoot.path.string());
+		LandscapeFoliageLayerAsset set;
+		set.type = HE::AssetType::LandscapeFoliageLayer;
+		set.name = "LF_Pending";
+		set.path = "LandscapeFoliage/LF_Pending.hasset";
+		set.id   = setId;
+		LandscapeFoliageEntry e;
+		e.name = "Tuft"; e.meshAssetId = HE::UUID{ 0x7003ULL, 0x1ULL }; e.density = 0.3f;
+		set.entries.push_back(e);
+		REQUIRE(author.saveAsset(set));
+	}
+	cm.scanContentDirectory();
+
+	// One more frame: the retry must fire now that the epoch moved, queuing the
+	// real disk load — it has not completed on THIS frame yet, the panel never
+	// blocks for it.
+	panelFrame(ctx, false);
+	CHECK(cm.getLandscapeFoliageLayer(setId) == nullptr);
+
+	// Drain the async read, the same way ContentManager's own worker completes it.
+	bool loaded = false;
+	for (int i = 0; i < 400 && !loaded; ++i)
+	{
+		cm.pollAsyncResults(16);
+		loaded = cm.getLandscapeFoliageLayer(setId) != nullptr;
+		if (!loaded) std::this_thread::sleep_for(std::chrono::milliseconds(2));
+	}
+	REQUIRE_MESSAGE(loaded, "the retried loadAssetAsync never resolved the pending set");
+
+	// One more draw: the row now shows the set, and Apply Foliage works without
+	// any restart.
+	panelFrame(ctx, false);
+	REQUIRE(locate(ctx, panelId("Apply Foliage"), bx, by));
+	clickAt(ctx, bx, by);
+	const FoliageComponent* fol = reg.try_get<FoliageComponent>(terrain);
+	REQUIRE(fol);
+	bool found = false;
+	for (const FoliageLayer& l : fol->layers)
+		if (l.sourceAssetId == setId) { found = true; CHECK(l.name == "Tuft"); }
+	CHECK(found);
+	CHECK(undo.undoDepth() == depth0 + 1);
+}
+
+// Step 9 review-fix (point 1): ContentManager only LOGS
+// validateLandscapeFoliageLayer's problems when it loads a LFOL chunk
+// (LandscapeFoliageLayerJson.cpp / ContentManager.cpp) — it never rejects or
+// repairs them, so a hand-edited or stale .hasset can still reach Apply with a
+// negative density, an inverted min/max or slope range, or an unordered LOD
+// list. Apply must clamp every numeric field to what FoliageSystem actually
+// scatters against, not hand it straight through.
+TEST_CASE("landscape ui: Apply Foliage clamps out-of-range values from the asset "
+          "instead of writing them straight into the layer")
+{
+	Harness harness;
+	HorizonWorld world;
+	EditorUndo   undo;
+	undo.setWorld(&world);
+	auto& reg = world.registry();
+
+	ContentManager cm(".");
+	cm.setEngineContentRoot((std::filesystem::path(HE_EDITOR_DEPS_DIR) / "EngineContent").string());
+
+	const HE::UUID badMesh{ 0x7101ULL, 0x1ULL };
+	const HE::UUID negMesh{ 0x7102ULL, 0x1ULL };
+
+	LandscapeFoliageLayerAsset set;
+	set.name = "Bad Ranges Set";
+	{
+		LandscapeFoliageEntry e;
+		e.name = "BadRanges"; e.meshAssetId = badMesh; e.density = 0.3f;
+		e.minScale = 2.0f;  e.maxScale = 0.5f;            // inverted
+		e.slopeMin = 1.5f;  e.slopeMax = -0.5f;           // out of [0,1] and inverted
+		e.heightMin = 100.0f; e.heightMax = -100.0f;      // inverted
+		e.drawDistance   = -10.0f;                        // must be positive
+		e.bucketSize     = 0.0f;                          // must be positive (a scatter-grid divisor)
+		e.shadowDistance = -5.0f;                         // must be >= 0
+		e.lodHysteresis  = -2.0f;                         // must be >= 0
+		LandscapeFoliageLod lod0; lod0.distance = 50.0f; lod0.density = 2.0f;    // out of [0,1]
+		LandscapeFoliageLod lod1; lod1.distance = 10.0f; lod1.density = -1.0f;   // out of [0,1] and out of order
+		e.lods.push_back(lod0);
+		e.lods.push_back(lod1);
+		set.entries.push_back(e);
+	}
+	{
+		LandscapeFoliageEntry e;
+		e.name = "NegDensity"; e.meshAssetId = negMesh; e.density = -5.0f;   // must never scatter negatively
+		set.entries.push_back(e);
+	}
+	const HE::UUID setId = cm.registerLandscapeFoliageLayer(set);
+
+	MaterialAsset mat;
+	mat.foliageSetId = setId;
+	const HE::UUID matId = cm.registerMaterial(mat);
+
+	const Entity terrain = world.createEntity("Terrain");
+	reg.emplace<TransformComponent>(terrain);
+	TerrainComponent tc;
+	tc.sizeX = 100.0f; tc.sizeZ = 100.0f; tc.seed = 0; tc.weightRes = 64;
+	reg.emplace<TerrainComponent>(terrain, tc);
+	MaterialComponent mc;
+	mc.materialAssetId = matId;
+	reg.emplace<MaterialComponent>(terrain, mc);
+
+	ContextBits bits;
+	AppContext ctx = bits.make(world, undo);
+	ctx.contentManager = &cm;
+	ImGui::GetIO().AddMousePosEvent(float(W) - 2.0f, float(H) - 2.0f);
+	for (int i = 0; i < 4; ++i) panelFrame(ctx, false);
+
+	float sx = 0.0f, sy = 0.0f;
+	REQUIRE(locate(ctx, panelId("##lsSetup"), sx, sy));
+	clickAt(ctx, sx, sy);
+	float bx = 0.0f, by = 0.0f;
+	REQUIRE_MESSAGE(locate(ctx, panelId("Apply Foliage"), bx, by), "no Apply Foliage button in Setup");
+	clickAt(ctx, bx, by);
+
+	FoliageComponent& f = reg.get<FoliageComponent>(terrain);
+	REQUIRE(f.layers.size() == 2u);
+	FoliageLayer* bad = nullptr;
+	FoliageLayer* neg = nullptr;
+	for (FoliageLayer& l : f.layers)
+	{
+		if (l.sourceAssetId == setId && l.sourceEntry == 0) bad = &l;
+		if (l.sourceAssetId == setId && l.sourceEntry == 1) neg = &l;
+	}
+	REQUIRE(bad);
+	REQUIRE(neg);
+
+	CHECK(bad->minScale     == doctest::Approx(0.5f));     // swapped into min <= max
+	CHECK(bad->maxScale     == doctest::Approx(2.0f));
+	CHECK(bad->slopeMin     == doctest::Approx(0.0f));      // clamped into 0..1, then swapped
+	CHECK(bad->slopeMax     == doctest::Approx(1.0f));
+	CHECK(bad->heightMin    == doctest::Approx(-100.0f));   // swapped into min <= max
+	CHECK(bad->heightMax    == doctest::Approx(100.0f));
+	CHECK(bad->drawDistance   > 0.0f);                      // negative rejected, a positive default kept
+	CHECK(bad->bucketSize     > 0.0f);                      // zero rejected (it divides the scatter grid)
+	CHECK(bad->shadowDistance >= 0.0f);
+	CHECK(bad->lodHysteresis  >= 0.0f);
+	REQUIRE(bad->lods.size() == 2u);
+	CHECK(bad->lods[0].distance == doctest::Approx(10.0f));  // sorted ascending by distance
+	CHECK(bad->lods[0].density  == doctest::Approx(0.0f));   // -1 clamped into 0..1
+	CHECK(bad->lods[1].distance == doctest::Approx(50.0f));
+	CHECK(bad->lods[1].density  == doctest::Approx(1.0f));   // 2.0 clamped into 0..1
+
+	CHECK(neg->density == doctest::Approx(0.0f));   // negative density clamped, never scatters backwards
+
+	// Not just the fields: the scatter itself must tolerate the corrected ranges
+	// (no crash, no NaN instances), and the clamped-to-zero density must really
+	// spawn nothing rather than something with a garbage transform.
+	FoliageSystem::update(world);
+	CHECK_FALSE(bad->cachedInstances.empty());
+	for (const auto& m : bad->cachedInstances)
+	{
+		CHECK(std::isfinite(m[3].x));
+		CHECK(std::isfinite(m[3].y));
+		CHECK(std::isfinite(m[3].z));
+	}
+	CHECK(neg->cachedInstances.empty());
+}
+
+// Step 9 review-fix (point 2): the reuse pass used to grab ANY layer with no
+// mesh and no asset tag, even one the author had already started hand-tuning
+// (a name, a placement rule, a painted mask) before picking a mesh — an empty
+// FoliageComponent starts with exactly one such layer (FoliageComponent.h),
+// and an author can set its rules up before its mesh. Apply must never
+// silently adopt that layer, name or index collision with an asset entry or
+// not.
+TEST_CASE("landscape ui: Apply Foliage never adopts a hand-tuned layer that has no mesh yet, "
+          "even when its name collides with an asset entry's")
+{
+	Harness harness;
+	HorizonWorld world;
+	EditorUndo   undo;
+	undo.setWorld(&world);
+	auto& reg = world.registry();
+
+	ContentManager cm(".");
+	cm.setEngineContentRoot((std::filesystem::path(HE_EDITOR_DEPS_DIR) / "EngineContent").string());
+
+	const HE::UUID tuftMesh{ 0x7201ULL, 0x1ULL };
+
+	LandscapeFoliageLayerAsset set;
+	set.name = "Collide Set";
+	{
+		LandscapeFoliageEntry e;
+		e.name = "Helper Rule";       // same name as the hand layer below, on purpose
+		e.meshAssetId = tuftMesh; e.density = 0.1f;
+		set.entries.push_back(e);
+	}
+	const HE::UUID setId = cm.registerLandscapeFoliageLayer(set);
+
+	MaterialAsset mat;
+	mat.foliageSetId = setId;
+	const HE::UUID matId = cm.registerMaterial(mat);
+
+	const Entity terrain = world.createEntity("Terrain");
+	reg.emplace<TransformComponent>(terrain);
+	TerrainComponent tc;
+	tc.sizeX = 100.0f; tc.sizeZ = 100.0f; tc.seed = 0; tc.weightRes = 64;
+	reg.emplace<TerrainComponent>(terrain, tc);
+	MaterialComponent mc;
+	mc.materialAssetId = matId;
+	reg.emplace<MaterialComponent>(terrain, mc);
+
+	// The author set placement rules and painted a mask on this landscape's one
+	// starter layer, same name as the asset entry above, but never picked a
+	// mesh — a plausible, real editing order (rules first, mesh later).
+	FoliageComponent fol;
+	fol.layers[0].name        = "Helper Rule";
+	fol.layers[0].slopeMin    = 0.2f;
+	fol.layers[0].slopeMax    = 0.6f;
+	fol.layers[0].weightLayer = 3;
+	fol.layers[0].maskRes     = 4;
+	fol.layers[0].densityMask.assign(16, 200);
+	reg.emplace<FoliageComponent>(terrain, fol);
+
+	ContextBits bits;
+	AppContext ctx = bits.make(world, undo);
+	ctx.contentManager = &cm;
+	ImGui::GetIO().AddMousePosEvent(float(W) - 2.0f, float(H) - 2.0f);
+	for (int i = 0; i < 4; ++i) panelFrame(ctx, false);
+
+	float sx = 0.0f, sy = 0.0f;
+	REQUIRE(locate(ctx, panelId("##lsSetup"), sx, sy));
+	clickAt(ctx, sx, sy);
+	float bx = 0.0f, by = 0.0f;
+	REQUIRE_MESSAGE(locate(ctx, panelId("Apply Foliage"), bx, by), "no Apply Foliage button in Setup");
+	clickAt(ctx, bx, by);
+
+	const FoliageComponent& f = reg.get<FoliageComponent>(terrain);
+	REQUIRE(f.layers.size() == 2u);   // the hand layer kept, a new one added — never merged into one
+
+	// The hand layer: completely untouched, still mesh-less, still unmarked.
+	CHECK(f.layers[0].name == "Helper Rule");
+	CHECK(f.layers[0].meshAssetId == HE::UUID{});
+	CHECK(f.layers[0].slopeMin == doctest::Approx(0.2f));
+	CHECK(f.layers[0].slopeMax == doctest::Approx(0.6f));
+	CHECK(f.layers[0].weightLayer == 3);
+	CHECK(f.layers[0].densityMask.size() == 16u);
+	CHECK(f.layers[0].sourceAssetId == HE::UUID{});
+	CHECK(f.layers[0].sourceEntry == -1);
+
+	// The asset entry got its OWN new layer instead of stealing the hand one.
+	CHECK(f.layers[1].name == "Helper Rule");      // same text, different layer
+	CHECK(f.layers[1].meshAssetId == tuftMesh);
+	CHECK(f.layers[1].sourceAssetId == setId);
+	CHECK(f.layers[1].sourceEntry == 0);
+}
+
+// Step 10/11 review-fix: the same guard also has to see a layer whose ONLY hand-tuning
+// is one scalar field (default name, mesh, mask, LODs, weight layer): a slope/height
+// rule, density, seed, scale range, draw/shadow distance, bucket size, the shadow/AO
+// switches, LOD hysteresis or visibility. Each SUBCASE changes exactly one field;
+// "pristine" is the positive control: an untouched starter is still reused, so the
+// test discriminates.
+TEST_CASE("landscape ui: Apply Foliage reuses only a starter layer whose hand-tunable fields are default")
+{
+	Harness harness;
+	HorizonWorld world;
+	EditorUndo   undo;
+	undo.setWorld(&world);
+	auto& reg = world.registry();
+
+	ContentManager cm(".");
+	cm.setEngineContentRoot((std::filesystem::path(HE_EDITOR_DEPS_DIR) / "EngineContent").string());
+
+	const HE::UUID tuftMesh{ 0x7301ULL, 0x1ULL };
+
+	LandscapeFoliageLayerAsset set;
+	set.name = "Rule Set";
+	{
+		LandscapeFoliageEntry e;
+		e.name = "Tuft"; e.meshAssetId = tuftMesh; e.density = 0.1f;
+		set.entries.push_back(e);
+	}
+	const HE::UUID setId = cm.registerLandscapeFoliageLayer(set);
+
+	MaterialAsset mat;
+	mat.foliageSetId = setId;
+	const HE::UUID matId = cm.registerMaterial(mat);
+
+	const Entity terrain = world.createEntity("Terrain");
+	reg.emplace<TransformComponent>(terrain);
+	TerrainComponent tc;
+	tc.sizeX = 100.0f; tc.sizeZ = 100.0f; tc.seed = 0; tc.weightRes = 64;
+	reg.emplace<TerrainComponent>(terrain, tc);
+	MaterialComponent mc;
+	mc.materialAssetId = matId;
+	reg.emplace<MaterialComponent>(terrain, mc);
+
+	FoliageComponent fol;                       // one default starter layer
+	bool handTuned = true;
+	SUBCASE("pristine starter")  { handTuned = false; }
+	SUBCASE("slopeMin")          { fol.layers[0].slopeMin  = 0.3f; }
+	SUBCASE("slopeMax")          { fol.layers[0].slopeMax  = 0.7f; }
+	SUBCASE("heightMin")         { fol.layers[0].heightMin = 5.0f; }
+	SUBCASE("heightMax")         { fol.layers[0].heightMax = 50.0f; }
+	SUBCASE("density")           { fol.layers[0].density        = 0.5f; }
+	SUBCASE("seed")              { fol.layers[0].seed           = 7; }
+	SUBCASE("minScale")          { fol.layers[0].minScale       = 0.5f; }
+	SUBCASE("maxScale")          { fol.layers[0].maxScale       = 2.0f; }
+	SUBCASE("drawDistance")      { fol.layers[0].drawDistance   = 150.0f; }
+	SUBCASE("bucketSize")        { fol.layers[0].bucketSize     = 64.0f; }
+	SUBCASE("castsShadow")       { fol.layers[0].castsShadow    = false; }
+	SUBCASE("contributesAO")     { fol.layers[0].contributesAO  = false; }
+	SUBCASE("shadowDistance")    { fol.layers[0].shadowDistance = 40.0f; }
+	SUBCASE("lodHysteresis")     { fol.layers[0].lodHysteresis  = 5.0f; }
+	SUBCASE("visible")           { fol.layers[0].visible        = false; }
+	const FoliageLayer before = fol.layers[0];
+	reg.emplace<FoliageComponent>(terrain, fol);
+
+	ContextBits bits;
+	AppContext ctx = bits.make(world, undo);
+	ctx.contentManager = &cm;
+	ImGui::GetIO().AddMousePosEvent(float(W) - 2.0f, float(H) - 2.0f);
+	for (int i = 0; i < 4; ++i) panelFrame(ctx, false);
+
+	float sx = 0.0f, sy = 0.0f;
+	REQUIRE(locate(ctx, panelId("##lsSetup"), sx, sy));
+	clickAt(ctx, sx, sy);
+	float bx = 0.0f, by = 0.0f;
+	REQUIRE_MESSAGE(locate(ctx, panelId("Apply Foliage"), bx, by), "no Apply Foliage button in Setup");
+	clickAt(ctx, bx, by);
+
+	const FoliageComponent& f = reg.get<FoliageComponent>(terrain);
+	if (handTuned)
+	{
+		REQUIRE(f.layers.size() == 2u);                  // the rule layer kept, a new one added
+		CHECK(f.layers[0].sourceAssetId == HE::UUID{});
+		CHECK(f.layers[0].meshAssetId == HE::UUID{});
+		CHECK(f.layers[0].slopeMin  == before.slopeMin);
+		CHECK(f.layers[0].slopeMax  == before.slopeMax);
+		CHECK(f.layers[0].heightMin == before.heightMin);
+		CHECK(f.layers[0].heightMax == before.heightMax);
+		CHECK(f.layers[0].density        == before.density);
+		CHECK(f.layers[0].seed           == before.seed);
+		CHECK(f.layers[0].minScale       == before.minScale);
+		CHECK(f.layers[0].maxScale       == before.maxScale);
+		CHECK(f.layers[0].drawDistance   == before.drawDistance);
+		CHECK(f.layers[0].bucketSize     == before.bucketSize);
+		CHECK(f.layers[0].castsShadow    == before.castsShadow);
+		CHECK(f.layers[0].contributesAO  == before.contributesAO);
+		CHECK(f.layers[0].shadowDistance == before.shadowDistance);
+		CHECK(f.layers[0].lodHysteresis  == before.lodHysteresis);
+		CHECK(f.layers[0].visible        == before.visible);
+		CHECK(f.layers[1].sourceAssetId == setId);
+		CHECK(f.layers[1].meshAssetId == tuftMesh);
+	}
+	else
+	{
+		REQUIRE(f.layers.size() == 1u);                  // the starter itself was reused
+		CHECK(f.layers[0].sourceAssetId == setId);
+		CHECK(f.layers[0].meshAssetId == tuftMesh);
+	}
+}
+
+// A quick drag moves the pointer further than the brush is wide between two frames (editor frame
+// rates, a big landscape: a few metres of mouse are tens of metres of ground). One dab per frame left
+// a row of dots, and "the paint tool cannot paint" was the report. The way between two frames is
+// filled with dabs now. Here the pointer jumps 80 m in one frame under a 30 m brush: the middle of
+// the way has to be painted, the ground off to the side not.
+TEST_CASE("landscape ui: a quick paint drag leaves no gap between two frames")
+{
+	Harness harness;
+	HorizonWorld world;
+	EditorUndo   undo;
+	undo.setWorld(&world);
+	auto& reg = world.registry();
+
+	ContentManager cm(".");
+	cm.setEngineContentRoot((std::filesystem::path(HE_EDITOR_DEPS_DIR) / "EngineContent").string());
+	REQUIRE(cm.loadAsset(HE::kAutoLandscapeMaterialPath) == HE::kAutoLandscapeMaterialId);
+
+	const Entity terrain = world.createEntity("Terrain");
+	reg.emplace<TransformComponent>(terrain);
+	TerrainComponent tc;
+	tc.sizeX = 200.0f; tc.sizeZ = 200.0f; tc.seed = 0; tc.weightRes = 128;
+	TerrainPaint::ensureWeightmap(tc);
+	reg.emplace<TerrainComponent>(terrain, tc);
+	MaterialComponent mc;
+	mc.materialAssetId = HE::kAutoLandscapeMaterialId;
+	reg.emplace<MaterialComponent>(terrain, mc);
+
+	ContextBits bits;
+	AppContext ctx = bits.make(world, undo);
+	ctx.contentManager = &cm;
+
+	ImGui::GetIO().AddMousePosEvent(float(W) - 2.0f, float(H) - 2.0f);
+	for (int i = 0; i < 4; ++i) panelFrame(ctx, false);
+	float sx = 0.0f, sy = 0.0f;
+	REQUIRE(locate(ctx, panelId("##lsPaint"), sx, sy));
+	clickAt(ctx, sx, sy);
+
+	auto layerRow = [&](int i, float& x, float& y)
+	{
+		ImGuiWindow* w = ImGui::FindWindowByName(kPanelWindow);
+		REQUIRE(w != nullptr);
+		for (float py = 14.0f; py < float(PH) - 14.0f; py += 4.0f)
+			for (float px = 14.0f; px < float(W) - 14.0f; px += 12.0f)
+			{
+				const ImGuiID hov = idAt(ctx, px, py);
+				for (ImGuiWindow* c : w->DC.ChildWindows)
+					if (c && hov == ImHashStr("##layer", 0, ImHashData(&i, sizeof(i), c->ID)))
+					{ x = px; y = py; return true; }
+			}
+		return false;
+	};
+	float rx = 0.0f, ry = 0.0f;
+	REQUIRE(layerRow(2, rx, ry));
+	clickAt(ctx, rx, ry);
+
+	// Top down at 120 m: a pixel is ~0.27 m. 300 px left to right is ~80 m, the middle is the origin.
+	const RenderWorld snap = topDownSnapshot(120.0f);
+	const float cy = float(H) * 0.5f, xa = float(W) * 0.5f - 150.0f, xb = float(W) * 0.5f + 150.0f;
+	viewportFrame(ctx, snap, xa, cy, false);
+	viewportFrame(ctx, snap, xa, cy, false);
+	viewportFrame(ctx, snap, xa, cy, true);     // the press: one dab at the left end
+	viewportFrame(ctx, snap, xb, cy, true);     // one frame later the pointer is 80 m further
+	viewportFrame(ctx, snap, xb, cy, false);
+
+	const TerrainComponent& painted = reg.get<TerrainComponent>(terrain);
+	auto texel = [&](float lx, float lz, uint8_t* out)
+	{
+		const uint32_t n = painted.weightRes;
+		const uint32_t tx = static_cast<uint32_t>(std::lround((lx / painted.sizeX + 0.5f) * float(n - 1)));
+		const uint32_t tz = static_cast<uint32_t>(std::lround((lz / painted.sizeZ + 0.5f) * float(n - 1)));
+		REQUIRE(TerrainPaint::texelWeights(painted, tx, tz, out));
+	};
+	uint8_t at[kTerrainMaxLayers];
+	texel(-40.0f, 0.0f, at);  CHECK(at[2] == 255);   // the press
+	texel( 40.0f, 0.0f, at);  CHECK(at[2] == 255);   // where the pointer is now
+	texel(  0.0f, 0.0f, at);  CHECK(at[2] == 255);   // the way between them
+	texel(-20.0f, 0.0f, at);  CHECK(at[2] == 255);
+	texel(  0.0f, 30.0f, at); CHECK(at[2] == 0);     // off the line: nothing
+	texel( 60.0f, 0.0f, at);  CHECK(at[2] == 0);     // past the end: nothing
+
+	// Back to Sculpt, so the file-static mode does not leak into another test.
+	for (int i = 0; i < 4; ++i) panelFrame(ctx, false);
+	REQUIRE(locate(ctx, panelId("##lsSculpt"), sx, sy));
+	clickAt(ctx, sx, sy);
+}
+
+#endif // HE_EDITOR_DEPS_DIR

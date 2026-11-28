@@ -8,12 +8,14 @@
 #include "EditorTransformGizmo.h"        // shared move/rotate/scale gizmo
 #include "EditorMarquee.h"               // which objects a drawn frame encloses
 #include "ViewportPick.h"                // which object a click lands on (mesh before terrain)
+#include "ShaderBuildHint.h"             // "Compiling shaders 3 / 8" while pipelines build
 #include "PreviewPick.h"                 // screenRay — the surface-snap probe's ray
 #include "SplineTool.h"                  // Spline mode: points, handles, the Move gizmo on one
 #include <HorizonScene/TransformHierarchy.h>          // worldPositionOf — fresh, not a frame old
 #include <HorizonScene/Components/TerrainComponent.h>      // vertex snap skips the landscape
 #include <HorizonScene/Components/TerrainChunkComponent.h>
 #include "TerrainTools.h"                // Landscape brush cursor + sculpt stroke
+#include "LandscapeWorldTools.h"         // the tile landscape's brush
 #include "CollabPresenceBar.h"           // name tags for the other people in the session
 #include "McpCameraGizmos.h"             // …and for the MCP clients' screenshot cameras
 #include "ViewportToolbar.h"             // the strip along the top of the Scene window
@@ -538,6 +540,51 @@ namespace
 			y += lineH;
 		}
 	}
+
+	// The key to the "Virtual Texture" view (ViewMode::RvtDebug), bottom left. The swatches are the lookup's page-map colours
+	// (RvtLookup.h: hue = fract(0.33 + mip * 0.13), full saturation): keep the two in step.
+	void drawRvtMipLegend(const ImVec2& rectMin, const ImVec2& rectMax)
+	{
+		static const char* const kMipText[] = { "Mip 0  finest", "Mip 1", "Mip 2", "Mip 3", "Mip 4", "Mip 5", "Mip 6", "Mip 7+" };
+		constexpr int kMips = 8;
+		const char* const kMarks[] = {
+			"Dark stripes: a coarser page stands in (finer one not painted yet)",
+			"Light checker: the page is painted but stale",
+			"White line: page border",
+			"Black: no page at any level",
+			"Uncoloured: not drawn from the RVT",
+		};
+		constexpr int kMarkCount = 5;
+		ImDrawList* dl = ImGui::GetWindowDrawList();
+		const float pad = 6.0f, lineH = ImGui::GetTextLineHeight(), sw = lineH * 0.8f;
+		float w = 0.0f;
+		for (const char* t : kMarks) w = std::max(w, ImGui::CalcTextSize(t).x);
+		for (const char* t : kMipText) w = std::max(w, sw + pad + ImGui::CalcTextSize(t).x);
+		const ImVec2 size(w + pad * 2.0f, lineH * float(kMips + kMarkCount) + pad * 2.0f);
+		const ImVec2 p0(rectMin.x + 8.0f, rectMax.y - size.y - 8.0f);
+		const ImVec2 p1(p0.x + size.x, p0.y + size.y);
+		if (p1.x > rectMax.x || p0.y < rectMin.y) return;   // too small a pane to hold it
+		dl->AddRectFilled(p0, p1, IM_COL32(12, 11, 10, 190), 4.0f);
+		dl->AddRect(p0, p1, IM_COL32(255, 255, 255, 30), 4.0f);
+		const ImU32 text = IM_COL32(225, 222, 215, 255);
+		float y = p0.y + pad;
+		for (int m = 0; m < kMips; ++m)
+		{
+			float hue = 0.33f + float(m) * 0.13f;
+			hue -= std::floor(hue);
+			float r = 0.0f, g = 0.0f, b = 0.0f;
+			ImGui::ColorConvertHSVtoRGB(hue, 1.0f, 1.0f, r, g, b);
+			const float sy = y + (lineH - sw) * 0.5f;
+			dl->AddRectFilled(ImVec2(p0.x + pad, sy), ImVec2(p0.x + pad + sw, sy + sw), ImGui::GetColorU32(ImVec4(r, g, b, 1.0f)), 2.0f);
+			dl->AddText(ImVec2(p0.x + pad + sw + pad, y), text, kMipText[m]);
+			y += lineH;
+		}
+		for (int i = 0; i < kMarkCount; ++i)
+		{
+			dl->AddText(ImVec2(p0.x + pad, y), i == kMarkCount - 1 ? IM_COL32(160, 157, 150, 255) : text, kMarks[i]);
+			y += lineH;
+		}
+	}
 }
 
 // The actions behind the menu, also bound to keys in render(): one place for
@@ -988,6 +1035,7 @@ void render(AppContext& ctx, float dt)
 			ctx.renderer->SetViewportSize(
 				static_cast<uint32_t>(s_viewportPxW),
 				static_cast<uint32_t>(s_viewportPxH));
+			ctx.renderer->SetSceneVisible(true);   // the picture is on screen this frame (EditorUI::renderEditor resets it)
 
 			if (void* tex = ctx.renderer->GetViewportTexture())
 			{
@@ -1810,6 +1858,8 @@ void render(AppContext& ctx, float dt)
 				TerrainTools::sculptInViewport(ctx, s_sceneSnapshot, rectMin, rectMax,
 					navigating, viewportHovered, dt,
 					[](const HE::UUID& meshId) { s_aabbCache.erase(meshId); });
+				// The tile landscape's own brush ("Edit Tiles" in its Details section): a world has one kind of landscape or the other.
+				LandscapeWorldTools::brushInViewport(ctx, s_sceneSnapshot, rectMin, rectMax, navigating, viewportHovered, dt);
 
 				// ── Collaboration name tags ────────────────────────────────
 				// Last, so they sit over the gizmo and the brush cursor: this is
@@ -1833,6 +1883,13 @@ void render(AppContext& ctx, float dt)
 				// readable whatever the scene is doing underneath it.
 				if (s_showFlags.stats)
 					drawStatsOverlay(ctx, rectMin, rectMax);
+				if (s_tb.viewMode == HE::ViewMode::RvtDebug)
+					drawRvtMipLegend(rectMin, rectMax);
+				if (ctx.renderer)
+				{
+					const IRenderer::ShaderBuildStatus builds = ctx.renderer->PumpShaderBuilds();
+					HE::Ed::drawShaderBuildHint(builds.pending, builds.total, rectMin, rectMax);
+				}
 			}
 			else
 			{

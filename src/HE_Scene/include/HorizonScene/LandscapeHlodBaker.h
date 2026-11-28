@@ -1,0 +1,157 @@
+#pragma once
+// The far-landscape bake (Thema 228, docs/landscape-hlod-baked-material-2026-11-02.md): a landscape chunk,
+// photographed from straight above in three unlit views of its own material (albedo, world normal,
+// AO + roughness). The far LOD levels then draw those three small pictures instead of running the
+// material's graph (noise, texture bombing, layer blends) for every pixel of a mountain a kilometre away.
+//
+// The baker works on a scratch world holding a copy of ONE landscape, so nothing else of the scene (props,
+// foliage, sky, other landscapes) is in the picture and the live world is not touched; the renderer's world
+// is switched for the duration and back at end(). The pictures come from IRenderer::RenderSceneImage with
+// EditorCameraOverride::rawOutput, so an unlit view's colour is returned unchanged.
+#include <entt/entt.hpp>
+#include <glm/vec2.hpp>
+#include <glm/vec3.hpp>
+#include <cstdint>
+#include <memory>
+#include <string>
+#include <vector>
+#include <Types/UUID.h>
+
+class HorizonWorld;
+struct TerrainComponent;
+class ContentManager;
+class IRenderer;
+
+namespace HE::landscape
+{
+    // Three RGBA8 pictures of one chunk, `side` x `side`, row 0 = the chunk's min-Z edge, column 0 = min-X
+    // (the way a texture is uploaded, so v = (z - minZ) / size).
+    struct HlodChunkImages
+    {
+        uint32_t             side = 0;
+        std::vector<uint8_t> albedo;    // the final albedo, sRGB-encoded (upload it as an sRGB texture)
+        std::vector<uint8_t> normal;    // world normal x 0.5 + 0.5, rgb
+        std::vector<uint8_t> surface;   // r = AO, g = roughness
+    };
+
+    // World-space XZ rectangle of a chunk.
+    struct HlodChunkRect
+    {
+        glm::vec2 min{0.0f};
+        glm::vec2 size{0.0f};
+    };
+
+    class HlodBaker
+    {
+    public:
+        // `source` holds the landscape (the open scene, or a scene loaded for the export); `restoreTo` is the world
+        // the renderer draws when the baker is done (the editor's own; null = `source`).
+        HlodBaker(HorizonWorld& source, ContentManager& cm, IRenderer& renderer, HorizonWorld* restoreTo = nullptr);
+        ~HlodBaker();
+        HlodBaker(const HlodBaker&) = delete;
+        HlodBaker& operator=(const HlodBaker&) = delete;
+
+        // Copies `terrain` into the scratch world, builds the three view materials from its (Auto Landscape)
+        // material with the terrain's own parameter overrides and switches, builds the chunks and waits for
+        // the three pipelines. False with the reason in `why`: not an Auto Landscape material, a rotated or
+        // scaled landscape, a renderer without RenderSceneImage.
+        // `switchRenderer` false (the Runtime Virtual Texture driver, every frame): the renderer keeps drawing `restoreTo`;
+        // paintBegin()/paintEnd() move it to the scratch world and back around each batch of pages.
+        // `rvtPages` (RVT 2.0): the three view materials are cut from the Lit material's own RVT Write inputs (matRvtLayerViews:
+        // the baked base, without snow, the sand's ripples, puddles or trails) instead of the full-material views, and the
+        // part after the RVT Read is kept as rvtLiveGraphJson() for the driver's consumer material.
+        // `bakedViews` (RVT 2.0 step 6, only with rvtPages): the three view materials are these (RvtBaseBake.h: they sample the
+        // export's baked pictures) and the material's own page graphs are not built at all. The live graph is still made. Such a
+        // baker cannot rebuild its views (rebuildRvtViews(true) is false): the pictures are a snapshot, a change of what they
+        // were made from means the caller starts over without them.
+        bool begin(entt::entity terrain, std::string* why = nullptr, bool switchRenderer = true, bool rvtPages = false,
+                   const HE::UUID* bakedViews = nullptr);
+        bool bakedViews() const { return m_bakedViews; }
+        // RVT 2.0: builds the view materials and the live graph again from the landscape's material as it is now (a parameter
+        // before the Write node moved), in place: the same material ids, the renderer rebuilds their shaders. The scratch
+        // landscape, the chunks and the pages are untouched; the caller marks the pages stale.
+        // `views` false: only the live graph is rebuilt (a parameter after the Read node moved); the page materials are left alone.
+        bool rebuildRvtViews(bool views = true);
+        // The graph after the RVT Read (the Lit material's live part) with this landscape's parameters; empty when the
+        // views were not cut from pages.
+        const std::string& rvtLiveGraphJson() const { return m_rvtLiveJson; }
+        // Switches the renderer back to the live world and drops the scratch world. Also called by the destructor.
+        void end();
+
+        uint32_t chunksPerSide() const { return m_chunksPerSide; }
+        bool     chunkRect(uint32_t cx, uint32_t cz, HlodChunkRect& out) const;
+
+        // Renders the three views of chunk (cx, cz) at side x side texels, each from a picture `supersample`
+        // times larger per axis, box filtered down. Main thread; blocks until the GPU has finished.
+        bool bake(uint32_t cx, uint32_t cz, uint32_t side, uint32_t supersample, HlodChunkImages& out);
+        // Same for any square world rectangle (the whole landscape in one picture is the test's reference).
+        bool bakeRect(const HlodChunkRect& rect, uint32_t side, uint32_t supersample, HlodChunkImages& out);
+        // Runtime Virtual Textures (Thema 333): the same three views of `rect`, `px` x `px`, but each goes straight into
+        // slice `slot` of the renderer's RVT pool (layer 0 BaseColor, 1 Normal, 2 Surface), no readback, no filter.
+        // `layers` (bit k = layer k): only those layers of the slice are painted, the others keep what they hold (a stale page whose
+        // roughness changed repaints the AO/roughness layer and nothing else). Default all three.
+        bool renderRvtPage(const HlodChunkRect& rect, uint32_t px, uint32_t slot, uint8_t layers = 0x7);
+        void paintBegin();   // the renderer draws the scratch world ...
+        void paintEnd();     // ... and the live one again
+        // Lets the renderer drop the GPU copies of the scratch landscape's chunk meshes (InvalidateMesh) that the live landscape is not
+        // drawing itself: with the shared meshes (6i) the LOD0 of every chunk, which the page draws put on the GPU all at once (53 MB on
+        // D3D11) and which nothing needs while no page is painted. They come back on the next page draw. Returns how many were dropped.
+        uint32_t releaseIdleMeshes();
+        // Brings the scratch landscape up to date with the live one after an edit of its ground: `all` = a full copy and
+        // rebuild, otherwise only the heights are copied and the chunks under the terrain-local rect (mn..mx) rebuilt (the
+        // weight texture is shared with the live landscape, so paint needs nothing). The height range the page camera has to
+        // cover is widened to what the rebuilt chunks hold.
+        void syncTerrain(const TerrainComponent& live, bool all, glm::vec2 mn, glm::vec2 mx);
+        bool active() const { return m_active; }
+        // The scratch landscape drawn top-down with ANY material (a witness: the RVT consumer against the analytic
+        // ramp), `px` x `px` RGBA8 read back, linear (no sRGB encode).
+        bool renderMaterialImage(const HE::UUID& material, const HlodChunkRect& rect, uint32_t px, std::vector<uint8_t>& rgba);
+
+        // The material graph groups the parameters of the landscape's material came from (index into
+        // kAutoLandscapeGroups), for the caller's log line.
+        int group() const { return m_group; }
+
+        // A witness hook (HE_DUMP_RVTTEST): the three view materials the baker draws (BaseColor, Normal, Surface),
+        // replaced by materials of the caller's, e.g. one whose colour is a function of the world position.
+        // On a backend that builds material pipelines in the background (Metal) the new views are warmed here and waited for,
+        // like begin() does for the originals: a view whose pipeline is still building is not drawn, and the first page of
+        // the new material would come out blank.
+        void setViewMaterials(const HE::UUID (&mats)[3]);
+        void viewMaterials(HE::UUID (&mats)[3]) const { for (int i = 0; i < 3; ++i) mats[i] = m_viewMat[i]; }
+
+    private:
+        // Reads the live landscape's material and (re)builds the three view materials (and the live graph) from it.
+        bool buildViews(entt::entity terrain, std::string* why, bool rebuild, bool touchViews = true);
+        bool renderView(const HE::UUID& material, const HlodChunkRect& rect, uint32_t px, bool srgb,
+                        std::vector<uint8_t>& rgba, int rvtSlot = -1, int rvtLayer = 0, bool invalidate = true);
+
+        HorizonWorld&   m_live;      // the landscape is read from here
+        HorizonWorld&   m_restore;   // and the renderer goes back to this one
+        ContentManager& m_cm;
+        IRenderer&      m_renderer;
+        std::unique_ptr<HorizonWorld> m_scratch;
+        entt::entity    m_terrain = entt::null;     // the copy, in m_scratch
+        HE::UUID        m_viewMat[3]{};             // BaseColor, Normal, Surface
+        uint32_t        m_chunksPerSide = 0;
+        float           m_topY = 0.0f, m_bottomY = 0.0f;   // world heights the camera has to cover
+        std::vector<HlodChunkRect> m_rects;          // [cz * chunksPerSide + cx]
+        glm::vec3       m_pos{ 0.0f };               // the landscape's world position (terrain-local XZ is relative to it)
+        int             m_group = -1;
+        bool            m_rvtPages = false;          // the views are the Write pages of the Lit material (begin's rvtPages)
+        bool            m_bakedViews = false;        // the views sample the export's baked pictures (begin's bakedViews)
+        std::string     m_rvtLiveJson;               // the Lit material after its Read node, this landscape's parameters
+        bool            m_rvtSeen[3] = { false, false, false };   // a view material the renderer has already resolved for pages
+        bool            m_active = false;
+        // Shared chunk meshes (Thema 333, step 6i): the scratch landscape's chunk entities point at the LIVE landscape's LOD0
+        // meshes instead of generating a second copy of the whole landscape's geometry (CPU and GPU). Only when every live
+        // chunk has its LOD0 mesh resident; otherwise (an export that has not built the live chunks, HE_RVT_SHARE_MESHES=0)
+        // the scratch world builds its own as before.
+        bool            m_shared = false;
+        entt::entity    m_liveTerrain = entt::null;
+        bool addSharedChunks();                 // (re)creates the scratch chunk entities from the live ones; false = not possible
+        void refreshSharedMeshes();             // the live chunks' current LOD0 ids into the scratch chunks
+    };
+
+    // Box filter: `src` is (side*ss) x (side*ss) RGBA8, the result side x side.
+    std::vector<uint8_t> boxDownsampleRgba8(const std::vector<uint8_t>& src, uint32_t side, uint32_t ss);
+}

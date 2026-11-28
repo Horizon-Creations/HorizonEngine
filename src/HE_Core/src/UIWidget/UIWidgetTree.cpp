@@ -3343,4 +3343,258 @@ int uiAlignElements(UIWidgetTree& tree, const std::vector<int>& ids, UIAlignOp o
     return moved;
 }
 
+
+bool uiEmitElement(const UIWidgetTree& tree, const UIElement& e, const UIWidgetRect& rect,
+                   const UIWidgetCanvas& canvas, const UIElementRenderState& st,
+                   const HE::UUID& matId, std::vector<UIRenderObject>& out, UIEmitted* info)
+{
+	const float sx = canvas.scaleX;
+	const float sy = canvas.scaleY;
+	// Rect in pixels.
+	HE::UIWidgetRect px;
+	px.x = rect.x * sx; px.y = rect.y * sy;
+	px.w = rect.w * sx; px.h = rect.h * sy;
+
+	// Cut off by a clipping ancestor? An element with nothing left of it
+	// is dropped here rather than handed to the backend to scissor
+	// away — that covers both an empty clip rect (clippers that do not
+	// overlap each other) and a rect that simply misses this element,
+	// which is every row of a list that is scrolled out of view.
+	HE::UIWidgetRect clip{};
+	const bool clipped = HE::uiElementClipRect(tree, e, clip, &canvas);
+	if (clipped)
+	{
+		if (clip.w <= 0.0f || clip.h <= 0.0f) return false;
+		if (rect.x + rect.w <= clip.x || rect.x >= clip.x + clip.w ||
+		    rect.y + rect.h <= clip.y || rect.y >= clip.y + clip.h) return false;
+	}
+
+	// The element draws itself (quads + glyphs) into `out`. The scale
+	// handed over turns one of THIS element's units into a pixel, so an
+	// embedded widget's factor belongs in it: its rect is already
+	// scaled, and a font size that is not would come out 1/factor too
+	// big — the one part of an element that is not a rectangle.
+	float eus = 1.0f, evs = 1.0f;
+	HE::uiElementUnitScale(tree, e, eus, evs, &canvas);
+	// ── The drop shadow, emitted BEFORE the element ──────────────────
+	// It is the element's own shape once more, in one colour, offset and
+	// softened — a quad like any other, which is why "Schicht 0" needs
+	// no blur pass and works in every backend.
+	//
+	// Before render() so it lands UNDER this element's own quads and
+	// over everything drawn earlier, which is where a shadow belongs;
+	// the vector is appended to, never inserted into.
+	//
+	// Grown by the blur on every side: the falloff reaches that far past
+	// the shape, and a quad cut off at the shape's edge would show the
+	// shadow as a hard line. The shader measures the shape against a box
+	// inset by exactly that much (see UIRenderObject::blur).
+	const size_t emitStart = out.size();
+	if (e.shadow && e.hasSurfaceStyle() && e.shadowColor.a > 0.001f)
+	{
+		const float blurPx = std::max(0.0f, e.shadowBlur * sy * evs);
+		UIRenderObject sh;
+		// The offset is a length on each axis and takes that axis's
+		// factor; the blur is one number and follows the radius.
+		sh.position = { px.x + e.shadowOffsetX * sx * eus - blurPx,
+		                px.y + e.shadowOffsetY * sy * evs - blurPx };
+		sh.size     = { px.w + 2.0f * blurPx, px.h + 2.0f * blurPx };
+		sh.color    = e.shadowColor;
+		sh.type     = 0;
+		sh.cornerRadius = e.cornerRadius * (sy * evs);
+		sh.blur     = blurPx;
+		out.push_back(std::move(sh));
+	}
+	const size_t firstQuad = out.size();
+	e.render(px, st, matId, sy * evs, out);
+
+	// ── The element's state, handed to its material (D5 Schicht 1) ───
+	// Stamped onto the quads that actually carry the material, not onto
+	// the first quad like the border: the border asks "which quad is the
+	// surface", this asks "which quad will a shader read it in", and a
+	// widget that draws its material on a second quad still means it.
+	//
+	// Through hoverAmount()/pressAmount(), never the raw hoverT/pressT:
+	// those carry the -1 "nobody is driving this" sentinel, and a
+	// negative hover in a shader is a black button.
+	if (matId != HE::UUID{})
+	{
+		const glm::vec4 state(st.hoverAmount(), st.pressAmount(),
+		                      st.focused ? 1.0f : 0.0f,
+		                      e.enabled ? 0.0f : 1.0f);
+		for (size_t qi = firstQuad; qi < out.size(); ++qi)
+			if (out[qi].materialAssetId == matId) out[qi].uiState = state;
+	}
+
+	// ── The border, stamped onto the element's SURFACE ────────────────
+	// Only the FIRST quad an element emits, and only when it covers the
+	// element's whole rect. That is the background — the surface the
+	// border belongs to. Stamping every quad would outline a progress
+	// bar's fill as well as its track, and a slider's handle as well as
+	// its groove; testing the rect is what tells a background apart from
+	// a part drawn on top of one, without any widget type knowing that
+	// borders exist.
+	if ((e.maxCornerRadius() > 0.0f || e.borderWidth > 0.0f || e.gradient ||
+	     e.innerShadow) && out.size() > firstQuad)
+	{
+		UIRenderObject& first = out[firstQuad];
+		const bool coversRect =
+			first.type == 0 &&
+			std::abs(first.position.x - px.x) < 0.5f &&
+			std::abs(first.position.y - px.y) < 0.5f &&
+			std::abs(first.size.x - px.w)     < 0.5f &&
+			std::abs(first.size.y - px.h)     < 0.5f;
+		if (coversRect)
+		{
+			// A length, so it scales with the canvas — and clamped the
+			// way the shaders clamp it, so a radius larger than the box
+			// is a capsule rather than a mistake.
+			// All four take the SAME factor: a radius is a length along
+			// the shorter way round its corner, and giving x and y their
+			// own scale would turn a circle into an ellipse the shaders
+			// cannot draw.
+			if (e.maxCornerRadius() > 0.0f)
+				first.cornerRadius = e.cornerRadius * (sy * evs);
+			if (e.borderWidth > 0.0f)
+			{
+				// In pixels like every other length here, so a scaled
+				// canvas scales the line with the box it outlines.
+				first.borderWidth = e.borderWidth * sy * evs;
+				first.borderColor = e.borderColor;
+			}
+			if (e.gradient)
+			{
+				// The angle is not a length, so it does NOT scale.
+				first.gradient         = true;
+				first.gradientColor    = e.gradientColor;
+				first.gradientAngleDeg = e.gradientAngle;
+				first.gradientShape    = e.gradientShape;
+			}
+			// The inner shadow rides on the surface itself, because it
+			// has to be cut off by the surface's own shape — a second
+			// quad could not be.
+			if (e.innerShadow && e.innerShadowColor.a > 0.001f)
+			{
+				first.innerShadowBlur  = std::max(0.0f, e.innerShadowBlur)
+				                       * sy * evs;
+				first.innerShadowColor = e.innerShadowColor;
+			}
+		}
+	}
+
+	// Inherited opacity and the disabled dim, applied to whatever the
+	// element emitted — same reason as the clip below: a widget type
+	// with five quads gets both right without knowing they exist.
+	// Multiplied, never assigned: an element's own colours keep their
+	// alpha, they are only faded further.
+	// …and the thing under the hand is half there. A drag whose source
+	// stays solid in its old place reads as a copy, which is the wrong
+	// promise for a gesture that is about to move something.
+	const float alpha = HE::uiElementEffectiveOpacity(tree, e)
+	                  * (st.dragging ? HE::kUIDraggedAlpha : 1.0f);
+	const bool  usable = HE::uiElementEffectiveEnabled(tree, e);
+	if (alpha < 1.0f || !usable)
+	{
+		const float dim = usable ? 1.0f : HE::kUIDisabledDim;
+		for (size_t i = emitStart; i < out.size(); ++i)
+		{
+			out[i].color.r *= dim;
+			out[i].color.g *= dim;
+			out[i].color.b *= dim;
+			out[i].color.a *= alpha;
+		}
+	}
+
+	// Every quad the element just emitted inherits the clip. Stamped
+	// here rather than passed into render(), so no widget type has to
+	// know clipping exists — a type that emits five quads gets it right
+	// by construction.
+	if (clipped)
+	{
+		const glm::vec4 r(clip.x * sx, clip.y * sy,
+		                  std::max(clip.w * sx, 0.0f), std::max(clip.h * sy, 0.0f));
+		for (size_t i = emitStart; i < out.size(); ++i) out[i].clipRect = r;
+	}
+
+	// Rotation, folded down the chain: the quads are shifted so the
+	// element's own pivot lands where its ancestors' rotations carried
+	// it, and then everything turns about that point. Stamped like the
+	// clip above, so no widget type has to know rotation exists.
+	{
+		HE::UIRotation rot;
+		if (HE::uiElementRotation(tree, e, rot, &canvas))
+		{
+			const float shiftX = (rot.dstX - rot.srcX) * sx;
+			const float shiftY = (rot.dstY - rot.srcY) * sy;
+			const float rad = rot.degrees * 3.14159265358979323846f / 180.0f;
+			const glm::vec2 pivot(rot.dstX * sx, rot.dstY * sy);
+			for (size_t i = emitStart; i < out.size(); ++i)
+			{
+				out[i].position.x += shiftX;
+				out[i].position.y += shiftY;
+				out[i].rotation      = rad;
+				out[i].rotationPivot = pivot;
+			}
+		}
+	}
+
+	if (info) { info->px = px; info->eus = eus; info->evs = evs; }
+	return true;
+}
+
+
+const UIElement& uiFocusRingTarget(const UIWidgetTree& tree, const UIElement& e)
+{
+	// A search field is a rounded panel with an icon and an inset text field
+	// inside it: the field takes the keyboard, but the thing a person sees is the
+	// panel, and a ring around the field is a small rectangle floating inside a
+	// pill. The first ancestor marked focusFrame wears the ring instead.
+	for (int p = e.parentId; p != 0; )
+	{
+		const UIElement* anc = tree.find(p);
+		if (!anc) break;
+		if (anc->focusFrame) return *anc;
+		p = anc->parentId;
+	}
+	return e;
+}
+
+void uiEmitRing(const UIWidgetTree& tree, const UIElement& ringOn, const UIWidgetCanvas& canvas,
+                const glm::vec4& colour, std::vector<UIRenderObject>& out)
+{
+	constexpr float kRing = 2.0f;   // pixels
+	const float sx = canvas.scaleX, sy = canvas.scaleY;
+	const std::size_t ringFirst = out.size();
+	const UIWidgetRect rr = uiElementRect(tree, ringOn, &canvas);
+	float rus = 1.0f, rvs = 1.0f;
+	uiElementUnitScale(tree, ringOn, rus, rvs, &canvas);
+	// It follows the element's OWN corners: four hairlines can only draw a
+	// square, and around a rounded field that reads as a drawing mistake rather
+	// than as focus. No fill and a border — the shaders blend the border over
+	// the fill, so a transparent fill leaves the outline.
+	//
+	// ON the element's edge, not around it. Outside would be the prettier ring
+	// and it is the one that disappears: a text field clips its own glyphs to
+	// its rect, a list row is clipped by its box, and a ring drawn two pixels
+	// beyond the edge is two pixels of clipped-away band.
+	UIRenderObject ro;
+	ro.position = { rr.x * sx, rr.y * sy };
+	ro.size     = { rr.w * sx, rr.h * sy };
+	ro.color    = glm::vec4(0.0f);
+	ro.cornerRadius = ringOn.maxCornerRadius() > 0.0f
+		? ringOn.cornerRadius * (sy * rvs) : glm::vec4(0.0f);
+	ro.borderWidth  = kRing;
+	ro.borderColor  = colour;
+	out.push_back(std::move(ro));
+	// Clipped by whatever clips the element the ring is drawn ON — which for a
+	// focus frame is NOT the focused element.
+	UIWidgetRect rclip{};
+	if (uiElementClipRect(tree, ringOn, rclip, &canvas))
+	{
+		const glm::vec4 r(rclip.x * sx, rclip.y * sy,
+		                  std::max(rclip.w * sx, 0.0f), std::max(rclip.h * sy, 0.0f));
+		for (std::size_t k = ringFirst; k < out.size(); ++k) out[k].clipRect = r;
+	}
+}
+
 } // namespace HE

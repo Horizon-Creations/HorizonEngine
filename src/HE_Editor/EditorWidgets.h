@@ -94,6 +94,9 @@ SlotAction assetDropSlot(AppContext& ctx, const char* label, HE::UUID& target,
 bool primaryButton(const char* label, const ImVec2& size = ImVec2(0, 0));
 bool dangerButton (const char* label, const ImVec2& size = ImVec2(0, 0));
 bool cancelButton (const char* label, const ImVec2& size = ImVec2(0, 0));
+// Remove/Delete on a panel or row (not a dialog's confirm): red text on a red
+// wash, the same look as dangerSmallButton at full height.
+bool removeButton (const char* label, const ImVec2& size = ImVec2(0, 0));
 
 // The counterpart for creation: a square, frame-height "+" — big enough to be
 // a target, small enough to sit in a section header. The glyph alone carries
@@ -156,6 +159,10 @@ namespace Row
 	                float max = 0.0f, const char* fmt = "%.2f");
 	bool dragFloat4(const char* label, float* v, float speed, float min = 0.0f,
 	                float max = 0.0f, const char* fmt = "%.2f");
+	// The axis-coloured fields of dragFloat3/4 alone, no label cell, at the next
+	// item width: for a row that puts something else beside them.
+	bool axisDrag(const char* id, float* v, int n, float speed, float min = 0.0f,
+	              float max = 0.0f, const char* fmt = "%.2f");
 	bool dragInt(const char* label, int* v, float speed = 1.0f, int min = 0, int max = 0);
 	bool inputInt(const char* label, int* v);
 	bool combo(const char* label, int* v, const char* const items[], int count);

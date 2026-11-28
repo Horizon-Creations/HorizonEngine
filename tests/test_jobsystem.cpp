@@ -271,6 +271,7 @@ using HE::CancelToken;
 using HE::JobDesc;
 using HE::JobHandle;
 using HE::JobPriority;
+using HE::JobKind;
 using HE::JobStatus;
 
 // A door the test opens: jobs that wait on it hold their worker until then.
@@ -834,4 +835,282 @@ TEST_CASE("ThreadPool::stats: queued, running, cap, executed and outcomes per pr
     CHECK(s.lanes[kHigh].failed == 1);
     CHECK(s.lanes[kNorm].failed == 0);
     CHECK(s.lanes[kNorm].cancelled == 0);
+}
+
+// ─── promote(), order, queue wait, shutdown of background work ──────────────────
+namespace {
+struct OrderLog
+{
+    std::mutex       m;
+    std::vector<int> v;
+    auto rec(int x) { return [this, x] { std::lock_guard<std::mutex> l(m); v.push_back(x); }; }
+    size_t size() { std::lock_guard<std::mutex> l(m); return v.size(); }
+};
+} // namespace
+
+TEST_CASE("promote(): a queued Low job overtakes Normal ones and still runs exactly once")
+{
+    OrderLog log;
+    std::atomic<int> runs{ 0 };
+    ThreadPool pool(1);
+    ParkedWorker park(pool);
+
+    JobHandle n1 = pool.schedule(log.rec(20), desc("TestPromN1", JobPriority::Normal));
+    JobHandle l1 = pool.schedule([&] { runs.fetch_add(1); log.rec(30)(); }, desc("TestPromL1", JobPriority::Low));
+    JobHandle l2 = pool.schedule(log.rec(31), desc("TestPromL2", JobPriority::Low));
+    JobHandle n2 = pool.schedule(log.rec(21), desc("TestPromN2", JobPriority::Normal));
+
+    l1.promote(JobPriority::High);
+    CHECK(pool.queuedCount(JobPriority::High) == 1);
+    CHECK(l1.status() == JobStatus::Queued);
+
+    park.open();
+    REQUIRE(eventually([&] { return log.size() == 4; }));
+    CHECK(log.v == std::vector<int>{ 30, 20, 21, 31 });
+    // The entry left behind in the Low lane is dropped, not run a second time.
+    REQUIRE(eventually([&] { return pool.queuedCount(JobPriority::Low) == 0; }));
+    CHECK(runs.load() == 1);
+    CHECK(l1.status() == JobStatus::Done);
+}
+
+TEST_CASE("promote(): never lowers, ignores finished jobs, moves a Waiting job once it is ready")
+{
+    OrderLog log;
+    ThreadPool pool(1);
+    ParkedWorker park(pool);
+
+    JobHandle dep = pool.schedule(log.rec(1), desc("TestPromDep", JobPriority::Normal));
+    JobHandle w   = pool.schedule(log.rec(40), after("TestPromWait", { dep }, JobPriority::Low));
+    JobHandle l   = pool.schedule(log.rec(41), desc("TestPromLow", JobPriority::Low));
+    REQUIRE(w.status() == JobStatus::Waiting);
+
+    l.promote(JobPriority::Low);         // same priority: nothing
+    dep.promote(JobPriority::Low);       // lower than its own: ignored
+    CHECK(pool.queuedCount(JobPriority::Normal) == 1);
+    w.promote(JobPriority::High);        // Waiting: parked, no queue entry yet
+    CHECK(pool.queuedCount(JobPriority::High) == 0);
+
+    park.open();
+    REQUIRE(eventually([&] { return log.size() == 3; }));
+    // dep (Normal) first; its dependent then queues straight into High and beats the Low job.
+    CHECK(log.v == std::vector<int>{ 1, 40, 41 });
+
+    JobHandle done = pool.schedule([] {}, desc("TestPromDone"));
+    done.wait();
+    done.promote(JobPriority::High);     // finished: no effect, no crash
+    JobHandle none;
+    none.promote(JobPriority::High);     // empty handle
+    CHECK(done.status() == JobStatus::Done);
+}
+
+TEST_CASE("order: smaller key first within one priority, equal keys stay FIFO")
+{
+    OrderLog log;
+    ThreadPool pool(1);
+    ParkedWorker park(pool);
+    auto keyed = [](const char* name, uint32_t order, JobPriority p = JobPriority::Low) {
+        JobDesc d = desc(name, p);
+        d.order = order;
+        return d;
+    };
+    pool.schedule(log.rec(50), keyed("TestOrd50", 50));
+    pool.schedule(log.rec(10), keyed("TestOrd10a", 10));
+    pool.schedule(log.rec(11), keyed("TestOrd10b", 10));   // same key, queued later
+    pool.schedule(log.rec(30), keyed("TestOrd30", 30));
+    pool.schedule(log.rec(99), keyed("TestOrdNormal", 999, JobPriority::Normal));   // priority still wins
+
+    park.open();
+    REQUIRE(eventually([&] { return log.size() == 5; }));
+    CHECK(log.v == std::vector<int>{ 99, 10, 11, 30, 50 });
+}
+
+TEST_CASE("order: many keyed jobs come out sorted")
+{
+    OrderLog log;
+    ThreadPool pool(1);
+    ParkedWorker park(pool);
+    constexpr int kN = 200;
+    std::vector<uint32_t> keys;
+    for (int i = 0; i < kN; ++i) keys.push_back(static_cast<uint32_t>((i * 7919) % 211));
+    for (int i = 0; i < kN; ++i)
+    {
+        JobDesc d = desc("TestOrdMany", JobPriority::Low);
+        d.order = keys[i];
+        pool.schedule(log.rec(static_cast<int>(keys[i])), d);
+    }
+    park.open();
+    REQUIRE(eventually([&] { return log.size() == kN; }));
+    CHECK(std::is_sorted(log.v.begin(), log.v.end()));
+}
+
+TEST_CASE("stats: queue wait is summed per priority and the peak can be reset")
+{
+    constexpr size_t kNorm = static_cast<size_t>(JobPriority::Normal);
+    constexpr size_t kLow  = static_cast<size_t>(JobPriority::Low);
+    ThreadPool pool(1);
+    OrderLog log;
+    {
+        ParkedWorker park(pool);
+        pool.schedule(log.rec(1), desc("TestWaitN", JobPriority::Normal));
+        pool.schedule(log.rec(2), desc("TestWaitL", JobPriority::Low));
+        std::this_thread::sleep_for(std::chrono::milliseconds(40));
+        park.open();
+    }
+    REQUIRE(eventually([&] { return log.size() == 2 && pool.stats().lanes[kLow].executed == 1; }));
+    HE::ThreadPoolStats s = pool.stats();
+    // Both stood in the queue for at least the sleep (generous lower bound for slow CI).
+    CHECK(s.lanes[kNorm].waitNs >= 30'000'000ull);
+    CHECK(s.lanes[kLow].waitNs  >= 30'000'000ull);
+    CHECK(s.lanes[kNorm].waitMaxNs >= 30'000'000ull);
+    CHECK(s.lanes[kNorm].waitMaxNs <= s.lanes[kNorm].waitNs);
+
+    pool.resetPeaks();
+    s = pool.stats();
+    CHECK(s.lanes[kNorm].waitMaxNs == 0);
+    CHECK(s.lanes[kNorm].waitNs >= 30'000'000ull);   // the sum is cumulative
+}
+
+TEST_CASE("stats: a promoted job reports its whole wait, not just the time since the promote")
+{
+    constexpr size_t kHigh = static_cast<size_t>(JobPriority::High);
+    ThreadPool pool(1);
+    OrderLog log;
+    {
+        ParkedWorker park(pool);
+        JobHandle j = pool.schedule(log.rec(1), desc("TestWaitPromote", JobPriority::Low));
+        std::this_thread::sleep_for(std::chrono::milliseconds(40));
+        j.promote(JobPriority::High);
+        park.open();
+    }
+    REQUIRE(eventually([&] { return log.size() == 1 && pool.stats().lanes[kHigh].executed >= 1; }));
+    CHECK(pool.stats().lanes[kHigh].waitMaxNs >= 30'000'000ull);
+}
+
+TEST_CASE("shutdown: Low jobs that have not begun end Cancelled instead of running")
+{
+    constexpr int kJobs = 20;
+    std::atomic<int> ran{ 0 };
+    std::atomic<int> cancelledCb{ 0 };
+    std::atomic<bool> release{ false };
+    std::atomic<bool> parked{ false };
+    std::vector<JobHandle> low;
+    JobHandle high;
+    auto pool = std::make_unique<ThreadPool>(1);
+    auto blocker = pool->submit([&] {
+        parked.store(true);
+        while (!release.load()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }, "TestShutdownBlock");
+    while (!parked.load()) std::this_thread::yield();
+    for (int i = 0; i < kJobs; ++i)
+    {
+        JobDesc d = desc("TestShutdownLow", JobPriority::Low);
+        d.onCancelled = [&] { cancelledCb.fetch_add(1); };
+        low.push_back(pool->schedule([&] { ran.fetch_add(1); }, d));
+    }
+    high = pool->schedule([&] { ran.fetch_add(1000); }, desc("TestShutdownHigh", JobPriority::High));
+
+    std::thread killer([&] { pool.reset(); });
+    // The destructor is blocked joining the held worker; give it time to get there.
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    release.store(true);
+    killer.join();
+
+    CHECK(ran.load() == 1000);               // the High job ran, no Low job did
+    CHECK(cancelledCb.load() == kJobs);
+    for (auto& h : low) CHECK(h.status() == JobStatus::Cancelled);
+    CHECK(high.status() == JobStatus::Done);
+}
+
+// ─── Io jobs: their own concurrency limit, Cpu jobs behind them still start ─────────
+TEST_CASE("Io jobs never exceed the Io limit, and Cpu jobs queued behind them still run")
+{
+    ThreadPool pool(4);
+    pool.setIoConcurrencyLimit(2);
+    CHECK(pool.ioConcurrencyLimit() == 2);
+
+    std::atomic<int>  ioNow{ 0 }, ioPeak{ 0 }, ioDone{ 0 };
+    std::atomic<bool> release{ false };
+    auto ioBody = [&] {
+        const int now = ioNow.fetch_add(1) + 1;
+        int peak = ioPeak.load();
+        while (now > peak && !ioPeak.compare_exchange_weak(peak, now)) {}
+        while (!release.load()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        ioNow.fetch_sub(1);
+        ioDone.fetch_add(1);
+    };
+    std::vector<JobHandle> ios;
+    for (int i = 0; i < 6; ++i)
+    {
+        JobDesc d = desc("TestIo", JobPriority::Normal);
+        d.kind = JobKind::Io;
+        ios.push_back(pool.schedule(ioBody, d));
+    }
+    REQUIRE(eventually([&] { return ioNow.load() == 2; }));
+
+    // Queued after six Io jobs in the very same priority; two workers are idle, so it
+    // must not wait for the reads (head-of-line blocking was the failure to avoid).
+    std::atomic<bool> cpuRan{ false };
+    JobHandle cpu = pool.schedule([&] { cpuRan.store(true); }, desc("TestCpuBehindIo", JobPriority::Normal));
+    CHECK(eventually([&] { return cpuRan.load(); }));
+    CHECK(ioNow.load() == 2);
+
+    const HE::ThreadPoolStats s = pool.stats();
+    CHECK(s.ioRunning == 2);
+    CHECK(s.ioLimit == 2);
+
+    release.store(true);
+    REQUIRE(eventually([&] { return ioDone.load() == 6; }));
+    CHECK(ioPeak.load() == 2);
+    CHECK(pool.stats().ioRunning == 0);
+}
+
+TEST_CASE("Io limit: raised while jobs wait, they start at once; 0 counts as 1")
+{
+    ThreadPool pool(4);
+    pool.setIoConcurrencyLimit(0);
+    CHECK(pool.ioConcurrencyLimit() == 1);
+
+    std::atomic<int>  running{ 0 };
+    std::atomic<bool> release{ false };
+    std::vector<JobHandle> hs;
+    for (int i = 0; i < 3; ++i)
+    {
+        JobDesc d = desc("TestIoRaise");
+        d.kind = JobKind::Io;
+        hs.push_back(pool.schedule([&] {
+            running.fetch_add(1);
+            while (!release.load()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }, d));
+    }
+    REQUIRE(eventually([&] { return running.load() == 1; }));
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    CHECK(running.load() == 1);
+    pool.setIoConcurrencyLimit(3);
+    CHECK(eventually([&] { return running.load() == 3; }));
+    release.store(true);
+    for (auto& h : hs) h.wait();
+}
+
+TEST_CASE("Io jobs follow the same priority and order rules as the rest")
+{
+    OrderLog log;
+    ThreadPool pool(1);
+    ParkedWorker park(pool);
+    auto io = [](const char* n, JobPriority p, uint32_t order) {
+        JobDesc d = desc(n, p);
+        d.kind = JobKind::Io; d.order = order;
+        return d;
+    };
+    pool.schedule(log.rec(3), io("TestIoLow", JobPriority::Low, 0));
+    pool.schedule(log.rec(2), desc("TestCpuNormal", JobPriority::Normal));
+    JobDesc cpuKeyed = desc("TestCpuKeyed", JobPriority::Normal);
+    cpuKeyed.order = 5;
+    pool.schedule(log.rec(21), cpuKeyed);
+    pool.schedule(log.rec(1), io("TestIoHigh", JobPriority::High, 0));
+    pool.schedule(log.rec(20), io("TestIoNormalKeyed", JobPriority::Normal, 1));   // before the Cpu job with key 5
+    park.open();
+    REQUIRE(eventually([&] { return log.size() == 5; }));
+    // High first; in Normal the keyed Io job (1) beats the unkeyed Cpu job (0)?  No: smaller key
+    // first, so the unkeyed Cpu job (0) goes before both keyed ones.
+    CHECK(log.v == std::vector<int>{ 1, 2, 20, 21, 3 });
 }

@@ -7,6 +7,10 @@
 struct LODLevel {
     HE::UUID meshId;
     float    maxDistance = std::numeric_limits<float>::max();
+    // Optional: drawn INSTEAD of the entity's material while this level is the chosen one. A terrain chunk's far
+    // levels carry the baked far-landscape material here when the export packed one (HorizonScene/LandscapeHlod.h);
+    // a null id means the entity's own material, which is every level of every other entity. Runtime only.
+    HE::UUID materialId{};
 };
 
 // Attaches LOD levels to a mesh entity. Levels must be sorted by maxDistance
@@ -34,4 +38,10 @@ struct LODComponent {
     // only, never serialised; a null id means none.
     HE::UUID              stitchedMeshId{};
     uint8_t               stitchedLevel = 0;
+
+    // The levels are the mesh asset's own (StaticMeshAsset::lods), put here by
+    // LODSystem::bindAssetLevels for an entity nobody gave levels by hand. Runtime
+    // only, never serialised: they follow the asset — regenerated levels, or none —
+    // and the component goes away with them.
+    bool                  fromAsset = false;
 };

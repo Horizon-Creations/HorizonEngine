@@ -409,6 +409,23 @@ std::uint32_t ScClient::backupSet(const std::string& url, const std::string& bra
     return request(Op::BackupSet, std::move(f), nullptr, std::move(done));
 }
 
+std::uint32_t ScClient::branchCreate(const std::string& name, ReplyFn done) {
+    std::vector<std::uint8_t> f;
+    putStr8(f, name);
+    return request(Op::BranchCreate, std::move(f), nullptr, std::move(done));
+}
+
+std::uint32_t ScClient::branchList(ReplyFn done) {
+    return request(Op::BranchList, {}, nullptr, std::move(done));
+}
+
+std::uint32_t ScClient::branchMerge(const std::string& name, const std::string& message, ReplyFn done) {
+    std::vector<std::uint8_t> f;
+    putStr8(f, name);
+    putStr16(f, message);
+    return request(Op::BranchMerge, std::move(f), nullptr, std::move(done));
+}
+
 std::uint32_t ScClient::backupStatus(ReplyFn done) {
     return request(Op::BackupStatus, {}, nullptr, std::move(done));
 }

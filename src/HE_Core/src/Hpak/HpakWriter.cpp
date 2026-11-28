@@ -1,10 +1,15 @@
 #include <Hpak/HpakWriter.h>
+#include <Hpak/ReachFilter.h>
+#include <Hpak/MeshBakePass.h>
 #include <cstdint>
 #include <Hpak/Aes256Gcm.h>
 #include <ContentManager/Assets.h>  // MeshSection + the MSEC (de)coder
 #include <ContentManager/HAsset.h>
 #include <ContentManager/TextureArrayBuild.h> // slice math for cooked texture arrays
+#include <ContentManager/TextureBlockDecode.h> // baked per-slice means (CHUNK_TXSM)
 #include <MaterialGraph/MaterialGraph.h> // pack-time GI-hit approx re-fold
+#include <MaterialGraph/RvtSplit.h>   // matRvtEnabled: the RVT switch the cook follows
+#include <ContentManager/ContentManager.h> // rebakeRvtMaterial: a scratch manager regenerates the shader
 #include <Types/Enums.h>
 #ifdef HE_HAVE_LZ4
 #  include <lz4.h>
@@ -26,7 +31,11 @@
 #  include <bc7enc/stb_dxt.h>
 #endif
 #include <algorithm>
+#include <atomic>
+#include <thread>
+#include <iterator>
 #include <fstream>
+#include <filesystem>
 #include <string>
 #include <map>
 #include <unordered_map>
@@ -346,6 +355,47 @@ static bool mtrlGraphAndParent(const std::vector<uint8_t>& blob,
 // A ref whose target isn't in the pack becomes a null UUID placeholder so the
 // vectors stay index-parallel; the streaming frontier skips nulls. Assets of any
 // other type are returned unchanged.
+// RVT 2.0 (Thema 335): a material with an RVT Write / RVT Read node carries GLSL that was generated under whatever the RVT switch
+// said when the file was last saved; the cook copies those bytes. So the cook asks the code generator again under the switch of THIS
+// export (matRvtEnabled: off = the inline graph, the same shader a graph without the pair makes), by loading the blob into a scratch
+// ContentManager (load-time regeneration is where the shader is made) and writing it back the way a save would. Returns false, and
+// leaves `out` alone, for everything else: no RVT node in the blob, an asset that is not a material, or a material that calls a
+// function (the scratch manager has none to give, so it keeps the GLSL it came with).
+static bool rebakeRvtMaterial(const std::vector<uint8_t>& blob, std::vector<uint8_t>& out)
+{
+    auto has = [&](const char* needle) {
+        const size_t n = std::strlen(needle);
+        return std::search(blob.begin(), blob.end(), needle, needle + n) != blob.end();
+    };
+    if (!has("RVT Write") && !has("RVT Read")) return false;
+    HAsset::Reader r;
+    if (!r.openData(blob) || static_cast<HE::AssetType>(r.assetType()) != HE::AssetType::Material) return false;
+
+    ContentManager scratch;
+    const HE::UUID id = scratch.loadAssetFromMemory(blob);
+    MaterialAsset* m = id != HE::UUID{} ? scratch.getMaterialMutable(id) : nullptr;
+    if (!m || m->nodeGraphJson.empty() || !m->parentMaterialPath.empty()) return false;
+    HE::MaterialGraph g;
+    if (!HE::materialGraphFromJson(m->nodeGraphJson, g)) return false;
+    for (const HE::MatGraphNode& n : g.nodes)
+        if (n.type == HE::MatNodeType::FunctionCall) return false;
+
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    const fs::path tmp = fs::temp_directory_path(ec) / ("he_rvt_rebake_" + std::to_string(reinterpret_cast<uintptr_t>(&scratch)) + ".hasset");
+    if (ec) return false;
+    const bool wrote = scratch.writeAssetTo(*m, tmp.string());
+    bool ok = false;
+    if (wrote)
+    {
+        std::ifstream f(tmp, std::ios::binary);
+        std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+        if (!bytes.empty()) { out = std::move(bytes); ok = true; }
+    }
+    fs::remove(tmp, ec);
+    return ok;
+}
+
 static std::vector<uint8_t> rewriteRefsForPack(
     const std::vector<uint8_t>& blob,
     const std::unordered_map<std::string, HE::UUID>& pathToUuid,
@@ -458,6 +508,7 @@ static std::vector<uint8_t> rewriteRefsForPack(
             std::string parentPath;    // instance parent — approx re-fold walks it
             std::vector<std::string> switchNames;  // instance switch permutation —
             std::vector<uint8_t>     switchValues; // the fold takes the same branches
+            std::string customGBufGlsl; // the deferred tail: PSHD bakes its fragment too
             size_t afterGBuf = 0;      // end of customShaderGBufGlsl (approx tail follows)
             bool   tailReachedGBuf = false;
             {
@@ -476,9 +527,8 @@ static std::vector<uint8_t> rewriteRefsForPack(
                 // Continue to the end of customShaderGBufGlsl — the GI-hit
                 // approximation (approxBaseColor/…) sits after it and is
                 // RE-COMPUTED at pack time below.
-                std::string gbuf;
                 tailReachedGBuf = HAsset::Reader::readVec(c.data, o2, sv)     // graphLayerNames
-                               && HAsset::Reader::readString(c.data, o2, gbuf); // customShaderGBufGlsl
+                               && HAsset::Reader::readString(c.data, o2, customGBufGlsl); // customShaderGBufGlsl
                 afterGBuf = o2;
             }
 
@@ -591,10 +641,17 @@ static std::vector<uint8_t> rewriteRefsForPack(
 
             // Precompile this material's shader for the chosen backends (CHUNK_PSHD) so
             // the shipped game never cross-compiles. The editor supplies the compiler.
-            if (!customShaderGlsl.empty() && settings.shaderBackends != 0 && settings.compileShaderVariants)
+            //
+            // Not for an instance with switch overrides: ContentManager::syncMaterialInstance
+            // regenerates its shader from the PARENT's graph at load and discards whatever
+            // PSHD it carries (the permutation differs from the GLSL stored here), so baking
+            // it only ships bytes nothing reads. Its parent keeps its graph and its own PSHD.
+            if (!customShaderGlsl.empty() && switchNames.empty()
+                && settings.shaderBackends != 0 && settings.compileShaderVariants)
             {
                 std::vector<uint8_t> pshd = settings.compileShaderVariants(
-                    customShaderGlsl, customVertBody, settings.shaderBackends);
+                    customShaderGlsl, customVertBody, tailReachedGBuf ? customGBufGlsl : std::string{},
+                    settings.shaderBackends);
                 if (!pshd.empty()) w.addChunk(HAsset::CHUNK_PSHD, pshd.data(), pshd.size());
             }
             continue;
@@ -727,6 +784,87 @@ void HpakWriter::addPackedEntry(const HE::UUID& id, const HpakReader::StoredEntr
     m_entries.push_back(std::move(e));
 }
 
+bool HpakWriter::addAlias(const HE::UUID& id, const HE::UUID& target)
+{
+    size_t owner = m_entries.size();
+    for (size_t i = m_entries.size(); i-- > 0;)
+        if (m_entries[i].uuid == target) { owner = i; break; }
+    if (owner == m_entries.size()) return false;
+    if (m_entries[owner].aliasOf >= 0)
+        owner = static_cast<size_t>(m_entries[owner].aliasOf); // an alias of an alias shares the owner
+
+    PendingEntry e;
+    e.uuid        = id;
+    e.origSize    = m_entries[owner].origSize;
+    e.contentHash = m_entries[owner].contentHash;
+    e.codec       = m_entries[owner].codec;
+    e.flags       = m_entries[owner].flags;
+    std::memcpy(e.nonce, m_entries[owner].nonce, sizeof(e.nonce));
+    e.aliasOf     = static_cast<int64_t>(owner);
+    m_entries.push_back(std::move(e));
+    return true;
+}
+
+// A static mesh's detail levels (HAsset::CHUNK_MLOD) become entries of their own: the
+// game loads a level by its UUID like any mesh (and the cook below gives it the same
+// MVBO), so nothing at runtime has to know levels were ever inside another file. The
+// base keeps its level index (MLDI), whose raw UUIDs are also what lets the reach
+// filter follow a reached mesh to its levels. Each level gets the base's material
+// slots, by index, written into its MSEC — the loose file leaves them empty — so the
+// reference rewrite turns them into UUIDs like every other section. False (nothing
+// changed) for a mesh without levels.
+static bool splitMeshLods(std::vector<uint8_t>& baseBytes,
+                          std::vector<std::pair<HE::UUID, std::vector<uint8_t>>>& levels)
+{
+    HAsset::Reader r;
+    if (!r.openData(baseBytes)) return false;
+    const auto* lodChunk = r.findChunk(HAsset::CHUNK_MLOD);
+    if (!lodChunk) return false;
+    std::vector<std::vector<uint8_t>> blobs;
+    if (!HE::decodeMeshLodBlobs(lodChunk->data, blobs)) return false;
+
+    std::vector<MeshSection> slots;
+    if (const auto* c = r.findChunk(HAsset::CHUNK_MSEC)) HE::decodeMeshSections(c->data, slots);
+    const auto* mref = r.findChunk(HAsset::CHUNK_MREF);
+
+    for (const std::vector<uint8_t>& blob : blobs)
+    {
+        HAsset::Reader lr;
+        if (!lr.openData(blob)) continue;
+        HE::UUID id; std::string path; uint16_t type = 0;
+        if (!metaFromHasset(blob, id, path, type) || id == HE::UUID{}) continue;
+        HAsset::Writer w;
+        for (const HAsset::Reader::Chunk& c : lr.chunks())
+        {
+            if (c.id == HAsset::CHUNK_MREF && mref) { w.addChunk(c.id, mref->data.data(), mref->data.size()); continue; }
+            if (c.id == HAsset::CHUNK_MSEC)
+            {
+                std::vector<MeshSection> secs;
+                if (HE::decodeMeshSections(c.data, secs) && !slots.empty())
+                {
+                    for (size_t k = 0; k < secs.size(); ++k)
+                    {
+                        const MeshSection& slot = slots[std::min(k, slots.size() - 1)];
+                        secs[k].materialPath = slot.materialPath;
+                        secs[k].materialId   = slot.materialId;
+                    }
+                    const auto b = HE::encodeMeshSections(secs);
+                    w.addChunk(c.id, b.data(), b.size());
+                    continue;
+                }
+            }
+            w.addChunk(c.id, c.data.data(), c.data.size());
+        }
+        levels.emplace_back(id, w.toBytes(lr.assetType()));
+    }
+
+    HAsset::Writer base;
+    for (const HAsset::Reader::Chunk& c : r.chunks())
+        if (c.id != HAsset::CHUNK_MLOD) base.addChunk(c.id, c.data.data(), c.data.size());
+    baseBytes = base.toBytes(r.assetType());
+    return true;
+}
+
 // Box-downsample an RGBA8 image to half size (min 1px), averaging each 2x2 block
 // (clamped on odd dimensions). Used to bake the mip chain at pack time.
 static std::vector<uint8_t> halveRGBA8(const uint8_t* src, uint32_t w, uint32_t h,
@@ -825,27 +963,51 @@ static std::vector<uint8_t> cookTexture(HAsset::Reader& r, uint8_t targetFormat,
     };
     // Encode `slices` consecutive mip chains of `count` levels each, starting at w x h,
     // from tightly packed RGBA8 `src`. False when any level fails.
+    // Slices are independent chains and the encoders are stateless, so an array's slices are
+    // encoded on a few threads (a 13-slice 2048^2 BC7 array is minutes on one); the output
+    // order stays slice-major. A single chain (a plain texture) is encoded inline.
     auto encodeChains = [&](const uint8_t* src, uint32_t slices, uint32_t count,
                             std::vector<uint8_t>& dst) -> bool
     {
-        size_t off = 0;
-        for (uint32_t s = 0; s < slices; ++s)
+        size_t chainBytes = 0;   // RGBA8 bytes of one slice's chain
+        { uint32_t lw = width, lh = height;
+          for (uint32_t l = 0; l < count; ++l)
+          { chainBytes += static_cast<size_t>(lw) * lh * 4; lw = std::max<uint32_t>(1, lw >> 1); lh = std::max<uint32_t>(1, lh >> 1); } }
+        auto encodeSlice = [&](uint32_t s, std::vector<uint8_t>& out) -> bool
         {
+            size_t off = static_cast<size_t>(s) * chainBytes;
             uint32_t lw = width, lh = height;
             for (uint32_t l = 0; l < count; ++l)
             {
                 std::vector<uint8_t> enc = encodeLevel(src + off, lw, lh);
                 if (enc.empty()) return false;
-                dst.insert(dst.end(), enc.begin(), enc.end());
+                out.insert(out.end(), enc.begin(), enc.end());
                 off += static_cast<size_t>(lw) * lh * 4;
                 lw = std::max<uint32_t>(1, lw >> 1);
                 lh = std::max<uint32_t>(1, lh >> 1);
             }
-        }
+            return true;
+        };
+        std::vector<std::vector<uint8_t>> parts(slices);
+        std::atomic<uint32_t> next{0};
+        std::atomic<bool> failed{false};
+        auto worker = [&]
+        {
+            for (uint32_t s; !failed && (s = next.fetch_add(1)) < slices;)
+                if (!encodeSlice(s, parts[s])) failed = true;
+        };
+        const uint32_t threads = std::min<uint32_t>(slices, std::max(1u, std::thread::hardware_concurrency()));
+        std::vector<std::thread> pool;
+        for (uint32_t t = 1; t < threads; ++t) pool.emplace_back(worker);
+        worker();
+        for (auto& t : pool) t.join();
+        if (failed) return false;
+        for (const auto& p : parts) dst.insert(dst.end(), p.begin(), p.end());
         return true;
     };
 
     std::vector<uint8_t> levels;
+    std::vector<float>   sliceMeans; // arrays only, see CHUNK_TXSM
     uint8_t  format = 0; // HE::TextureFormat value
     uint32_t count  = 1;
     if (layers > 1)
@@ -857,6 +1019,10 @@ static std::vector<uint8_t> cookTexture(HAsset::Reader& r, uint8_t targetFormat,
         count = std::max<uint32_t>(1, existingMips);
         if (px->data.size() != static_cast<size_t>(layers) * HE::textureArraySliceBytes(width, height, count))
             return {};
+        // The CPU cannot read BC7 / ASTC back, and the GI landscape colours are the mean of
+        // five slices — so the means leave here, computed from the RGBA8 the encoder sees.
+        if (!HE::bakeTextureArraySliceMeans(px->data.data(), px->data.size(), width, height, count,
+                                            layers, srgb != 0, sliceMeans)) return {};
         if (!encodeChains(px->data.data(), layers, count, levels)) return {};
         format = targetFormat;
     }
@@ -902,10 +1068,24 @@ static std::vector<uint8_t> cookTexture(HAsset::Reader& r, uint8_t targetFormat,
         }
         else if (c.id == HAsset::CHUNK_PIXL)
             w.addChunk(HAsset::CHUNK_PIXL, levels.data(), levels.size());
-        else
+        else if (c.id != HAsset::CHUNK_TXSM) // re-baked below
             w.addChunk(c.id, c.data.data(), c.data.size());
     }
+    if (!sliceMeans.empty())
+    {
+        std::vector<uint8_t> b; HAsset::Writer::appendVec(b, sliceMeans);
+        w.addChunk(HAsset::CHUNK_TXSM, b.data(), b.size());
+    }
     return w.toBytes(r.assetType());
+}
+
+std::vector<uint8_t> Hpak::cookTextureBlob(const std::vector<uint8_t>& blob, uint8_t format,
+                                                 uint8_t quality)
+{
+    HAsset::Reader r;
+    if (!r.openData(blob) || static_cast<HE::AssetType>(r.assetType()) != HE::AssetType::Texture) return blob;
+    std::vector<uint8_t> cooked = cookTexture(r, format, quality, /*cookArrays=*/true);
+    return cooked.empty() ? blob : cooked;
 }
 
 // Pack-time asset cook: transform an already-ref-rewritten .hasset blob into a
@@ -1049,6 +1229,9 @@ int HpakWriter::addDirectories(const std::vector<SourceRoot>& roots,
     m_packedPaths.clear();
     m_packedTypes.clear();
     m_warnings.clear();
+    m_unreachableScenes.clear();
+    m_unreferencedCount = 0;
+    m_unreferencedBytes = 0;
     auto warn = [&](std::string msg)
     {
         if (settings.onWarning) settings.onWarning(msg);
@@ -1130,11 +1313,169 @@ int HpakWriter::addDirectories(const std::vector<SourceRoot>& roots,
                 // a mounted-pak asset that wasn't reached via the scene's UUID closure.
                 m_packedPaths[rel] = id;
                 if (metaInNamespace && path != rel) m_packedPaths[path] = id;
+                std::vector<std::pair<HE::UUID, std::vector<uint8_t>>> levels;
+                if (static_cast<HE::AssetType>(type) == HE::AssetType::StaticMesh)
+                    splitMeshLods(bytes, levels);
+                for (size_t n = 0; n < levels.size(); ++n)
+                {
+                    auto& [levelId, levelBytes] = levels[n];
+                    if (!claimed.insert(levelId).second)
+                    {
+                        warn(rel + ": level " + std::to_string(n + 1) + " has UUID " + uuidText(levelId)
+                             + ", which another asset already has - not packed");
+                        continue;
+                    }
+                    const std::string levelRel = rel + "#LOD" + std::to_string(n + 1);
+                    claimedBy[levelId] = levelRel;
+                    m_packedTypes[levelId] = static_cast<uint16_t>(HE::AssetType::StaticMesh);
+                    pending.push_back({std::move(levelBytes), levelId, levelRel, std::string{}});
+                }
                 pending.push_back({std::move(bytes), id, std::move(rel), std::move(path)});
             } while (false);
             it.increment(ec);
         }
         ec.clear();
+    }
+
+    // Assets the editor made for this export (PackSettings::extraAssets). They are pending entries like the files
+    // above, and the folder each sits in is a reach root: the runtime finds them by id, no scene names them.
+    std::vector<std::string> extraRootPrefixes;
+    for (const Hpak::PackSettings::ExtraAsset& ea : settings.extraAssets)
+    {
+        if (ea.bytes.empty() || ea.id == HE::UUID{} || claimed.count(ea.id)) continue;
+        claimed.insert(ea.id);
+        m_packedTypes[ea.id] = ea.type;
+        pathToUuid[ea.relPath] = ea.id;
+        m_packedPaths[ea.relPath] = ea.id;
+        pending.push_back({ ea.bytes, ea.id, ea.relPath, ea.relPath });
+        const size_t slash = ea.relPath.find_last_of('/');
+        if (slash != std::string::npos)
+        {
+            const std::string folder = ea.relPath.substr(0, slash + 1);
+            if (std::find(extraRootPrefixes.begin(), extraRootPrefixes.end(), folder) == extraRootPrefixes.end())
+                extraRootPrefixes.push_back(folder);
+        }
+    }
+
+    // Pass 1b: leave out what the game does not reach (Hpak/ReachFilter.h). Every blob is
+    // in `pending` and every path is in pathToUuid by now, so this is the one place the whole
+    // reference graph is visible. Scenes the game may load are nodes of the same graph.
+    // A lambda because the texture bake (Pass 1c) rewrites assets and the filter has to run
+    // again over the result: the textures a merged mesh no longer names must stay out.
+    // `first` = also settle the scenes; `announce` = print the "Not packed" notice.
+    const auto applyReach = [&](bool first, bool announce)
+    {
+        std::vector<HE::reach::Node> nodes;
+        nodes.reserve(pending.size() + settings.reachScenes.size());
+        for (const Pending& pe : pending)
+        {
+            HE::reach::Node n;
+            n.id = pe.id; n.path = pe.relPath;
+            if (pe.metaPath != pe.relPath) n.metaPath = pe.metaPath;
+            const auto ty = m_packedTypes.find(pe.id);
+            n.type = ty != m_packedTypes.end() ? ty->second : uint16_t(0);
+            n.data = pe.bytes.data(); n.size = pe.bytes.size();
+            nodes.push_back(std::move(n));
+        }
+        for (const Hpak::PackSettings::ReachScene& sc : settings.reachScenes)
+        {
+            HE::reach::Node n;
+            n.path = sc.path;
+            if (sc.path.rfind("Content/", 0) == 0) n.metaPath = sc.path.substr(8);
+            n.data = sc.bytes.data(); n.size = sc.bytes.size();
+            nodes.push_back(std::move(n));
+        }
+        HE::reach::Roots roots = HE::reach::engineImplicitRoots();
+        roots.globs = settings.alwaysIncludePatterns;
+        roots.pathPrefixes.insert(roots.pathPrefixes.end(), extraRootPrefixes.begin(), extraRootPrefixes.end());
+        for (const auto& b : settings.referenceRoots) roots.blobs.emplace_back(b.data(), b.size());
+        const HE::reach::Result res = HE::reach::computeReachable(nodes, roots);
+
+        struct Dropped { std::string path; size_t bytes; };
+        std::vector<Dropped> dropped;
+        const size_t nAssets = pending.size();
+        std::vector<Pending> kept;
+        kept.reserve(pending.size());
+        for (size_t i = 0; i < pending.size(); ++i)
+        {
+            if (res.reachable[i]) { kept.push_back(std::move(pending[i])); continue; }
+            const Pending& pe = pending[i];
+            dropped.push_back({ pe.relPath, pe.bytes.size() });
+            m_unreferencedBytes += pe.bytes.size();
+            ++m_unreferencedCount;
+            // Out of every index the pak derives from this scan. A kept asset that still
+            // names it (a spelling the scan missed) now bakes to a null UUID WITH the "in no
+            // packed root" warning below, instead of a UUID the pak does not hold.
+            m_packedTypes.erase(pe.id);
+            for (auto it = m_packedPaths.begin(); it != m_packedPaths.end();)
+                it = (it->second == pe.id) ? m_packedPaths.erase(it) : std::next(it);
+            for (auto it = pathToUuid.begin(); it != pathToUuid.end();)
+                it = (it->second == pe.id) ? pathToUuid.erase(it) : std::next(it);
+        }
+        pending = std::move(kept);
+        if (first)
+            for (size_t i = 0; i < settings.reachScenes.size(); ++i)
+                if (!res.reachable[nAssets + i])
+                    m_unreachableScenes.push_back(settings.reachScenes[i].path);
+
+        if (announce && settings.onNotice)
+        {
+            std::sort(dropped.begin(), dropped.end(),
+                      [](const Dropped& a, const Dropped& b) { return a.bytes > b.bytes; });
+            std::string msg = "Not packed, nothing the game reaches names them: "
+                            + std::to_string(m_unreferencedCount) + " asset(s), "
+                            + std::to_string(m_unreferencedBytes / 1024) + " KB";
+            if (!dropped.empty()) msg += "; largest:";
+            for (size_t i = 0; i < dropped.size() && i < 5; ++i)
+                msg += " " + dropped[i].path + " (" + std::to_string(dropped[i].bytes / 1024) + " KB)";
+            if (!m_unreachableScenes.empty())
+                msg += "; " + std::to_string(m_unreachableScenes.size()) + " scene(s) nothing loads";
+            settings.onNotice(msg);
+        }
+    };
+    // The bake needs the reach filter's verdict first (only reachable meshes are worth it), so
+    // the notice waits for the second run when a bake is going to happen.
+    const bool bakeMeshes = settings.bakeMeshTextures && settings.onlyReferenced;
+    if (settings.onlyReferenced) applyReach(/*first=*/true, /*announce=*/!bakeMeshes);
+
+    // Pass 1c: bake textures onto meshes (Hpak/MeshBakePass.h). Rewrites the meshes it can,
+    // adds the derived material and atlases, then filters again.
+    if (bakeMeshes)
+    {
+        std::vector<HE::MeshBake::PassEntry> entries;
+        entries.reserve(pending.size());
+        for (const Pending& pe : pending)
+        {
+            HE::MeshBake::PassEntry e;
+            e.id = pe.id; e.relPath = pe.relPath;
+            if (pe.metaPath != pe.relPath) e.metaPath = pe.metaPath;
+            const auto ty = m_packedTypes.find(pe.id);
+            e.type = ty != m_packedTypes.end() ? ty->second : uint16_t(0);
+            e.bytes = &pe.bytes;
+            entries.push_back(std::move(e));
+        }
+        HE::MeshBake::PassOptions po;
+        po.maxAtlas = settings.bakeMaxAtlas;
+        po.skipMeshes = settings.bakeSkipMeshes;
+        HE::MeshBake::PassResult baked = HE::MeshBake::runPass(entries, po);
+        entries.clear();
+        for (HE::MeshBake::ReplacedMesh& rm : baked.replaced)
+            for (Pending& pe : pending)
+                if (pe.id == rm.id) { pe.bytes = std::move(rm.bytes); break; }
+        for (HE::MeshBake::NewAsset& na : baked.added)
+        {
+            Pending pe;
+            pe.id = na.id; pe.relPath = na.relPath; pe.metaPath = na.relPath;
+            pe.bytes = std::move(na.bytes);
+            pathToUuid[na.relPath] = na.id;
+            m_packedPaths[na.relPath] = na.id;
+            m_packedTypes[na.id] = na.type;
+            pending.push_back(std::move(pe));
+        }
+        if (settings.onNotice)
+            for (const std::string& line : baked.notices)
+                settings.onNotice("Mesh bake - " + line);
+        applyReach(/*first=*/false, /*announce=*/true);
     }
 
     // Pass 2: rewrite path refs to baked UUIDs (dropping the path strings), then pack.
@@ -1201,9 +1542,29 @@ int HpakWriter::addDirectories(const std::vector<SourceRoot>& roots,
         return true;
     };
 
-    for (auto& pe : pending)
+    // ── Cook pass: every asset through the pipeline, one line each, BEFORE anything is stored ──
+    // What the pipeline makes of an asset (references rewritten, textures and static meshes converted,
+    // import source stripped) is held until the pack pass below compresses and stores it, so the
+    // build window can show "cook" and "pack" as the two steps they are. The source bytes were already
+    // in memory (`pending`); they are released as soon as this pass is over.
+    struct Cooked
     {
-        if (progress) progress(count, total, pe.relPath);
+        std::vector<uint8_t>             blob;
+        size_t                           blobSize = 0;
+        Hpak::CachedEntry                info;          // srcHash, inHash, deps
+        bool                             carried = false; // level 1: the previous archive's entry is taken as it is
+        HpakReader::StoredEntry          carriedEntry;
+    };
+    std::vector<Cooked> cooked(pending.size());
+    const auto kb = [](size_t n) { return std::to_string((n + 1023) / 1024) + " KB"; };
+    // A caller that does not ask for the phase change (hpak_packer, tests) sees one progress run, as ever:
+    // the pack pass's. Only a caller with onPhase gets a run per pass.
+    const bool cookProgress = progress && settings.onPhase;
+    for (size_t i = 0; i < pending.size(); ++i)
+    {
+        Pending& pe = pending[i];
+        Cooked&  ck = cooked[i];
+        if (cookProgress) progress(count, total, pe.relPath);
         const uint64_t inHash = Hpak::hash64(pe.bytes.data(), pe.bytes.size());
 
         // ── Level 1: nothing changed since the last pack → skip the pipeline ─────
@@ -1222,13 +1583,12 @@ int HpakWriter::addDirectories(const std::vector<SourceRoot>& roots,
                     && ((se.flags & Hpak::kFlagEncrypted) != 0) == wantEncrypted
                     && (se.flags & Hpak::kFlagUsesDict) == 0)
                 {
-                    addPackedEntry(pe.id, se);
-                    ++m_reused;
+                    ck.carried      = true;
+                    ck.carriedEntry = std::move(se);
+                    ck.info         = cit->second;
                     warnUnresolved(pe.relPath, cit->second.deps);
-                    m_srcHashes.emplace_back(pe.id, cit->second.srcHash);
-                    m_entryInfos.emplace_back(pe.id, cit->second);
                     ++count;
-                    if (settings.onAsset) settings.onAsset(pe.relPath, true);
+                    if (settings.onCook) settings.onCook("cached  " + pe.relPath);
                     continue;
                 }
             }
@@ -1236,7 +1596,9 @@ int HpakWriter::addDirectories(const std::vector<SourceRoot>& roots,
 
         // ── The pipeline, recording what it looked at ───────────────────────────
         Hpak::PackDeps deps;
-        std::vector<uint8_t> blob = rewriteRefsForPack(pe.bytes, pathToUuid, settings, &blobByPath, &deps);
+        std::vector<uint8_t> rvtRebaked;
+        const std::vector<uint8_t>& packSrc = rebakeRvtMaterial(pe.bytes, rvtRebaked) ? rvtRebaked : pe.bytes;
+        std::vector<uint8_t> blob = rewriteRefsForPack(packSrc, pathToUuid, settings, &blobByPath, &deps);
         if (settings.cook) blob = cookForPack(blob, settings.textureCompression, settings.textureQuality,
                                                  settings.cookTextureArrays);
         // After every rewrite above (each of which copies META through verbatim)
@@ -1247,7 +1609,6 @@ int HpakWriter::addDirectories(const std::vector<SourceRoot>& roots,
         // Hash the final (cooked) blob: incremental reuse keys on exactly the
         // bytes that get stored, so a cook change re-packs the entry.
         const uint64_t srcHash = Hpak::hash64(blob.data(), blob.size());
-        m_srcHashes.emplace_back(pe.id, srcHash);
 
         // One row per path: the same material is often referenced several times.
         std::sort(deps.refs.begin(), deps.refs.end(),
@@ -1261,7 +1622,47 @@ int HpakWriter::addDirectories(const std::vector<SourceRoot>& roots,
                            [](const auto& a, const auto& b) { return a.first == b.first; }),
                            deps.parents.end());
         warnUnresolved(pe.relPath, deps);
-        m_entryInfos.emplace_back(pe.id, Hpak::CachedEntry{ srcHash, inHash, std::move(deps) });
+        if (settings.onCook)
+        {
+            // Only what changed is "cooked": a blob that comes out as it went in (a text asset
+            // with no references to rewrite, say) is reported as it is.
+            const bool changed = blob.size() != pe.bytes.size() || blob != pe.bytes;
+            settings.onCook(changed
+                ? "cooked  " + pe.relPath + "  " + kb(pe.bytes.size()) + " -> " + kb(blob.size())
+                : "unchanged  " + pe.relPath + "  " + kb(blob.size()));
+        }
+        ck.blobSize = blob.size();
+        ck.blob     = std::move(blob);
+        ck.info     = Hpak::CachedEntry{ srcHash, inHash, std::move(deps) };
+        ++count;
+    }
+    if (cookProgress) progress(count, total, {});
+    // The source bytes are no longer needed (blobByPath is not read below).
+    for (Pending& pe : pending) std::vector<uint8_t>().swap(pe.bytes);
+
+    // ── Pack pass: compress, encrypt and store, in the order of `pending` ──────
+    if (settings.onPhase) settings.onPhase("pack");
+    count = 0;
+    for (size_t i = 0; i < pending.size(); ++i)
+    {
+        Pending& pe = pending[i];
+        Cooked&  ck = cooked[i];
+        if (progress) progress(count, total, pe.relPath);
+
+        if (ck.carried)
+        {
+            addPackedEntry(pe.id, ck.carriedEntry);
+            ++m_reused;
+            m_srcHashes.emplace_back(pe.id, ck.info.srcHash);
+            m_entryInfos.emplace_back(pe.id, std::move(ck.info));
+            ++count;
+            if (settings.onAsset) settings.onAsset(pe.relPath, true);
+            continue;
+        }
+
+        m_srcHashes.emplace_back(pe.id, ck.info.srcHash);
+        const uint64_t srcHash = ck.info.srcHash;
+        m_entryInfos.emplace_back(pe.id, std::move(ck.info));
 
         // ── Level 2: the output is what the previous archive already holds ──────
         bool reused = false;
@@ -1280,7 +1681,7 @@ int HpakWriter::addDirectories(const std::vector<SourceRoot>& roots,
                 if (cache->previousPak->readStoredEntry(pe.id, se)
                     && ((se.flags & Hpak::kFlagEncrypted) != 0) == wantEncrypted
                     && (se.flags & Hpak::kFlagUsesDict) == 0
-                    && se.origSize == static_cast<uint32_t>(blob.size()))
+                    && se.origSize == static_cast<uint32_t>(ck.blobSize))
                 {
                     addPackedEntry(pe.id, se);
                     reused = true;
@@ -1288,7 +1689,8 @@ int HpakWriter::addDirectories(const std::vector<SourceRoot>& roots,
                 }
             }
         }
-        if (!reused) addEntry(pe.id, blob, settings);
+        if (!reused) addEntry(pe.id, ck.blob, settings);
+        std::vector<uint8_t>().swap(ck.blob);   // stored (or reused): the cooked bytes can go
         ++count;
         if (settings.onAsset) settings.onAsset(pe.relPath, reused);
     }
@@ -1320,22 +1722,33 @@ bool HpakWriter::write(const std::string& outputPath) const
     std::vector<uint8_t> toc(m_entries.size() * sizeof(Hpak::EntryDesc));
     uint64_t offset       = dataStart;
     uint32_t archiveFlags = Hpak::kArchiveSortedTOC;
+    // Where each OWNING entry's bytes start; an alias row points at its owner's range, which
+    // may sort after the alias, so the offsets are laid out before any row is built.
+    std::vector<uint64_t> dataAt(m_entries.size(), 0);
     for (size_t k = 0; k < order.size(); ++k)
     {
         const auto& e = m_entries[order[k]];
+        if (e.aliasOf >= 0) continue;
+        dataAt[order[k]] = offset;
+        offset += e.data.size();
+    }
+    for (size_t k = 0; k < order.size(); ++k)
+    {
+        const auto& e     = m_entries[order[k]];
+        const size_t own  = e.aliasOf >= 0 ? static_cast<size_t>(e.aliasOf) : order[k];
+        const auto& bytes = m_entries[own].data;
         Hpak::EntryDesc desc{};
         desc.uuidHi      = e.uuid.hi;
         desc.uuidLo      = e.uuid.lo;
-        desc.dataOffset  = offset;
+        desc.dataOffset  = dataAt[own];
         desc.origSize    = e.origSize;
-        desc.dataSize    = static_cast<uint32_t>(e.data.size());
+        desc.dataSize    = static_cast<uint32_t>(bytes.size());
         desc.contentHash = e.contentHash;
         std::memcpy(desc.nonce, e.nonce, sizeof(desc.nonce));
         desc.codec       = e.codec;
         desc.entryFlags  = e.flags;
         std::memcpy(toc.data() + k * sizeof(Hpak::EntryDesc), &desc, sizeof(desc));
         if (e.flags & Hpak::kFlagEncrypted) archiveFlags |= Hpak::kArchiveEncrypted;
-        offset += e.data.size();
     }
 
     // Header
@@ -1356,11 +1769,11 @@ bool HpakWriter::write(const std::string& outputPath) const
         f.write(reinterpret_cast<const char*>(toc.data()),
                 static_cast<std::streamsize>(toc.size()));
 
-    // Data blocks — same (sorted) order as the TOC offsets
+    // Data blocks — same (sorted) order as the TOC offsets (an alias has no bytes of its own)
     for (size_t k = 0; k < order.size(); ++k)
     {
         const auto& e = m_entries[order[k]];
-        if (!e.data.empty())
+        if (e.aliasOf < 0 && !e.data.empty())
             f.write(reinterpret_cast<const char*>(e.data.data()),
                     static_cast<std::streamsize>(e.data.size()));
     }

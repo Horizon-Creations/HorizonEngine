@@ -133,6 +133,16 @@ set(ENABLE_INSTALL          OFF CACHE BOOL "" FORCE)
 # Match the engine's /MD runtime — Jolt defaults to /MT which causes LNK2038
 # "RuntimeLibrary conflict MTd_StaticDebug vs MDd_DynamicDebug" at link time.
 set(USE_STATIC_MSVC_RUNTIME_LIBRARY OFF CACHE BOOL "" FORCE)
+# Jolt builds itself with /fp:fast on MSVC, and MSVC 14.52 under /fp:fast folds -0.0f
+# to 0.0f: FlipSign and Quat::Conjugated become no-ops, every inverse rotation in the
+# solver is wrong (joint limits flip, rays hit a mirrored slope). The deterministic
+# build is Jolt's own switch to /fp:precise; a /fp:precise added on top would warn
+# (D9025) inside Jolt's /WX build. MSVC only: clang keeps FMA and its own flags.
+# Fixed upstream in Jolt v5.7.0 (jrouwe/JoltPhysics#2222); drop this once the tag
+# above is >= v5.7.0.
+if(MSVC)
+    set(CROSS_PLATFORM_DETERMINISTIC ON CACHE BOOL "" FORCE)
+endif()
 FetchContent_MakeAvailable(JoltPhysics)
 
 # ─── Recast Navigation ────────────────────────────────────────────────────────
@@ -146,6 +156,22 @@ set(RECASTNAVIGATION_DEMO     OFF CACHE BOOL "" FORCE)
 set(RECASTNAVIGATION_TESTS    OFF CACHE BOOL "" FORCE)
 set(RECASTNAVIGATION_EXAMPLES OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(recastnavigation)
+
+# ─── meshoptimizer (mesh LOD simplification, tool-only) ───────────────────────
+# Static lib, MIT. Only ever linked into HorizonImporters (editor/asset_compiler
+# build-time tool); never into HorizonGame. Approved as a new dependency by the
+# human (Thema 331, step 2).
+FetchContent_Declare(
+    meshoptimizer
+    GIT_REPOSITORY https://github.com/zeux/meshoptimizer.git
+    GIT_TAG        v1.3
+    GIT_SHALLOW    TRUE
+)
+set(MESHOPT_BUILD_DEMO     OFF CACHE BOOL "" FORCE)
+set(MESHOPT_BUILD_GLTFPACK OFF CACHE BOOL "" FORCE)
+set(MESHOPT_INSTALL        OFF CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(meshoptimizer)
+set_target_properties(meshoptimizer PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 # ─── Kein -g in den Release-Builds der Physik/Navigation ──────────────────────
 # Jolt (option GENERATE_DEBUG_SYMBOLS, default ON) und Recast (add_compile_options(-g),
@@ -1014,6 +1040,20 @@ endfunction()
 # cache — without it, a reconfigure keeps the old cached codename (the version from
 # project() updates, but the codename would silently stay stale).
 set(HE_VERSION_CODENAME "Nimbus" CACHE STRING "Sky-themed codename for this release" FORCE)
+# The commit this build comes from, for the log's Build line: a bug report with only a build
+# time cannot say which side of a fix the package is on. Read at configure time, so a local
+# build shows the commit it was last configured at; CI configures fresh. "unknown" without git.
+set(HE_GIT_COMMIT "unknown")
+find_package(Git QUIET)
+if(GIT_FOUND)
+    execute_process(COMMAND "${GIT_EXECUTABLE}" rev-parse --short=10 HEAD
+                    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+                    OUTPUT_VARIABLE HE_GIT_COMMIT_OUT OUTPUT_STRIP_TRAILING_WHITESPACE
+                    RESULT_VARIABLE HE_GIT_COMMIT_RC ERROR_QUIET)
+    if(HE_GIT_COMMIT_RC EQUAL 0 AND HE_GIT_COMMIT_OUT)
+        set(HE_GIT_COMMIT "${HE_GIT_COMMIT_OUT}")
+    endif()
+endif()
 configure_file(
     "${CMAKE_SOURCE_DIR}/cmake/HorizonVersion.h.in"
     "${CMAKE_BINARY_DIR}/generated/HorizonVersion.h"

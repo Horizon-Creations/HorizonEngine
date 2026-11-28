@@ -2093,13 +2093,13 @@ TEST_CASE("ui shot: the compile readout writes its check")
 			if (stroke >= 0.0f)
 			{
 				const ImVec2 c = bar.readout([](ImDrawList*, const ImVec2&, float, ImU32) {},
-				                             "compiles clean — 120 lines of C++",
+				                             "Compiles clean — 120 lines of C++",
 				                             EditorToolbar::kGood);
 				const float s = bar.iconSize();
 				drawCheckMark(c.x - s * 0.5f, c.y - s * 0.5f, s, stroke, 1.0f);
 			}
 			else
-				bar.readout(EditorToolbar::iconCheck, "compiles clean — 120 lines of C++",
+				bar.readout(EditorToolbar::iconCheck, "Compiles clean — 120 lines of C++",
 				            EditorToolbar::kGood);
 			bar.endGroup();
 		}

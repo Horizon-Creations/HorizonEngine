@@ -34,9 +34,11 @@ BusChoice busChoice(const HE::AudioBusConfig* buses, const std::string& assetBus
 	return c;
 }
 
-bool drawBusCombo(const HE::AudioBusConfig* buses, std::string& assetBus, bool enabled)
+bool drawBusCombo(const HE::AudioBusConfig* buses, std::string& assetBus, bool enabled,
+                  const char* emptyLabel)
 {
-	const BusChoice choice = busChoice(buses, assetBus);
+	BusChoice choice = busChoice(buses, assetBus);
+	if (assetBus.empty()) choice.preview = emptyLabel;
 	bool changed = false;
 	ImGui::BeginDisabled(!enabled);
 	if (choice.missing) ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.62f, 0.38f, 1.0f));
@@ -54,7 +56,7 @@ bool drawBusCombo(const HE::AudioBusConfig* buses, std::string& assetBus, bool e
 			}
 			if (sel) ImGui::SetItemDefaultFocus();
 		};
-		item("Master", std::string());
+		item(emptyLabel, std::string());
 		if (buses)
 			for (const HE::AudioBusDef& b : buses->buses)
 				item(b.name.c_str(), b.name);
@@ -377,7 +379,7 @@ namespace
 		drag("##q", &b.q, 0.01f, HE::AudioEqBand::kMinQ, HE::AudioEqBand::kMaxQ, "Q %.2f",
 		     ImGuiSliderFlags_Logarithmic, "Audio Editor/Band Q", fs * 4.0f);
 		ImGui::SameLine();
-		if (ImGui::SmallButton("Remove")) remove = true;
+		if (EditorWidgets::dangerSmallButton("Remove")) remove = true;
 		EditorWidgets::helpForKey("Audio Editor/Remove Band");
 		ImGui::PopID();
 		return r;

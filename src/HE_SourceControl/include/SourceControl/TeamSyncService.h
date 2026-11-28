@@ -50,6 +50,26 @@ public:
 		std::string           team, member, project;
 		// Saved/TeamSync/<team>-<project>.state under the project by default.
 		std::filesystem::path stateFile;
+		// Switching to (or back from) a branch: the first reconcile makes the folder exactly
+		// the team's version of this project, files the team does not have removed, with no
+		// first-sync question. The editor only switches with nothing waiting to go up.
+		bool                  mirrorOnStart = false;
+	};
+
+	// A branch of this project on the server ("<project>--<name>").
+	struct Branch
+	{
+		std::string   name;
+		std::uint64_t forkRev = 0;   // this project's revision it was copied from
+		std::string   creator;
+	};
+	// What a branch request did, for the editor (it switches to a branch it created).
+	struct BranchEvent
+	{
+		enum class Kind : std::uint8_t { Created, Merged, Failed } kind = Kind::Failed;
+		std::string   name;
+		std::uint64_t rev = 0;   // Created: the fork revision; Merged: the new head
+		std::string   error;
 	};
 
 	enum class Phase : std::uint8_t
@@ -165,8 +185,30 @@ public:
 	// first revision.
 	void createProject();
 	// Fetch our overruled version of `lost` into
-	// Saved/TeamSync/Lost/r<rev>/<path>; the path arrives through takeOpened().
-	void fetchLost(const Lost& lost);
+	// Saved/TeamSync/Lost/r<rev>/<path>; with `reveal` the path arrives through
+	// takeOpened() (the editor shows the folder), without it the file is only there
+	// (the conflict window reads it at lostCopyPath()).
+	void fetchLost(const Lost& lost, bool reveal = true);
+	// Where fetchLost() puts our version of `lost` (it may not be there yet).
+	std::filesystem::path lostCopyPath(const Lost& lost) const;
+	// The conflict is settled (the person picked a version or merged them): it leaves
+	// lost() and stays out of it, also after a restart (kept beside the state file,
+	// with the open ones, so a conflict does not drop off with the 100-revision log).
+	void resolveLost(std::uint64_t rev, const std::string& path);
+	// Make the project what it was at revision `rev`, as a new revision on top
+	// ("Restore r<rev>"): every file that differs is written back (through pump(),
+	// so keep-local and Play apply), files added since are removed, and the result
+	// is uploaded. Nothing of the history is rewritten.
+	void restoreRevision(std::uint64_t rev);
+
+	// ── Feature branches (on this project's connection) ──
+	void createBranch(const std::string& name);
+	void refreshBranches();
+	// Applies what changed on the branch since its fork to this project (the server merges
+	// per file, as for a save); the results arrive in lastResults(), the merge with the next reconcile.
+	void mergeBranch(const std::string& name, const std::string& message = {});
+	std::vector<Branch> branches() const;
+	bool pollBranchEvent(BranchEvent& out);
 
 	// ── Main thread ──
 	// Delivers events, runs the ticket source when asked and writes incoming

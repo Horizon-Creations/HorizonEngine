@@ -44,6 +44,18 @@ inline glm::mat4 taaJitteredViewProj(const glm::mat4& viewProj, const glm::vec2&
 	return j * viewProj;
 }
 
+// Last frame's view-projection for geometry whose position THIS frame gives, across a floating-origin hop. Last frame's
+// matrix was built for last frame's origin; a point that is p now (relative to `originNow`) was p + (originNow - originPrev)
+// then, so the matrix takes that translation on its right. For the tile landscape's ground, a foliage cluster's plants and an
+// object seen for the first time (its "previous" model is this frame's). NOT for an object with a remembered model: that
+// model is in the old frame like the matrix (shiftWorldOrigin moved the entity), and this would shift it twice.
+inline glm::mat4 taaPrevViewProjAt(glm::mat4 prevViewProj, const glm::dvec3& originNow, const glm::dvec3& originPrev)
+{
+	const glm::vec3 d(originNow - originPrev);
+	prevViewProj[3] += prevViewProj[0] * d.x + prevViewProj[1] * d.y + prevViewProj[2] * d.z;
+	return prevViewProj;
+}
+
 // History weight of the resolve. 0.9 keeps ~10 frames of samples: enough to
 // converge on an edge, short enough that a mis-reprojected pixel does not
 // linger. GL and Metal use the same number.

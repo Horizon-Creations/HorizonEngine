@@ -597,6 +597,11 @@ void TeamController::handleEvent(const TeamClient::Event& ev)
 	case TeamClient::EventKind::ScHead:
 		if (m_onScHead) m_onScHead(ev.project, ev.rev, ev.member);
 		break;
+	case TeamClient::EventKind::Notice:
+		// Nobody polling (no task board) must not grow this without bound.
+		if (m_incomingNotices.size() >= 256) m_incomingNotices.pop_front();
+		m_incomingNotices.push_back({ ev.member, ev.payload });
+		break;
 	default:
 		// Presence, roster and session changes are already in the lists.
 		break;
@@ -676,6 +681,11 @@ TeamClient::ReplyFn TeamController::reportFailure(std::string what)
 
 bool TeamController::sessionRunning() const { return m_collab.active(); }
 
+void TeamController::stopHosting()
+{
+	if (!m_hosted.empty() && m_collab.active() && m_collab.isHost()) m_collab.leave();
+}
+
 bool TeamController::inSession(const std::string& session) const
 {
 	return !session.empty() && m_collab.active() && m_collab.sessionId() == session;
@@ -732,6 +742,20 @@ bool TeamController::setSessionOpen(bool open)
 	}
 	m_hostedOpen = open;
 	m_client->setSessionOpen(m_hosted, open, reportFailure("Could not change who may join"));
+	return true;
+}
+
+bool TeamController::sendNotice(const std::string& member, const std::string& payload)
+{
+	if (!m_client || !m_client->loggedIn() || !m_client->noticesSupported()) return false;
+	return m_client->notify(member, payload) != 0;
+}
+
+bool TeamController::pollNotice(IncomingNotice& out)
+{
+	if (m_incomingNotices.empty()) return false;
+	out = std::move(m_incomingNotices.front());
+	m_incomingNotices.pop_front();
 	return true;
 }
 

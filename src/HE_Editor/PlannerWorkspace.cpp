@@ -12,6 +12,20 @@ namespace HE::Planner
 
 namespace
 {
+std::function<void(const std::filesystem::path&)> s_savedHook;
+}
+
+void Workspace::setSavedHook(std::function<void(const std::filesystem::path&)> fn) { s_savedHook = std::move(fn); }
+
+bool Workspace::saved(const std::filesystem::path& file, bool ok)
+{
+	if (ok && s_savedHook) s_savedHook(file);
+	return ok;
+}
+
+
+namespace
+{
 
 // Byte-wise, like std::string::operator< on the lowered titles, but without building them.
 int compareTitlesNoCase(const std::string& a, const std::string& b)
@@ -200,7 +214,7 @@ Database* Workspace::create(std::string name)
 	Entry e;
 	e.db = Database::create(std::move(name));
 	std::string err;
-	if (!saveDatabase(m_root, e.db, &err))
+	if (!saved(databasePath(m_root, e.db.id), saveDatabase(m_root, e.db, &err)))
 	{
 		m_error = err;
 		return nullptr;
@@ -230,7 +244,7 @@ Database* Workspace::ensure(const UUID& id, const std::string& name,
 	if (init) init(e.db);
 	if (e.db.views.empty()) e.db.addView("Table", ViewKind::Table);
 	std::string err;
-	if (!saveDatabase(m_root, e.db, &err))
+	if (!saved(databasePath(m_root, e.db.id), saveDatabase(m_root, e.db, &err)))
 	{
 		m_error = err;
 		return nullptr;
@@ -297,7 +311,7 @@ Page* Workspace::createPage(std::string title, const UUID& parent)
 	e.page.createdMs = e.page.modifiedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
 		std::chrono::system_clock::now().time_since_epoch()).count();
 	std::string err;
-	if (!savePage(m_root, e.page, &err))
+	if (!saved(pagePath(m_root, e.page.id), savePage(m_root, e.page, &err)))
 	{
 		m_error = err;
 		return nullptr;
@@ -362,7 +376,7 @@ bool Workspace::editPage(const UUID& id, const std::function<bool(Page&)>& fn)
 	++m_generation;
 
 	std::string err;
-	if (savePage(m_root, e->page, &err))
+	if (saved(pagePath(m_root, e->page.id), savePage(m_root, e->page, &err)))
 	{
 		stampPage(*e);
 		m_error.clear();
@@ -374,7 +388,7 @@ bool Workspace::editPage(const UUID& id, const std::function<bool(Page&)>& fn)
 	if (r.ok)
 	{
 		e->page = std::move(fresh);
-		if (fn(e->page) && savePage(m_root, e->page, &err))
+		if (fn(e->page) && saved(pagePath(m_root, e->page.id), savePage(m_root, e->page, &err)))
 		{
 			stampPage(*e);
 			++m_generation;
@@ -415,7 +429,7 @@ Board* Workspace::createBoard(std::string title)
 	e.board.createdMs = e.board.modifiedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
 		std::chrono::system_clock::now().time_since_epoch()).count();
 	std::string err;
-	if (!saveBoard(m_root, e.board, &err))
+	if (!saved(boardPath(m_root, e.board.id), saveBoard(m_root, e.board, &err)))
 	{
 		m_error = err;
 		return nullptr;
@@ -449,7 +463,7 @@ bool Workspace::editBoard(const UUID& id, const std::function<bool(Board&)>& fn)
 	++m_generation;
 
 	std::string err;
-	if (saveBoard(m_root, e->board, &err))
+	if (saved(boardPath(m_root, e->board.id), saveBoard(m_root, e->board, &err)))
 	{
 		stampBoard(*e);
 		m_error.clear();
@@ -461,7 +475,7 @@ bool Workspace::editBoard(const UUID& id, const std::function<bool(Board&)>& fn)
 	if (r.ok)
 	{
 		e->board = std::move(fresh);
-		if (fn(e->board) && saveBoard(m_root, e->board, &err))
+		if (fn(e->board) && saved(boardPath(m_root, e->board.id), saveBoard(m_root, e->board, &err)))
 		{
 			stampBoard(*e);
 			++m_generation;
@@ -496,7 +510,7 @@ bool Workspace::edit(const UUID& id, const std::function<bool(Database&)>& fn)
 		++m_generation;
 		if (before.toJson() == e->db.toJson()) { m_error.clear(); return true; }   // rows only
 		std::string saveErr;
-		if (!saveDatabase(m_root, e->db, &saveErr))
+		if (!saved(databasePath(m_root, e->db.id), saveDatabase(m_root, e->db, &saveErr)))
 		{
 			m_error = saveErr;
 			return false;
@@ -510,7 +524,7 @@ bool Workspace::edit(const UUID& id, const std::function<bool(Database&)>& fn)
 	++m_generation;
 
 	std::string err;
-	if (saveDatabase(m_root, e->db, &err))
+	if (saved(databasePath(m_root, e->db.id), saveDatabase(m_root, e->db, &err)))
 	{
 		stamp(*e);
 		m_error.clear();
@@ -525,7 +539,7 @@ bool Workspace::edit(const UUID& id, const std::function<bool(Database&)>& fn)
 	if (r.ok)
 	{
 		e->db = std::move(fresh);
-		if (fn(e->db) && saveDatabase(m_root, e->db, &err))
+		if (fn(e->db) && saved(databasePath(m_root, e->db.id), saveDatabase(m_root, e->db, &err)))
 		{
 			stamp(*e);
 			++m_generation;

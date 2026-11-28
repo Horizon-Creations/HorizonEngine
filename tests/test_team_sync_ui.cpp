@@ -6,9 +6,11 @@
 #include "EditorTheme.h"
 #include "EditorWidgets.h"
 #include "GitController.h"
+#include "NotificationStore.h"
 #include "TeamController.h"
 #include "TeamSyncController.h"
 #include "TeamSyncView.h"
+#include "ProjectTeamGate.h"
 
 #include <HorizonScene/HorizonWorld.h>
 
@@ -323,4 +325,364 @@ TEST_CASE("Team sync UI: a first sync that differs asks before anything moves")
 	dump(shot, "team-sync-first-sync.bmp");
 	CHECK(inkPixels(shot) > 1000);
 	CHECK(other.file("Content/door.txt") == "very old\n");
+}
+
+TEST_CASE("Team sync UI: the switch - names for the server, Use the Team Server with the project's name, and back to git")
+{
+	CHECK(TeamSyncView::serverProjectName("My Game 2") == "My-Game-2");
+	CHECK(TeamSyncView::serverProjectName("  !!") == "project");
+	CHECK(TeamSyncView::serverProjectName("Ünïcode Game") == "n-code-Game");   // what is not ASCII becomes a dash
+	CHECK(TeamSyncView::validServerName("game_01-b"));
+	CHECK_FALSE(TeamSyncView::validServerName("my game"));
+	CHECK_FALSE(TeamSyncView::validServerName(std::string(65, 'a')));
+
+	Harness h;
+	FakeTeamServer server;
+	CollabController collab;
+	TeamController   team(collab);
+	std::string gotTeam, gotProject;
+	int toTeam = 0, toGit = 0;
+	bool locked = false;
+	auto draw = [&](bool mouseDown, he_ui::Image* shot = nullptr) {
+		server.pump();
+		const std::uint64_t now = steadyMs();
+		collab.update(now);
+		team.update(now);
+		ImGui::GetIO().AddMouseButtonEvent(ImGuiMouseButton_Left, mouseDown);
+		ImGui::NewFrame();
+		ImGui::SetNextWindowPos(ImVec2(0, 0));
+		ImGui::SetNextWindowSize(ImVec2(float(kW), float(kH)));
+		ImGui::Begin("Source Control", nullptr, ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoMove);
+		TeamSyncView::drawSwitchToTeam(&team, "My Game 2", locked, [&](const std::string& t, const std::string& p) {
+			gotTeam = t;
+			gotProject = p;
+			++toTeam;
+			return true;
+		});
+		TeamSyncView::drawSwitchToGit(locked, [&] { ++toGit; return true; });
+		ImGui::End();
+		EditorWidgets::drawQueuedHelp();
+		ImGui::Render();
+		if (shot) *shot = he_ui::rasterize(ImGui::GetDrawData(), kW, kH);
+	};
+	auto click = [&](const std::string& name) {
+		const TeamSyncView::Rect r = TeamSyncView::controlRect(name);
+		if (r.x1 <= r.x0) return false;
+		ImGui::GetIO().AddMousePosEvent((r.x0 + r.x1) * 0.5f, (r.y0 + r.y1) * 0.5f);
+		draw(false); draw(false); draw(true); draw(false); draw(false);
+		return true;
+	};
+
+	// Signed out: the way in is not shown at all.
+	draw(false);
+	draw(false);
+	CHECK(TeamSyncView::controlRect("Use the Team Server...").x1 <= 0);
+
+	REQUIRE(team.signIn(addressOf(server), "studio", "Anna", "correct-horse"));
+	const auto deadline = std::chrono::steady_clock::now() + kDeadline;
+	while (!team.signedIn() && std::chrono::steady_clock::now() < deadline) draw(false);
+	REQUIRE(team.signedIn());
+	draw(false);
+	REQUIRE(click("Use the Team Server..."));
+	REQUIRE(TeamSyncView::controlRect("Switch to the Team Server").x1 > 0);
+	{
+		he_ui::Image img;
+		ImGui::GetIO().AddMousePosEvent(float(kW) - 2.0f, float(kH) - 2.0f);
+		draw(false);
+		draw(false, &img);
+		dump(img, "team-sync-switch-to-team.bmp");
+	}
+	REQUIRE(click("Switch to the Team Server"));
+	CHECK(toTeam == 1);
+	CHECK(gotTeam == "studio");
+	CHECK(gotProject == "My-Game-2");   // the project's name, made fit for the server
+	CHECK(TeamSyncView::controlRect("Switch to the Team Server").x1 <= 0);   // the popup closed
+
+	REQUIRE(click("Switch Back to Git..."));
+	REQUIRE(click("Switch to Git"));
+	CHECK(toGit == 1);
+
+	// In a collaboration session neither moves.
+	locked = true;
+	draw(false);
+	REQUIRE(click("Use the Team Server..."));
+	CHECK(TeamSyncView::controlRect("Switch to the Team Server").x1 <= 0);
+	CHECK(toTeam == 1);
+	team.signOut();
+}
+
+TEST_CASE("Team project open: the gate waits, opens once the team's version is here, and says why when it cannot")
+{
+	using ProjectTeamGate::State;
+	using TS = TeamController::Status;
+	ProjectTeamGate::Input in;
+	in.teamName = "studio";
+	in.projectName = "game";
+	in.startUnix = 1000;
+
+	in.team = TS::Connecting;
+	CHECK(ProjectTeamGate::evaluate(in).state == State::Waiting);
+	in.elapsedMs = ProjectTeamGate::kConnectTimeoutMs;
+	{
+		const auto r = ProjectTeamGate::evaluate(in);
+		CHECK(r.state == State::Failed);
+		CHECK(r.unreachable);
+		CHECK(r.headline == "The team server could not be reached.");
+	}
+	in.elapsedMs = 0;
+	in.team = TS::SignedOut;
+	CHECK(ProjectTeamGate::evaluate(in).headline == "Not signed in to team \"studio\".");
+	CHECK_FALSE(ProjectTeamGate::evaluate(in).unreachable);
+	in.team = TS::Failed;
+	in.teamError = "Could not open a connection to the team server at 10.0.0.1:7777.";
+	CHECK(ProjectTeamGate::evaluate(in).reason == in.teamError);
+
+	in.team = TS::SignedIn;
+	in.syncRunning = true;
+	in.sync.phase = HE::Sc::TeamSyncService::Phase::Connecting;
+	CHECK(ProjectTeamGate::evaluate(in).state == State::Waiting);
+	in.sync.phase = HE::Sc::TeamSyncService::Phase::Offline;
+	in.sync.error = "connection reset";
+	CHECK(ProjectTeamGate::evaluate(in).state == State::Failed);
+	CHECK(ProjectTeamGate::evaluate(in).headline == "The project could not be updated from the team server.");
+	in.sync.error.clear();
+	in.sync.phase = HE::Sc::TeamSyncService::Phase::Idle;
+	in.sync.connected = true;
+	in.sync.lastSyncUnix = 999;   // a sync from before this open does not count
+	CHECK(ProjectTeamGate::evaluate(in).state == State::Waiting);
+	in.sync.lastSyncUnix = 1000;
+	CHECK(ProjectTeamGate::evaluate(in).state == State::Ready);
+	in.sync.firstSyncDiffers = { "Content/door.txt" };
+	CHECK(ProjectTeamGate::evaluate(in).state == State::AskUser);
+	in.sync.firstSyncDiffers.clear();
+	in.sync.projectMissing = true;
+	CHECK(ProjectTeamGate::evaluate(in).state == State::Failed);   // not an admin: nobody here can create it
+	in.sync.isAdmin = true;
+	CHECK(ProjectTeamGate::evaluate(in).state == State::AskUser);
+	in.sync.projectMissing = false;
+	in.blocker = TeamSyncController::Blocker::OtherTeam;
+	CHECK(ProjectTeamGate::evaluate(in).headline == "Signed in to another team.");
+
+	// The dialogs, as the preflight shows them.
+	Harness h;
+	auto shotOf = [&](auto body, const char* file) {
+		he_ui::Image img;
+		for (int frame = 0; frame < 3; ++frame)
+		{
+			ImGui::NewFrame();
+			ImGui::SetNextWindowPos(ImVec2(20, 20));
+			ImGui::Begin("Opening", nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar);
+			body();
+			ImGui::End();
+			ImGui::Render();
+			img = he_ui::rasterize(ImGui::GetDrawData(), kW, kH);
+		}
+		dump(img, file);
+		CHECK(inkPixels(img) > 1000);
+	};
+	ProjectTeamGate::Result failed;
+	failed.state = State::Failed;
+	failed.headline = "The team server could not be reached.";
+	failed.reason = "Could not open a connection to the team server at 212.227.140.164:7777.";
+	shotOf([&] { ProjectTeamGate::drawFailed("Harbour", failed); }, "team-project-open-failed.bmp");
+	ProjectTeamGate::Result waiting;
+	waiting.stage = "Downloading 12 files";
+	shotOf([&] { ProjectTeamGate::drawWaiting("Harbour", waiting, nullptr); }, "team-project-open-waiting.bmp");
+}
+
+TEST_CASE("Team project open: a copy that is behind gets the team's newest version before it opens")
+{
+	FakeTeamServer server;
+	FakeScServer   sc(server);
+	Editor anna("Anna");
+	anna.put("Content/door.txt", "open\n");
+	REQUIRE(anna.team.signIn(addressOf(server), "studio", "Anna", "correct-horse"));
+	REQUIRE(pump(server, { &anna }, [&] { return anna.settled(0); }));
+	anna.sync.syncNow();
+	REQUIRE(pump(server, { &anna }, [&] { return anna.settled(1); }));
+
+	// Bob's machine has never had the project: the folder is empty when he opens it.
+	Editor bob("Bob");
+	const std::int64_t startUnix = static_cast<std::int64_t>(std::chrono::duration_cast<std::chrono::seconds>(
+		std::chrono::system_clock::now().time_since_epoch()).count());
+	const std::uint64_t start = steadyMs();
+	REQUIRE(bob.team.signIn(addressOf(server), "studio", "Bob", "correct-horse"));
+	ProjectTeamGate::Result r;
+	REQUIRE(pump(server, { &anna, &bob }, [&] {
+		ProjectTeamGate::Input in;
+		in.team        = bob.team.status();
+		in.teamName    = "studio";
+		in.projectName = "game";
+		in.blocker     = bob.sync.blocker();
+		in.syncRunning = bob.sync.running();
+		in.sync        = bob.sync.service().status();
+		in.elapsedMs   = steadyMs() - start;
+		in.startUnix   = startUnix;
+		r = ProjectTeamGate::evaluate(in);
+		return r.state != ProjectTeamGate::State::Waiting;
+	}));
+	CHECK(r.state == ProjectTeamGate::State::Ready);
+	CHECK(bob.file("Content/door.txt") == "open\n");   // on disk before anything loads it
+}
+
+TEST_CASE("Team sync UI: a conflict is a notification with Resolve; the window merges per block and the team gets the result")
+{
+	FakeTeamServer server;
+	FakeScServer   sc(server);
+	Editor anna("Anna"), bob("Bob");
+	HE::Ed::NotificationStore bell;
+	anna.sync.setNotifications(&bell);
+	int resolveAsked = 0;
+	anna.sync.setOnResolve([&](const HE::Sc::TeamSyncService::Lost& l) { ++resolveAsked; TeamSyncView::openConflict(l); });
+	const std::string base = "{\n  \"a\": 1,\n  \"b\": 2,\n  \"c\": 3\n}\n";
+	anna.put("Config/level.json", base);
+	REQUIRE(anna.team.signIn(addressOf(server), "studio", "Anna", "correct-horse"));
+	REQUIRE(bob.team.signIn(addressOf(server), "studio", "Bob", "correct-horse"));
+	REQUIRE(pump(server, { &anna, &bob }, [&] { return anna.settled(0) && bob.settled(0); }));
+	anna.sync.syncNow();
+	REQUIRE(pump(server, { &anna, &bob }, [&] { return anna.settled(1) && bob.file("Config/level.json") == base; }));
+
+	// Both change the same file; Bob's save comes later and wins whole (the fake server replaces).
+	anna.put("Config/level.json", "{\n  \"a\": 100,\n  \"b\": 2,\n  \"c\": 3\n}\n");
+	bob.put("Config/level.json", "{\n  \"a\": 1,\n  \"b\": 2,\n  \"c\": 300\n}\n");
+	anna.sync.syncNow();
+	REQUIRE(pump(server, { &anna, &bob }, [&] { return anna.settled(2) && bob.settled(2); }));
+	bob.sync.syncNow();
+	REQUIRE(pump(server, { &anna, &bob }, [&] { return !anna.sync.service().lost().empty() && anna.settled(3); }));
+
+	// The bell has it, with Resolve.
+	const auto notes = bell.snapshot();
+	REQUIRE_FALSE(notes.empty());
+	CHECK(notes.back().title == "Team sync: conflict in level.json");
+	REQUIRE(notes.back().actions.size() == 1);
+	CHECK(notes.back().actions[0].label == "Resolve");
+	notes.back().actions[0].run();
+	CHECK(resolveAsked == 1);
+	CHECK(TeamSyncView::conflictOpen());
+
+	// The window fetches Anna's version, then shows the two changed blocks.
+	Harness h;
+	auto frameWith = [&](he_ui::Image* img) {
+		ImGui::NewFrame();
+		ImGui::SetNextWindowPos(ImVec2(0, 0));
+		ImGui::SetNextWindowSize(ImVec2(float(kW), float(kH)));
+		ImGui::Begin("Source Control", nullptr, ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoMove);
+		TeamSyncView::draw(anna.sync);
+		TeamSyncView::drawConflictWindow(anna.sync);
+		ImGui::End();
+		ImGui::Render();
+		if (img) *img = he_ui::rasterize(ImGui::GetDrawData(), kW, kH);
+	};
+	REQUIRE(pump(server, { &anna, &bob }, [&] {
+		frameWith(nullptr);
+		return TeamSyncView::controlRect("pick:0:Yours").x1 > 0;
+	}));
+	{
+		he_ui::Image img;
+		frameWith(nullptr);
+		frameWith(&img);
+		dump(img, "team-sync-conflict-window.bmp");
+	}
+	// Anna's "a", Bob's "c": the result keeps both.
+	TeamSyncView::setConflictPicks({ HE::Sc::Pick::Ours, HE::Sc::Pick::Theirs });
+	const std::string merged = TeamSyncView::conflictResult();
+	CHECK(merged == "{\n  \"a\": 100,\n  \"b\": 2,\n  \"c\": 300\n}\n");
+	CHECK(TeamSyncView::resultIsValid(base, base, merged));
+	CHECK_FALSE(TeamSyncView::resultIsValid(base, base, "{\n  \"a\": 100,\n"));   // a broken mix is refused
+
+	const auto lost = anna.sync.service().lost();
+	REQUIRE(anna.sync.resolve(lost[0], &merged));
+	CHECK(anna.sync.service().lost().empty());
+	REQUIRE(pump(server, { &anna, &bob }, [&] { return anna.settled(4) && bob.file("Config/level.json") == merged; }));
+	CHECK(anna.file("Config/level.json") == merged);
+	TeamSyncView::openConflict({});   // leave no window state behind for other tests
+	TeamSyncView::setConflictPicks({});
+}
+
+TEST_CASE("Team sync UI: the view - a status card, files and the history as a timeline with restore")
+{
+	FakeTeamServer server;
+	FakeScServer   sc(server);
+	Editor anna("Anna"), bob("Bob");
+	anna.put("Content/door.txt", "closed\n");
+	REQUIRE(anna.team.signIn(addressOf(server), "studio", "Anna", "correct-horse"));
+	REQUIRE(bob.team.signIn(addressOf(server), "studio", "Bob", "correct-horse"));
+	REQUIRE(pump(server, { &anna, &bob }, [&] { return anna.settled(0) && bob.settled(0); }));
+	anna.sync.syncNow();
+	REQUIRE(pump(server, { &anna, &bob }, [&] { return anna.settled(1) && bob.settled(1); }));
+	bob.put("Content/door.txt", "open\n");
+	bob.put("Content/window.txt", "glass\n");
+	bob.sync.syncNow();
+	REQUIRE(pump(server, { &anna, &bob }, [&] { return anna.settled(2) && bob.settled(2) && anna.sync.service().history().size() == 2; }));
+
+	Harness h;
+	const he_ui::Image shot = h.shot(anna.sync);
+	dump(shot, "team-sync-view.bmp");
+	CHECK(inkPixels(shot) > 1000);
+	CHECK(TeamSyncView::controlRect("Sync Now").x1 > 0);
+}
+
+TEST_CASE("Team sync UI: feature branches through a real collab_server (HE_TEST_TEAM_SERVER=host:port)")
+{
+	const char* env = std::getenv("HE_TEST_TEAM_SERVER");
+	if (!env || !*env)
+	{
+		MESSAGE("HE_TEST_TEAM_SERVER not set — skipped (start collab_server with --data-dir and point it there)");
+		return;
+	}
+	Editor anna("Anna");
+	anna.projectTeam = "branches" + std::to_string(steadyMs() % 1000000);
+	anna.put("Content/door.txt", "closed\n");
+	REQUIRE(anna.team.createTeam(env, anna.projectTeam, "Anna", "anna-secret-1"));
+	auto idle = [&] {
+		const auto st = anna.sync.service().status();
+		return anna.sync.running() && st.connected && st.phase == HE::Sc::TeamSyncService::Phase::Idle &&
+		       st.activity.empty() && st.firstSyncDiffers.empty() && !st.projectMissing;
+	};
+	auto run = [&](auto done) {
+		const auto deadline = std::chrono::steady_clock::now() + kDeadline;
+		while (std::chrono::steady_clock::now() < deadline)
+		{
+			anna.update();
+			if (done()) return true;
+			std::this_thread::sleep_for(std::chrono::milliseconds(2));
+		}
+		return false;
+	};
+	REQUIRE(run([&] { return anna.sync.service().status().projectMissing && anna.sync.service().status().isAdmin; }));
+	anna.sync.service().createProject();
+	REQUIRE(run([&] { return idle() && anna.sync.service().status().rev >= 1; }));
+	CHECK(anna.sync.branch().empty());
+
+	// A branch: made on the server from the head, and this editor works on it from now on.
+	REQUIRE(anna.sync.canSwitchBranch());
+	anna.sync.createBranch("lights");
+	REQUIRE(run([&] { return anna.sync.branch() == "lights" && idle(); }));
+	anna.put("Content/lamp.txt", "on\n");
+	anna.sync.syncNow();
+	REQUIRE(run([&] { return idle() && anna.sync.service().status().waiting == 0 && anna.sync.service().status().rev >= 2; }));
+	CHECK(anna.sync.service().history().front().subject.find("Save by") == 0);
+
+	// An edit not synced yet when switching: it goes up to this branch first, nothing is lost.
+	anna.put("Content/notes.txt", "draft\n");
+	REQUIRE(anna.sync.switchBranch(""));
+	CHECK(anna.sync.switching());
+	REQUIRE(run([&] { return anna.sync.branch().empty() && idle() && !fs::exists(anna.root / "Content" / "notes.txt"); }));
+	REQUIRE(anna.sync.switchBranch("lights"));
+	REQUIRE(run([&] { return anna.sync.branch() == "lights" && idle() && anna.file("Content/notes.txt") == "draft\n"; }));
+
+	// Back to the project: the folder is the project's version again (no lamp), and back to the branch.
+	REQUIRE(anna.sync.switchBranch(""));
+	REQUIRE(run([&] { return anna.sync.branch().empty() && idle() && !fs::exists(anna.root / "Content" / "lamp.txt"); }));
+	CHECK(anna.file("Content/door.txt") == "closed\n");
+	REQUIRE(anna.sync.switchBranch("lights"));
+	REQUIRE(run([&] { return anna.sync.branch() == "lights" && idle() && anna.file("Content/lamp.txt") == "on\n"; }));
+
+	// Merged: back on the project, with the branch's lamp.
+	anna.sync.mergeIntoMain();
+	REQUIRE(run([&] { return anna.sync.branch().empty() && !anna.sync.merging() && idle() && anna.file("Content/lamp.txt") == "on\n"; }));
+	REQUIRE(run([&] { return !anna.sync.service().history().empty() && anna.sync.service().history().front().subject == "Merge branch lights"; }));
+	Harness h;
+	dump(h.shot(anna.sync), "team-sync-branches.bmp");
+	anna.team.signOut();
 }

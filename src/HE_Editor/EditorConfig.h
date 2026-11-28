@@ -28,6 +28,16 @@ struct EditorConfig
 	bool KeepCPUAssetsInfoAcknowledged = false;
 	int  ContentBrowserRefreshRate = 60;
 
+	// Importing a static mesh also writes its Auto-LOD chain (inside the mesh's file;
+	// Importer::setAutoLodOnImport, AutoLod.h). Off: it makes every import slower.
+	bool AutoLodOnImport = false;
+
+	// The baked far landscape (the pictures a landscape's distant chunks draw with,
+	// LandscapeFarBake.h) in the editor: 0 Off (only the export bakes), 1 Manual (the
+	// Bake button in Landscape ▸ Setup), 2 Automatic (after a landscape was left
+	// alone for a few seconds).
+	int LandscapeFarBake = 1;
+
 	// Content browser tree-panel width (-1 = auto on first frame)
 	float CbTreeWidth = -1.0f;
 
@@ -212,9 +222,10 @@ struct EditorConfig
 	bool  GraphicsFromProject = false;
 
 	// Render path (pushed to the renderer each frame via SetRenderPath): 0 =
-	// Forward (default), 1 = Deferred (G-buffer + fullscreen lighting resolve,
-	// Metal + OpenGL). The backend's supportsDeferredRendering gates it.
-	int   RenderPath = 0;
+	// Forward, 1 = Deferred (default; G-buffer + fullscreen lighting resolve,
+	// Metal + OpenGL). The backend's supportsDeferredRendering gates it: a backend
+	// without one stays forward whatever this says.
+	int   RenderPath = 1;
 
 	// CPU occlusion culling (pushed each frame via SetOcclusionCullingSettings):
 	// objects hidden behind nearer opaque geometry are not drawn. OpenGL + Metal;
@@ -222,6 +233,12 @@ struct EditorConfig
 	// default until it has run on real scenes for a while (a culler bug makes
 	// things vanish, and that is the worse failure).
 	bool  OcclusionCulling = false;
+
+	// Runtime Virtual Textures (RVT 2.0, Thema 335): the ONE global switch. On: an RVT Write node paints its inputs into
+	// pages and the RVT Read node reads them. Off (or a backend that cannot hold a virtual texture): the Write node is
+	// skipped and the Read node is replaced by the expressions that feed the Write node, the graph computes directly. The
+	// export follows it. HE_RVT=1/0 in the environment overrides it (RvtLandscape::wanted).
+	bool  RuntimeVirtualTextures = false;
 
 	// Screen-space reflections (pushed each frame via SetSSRSettings). v1 only
 	// effective on Metal in the deferred render path; supportsScreenSpaceReflections

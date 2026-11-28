@@ -8,6 +8,7 @@
 #include <HorizonScene/CellSplit.h>
 #include <HorizonScene/CellStreamer.h>
 #include <HorizonScene/HorizonWorld.h>
+#include <HorizonScene/LandscapeRuntime.h>   // the tile landscape's store and atlas
 #include <HorizonScene/SceneSerializer.h>
 #include <JobSystem/JobSystem.h>
 #include <ContentManager/ContentManager.h>
@@ -15,6 +16,7 @@
 #include <glm/glm.hpp>
 #include <algorithm>
 #include <chrono>
+#include <cfloat>
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
@@ -273,6 +275,8 @@ struct PoolRates
 {
 	double jobsPerSec[HE::kJobPriorityCount] = {};
 	double poolShare[HE::kJobPriorityCount]  = {};   // busy time / (wall time × workers)
+	double waitAvgMs[HE::kJobPriorityCount]  = {};   // queue wait per job that ran in the window
+	double waitMaxMs[HE::kJobPriorityCount]  = {};   // longest single wait in the window
 };
 
 const PoolRates& poolRates(const HE::ThreadPoolStats& now)
@@ -297,7 +301,12 @@ const PoolRates& poolRates(const HE::ThreadPoolStats& now)
 		const auto& b = now.lanes[p];
 		s_rates.jobsPerSec[p] = static_cast<double>(b.executed - a.executed) / dt;
 		s_rates.poolShare[p]  = static_cast<double>(b.busyNs - a.busyNs) * 1e-9 / (dt * workers);
+		const uint64_t ran = b.executed - a.executed;
+		s_rates.waitAvgMs[p] = ran > 0 ? static_cast<double>(b.waitNs - a.waitNs) * 1e-6 / static_cast<double>(ran) : 0.0;
+		s_rates.waitMaxMs[p] = static_cast<double>(b.waitMaxNs) * 1e-6;
 	}
+	// The peak is per window: without the reset it would show the worst moment since start.
+	globalPool().resetPeaks();
 	s_prev = now; s_prevAt = t;
 	return s_rates;
 }
@@ -321,8 +330,9 @@ void drawJobs()
 	ImGui::Text("%zu workers", s.threads);
 	constexpr ImGuiTableFlags kFlags = ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV
 	                                 | ImGuiTableFlags_SizingStretchProp;
-	if (!ImGui::BeginTable("##jobs", 8, kFlags)) return;
-	for (const char* h : { "Priority", "Queued", "Running", "Cap", "Jobs/s", "Pool", "Cancelled", "Failed" })
+	if (!ImGui::BeginTable("##jobs", 10, kFlags)) return;
+	for (const char* h : { "Priority", "Queued", "Running", "Cap", "Jobs/s", "Pool", "Wait avg", "Wait max",
+	                       "Cancelled", "Failed" })
 		ImGui::TableSetupColumn(h);
 	ImGui::TableHeadersRow();
 	static const char* kNames[HE::kJobPriorityCount] = { "High", "Normal", "Low" };
@@ -338,14 +348,19 @@ void drawJobs()
 		else                      ImGui::Text("%zu", l.limit);
 		ImGui::TableNextColumn(); ImGui::Text("%.0f", r.jobsPerSec[p]);
 		ImGui::TableNextColumn(); ImGui::Text("%.0f %%", r.poolShare[p] * 100.0);
+		ImGui::TableNextColumn(); ImGui::Text("%.1f ms", r.waitAvgMs[p]);
+		ImGui::TableNextColumn(); ImGui::Text("%.1f ms", r.waitMaxMs[p]);
 		ImGui::TableNextColumn(); ImGui::Text("%llu", static_cast<unsigned long long>(l.cancelled));
 		ImGui::TableNextColumn(); ImGui::Text("%llu", static_cast<unsigned long long>(l.failed));
 	}
 	ImGui::EndTable();
 	EditorWidgets::WrapText wrap;
 	ImGui::TextDisabled("Pool is the share of all workers' time the priority took over the last "
-	                    "half second. Low is background streaming; its cap keeps workers free "
-	                    "for the frame. The Timeline tab names every job on the worker lanes.");
+	                    "half second. Wait is how long jobs stood in the queue before a worker took "
+	                    "them (average and longest over the same window): a Low wait that keeps "
+	                    "growing means streaming is starved or capped. Low is background streaming; "
+	                    "its cap keeps workers free for the frame. The Timeline tab names every job "
+	                    "on the worker lanes.");
 }
 
 constexpr double kBytesPerMB = 1048576.0;
@@ -360,6 +375,7 @@ void drawAssets(ContentManager& cm)
 	            static_cast<unsigned long long>(ps.dropped), static_cast<unsigned long long>(ps.restarted));
 	ImGui::Text("Last poll: %.2f ms on the main thread, %zu taken, %zu left for the next frame",
 	            ps.lastPollMs, ps.lastPollHandled, ps.lastPollLeft);
+	ImGui::Text("Decoded, waiting for the main thread: %.1f MB", static_cast<double>(cm.asyncBacklogBytes()) / kBytesPerMB);
 	constexpr size_t kShown = 12;
 	const std::vector<std::string> paths = cm.asyncInFlightPaths(kShown);
 	for (const std::string& p : paths)
@@ -433,12 +449,16 @@ void drawCells(AppContext& ctx)
 		                    "decals and placed prefabs into one file per square; the game then loads "
 		                    "the squares around the camera, and so does Play in the editor.");
 		static HE::CellSplitOptions s_options;
-		EditorWidgets::Row::dragFloat("Cell size (m)##cellsplit", &s_options.cellSize, 8.0f, 16.0f, 100000.0f, "%.0f");
-		EditorWidgets::Row::dragFloat("Load radius (m), 0 = 1.5 cells##cellsplit", &s_options.loadRadius, 8.0f,
-		                              0.0f, 1.0e6f, "%.0f");
-		EditorWidgets::Row::dragFloat("Unload radius (m), 0 = 1.25 x load##cellsplit", &s_options.unloadRadius,
-		                              8.0f, 0.0f, 1.0e6f, "%.0f");
-		EditorWidgets::Row::dragFloat("Look ahead (s)##cellsplit", &s_options.lookaheadSec, 0.1f, 0.0f, 30.0f, "%.1f");
+		{
+			EditorWidgets::Row::InlineLabels inlineLabels;
+			EditorWidgets::Row::dragFloat("Cell Size##cellsplit", &s_options.cellSize, 8.0f, 16.0f, 100000.0f, "%.0f m");
+			EditorWidgets::Row::dragFloat("Load Radius##cellsplit", &s_options.loadRadius, 8.0f,
+			                              0.0f, 1.0e6f, "%.0f m");
+			EditorWidgets::Row::dragFloat("Unload Radius##cellsplit", &s_options.unloadRadius,
+			                              8.0f, 0.0f, 1.0e6f, "%.0f m");
+			EditorWidgets::Row::dragFloat("Look Ahead##cellsplit", &s_options.lookaheadSec, 0.1f, 0.0f, 30.0f, "%.1f s");
+		}
+		EditorWidgets::hint("A radius of 0 picks the default: 1.5 cells to load, 1.25 times the load radius to unload.");
 		ImGui::BeginDisabled(!editable);
 		if (EditorWidgets::button("Split into Streaming Cells")) splitOpenScene(ctx, s_options, s_message);
 		ImGui::EndDisabled();
@@ -480,7 +500,7 @@ void drawCells(AppContext& ctx)
 	// a player, a pin a script sets). The editor has one camera, so a pin here is a way
 	// to look at what two places hold together; the Scene window draws them as well.
 	std::vector<HE::CellAnchor>& pins = previewPins();
-	if (EditorWidgets::button("Pin an anchor at the editor camera"))
+	if (EditorWidgets::button("Pin an Anchor at the Editor Camera"))
 	{
 		HE::CellAnchor pin;
 		pin.position = eye;
@@ -488,7 +508,7 @@ void drawCells(AppContext& ctx)
 	}
 	ImGui::BeginDisabled(pins.empty());
 	ImGui::SameLine();
-	if (EditorWidgets::button("Clear anchors")) pins.clear();
+	if (EditorWidgets::button("Clear Anchors")) pins.clear();
 	ImGui::EndDisabled();
 	if (!pins.empty())
 		ImGui::Text("%zu preview anchor(s) besides the camera.", pins.size());
@@ -507,9 +527,9 @@ void drawCells(AppContext& ctx)
 	            pins.empty() ? "the editor camera" : "the camera and the anchors", loadCells,
 	            static_cast<unsigned long long>(loadEnts), keepCells, static_cast<unsigned long long>(keepEnts));
 	ImGui::TextDisabled("A cell is built in slices of whole objects, up to %zu entities each, as many per frame as "
-	                    "fit its budget; the largest cell in reach here takes about %u slices. It is dropped only "
+	                    "fit its budget; the largest cell in reach here takes about %u slice%s. It is dropped only "
 	                    "once every anchor is beyond the unload radius.",
-	                    HE::kDefaultCellSliceEntities, mostSlices);
+	                    HE::kDefaultCellSliceEntities, mostSlices, mostSlices == 1 ? "" : "s");
 
 	constexpr ImGuiTableFlags kFlags = ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV
 	                                 | ImGuiTableFlags_SizingStretchProp;
@@ -528,6 +548,73 @@ void drawCells(AppContext& ctx)
 		ImGui::TableNextColumn(); ImGui::TextUnformatted(reachName(v.reach));
 	}
 	ImGui::EndTable();
+}
+
+// The world-scale tile landscape (Thema 326, step 6): what its store holds and how it is doing, and a map of the tiles around the editor camera.
+// Nothing at all for a scene without one (or one whose pack did not open: the log says why).
+void drawLandscape(AppContext& ctx)
+{
+	const HE::LandscapeRuntime* rt = ctx.world ? ctx.world->landscapeRuntime() : nullptr;
+	if (!rt || !rt->active() || !rt->store()) return;
+	const HE::LandscapeStore& store = *rt->store();
+	const HE::LandscapeStoreStats& s = store.stats();
+	const HE::LandscapeTileSource& src = store.source();
+	const HE::LandscapeGeometry& g = src.geometry();
+	ImGui::SeparatorText("Tile landscape");
+	EditorWidgets::WrapText wrap;
+	constexpr double kMB = 1024.0 * 1024.0;
+	ImGui::Text("World %.1f x %.1f km: %d x %d tiles of %.0f m (%.0f m raster, %d weight channels).",
+	            src.tilesX() * static_cast<double>(g.tileM) / 1000.0, src.tilesZ() * static_cast<double>(g.tileM) / 1000.0, src.tilesX(), src.tilesZ(),
+	            static_cast<double>(g.tileM), static_cast<double>(g.tileM) / g.hCells, static_cast<int>(g.channels));
+	ImGui::Text("Tiles: %zu resident, %zu loading, %zu failed, %zu wanted within %.0f m (keep to %.0f m).", s.resident, s.loading, s.failed, s.wanted,
+	            static_cast<double>(store.config().loadRadius), static_cast<double>(store.config().loadRadius * store.config().keepFactor));
+	// Memory: what the decoded tiles take against the budget, with the highest it has been.
+	const double budget = static_cast<double>(store.config().byteBudget);
+	char overlay[96];
+	std::snprintf(overlay, sizeof overlay, "%.0f of %.0f MB (peak %.0f MB, %.1f MB a tile)", static_cast<double>(s.residentBytes) / kMB, budget / kMB,
+	              static_cast<double>(s.peakBytes) / kMB, static_cast<double>(store.tileBytes()) / kMB);
+	ImGui::ProgressBar(budget > 0.0 ? static_cast<float>(std::min(1.0, static_cast<double>(s.residentBytes) / budget)) : 0.0f, ImVec2(-FLT_MIN, 0.0f), overlay);
+	if (s.budgetClamped)
+		ImGui::TextColored(ImVec4(0.95f, 0.75f, 0.35f, 1.0f), "The memory budget cuts the load radius to %zu tiles.", s.maxTiles);
+	ImGui::Text("Streaming: %llu loaded, %llu failed, %llu cancelled, %llu discarded, %llu evicted; update %.2f ms (avg %.2f, max %.2f).",
+	            static_cast<unsigned long long>(s.loadsFinished), static_cast<unsigned long long>(s.loadsFailed), static_cast<unsigned long long>(s.loadsCancelled),
+	            static_cast<unsigned long long>(s.loadsDiscarded), static_cast<unsigned long long>(s.evictions), s.lastUpdateMs, s.avgUpdateMs, s.maxUpdateMs);
+	if (const HE::LandscapeAtlas* atlas = rt->atlas())
+		ImGui::Text("GPU atlas: %zu of %zu slots, %llu uploads, %llu releases%s.", atlas->stats().used, atlas->capacity(),
+		            static_cast<unsigned long long>(atlas->stats().uploads), static_cast<unsigned long long>(atlas->stats().releases),
+		            atlas->stats().full || atlas->stats().aliased ? " (FULL or aliased: raise the slot count)" : "");
+	ImGui::Text("Ground: %zu physics fields, %zu foliage scatters (%zu plants), GI clipmap %s.", rt->ground().stats().fields, rt->foliage().stats().scattered,
+	            rt->foliage().stats().instances, rt->giHeightfield().active() ? "active" : "not built");
+
+	// The map: tiles around the camera, one square each. Dark = outside the kept ring, blue = kept but not in memory, green = resident,
+	// yellow = loading; the white frame is the tile under the camera.
+	if (!ctx.editorCamera) return;
+	const glm::dvec3 cam = glm::dvec3(ctx.editorCamera->position()) + (ctx.world ? ctx.world->origin() : glm::dvec3(0.0));
+	const int camX = static_cast<int>(std::floor(cam.x / g.tileM)), camZ = static_cast<int>(std::floor(cam.z / g.tileM));
+	constexpr int kHalf = 12;          // 25 x 25 tiles
+	const float cell = 9.0f;
+	const ImVec2 origin = ImGui::GetCursorScreenPos();
+	ImDrawList* dl = ImGui::GetWindowDrawList();
+	for (int dz = -kHalf; dz <= kHalf; ++dz)
+		for (int dx = -kHalf; dx <= kHalf; ++dx)
+		{
+			const HE::LandscapeTileKey key{ camX + dx, camZ + dz };
+			const bool inWorld = key.x >= 0 && key.z >= 0 && key.x < src.tilesX() && key.z < src.tilesZ();
+			ImU32 col = IM_COL32(24, 26, 30, 255);
+			if (inWorld)
+			{
+				if (store.isResident(key)) col = IM_COL32(70, 170, 90, 255);
+				else if (store.isLoading(key)) col = IM_COL32(220, 190, 70, 255);
+				else if (store.inKeptRing(key)) col = IM_COL32(60, 90, 150, 255);
+				else col = IM_COL32(48, 52, 60, 255);
+			}
+			const ImVec2 a(origin.x + static_cast<float>(dx + kHalf) * cell, origin.y + static_cast<float>(dz + kHalf) * cell);
+			dl->AddRectFilled(a, ImVec2(a.x + cell - 1.0f, a.y + cell - 1.0f), col);
+		}
+	const ImVec2 c(origin.x + static_cast<float>(kHalf) * cell, origin.y + static_cast<float>(kHalf) * cell);
+	dl->AddRect(c, ImVec2(c.x + cell - 1.0f, c.y + cell - 1.0f), IM_COL32(255, 255, 255, 255));
+	ImGui::Dummy(ImVec2(static_cast<float>(2 * kHalf + 1) * cell, static_cast<float>(2 * kHalf + 1) * cell));
+	ImGui::TextDisabled("Camera over tile %d, %d. Green resident, yellow loading, blue kept.", camX, camZ);
 }
 
 void drawWorldSize(AppContext& ctx)
@@ -568,6 +655,7 @@ void draw(AppContext& ctx)
 	if (ctx.contentManager) drawAssets(*ctx.contentManager);
 	drawScene(ctx);
 	drawCells(ctx);
+	drawLandscape(ctx);
 	drawWorldSize(ctx);
 #else
 	(void)ctx;

@@ -6,6 +6,7 @@
 #include "Renderer/EnvironmentSettings.h" // IRenderer::EnvironmentSettings (aliased below)
 #include "Renderer/UIRenderObject.h"     // RenderWidgetThumbnail takes UI draw quads
 #include "Renderer/WaterRipples.h"       // SetWaterRipples: the rings the water material reads
+#include "Renderer/LandscapeRenderFrame.h" // SetLandscapeProvider: the world-scale landscape's per-frame data
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>   // worldPreviewProjection (below)
 #include <cmath>
@@ -24,6 +25,14 @@ class ContentManager;
 // the resulting view matrix here every frame; the projection is rebuilt by the
 // extractor with the backend's current aspect ratio so it always matches the
 // viewport size exactly.
+// The tile landscape's ground in the passes besides the scene's (IRenderer::Capabilities::landscapePassMask).
+constexpr uint32_t kLandscapePassShadow   = 1u << 0;   // casts into the cascades and the local shadow layers
+constexpr uint32_t kLandscapePassGi       = 1u << 1;   // GI: the pre-pass (takes ray-traced shadows) and the ray structure (casts them)
+constexpr uint32_t kLandscapePassSsao     = 1u << 2;   // ambient occlusion sees the ground
+constexpr uint32_t kLandscapePassVelocity = 1u << 3;   // TAA / motion blur velocity
+constexpr uint32_t kLandscapePassGBuffer  = 1u << 4;   // drawn into the G-buffer on a deferred frame (not forward on top of it)
+constexpr uint32_t kLandscapePassAll      = 31u;
+
 struct EditorCameraOverride
 {
     bool      active       = false;
@@ -43,6 +52,27 @@ struct EditorCameraOverride
     // because the same override feeds the panel's own pick extract, and the
     // picker must see exactly the quads the frame drew.
     bool      editorIcons  = true;
+    // RenderSceneImage only: the picture is the materials' own output, untouched. An unlit material's colour
+    // comes back byte for byte (no tonemap, gamma, bloom, SSAO, AA, depth of field, reflections or GI), which
+    // is what a baker needs when it photographs a material's albedo or a data view. Forward path only.
+    bool      rawOutput    = false;
+    // With rawOutput: the colour is written sRGB-encoded (the exact curve), for a picture that becomes an sRGB
+    // texture. Without it the 8 bits hold the linear value, which is what data views (normals, roughness) want.
+    bool      rawSrgb      = false;
+    // RenderSceneImage only (Runtime Virtual Textures, Thema 333): >= 0 sends the finished picture, on the GPU and
+    // without a readback, into slice `rvtSlot` of layer `rvtLayer` of the pool CreateRvtPool made. The picture must be
+    // exactly the pool's page size; `rgba` stays empty and the call returns true. Layer 0 is read as sRGB (use rawSrgb),
+    // layers 1 and 2 as plain data.
+    int       rvtSlot      = -1;
+    int       rvtLayer     = 0;
+    // With rvtSlot >= 0: draw every object of the world with this material (null = the objects' own). The page of a virtual
+    // texture is one world seen three times, once per layer view; with the material here instead of written into the
+    // world's components, the three views extract the same scene and the renderer walks it once (the extractor's
+    // beginFrame reuse). It also keeps a far-LOD stand-in material (the baked far landscape) out of a page.
+    HE::UUID  rvtMaterial;
+    // With rvtSlot >= 0: the page is the TILE landscape's (SetLandscapeProvider), whose ground is then drawn with rvtMaterial.
+    // False: a page of meshes, and the tile ground stays out of it.
+    bool      rvtTileGround = false;
 };
 
 // ─── WorldPreviewEnv ────────────────────────────────────────────────────────
@@ -159,6 +189,12 @@ enum class AAMethod : int
 //   GBuffer*   — one G-buffer attachment straight to the screen. Deferred path
 //                only: the forward path has no G-buffer, so a backend that is
 //                forward this frame draws Lit instead (see resolveViewMode).
+//   RvtDebug   — the Runtime Virtual Texture page map (RVT 2.0 step 5): the scene is
+//                drawn unlit and a landscape read from pages shows each page by its
+//                mip, with page borders and marks for stale / fallback / missing
+//                pages. Not a pass: the lookup in RvtLookup.h reads the same table
+//                and branches on heLight.viewMode.y. A landscape without RVT is just
+//                shown unlit.
 // Append-only: the values travel through the headless dump knobs.
 enum class ViewMode : int
 {
@@ -169,8 +205,9 @@ enum class ViewMode : int
     GBufferNormal         = 4,
     GBufferRoughSpecMetal = 5, // r = roughness, g = specular, b = metallic
     GBufferEmissive       = 6,
+    RvtDebug              = 7,
 };
-constexpr int kViewModeCount = 7;
+constexpr int kViewModeCount = 8;
 
 inline bool viewModeIsGBuffer(ViewMode m)
 {
@@ -208,6 +245,7 @@ inline const char* viewModeName(ViewMode m)
     case ViewMode::GBufferNormal:         return "Normals";
     case ViewMode::GBufferRoughSpecMetal: return "Rough / Spec / Metal";
     case ViewMode::GBufferEmissive:       return "Emissive";
+    case ViewMode::RvtDebug:              return "Virtual Texture";
     }
     return "Lit";
 }
@@ -245,6 +283,32 @@ public:
         // forward regardless of SetRenderPath. What each backend's deferred
         // frame does and does not run (decals, SSR, AO) is plan §10.3/§10.12.
         bool supportsDeferredRendering = false;
+        // RenderSceneImage honours EditorCameraOverride::rawOutput / rawSrgb: the picture is the materials' own
+        // colour, no tonemap, bloom, AA or other post. The far-landscape bake needs it (Thema 228).
+        bool supportsRawCapture = false;
+        // The tile landscape's far data can change without the landscape being another one: the backend looks at
+        // LandscapeRenderStatic::coarseRevision and makes its coarse images (and far image) again, of whatever size they
+        // now are, while the tile atlas and the slot table stay. With it a render window that moves, and a brush stroke,
+        // never send the near ground back to the far levels. False = the application has to announce such a change as a
+        // new landscape (LandscapeRuntime::setWindowKeepsAtlas), which empties the atlas once.
+        bool landscapeCoarseRevision = false;
+        // The tile landscape is drawn with LandscapeRenderFrame::materialId (the material's fragment, weights from the tile atlas),
+        // so the ground is lit, shadowed and fogged like every other surface. false: the fixed layer blend, whatever the frame names.
+        bool landscapeMaterial = false;
+        // ... and the ground is in the backend's other geometry passes as well: it casts into the shadow maps, is in the GI
+        // pre-pass and the ray structure, in the SSAO and velocity passes, and in the G-buffer on a deferred frame. Without it
+        // the ground receives (shadows of meshes, fog, the lighting) but does not cast, occlude or report motion.
+        bool landscapePasses = false;
+        // Which of those passes the backend has, one bit each (kLandscapePass*): a backend that is part of the way there says
+        // so here and leaves landscapePasses false until it has them all. landscapePasses true means every bit.
+        uint32_t landscapePassMask = 0;
+        // SetRvtTileGround / EditorCameraOverride::rvtTileGround work: the tile landscape's ground can be painted into virtual
+        // texture pages and drawn from them. Without it the ground is computed in place.
+        bool landscapeRvt = false;
+        // CreateRvtPool / EditorCameraOverride::rvtSlot work: the backend can hold the page pool of the Runtime
+        // Virtual Textures and fill a slice of it from RenderSceneImage (Thema 333). False = the landscape keeps
+        // running its material directly.
+        bool supportsRvt = false;
         // Screen-space reflections (docs/ssr-plan.md, docs/ssr-cross-backend-
         // plan.md). Metal (in the deferred tile path: lag-free, from the stored
         // G-buffer), OpenGL and D3D11/D3D12/Vulkan (forward trace against last
@@ -276,6 +340,15 @@ public:
         // window that refuses to open. `window.open` refuses in one place from
         // this flag rather than each backend inventing its own excuse.
         bool supportsSecondaryWindows = false;
+        // Volumetric fog (Thema 225, docs/volumetric-fog-plan.md): the froxel-grid
+        // Inject/Integrate/Apply passes, vs. the analytic height-fog formula every
+        // backend already has. False everywhere until a backend implements it
+        // (Metal/OpenGL/Vulkan/D3D11/D3D12 — plan steps 3-6); Software stays false,
+        // it draws no 3D. The extractor (RenderWorld.h's FogVolumeData) gates
+        // `enabled` on this, and the editor greys out fogMode's volumetric choice
+        // when false — a scene authored with fogMode=1 still loads and plays, it
+        // just renders with the analytic fallback on a backend without this.
+        bool supportsVolumetricFog = false;
     };
 
     // Overlay callback: called by the backend at the correct point inside the
@@ -293,6 +366,13 @@ public:
     // Called every frame for the primary window.
     virtual void Render()                        = 0;
     virtual Capabilities GetCapabilities() const = 0;
+
+    // Why GI reflections cannot run although Capabilities::supportsGIReflections says the
+    // backend has them: the pipelines are built on the first GI frame, so a driver that
+    // refuses them (or a package without their shaders) is only known afterwards. Empty
+    // while everything is fine or not yet tried. The settings panel shows it under the
+    // checkbox; before, the switch simply did nothing.
+    virtual std::string GIReflectionsInactiveReason() const { return {}; }
 
     // Blocks until the primary window can take another frame (Metal: acquires
     // the next drawable). Application::Run calls it at the top of the frame,
@@ -674,6 +754,10 @@ public:
     // ImGui-compatible texture handle (GL: GLuint cast; Metal: id<MTLTexture>).
     // Pass 0×0 to return to direct-to-window rendering.
     virtual void  SetViewportSize(uint32_t /*width*/, uint32_t /*height*/) {}
+    // Whether the offscreen viewport (SetViewportSize) is on screen this frame. False = nobody looks at it (another editor tab
+    // in front, the viewport window hidden): the backend may skip the scene's GPU work and keep the last image; the world goes
+    // on ticking as usual. Set every frame before Render(); a backend that ignores it renders as before.
+    virtual void  SetSceneVisible(bool /*visible*/) {}
     virtual void* GetViewportTexture() { return m_viewportImGuiHandle; }
 
     // Called by the platform layer (editor) after it has registered the viewport
@@ -709,6 +793,60 @@ public:
                                    uint32_t /*width*/, uint32_t /*height*/,
                                    std::vector<uint8_t>& /*rgba*/) { return false; }
 
+    // ── Runtime Virtual Texture page pool (Thema 333, docs/rvt-design-2026-11-04.md) ──
+    // Three texture arrays of `slots` slices, each pagePx x pagePx RGBA8: layer 0 BaseColor (sRGB), layer 1 world
+    // normal x 0.5 + 0.5, layer 2 R = AO, G = roughness: the three unlit views of the Auto Landscape material.
+    // Slices are filled with RenderSceneImage and EditorCameraOverride::rvtSlot. Creating again replaces the pool.
+    // False (and nothing created) when the backend cannot (Capabilities::supportsRvt).
+    virtual bool CreateRvtPool(uint32_t /*slots*/, uint32_t /*pagePx*/) { return false; }
+    virtual void DestroyRvtPool() {}
+    // Reads one slice back (a witness or a debug view; not for per-frame use). `rgba` = pagePx * pagePx * 4 bytes,
+    // row 0 first. False when there is no pool or the slice is out of range.
+    virtual bool ReadbackRvtSlot(int /*layer*/, uint32_t /*slot*/, std::vector<uint8_t>& /*rgba*/) { return false; }
+    // The page table the landscape shader reads (Thema 333 step 3): one R32_UINT texture with a mip chain, mip m being
+    // (side >> m)^2 entries row-major (y * side + x), exactly what rvt::RvtManager::pageTable() returns per mip, each entry
+    // `slot | effectiveMip << 24` or 0xFFFFFFFF. `mips[0]` is the finest, its side a power of two. Upload again whenever
+    // RvtManager::tableVersion changes; a different shape recreates the texture. False without a pool or on a bad shape.
+    // One table per VOLUME, named by the consumer material that reads it: a draw whose material is that consumer gets that
+    // table bound, so a landscape cut into tiles (one volume each, all in the one pool) draws every tile from its own.
+    virtual bool SetRvtPageTable(const HE::UUID& /*consumerMaterial*/, const std::vector<std::vector<uint32_t>>& /*mips*/) { return false; }
+    // Reads the table back the same way (a witness).
+    virtual bool ReadbackRvtPageTable(const HE::UUID& /*consumerMaterial*/, std::vector<std::vector<uint32_t>>& /*mips*/) { return false; }
+    // From now on the terrain chunks of landscape entity `terrainEntity` that are drawn with `landscapeMaterial` are drawn with
+    // `consumerMaterial` instead (the material with the RvtSample node, which reads the pool and the table above), and with
+    // none of the object's own parameter block (it is laid out for the old material). Null `consumerMaterial` = off for that
+    // landscape. Keyed by the landscape AND its material: a far LOD level that already carries another material (the baked far
+    // landscape) stays as it is. Done in the renderer's own view of the frame, never in the world: the scene stays as authored.
+    virtual void SetRvtLandscape(uint32_t /*terrainEntity*/, const HE::UUID& /*landscapeMaterial*/, const HE::UUID& /*consumerMaterial*/) {}
+    // The chunk entities of that landscape that keep their own material although the swap is on (the native near view: close
+    // to the camera the material itself is sharper than any page). Replaces the previous set; empty = every chunk swaps.
+    // A backend without it swaps every chunk (the near view is then blurrier, nothing else changes).
+    virtual void SetRvtNearChunks(uint32_t /*terrainEntity*/, const std::vector<uint32_t>& /*chunkEntities*/) {}
+    // The tile landscape's ground (SetLandscapeProvider): its patches that lie wholly inside the absolute XZ rectangle are drawn
+    // with `consumerMaterial` (which reads the pool through the table SetRvtPageTable gave it), the others with the ground's own
+    // material as before. Null `consumerMaterial` = off. A backend without it draws the whole ground with its own material.
+    // `nativeNearM` > 0: patches closer to the camera than this (horizontally, to the patch's square) keep the ground's own
+    // material too (the native near view: up close the material itself is sharper than any page; the driver passes the distance
+    // at which a mip-0 texel is a pixel, so the change of material is where both are equally sharp).
+    virtual void SetRvtTileGround(const HE::UUID& /*consumerMaterial*/, const glm::dvec2& /*minXZ*/, const glm::dvec2& /*maxXZ*/,
+                                  float /*nativeNearM*/ = 0.0f) {}
+    // The pages the lookup's feedback reported since the last call (keys of RvtLookup.h's rvtFeedbackKey, unordered, may repeat),
+    // appended to `keys`. False = the backend has no feedback (the driver then serves the camera square alone).
+    virtual bool ReadRvtFeedback(std::vector<uint32_t>& /*keys*/) { return false; }
+    // Takes one volume out: its table and its swap go, the pool and the other volumes stay (DestroyRvtPool drops everything).
+    virtual void ReleaseRvtConsumer(const HE::UUID& /*consumerMaterial*/) {}
+    // The pages of one tick are painted between BeginRvtPages(pagePx) and EndRvtPages(): a backend whose page is the general
+    // RenderSceneImage frame (a viewport-sized set set aside and rebuilt around every call, post-FX repaired at the live size
+    // afterwards) keeps ONE page-size set across the whole bracket and gives the live viewport back once, at the end. The
+    // result of every page is the same inside or outside a bracket (witness: HE_DUMP_RVTTEST part 1b). No-ops
+    // by default (D3D11 has a lean page pass of its own, OpenGL's per-call set is cheap).
+    virtual void BeginRvtPages(uint32_t /*pagePx*/) {}
+    virtual void EndRvtPages() {}
+    // Which of the four channels (bit 0 R .. bit 3 A) of pool layer `layer` the backend keeps. A backend that packs a layer into fewer
+    // channels (Metal: normal as x and z in RG8, the surface as R and G; the shader rebuilds the rest) says so, ReadbackRvtSlot returns
+    // those channels in their place and zero elsewhere, and a witness compares only what exists. Default: all four.
+    virtual uint32_t RvtLayerChannels(int /*layer*/) const { return 0xFu; }
+
     // ── Material hot-reload ────────────────────────────────────────────────
     // Drop any GPU state the backend cached for this material (e.g. uploaded
     // base-color textures) so the next frame re-resolves it from the
@@ -724,6 +862,19 @@ public:
     // game). Materials without a custom shader are skipped; already-built
     // pipelines are a cheap cache hit. No-op on backends that build eagerly.
     virtual void WarmupMaterials(const std::vector<HE::UUID>& /*materialIds*/) {}
+
+    // ── Background shader builds ───────────────────────────────────────────
+    // A backend that compiles material pipelines off the render thread (Metal)
+    // does not draw an object whose pipeline is still compiling; it appears when
+    // the build lands. `pending` is how many builds are still running, `total`
+    // how many were started since the queue was last empty (so a progress bar
+    // reads total - pending of total). Both 0 on a backend that builds
+    // synchronously, which is the default.
+    struct ShaderBuildStatus { int pending = 0; int total = 0; };
+    // Collects the builds that finished since the last call and reports the
+    // state. Main thread. Cheap enough for once per frame, and the loop of a
+    // startup step ("Compiling shaders 3/8") that waits for pending == 0.
+    virtual ShaderBuildStatus PumpShaderBuilds() { return {}; }
 
     // ── Material preview ───────────────────────────────────────────────────
     // Render a single primitive shaded with material `materialId` into a small
@@ -904,6 +1055,39 @@ public:
     // knows how to draw UIRenderObjects but nothing about widget assets. `size`
     // is the tile edge; the quads must already be laid out for a square viewport
     // of that many pixels, since UI layout is resolution-dependent.
+    // ── UI preview ─────────────────────────────────────────────────────────
+    // Draw a list of UI quads (what HE::uiEmitElement / WidgetManager::extract
+    // produce) into a dedicated offscreen target of width x height pixels,
+    // cleared to the opaque `clear` colour, and return its ImGui handle. It is
+    // the SAME UI pass the game frame draws its widgets with — materials,
+    // fonts, Pixelated, clipping and all — which is the point: the widget
+    // designer shows the renderer's picture rather than an ImGui imitation.
+    // Opaque on purpose: a transparent target composited a second time by
+    // ImGui puts dark fringes on every translucent edge.
+    //
+    // Same handle conventions as RenderWorldPreview (OpenGL's is bottom-up, the
+    // caller flips V) and the same slot rule: one target per slot, so two
+    // designers docked side by side in one frame take two slots. nullptr = no
+    // such path on this backend; the caller draws its own approximation.
+    static constexpr uint32_t kUIPreviewSlots = 4;
+
+    // The same on the CPU: the quads drawn into `outRgba8` (width x height,
+    // top-down, cleared to the opaque `clear`) exactly as this backend draws a
+    // frame. Only the Software backend has it — it is how the widget designer
+    // shows an application that SHIPS on the software renderer its real
+    // picture (its materials run on the CPU, as in the app). `animated`
+    // (optional) is set when a material in it reads Time or Backdrop, so the
+    // same quads can come out differently next frame. false = not a CPU backend.
+    virtual bool RasterizeUI(const std::vector<UIRenderObject>& /*uiObjects*/,
+                             uint32_t /*width*/, uint32_t /*height*/,
+                             const glm::vec4& /*clear*/, std::vector<uint8_t>& /*outRgba8*/,
+                             bool* /*animated*/ = nullptr)
+    { return false; }
+    virtual void* RenderUIPreview(const std::vector<UIRenderObject>& /*uiObjects*/,
+                                  uint32_t /*width*/, uint32_t /*height*/,
+                                  const glm::vec4& /*clear*/, uint32_t /*slot*/ = 0)
+    { return nullptr; }
+
     virtual bool RenderWidgetThumbnail(const std::vector<UIRenderObject>& /*uiObjects*/,
                                        uint32_t /*size*/, std::vector<uint8_t>& /*outRgba8*/)
     { return false; }
@@ -980,6 +1164,19 @@ public:
     void SetWaterRipples(const WaterRippleBlock& w) { m_waterRipples = w; }
     const WaterRippleBlock& GetWaterRipples() const { return m_waterRipples; }
 
+    // ── World-scale landscape (Thema 326) ──────────────────────────────────
+    // The application's LandscapeRuntime, as a callback: once per main scene frame
+    // the backend calls it with the view-projection it is about to use (origin-
+    // relative world to ITS clip space) and whether its clip depth is 0..1, and
+    // gets the patches to draw plus the image uploads
+    // to execute BEFORE drawing (LandscapeRenderFrame.h). Executing a frame it
+    // asked for is the backend's duty: the runtime counts uploads as done. Empty
+    // (the default) = no landscape. Only the main scene pass asks, never a preview
+    // or a thumbnail. Plain storage, not virtual, for the reason SetWaterRipples
+    // gives; the member sits after every other one.
+    void SetLandscapeProvider(HE::LandscapeProvider p) { m_landscapeProvider = std::move(p); }
+    const HE::LandscapeProvider& GetLandscapeProvider() const { return m_landscapeProvider; }
+
 protected:
     OverlayCallback      m_overlayCallback;
     HE::RenderPath       m_renderPath           = HE::RenderPath::Forward;
@@ -998,4 +1195,5 @@ protected:
     std::function<void*(void*, void*)> m_imguiTexRegistrar;
     // Last: appended after every older member so their offsets stay where they were.
     WaterRippleBlock     m_waterRipples;
+    HE::LandscapeProvider m_landscapeProvider;
 };

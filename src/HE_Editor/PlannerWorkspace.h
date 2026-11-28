@@ -105,6 +105,11 @@ public:
 	const std::string& lastError() const { return m_error; }
 	void clearError() { m_error.clear(); }
 
+	// Called with every file a workspace writes. The editor: a planner edit is a save, which
+	// the team server's sync hears about like a scene save (TeamSyncController::noteSaved),
+	// and which goes to the others in a collaboration session at once.
+	static void setSavedHook(std::function<void(const std::filesystem::path&)> fn);
+
 	// ── A database whose rows live somewhere else ────────────────────────────
 	// The Tasks database is a view of the Task Board (PlannerTasks.h): its rows
 	// are read from the board and its edits are written to the board, and only
@@ -131,6 +136,8 @@ public:
 	const std::string& author() const { return m_author; }
 
 private:
+	static bool saved(const std::filesystem::path& file, bool ok);   // `ok`, after telling the saved hook
+
 	struct BoardEntry
 	{
 		Board                            board;

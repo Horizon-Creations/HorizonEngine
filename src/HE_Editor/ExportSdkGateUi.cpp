@@ -34,7 +34,8 @@ void drawGameCompileStatus(AppContext& ctx, const HE::ExportSdk::ExportGate& gat
 		const std::string msg = "The game is compiled from the engine SDK and this machine has " +
 		                        std::string(gate.needCmake && gate.needCompiler ? "no cmake and no C++ compiler"
 		                                    : gate.needCmake ? "no cmake" : "no working C++ compiler") +
-		                        ". Export opens Tool Setup to install it, then continues.";
+		                        // Named as the dialog's heading reads ("Missing Tools").
+		                        ". Export first opens the Missing Tools dialog to install it, then continues.";
 		ToolSetupDialog::drawMissingBanner(ctx, toolFor(gate), msg.c_str());
 		break;
 	}

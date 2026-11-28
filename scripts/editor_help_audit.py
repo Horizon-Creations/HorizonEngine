@@ -67,8 +67,9 @@ CHROME = {
 # things to hide.
 IGNORE = {
     # Covered by an explicit helpForKey("details.add-component") call — the scan
-    # matches labels against scopes and cannot see a key passed by hand.
-    ("UI Button", "Add Component"),
+    # matches labels against scopes and cannot see a key passed by hand. The
+    # scope is the last section drawn above it in the source, Replication.
+    ("Replication", "Add Component"),
     # The multi-selection panel's own Add Component (renderMultiSelection, drawn
     # before any section scope): covered by helpForKey("details.multi.add-component").
     (None, "Add Component"),
@@ -121,7 +122,8 @@ AREAS: dict[str, list[str]] = {
                   "NotificationBar.cpp", "PlayReportPanel.cpp", "DocsPanel.cpp",
                   "TutorialPanel.cpp", "McpStatusBar.cpp", "AudioMixerPanel.cpp",
                   "TextureViewerPanel.cpp", "TextureColourSpaceDialog.cpp", "AssetRecoveryDialog.cpp",
-                  "TaskBoardPanel.cpp", "TaskBoardFooter.cpp", "PlannerPanel.cpp", "PlannerBoardView.cpp"],
+                  "TaskBoardPanel.cpp", "TaskBoardFooter.cpp", "PlannerPanel.cpp", "PlannerBoardView.cpp",
+                  "ProjectPreflight.cpp", "ProjectTeamGate.cpp"],
     "components": ["InspectorPanel.cpp"],
     "settings": ["EditorSettingsPanel.cpp", "ProjectSettingsPanel.cpp", "ToolSetupDialog.cpp"],
     "materials": ["MaterialEditorPanel.cpp"],
@@ -139,7 +141,7 @@ AREAS: dict[str, list[str]] = {
     "export": ["ExportDialogPanel.cpp", "BuildProgressDialog.cpp", "ProfilerPanel.cpp"],
     "collab": ["CollabPanel.cpp", "CollabPresenceBar.cpp", "SourceControlPanel.cpp",
                "GitMissingDialog.cpp", "EngineContentPublishDialog.cpp",
-               "ReportIssueDialog.cpp", "GitCloneDialog.cpp",
+               "ReportIssueDialog.cpp", "GitCloneDialog.cpp", "GitCloneView.cpp",
                "GitHubSignIn.cpp", "GitHubSignInView.cpp", "TeamView.cpp", "TeamSyncView.cpp"],
 }
 

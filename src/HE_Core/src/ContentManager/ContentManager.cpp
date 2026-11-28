@@ -5,11 +5,34 @@
 #include <cstdint>
 #include "MaterialGraph/MaterialGraph.h" // instance sync: switch-permutation regenerate
 #include "MaterialGraph/AutoLandscapeMaterial.h" // the three auto landscape array paths
+#include "Trails/TrailClipmap.h"           // the runtime trail texture answers its own path in loadAsset
 #include "Renderer/UIFont.h"           // uiRasterizeIcon: the editor icon textures
 #include "ContentManager/HAsset.h"
+#include "ContentManager/GpuArrayCook.h"     // editor: texture arrays cooked for the GPU on load
 #include "ContentManager/AssetRefRetarget.h" // move/rename: carry path references over
 #include "Sequence/SequenceJson.h"        // CHUNK_SEQU <-> SequenceAsset
+#include "LandscapeFoliage/LandscapeFoliageLayerJson.h" // CHUNK_LFOL <-> LandscapeFoliageLayerAsset
 #include "Hpak/HpakReader.h"
+
+namespace
+{
+// A graph texture that is made at runtime and changes (the landscape's trail clipmap, kTrailTexturePath) must reach the
+// renderers by ID: they cache a path-referenced texture under its path, and IRenderer::InvalidateTexture only drops
+// id-keyed entries, so a texture bound by path would stay at its first upload. Every material that lists it gets
+// its fixed id next to the path (`graphTextureIds` is parallel to `graphTexturePaths`; a baked pak already carries ids
+// and is left alone), and the texture is made right away so the first request finds it.
+void bindRuntimeTextureIds(ContentManager& cm, MaterialAsset& m)
+{
+    for (size_t i = 0; i < m.graphTexturePaths.size(); ++i)
+        if (m.graphTexturePaths[i] == HE::kTrailTexturePath)
+        {
+            if (m.graphTextureIds.size() < m.graphTexturePaths.size()) m.graphTextureIds.resize(m.graphTexturePaths.size());
+            m.graphTextureIds[i] = HE::kTrailTextureId;
+            HE::TrailClipmap::ensureTexture(cm);
+        }
+}
+} // namespace
+
 #include "Hpak/ProjectExporter.h"        // sceneUuidForPath + the reserved pak entry names
 #include "JobSystem/JobSystem.h"
 #include "Diagnostics/Logger.h"
@@ -154,6 +177,50 @@ static void readMeshSections(const HAsset::Reader& reader, Mesh& a, const std::s
 	a.sections.push_back(std::move(whole));
 }
 
+// The geometry, material and bake chunks of a static mesh — shared by the mesh
+// itself and by each detail level inside it (CHUNK_MLOD), which is a complete
+// static-mesh file of its own.
+static void readStaticMeshChunks(const HAsset::Reader& reader, StaticMeshAsset& a, const std::string& relativePath)
+{
+	if (const auto* c = reader.findChunk(HAsset::CHUNK_MREF)) { size_t o=0; HAsset::Reader::readString(c->data,o,a.materialPath); }
+	if (const auto* c = reader.findChunk(HAsset::CHUNK_MRFU)) { size_t o=0; HAsset::Reader::readPOD(c->data,o,a.materialId.hi); HAsset::Reader::readPOD(c->data,o,a.materialId.lo); }
+	if (const auto* c = reader.findChunk(HAsset::CHUNK_INDX)) { size_t o=0; HAsset::Reader::readVec(c->data,o,a.indices); }
+	if (const auto* c = reader.findChunk(HAsset::CHUNK_MVBO))
+	{
+		// Cooked (pack-time) form: interleaved GPU-ready vertices + baked AABB.
+		size_t o = 0;
+		HAsset::Reader::readPOD(c->data, o, a.vertexCount);
+		for (int i = 0; i < 3; ++i) HAsset::Reader::readPOD(c->data, o, a.boundsMin[i]);
+		for (int i = 0; i < 3; ++i) HAsset::Reader::readPOD(c->data, o, a.boundsMax[i]);
+		HAsset::Reader::readVec(c->data, o, a.interleaved);
+		a.cooked = a.vertexCount > 0 && a.interleaved.size() == static_cast<size_t>(a.vertexCount) * 8;
+	}
+	else
+	{
+		// Raw SoA form (loose/editor assets).
+		if (const auto* c = reader.findChunk(HAsset::CHUNK_VERT)) { size_t o=0; HAsset::Reader::readVec(c->data,o,a.vertices); }
+		if (const auto* c = reader.findChunk(HAsset::CHUNK_NORM)) { size_t o=0; HAsset::Reader::readVec(c->data,o,a.normals); }
+		if (const auto* c = reader.findChunk(HAsset::CHUNK_TEXC)) { size_t o=0; HAsset::Reader::readVec(c->data,o,a.uvs); }
+		// Object-space AABB, so the extractor can cull against real bounds (the
+		// cooked path already carries a baked AABB). Cheap one-time scan on load.
+		if (!a.vertices.empty())
+		{
+			a.boundsMin[0] = a.boundsMin[1] = a.boundsMin[2] =  1e30f;
+			a.boundsMax[0] = a.boundsMax[1] = a.boundsMax[2] = -1e30f;
+			for (size_t v = 0; v + 2 < a.vertices.size(); v += 3)
+				for (int k = 0; k < 3; ++k)
+				{
+					a.boundsMin[k] = std::min(a.boundsMin[k], a.vertices[v + k]);
+					a.boundsMax[k] = std::max(a.boundsMax[k], a.vertices[v + k]);
+				}
+		}
+		ensureMeshUVs(a); // loose meshes with no TEXC chunk get box-projected UVs
+	}
+	readMeshSections(reader, a, relativePath);
+	if (const auto* c = reader.findChunk(HAsset::CHUNK_MBKE))
+		if (!c->data.empty()) a.bake = MeshBakeSettings::fromByte(c->data[0]);
+}
+
 // ─── sniffAssetTypeFromFile ───────────────────────────────────────────────────
 HE::AssetType ContentManager::sniffAssetTypeFromFile(const std::string& path) const
 {
@@ -204,41 +271,18 @@ HE::UUID ContentManager::parseAndRegisterAsset(const std::string& relativePath,
 	{
 		StaticMeshAsset a{}; a.id = id; a.type = type; a.name = assetName; a.path = relativePath;
 		a.sourcePath = assetSource;
-		if (const auto* c = reader.findChunk(HAsset::CHUNK_MREF)) { size_t o=0; HAsset::Reader::readString(c->data,o,a.materialPath); }
-		if (const auto* c = reader.findChunk(HAsset::CHUNK_MRFU)) { size_t o=0; HAsset::Reader::readPOD(c->data,o,a.materialId.hi); HAsset::Reader::readPOD(c->data,o,a.materialId.lo); }
-		if (const auto* c = reader.findChunk(HAsset::CHUNK_INDX)) { size_t o=0; HAsset::Reader::readVec(c->data,o,a.indices); }
-		if (const auto* c = reader.findChunk(HAsset::CHUNK_MVBO))
+		readStaticMeshChunks(reader, a, relativePath);
+		// The detail levels inside the file: the index, and in a loose file the levels'
+		// own bytes. They are registered under their own UUIDs once this one is (below).
+		if (const auto* c = reader.findChunk(HAsset::CHUNK_MLDI)) HE::decodeMeshLodIndex(c->data, a.lods);
+		if (const auto* c = reader.findChunk(HAsset::CHUNK_MLOD)) HE::decodeMeshLodBlobs(c->data, a.lodBlobs);
+		if (!a.lodBlobs.empty() && a.lodBlobs.size() != a.lods.size())
 		{
-			// Cooked (pack-time) form: interleaved GPU-ready vertices + baked AABB.
-			size_t o = 0;
-			HAsset::Reader::readPOD(c->data, o, a.vertexCount);
-			for (int i = 0; i < 3; ++i) HAsset::Reader::readPOD(c->data, o, a.boundsMin[i]);
-			for (int i = 0; i < 3; ++i) HAsset::Reader::readPOD(c->data, o, a.boundsMax[i]);
-			HAsset::Reader::readVec(c->data, o, a.interleaved);
-			a.cooked = a.vertexCount > 0 && a.interleaved.size() == static_cast<size_t>(a.vertexCount) * 8;
+			HE_LOG_WARN(Asset, "ContentManager: '%s' carries %zu level index entries for %zu levels — the levels are ignored",
+			            relativePath.c_str(), a.lods.size(), a.lodBlobs.size());
+			a.lods.clear();
+			a.lodBlobs.clear();
 		}
-		else
-		{
-			// Raw SoA form (loose/editor assets).
-			if (const auto* c = reader.findChunk(HAsset::CHUNK_VERT)) { size_t o=0; HAsset::Reader::readVec(c->data,o,a.vertices); }
-			if (const auto* c = reader.findChunk(HAsset::CHUNK_NORM)) { size_t o=0; HAsset::Reader::readVec(c->data,o,a.normals); }
-			if (const auto* c = reader.findChunk(HAsset::CHUNK_TEXC)) { size_t o=0; HAsset::Reader::readVec(c->data,o,a.uvs); }
-			// Object-space AABB, so the extractor can cull against real bounds (the
-			// cooked path already carries a baked AABB). Cheap one-time scan on load.
-			if (!a.vertices.empty())
-			{
-				a.boundsMin[0] = a.boundsMin[1] = a.boundsMin[2] =  1e30f;
-				a.boundsMax[0] = a.boundsMax[1] = a.boundsMax[2] = -1e30f;
-				for (size_t v = 0; v + 2 < a.vertices.size(); v += 3)
-					for (int k = 0; k < 3; ++k)
-					{
-						a.boundsMin[k] = std::min(a.boundsMin[k], a.vertices[v + k]);
-						a.boundsMax[k] = std::max(a.boundsMax[k], a.vertices[v + k]);
-					}
-			}
-			ensureMeshUVs(a); // loose meshes with no TEXC chunk get box-projected UVs
-		}
-		readMeshSections(reader, a, relativePath);
 		handle = m_staticMeshAssets.insert(std::move(a)); break;
 	}
 	case HE::AssetType::SkeletalMesh:
@@ -287,7 +331,18 @@ HE::UUID ContentManager::parseAndRegisterAsset(const std::string& relativePath,
 			if (a.mipLevels == 0) a.mipLevels = 1;
 			if (a.layers == 0) a.layers = 1;
 		}
-		if (const auto* c = reader.findChunk(HAsset::CHUNK_PIXL)) a.data = c->data;
+		// Moved, not copied: the reader dies with this call, and the payload is the
+		// largest single buffer a registration touches on the main thread.
+		reader.takeChunkData(HAsset::CHUNK_PIXL, a.data);
+		// Baked slice means (cooked arrays only). Dropped when the count disagrees with the
+		// slice count, so a stale chunk can never feed the GI a wrong colour.
+		if (const auto* c = reader.findChunk(HAsset::CHUNK_TXSM))
+		{
+			size_t o = 0;
+			if (HAsset::Reader::readVec(c->data, o, a.sliceMeans) &&
+			    a.sliceMeans.size() != static_cast<size_t>(a.layers) * 3)
+				a.sliceMeans.clear();
+		}
 		handle = m_textureAssets.insert(std::move(a)); break;
 	}
 	case HE::AssetType::Material:
@@ -352,6 +407,10 @@ HE::UUID ContentManager::parseAndRegisterAsset(const std::string& relativePath,
 			// Tessellation displacement (Thema 207): appended after the approx block,
 			// absent in older files → empty = no tessellation.
 			HAsset::Reader::readString(c->data,o,a.customShaderDispGlsl);
+			// Landscape foliage set (Thema 327): after the displacement body, absent in
+			// older files → {} = none (readPOD leaves it untouched at EOF).
+			HAsset::Reader::readPOD(c->data,o,a.foliageSetId.hi);
+			HAsset::Reader::readPOD(c->data,o,a.foliageSetId.lo);
 		}
 		// Baked graph-texture UUIDs live in MTLU alongside shaderId/textureIds.
 		if (const auto* c = reader.findChunk(HAsset::CHUNK_MTLU))
@@ -364,6 +423,7 @@ HE::UUID ContentManager::parseAndRegisterAsset(const std::string& relativePath,
 		}
 		if (const auto* c = reader.findChunk(HAsset::CHUNK_PSHD)) // precompiled shaders (packed)
 			a.precompiledShaders = HE::decodeMaterialShaderVariants(c->data);
+		bindRuntimeTextureIds(*this, a);
 		handle = m_materialAssets.insert(std::move(a)); break;
 	}
 	case HE::AssetType::Scene:
@@ -553,7 +613,7 @@ HE::UUID ContentManager::parseAndRegisterAsset(const std::string& relativePath,
 		// depend on. SceneSerializer::instantiatePrefab is the only thing that
 		// ever looks inside, and it is handed these bytes verbatim.
 		PrefabAsset a{}; a.id = id; a.type = type; a.name = assetName; a.path = relativePath;
-		if (const auto* c = reader.findChunk(HAsset::CHUNK_PFAB)) a.data = c->data;
+		reader.takeChunkData(HAsset::CHUNK_PFAB, a.data);
 		handle = m_prefabAssets.insert(std::move(a)); break;
 	}
 	case HE::AssetType::AnimationClip:
@@ -672,6 +732,28 @@ HE::UUID ContentManager::parseAndRegisterAsset(const std::string& relativePath,
 		}
 		handle = m_sequenceAssets.insert(std::move(a)); break;
 	}
+	case HE::AssetType::LandscapeFoliageLayer:
+	{
+		// Same rule as the Sequence: no chunk is an empty set (a stub, or a file
+		// from before the chunk), a chunk that does not parse is a FAILED load so
+		// a save cannot overwrite the author's rules with nothing.
+		LandscapeFoliageLayerAsset a{}; a.id = id; a.type = type; a.name = assetName; a.path = relativePath;
+		if (const auto* c = reader.findChunk(HAsset::CHUNK_LFOL))
+		{
+			const std::string text(reinterpret_cast<const char*>(c->data.data()), c->data.size());
+			std::string why;
+			if (!HE::landscapeFoliageLayerFromJson(text, a, &why))
+			{
+				HE_LOG_ERROR(Asset, "LandscapeFoliageLayer '%s': the LFOL chunk is not readable (%s) "
+				                    "— not loaded, so a save cannot overwrite it",
+				             relativePath.c_str(), why.c_str());
+				return HE::UUID();
+			}
+			for (const std::string& problem : HE::validateLandscapeFoliageLayer(a))
+				HE_LOG_WARN(Asset, "LandscapeFoliageLayer '%s': %s", relativePath.c_str(), problem.c_str());
+		}
+		handle = m_landscapeFoliageLayerAssets.insert(std::move(a)); break;
+	}
 	default:
 		return HE::UUID();
 	}
@@ -679,6 +761,7 @@ HE::UUID ContentManager::parseAndRegisterAsset(const std::string& relativePath,
 	m_handleToUUID[id]         = handle;
 	m_assetTypeIndex[id]       = type;
 	m_pathToUUID[relativePath] = id;
+	if (type == HE::AssetType::StaticMesh) registerMeshLods(id);
 	if (!fullPath.empty())
 	{
 		std::error_code ec;
@@ -831,7 +914,10 @@ void ContentManager::regenerateMaterialFromGraph(HE::UUID materialId)
 	mat->blendMode            = gen.blendMode;
 	mat->domain               = gen.domain;
 	mat->graphTexturePaths    = gen.textures;
+	mat->graphTextureIds.clear();
+	bindRuntimeTextureIds(*this, *mat);
 	mat->graphLayerNames      = gen.layerNames;   // landscape paint layers
+	mat->foliageSetId         = gen.foliageSetId; // landscape foliage set (metadata node)
 	applyGraphParams(*mat, gen, &oldValues);      // keep every user-edited value
 	applyApproxSurface(*mat, g);                  // GI-hit colours (needs final param slots)
 }
@@ -904,7 +990,10 @@ void ContentManager::syncMaterialInstance(HE::UUID instanceId)
 			// re-applied from oldValues below, the rest must follow the parent.
 			applyGraphParams(*inst, gen, nullptr);
 			inst->graphTexturePaths = gen.textures;
+			inst->graphTextureIds.clear();
+			bindRuntimeTextureIds(*this, *inst);
 			inst->graphLayerNames      = gen.layerNames; // landscape paint layers
+			inst->foliageSetId         = gen.foliageSetId;
 			inst->blendMode            = gen.blendMode;
 			inst->domain               = gen.domain;
 			inst->customShaderVertGlsl = gen.vertexBody;
@@ -931,6 +1020,7 @@ void ContentManager::syncMaterialInstance(HE::UUID instanceId)
 		// panel refused to paint with it ("needs a material with a Landscape
 		// Layer Blend node") even though its shader samples the weightmap.
 		inst->graphLayerNames      = parent->graphLayerNames;
+		inst->foliageSetId         = parent->foliageSetId; // same graph = same foliage set
 		inst->shaderParamData      = parent->shaderParamData;
 		inst->precompiledShaders   = parent->precompiledShaders;
 		inst->blendMode            = parent->blendMode;
@@ -966,6 +1056,22 @@ void ContentManager::syncMaterialInstance(HE::UUID instanceId)
 	inst->metallic = parent->metallic; inst->roughness = parent->roughness;
 	inst->opacity  = parent->opacity;  inst->doubleSided = parent->doubleSided;
 	s_depth--;
+}
+
+size_t ContentManager::regenerateRvtMaterials()
+{
+	size_t n = 0;
+	for (const HE::UUID& id : enumerateIds(HE::AssetType::Material))
+	{
+		const MaterialAsset* m = getMaterial(id);
+		if (!m || !m->parentMaterialPath.empty() || m->nodeGraphJson.empty() || !m->precompiledShaders.empty()) continue;
+		if (m->nodeGraphJson.find("RVT Write") == std::string::npos && m->nodeGraphJson.find("RVT Read") == std::string::npos) continue;
+		const std::string path = m->path;
+		regenerateMaterialFromGraph(id);
+		syncMaterialInstancesOf(path);
+		++n;
+	}
+	return n;
 }
 
 void ContentManager::syncMaterialInstancesOf(const std::string& parentRelPath)
@@ -1099,6 +1205,10 @@ HE::UUID ContentManager::loadAsset(const std::string& relativePath)
 	HE_PROFILE_SCOPE_N("ContentManager::load");
 	if (const auto loaded = m_pathToUUID.find(relativePath); loaded != m_pathToUUID.end())
 		return loaded->second;
+	// The landscape's trail clipmap is a runtime texture with no file (Trails/TrailClipmap.h): answer it
+	// here, untouched, so a material that asks before the first scene tick finds it.
+	if (relativePath == HE::kTrailTexturePath)
+		return HE::TrailClipmap::ensureTexture(*this);
 
 	// Packed build: resolve the content path to a mounted-pak UUID via the asset
 	// index, then load that entry synchronously (registers it under its embedded
@@ -1129,7 +1239,11 @@ HE::UUID ContentManager::loadAsset(const std::string& relativePath)
 	const std::string fullPath = resolveAbsolutePath(relativePath);
 
 	HAsset::Reader reader;
-	if (!reader.open(fullPath))
+	// A big loose RGBA8 texture array comes cooked for the GPU when the editor asked for it (GpuArrayCook.h).
+	std::vector<uint8_t> gpuCooked;
+	const bool opened = HE::readGpuCookedArray(fullPath, gpuCooked) ? reader.openData(gpuCooked)
+	                                                                 : reader.open(fullPath);
+	if (!opened)
 	{
 		// The most-reported "why is my asset not there" path: the reference is
 		// fine, the file simply is not where the content root says it should be.
@@ -1161,7 +1275,13 @@ void ContentManager::LoadInterest::join(const LoadRequester& r)
 {
 	std::lock_guard<std::mutex> lock(m);
 	if (r.pinned) who.pinned = true;
-	if (static_cast<int>(r.priority) < static_cast<int>(who.priority)) who.priority = r.priority;
+	if (static_cast<int>(r.priority) < static_cast<int>(who.priority))
+	{
+		who.priority = r.priority;
+		// Already queued (a prefetch asked at Low, the camera now needs it): the lane
+		// it was queued in is not changed by the field above.
+		for (const HE::JobHandle& j : jobs) j.promote(who.priority);
+	}
 	if (who.pinned || r.tokens.empty()) return;
 	// Drop tokens that are already cancelled, so an asset re-requested by every
 	// streamed-in-and-out zone does not grow this list forever. Never leaves it
@@ -1258,6 +1378,14 @@ std::shared_ptr<HAsset::Reader> splitChunks(std::vector<uint8_t>& bytes)
 	return reader;
 }
 
+// Above this many decoded-but-unregistered bytes a background (Low) load does not
+// start: it waits for the main thread to take results. 256 MB holds a few hundred
+// typical assets, far more than the 16-per-frame poll drains in a second, and is
+// small enough that a world jump cannot pile the whole request list into RAM.
+constexpr std::uint64_t kAsyncBacklogBytes = 256ull << 20;
+// …but never for longer than this: a process that does not poll must not freeze a worker.
+constexpr auto kAsyncBacklogMaxWait = std::chrono::seconds(10);
+
 // The synthetic m_pendingPaths key of a UUID-addressed load, e.g. "pak://12-34":
 // `scheme` keeps it apart from real relative paths and from the other scheme.
 std::string uuidCoalesceKey(const char* scheme, HE::UUID id)
@@ -1266,6 +1394,36 @@ std::string uuidCoalesceKey(const char* scheme, HE::UUID id)
 }
 
 } // namespace
+
+// The result goes to the sink, its size to the backlog (under the sink's mutex, so
+// the main thread never sees the entry without its bytes).
+void ContentManager::pushAsyncResult(AsyncSink& sink, AsyncResult&& result)
+{
+	std::unique_lock<std::mutex> lock(sink.mutex);
+	sink.backlogBytes.fetch_add(result.bytes, std::memory_order_relaxed);
+	sink.results.push(std::move(result));
+}
+
+// Top of a background job's body: hold back while the main thread has a pile of
+// results to work through. Only Low loads wait — an asset someone needs now
+// (promoted, or asked for at a higher priority) goes through — and only while the
+// load is still wanted.
+void ContentManager::awaitBacklogRoom(AsyncSink& sink, const LoadInterest& interest)
+{
+	if (sink.backlogBytes.load(std::memory_order_relaxed) < kAsyncBacklogBytes) return;
+	HE_PROFILE_SCOPE_N("AssetBacklogWait");
+	const auto until = std::chrono::steady_clock::now() + kAsyncBacklogMaxWait;
+	for (;;)
+	{
+		if (sink.backlogBytes.load(std::memory_order_relaxed) < kAsyncBacklogBytes) return;
+		if (interest.snapshot().priority != HE::JobPriority::Low) return;
+		if (interest.stale() || std::chrono::steady_clock::now() >= until) return;
+		std::unique_lock<std::mutex> lock(sink.mutex);
+		sink.drained.wait_for(lock, std::chrono::milliseconds(20), [&] {
+			return sink.backlogBytes.load(std::memory_order_relaxed) < kAsyncBacklogBytes;
+		});
+	}
+}
 
 void ContentManager::launchPathLoad(const std::string& relativePath, const std::string& fullPath,
                                      std::function<void(HE::UUID)> callback,
@@ -1283,6 +1441,7 @@ void ContentManager::launchPathLoad(const std::string& relativePath, const std::
 
 	HE::JobDesc desc;
 	desc.name     = "AssetLoad";
+	desc.kind     = HE::JobKind::Io;   // a blocking file read, plus a cheap split
 	desc.priority = interest->snapshot().priority;
 	desc.stale    = [interest] { return interest->stale(); };
 	// Dropped before it started: still report, or the coalesce key would stay in
@@ -1294,22 +1453,33 @@ void ContentManager::launchPathLoad(const std::string& relativePath, const std::
 		result.fullPath     = fullPath;
 		result.callback     = cb;
 		result.cancelled    = true;
-		std::unique_lock<std::mutex> lock(sink->mutex);
-		sink->results.push(std::move(result));
+		pushAsyncResult(*sink, std::move(result));
 	};
 
 	// Captures the sink, the progress cell and the interest, never `this` — the
 	// job may outlive this ContentManager.
-	globalPool().schedule([relativePath, fullPath, sink = m_asyncSink, progress, interest,
+	HE::JobHandle handle = globalPool().schedule([relativePath, fullPath, sink = m_asyncSink, progress, interest,
 	                       cb = std::move(callback)]() mutable
 	{
+		awaitBacklogRoom(*sink, *interest);
 		AsyncResult result;
 		result.relativePath = relativePath;
 		result.fullPath     = fullPath;
 		result.callback     = std::move(cb);
 
-		std::ifstream f(fullPath, std::ios::binary | std::ios::ate);
-		if (f)
+		// A big loose RGBA8 texture array is read as the GPU wants it when the editor asked for that
+		// (GpuArrayCook.h): the cooked file from the cache, or encoded here on the worker, once.
+		const bool gpuCooked = HE::readGpuCookedArray(fullPath, result.fileBytes);
+		std::ifstream f;
+		if (!gpuCooked) f.open(fullPath, std::ios::binary | std::ios::ate);
+		if (gpuCooked)
+		{
+			progress->bytesTotal.store(result.fileBytes.size(), std::memory_order_relaxed);
+			progress->bytesRead.store(result.fileBytes.size(), std::memory_order_relaxed);
+			result.bytes = result.fileBytes.size();
+			result.asset = splitChunks(result.fileBytes);
+		}
+		else if (f)
 		{
 			// Read in blocks rather than in one istreambuf_iterator gulp: the caller
 			// gets a live byte count (asyncProgress → the editor's progress bar for a
@@ -1343,6 +1513,7 @@ void ContentManager::launchPathLoad(const std::string& relativePath, const std::
 				progress->bytesRead.store(done, std::memory_order_relaxed);
 			}
 			if (result.fileBytes.empty() && !result.cancelled) result.failed = true;
+			result.bytes = result.fileBytes.size();   // before the split empties it
 			if (!result.failed && !result.cancelled) result.asset = splitChunks(result.fileBytes);
 		}
 		else
@@ -1350,9 +1521,12 @@ void ContentManager::launchPathLoad(const std::string& relativePath, const std::
 			result.failed = true;
 		}
 
-		std::unique_lock<std::mutex> lock(sink->mutex);
-		sink->results.push(std::move(result));
+		pushAsyncResult(*sink, std::move(result));
 	}, std::move(desc));
+	{
+		std::lock_guard<std::mutex> lock(interest->m);
+		interest->jobs.assign(1, std::move(handle));
+	}
 }
 
 // ─── pollAsyncResults ─────────────────────────────────────────────────────────
@@ -1432,7 +1606,9 @@ std::vector<HE::UUID> ContentManager::pollAsyncResults(size_t maxRegistrations, 
 			if (m_asyncSink->results.empty()) break;
 			r = std::move(m_asyncSink->results.front());
 			m_asyncSink->results.pop();
+			m_asyncSink->backlogBytes.fetch_sub(r.bytes, std::memory_order_relaxed);
 		}
+		m_asyncSink->drained.notify_all();   // a Low load held back by the backlog may start
 		++handled;
 		if (!r.cancelled) ++toRegister;
 
@@ -1608,8 +1784,16 @@ void ContentManager::loadUuidAsync(HE::UUID id, std::function<void(HE::UUID)> ca
 		// registry (async path-based load; coalesced by path).
 		if (const auto d = m_diskRegistry.find(id); d != m_diskRegistry.end())
 		{
-			loadPathAsync(d->second, std::move(callback), requester);
-			return;
+			// The file this entry names may have been removed since it was indexed (a stale cached
+			// copy the sync dropped). When the manifest can bring it back, forget the entry and take
+			// the remote route below instead of failing a load that can never succeed.
+			std::error_code ec;
+			if (!m_remoteAssets.count(id) || std::filesystem::exists(resolveAbsolutePath(d->second), ec))
+			{
+				loadPathAsync(d->second, std::move(callback), requester);
+				return;
+			}
+			m_diskRegistry.erase(d);
 		}
 		// A remote-only EngineContent asset (see registerRemoteAsset): materialize
 		// it first, then load it the normal way. Coalesced by the same synthetic-key
@@ -1684,11 +1868,54 @@ bool ContentManager::launchPakLoad(HE::UUID id, const std::string& coalesceKey,
 	std::array<uint8_t, 32> key  = mount.key;
 	std::shared_ptr<const HpakReader::Toc> toc = mount.reader->sharedToc();
 
+	// Two jobs, as the read and the decode wait for different things: the read (Io
+	// kind, limited separately) for the disk, the decode (decrypt + decompress, an
+	// ordinary CPU job) for a core. One job doing both held a worker through the
+	// whole read, so a Low cap's worth of slow reads left nobody to decode what
+	// had been read. The read hands the stored bytes over in `stage`.
+	struct PakStage
+	{
+		HpakReader::StoredEntry stored;
+		bool                    read    = false;   // stored holds the entry
+		bool                    stopped = false;   // nobody wanted it any more
+		// Neither read nor stopped: the pak could not be opened/read, or the read threw.
+	};
+	auto stage = std::make_shared<PakStage>();
+
+	HE::JobDesc readDesc;
+	readDesc.name     = "AssetReadPak";
+	readDesc.kind     = HE::JobKind::Io;
+	readDesc.priority = interest->snapshot().priority;
+	readDesc.stale    = [interest] { return interest->stale(); };
+	// No onCancelled here: a read dropped before it started cancels the decode job
+	// behind it, and that one reports for both.
+	HE::JobHandle readJob = globalPool().schedule([id, path, toc, stage, sink = m_asyncSink, interest]
+	{
+		awaitBacklogRoom(*sink, *interest);
+		// Worker-local, safe for concurrent reads across jobs. A package replaced
+		// on disk since the mount no longer matches the shared table: then read
+		// the new one in full, as every job did before.
+		try
+		{
+			HpakReader reader;
+			if (reader.openShared(path, toc) || reader.open(path))
+				stage->read = reader.readStoredStoppable(
+					id, stage->stored, [&interest] { return interest->stale(); }, &stage->stopped);
+		}
+		catch (const std::exception& e)
+		{
+			HE_LOG_ERROR(Pak, "Reading a package entry threw: %s", e.what());
+			stage->read = false;
+		}
+	}, std::move(readDesc));
+
 	HE::JobDesc desc;
 	desc.name     = "AssetLoadPak";
 	desc.priority = interest->snapshot().priority;
+	desc.after    = { readJob };
 	desc.stale    = [interest] { return interest->stale(); };
-	// Same reason as in launchPathLoad: the key must come back to be released.
+	// Dropped before it started, or the read in front of it was: the key must come
+	// back to be released, exactly as for a loose load.
 	desc.onCancelled = [id, coalesceKey, sink = m_asyncSink, cb = callback]
 	{
 		AsyncResult result;
@@ -1696,15 +1923,15 @@ bool ContentManager::launchPakLoad(HE::UUID id, const std::string& coalesceKey,
 		result.callback     = cb;
 		result.cancelled    = true;
 		result.pakId        = id;
-		std::unique_lock<std::mutex> lock(sink->mutex);
-		sink->results.push(std::move(result));
+		pushAsyncResult(*sink, std::move(result));
 	};
 
 	// Captures the sink, never `this` — the job may outlive this ContentManager.
-	// Once started it can still be dropped: readEntry asks the interest between
-	// 4 MiB blocks of the read and of a zstd decode, and before each decode step.
-	// A dropped read reports `cancelled`, so the coalesce key comes back.
-	globalPool().schedule([id, path, enc, key, toc, coalesceKey, sink = m_asyncSink, interest,
+	// Once started it can still be dropped: the read asks the interest between
+	// 4 MiB blocks, the decode before each decode step and between 4 MiB windows
+	// of a zstd decode. A dropped load reports `cancelled`, so the coalesce key
+	// comes back.
+	HE::JobHandle handle = globalPool().schedule([id, enc, key, stage, coalesceKey, sink = m_asyncSink, interest,
 	                       cb = std::move(callback)]() mutable
 	{
 		AsyncResult result;
@@ -1712,28 +1939,31 @@ bool ContentManager::launchPakLoad(HE::UUID id, const std::string& coalesceKey,
 		result.callback     = std::move(cb);
 		result.pakId        = id;
 
-		// Worker-local, safe for concurrent reads across jobs. A package replaced
-		// on disk since the mount no longer matches the shared table: then read
-		// the new one in full, as every job did before.
-		HpakReader reader;
-		if (reader.openShared(path, toc) || reader.open(path))
+		if (stage->read)
 		{
 			bool stopped = false;
-			auto data = reader.readEntry(id, enc ? key.data() : nullptr,
-			                             [&interest] { return interest->stale(); }, &stopped);
+			auto data = HpakReader::decodeStored(id, std::move(stage->stored), enc ? key.data() : nullptr,
+			                                     [&interest] { return interest->stale(); }, &stopped);
 			if (!data.empty())
 			{
 				result.fileBytes = std::move(data); // decoded .hasset
+				result.bytes     = result.fileBytes.size();
 				result.asset     = splitChunks(result.fileBytes);
 			}
 			else if (stopped) result.cancelled = true;
 			else              result.failed    = true;
 		}
-		else result.failed = true;
+		else if (stage->stopped) result.cancelled = true;
+		else                     result.failed    = true;
 
-		std::unique_lock<std::mutex> lock(sink->mutex);
-		sink->results.push(std::move(result));
+		pushAsyncResult(*sink, std::move(result));
 	}, std::move(desc));
+	{
+		std::lock_guard<std::mutex> lock(interest->m);
+		interest->jobs.clear();
+		interest->jobs.push_back(std::move(readJob));
+		interest->jobs.push_back(std::move(handle));
+	}
 	return true;
 }
 
@@ -1743,7 +1973,19 @@ void ContentManager::registerRemoteAsset(HE::UUID id, std::string relativePath,
 {
 	// Already resolvable some other way — a real local/override/mounted file
 	// always wins, and there is nothing for a materializer to add.
-	if (isLoaded(id) || m_diskRegistry.count(id)) return;
+	if (isLoaded(id)) return;
+	if (const auto d = m_diskRegistry.find(id); d != m_diskRegistry.end())
+	{
+		// The index only says what the folders held WHEN THEY WERE SCANNED. The EngineContent sync
+		// removes a cached file the server has a newer copy of ("downloads again when it is used"),
+		// often right after the startup scan: the id then still maps to a file that is gone, and
+		// skipping the registration here left that asset with no way to ever be fetched — every
+		// load of it ended in "Cannot load asset … no readable .hasset". Only a file that is really
+		// there counts as resolvable.
+		std::error_code ec;
+		if (std::filesystem::exists(resolveAbsolutePath(d->second), ec)) return;
+		m_diskRegistry.erase(d);
+	}
 
 	RemoteAssetEntry entry;
 	m_remoteByPath[relativePath] = id;
@@ -1877,20 +2119,18 @@ const MaterialAsset* ContentManager::resolveMaterialRef(HE::UUID bakedId, const 
 static void noteLandscapeArrayDepth(const std::string& path, const TextureAsset* t)
 {
 	if (!t || t->layers == 0) return;
-	static std::atomic<uint32_t> depth[3] = {};
-	static std::atomic<bool> warned{ false };
-	const char* const names[3] = { HE::kAutoLandscapeAlbedoArray, HE::kAutoLandscapeNormalArray,
-	                               HE::kAutoLandscapeMaskArray };
-	for (int i = 0; i < 3; ++i)
-	{
-		if (path != names[i]) continue;
-		depth[i].store(t->layers);
-		const uint32_t a = depth[0].load(), b = depth[1].load(), c = depth[2].load();
-		if (a && b && c && (a != b || b != c) && !warned.exchange(true))
-			HE_LOG_WARN(Asset, "Auto landscape arrays differ in depth (Albedo %u, Normal %u, Mask %u slices): "
-			            "the variants of a layer will not line up across the maps", a, b, c);
-		return;
-	}
+	// One set per texture group: Forest's arrays are checked against each other, not against Mountains'.
+	static std::atomic<uint32_t> depth[HE::kAutoLandscapeGroupCount][3] = {};
+	static std::atomic<bool> warned[HE::kAutoLandscapeGroupCount] = {};
+	int i = 0;
+	const int g = HE::autoLandscapeGroupOfArray(path.c_str(), &i);
+	if (g < 0) return;
+	depth[g][i].store(t->layers);
+	const uint32_t a = depth[g][0].load(), b = depth[g][1].load(), c = depth[g][2].load();
+	if (a && b && c && (a != b || b != c) && !warned[g].exchange(true))
+		HE_LOG_WARN(Asset, "Auto landscape arrays (%s) differ in depth (Albedo %u, Normal %u, Mask %u slices): "
+		            "the variants of a layer will not line up across the maps",
+		            HE::kAutoLandscapeGroups[g].name, a, b, c);
 }
 
 const TextureAsset* ContentManager::resolveTextureRef(HE::UUID bakedId, const std::string& path)
@@ -1950,6 +2190,16 @@ void ContentManager::expandFrontier(HE::UUID id, const LoadRequester& requester)
 			for (HE::UUID r : refs) enqueue(r);
 		}
 		break;
+	case HE::AssetType::LandscapeFoliageLayer:
+		// The meshes and materials the rules name: applying the set needs them,
+		// and the set itself is only requested when something wants to apply it.
+		if (const auto* a = getLandscapeFoliageLayer(id))
+		{
+			std::vector<HE::UUID> refs;
+			HE::landscapeFoliageLayerAssetRefs(*a, refs);
+			for (HE::UUID r : refs) enqueue(r);
+		}
+		break;
 	default:
 		break;
 	}
@@ -1989,6 +2239,11 @@ static bool encodeAssetChunks(RuntimeAsset& asset, HAsset::Writer& w)
 {
 	// META chunk — common to all
 	{ auto m = buildMetaChunk(asset); w.addChunk(HAsset::CHUNK_META, m.data(), m.size()); }
+	// A mesh's level index straight after META: the disk scan reads the two and stops.
+	// Only with the levels' files beside it, so a level is never named without its geometry.
+	if (asset.type == HE::AssetType::StaticMesh)
+		if (const auto& a = static_cast<const StaticMeshAsset&>(asset); !a.lods.empty() && a.lodBlobs.size() == a.lods.size())
+		{ auto b = HE::encodeMeshLodIndex(a.lods); w.addChunk(HAsset::CHUNK_MLDI, b.data(), b.size()); }
 
 	switch (asset.type)
 	{
@@ -2001,6 +2256,10 @@ static bool encodeAssetChunks(RuntimeAsset& asset, HAsset::Writer& w)
 		// one section it always was.
 		if (!a.sections.empty())
 		{ auto b = HE::encodeMeshSections(a.sections); w.addChunk(HAsset::CHUNK_MSEC,b.data(),b.size()); }
+		// MBKE only when a switch differs from its default, so an untouched mesh
+		// saves byte-for-byte as before the bake switches existed.
+		if (a.bake != MeshBakeSettings{})
+		{ const uint8_t b = a.bake.toByte(); w.addChunk(HAsset::CHUNK_MBKE,&b,1); }
 		{ std::vector<uint8_t> b; HAsset::Writer::appendVec(b,a.indices);    w.addChunk(HAsset::CHUNK_INDX,b.data(),b.size()); }
 		if (a.cooked)
 		{
@@ -2019,6 +2278,8 @@ static bool encodeAssetChunks(RuntimeAsset& asset, HAsset::Writer& w)
 			{ std::vector<uint8_t> b; HAsset::Writer::appendVec(b,a.normals);  w.addChunk(HAsset::CHUNK_NORM,b.data(),b.size()); }
 			{ std::vector<uint8_t> b; HAsset::Writer::appendVec(b,a.uvs);      w.addChunk(HAsset::CHUNK_TEXC,b.data(),b.size()); }
 		}
+		if (!a.lods.empty() && a.lodBlobs.size() == a.lods.size())
+		{ auto b = HE::encodeMeshLodBlobs(a.lodBlobs); w.addChunk(HAsset::CHUNK_MLOD,b.data(),b.size()); }
 		break;
 	}
 	case HE::AssetType::SkeletalMesh:
@@ -2058,6 +2319,11 @@ static bool encodeAssetChunks(RuntimeAsset& asset, HAsset::Writer& w)
 		  if (a.layers > 1) HAsset::Writer::appendPOD(b, a.layers);
 		  w.addChunk(HAsset::CHUNK_TXMI,b.data(),b.size()); }
 		w.addChunk(HAsset::CHUNK_PIXL, a.data.data(), a.data.size());
+		if (!a.sliceMeans.empty())
+		{
+			std::vector<uint8_t> b; HAsset::Writer::appendVec(b, a.sliceMeans);
+			w.addChunk(HAsset::CHUNK_TXSM, b.data(), b.size());
+		}
 		break;
 	}
 	case HE::AssetType::Material:
@@ -2110,6 +2376,10 @@ static bool encodeAssetChunks(RuntimeAsset& asset, HAsset::Writer& w)
 		// Tessellation displacement body — after the approx block, which the packer
 		// re-folds and then copies everything behind it verbatim, so this ships too.
 		HAsset::Writer::appendString(b,a.customShaderDispGlsl);
+		// Landscape foliage set — behind the displacement body, so the packer's
+		// verbatim copy of everything after the approx block ships it too.
+		HAsset::Writer::appendPOD(b,a.foliageSetId.hi);
+		HAsset::Writer::appendPOD(b,a.foliageSetId.lo);
 		w.addChunk(HAsset::CHUNK_MTRL,b.data(),b.size());
 		break;
 	}
@@ -2329,6 +2599,15 @@ static bool encodeAssetChunks(RuntimeAsset& asset, HAsset::Writer& w)
 		w.addChunk(HAsset::CHUNK_SEQU, text.data(), text.size());
 		break;
 	}
+	case HE::AssetType::LandscapeFoliageLayer:
+	{
+		// Written even when empty, like the sequence: a set whose entries were all
+		// removed keeps its description and scale rather than turning into a stub.
+		const std::string text =
+			HE::landscapeFoliageLayerToJson(static_cast<LandscapeFoliageLayerAsset&>(asset));
+		w.addChunk(HAsset::CHUNK_LFOL, text.data(), text.size());
+		break;
+	}
 	default:
 		return false;
 	}
@@ -2355,6 +2634,14 @@ static bool writeAssetFile(RuntimeAsset& asset, const std::string& fullPath)
 		std::filesystem::create_directories(std::filesystem::path(fullPath).parent_path(), ec);
 	}
 	return w.write(fullPath, static_cast<uint16_t>(asset.type));
+}
+
+std::vector<uint8_t> HE::encodeAssetBytes(RuntimeAsset& asset)
+{
+	if (asset.id == HE::UUID{}) asset.id = HE::UUID::generate();
+	HAsset::Writer w;
+	if (!encodeAssetChunks(asset, w)) return {};
+	return w.toBytes(static_cast<uint16_t>(asset.type));
 }
 
 bool ContentManager::writeAssetTo(RuntimeAsset& asset, const std::string& fullPath) const
@@ -2430,6 +2717,11 @@ bool ContentManager::saveAsset(RuntimeAsset& asset)
 	// successful write, so a collaboration session never publishes a save that
 	// did not happen. ContentManager itself stays unaware of who listens.
 	if (m_onAssetSaved) m_onAssetSaved(asset.path, fullPath);
+	// A mesh's detail levels follow what was saved: the slots they draw with (a slot
+	// edit on the base is a slot edit on every level). Last, because registering a
+	// level that was not yet may move the pool `asset` lives in.
+	if (asset.type == HE::AssetType::StaticMesh && getStaticMesh(asset.id) == &asset)
+		registerMeshLods(asset.id);
 	return true;
 }
 
@@ -2450,6 +2742,9 @@ inline constexpr bool kHasUIVertex = requires(Variant v) { v.uiVertex; };
 // …and the clustered-lighting pair (Thema 117)? Material only, detected the same way.
 template<typename Variant>
 inline constexpr bool kHasClustered = requires(Variant v) { v.fragmentClustered; v.vertexClustered; };
+// …and the deferred G-buffer fragment + the instanced vertex twins? Material only.
+template<typename Variant>
+inline constexpr bool kHasGBuffer = requires(Variant v) { v.fragmentGBuffer; v.vertexInstanced; v.vertexInstancedClustered; };
 
 // A record grew a field, and the record is repeated — so a reader that stops early
 // mis-parses everything AFTER it, not just the tail. Hence a version, and hence it is
@@ -2461,7 +2756,10 @@ constexpr uint8_t kShaderVariantVersionMark = 0;
 // record's clustered pair (fragmentClustered, vertexClustered) in record order — a
 // tail rather than two more per-record strings so a v2 reader, which walks the
 // records and stops, still parses a v3 blob correctly (it just never sees the tail).
-constexpr uint8_t kShaderVariantVersion     = 3;
+// v4 = + a second tail after the clustered one: each record's fragmentGBuffer,
+// vertexInstanced and vertexInstancedClustered, in record order. A v3 reader stops
+// after its own tail and never sees it.
+constexpr uint8_t kShaderVariantVersion     = 4;
 
 template<typename Variant>
 std::vector<uint8_t> encodeShaderVariants(const std::vector<Variant>& vars)
@@ -2490,6 +2788,13 @@ std::vector<uint8_t> encodeShaderVariants(const std::vector<Variant>& vars)
 		{
 			HAsset::Writer::appendString(b, vars[i].fragmentClustered);
 			HAsset::Writer::appendString(b, vars[i].vertexClustered);
+		}
+	if constexpr (kHasGBuffer<Variant>)
+		for (size_t i = 0; i < count; ++i)
+		{
+			HAsset::Writer::appendString(b, vars[i].fragmentGBuffer);
+			HAsset::Writer::appendString(b, vars[i].vertexInstanced);
+			HAsset::Writer::appendString(b, vars[i].vertexInstancedClustered);
 		}
 	return b;
 }
@@ -2522,19 +2827,37 @@ std::vector<Variant> decodeShaderVariants(const std::vector<uint8_t>& bytes)
 		}
 		out.push_back(std::move(v));
 	}
+	// Whether every tail so far was read whole: a torn one leaves `o` mid-record, and the
+	// next tail would read garbage from there.
+	bool tailsIntact = out.size() == count;
 	if constexpr (kHasClustered<Variant>)
 	{
 		// v1/v2 paks have no tail: every clustered pair stays empty and the renderer
 		// draws the plain fragment, as before. A torn tail leaves the rest empty too.
 		// Indexed by out.size(), not count — the record loop may have stopped early.
-		if (version >= 3 && out.size() == count)
+		if (version >= 3 && tailsIntact)
 			for (auto& v : out)
 			{
 				std::string frag, vert;
-				if (!HAsset::Reader::readString(bytes, o, frag)) break;
-				if (!HAsset::Reader::readString(bytes, o, vert)) break;
+				if (!HAsset::Reader::readString(bytes, o, frag)) { tailsIntact = false; break; }
+				if (!HAsset::Reader::readString(bytes, o, vert)) { tailsIntact = false; break; }
 				v.fragmentClustered = std::move(frag);
 				v.vertexClustered   = std::move(vert);
+			}
+	}
+	if constexpr (kHasGBuffer<Variant>)
+	{
+		// v1..v3 paks have no G-buffer tail: the deferred path cross-compiles, as before.
+		if (version >= 4 && tailsIntact)
+			for (auto& v : out)
+			{
+				std::string gb, vi, vic;
+				if (!HAsset::Reader::readString(bytes, o, gb))  break;
+				if (!HAsset::Reader::readString(bytes, o, vi))  break;
+				if (!HAsset::Reader::readString(bytes, o, vic)) break;
+				v.fragmentGBuffer          = std::move(gb);
+				v.vertexInstanced          = std::move(vi);
+				v.vertexInstancedClustered = std::move(vic);
 			}
 	}
 	return out;
@@ -2620,6 +2943,65 @@ bool decodeMeshSections(const std::vector<uint8_t>& bytes, std::vector<MeshSecti
 	}
 	return true;
 }
+std::vector<uint8_t> encodeMeshLodIndex(const std::vector<StaticMeshAsset::Lod>& lods)
+{
+	std::vector<uint8_t> b;
+	HAsset::Writer::appendPOD(b, static_cast<uint32_t>(lods.size()));
+	for (const StaticMeshAsset::Lod& l : lods)
+	{
+		HAsset::Writer::appendPOD(b, l.id.hi);
+		HAsset::Writer::appendPOD(b, l.id.lo);
+		HAsset::Writer::appendPOD(b, l.worldError);
+		HAsset::Writer::appendPOD(b, l.triangles);
+	}
+	return b;
+}
+
+bool decodeMeshLodIndex(const std::vector<uint8_t>& bytes, std::vector<StaticMeshAsset::Lod>& out)
+{
+	out.clear();
+	size_t   o     = 0;
+	uint32_t count = 0;
+	if (!HAsset::Reader::readPOD(bytes, o, count)) return false;
+	if (static_cast<uint64_t>(count) * 24 > bytes.size() - o) return false;
+	out.resize(count);
+	for (StaticMeshAsset::Lod& l : out)
+		if (!HAsset::Reader::readPOD(bytes, o, l.id.hi) || !HAsset::Reader::readPOD(bytes, o, l.id.lo) ||
+		    !HAsset::Reader::readPOD(bytes, o, l.worldError) || !HAsset::Reader::readPOD(bytes, o, l.triangles))
+			return false;
+	return true;
+}
+
+std::vector<uint8_t> encodeMeshLodBlobs(const std::vector<std::vector<uint8_t>>& blobs)
+{
+	std::vector<uint8_t> b;
+	HAsset::Writer::appendPOD(b, static_cast<uint32_t>(blobs.size()));
+	for (const std::vector<uint8_t>& blob : blobs)
+	{
+		HAsset::Writer::appendPOD(b, static_cast<uint64_t>(blob.size()));
+		b.insert(b.end(), blob.begin(), blob.end());
+	}
+	return b;
+}
+
+bool decodeMeshLodBlobs(const std::vector<uint8_t>& bytes, std::vector<std::vector<uint8_t>>& out)
+{
+	out.clear();
+	size_t   o     = 0;
+	uint32_t count = 0;
+	if (!HAsset::Reader::readPOD(bytes, o, count)) return false;
+	if (static_cast<uint64_t>(count) * 8 > bytes.size() - o) return false;
+	out.resize(count);
+	for (std::vector<uint8_t>& blob : out)
+	{
+		uint64_t size = 0;
+		if (!HAsset::Reader::readPOD(bytes, o, size) || size > bytes.size() - o) return false;
+		blob.assign(bytes.begin() + static_cast<std::ptrdiff_t>(o), bytes.begin() + static_cast<std::ptrdiff_t>(o + size));
+		o += static_cast<size_t>(size);
+	}
+	return true;
+}
+
 std::vector<uint8_t> encodeParticleShaderVariants(const std::vector<ParticleShaderVariant>& vars)
 { return encodeShaderVariants(vars); }
 std::vector<ParticleShaderVariant> decodeParticleShaderVariants(const std::vector<uint8_t>& bytes)
@@ -2654,6 +3036,7 @@ static T* lookupAssetMutable(const std::unordered_map<HE::UUID, SlotHandle>& ind
 const StaticMeshAsset*    ContentManager::getStaticMesh(HE::UUID id) const    { return lookupAsset(m_handleToUUID, m_staticMeshAssets, id); }
 const SkeletalMeshAsset*  ContentManager::getSkeletalMesh(HE::UUID id) const  { return lookupAsset(m_handleToUUID, m_skeletalMeshAssets, id); }
 StaticMeshAsset*          ContentManager::getStaticMeshMutable(HE::UUID id)   { return lookupAssetMutable(m_handleToUUID, m_staticMeshAssets, id); }
+TextureAsset*             ContentManager::getTextureMutable(HE::UUID id)      { return lookupAssetMutable(m_handleToUUID, m_textureAssets, id); }
 SkeletalMeshAsset*        ContentManager::getSkeletalMeshMutable(HE::UUID id) { return lookupAssetMutable(m_handleToUUID, m_skeletalMeshAssets, id); }
 const TextureAsset*       ContentManager::getTexture(HE::UUID id) const       { return lookupAsset(m_handleToUUID, m_textureAssets, id); }
 const MaterialAsset*      ContentManager::getMaterial(HE::UUID id) const      { return lookupAsset(m_handleToUUID, m_materialAssets, id); }
@@ -2683,6 +3066,8 @@ const PropertyAnimClipAsset*   ContentManager::getPropertyAnimClip(HE::UUID id) 
 PropertyAnimClipAsset*         ContentManager::getPropertyAnimClipMutable(HE::UUID id)  { return lookupAssetMutable(m_handleToUUID, m_propAnimClipAssets, id); }
 const SequenceAsset*           ContentManager::getSequence(HE::UUID id) const           { return lookupAsset(m_handleToUUID, m_sequenceAssets, id); }
 SequenceAsset*                 ContentManager::getSequenceMutable(HE::UUID id)          { return lookupAssetMutable(m_handleToUUID, m_sequenceAssets, id); }
+const LandscapeFoliageLayerAsset* ContentManager::getLandscapeFoliageLayer(HE::UUID id) const { return lookupAsset(m_handleToUUID, m_landscapeFoliageLayerAssets, id); }
+LandscapeFoliageLayerAsset*       ContentManager::getLandscapeFoliageLayerMutable(HE::UUID id)    { return lookupAssetMutable(m_handleToUUID, m_landscapeFoliageLayerAssets, id); }
 const ThemeAsset*            ContentManager::getTheme(HE::UUID id) const { return lookupAsset(m_handleToUUID, m_themeAssets, id); }
 ThemeAsset*                  ContentManager::getThemeMutable(HE::UUID id) { return lookupAssetMutable(m_handleToUUID, m_themeAssets, id); }
 const BoneMaskAsset*         ContentManager::getBoneMask(HE::UUID id) const { return lookupAsset(m_handleToUUID, m_boneMaskAssets, id); }
@@ -2773,6 +3158,75 @@ bool ContentManager::replaceRuntimeAsset(SlotMap<T>& map, HE::UUID id, T asset)
 	return true;
 }
 
+void ContentManager::registerMeshLods(HE::UUID baseId)
+{
+	const StaticMeshAsset* base = getStaticMesh(baseId);
+	if (!base) return;
+	for (const StaticMeshAsset::Lod& l : base->lods) m_lodBase[l.id] = baseId;
+	if (base->lodBlobs.size() != base->lods.size()) return;
+	// Copied out: inserting a level into the pool may move `base`.
+	const std::vector<MeshSection> slots = base->sections;
+	const std::string baseName = base->name, basePath = base->path, baseMaterial = base->materialPath;
+	const HE::UUID    baseMaterialId = base->materialId;
+	const size_t      count = base->lods.size();
+	for (size_t i = 0; i < count; ++i)
+	{
+		base = getStaticMesh(baseId);
+		if (!base) return;
+		HAsset::Reader r;
+		if (!r.openData(base->lodBlobs[i])) continue;
+		const auto* meta = r.findChunk(HAsset::CHUNK_META);
+		HE::UUID id; std::string name, metaPath;
+		if (!meta || !readMetaChunk(*meta, r.header().version, id, name, metaPath) || id == HE::UUID{}) continue;
+		StaticMeshAsset lvl{};
+		lvl.id   = id;
+		lvl.type = HE::AssetType::StaticMesh;
+		lvl.name = baseName + "_LOD" + std::to_string(i + 1);
+		readStaticMeshChunks(r, lvl, basePath + "#LOD" + std::to_string(i + 1));
+		// The base's slots, by index: a level is the base simplified section by section
+		// (AutoLod::buildLevel keeps one section per slot), and its file names no material.
+		lvl.materialPath = baseMaterial;
+		lvl.materialId   = baseMaterialId;
+		for (size_t k = 0; k < lvl.sections.size() && !slots.empty(); ++k)
+		{
+			const MeshSection& slot = slots[std::min(k, slots.size() - 1)];
+			lvl.sections[k].materialPath = slot.materialPath;
+			lvl.sections[k].materialId   = slot.materialId;
+		}
+		m_lodBase[id] = baseId;
+		if (isLoaded(id)) replaceRuntimeAsset(m_staticMeshAssets, id, std::move(lvl));
+		else              registerRuntimeAsset(m_staticMeshAssets, std::move(lvl), HE::AssetType::StaticMesh);
+	}
+}
+
+bool ContentManager::refreshMeshLods(HE::UUID baseId)
+{
+	StaticMeshAsset* base = getStaticMeshMutable(baseId);
+	if (!base || base->path.empty()) return false;
+	HAsset::Reader r;
+	std::vector<StaticMeshAsset::Lod> lods;
+	std::vector<std::vector<uint8_t>> blobs;
+	if (r.open(resolveAbsolutePath(base->path)))
+	{
+		if (const auto* c = r.findChunk(HAsset::CHUNK_MLDI)) HE::decodeMeshLodIndex(c->data, lods);
+		if (const auto* c = r.findChunk(HAsset::CHUNK_MLOD)) HE::decodeMeshLodBlobs(c->data, blobs);
+	}
+	if (blobs.size() != lods.size()) { lods.clear(); blobs.clear(); }
+	base->lods     = std::move(lods);
+	base->lodBlobs = std::move(blobs);
+	const bool        any  = !base->lods.empty();
+	const std::string path = base->path;   // registering the levels below may move `base`
+	registerMeshLods(baseId);
+	// The file is what memory now holds: not an outside edit for the hot reload.
+	if (auto watched = m_pathMtime.find(path); watched != m_pathMtime.end())
+	{
+		std::error_code ec;
+		const auto mtime = std::filesystem::last_write_time(resolveAbsolutePath(path), ec);
+		if (!ec) watched->second = mtime;
+	}
+	return any;
+}
+
 HE::UUID ContentManager::registerStaticMesh(StaticMeshAsset asset)       { ensureMeshUVs(asset); return registerRuntimeAsset(m_staticMeshAssets,  std::move(asset), HE::AssetType::StaticMesh);    }
 HE::UUID ContentManager::registerSkeletalMesh(SkeletalMeshAsset asset)   { return registerRuntimeAsset(m_skeletalMeshAssets, std::move(asset), HE::AssetType::SkeletalMesh); }
 HE::UUID ContentManager::registerTexture(TextureAsset asset)             { return registerRuntimeAsset(m_textureAssets,     std::move(asset), HE::AssetType::Texture);       }
@@ -2794,6 +3248,7 @@ HE::UUID ContentManager::registerSaveGameTemplate(SaveGameTemplateAsset asset) {
 HE::UUID ContentManager::registerTheme(ThemeAsset asset) { return registerRuntimeAsset(m_themeAssets, std::move(asset), HE::AssetType::Theme); }
 HE::UUID ContentManager::registerBoneMask(BoneMaskAsset asset) { return registerRuntimeAsset(m_boneMaskAssets, std::move(asset), HE::AssetType::BoneMask); }
 HE::UUID ContentManager::registerSequence(SequenceAsset asset) { return registerRuntimeAsset(m_sequenceAssets, std::move(asset), HE::AssetType::Sequence); }
+HE::UUID ContentManager::registerLandscapeFoliageLayer(LandscapeFoliageLayerAsset asset) { return registerRuntimeAsset(m_landscapeFoliageLayerAssets, std::move(asset), HE::AssetType::LandscapeFoliageLayer); }
 HE::UUID ContentManager::registerBlendSpace(BlendSpaceAsset asset) { return registerRuntimeAsset(m_blendSpaceAssets, std::move(asset), HE::AssetType::BlendSpace); }
 HE::UUID ContentManager::registerEnumType(EnumTypeAsset asset)     { return registerRuntimeAsset(m_enumTypeAssets,   std::move(asset), HE::AssetType::EnumType);   }
 
@@ -2832,6 +3287,12 @@ bool ContentManager::unloadAsset(HE::UUID id)
 		return false;
 	const SlotHandle handle = it->second;
 
+	// A mesh's detail levels came with its file and go with it: a reload registers
+	// them again, and a level left behind would draw the old geometry.
+	std::vector<HE::UUID> levels;
+	if (const StaticMeshAsset* m = getStaticMesh(id); m && m->lodBlobs.size() == m->lods.size())
+		for (const StaticMeshAsset::Lod& l : m->lods) levels.push_back(l.id);
+
 	// Remove from whichever pool actually holds *this* asset. The id check guards
 	// against the same SlotHandle being valid in another pool (see lookupAsset).
 	// A pool anyPool does not visit would make unloadAsset() return false for its
@@ -2860,6 +3321,8 @@ bool ContentManager::unloadAsset(HE::UUID id)
 	// A loose-content asset keeps the old behaviour; the content walk re-sniffs it.
 	if (!m_pakResidency.count(id))
 		m_assetTypeIndex.erase(id);
+	for (const HE::UUID& l : levels)
+		if (!isPinned(l)) unloadAsset(l);
 	return true;
 }
 
@@ -3379,7 +3842,27 @@ void ContentManager::scanDirInto(const std::string& rootStr, const std::string& 
 				// Key by the file's ACTUAL location relative to its root (not the
 				// META-embedded path) so moved/renamed files still resolve.
 				const auto rel = std::filesystem::relative(p.path(), root, ec);
-				if (!ec) m_diskRegistry[id] = pathPrefix + rel.generic_string();
+				if (!ec)
+				{
+					const std::string key = pathPrefix + rel.generic_string();
+					m_diskRegistry[id] = key;
+					// A static mesh's detail levels resolve to its file: their index is
+					// the chunk right after META (encodeAssetChunks writes it there).
+					HAsset::ChunkHeader next{};
+					if (i + 1 < hdr.chunk_count && f.read(reinterpret_cast<char*>(&next), sizeof(next))
+					    && next.id == HAsset::CHUNK_MLDI && next.size < (1u << 20))
+					{
+						std::vector<uint8_t> bytes(static_cast<size_t>(next.size));
+						std::vector<StaticMeshAsset::Lod> lods;
+						if (f.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(next.size))
+						    && HE::decodeMeshLodIndex(bytes, lods))
+							for (const StaticMeshAsset::Lod& l : lods)
+							{
+								m_diskRegistry[l.id] = key;
+								m_lodBase[l.id]      = id;
+							}
+					}
+				}
 			}
 			break; // META handled — done with this file
 		}
@@ -3414,6 +3897,7 @@ void ContentManager::forgetProjectContent()
 	// outlived it was already dangling.
 	m_pinCounts.clear();
 	m_diskRegistry.clear();
+	m_lodBase.clear();
 
 	// Mounted archives belong to a build of a project, so they go too. In
 	// practice this is a no-op both ways round: the editor mounts none, and the
@@ -3534,6 +4018,36 @@ ContentManager::AssetFileList ContentManager::sceneFiles() const
 	ix.epoch       = m_contentEpoch;
 	ix.contentRoot = m_contentRoot;
 	return ix.scenes;
+}
+
+bool ContentManager::releaseCpuPixels(HE::UUID id)
+{
+	if (!m_releaseCpuPixels) return false;
+	TextureAsset* t = getTextureMutable(id);
+	if (!t || t->data.empty()) return false;
+	if (t->format == TextureFormat::RGBA8) return false;               // raw pixels: CPU code reads them
+	if (t->layers > 1 && t->sliceMeans.empty()) return false;          // the GI means come from the pixels
+	const auto it = m_pakResidency.find(id);                           // only what a pak can give back
+	if (it == m_pakResidency.end() || !m_mounts[it->second].reader) return false;
+	std::vector<uint8_t>().swap(t->data);                              // really free it, not just clear()
+	m_pixelsReleased.insert(id);
+	return true;
+}
+
+const TextureAsset* ContentManager::restoreCpuPixels(HE::UUID id)
+{
+	TextureAsset* t = getTextureMutable(id);
+	if (!t || !t->data.empty() || m_pixelsReleased.count(id) == 0) return t;
+	const auto it = m_pakResidency.find(id);
+	if (it == m_pakResidency.end()) return t;
+	MountedPak& mount = m_mounts[it->second];
+	if (!mount.reader) return t;
+	const std::vector<uint8_t> bytes = mount.reader->readEntry(id, mount.encrypted ? mount.key.data() : nullptr);
+	HAsset::Reader reader;
+	if (bytes.empty() || !reader.openData(bytes)) return t;
+	reader.takeChunkData(HAsset::CHUNK_PIXL, t->data);
+	m_pixelsReleased.erase(id);
+	return t;
 }
 
 bool ContentManager::ensureResident(HE::UUID id)

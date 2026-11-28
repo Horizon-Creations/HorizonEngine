@@ -169,7 +169,7 @@ TEST_CASE("task notice recipients: everyone the task concerns, never yourself, o
 	n.assignees.clear();
 	CHECK(HE::describeTaskNotice(n, "Bob") == "Anna unassigned “Crates”");
 	n.kind = TaskNoticeKind::Status; n.status = "in-progress";
-	CHECK(HE::describeTaskNotice(n, "Bob") == "Anna set “Crates” to In Progress");
+	CHECK(HE::describeTaskNotice(n, "Bob") == "Anna set “Crates” to In progress");
 	n.kind = TaskNoticeKind::Comment;
 	CHECK(HE::describeTaskNotice(n, "Bob") == "Anna commented on “Crates”");
 }
@@ -260,7 +260,7 @@ TEST_CASE("task board team: a status change and a comment go at once, to the peo
 	CHECK(bob.link.sent.size() == 2);
 	frame(server.latencyMs);
 	CHECK(anna.bellTexts() == std::vector<std::string>{
-		"Bob set “Fix the harbour lights” to In Progress",
+		"Bob set “Fix the harbour lights” to In progress",
 		"Bob commented on “Fix the harbour lights”" });
 	// The comment's text is the detail line.
 	CHECK(anna.bell.snapshot()[1].detail.find("The bulbs are in the crate") == 0);

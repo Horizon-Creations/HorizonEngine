@@ -11,6 +11,7 @@
 #include <Hpak/HpakWriter.h>
 #include <Hpak/HpakReader.h>
 #include <Hpak/HpakFormat.h>
+#include <Hpak/ReachFilter.h>
 #include <Hpak/PackManifest.h>
 #include <Hpak/Aes256Gcm.h>
 #include <Types/UUID.h>
@@ -615,11 +616,22 @@ static std::optional<ExportResult> resolvePackSettings(const ExportSettings& set
     packSettings.cook = true; // always cook exports into the runtime-optimal form
     packSettings.textureCompression = settings.textureCompression;
     packSettings.textureQuality     = settings.textureQuality;
-    packSettings.shaderBackends        = settings.shaderBackends;        // precompile material shaders
+    packSettings.cookTextureArrays  = settings.cookTextureArrays;
+    packSettings.bakeMeshTextures   = settings.bakeMeshTextures;
+    packSettings.bakeSkipMeshes     = settings.bakeSkipMeshes;
+    packSettings.extraAssets        = settings.extraAssets;
+    packSettings.shaderBackends       = settings.shaderBackends;        // precompile material shaders
     packSettings.compileShaderVariants = settings.compileShaderVariants;
     packSettings.compileParticleShaderVariants = settings.compileParticleShaderVariants;
     packSettings.onAsset = settings.onAsset;
+    packSettings.onCook = settings.onCook;
+    // The writer says when its cook pass is over; the caller sees that as the "pack" stage.
+    if (settings.onStage)
+        packSettings.onPhase = [onStage = settings.onStage](const char* phase) { onStage(phase); };
     packSettings.onWarning = settings.onWarning;
+    packSettings.onlyReferenced = settings.onlyReferenced;
+    packSettings.alwaysIncludePatterns = settings.alwaysIncludePatterns;
+    packSettings.onNotice = settings.onNotice;
     return std::nullopt;
 }
 
@@ -648,9 +660,23 @@ static void addSceneEntries(
     // Every other project scene rides along under a path-derived UUID so the
     // game runtime can scene.load("<project-relative path>") for level
     // transitions. Same codec + encryption as the assets.
+    //
+    // A scene whose bytes equal one already packed (the startup scene is also a
+    // scene.load target, and nothing stops two copies of a level) becomes a second TOC row on
+    // those bytes instead of a second copy: on a big map that was another 7 MB.
+    std::vector<std::pair<const std::vector<uint8_t>*, HE::UUID>> packedScenes;
+    if (!startupSceneBinary.empty()) packedScenes.emplace_back(&startupSceneBinary, ctx.sceneUuid);
     for (const auto& [relPath, bytes] : extraScenes)
-        if (!bytes.empty())
-            packer.addEntry(sceneUuidForPath(relPath), bytes, packSettings);
+    {
+        if (bytes.empty()) continue;
+        const HE::UUID id = sceneUuidForPath(relPath);
+        bool aliased = false;
+        for (const auto& [other, otherId] : packedScenes)
+            if (*other == bytes && packer.addAlias(id, otherId)) { aliased = true; break; }
+        if (aliased) continue;
+        packer.addEntry(id, bytes, packSettings);
+        packedScenes.emplace_back(&bytes, id);
+    }
     // …plus a scene INDEX (a JSON string array of those paths) under a
     // well-known name, so scene.available() can enumerate scenes in shipped
     // builds (pak entries are UUID-keyed — paths aren't recoverable from them).
@@ -786,13 +812,44 @@ static std::optional<ExportResult> packContent(
             roots.push_back({ settings.engineContentCacheDir, "Engine/", /*fallbackOnly*/ true });
     }
 
+    // The reference roots of the "pack only what is reached" filter. The startup scene and
+    // every blob of project text are always kept (and scanned); any OTHER scene is a node of the
+    // graph, kept only when something reachable names it (the startup scene's own entry among the
+    // extra scenes stays: scene.load of the startup level must keep working). With no packed
+    // startup scene (a loose one) nothing can be told apart, so every scene stays.
+    std::vector<std::pair<std::string, std::vector<uint8_t>>> sceneEntries;
+    if (ctx.packSettings.onlyReferenced)
+    {
+        Hpak::PackSettings& ps = ctx.packSettings;
+        ps.referenceRoots.clear();
+        ps.reachScenes.clear();
+        if (!startupSceneBinary.empty()) ps.referenceRoots.push_back(startupSceneBinary);
+        if (!gameInstanceJson.empty())
+            ps.referenceRoots.emplace_back(gameInstanceJson.begin(), gameInstanceJson.end());
+        HE::reach::collectProjectTextRoots(contentDir, ps.referenceRoots);
+        for (const auto& [rel, bytes] : extraScenes)
+        {
+            if (startupSceneBinary.empty())
+                ps.referenceRoots.push_back(bytes);
+            else if (bytes != startupSceneBinary)   // the startup scene is already a root
+                ps.reachScenes.push_back({ rel, bytes });
+        }
+    }
+
     HpakWriter packer;
     ctx.assetsPacked = packer.addDirectories(roots, ctx.packSettings, settings.progress,
                                              haveCache ? &cache : nullptr);
     ctx.assetsReused = packer.reusedCount();
     prevPak.reset(); // release the read handle BEFORE write() replaces the file
+    // The scenes nothing loads stay out of the pak and out of the scene index.
+    const std::vector<std::string>& dropScenes = packer.unreachableScenes();
+    for (const auto& sc : extraScenes)
+        if (std::find(dropScenes.begin(), dropScenes.end(), sc.first) == dropScenes.end())
+            sceneEntries.push_back(sc);
+    ctx.packSettings.referenceRoots.clear();
+    ctx.packSettings.reachScenes.clear();
 
-    addSceneEntries(packer, startupSceneBinary, extraScenes, gameInstanceJson, ctx);
+    addSceneEntries(packer, startupSceneBinary, sceneEntries, gameInstanceJson, ctx);
     addAssetPathIndex(packer, ctx);
     addAssetTypeIndex(packer, ctx);
     addTypeIndex(packer, ctx);
@@ -900,6 +957,15 @@ static std::optional<ExportResult> copyRuntimeBinaries(const ExportSettings& set
             return isZip || isPth || isPyLib || isPlugin;
         };
 
+        // Steam Audio (libphonon / phonon.dll, ~22 MB) is opened by name only when the project's
+        // audio buses name it as the spatialiser (SteamAudio.cpp), and nothing else switches it:
+        // the mixer window writes AudioBusConfig::spatialBackend, which is what this export
+        // packs. A project that stayed on the built-in spatialiser never loads it.
+        const auto skippedPhonon = [&settings](const std::string& fname) {
+            if (settings.audioBuses.spatialBackend == HE::AudioSpatialBackend::SteamAudio) return false;
+            return fname.find("phonon") != std::string::npos;
+        };
+
         // Clear STALE code before copying fresh binaries. Re-signing over a
         // previous export's leftovers is the classic codesign failure ("bundle
         // format unrecognized" / "code object is not signed"): an old
@@ -1004,7 +1070,8 @@ static std::optional<ExportResult> copyRuntimeBinaries(const ExportSettings& set
                 // along. The game's loader never looks at it.
                 const bool strayEngineDll = ctx.engineLayout && fname.rfind("Horizon", 0) == 0
                     && fname.size() > 4 && fname.compare(fname.size() - 4, 4, ".dll") == 0;
-                if (runLog || strayEngineDll || skippedPython(fname)) { dit.increment(ec); continue; }
+                if (runLog || strayEngineDll || skippedPython(fname) || skippedPhonon(fname))
+                { dit.increment(ec); continue; }
                 if (auto fail = shipFile(dit->path(), routeRuntime(fname))) return fail;
             }
             dit.increment(ec);
@@ -1047,7 +1114,7 @@ static std::optional<ExportResult> copyRuntimeBinaries(const ExportSettings& set
                                                        + fname + ": " + fec.message(),
                                                 ctx.assetsPacked};
                     }
-                    else if (!skippedPython(fname))
+                    else if (!skippedPython(fname) && !skippedPhonon(fname))
                     {
                         if (auto fail = shipFile(rit->path(), dst)) return fail;
                     }
@@ -1342,6 +1409,37 @@ static std::optional<ExportResult> copyProjectSettingsFile(const ExportSettings&
     return std::nullopt;
 }
 
+// The loose files an export ships beside the pak (ExportSettings::dataFiles): a landscape pack is too big and too seek-heavy for the pak.
+// A destination that would leave the data folder is refused rather than written: the list comes from scene content.
+static std::optional<ExportResult> copyDataFiles(const ExportSettings& settings, const ExportContext& ctx)
+{
+    namespace fs = std::filesystem;
+    for (const ExportSettings::DataFile& f : settings.dataFiles)
+    {
+        const fs::path rel = fs::path(f.dest).lexically_normal();
+        if (f.dest.empty() || rel.is_absolute() || rel.has_root_name() || *rel.begin() == "..")
+            return ExportResult{false, "Refusing to ship a data file to '" + f.dest + "': it is not inside the data folder",
+                                ctx.assetsPacked};
+        std::error_code ec;
+        const fs::path dst = ctx.dataDir / rel;
+        fs::create_directories(dst.parent_path(), ec);
+        if (ec)
+            return ExportResult{false, "Failed to create " + dst.parent_path().string(), ctx.assetsPacked};
+        fs::copy_file(f.source, dst, fs::copy_options::overwrite_existing, ec);
+        if (ec)
+            return ExportResult{false, "Failed to copy " + f.source.string() + " to " + dst.string() + ": " + ec.message(),
+                                ctx.assetsPacked};
+        if (f.afterCopy)
+        {
+            std::string why;
+            if (!f.afterCopy(dst, why))
+                return ExportResult{false, "Failed to prepare " + dst.string() + (why.empty() ? std::string() : ": " + why),
+                                    ctx.assetsPacked};
+        }
+    }
+    return std::nullopt;
+}
+
 // The splash picture, copied under the fixed name the packaged game looks for.
 // Same shape as the settings file above it: an absent source REMOVES a stale
 // copy, because "no picture" is the project's answer and a leftover from an
@@ -1532,7 +1630,7 @@ ExportResult ProjectExporter::exportProject(
     if (auto fail = prepareOutputLayout(outputDir, projectName, settings, ctx)) return *fail;
     if (auto fail = resolvePackSettings(settings, ctx))                         return *fail;
     if (settings.planned) ctx.sceneUuid = settings.plannedSceneUuid;
-    stage("pack");
+    stage("cook");   // the writer announces "pack" itself once every asset is cooked
     if (auto fail = packContent(contentDir, projectName, settings, startupSceneBinary,
                                 extraScenes, gameInstanceJson, ctx))            return *fail;
 
@@ -1547,6 +1645,7 @@ ExportResult ProjectExporter::exportProject(
         return *fail;
     if (auto fail = writeGameConfig(settings, ctx))                             return *fail;
     if (auto fail = copyProjectSettingsFile(settings, ctx))                     return *fail;
+    if (auto fail = copyDataFiles(settings, ctx))                               return *fail;
     if (auto fail = copySplashImage(settings, ctx))                             return *fail;
     stage("icon");
     const bool hasIcon = writeAppIcons(settings, ctx);

@@ -10,6 +10,7 @@
 #include <Application/AppIcon.h>       // the window icon the export generated
 #include <Application/Autostart.h>     // …and the login entry app.setAutostart writes
 #include <Application/GameBackendRules.h> // shared with the export dialog that writes config.json
+#include <HorizonRendering/SkyNoise3D.h>   // the sky noise bake the constructor starts early
 #ifdef __APPLE__
 #include "AppMacMenu.h"                // the menu bar in the system bar (macOS)
 #include "AppNotify.h"                 // …and the notification centre
@@ -25,6 +26,8 @@
 #include <HorizonScene/UICursorSDL.h>
 #include <HorizonScene/SceneSerializer.h>
 #include <HorizonScene/SceneSystems.h>
+#include <HorizonScene/RvtLandscape.h>
+#include <MaterialGraph/RvtSplit.h>   // matSetRvtEnabled
 #include <HorizonScene/RootMotion.h>
 #include <HorizonScene/SequenceSystem.h>
 #include <HorizonScene/AudioSystem.h>
@@ -50,6 +53,7 @@
 #include <HorizonScene/CameraRigController.h>  // first/third person rig (shared with the editor's PIE)
 #include <HorizonScene/TransformHierarchy.h>   // worldPositionOf — the camera position fed to tickWorld
 #include <HorizonScene/FloatingOrigin.h>
+#include <HorizonScene/LandscapeCellRegions.h> // the region gate for the entity cells of a tile landscape
 #include <Scripting/ScriptTypes.h>
 #include <HorizonScene/Components/CameraComponent.h>
 #include <HorizonScene/Components/TransformComponent.h>
@@ -80,6 +84,20 @@ namespace fs = std::filesystem;
 
 namespace
 {
+// ── The render path the game's config asks for ───────────────────────────────
+// The same config.json key the editor's Preferences combo writes ("RenderPath": 0 Forward,
+// 1 Deferred), capability-gated: a backend that cannot do deferred stays forward. An absent key
+// is the engine's default, Deferred (EditorConfig::RenderPath). One function because it is asked
+// twice: at the end of OnInit, BEFORE the first material warm-up (which builds the G-buffer
+// variants only on a deferred path and used to run a frame ahead of the per-frame push), and
+// in that push.
+static HE::RenderPath configuredRenderPath(IRenderer& r)
+{
+	const bool deferred = GlobalState::getInstance().getCustomConfigInt("RenderPath", 1) == 1
+	                   && r.GetCapabilities().supportsDeferredRendering;
+	return deferred ? HE::RenderPath::Deferred : HE::RenderPath::Forward;
+}
+
 // ── The frame of a borderless window (docs/he-apps-plan.md F3) ──────────────
 // The grab band along the edges, in window POINTS, so it is the same physical
 // thickness on a Retina screen as on a plain one. Six is what the desktops
@@ -421,6 +439,13 @@ GameApplication::GameApplication(std::string startupPath)
 	: HE::Application(std::move(startupPath))
 {
 	applyShippedConfig();
+	// The audio device opens while SDL, the window and the renderer come up (see m_audioInit).
+	m_audioInit = std::async(std::launch::async, [this] { return m_audioEngine.init(); });
+	// So does the 256³ sky/cloud noise every backend bakes at renderer start (61 ms on the job
+	// pool): the renderer takes the finished volume instead of baking it on the frame's path.
+	// The software rasteriser has no sky; it would only hold 33 MB.
+	if (m_backend != HE::RendererBackend::Software)
+		HE::PrewarmSkyNoise3D(HE::SkyNoise3DResolution());
 }
 GameApplication::~GameApplication() = default;
 
@@ -770,6 +795,12 @@ void GameApplication::OnInit()
 		std::memcpy(&sceneUuid.hi, m_config.startupSceneUuid,     8);
 		std::memcpy(&sceneUuid.lo, m_config.startupSceneUuid + 8, 8);
 	}
+
+	// A shipped game holds each block-compressed texture once, in the GPU: the backend frees the
+	// CPU copy after its upload and the pak gives it back if a second upload needs it. Set before
+	// the mount so no texture streams in without the rule. HE_KEEP_CPU_PIXELS=1 turns it off for
+	// an A/B memory comparison.
+	contentManager().setReleaseCpuPixelsAfterUpload(std::getenv("HE_KEEP_CPU_PIXELS") == nullptr);
 
 	if (contentManager().mountPak(pakPath, pakKey))
 	{
@@ -1328,20 +1359,22 @@ void GameApplication::OnInit()
 		m_gameInstance.runtime().setServices(std::move(svc));
 	}
 
-	// GameInstance OnInit fires FIRST — before any world/scene. Its UI (m_widgets)
-	// and objects are app-level, so they're up from frame one and survive scene
-	// loads.
-	m_gameInstance.fireInit();
-
-	// Load the startup scene into a world and hand it to the renderer. The base
+	// The (still empty) world the startup scene is loaded into below. The base
 	// Application renders m_world each frame; OnRender ticks its gameplay systems.
 	// The world borrows the app-level WidgetManager (setWidgetManager) so the
 	// renderer + input see the GameInstance's UI, and a scene switch never clears it.
+	// Built BEFORE fireInit: every widget.* engine call reaches the widgets through
+	// Ctx::world, so a Play Animation in the Construct of a widget OnInit creates
+	// found no world, returned false and the animation never started.
 	m_world = std::make_unique<HorizonWorld>();
 	// Widgets + the level script join the app-wide runtime (shared with the
 	// GameInstance), so any scene script can Get Game Instance / bind its events.
 	m_world->setScriptRuntime(&m_gameInstance.runtime());
 	m_world->setWidgetManager(&m_widgets);   // borrow the app-level UI
+
+	// GameInstance OnInit fires before any scene. Its UI (m_widgets) and objects
+	// are app-level, so they're up from frame one and survive scene loads.
+	m_gameInstance.fireInit();
 
 	SceneSerializer serializer;
 	bool sceneLoaded = false;
@@ -1424,7 +1457,10 @@ void GameApplication::OnInit()
 
 	// Audio: init the engine and start playOnStart sources, mirroring the editor's
 	// play mode — packaged games get sound too (HC/script audio.* routes here).
-	if (m_audioEngine.init())
+	// The constructor started the device open; this only collects it (init() again if it was
+	// never started, e.g. a subclass that skipped the constructor path).
+	const bool audioOk = m_audioInit.valid() ? m_audioInit.get() : m_audioEngine.init();
+	if (audioOk)
 	{
 		// The project's buses BEFORE the first source starts: a source names
 		// its bus at play time, and one that does not exist yet means master.
@@ -1442,6 +1478,17 @@ void GameApplication::OnInit()
 	// runtime, for the whole life of the application — before the first script runs,
 	// so a pin set in BeginPlay lands.
 	HE::api::streaming::install(&m_cellRuntime);
+
+	// The renderer is up: a prewarmed sky noise it did not take (a backend with no sky) is dead
+	// weight from here on.
+	HE::DiscardSkyNoise3DPrewarm();
+
+	// The material warm-up of the first frame builds the G-buffer variants only when the renderer
+	// is already on the deferred path; the per-frame push that sets it comes later in that frame.
+	// Say it now (a world game only: an app is forward and says so itself).
+	if (!m_appMode)
+		if (IRenderer* const rr = renderer())
+			rr->SetRenderPath(configuredRenderPath(*rr));
 
 	// Nothing to stream without a scene: an app's assets are reached through its
 	// widgets, which load on demand.
@@ -1610,6 +1657,61 @@ void GameApplication::cellLoaded(HorizonWorld& world, entt::entity, const std::v
 void GameApplication::cellUnloading(HorizonWorld& world, entt::entity root)
 {
 	HE::stopCellScripts(cellScriptHosts(), world, root);
+}
+
+void GameApplication::updateLandscape(float dt)
+{
+	HE_PROFILE_SCOPE_N("Landscape");
+	// Every call, not just the first: a scene swap replaces m_world (RenderExtractor reads this to
+	// build the GI shadow kernel's height clipmap, step 4).
+	if (m_world) m_world->setLandscapeRuntime(&m_landscape);
+	if (!m_landscapeBound && renderer())
+	{
+		// Reads m_world at each call: a scene swap replaces the world, and the runtime keeps its own state.
+		renderer()->SetLandscapeProvider([this](const glm::dmat4& vp, bool zeroToOne, HE::LandscapeRenderFrame& out) {
+			if (m_world) m_landscape.buildRenderFrame(vp, m_world->origin(), zeroToOne, out);
+		});
+		// A backend that can swap the far data alone lets a render window move without emptying the tile atlas.
+		m_landscape.setWindowKeepsAtlas(renderer()->GetCapabilities().landscapeCoarseRevision);
+		m_landscapeBound = true;
+	}
+	// Ground for the physics world and a navmesh for the agents, both around the camera and the things that move. The physics world is
+	// rebuilt with every scene, so it is attached when it changes; the runtime builds nothing for a scene without a landscape.
+	if (m_landscapePhysics != m_physicsWorld.get())
+	{
+		m_landscape.setPhysics(m_physicsWorld.get());
+		m_landscapePhysics = m_physicsWorld.get();
+	}
+	if (!m_landscapeNavigation)
+	{
+		const HE::LandscapeNavConfig nav;
+		m_landscape.setNavigation(&nav);
+		m_landscapeNavigation = true;
+	}
+	if (contentManager().contentRoot() != m_landscapeContentRoot)
+	{
+		m_landscapeContentRoot = contentManager().contentRoot();
+		m_landscape.setProjectRoot(m_landscapeContentRoot.empty() ? std::filesystem::path{}
+		                                                          : std::filesystem::path(m_landscapeContentRoot).parent_path());
+	}
+	m_landscape.update(*m_world, dt);
+	// The entity cells follow the landscape's residency: their region gate takes the tile size and the store's radii, and is off again for a
+	// scene without a tile landscape (the streamer keeps its config across scenes).
+	{
+		HE::CellRegionConfig want;
+		if (m_landscape.active() && m_cellRuntime.active())
+			want = HE::cellRegionConfigForLandscape(m_cellRuntime.streamer().manifest(), m_landscape.quadtree().tileM,
+			                                        m_landscape.config().store.loadRadius, m_landscape.config().store.keepFactor);
+		if (!HE::sameRegionConfig(want, m_cellRuntime.streamer().regionConfig())) m_cellRuntime.streamer().setRegionConfig(want);
+	}
+	m_landscapeStamps.sync(*m_world, m_landscape, contentManager());   // a project run without an export: its stamps are not baked yet
+	m_landscapeProxies.sync(*m_world, m_landscape, contentManager(), renderer());
+	// Entity cells that are not built yet (or any more) stand in as their baked proxy while the pack has one; the cell streamer ran
+	// the frame before, so this reads what it holds.
+	if (const HE::LandscapeHlodTable* hlod = m_landscape.active() ? m_landscape.hlod() : nullptr)
+		m_hlodProxies.sync(*m_world, *hlod, m_cellRuntime.streamer(), m_landscape.cameraAbsolute(), contentManager(), renderer());
+	else
+		m_hlodProxies.clear(*m_world, contentManager(), renderer());
 }
 
 void GameApplication::updateCellStreaming(float dt)
@@ -1866,6 +1968,16 @@ void GameApplication::swapToWorld(std::unique_ptr<HorizonWorld> newWorld, const 
 	WeatherAudio::stop(m_weatherAudio, m_audioEngine);   // the new scene's weather fades in on its own
 	m_audioEngine.stopAll();
 	HE::api::scene::clearZones();
+	// The segments are keyed by entt::entity of the outgoing m_world; a handle from
+	// that registry can alias an unrelated entity in the new one (same reason the
+	// entity/animator hosts below are torn down and rebuilt rather than carried over).
+	// Re-attaching against the new world on the next OnRender tick is cheap — nothing
+	// runs until a landscape is actually near the camera.
+	if (m_rvtLandscape)
+	{
+		m_rvtLandscape->detach();
+		m_rvtLandscape.reset();
+	}
 
 	// A scene must not inherit the last one's time controls. Whoever loaded a
 	// level in slow motion, or from behind a pause menu, meant to leave it —
@@ -3295,6 +3407,8 @@ void GameApplication::OnRender(float deltaTime)
 	}
 	// Then the cells of a split scene, against the camera where it now stands.
 	if (m_world && !m_appMode) updateCellStreaming(gameDt);
+	// The tile landscape of the scene, if it has one: tiles around the camera, before anything draws.
+	if (m_world && !m_appMode) updateLandscape(gameDt);
 
 	// Keep the audio listener + spatial sources tracking their entities.
 	if (m_world && m_audioEngine.isInitialized())
@@ -3365,8 +3479,10 @@ void GameApplication::OnRender(float deltaTime)
 	if (m_world && !m_appMode)
 	{
 		glm::vec3 camPos(0.0f);
+		float camFovDeg = 60.0f;   // the RVT's native near view measures its radius against it
 		for (auto e : m_world->registry().view<TransformComponent, CameraComponent>())
 		{
+			camFovDeg = m_world->registry().get<CameraComponent>(e).fovDegrees;
 			// Composed from the parent chain, not read out of tc.worldMatrix: that
 			// matrix is only as fresh as the last propagateTransforms. The rig path
 			// above runs one, the free-flight path does not, and a camera spawned
@@ -3383,6 +3499,28 @@ void GameApplication::OnRender(float deltaTime)
 		HE_PROFILE_SCOPE_N("SceneSystemsTick");
 		SceneSystems::tickWorld(*m_world, contentManager(), r, camPos, gameDt,
 		                        m_physicsWorld.get(), gpuParticles);
+		// The virtual texture of the landscape, after the terrain update of the tick: the exported config.json's switch on a
+		// backend that can hold one, or HE_RVT=1 / 0 over it.
+		const bool rvtOn = HE::landscape::RvtLandscape::wanted(
+			GlobalState::getInstance().getCustomConfigBool("RuntimeVirtualTextures", false),
+			r && r->GetCapabilities().supportsRvt);
+		if (rvtOn != HE::matRvtEnabled())
+		{
+			HE::matSetRvtEnabled(rvtOn);
+			contentManager().regenerateRvtMaterials();
+		}
+		if (r && rvtOn)
+		{
+			if (!m_rvtLandscape) m_rvtLandscape = std::make_shared<HE::landscape::RvtLandscape>(contentManager(), *r);
+			m_rvtLandscape->setSettings(HE::landscape::RvtLandscape::settingsFromProject(m_projectSettings.rvt));
+			m_rvtLandscape->setView(glm::radians(camFovDeg), static_cast<float>(m_windowHeight));
+			m_rvtLandscape->tick(*m_world, camPos);
+		}
+		else if (m_rvtLandscape)
+		{
+			m_rvtLandscape->detach();
+			m_rvtLandscape.reset();
+		}
 		// Animation last, after every system that could have moved something this
 		// frame — a state machine reads what gameplay just produced. Still ahead
 		// of extraction, which consumes the bone matrices.
@@ -3574,11 +3712,10 @@ void GameApplication::OnRender(float deltaTime)
 			r->SetAntiAliasingSettings(aa);
 
 			// Render path — same config.json key the editor's Preferences combo
-			// writes ("RenderPath": 0 = Forward, 1 = Deferred), capability-gated.
-			const bool deferredPath =
-				GlobalState::getInstance().getCustomConfigInt("RenderPath", 0) == 1 &&
-				r->GetCapabilities().supportsDeferredRendering;
-			r->SetRenderPath(deferredPath ? HE::RenderPath::Deferred : HE::RenderPath::Forward);
+			// writes ("RenderPath": 0 = Forward, 1 = Deferred), capability-gated. An absent
+			// key is the engine's default, Deferred (EditorConfig::RenderPath); a backend that
+			// cannot do it stays forward.
+			r->SetRenderPath(configuredRenderPath(*r));
 
 			// Push the scene environment to the renderer. The base Application renders the
 			// world but never pushes EnvironmentSettings (that lived only in the editor), so
@@ -3710,6 +3847,8 @@ void GameApplication::installPlayerSettings()
 
 void GameApplication::OnShutdown()
 {
+	// The virtual texture driver hands its pool back to the renderer: while it still exists, not from the destructor.
+	m_rvtLandscape.reset();
 	// The session FIRST, and said out loud: leave() writes a goodbye and drops
 	// every peer, so the others learn the seat is free now rather than waiting
 	// out the transport timeout. A quitting host that simply vanished would
@@ -3773,6 +3912,8 @@ void GameApplication::OnShutdown()
 	// that (the apps set it before begin()), so it is dropped here — before the
 	// world it points at goes away.
 	m_entityHost.setPhysicsWorld(nullptr);
+	m_landscape.setPhysics(nullptr);   // its ground lives in that world: give it back first
+	m_landscapePhysics = nullptr;
 	m_physicsWorld.reset();
 
 	// GameInstance OnShutdown fires last (symmetric to OnInit firing first).

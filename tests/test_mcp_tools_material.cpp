@@ -1,4 +1,5 @@
 #include "doctest.h"
+#include <MaterialGraph/MatCpuEval.h>
 
 #include "AssetStubWriter.h"
 #include "EditorAssetTypeCache.h"
@@ -158,7 +159,7 @@ struct Fixture
 
 	// The editor half, as flags a test sets.
 	bool        playing = false;
-	bool        materialsOk = true;
+	bool        cpuOnly = false;   // Advanced Shader Effects off (cpuNodesOnly)
 	std::string lockedRel;   // non-empty = a peer holds it
 	std::string dirtyRel;    // non-empty = an open tab holds it with edits
 	std::string openRel;     // non-empty = an open tab holds it (clean or not)
@@ -187,7 +188,7 @@ struct Fixture
 			++reloadCalls;
 			return true;
 		};
-		h.materialsAllowed = [this] { return materialsOk; };
+		h.cpuNodesOnly = [this] { return cpuOnly; };
 		h.publishCreate = [this](const std::string& rel, const std::string&) {
 			published.push_back(rel);
 		};
@@ -803,15 +804,6 @@ TEST_CASE("mcp material tools: creating an instance, and the four ways it is ref
 	CHECK(gone.isError);
 	CHECK(gone.errorCode == "not_found");
 
-	// The project's own gate: no Advanced Shader Effects, no materials — the same
-	// refusal the create menu gives by not offering the row.
-	f.materialsOk = false;
-	const ToolResult gated = f.call("material_create_instance",
-	                               json{ { "parent", "Materials/Master.hasset" } });
-	CHECK(gated.isError);
-	CHECK(gated.errorCode == "invalid_payload");
-	f.materialsOk = true;
-
 	f.playing = true;
 	const ToolResult playing = f.call("material_create_instance",
 	                                 json{ { "parent", "Materials/Master.hasset" } });
@@ -1126,7 +1118,6 @@ TEST_CASE("mcp material tools: material_create refuses without writing")
 	};
 
 	f.playing = true;   refused("play_mode");        f.playing = false;
-	f.materialsOk = false; refused("invalid_payload"); f.materialsOk = true;
 	f.lockedRel = rel;  refused("locked_by_other");  f.lockedRel.clear();
 
 	// No path at all, the wrong suffix, escaping and absolute paths.
@@ -1653,6 +1644,41 @@ TEST_CASE("mcp material tools: node_types is the registry minus Output, with the
 	CHECK(widget.errorCode == "invalid_path");
 }
 
+// Advanced Shader Effects off: the project ships on the software renderer, so
+// the catalogue is the CPU's node set and add_node refuses what needs a GPU —
+// the add menu's rule (MaterialEditorPanel::cpuNodesOnly). Creating is allowed.
+TEST_CASE("mcp material tools: Advanced Shader Effects off offers the CPU node set, not nothing")
+{
+	Fixture f("cpu_only");
+	f.cpuOnly = true;
+	f.writeMaterial("Materials/Rock.hasset", makeParamGraph());
+
+	const ToolResult cat = f.call("material_node_types", json::object());
+	REQUIRE_FALSE(cat.isError);
+	bool sawBackdrop = false;
+	for (const json& t : cat.content.at("nodeTypes"))
+	{
+		HE::MatNodeType nt{};
+		for (const HE::MatNodeDesc& d : HE::matNodeRegistry())
+			if (t.at("displayName") == d.name) nt = d.type;
+		CAPTURE(t.at("type").get<std::string>());
+		CHECK(HE::matCpuSupports(nt));
+		sawBackdrop = sawBackdrop || t.at("type") == "Backdrop";
+	}
+	CHECK(sawBackdrop);
+
+	const ToolResult fresnel = f.call("material_add_node",
+		json{ { "path", "Materials/Rock.hasset" }, { "type", "Fresnel" } });
+	CHECK(fresnel.isError);
+	CHECK(fresnel.errorCode == "refused_by_policy");
+	const ToolResult state = f.call("material_add_node",
+		json{ { "path", "Materials/Rock.hasset" }, { "type", "ElementState" } });
+	CHECK_FALSE(state.isError);
+
+	const ToolResult made = f.call("material_create", json{ { "path", "Materials/New.hasset" } });
+	CHECK_FALSE(made.isError);
+}
+
 TEST_CASE("mcp material tools: every listed type goes through add_node, and the file has it")
 {
 	Fixture f("add_sweep");
@@ -1777,6 +1803,7 @@ TEST_CASE("mcp material tools: add_node takes the payloads and refuses the wrong
 	refused(json{ { "path", path }, { "type", "Output" } },                "refused_by_policy");
 	refused(json{ { "path", path }, { "type", "FnInput" } },               "refused_by_policy");
 	refused(json{ { "path", path }, { "type", "FnOutput" } },              "refused_by_policy");
+	refused(json{ { "path", path }, { "type", "RvtSample" } },             "refused_by_policy");
 	refused(json{ { "path", path }, { "type", "FunctionCall" } },          "invalid_payload");
 	refused(json{ { "path", path }, { "type", "FunctionCall" }, { "s", path } }, "invalid_path");
 	refused(json{ { "path", path }, { "type", "FunctionCall" },

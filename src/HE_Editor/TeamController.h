@@ -126,6 +126,9 @@ public:
 	// team. `open`: members may join without an invitation. False (with
 	// lastError()) when not signed in or a collab session is already running.
 	bool hostSession(bool open);
+	// Ends the session this editor hosts. update() then withdraws the
+	// announcement, as it does for any other way a hosted session ends.
+	void stopHosting();
 	// Whether a collab session (team or not) is running on the controller next
 	// door — Host and Join are pointless then — and whether it is `session`.
 	bool sessionRunning() const;
@@ -150,6 +153,19 @@ public:
 	using ScHeadFn = std::function<void(const std::string& project, std::uint64_t rev,
 	                                    const std::string& member)>;
 	void setOnScHead(ScHeadFn fn) { m_onScHead = std::move(fn); }
+	// ── Notices for one member (the task board, TaskBoardTeamLink.h) ──
+	// sendNotice: false when it cannot go now (not signed in, or the server
+	// predates NOTIFY); the caller keeps it and tries again. A member who went
+	// offline meanwhile simply misses it (the server keeps nothing).
+	bool sendNotice(const std::string& member, const std::string& payload);
+	bool noticesSupported() const { return !m_client || m_client->noticesSupported(); }
+	struct IncomingNotice
+	{
+		std::string from, payload;
+	};
+	// The next notice somebody sent us, oldest first. Never shown as a toast
+	// here: the task board turns it into its own sentence.
+	bool pollNotice(IncomingNotice& out);
 	// Where the team connection goes (the sync connection goes there too).
 	const HE::Net::RelayAddress& serverAddress() const { return m_server; }
 
@@ -291,6 +307,7 @@ private:
 	std::string           m_joining;       // JOIN sent, reply pending
 
 	std::deque<Notice>    m_notices;
+	std::deque<IncomingNotice> m_incomingNotices;   // pollNotice; capped
 
 	// A colour picked but not yet sent (see setColor).
 	bool                  m_colorPending = false;

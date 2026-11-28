@@ -134,7 +134,7 @@ std::string describeTaskNotice(const TaskNotice& n, const std::string& self)
 			std::string word = n.status;
 			if (taskStatusFromName(n.status, st))
 			{
-				static const char* const kLabels[] = { "Open", "In Progress", "Blocked", "Done" };
+				static const char* const kLabels[] = { "Open", "In progress", "Blocked", "Done" };
 				word = kLabels[(int)st];
 			}
 			s = who + " set " + title + " to " + word;

@@ -1856,7 +1856,7 @@ TEST_CASE("Camera + Environment: registry knobs reach the world's components")
     int envRows = 0;
     for (const auto& fn : HE::api::registry())
         if (std::string(fn.id).rfind("env.", 0) == 0) ++envRows;
-    CHECK(envRows == 2 * (39 + 6 + 4 + 9));   // float + bool + int + colour fields
+    CHECK(envRows == 2 * (48 + 6 + 7 + 10));   // float + bool + int + colour fields (release/0.8.0 added cloudType; Thema 225 added fogMode/fogQuality)
 }
 
 // ═══ Spawning a class: the host service contract ══════════════════════════════
@@ -2014,6 +2014,30 @@ TEST_CASE("Audio: null-tolerant without an engine; headless engine answers queri
     CHECK_NOTHROW(call("audio.setBusVolume", { Value::ofString("SFX"), Value::ofFloat(0.5f) }));
     CHECK(call("audio.isPlaying", { Value::ofInt(42) })[0].b == false);
     CHECK_NOTHROW(call("audio.stopAll", {}));
+    engine.shutdown();
+}
+
+TEST_CASE("Audio: a held playback gate starts nothing; released, the same call plays")
+{
+    // The editor holds it while an application's live preview runs, so the
+    // preview plays no sound (EditorApplication::OnRender). A real clip, so the
+    // 0 can only come from the gate.
+    ContentManager cm;
+    cm.setEngineContentRoot((std::filesystem::path(HE_EDITOR_DEPS_DIR) / "EngineContent").string());
+    AudioEngine engine;
+    REQUIRE(engine.init(/*noDevice=*/true));
+    Ctx c{}; c.audio = &engine; c.content = &cm;
+    const std::string clip = "Engine/Audio/Weather/Thunder.hasset";
+    REQUIRE(HE::api::audio::play(c, clip, 1.0f, 1.0f, false) != 0);
+
+    HE::api::audio::setPlaybackHeld(true);
+    CHECK(HE::api::audio::play(c, clip, 1.0f, 1.0f, true) == 0);
+    CHECK(HE::api::audio::playAt(c, clip, glm::vec3(0.0f), 1.0f, 1.0f, true, 1.0f, 20.0f) == 0);
+    HE::api::audio::setPlaybackHeld(false);
+
+    const int h = HE::api::audio::play(c, clip, 1.0f, 1.0f, false);
+    CHECK(h != 0);
+    CHECK(HE::api::audio::isPlaying(c, h));
     engine.shutdown();
 }
 
@@ -4484,7 +4508,8 @@ TEST_CASE("Double pin: converts like a number, and only like a number")
     CHECK(canConvertPinType(P::Float,  P::Double));
     CHECK(canConvertPinType(P::Double, P::Int));
     CHECK(canConvertPinType(P::Int,    P::Double));
-    CHECK(canConvertPinType(P::Double, P::Bool));
+    CHECK_FALSE(canConvertPinType(P::Double, P::Bool));   // a Bool wants a comparison
+    CHECK(canConvertPinType(P::Bool,   P::Double));
     CHECK(canConvertPinType(P::Double, P::Enum));
     CHECK(canConvertPinType(P::Enum,   P::Double));
     CHECK_FALSE(canConvertPinType(P::Double, P::String));
@@ -5512,4 +5537,23 @@ TEST_CASE("Physics: the new joint rows are neutral without a PhysicsWorld")
         { Value::ofInt(1), Value::ofFloat(1.0f), Value::ofFloat(100.0f) });
     REQUIRE(motorOut.size() == 1);
     CHECK_FALSE(motorOut[0].b);
+}
+
+// A fresh Play Sound node played at volume 0 and pitch 0: an unwired Float pin
+// starts at its type's zero unless the row says otherwise (ApiParam::def).
+TEST_CASE("Engine API: audio rows give volume and pitch a default of 1, everything else stays 0")
+{
+    auto def = [](const char* row, const char* param) {
+        const HE::api::ApiFn* fn = HE::api::find(row);
+        REQUIRE(fn != nullptr);
+        for (const auto& p : fn->params)
+            if (std::string(p.name) == param) return p.def;
+        FAIL("no parameter " << param << " on " << row);
+        return -1.0f;
+    };
+    CHECK(def("audio.play", "volume") == 1.0f);
+    CHECK(def("audio.play", "pitch") == 1.0f);
+    CHECK(def("audio.playAt", "maxDist") == 20.0f);
+    CHECK(def("audio.setPitch", "pitch") == 1.0f);
+    CHECK(def("locomotion.look", "pitch") == 0.0f);   // a camera pitch, not a sound's
 }

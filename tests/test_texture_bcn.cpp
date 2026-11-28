@@ -17,10 +17,13 @@
 #include <ContentManager/Assets.h>
 #include <ContentManager/TextureArrayBuild.h>
 #include <ContentManager/TextureBlockDecode.h>
+#include <HorizonRendering/GiLandscape.h>
 
 #include <algorithm>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <string>
 #include <vector>
 
@@ -238,7 +241,8 @@ TEST_CASE("Block decoders: hand-built blocks")
 	SUBCASE("refusals")
 	{
 		uint8_t blk[16] = {};
-		CHECK_FALSE(HE::decodeBlockLevelToRGBA8(TextureFormat::BC7, blk, sizeof(blk), 4, 4, px));       // no decoder
+		CHECK_FALSE(HE::decodeBlockLevelToRGBA8(TextureFormat::ASTC_4x4, blk, sizeof(blk), 4, 4, px));  // no block decoder here
+		CHECK_FALSE(HE::decodeBlockLevelToRGBA8(TextureFormat::BC7, blk, 8, 4, 4, px));                 // too short
 		CHECK_FALSE(HE::decodeBlockLevelToRGBA8(TextureFormat::BC1, blk, 4, 4, 4, px));                 // too short
 		CHECK_FALSE(HE::decodeBlockLevelToRGBA8(TextureFormat::BC5, blk, sizeof(blk), 0, 4, px));
 		CHECK_FALSE(HE::textureFormatCpuDecodable(TextureFormat::BC7));
@@ -436,6 +440,102 @@ TEST_CASE("Cook: arrays ship RGBA8 unless PackSettings::cookTextureArrays asks, 
 	CHECK(flat.format == TextureFormat::BC3);
 }
 
+TEST_CASE("Cook: a cooked texture array carries the slice means of its RGBA8 source")
+{
+	const TextureAsset s0 = rampTexture(32, 16, 0), s1 = rampTexture(32, 16, 45), s2 = rampTexture(32, 16, 90);
+	TextureAsset arr;
+	REQUIRE(HE::buildTextureArray({ &s0, &s1, &s2 }, arr, /*bakeMips=*/true));
+	arr.type = HE::AssetType::Texture; arr.name = "mean_arr"; arr.path = "mean_arr.hasset"; arr.srgb = true;
+
+	TextureAsset cooked;
+	REQUIRE(cookViaPak(arr, 3, 0, "arrmeans", cooked));
+	REQUIRE(cooked.format == TextureFormat::BC3);
+	REQUIRE(cooked.sliceMeans.size() == 3 * 3);
+
+	// The baked values are exactly what reading the source pixels gives, slice by slice.
+	for (uint32_t s = 0; s < 3; ++s)
+	{
+		float want[3];
+		REQUIRE(HE::textureArraySliceMean(arr, s, want));
+		for (int c = 0; c < 3; ++c)
+		{
+			CAPTURE(s); CAPTURE(c);
+			CHECK(cooked.sliceMeans[s * 3 + c] == doctest::Approx(want[c]).epsilon(1e-6));
+		}
+	}
+	// Slices differ (phase 0 / 45 / 90 on R), so a slice mix-up would show.
+	CHECK(cooked.sliceMeans[0] < cooked.sliceMeans[3]);
+	CHECK(cooked.sliceMeans[3] < cooked.sliceMeans[6]);
+
+	// A 2D texture and an array that is not cooked get none.
+	TextureAsset flat, off;
+	REQUIRE(cookViaPak(rampTexture(8, 8), 3, 0, "flatmeans", flat));
+	CHECK(flat.sliceMeans.empty());
+	REQUIRE(cookViaPak(arr, 3, 0, "offmeans", off, /*cookArrays=*/false));
+	CHECK(off.sliceMeans.empty());
+}
+
+TEST_CASE("cookTextureBlob: an array .hasset becomes the compressed array in place, slices stay in order")
+{
+	namespace fs = std::filesystem;
+	const fs::path dir = fs::temp_directory_path() / "he_bcn_blob";
+	he_test::removeAllQuiet(dir);
+	fs::create_directories(dir);
+	// Eight slices so the encoder's worker threads each take several; phase raises R slice by slice.
+	std::vector<TextureAsset> src;
+	for (int s = 0; s < 8; ++s) src.push_back(rampTexture(32, 16, s * 12));
+	std::vector<const TextureAsset*> ptrs;
+	for (const auto& t : src) ptrs.push_back(&t);
+	TextureAsset arr;
+	REQUIRE(HE::buildTextureArray(ptrs, arr, /*bakeMips=*/true));
+	arr.type = HE::AssetType::Texture; arr.name = "blob_arr"; arr.path = "blob_arr.hasset"; arr.srgb = true;
+	TextureAsset flat = rampTexture(8, 8);
+	flat.name = "blob_flat"; flat.path = "blob_flat.hasset";
+	{
+		ContentManager cmw(dir.string());
+		REQUIRE(cmw.saveAsset(arr));
+		REQUIRE(cmw.saveAsset(flat));
+	}
+	const auto slurp = [](const fs::path& p) {
+		std::ifstream in(p, std::ios::binary);
+		return std::vector<uint8_t>(std::istreambuf_iterator<char>(in), {}); };
+	const std::vector<uint8_t> arrBlob = slurp(dir / "blob_arr.hasset"), flatBlob = slurp(dir / "blob_flat.hasset");
+
+	// A format no encoder knows: handed back untouched. A plain 2D texture is cooked too (as an export does).
+	CHECK(Hpak::cookTextureBlob(flatBlob, 3, 0) != flatBlob);
+	CHECK(Hpak::cookTextureBlob(arrBlob, 99, 0) == arrBlob);
+
+	const std::vector<uint8_t> cooked = Hpak::cookTextureBlob(arrBlob, 3, 0);
+	REQUIRE(cooked != arrBlob);
+	{
+		std::ofstream out(dir / "blob_arr.hasset", std::ios::binary | std::ios::trunc);
+		out.write(reinterpret_cast<const char*>(cooked.data()), static_cast<std::streamsize>(cooked.size()));
+	}
+	ContentManager cm(dir.string());
+	const TextureAsset* t = cm.getTexture(cm.loadAsset("blob_arr.hasset"));
+	REQUIRE(t);
+	CHECK(t->format == TextureFormat::BC3);
+	CHECK(t->layers == 8);
+	CHECK(t->srgb);
+	CHECK(t->mipLevels == arr.mipLevels);
+	CHECK(HE::textureArrayPayloadValid(*t));
+	REQUIRE(t->sliceMeans.size() == 8 * 3);
+	// The decoded slices are in the order they went in: R rises with the phase (12 per slice stays inside a byte).
+	float prev = -1.0f;
+	for (uint32_t s = 0; s < 8; ++s)
+	{
+		float rgb[3];
+		REQUIRE(HE::textureArraySliceMean(*t, s, rgb));
+		CAPTURE(s);
+		CHECK(rgb[0] > prev);
+		prev = rgb[0];
+		CHECK(t->sliceMeans[s * 3] == doctest::Approx(rgb[0]).epsilon(0.1));
+	}
+	// Already compressed: handed back as it is, not encoded a second time.
+	CHECK(Hpak::cookTextureBlob(cooked, 3, 0) == cooked);
+	he_test::removeAllQuiet(dir);
+}
+
 #endif // HE_HAVE_STB_DXT
 
 TEST_CASE("Textures written before BC1/BC4/BC5 existed still load")
@@ -490,4 +590,69 @@ TEST_CASE("Textures written before BC1/BC4/BC5 existed still load")
 	CHECK(cm.getTexture(b4)->format == TextureFormat::BC4);
 	CHECK(cm.getTexture(b5)->format == TextureFormat::BC5);
 	CHECK(cm.getTexture(b1)->data.size() == textureLevelBytes(TextureFormat::BC1, 8, 8));
+}
+
+TEST_CASE("GI landscape means: a BC7 / ASTC array is read from its baked slice means")
+{
+	// 13 slices (V = 3): Grass at 0, Dirt at 3, Rock at 6, Snow at 9, Wet Ground last (12).
+	// The payload is junk bytes in a format the CPU cannot decode: the pixels must not be read.
+	for (const TextureFormat f : { TextureFormat::BC7, TextureFormat::ASTC_4x4 })
+	{
+		TextureAsset t;
+		t.width = t.height = 8; t.channels = 4; t.mipLevels = 4; t.layers = 13; t.srgb = true;
+		t.format = f;
+		t.data.assign(13 * HE::textureArraySliceBytes(8, 8, 4, f), 0xAB);
+		HE::GiLandscape L;
+		CHECK_FALSE(HE::giAutoLandscapeSliceMeans(t, L));          // nothing baked, nothing readable
+
+		t.sliceMeans.assign(13 * 3, 0.0f);
+		auto put = [&](int slice, float r, float g, float b) {
+			t.sliceMeans[slice * 3 + 0] = r; t.sliceMeans[slice * 3 + 1] = g; t.sliceMeans[slice * 3 + 2] = b; };
+		put(0, 0.1f, 0.2f, 0.3f); put(3, 0.4f, 0.5f, 0.6f); put(6, 0.7f, 0.8f, 0.9f);
+		put(9, 1.0f, 1.0f, 1.0f); put(12, 0.2f, 0.4f, 0.8f);
+		REQUIRE(HE::giAutoLandscapeSliceMeans(t, L));
+		CHECK(L.layerColor[0].x == doctest::Approx(0.1f));
+		CHECK(L.layerColor[1].y == doctest::Approx(0.5f));
+		CHECK(L.layerColor[2].z == doctest::Approx(0.9f));
+		CHECK(L.layerColor[3].x == doctest::Approx(1.0f));
+		CHECK(L.autoWet.z == doctest::Approx(0.8f * 0.675f));
+
+		// A count that disagrees with the slice count is ignored, not trusted.
+		t.sliceMeans.pop_back();
+		CHECK_FALSE(HE::giAutoLandscapeSliceMeans(t, L));
+	}
+}
+
+TEST_CASE("Slice means survive a save and load; a texture without the chunk loads as before")
+{
+	namespace fs = std::filesystem;
+	const fs::path dir = fs::temp_directory_path() / "he_bcn_slicemeans_io";
+	he_test::removeAllQuiet(dir);
+	fs::create_directories(dir);
+	const TextureAsset s0 = rampTexture(8, 8, 0), s1 = rampTexture(8, 8, 30);
+	TextureAsset arr, flat = rampTexture(8, 8);
+	REQUIRE(HE::buildTextureArray({ &s0, &s1 }, arr, true));
+	arr.type = HE::AssetType::Texture; arr.name = "io_arr"; arr.path = "io_arr.hasset";
+	flat.name = "io_flat"; flat.path = "io_flat.hasset";
+	arr.sliceMeans = { 0.1f, 0.2f, 0.3f, 0.4f, 0.5f, 0.6f };
+	{
+		ContentManager cmw(dir.string());
+		REQUIRE(cmw.saveAsset(arr));
+		REQUIRE(cmw.saveAsset(flat));
+	}
+	ContentManager cm(dir.string());
+	// Both loads first: loadAsset() registers into the SlotMap-backed asset pool
+	// and can reallocate it (ContentManager.h "THE POINTER IS ONLY GOOD UNTIL THE
+	// NEXT LOAD"), so a getTexture() pointer taken between the two loadAsset()
+	// calls would dangle once the second load grows the pool — exactly the SIGSEGV
+	// this test used to hit on Windows Release (Thema 332).
+	const HE::UUID arrId = cm.loadAsset("io_arr.hasset");
+	const HE::UUID flatId = cm.loadAsset("io_flat.hasset");
+	const TextureAsset* a = cm.getTexture(arrId);
+	const TextureAsset* f = cm.getTexture(flatId);
+	REQUIRE(a); REQUIRE(f);
+	CHECK(a->sliceMeans == arr.sliceMeans);
+	CHECK(f->sliceMeans.empty());
+	CHECK(f->data == flat.data);
+	he_test::removeAllQuiet(dir);
 }

@@ -374,6 +374,39 @@ TEST_CASE("terrain_mountain rises inside the world area and falls off to nothing
 	CHECK(groundAt(f, after, 200.0f, -50.0f) == doctest::Approx(5.0f));
 }
 
+TEST_CASE("terrain_mountain hands its paths back as world points, rim first, on the ground")
+{
+	Fixture f;
+	const Entity e = f.makeTerrain(glm::vec3(200.0f, 5.0f, -50.0f), /*res=*/65);
+	const ToolResult r = f.call("terrain_mountain", json{
+		{ "uuid", f.uuid(e) }, { "x", 200.0 }, { "z", -50.0 }, { "radius", 30.0 },
+		{ "maxHeight", 20.0 }, { "falloff", 30.0 }, { "roughness", 0.0 },
+		{ "terraces", 4 }, { "paths", 2 }, { "pathWidth", 3.0 }, { "pathMaxGrade", 0.3 },
+	});
+	REQUIRE_MESSAGE(!r.isError, codeOf(r));
+	CHECK(r.content["peakAdded"].get<float>() == doctest::Approx(20.0f));
+	REQUIRE(r.content["paths"].is_array());
+	REQUIRE(r.content["paths"].size() == 2);
+	for (const json& line : r.content["paths"])
+	{
+		REQUIRE(line.size() >= 2);
+		const json& first = line.front();
+		const json& last = line.back();
+		// World coordinates: the rim is ~30 m from the centre; the summit is somewhere on the top terrace round it, 20 m above
+		// the entity's ground at y = 5.
+		CHECK(std::hypot(first[0].get<float>() - 200.0f, first[2].get<float>() + 50.0f) > 20.0f);
+		CHECK(std::hypot(last[0].get<float>() - 200.0f, last[2].get<float>() + 50.0f) < 12.0f);
+		CHECK(last[1].get<float>() == doctest::Approx(25.0f).epsilon(0.02));
+		for (const json& pt : line)
+			CHECK(pt[1].get<float>() == doctest::Approx(groundAt(f, e, pt[0].get<float>(), pt[2].get<float>())).epsilon(0.02));
+	}
+	// Without the argument there is no such key.
+	const ToolResult plain = f.call("terrain_mountain", json{
+		{ "uuid", f.uuid(e) }, { "x", 200.0 }, { "z", -50.0 }, { "radius", 30.0 } });
+	REQUIRE_MESSAGE(!plain.isError, codeOf(plain));
+	CHECK_FALSE(plain.content.contains("paths"));
+}
+
 TEST_CASE("terrain_mountain stands on the ground that was sculpted before it")
 {
 	Fixture f;
@@ -488,6 +521,13 @@ TEST_CASE("terrain_mountain refuses what a client can correct, under the code it
 	CHECK(with({ { "octaves", 0 } })      == "invalid_payload");
 	CHECK(with({ { "octaves", 13 } })     == "invalid_payload");
 	CHECK(with({ { "frequency", 0.0 } })  == "invalid_payload");
+	CHECK(with({ { "ridges", 1.5 } })     == "invalid_payload");
+	CHECK(with({ { "erosion", -0.1 } })   == "invalid_payload");
+	CHECK(with({ { "terraces", -1 } })    == "invalid_payload");
+	CHECK(with({ { "terraceSharpness", 2.0 } }) == "invalid_payload");
+	CHECK(with({ { "paths", 9 } })        == "invalid_payload");
+	CHECK(with({ { "pathWidth", 0.0 } })  == "invalid_payload");
+	CHECK(with({ { "pathMaxGrade", 0.0 } }) == "invalid_payload");
 	// None of those left anything behind.
 	CHECK(f.regenCalls == 0);
 
@@ -621,7 +661,7 @@ TEST_CASE("terrain_paint reaches layers 4..7 on the second weight page, and undo
 	});
 	REQUIRE_MESSAGE(!r.isError, codeOf(r));
 	CHECK(f.terrain(e).layerWeights2.empty());
-	REQUIRE(r.content["mixAtCenter"].size() == 8);
+	REQUIRE(r.content["mixAtCenter"].size() == 12);
 
 	r = f.call("terrain_paint", json{
 		{ "uuid", f.uuid(e) }, { "x", 210.0 }, { "z", -50.0 },
@@ -629,7 +669,7 @@ TEST_CASE("terrain_paint reaches layers 4..7 on the second weight page, and undo
 	});
 	REQUIRE_MESSAGE(!r.isError, codeOf(r));
 	CHECK(r.content["changed"] == true);
-	REQUIRE(r.content["mixAtCenter"].size() == 8);
+	REQUIRE(r.content["mixAtCenter"].size() == 12);
 	CHECK(r.content["mixAtCenter"][5].get<float>() == doctest::Approx(1.0f));
 	CHECK(r.content["mixAtCenter"][0].get<float>() == doctest::Approx(0.0f));
 
@@ -653,6 +693,49 @@ TEST_CASE("terrain_paint reaches layers 4..7 on the second weight page, and undo
 	CHECK(f.terrain(after).layerWeights2.empty());
 }
 
+TEST_CASE("terrain_paint reaches layers 8..11 on the third weight page, and undo takes it back")
+{
+	Fixture f;
+	const Entity e = f.makeTerrain();
+
+	// A second-page stroke first, so the third page is the new thing.
+	ToolResult r = f.call("terrain_paint", json{
+		{ "uuid", f.uuid(e) }, { "x", 190.0 }, { "z", -50.0 },
+		{ "layer", 5 }, { "radius", 4.0 }, { "falloff", 0.0 }, { "strength", 1.0 },
+	});
+	REQUIRE_MESSAGE(!r.isError, codeOf(r));
+	CHECK(f.terrain(e).layerWeights3.empty());
+
+	r = f.call("terrain_paint", json{
+		{ "uuid", f.uuid(e) }, { "x", 210.0 }, { "z", -50.0 },
+		{ "layer", 10 }, { "radius", 4.0 }, { "falloff", 0.0 }, { "strength", 1.0 },
+	});
+	REQUIRE_MESSAGE(!r.isError, codeOf(r));
+	CHECK(r.content["changed"] == true);
+	REQUIRE(r.content["mixAtCenter"].size() == 12);
+	CHECK(r.content["mixAtCenter"][10].get<float>() == doctest::Approx(1.0f));
+	CHECK(r.content["mixAtCenter"][5].get<float>() == doctest::Approx(0.0f));
+
+	// All three pages landed in the component (they travel as one scene patch).
+	const auto& tc = f.terrain(e);
+	REQUIRE(tc.layerWeights2.size() == tc.layerWeights.size());
+	REQUIRE(tc.layerWeights3.size() == tc.layerWeights.size());
+	CHECK(TerrainPaint::usesThirdPage(tc));
+	std::uint8_t w[kTerrainMaxLayers] = {};
+	const std::uint32_t wr = tc.weightRes;
+	const auto tx = static_cast<std::uint32_t>((10.0f + tc.sizeX * 0.5f) / tc.sizeX * wr);
+	REQUIRE(TerrainPaint::texelWeights(tc, tx, wr / 2, w));
+	CHECK(static_cast<int>(w[10]) == 255);
+
+	// Undo restores the state before the layer-10 stroke: two pages, no third.
+	const std::string id = f.uuid(e);
+	REQUIRE(f.snapshotUndo.undo());
+	const Entity after = HE::Ed::entityByUuid(f.world, id);
+	REQUIRE((after != entt::null));
+	CHECK_FALSE(f.terrain(after).layerWeights2.empty());
+	CHECK(f.terrain(after).layerWeights3.empty());
+}
+
 TEST_CASE("terrain_paint refuses a layer a landscape does not have")
 {
 	Fixture f;
@@ -660,7 +743,7 @@ TEST_CASE("terrain_paint refuses a layer a landscape does not have")
 
 	CHECK(codeOf(f.call("terrain_paint", json{
 		{ "uuid", f.uuid(e) }, { "x", 200.0 }, { "z", -50.0 },
-		{ "layer", 8 } })) == "invalid_payload");
+		{ "layer", 12 } })) == "invalid_payload");
 	CHECK(codeOf(f.call("terrain_paint", json{
 		{ "uuid", f.uuid(e) }, { "x", 200.0 }, { "z", -50.0 },
 		{ "layer", -1 } })) == "invalid_payload");

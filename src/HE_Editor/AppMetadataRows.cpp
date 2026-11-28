@@ -184,8 +184,8 @@ bool drawSplashRows(AppContext& ctx, ProjectData& p, bool compact)
 	commit |= EditorWidgets::checkbox("Show a splash while starting", &g.splashEnabled);
 	EditorWidgets::helpForLabel("Show a splash while starting");
 	if (!compact)
-		ImGui::TextDisabled("A small window with your picture and the title, up while the game\n"
-		                    "loads. Without a picture no splash opens — the engine does not\n"
+		EditorWidgets::hint("A small window with your picture and the title, up while the game "
+		                    "loads. Without a picture no splash opens — the engine does not "
 		                    "advertise itself inside your game.");
 	if (g.splashEnabled)
 	{

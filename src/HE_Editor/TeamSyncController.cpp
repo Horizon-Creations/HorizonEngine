@@ -8,6 +8,8 @@
 #include <Net/TeamClient.h>
 
 #include <cctype>
+#include <chrono>
+#include <fstream>
 
 namespace {
 
@@ -45,7 +47,8 @@ TeamSyncController::TeamSyncController(TeamController& team, GitController& git,
 		return true;
 	});
 	m_team.setOnScHead([this](const std::string& project, std::uint64_t rev, const std::string&) {
-		if (m_sync.running() && caseInsensitiveEqual(project, m_project.project)) m_sync.notifyHead(rev);
+		if (m_sync.running() && caseInsensitiveEqual(project, serverProjectFor(m_project.project, m_branch)))
+			m_sync.notifyHead(rev);
 	});
 }
 
@@ -58,6 +61,11 @@ TeamSyncController::~TeamSyncController()
 
 void TeamSyncController::close()
 {
+	m_conflictsPosted.clear();
+	m_switchPending = false;
+	m_switchTo.clear();
+	m_pendingSwitch.clear();
+	m_pendingMerge.clear();
 	m_sync.stop();
 	m_key.clear();
 	m_project  = {};
@@ -65,10 +73,118 @@ void TeamSyncController::close()
 	m_wasClient = m_wasHost = false;
 }
 
-void TeamSyncController::noteSaved()
+void TeamSyncController::noteSaved(std::uint64_t delayMs)
 {
 	if (!m_sync.running()) return;
-	m_saveAtMs = m_nowMs + kDebounceMs;
+	const std::uint64_t at = m_nowMs + delayMs;
+	// Re-armed by every save of the same kind (a run of them is one revision); a
+	// sooner one already pending is not pushed back by a later, slower kind.
+	m_saveAtMs = (m_saveAtMs != 0 && m_saveAtMs < at && delayMs > kDebounceMs) ? m_saveAtMs : at;
+}
+
+bool TeamSyncController::inSession() const { return m_collab.inSession(); }
+
+namespace
+{
+std::filesystem::path branchFile(const std::filesystem::path& root, const std::string& team, const std::string& project)
+{
+	return root / "Saved" / "TeamSync" / (folded(team) + "-" + folded(project) + ".branch");
+}
+} // namespace
+
+std::string TeamSyncController::currentBranch(const std::filesystem::path& root, const std::string& team,
+                                              const std::string& project)
+{
+	std::ifstream in(branchFile(root, team, project), std::ios::binary);
+	std::string name;
+	if (in) std::getline(in, name);
+	while (!name.empty() && (name.back() == '\r' || name.back() == ' ')) name.pop_back();
+	return name;
+}
+
+bool TeamSyncController::canSwitchBranch() const
+{
+	if (!m_sync.running() || m_collab.inSession() || m_blocker != Blocker::None || m_switchPending) return false;
+	const HE::Sc::TeamSyncService::Status s = m_sync.status();
+	return s.firstSyncDiffers.empty() && !s.projectMissing;
+}
+
+bool TeamSyncController::switchBranch(const std::string& name)
+{
+	if (!canSwitchBranch() || caseInsensitiveEqual(name, m_branch)) return false;
+	// First what is here goes up, to the branch it was made on; the switch waits for that.
+	m_switchPending   = true;
+	m_switchTarget    = name;
+	m_switchAskedUnix = static_cast<std::int64_t>(std::chrono::duration_cast<std::chrono::seconds>(
+		std::chrono::system_clock::now().time_since_epoch()).count());
+	syncNow();
+	return true;
+}
+
+void TeamSyncController::doSwitch(const std::string& name)
+{
+	const std::filesystem::path f = branchFile(m_project.root, m_project.team, m_project.project);
+	std::error_code ec;
+	std::filesystem::create_directories(f.parent_path(), ec);
+	if (name.empty()) std::filesystem::remove(f, ec);
+	else
+	{
+		std::ofstream out(f, std::ios::binary | std::ios::trunc);
+		out << name << '\n';
+		if (!out)
+		{
+			if (m_notes) m_notes->post(HE::Ed::NoteLevel::Important, "Could not switch branches: " + f.generic_string() + " cannot be written.");
+			return;
+		}
+	}
+	m_mirrorNext = true;
+	m_key.clear();   // the next update() restarts on the other server project
+}
+
+void TeamSyncController::createBranch(const std::string& name)
+{
+	if (!canSwitchBranch() || !m_branch.empty()) return;   // branches are made from the project itself
+	m_pendingSwitch = name;
+	m_sync.createBranch(name);
+}
+
+void TeamSyncController::mergeIntoMain()
+{
+	if (m_branch.empty() || !canSwitchBranch()) return;
+	const std::string b = m_branch;
+	if (switchBranch("")) m_pendingMerge = b;
+}
+
+std::string TeamSyncController::conflictKey(const HE::Sc::TeamSyncService::Lost& l)
+{
+	return "teamsync.conflict." + std::to_string(l.rev) + "." + l.path;
+}
+
+bool TeamSyncController::resolve(const HE::Sc::TeamSyncService::Lost& l, const std::string* bytes)
+{
+	if (bytes)
+	{
+		// The project's own file, inside the project only: the path came from the server.
+		const std::filesystem::path root = m_project.root;
+		const std::filesystem::path full = (root / l.path).lexically_normal();
+		const std::string rel = full.lexically_relative(root).generic_string();
+		if (root.empty() || rel.empty() || rel.rfind("..", 0) == 0) return false;
+		std::error_code ec;
+		std::filesystem::create_directories(full.parent_path(), ec);
+		const std::filesystem::path tmp = full.string() + ".resolving";
+		{
+			std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
+			out.write(bytes->data(), static_cast<std::streamsize>(bytes->size()));
+			if (!out) return false;
+		}
+		std::filesystem::rename(tmp, full, ec);
+		if (ec) { std::filesystem::remove(tmp, ec); return false; }
+		m_localWrites.push_back(rel);
+		syncNow("Resolve " + l.path + " (r" + std::to_string(l.rev) + ")");
+	}
+	m_sync.resolveLost(l.rev, l.path);
+	if (m_notes) m_notes->resolve(conflictKey(l));
+	return true;
 }
 
 void TeamSyncController::syncNow(const std::string& message)
@@ -79,6 +195,7 @@ void TeamSyncController::syncNow(const std::string& message)
 
 void TeamSyncController::restart(const Project& project)
 {
+	m_conflictsPosted.clear();
 	m_sync.stop();
 	m_project = project;
 	HE::Sc::TeamSyncService::Settings s;
@@ -87,7 +204,9 @@ void TeamSyncController::restart(const Project& project)
 	s.port        = m_team.serverAddress().port;
 	s.team        = m_team.team();
 	s.member      = m_team.member();
-	s.project     = project.project;
+	s.project     = serverProjectFor(project.project, m_branch);
+	s.mirrorOnStart = m_mirrorNext;
+	m_mirrorNext    = false;
 	TeamController* team = &m_team;
 	// The reply runs inside TeamController::update, so the controller is alive;
 	// the service's own half is behind a weak_ptr (Deliver).
@@ -130,9 +249,10 @@ std::vector<std::string> TeamSyncController::update(std::uint64_t nowMs, const P
 	}
 	m_blocker = Blocker::None;
 
+	m_branch = currentBranch(project.root, project.team, project.project);
 	const auto& at = m_team.serverAddress();
 	const std::string key = project.root.generic_string() + "\n" + folded(project.team) + "\n" +
-	                        folded(project.project) + "\n" + folded(m_team.member()) + "\n" + at.host +
+	                        folded(serverProjectFor(project.project, m_branch)) + "\n" + folded(m_team.member()) + "\n" + at.host +
 	                        ":" + std::to_string(at.port);
 	if (key != m_key || !m_sync.running())
 	{
@@ -162,6 +282,74 @@ std::vector<std::string> TeamSyncController::update(std::uint64_t nowMs, const P
 
 	std::vector<std::string> written = m_sync.pump(!playing, m_keepLocal);
 
+	// Branch requests: a branch made by us is switched to; a merge waits until we are back on the project.
+	HE::Sc::TeamSyncService::BranchEvent be;
+	while (m_sync.pollBranchEvent(be))
+	{
+		using K = HE::Sc::TeamSyncService::BranchEvent::Kind;
+		if (be.kind == K::Created && caseInsensitiveEqual(be.name, m_pendingSwitch))
+			m_switchTo = be.name;   // switched as soon as the service is idle again (below)
+		else if (be.kind == K::Merged)
+		{
+			if (m_notes) m_notes->post(HE::Ed::NoteLevel::Info, "Branch \"" + be.name + "\" merged into " + m_project.project +
+			                                                     " as r" + std::to_string(be.rev) + ".");
+		}
+		else if (be.kind == K::Failed)
+		{
+			if (caseInsensitiveEqual(be.name, m_pendingSwitch)) m_pendingSwitch.clear();
+			if (caseInsensitiveEqual(be.name, m_pendingMerge)) m_pendingMerge.clear();
+			if (m_notes) m_notes->post(HE::Ed::NoteLevel::Important, "Branch \"" + be.name + "\": " + be.error);
+		}
+	}
+	if (!m_switchTo.empty() && canSwitchBranch())
+	{
+		const std::string to = m_switchTo;
+		m_switchTo.clear();
+		m_pendingSwitch.clear();
+		switchBranch(to);
+	}
+	if (m_switchPending)
+	{
+		// Switched only once a sync asked for after the request has finished with nothing left
+		// to upload and no save pending: nothing of this branch is lost by the mirror.
+		const HE::Sc::TeamSyncService::Status st = m_sync.status();
+		if (m_collab.inSession()) m_switchPending = false;
+		else if (st.connected && st.phase == HE::Sc::TeamSyncService::Phase::Idle && st.activity.empty() && st.waiting == 0 &&
+		         m_saveAtMs == 0 && static_cast<std::int64_t>(st.lastSyncUnix) >= m_switchAskedUnix)
+		{
+			m_switchPending = false;
+			doSwitch(m_switchTarget);
+		}
+	}
+	if (!m_pendingMerge.empty() && m_branch.empty())
+	{
+		const HE::Sc::TeamSyncService::Status st = m_sync.status();
+		if (st.connected && st.phase == HE::Sc::TeamSyncService::Phase::Idle && st.activity.empty() && st.firstSyncDiffers.empty())
+		{
+			m_sync.mergeBranch(m_pendingMerge, "Merge branch " + m_pendingMerge);
+			m_pendingMerge.clear();
+		}
+	}
+
+	// Every conflict once per run: a new one, and the open ones from before at the start.
+	if (m_notes)
+		for (const HE::Sc::TeamSyncService::Lost& l : m_sync.lost())
+		{
+			const std::string key = conflictKey(l);
+			if (!m_conflictsPosted.insert(key).second) continue;
+			HE::Ed::NoteSpec note;
+			note.level = HE::Ed::NoteLevel::Important;
+			note.title = "Team sync: conflict in " + std::filesystem::path(l.path).filename().string();
+			note.text  = l.outcome == "replaced"
+			    ? l.winner + "'s later save (r" + std::to_string(l.rev) + ") replaced your version of " + l.path + "."
+			    : l.winner + "'s later save (r" + std::to_string(l.rev) + ") won where you both changed " + l.path + ".";
+			note.detail = "Both versions are kept on the team server. Compare them and pick or merge.";
+			note.key    = key;
+			if (m_onResolve)
+				note.actions.push_back({ "Resolve", [this, l] { if (m_onResolve) m_onResolve(l); }, true });
+			m_notes->post(std::move(note));
+		}
+
 	std::string text;
 	bool        error = false;
 	while (m_sync.pollNotice(text, error))
@@ -177,6 +365,9 @@ std::vector<std::string> TeamSyncController::update(std::uint64_t nowMs, const P
 		// in whatever app claims the extension, maybe a second editor.
 		if (m_openFolder) m_openFolder(opened.parent_path());
 	}
+	// What resolve() wrote: the editor reloads it like a file from the server.
+	written.insert(written.end(), m_localWrites.begin(), m_localWrites.end());
+	m_localWrites.clear();
 	return written;
 }
 
@@ -214,6 +405,9 @@ std::string TeamSyncController::stateLine() const
 	case Phase::Idle:
 		if (s.waiting) return plural(s.waiting, "change", "changes") + " not on the team server yet (r" +
 		                      std::to_string(s.rev) + ").";
+		// A conflict left over is not "in sync", whatever the revision says.
+		if (const std::size_t open = m_sync.lost().size())
+			return plural(open, "file", "files") + " to resolve (r" + std::to_string(s.rev) + ").";
 		return "In sync with the team at r" + std::to_string(s.rev) + ".";
 	}
 	return {};

@@ -1,6 +1,7 @@
 #include "ImporterCommon.h"
 #include <Platform/ProjectWriteGate.h>
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <cstdint>
 #include <cstring>
@@ -13,6 +14,7 @@
 // The whole importer set, because importSource() below is the one place that
 // decides which of them a given file belongs to.
 #include "AnimationClipImporter.h"
+#include "AutoLod.h"
 #include "AudioImporter.h"
 #include "FontImporter.h"
 #include "MaterialImporter.h"
@@ -180,6 +182,8 @@ static HE::UUID existingUUID(const std::filesystem::path& file)
 	return meta.id;
 }
 
+HE::UUID assetIdOf(const std::filesystem::path& assetFile) { return existingUUID(assetFile); }
+
 std::string sourceFileOf(const std::filesystem::path& assetFile)
 {
 	MetaFields meta;
@@ -331,6 +335,27 @@ bool writeAsset(RuntimeAsset& asset, const std::filesystem::path& contentRoot,
 	// Re-import: keep the identity the asset already has on disk.
 	if (asset.id == HE::UUID{})
 		asset.id = existingUUID(target);
+
+	// …and a mesh's detail levels with it (HAsset::CHUNK_MLOD): an importer builds the
+	// mesh without them, and a scene names them by UUID. A re-import that had levels
+	// regenerates them right after this write (MeshImporter) and reuses these ids.
+	if (asset.type == HE::AssetType::StaticMesh)
+	{
+		auto& mesh = static_cast<StaticMeshAsset&>(asset);
+		std::vector<uint8_t> index, blobs;
+		if (mesh.lods.empty() && readAssetChunk(target, HAsset::CHUNK_MLDI, index)
+		    && readAssetChunk(target, HAsset::CHUNK_MLOD, blobs))
+		{
+			std::vector<StaticMeshAsset::Lod> lods;
+			std::vector<std::vector<uint8_t>> levelBytes;
+			if (HE::decodeMeshLodIndex(index, lods) && HE::decodeMeshLodBlobs(blobs, levelBytes)
+			    && lods.size() == levelBytes.size())
+			{
+				mesh.lods     = std::move(lods);
+				mesh.lodBlobs = std::move(levelBytes);
+			}
+		}
+	}
 
 	if (!sourceFile.empty())
 	{
@@ -707,6 +732,13 @@ const char* importBlockedReason(const std::filesystem::path& sourcePath)
 	return "";
 }
 
+namespace
+{
+	std::atomic<bool> s_autoLodOnImport{ false };
+}
+bool autoLodOnImport() { return s_autoLodOnImport.load(std::memory_order_relaxed); }
+void setAutoLodOnImport(bool on) { s_autoLodOnImport.store(on, std::memory_order_relaxed); }
+
 bool importSource(const std::filesystem::path& sourcePath,
                   const std::filesystem::path& contentRoot,
                   const std::filesystem::path& relativeOutputDir,
@@ -734,8 +766,14 @@ bool importSource(const std::filesystem::path& sourcePath,
 			AnimationClipImporter::importAndWrite(sourcePath, contentRoot, relativeOutputDir);
 			return true;
 		}
+	{
+		MeshImporter::ImportSettings settings;
+		settings.generateLods = options.generateLods.value_or(autoLodOnImport());
+		settings.lodRatios    = options.lodRatios;
+		settings.lodFoliage   = options.lodFoliage;
 		return MeshImporter::import(sourcePath, contentRoot, relativeOutputDir,
-		                            MeshImporter::ImportSettings{}, outputs)     != nullptr;
+		                            settings, outputs)                           != nullptr;
+	}
 	case SourceKind::Texture:
 	{
 		TextureImporter::ImportSettings settings;
@@ -860,6 +898,30 @@ bool reimport(const std::filesystem::path& assetFile,
 	ImportOptions options;
 	if (classifySource(source) == SourceKind::Texture)
 		options.textureSrgb = textureSrgbOf(assetFile);
+	// A mesh that has an Auto-LOD chain keeps one: the levels are derived from LOD0,
+	// so a changed source leaves them describing the old geometry. How many it had is
+	// all the file records (the ratios are not stored), so the default run is cut — or,
+	// for a chain longer than the default 3, regenerated on the same curve — to that
+	// count. Neither is the foliage flag, so a chain made in foliage mode comes back
+	// as a plain one — the file has nowhere to say which it was; re-run the dialog on
+	// LOD0 to get it back. The MeshImporter drops the old levels the shorter run no
+	// longer rewrites, so the chain never mixes old and new geometry.
+	if (classifySource(source) == SourceKind::Mesh)
+	{
+		const size_t levels = AutoLod::levelCount(contentRoot, outputs.asset);
+		if (levels > 0)
+		{
+			options.generateLods = true;
+			if (levels <= options.lodRatios.size())
+				options.lodRatios.resize(levels);
+			else
+				// Same step/floor (0.5 / 0.1) the default 3-entry lodRatios comes from
+				// (AutoLodDialog::Options' own defaults) — a chain longer than that is
+				// regenerated on it instead of being silently capped to 3, which used to
+				// drop LOD4+ as stale even though the old chain was still live.
+				options.lodRatios = AutoLod::ratiosFor(static_cast<int>(levels), 0.5f, 0.1f);
+		}
+	}
 
 	if (!importSource(source, contentRoot, relDir, outputs, options))
 		return false;

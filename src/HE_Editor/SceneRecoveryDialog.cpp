@@ -60,9 +60,10 @@ void Draw(AppContext& ctx)
 	constexpr float kDialogWidth = 520.0f;
 	ImGui::SetNextWindowSize(ImVec2(kDialogWidth, 0.0f), ImGuiCond_Appearing);
 	EditorWidgets::pinDialogToEditorWindow();
+	// No title bar: the title is hidden ("##"), and the heading below says it.
 	if (!ImGui::BeginPopupModal(kTitle, nullptr,
 	                            ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_AlwaysAutoResize |
-	                            ImGuiWindowFlags_NoSavedSettings))
+	                            ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoTitleBar))
 		return;
 
 	HE::Ed::Help::Scope helpScope("Scene Recovery");
@@ -90,14 +91,17 @@ void Draw(AppContext& ctx)
 			when.c_str());
 		ImGui::Spacing();
 
+		// Both paths start in one column, past the wider of the two labels.
+		const float valueX = ImGui::GetCursorPosX() + ImGui::CalcTextSize("Scene:").x +
+		                     ImGui::GetStyle().ItemSpacing.x;
 		if (!offer.scenePath.empty())
 		{
 			ImGui::TextDisabled("Scene:");
-			ImGui::SameLine();
+			ImGui::SameLine(valueX);
 			ImGui::TextUnformatted(offer.scenePath.c_str());
 		}
 		ImGui::TextDisabled("Copy:");
-		ImGui::SameLine();
+		ImGui::SameLine(valueX);
 		ImGui::TextUnformatted(offer.snapshotPath.c_str());
 		ImGui::Spacing();
 
@@ -116,7 +120,7 @@ void Draw(AppContext& ctx)
 		ImGui::CloseCurrentPopup();
 	}
 	ImGui::SameLine();
-	if (EditorWidgets::dangerButton("Delete Snapshot", ImVec2(140, 0)))
+	if (EditorWidgets::removeButton("Delete Copy", ImVec2(140, 0)))
 	{
 		if (ctx.discardRecovery) ctx.discardRecovery();
 		ImGui::CloseCurrentPopup();

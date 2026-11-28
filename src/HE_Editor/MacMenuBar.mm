@@ -362,7 +362,8 @@ void install()
 			for (int m = 0; m < HE::kViewModeCount; ++m)
 			{
 				const auto mode = static_cast<HE::ViewMode>(m);
-				if (mode == HE::ViewMode::GBufferBaseColor) [modes addItem:[NSMenuItem separatorItem]];
+				if (mode == HE::ViewMode::GBufferBaseColor || mode == HE::ViewMode::RvtDebug)
+					[modes addItem:[NSMenuItem separatorItem]];
 				heAddToggle(modes, [NSString stringWithUTF8String:HE::viewModeName(mode)],
 				            C::SetViewMode, true, m + 1);
 			}
@@ -434,6 +435,7 @@ void install()
 		heAddToggle(window, @"Source Control",        C::ToggleSourceControl, true);
 		heAddToggle(window, @"Undo History",          C::ToggleUndoHistory,   false);
 		heAddToggle(window, @"Watch",                 C::ToggleWatch,         false);
+		heAddItem(window, @"Stamp Heightmap",         C::OpenStampHeightmap,  nil, 0, true);
 		heAddItem(window, @"Task Board",              C::OpenTaskBoard,       nil, 0, true);
 		// The secondary scene viewports, ticked while open like the panels above.
 		{

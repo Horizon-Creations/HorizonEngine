@@ -180,9 +180,18 @@ void forgetBuildCache(const std::filesystem::path& workDir);
 // library of the SDK's lib set (lib/<profile>/*.dylib|*.so*, bin/<profile>/*.dll) into
 // exportEngineDir(exportedExe), overwriting the prebuilt runtime's copies. Empty
 // string = done.
+//
+// `keepRuntimeEngine`: the runtime laid down is an APP flavour (AppBasic:
+// the software renderer alone; AppAdvanced: one GPU renderer) whose engine
+// libraries are the point of choosing it — the SDK's are the full game engine.
+// Then only the executable is swapped, and an SDK library the runtime does not
+// carry at all is added; none of the runtime's is overwritten. Only for the lib
+// set the runtime was built with: the prebuilt runtimes are dev builds, and a
+// game refuses an engine of another profile.
 std::string installBuiltGame(const GameSdk& sdk, const std::filesystem::path& builtExe,
                              const std::filesystem::path& exportedExe,
-                             std::vector<std::string>* copied = nullptr);
+                             std::vector<std::string>* copied = nullptr,
+                             bool keepRuntimeEngine = false);
 
 // macOS: the SDK's libraries name Homebrew lz4/zstd/openssl by absolute path,
 // where the prebuilt runtime's copies were rewritten to the bundled ones

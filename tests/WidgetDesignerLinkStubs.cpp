@@ -49,6 +49,8 @@ namespace EditorSettingsPanel
 	// show their own switch, hint and (greyed) emptiness, which is all the tests
 	// look at.
 	void DrawEngineSettings(AppContext&, SettingsMode, const DrawOptions&) {}
+	// The Team Sync view's "Open Team Settings" (test_team_sync_ui.cpp).
+	void requestOpen(Page) {}
 }
 
 namespace HcRenameDialog
@@ -67,4 +69,20 @@ namespace HcPullUi
 namespace HcExtractUi
 {
 	void bindFrom(AppContext&) { setTargets({}); }
+}
+
+// The designer's canvas for an application that ships on the software renderer
+// asks the factory for one (softwareCanvas). he_tests links no HorizonRendering
+// but compiles SoftwareRenderer.cpp itself, so the factory here makes exactly
+// that one: the designer test then draws through the real CPU rasterizer.
+#include <Renderer/RendererFactory.h>
+#include <Backends/Software/SoftwareRenderer.h>
+std::unique_ptr<IRenderer> RendererFactory::Create(HE::RendererBackend backend)
+{
+	if (backend == HE::RendererBackend::Software) return std::make_unique<SoftwareRenderer>();
+	return nullptr;
+}
+bool RendererFactory::Available(HE::RendererBackend backend)
+{
+	return backend == HE::RendererBackend::Software;
 }

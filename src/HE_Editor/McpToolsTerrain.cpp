@@ -622,6 +622,26 @@ void registerTerrainTools(McpToolRegistry& registry, EditorCommands& cmds,
 			                          "metre). Default 2.") },
 			{ "seed",      json{ { "type", "integer" },
 			                     { "description", "Which variation of the noise. Default 1." } } },
+			{ "ridges",    numberProp("How much of the relief is ridged noise (sharp crests, "
+			                          "V-shaped valleys) rather than round fBm, 0..1. Needs "
+			                          "roughness above 0. Default 0.") },
+			{ "erosion",   numberProp("Thermal erosion, 0..1: flanks steeper than a scree "
+			                          "slope shed material downhill. Default 0.") },
+			{ "terraces",  json{ { "type", "integer" }, { "minimum", 0 }, { "maximum", 256 },
+			                     { "description", "Cut the height into this many level steps "
+			                                      "from the ground to the peak. 0 is off. "
+			                                      "Default 0." } } },
+			{ "terraceSharpness", numberProp("How much of a step is level bench, 0..1: 0 leaves "
+			                                 "the slope as it is, 1 is a staircase. Default 0.7.") },
+			{ "paths",     json{ { "type", "integer" }, { "minimum", 0 }, { "maximum", 8 },
+			                     { "description", "Trails from the rim up to the summit, spread "
+			                                      "round the area and cut into the ground. Their "
+			                                      "points come back as `paths` (world x, y, z), "
+			                                      "ready for a spline. Default 0." } } },
+			{ "pathWidth", numberProp("Width of a path's level bench in world units. Default 4.") },
+			{ "pathMaxGrade", numberProp("Steepest a path should climb, rise over run. A "
+			                             "steeper flank makes it traverse and turn back. "
+			                             "Default 0.3.") },
 		}, { "uuid", "x", "z" });
 		t.mutates = true;
 		t.handler = [c, h](const json& args) -> ToolResult {
@@ -669,6 +689,26 @@ void registerTerrainTools(McpToolRegistry& registry, EditorCommands& cmds,
 			if (!(p.frequency > 0.0f))
 				return failFor(CmdError::InvalidPayload,
 				               "'frequency' must be positive.");
+			p.ridges           = static_cast<float>(numArg(args, "ridges", p.ridges));
+			p.erosion          = static_cast<float>(numArg(args, "erosion", p.erosion));
+			p.terraces         = intArg(args, "terraces", p.terraces);
+			p.terraceSharpness = static_cast<float>(numArg(args, "terraceSharpness", p.terraceSharpness));
+			p.paths            = intArg(args, "paths", p.paths);
+			p.pathWidth        = static_cast<float>(numArg(args, "pathWidth", p.pathWidth));
+			p.pathMaxGrade     = static_cast<float>(numArg(args, "pathMaxGrade", p.pathMaxGrade));
+			if (!(p.ridges >= 0.0f && p.ridges <= 1.0f) || !(p.erosion >= 0.0f && p.erosion <= 1.0f)
+			    || !(p.terraceSharpness >= 0.0f && p.terraceSharpness <= 1.0f))
+				return failFor(CmdError::InvalidPayload,
+				               "'ridges', 'erosion' and 'terraceSharpness' must be between 0 and 1.");
+			if (p.terraces < 0 || p.terraces > 256)
+				return failFor(CmdError::InvalidPayload,
+				               "'terraces' must be between 0 and 256. 0 is off.");
+			if (p.paths < 0 || p.paths > 8)
+				return failFor(CmdError::InvalidPayload,
+				               "'paths' must be between 0 and 8. 0 is off.");
+			if (!(p.pathWidth > 0.0f) || !(p.pathMaxGrade > 0.0f))
+				return failFor(CmdError::InvalidPayload,
+				               "'pathWidth' and 'pathMaxGrade' must be positive.");
 
 			// Only the XZ centre crosses into terrain-local space. maxHeight is an
 			// amount ADDED, like terrain_sculpt's raise — not a target like its
@@ -713,6 +753,19 @@ void registerTerrainTools(McpToolRegistry& registry, EditorCommands& cmds,
 				result["touchedMin"] = r.worldPos.y + gr.minHeight;
 				result["touchedMax"] = r.worldPos.y + gr.maxHeight;
 			}
+			if (p.paths > 0)
+			{
+				// World points, rim first: what a client hands to a spline.
+				json paths = json::array();
+				for (const std::vector<TerrainGenerate::PathPoint>& line : gr.paths)
+				{
+					json pts = json::array();
+					for (const TerrainGenerate::PathPoint& pt : line)
+						pts.push_back(json::array({ r.worldPos.x + pt.x, r.worldPos.y + pt.y, r.worldPos.z + pt.z }));
+					paths.push_back(std::move(pts));
+				}
+				result["paths"] = std::move(paths);
+			}
 
 			// Off the landscape, or a height of zero: no undo step for a change
 			// that did not happen — see terrain_sculpt.
@@ -755,7 +808,7 @@ void registerTerrainTools(McpToolRegistry& registry, EditorCommands& cmds,
 		McpTool t;
 		t.name        = "terrain_paint";
 		t.description =
-			"Paint one of the landscape's eight material layers at a WORLD position. The "
+			"Paint one of the landscape's twelve material layers at a WORLD position. The "
 			"layers are named by the material's Landscape Layer Blend node; the weights "
 			"under the brush stay normalised, so painting a different layer over a spot "
 			"undoes the first. Undoable in the editor like any other change. The first "
@@ -767,7 +820,7 @@ void registerTerrainTools(McpToolRegistry& registry, EditorCommands& cmds,
 			{ "z",     numberProp("World Z of the brush centre.") },
 			{ "layer", json{ { "type", "integer" }, { "minimum", 0 },
 			                 { "maximum", kTerrainMaxLayers - 1 },
-			                 { "description", "Which of the eight layers to paint, 0..7, in "
+			                 { "description", "Which of the twelve layers to paint, 0..11, in "
 			                                  "the order the material's Landscape Layer Blend "
 			                                  "names them. 0 is what an unpainted landscape "
 			                                  "shows." } } },
@@ -790,7 +843,7 @@ void registerTerrainTools(McpToolRegistry& registry, EditorCommands& cmds,
 			const int layer = intArg(args, "layer", -1);
 			if (layer < 0 || layer >= kTerrainMaxLayers)
 				return failFor(CmdError::InvalidPayload,
-				               "'layer' must be 0..7 — a landscape blends at most eight "
+				               "'layer' must be 0..11 — a landscape blends at most twelve "
 				               "material layers.");
 
 			const float wx       = static_cast<float>(numArg(args, "x", 0.0));
@@ -814,6 +867,7 @@ void registerTerrainTools(McpToolRegistry& registry, EditorCommands& cmds,
 
 			const std::vector<std::uint8_t> before  = work.layerWeights;
 			const std::vector<std::uint8_t> before2 = work.layerWeights2;
+			const std::vector<std::uint8_t> before3 = work.layerWeights3;
 			// paint() answers false for two different things: a landscape with no
 			// extent, and a dab that fell entirely off the weightmap. Only the first
 			// is a mistake the client made — the second is the same "nothing
@@ -829,8 +883,9 @@ void registerTerrainTools(McpToolRegistry& registry, EditorCommands& cmds,
 			const std::string uuid = uuidOf(*r.world, r.entity);
 			// The mix at the brush centre afterwards, normalised to 1 — what the
 			// shader will blend by, and the only readable proof the dab landed.
-			// One entry per layer, all eight: layers 4..7 read 0 until a stroke
-			// on one of them gives the landscape its second weight page.
+			// One entry per layer, all twelve: layers 4..7 read 0 until a stroke
+			// on one of them gives the landscape its second weight page, 8..11
+			// until one gives it the third.
 			json mix = json::array();
 			for (int k = 0; k < kTerrainMaxLayers; ++k) mix.push_back(0.0f);
 			{
@@ -863,7 +918,8 @@ void registerTerrainTools(McpToolRegistry& registry, EditorCommands& cmds,
 			// Allocating the weightmap IS a change even when no texel moved: the
 			// landscape goes from "unpainted, shader falls back to layer 0" to a
 			// real map, and that has to be written or the next call re-allocates it.
-			if (work.layerWeights == before && work.layerWeights2 == before2)
+			if (work.layerWeights == before && work.layerWeights2 == before2
+			    && work.layerWeights3 == before3)
 			{
 				result["changed"]     = false;
 				result["regenerated"] = false;
@@ -878,8 +934,13 @@ void registerTerrainTools(McpToolRegistry& registry, EditorCommands& cmds,
 			terrain["layerWeightsB64"] = SceneSerializer::encodeBase64(
 				work.layerWeights.data(), work.layerWeights.size());
 			if (work.layerWeights2.size() == work.layerWeights.size())
+			{
 				terrain["layerWeights2B64"] = SceneSerializer::encodeBase64(
 					work.layerWeights2.data(), work.layerWeights2.size());
+				if (work.layerWeights3.size() == work.layerWeights.size())
+					terrain["layerWeights3B64"] = SceneSerializer::encodeBase64(
+						work.layerWeights3.data(), work.layerWeights3.size());
+			}
 
 			CarryOver carry;
 			// The texture is REPLACED in place when its uuid survives, and registered

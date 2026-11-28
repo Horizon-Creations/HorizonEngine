@@ -66,12 +66,14 @@
 #include "ProjectSettingsPanel.h"        // the project pages of the Preferences tab
 #include "ToolSetupDialog.h"             // startup check: cmake, compiler, git, Git LFS, identity
 #include "ProjectPreflight.h"            // engine-content check in front of every project open
+#include <Platform/BuildProfile.h>       // HE_FEATURE_TEST_HOOKS: the close/reopen witness
 #include "SceneDiskWatch.h"             // "the open scene changed on disk (git pull) - reload?"
 #include "GitCloneDialog.h"               // clone a GitHub repository as a project
 #include "GitHubSignIn.h"                 // Sign in with GitHub (device flow)
 #include "ProjectLaunchOpen.h"            // a .heproj double-clicked in the file manager
 #include "SceneRecoveryDialog.h"          // startup "unsaved work found" offer
 #include "AssetRecoveryDialog.h"          // the same for asset tabs
+#include "AutoLodDialog.h"                // Generate LODs: Content Browser, Foliage levels, LOD component
 #include "TextureColourSpaceDialog.h"     // sRGB or linear, at import and after
 #include "ReportIssueDialog.h"           // Help > Report Issue (pre-filled GitHub issue)
 #include "SelfUpdateDialog.h"            // Help > Check for Updates (SFTP self-update)
@@ -81,7 +83,10 @@
 #include "PlayReportPanel.h"             // post-PIE warning/error report
 #include "UndoHistoryPanel.h"            // Window > Undo History window
 #include "HcWatchPanel.h"                // Window > Watch window (a stopped HorizonCode run's values)
+#include "StampHeightmapPanel.h"         // Window > Stamp Heightmap (the tab that makes a Landscape Stamp's heightmap)
+#include "StampHeightmap.h"              // ... and the request the Inspector and the Landscape mode open it with
 #include "TaskBoardPanel.h"              // Window > Task Board (the project's to-do list) + its chip jumps
+#include "TeamSyncView.h"                // a conflict's Resolve opens Source Control
 #include "TaskBoardFooter.h"             // ...and its count, next task and tick-off list in the footer
 #include "EditorAssetTypeCache.h"        // shared path → AssetType sniff (invalidated below)
 #include "EditorWidgets.h"               // dialog placement + detached-modal raise
@@ -353,8 +358,7 @@ static PanelVisibilityPref s_panelPrefs[] = {
 	{ "Source Control",       "PanelOpenSourceControl", &s_showSourceControl },
 	{ "Console",              "PanelOpenConsole",       &s_showConsole       },
 	{ "Undo History",         "PanelOpenUndoHistory",   &s_showUndoHistory   },
-	{ "Watch",                "PanelOpenWatch",         &s_showWatch         },
-	// The secondary scene viewports: a Top view docked beside the Scene window
+	{ "Watch",                "PanelOpenWatch",         &s_showWatch         },	// The secondary scene viewports: a Top view docked beside the Scene window
 	// is a layout decision like any other panel's.
 	{ "Scene 2",              "PanelOpenScene2",        &SecondaryViewportPanel::open(0) },
 	{ "Scene 3",              "PanelOpenScene3",        &SecondaryViewportPanel::open(1) },
@@ -582,6 +586,25 @@ void EditorUI::flushGraphViews(AppContext& ctx, bool write)
 	if (graphViewsStore(*ctx.globalState, s_graphViewProject) && write)
 		ctx.globalState->writeConfig();
 }
+
+#ifdef HE_IMGUI_ENABLED
+// The close/reopen witness (HE_CLOSE_PROJECT_AT_FRAME, HE_REOPEN_PROJECT_AT_FRAME):
+// each fires once, on its UI frame. The project it closed is remembered for the
+// reopen, which goes through ProjectPreflight like the Hub's own Open.
+static std::string s_witnessClosedProject;
+static bool witnessFrameDue(const char* var)
+{
+#if HE_FEATURE_TEST_HOOKS
+	const char* v = std::getenv(var);
+	return v && *v && ImGui::GetFrameCount() == std::atoi(v);
+#else
+	(void)var;
+	return false;
+#endif
+}
+static bool closeProjectWitnessDue()  { return witnessFrameDue("HE_CLOSE_PROJECT_AT_FRAME"); }
+static bool reopenProjectWitnessDue() { return witnessFrameDue("HE_REOPEN_PROJECT_AT_FRAME"); }
+#endif
 
 void EditorUI::render(AppContext& ctx, float dt)
 {
@@ -826,6 +849,8 @@ void EditorUI::render(AppContext& ctx, float dt)
     SceneRecoveryDialog::Draw(ctx);
     // The asset tabs' copies, once the scene's offer is answered (it waits).
     AssetRecoveryDialog::Draw(ctx);
+    // Generate LODs, opened by the Content Browser, the Details panel (Foliage, LOD).
+    AutoLodDialog::draw(ctx);
 
     // ── Assets ▸ Publish Engine Content to Server… ───────────────────────────
     EngineContentPublishDialog::Draw(ctx);
@@ -887,6 +912,8 @@ void EditorUI::render(AppContext& ctx, float dt)
     else
     {
         ProjectHubPanel::render(ctx);
+        if (reopenProjectWitnessDue() && !s_witnessClosedProject.empty())
+            ProjectPreflight::request(ctx, s_witnessClosedProject);
         // Restart to Update with no project open: nothing unsaved to ask about,
         // so no guard. Not while a project is being opened — the request then
         // waits and is taken by renderEditor's guarded path once it is loaded.
@@ -995,33 +1022,12 @@ struct AssetPanelOps
 	bool (*reloadFromDisk)(const std::string& path);
 };
 
-// Advanced Shader Effects off = this project does not author materials
-// (docs/he-apps-plan.md E1b). An existing one can still be opened — the file is
-// right there in the browser — but it says why it is inert rather than showing
-// an editor whose result nothing would draw.
+// Every project edits its materials. With Advanced Shader Effects off the
+// editor offers only the nodes the software renderer runs (MaterialEditorPanel
+// ::cpuNodesOnly), which is a restriction inside the panel, not a closed tab.
 void renderMaterialTab(AppContext& ctx, const std::string& path, const ImVec2& pos, const ImVec2& size)
 {
-	const bool allowMaterials = !ctx.projectManager ||
-		ctx.projectManager->currentProject().advancedShaderEffects;
-	if (allowMaterials)
-	{
-		MaterialEditorPanel::render(ctx, path, pos, size);
-		return;
-	}
-#ifdef HE_IMGUI_ENABLED
-	ImGui::SetNextWindowPos(pos);
-	ImGui::SetNextWindowSize(size);
-	ImGui::Begin("##MaterialsDisabled", nullptr,
-	             ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
-	             ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse);
-	ImGui::TextWrapped(
-		"Advanced Shader Effects are switched off for this project, so materials "
-		"are not used. Widgets are styled with corner radius, borders, gradients "
-		"and shadows instead.");
-	ImGui::Spacing();
-	ImGui::TextDisabled("Turn them on in the project settings to edit this asset.");
-	ImGui::End();
-#endif
+	MaterialEditorPanel::render(ctx, path, pos, size);
 }
 
 // Panels whose save() needs no context.
@@ -1295,6 +1301,9 @@ void EditorUI::endProjectSession(AppContext& ctx)
 	// the peer as OUR deletion, and they would lose their level script.
 	if (ctx.collab && ctx.collab->inSession()) ctx.collab->leave();
 
+	// The Hub's picture of this project, before anything below changes the view.
+	if (ctx.captureProjectThumbnail) ctx.captureProjectThumbnail();
+
 	// Both the open tabs and the panels whose tab was already closed while
 	// dirty — the second set has no tab to walk to.
 	std::vector<std::string> paths = unsavedAssetPaths();
@@ -1320,6 +1329,10 @@ void EditorUI::endProjectSession(AppContext& ctx)
 	ctx.activeTab = 0;
 	// The world last: it drops the scene, the selection and the undo history,
 	// and it is what a panel above might still have been reading.
+	// What the project runs beyond the world goes just before it (play mode, the
+	// app preview with its sounds and timers, the source-control worker): the
+	// preview's OnShutdown still has to find its widgets, which the world owns.
+	if (ctx.endProjectRuntime) ctx.endProjectRuntime();
 	if (ctx.newScene) ctx.newScene();
 	ctx.contentRefreshPending = true;
 }
@@ -1625,7 +1638,8 @@ static void drawNewProjectPopup(AppContext& ctx)
         "Native GameLogic library, built with your own toolchain.",
     };
 
-    ImGui::SetNextWindowSize(ImVec2(480, 0), ImGuiCond_Always);
+    // Wide enough for the Hub's six template tiles in a row.
+    ImGui::SetNextWindowSize(ImVec2(720, 0), ImGuiCond_Always);
     EditorWidgets::pinDialogToEditorWindow();
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(16.0f, 16.0f));
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,   ImVec2(8.0f, 8.0f));
@@ -1716,11 +1730,8 @@ static void drawNewProjectPopup(AppContext& ctx)
 
         ImGui::Spacing();
         ImGui::Text("Template");
-        ImGui::SetNextItemWidth(-1);
-        // All of them, not the first five — see the Project Hub's twin.
-        ImGui::ListBox("##npPresets", &ctx.hubSelectedPreset,
-            ProjectHubPanel::kPresetNames, ProjectHubPanel::kPresetCount,
-            ProjectHubPanel::kPresetCount);
+        // The Hub's tiles, so a template looks the same in both places.
+        ProjectHubPanel::drawTemplateGrid(ctx.hubSelectedPreset, ImGui::GetContentRegionAvail().x);
         ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
         ImGui::TextWrapped("%s", ProjectHubPanel::kPresetDescs[ctx.hubSelectedPreset]);
         ImGui::PopStyleColor();
@@ -1735,11 +1746,11 @@ static void drawNewProjectPopup(AppContext& ctx)
         ImGui::TextWrapped("Applies to the whole project and can't be changed after it's created.");
         ImGui::PopStyleColor();
 
-        // Advanced Shader Effects: whether this project may author materials
-        // (docs/he-apps-plan.md A0). Only for APPLICATIONS — a game without
-        // materials is not a thing anyone wants, and offering the switch
-        // everywhere is how an Empty project ended up with materials
-        // disabled by a checkbox its author read as harmless.
+        // Advanced Shader Effects: which renderer this application ships, and
+        // with it how much of the material graph it may use (docs/he-apps-plan.md
+        // A0, and "Materials on the software renderer"). Only for APPLICATIONS —
+        // offering the switch everywhere is how an Empty project ended up with
+        // its materials limited by a checkbox its author read as harmless.
         //
         // Forced back on for every other template, so leaving it unticked and
         // then picking Game cannot carry the setting across.
@@ -1748,8 +1759,8 @@ static void drawNewProjectPopup(AppContext& ctx)
             ImGui::Spacing();
             ImGui::Checkbox("Advanced Shader Effects", &ctx.hubAdvancedShaderFx);
             ImGui::TextDisabled("%s", ctx.hubAdvancedShaderFx
-                ? "Materials and material graphs are available. The packaged build ships a GPU renderer."
-                : "No materials: widgets are styled with corner radius, borders, gradients and shadows. "
+                ? "Every material node is available. The packaged build ships a GPU renderer."
+                : "Widget materials only (the nodes the software renderer runs). "
                   "Smaller build, no GPU required.");
         }
         else
@@ -1779,6 +1790,10 @@ static void drawNewProjectPopup(AppContext& ctx)
             else
             {
                 std::filesystem::path projRoot = std::filesystem::path(dir) / name;
+                // Over an open project: its session ends first, as an Open does
+                // (ProjectPreflight::openNow). Without it the old project's tabs,
+                // collab session and scene stayed, the scene under the new one.
+                if (ctx.projectLoaded) EditorUI::endProjectSession(ctx);
                 bool ok = ctx.projectManager->createNewProject(
                     projRoot.string(), name,
                     static_cast<ProjectPreset>(ctx.hubSelectedPreset),
@@ -2346,6 +2361,9 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 	EditorToolbar::setRevealAssetHook(&ContentBrowserPanel::revealAsset);
 	// …and so does its Save: the button must be the keystroke, cues included.
 	EditorToolbar::setSaveHook([] { s_saveFromToolbar = true; });
+	// Nobody looks at the scene until the viewport shows it this frame (ViewportPanel sets it back): with another tab in
+	// front the renderer skips the scene's GPU work, the world keeps ticking.
+	if (ctx.renderer) ctx.renderer->SetSceneVisible(false);
 	// Runs every frame regardless of which tab/panel is active (before any early-out):
 	// guarantees the RMB fly-look capture can never stay stuck once the button is released.
 	ViewportPanel::enforceViewportLookCaptureInvariant(ctx.window ? ctx.window->GetNativeWindow() : nullptr);
@@ -2452,6 +2470,8 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		const std::string path =
 			(ctx.activeTab >= 0 && ctx.activeTab < static_cast<int>(ctx.tabs.size()))
 				? ctx.tabs[ctx.activeTab].assetPath : std::string{};
+		// The Stamp Heightmap tab holds a picture of its own: Save writes its file, not the scene.
+		if (path == StampHeightmapPanel::kTabPath) { StampHeightmapPanel::save(ctx); return; }
 		if (path.empty()
 		    || path == LevelScriptPanel::kTabPath
 		    || path == GameInstancePanel::kTabPath
@@ -2727,6 +2747,15 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		requestGuarded(GuardedAction::Quit);
 	}
 
+	// HE_CLOSE_PROJECT_AT_FRAME=N: File ▸ Close Project at UI frame N, through the
+	// same guarded request, for the headless witness that a close stops what the
+	// project ran (docs/headless-runs.md). The Hub reopens it: see render().
+	if (closeProjectWitnessDue() && ctx.projectManager)
+	{
+		s_witnessClosedProject = ctx.projectManager->currentProject().path;
+		requestGuarded(GuardedAction::CloseProject);
+	}
+
 	// Help ▸ Check for Updates ▸ Restart to Update: through the same door as
 	// Quit, so unsaved scene and asset-tab edits are asked about first.
 	if (SelfUpdateDialog::takeInstallRequest())
@@ -2991,8 +3020,7 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		MacMenuBar::setToggleState(MC::ToggleSourceControl, s_showSourceControl);
 		MacMenuBar::setToggleState(MC::ToggleConsole,       s_showConsole);
 		MacMenuBar::setToggleState(MC::ToggleUndoHistory,   s_showUndoHistory);
-		MacMenuBar::setToggleState(MC::ToggleWatch,         s_showWatch);
-		MacMenuBar::setToggleState(MC::ToggleScene2,        SecondaryViewportPanel::open(0));
+		MacMenuBar::setToggleState(MC::ToggleWatch,         s_showWatch);		MacMenuBar::setToggleState(MC::ToggleScene2,        SecondaryViewportPanel::open(0));
 		MacMenuBar::setToggleState(MC::ToggleScene3,        SecondaryViewportPanel::open(1));
 		MacMenuBar::setToggleState(MC::ToggleScene4,        SecondaryViewportPanel::open(2));
 		MacMenuBar::setToggleState(MC::ToggleLandscapeTools, ctx.editorConfig.mode == EditorMode::Landscape);
@@ -3141,6 +3169,7 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 			case MC::ToggleConsole:   togglePanelWindow(s_showConsole, "Console");            break;
 			case MC::ToggleUndoHistory: togglePanelWindow(s_showUndoHistory, "Undo History");  break;
 			case MC::ToggleWatch:     togglePanelWindow(s_showWatch, "Watch");                break;
+			case MC::OpenStampHeightmap: if (ctx.projectLoaded) openVirtualTab("Stamp Heightmap", StampHeightmapPanel::kTabPath); break;
 			case MC::OpenTaskBoard:   if (ctx.projectLoaded) openPlannerTasks(HE::UUID{});  break;
 			case MC::ToggleScene2:
 				if (ctx.projectLoaded) togglePanelWindow(SecondaryViewportPanel::open(0), "Scene 2"); break;
@@ -3535,6 +3564,8 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
             openVirtualTab("Game Instance", GameInstancePanel::kTabPath);
         if (EditorWidgets::menuItem("Planner", nullptr, false, ctx.projectLoaded))
             openVirtualTab("Planner", PlannerPanel::kTabPath);
+        if (!appProj && EditorWidgets::menuItem("Stamp Heightmap", nullptr, false, ctx.projectLoaded))
+            openVirtualTab("Stamp Heightmap", StampHeightmapPanel::kTabPath);
         if (!appProj)
         {
             ImGui::Separator();
@@ -4291,6 +4322,8 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
             GameInstancePanel::render(ctx, tabPos, tabSize);
         else if (tabPath == PlannerPanel::kTabPath)
             PlannerPanel::render(ctx, tabPos, tabSize);
+        else if (tabPath == StampHeightmapPanel::kTabPath)
+            StampHeightmapPanel::render(ctx, tabPos, tabSize);
         else
             assetPanelFor(tabPath).render(ctx, tabPath, tabPos, tabSize);
 
@@ -4457,6 +4490,8 @@ void EditorUI::renderOverlays(AppContext& ctx, float dt)
     EnvironmentPanel::DrawEnvironmentWindow(ctx, s_showEnvironment);
     CollabPanel::DrawCollabWindow(ctx, s_showCollab);
     drawTeamWindow(ctx, s_showTeam);
+	// A conflict's Resolve (the team-sync view, a notification) opens the window it is shown in.
+	if (TeamSyncView::takeWindowRequest()) revealFloatingWindow(s_showSourceControl, "Source Control");
 	SourceControlPanel::DrawSourceControlWindow(ctx, s_showSourceControl);
 	// Here for the reason this whole function exists, and it earns it more than
 	// most: output is watched from INSIDE a script or a graph tab, and left
@@ -4478,6 +4513,17 @@ void EditorUI::renderOverlays(AppContext& ctx, float dt)
 		s_wasHcPaused = paused;
 	}
 	HcWatchPanel::DrawWatchWindow(ctx, s_showWatch);
+	// "Edit Heightmap..." on a Landscape Stamp or the Stamp tool (and HE_DUMP_STAMPHEIGHTMAP, once, for a headless run): the tab, with that file.
+	{
+		static bool s_dumpAsked = false;
+		if (!s_dumpAsked && ctx.projectLoaded && std::getenv("HE_DUMP_STAMPHEIGHTMAP")) HE::StampHeightmap::requestEdit("");
+		s_dumpAsked = s_dumpAsked || ctx.projectLoaded;
+		if (std::string file; ctx.projectLoaded && HE::StampHeightmap::takeEditRequest(file))
+		{
+			EditorTabs::openOrFocus(ctx.tabs, ctx.activeTab, s_tabSelectRequest, StampHeightmapPanel::kTabPath, "Stamp Heightmap");
+			StampHeightmapPanel::open(ctx, file);
+		}
+	}
 	// The task board: a task is read and ticked off from wherever the work is,
 	// which is as often a graph tab as the scene. Drawn even while closed — a
 	// chip that had to open a scene selects its entity once the scene is in.

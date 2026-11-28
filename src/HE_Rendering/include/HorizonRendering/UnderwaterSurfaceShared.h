@@ -1,5 +1,6 @@
 #pragma once
 #include <Physics/WaterWaves.h>
+#include <HorizonRendering/RenderWorld.h>   // UnderwaterCameraData
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -62,5 +63,29 @@ namespace HE
         replace("@V2@", lang == SurfaceLang::GLSL ? "vec2" : "float2");
         replace("@V4@", lang == SurfaceLang::GLSL ? "vec4" : "float4");
         return s;
+    }
+
+    // `src` with its @SURF@ token replaced by the functions above (the post passes' shaders carry the token).
+    inline std::string withUnderwaterSurface(std::string src, SurfaceLang lang)
+    {
+        const std::string fns = underwaterSurfaceFunctions(lang);
+        for (size_t p = src.find("@SURF@"); p != std::string::npos; p = src.find("@SURF@", p + fns.size()))
+            src.replace(p, 6, fns);
+        return src;
+    }
+
+    // The two float4 every post pass takes for the surface (uSurfWave, uSurfParams of the shaders): the wind's
+    // factors on the trains, then the body's height / coast fade / the wave clock / the flat level. `seconds`
+    // is the SAME clock the material displaces by (SDL ticks, HE_SKY_TIME pins it). Height 0 = the flat plane at
+    // `surfaceY`, exactly the old pass (what a landscape without tessellation and a backend that cannot tessellate send).
+    struct UnderwaterSurfaceUniforms { float wave[4]; float params[4]; };
+    inline UnderwaterSurfaceUniforms underwaterSurfaceUniforms(const UnderwaterCameraData& uc, float seconds)
+    {
+        UnderwaterSurfaceUniforms u{};
+        u.wave[0] = uc.waveTurn;  u.wave[1] = uc.waveLengthFactor;
+        u.wave[2] = uc.waveSpeedFactor; u.wave[3] = uc.waveSteepFactor;
+        u.params[0] = uc.surfaceHeight; u.params[1] = uc.surfaceShoreWidth; u.params[2] = seconds;
+        u.params[3] = uc.surfaceHeight > 0.0f ? uc.surfaceLevel : uc.surfaceY;
+        return u;
     }
 }

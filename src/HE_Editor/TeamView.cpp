@@ -105,7 +105,7 @@ void probeRect(const char* label, const std::string& row, ImVec2 mn, ImVec2 mx)
 // Defined below the two entry points. The entry points come first because they
 // open the "Team" help scope every control in this file is looked up under,
 // and scripts/editor_help_audit.py reads a file top to bottom.
-void drawStatus(TeamController& team);
+void drawStatus(TeamController& team, bool withServer = true);
 void drawServerField(TeamController& team, const Settings& settings);
 void drawSignIn(TeamController& team, const Settings& settings, Form& form);
 void drawMembers(TeamController& team, Form& form);
@@ -131,18 +131,18 @@ void drawSettings(TeamController& team, const Settings& settings, Form& form)
 	if (s_probe) s_probe->clear();
 	collectNotices(team, form);
 	drawServerField(team, settings);
-	EditorWidgets::hint("The team server keeps the team's members and passwords, shows who is "
-	                    "online and is where team sessions are announced. It is also the relay "
-	                    "those sessions run on, and the one sessions hosted from the "
-	                    "Collaboration window use: leave it empty to work peer to peer without "
-	                    "a team. Port 7777 if none is given; IPv6 addresses go in brackets.");
+	EditorWidgets::hint("The team server keeps members and passwords, shows who is online and relays "
+	                    "team sessions; leave it empty to work peer to peer. Port 7777 if none is "
+	                    "given; IPv6 addresses go in brackets.");
 	ImGui::Spacing();
 	drawSignIn(team, settings, form);
+	// Create Team is only there while signed out, so its line is too.
 	EditorWidgets::hint("The password is never written to disk. Signed in, this computer keeps "
 	                    "a session token from the team server and signs in with it after a "
-	                    "restart, until you sign out. Create Team makes a new team on the server "
-	                    "with you as its first admin. Members, presence and invitations are in "
-	                    "Window \xc2\xbb Team.");
+	                    "restart, until you sign out.%s Members, presence and invitations are in "
+	                    "Window > Team.",
+	                    connectionUp(team.status()) ? ""
+	                        : " Create Team makes a new team on the server with you as its first admin.");
 	if (team.signedIn())
 	{
 		ImGui::Spacing();
@@ -167,13 +167,13 @@ void drawPanel(TeamController& team, const Settings& settings, Form& form)
 	}
 
 	drawStatus(team);
-	const bool out = EditorWidgets::smallButton("Sign Out");
+	const bool out = EditorWidgets::button("Sign Out");
 	probe("Sign Out");
 	bool everywhere = false;
 	if (team.signedIn())
 	{
 		ImGui::SameLine();
-		everywhere = EditorWidgets::smallButton("Sign Out Everywhere");
+		everywhere = EditorWidgets::button("Sign Out Everywhere");
 		probe("Sign Out Everywhere");
 	}
 	if (out || everywhere)
@@ -265,7 +265,10 @@ constexpr int   kOnlineShown = 4;
 // session's faces (CollabPresenceBar.cpp has why those are not): the seam
 // here is a dark halo rather than a plug of the footer's colour, so it does
 // not care what colour the footer is.
-constexpr float kOnlineStep  = 0.6f;
+// Three quarters: the covered quarter of each face under the stack stops short
+// of its centred letter, which 0.62 still clipped. Four faces are then 3.25
+// faces wide, still well short of four side by side.
+constexpr float kOnlineStep  = 0.75f;
 
 // Split out so footerOnlineWidth() and drawFooterOnline() cannot disagree.
 struct OnlineLayout
@@ -283,7 +286,9 @@ OnlineLayout onlineLayout(std::size_t online)
 {
 	OnlineLayout l;
 	if (online == 0) return l;
-	l.face  = footerStatusWidth();
+	// A fifth larger than a text line: at line height a face's letter was a
+	// smudge. Still inside the footer's frame-height row.
+	l.face  = std::round(std::min(footerStatusWidth() * 1.2f, ImGui::GetFrameHeight() - 2.0f));
 	l.step  = std::round(l.face * kOnlineStep);
 	l.shown = std::min<int>(kOnlineShown, static_cast<int>(online));
 	l.extra = static_cast<int>(online) - l.shown;
@@ -516,9 +521,12 @@ bool drawOnlineMenuWindow(TeamController& team, bool& openTeamWindow)
 		// online, so hosting is the whole condition.
 		const bool  hosting = !hosted.empty();
 		const float rowH    = ImGui::GetFrameHeight();
-		const float inviteW = ImGui::CalcTextSize("Invite").x + ImGui::GetStyle().FramePadding.x * 2.0f;
 		for (const HE::Net::TeamMember* m : online)
 		{
+			// Beside "invited", a plain "Invite" reads as if the first one had not gone out.
+			const bool  again   = s_invited.count(m->name) != 0;
+			const char* label   = again ? "Invite Again" : "Invite";
+			const float inviteW = ImGui::CalcTextSize(label).x + ImGui::GetStyle().FramePadding.x * 2.0f;
 			ImGui::PushID(m->name.c_str());
 			face(m, m->color, m->name, rowH);
 			ImGui::SameLine();
@@ -530,7 +538,7 @@ bool drawOnlineMenuWindow(TeamController& team, bool& openTeamWindow)
 			ImGui::PushClipRect(at, ImVec2(clipX, at.y + rowH), true);
 			ImGui::AlignTextToFramePadding();
 			ImGui::TextUnformatted(m->name.c_str());
-			if (s_invited.count(m->name))
+			if (again)
 			{
 				ImGui::SameLine();
 				ImGui::TextDisabled("invited");
@@ -538,7 +546,7 @@ bool drawOnlineMenuWindow(TeamController& team, bool& openTeamWindow)
 			ImGui::PopClipRect();
 			ImGui::SameLine(buttonX);
 			ImGui::BeginDisabled(!hosting);
-			if (EditorWidgets::smallButton("Invite") && team.invite(m->name)) s_invited.insert(m->name);
+			if (EditorWidgets::smallButton(label) && team.invite(m->name)) s_invited.insert(m->name);
 			probe("Invite", m->name);
 			if (!hosting && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
 				ImGui::SetTooltip("%s", team.sessionRunning()
@@ -738,7 +746,8 @@ void face(const HE::Net::TeamMember* m, HE::Net::TeamColor colour, const std::st
 
 // One line: a dot in the status colour, the status, and what the controller
 // last refused (a wrong password, an address that does not parse).
-void drawStatus(TeamController& team)
+// `withServer` off where the Team Server field is right above and already says it.
+void drawStatus(TeamController& team, bool withServer)
 {
 	const TeamController::Status s = team.status();
 	presenceDot(s == TeamController::Status::SignedIn, statusColour(s));
@@ -750,7 +759,7 @@ void drawStatus(TeamController& team)
 	else
 		ImGui::TextColored(statusColour(s), "%s", statusText(s));
 
-	if (s == TeamController::Status::SignedIn || s == TeamController::Status::Reconnecting)
+	if (withServer && (s == TeamController::Status::SignedIn || s == TeamController::Status::Reconnecting))
 		EditorWidgets::hint("Team server %s", team.serverText().c_str());
 	// The reason a sign-in failed is a notification (TeamController), not a red line
 	// here that stays after the sign-in form is gone.
@@ -829,7 +838,7 @@ void drawSignIn(TeamController& team, const Settings& settings, Form& form)
 		if (in || create) form.wipeSecrets();
 	}
 	ImGui::Spacing();
-	drawStatus(team);
+	drawStatus(team, /*withServer=*/false);   // drawSignIn always follows drawServerField
 }
 
 // The footer's sign-in, opened from the X right of the bell: name and password,
@@ -1009,7 +1018,7 @@ void drawMembers(TeamController& team, Form& form)
 					}
 					else
 					{
-						if (EditorWidgets::smallButton("Remove")) form.removeArmed = m.name;
+						if (EditorWidgets::dangerSmallButton("Remove")) form.removeArmed = m.name;
 						probe("Remove", m.name);
 					}
 				}
@@ -1033,6 +1042,9 @@ void drawSessions(TeamController& team, Form& form)
 		probe("Anyone in the Team May Join");
 		EditorWidgets::hint(open ? "Members join from their Team window without an invitation."
 		                         : "Invitation only: press Invite next to an online member.");
+		// The way out next to the way in: Host Session is gone while hosting.
+		if (EditorWidgets::removeButton("Stop Hosting")) team.stopHosting();
+		probe("Stop Hosting");
 	}
 	else
 	{
@@ -1071,7 +1083,7 @@ void drawSessions(TeamController& team, Form& form)
 		if (!here)
 		{
 			ImGui::SameLine();
-			ImGui::BeginDisabled(!(s.open || s.invited) || team.sessionRunning());
+			ImGui::BeginDisabled(!(s.open || s.invited) || team.sessionRunning() || !team.hostedSession().empty());
 			if (EditorWidgets::smallButton("Join")) team.join(s.session);
 			probe("Join", s.host);
 			ImGui::EndDisabled();
@@ -1175,6 +1187,12 @@ void drawColourRow(TeamController& team, HE::Net::TeamColor mine)
 		++index;
 	}
 
+	// None and the custom square are swatch tall too: the padding that centres a
+	// line of text in kSwatch, or None's text sits on its bottom edge and the
+	// colour square (one frame height) stands out bigger than the presets.
+	ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,
+	                    ImVec2(ImGui::GetStyle().FramePadding.x,
+	                           std::max(0.0f, (kSwatch - ImGui::GetFontSize()) * 0.5f)));
 	ImGui::SameLine();
 	ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, mine.unset() ? 2.0f : 0.0f);
 	ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(1, 1, 1, mine.unset() ? 1.0f : 0.0f));
@@ -1196,6 +1214,7 @@ void drawColourRow(TeamController& team, HE::Net::TeamColor mine)
 		if (picked.unset()) picked.r = picked.g = picked.b = 1;
 		team.setColor(picked);
 	}
+	ImGui::PopStyleVar();
 	EditorWidgets::helpForLabel("Custom");
 	probe("Custom##teamcolour");
 }

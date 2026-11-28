@@ -1,10 +1,12 @@
 #include "doctest.h"
 
 #include <Backends/Software/SoftwareRaster.h>
+#include <MaterialGraph/MatCpuEval.h>
 #include <Renderer/UIFont.h>
 #include <UIWidget/UIElements.h>
 #include <UIWidget/UIWidgetTree.h>
 
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
@@ -251,6 +253,53 @@ TEST_CASE("Software raster: text draws through the shared font atlas")
         for (int x = 0; x < img.width; ++x)
             if (at(img, x, y).r > 30) ++inked;
     CHECK(inked > 100);
+}
+
+// Small text against the truth: the same line drawn four times as large and
+// box-filtered down is what a pixel of 9 px text should hold. The atlas is
+// baked at 64 px, so 9 px text reads it seven times minified — with only the
+// base level that is four texels out of ~50 per pixel, and strokes come out
+// patchy. The atlas mips are what close that gap.
+TEST_CASE("Software raster: small text is close to its supersampled self")
+{
+    const HE::BakedUIFont& f = HE::sharedUIFont();
+    REQUIRE(f.ok);
+    const char* line = "Settings: Volume 75% - Quick brown fox 0123";
+    auto drawAt = [&](float size, int scale, int w, int h)
+    {
+        HE::UITextLayout opts;
+        std::vector<UIRenderObject> glyphs;
+        HE::emitUITextGlyphs(f, 0, line, { 2.0f * scale, 2.0f * scale },
+                             { static_cast<float>(w), static_cast<float>(h) }, size * scale,
+                             glm::vec4(1.0f), 0, opts, glyphs);
+        Image img = canvas(w, h);
+        HE::sw::draw(img, glyphs);
+        return img;
+    };
+    for (const float size : { 9.0f, 12.0f })
+    {
+        const int W = 300, H = 24;
+        const Image small = drawAt(size, 1, W, H);
+        const Image big = drawAt(size, 4, W * 4, H * 4);
+        double err = 0.0;
+        int n = 0;
+        for (int y = 0; y < H; ++y)
+            for (int x = 0; x < W; ++x)
+            {
+                int ref = 0;
+                for (int j = 0; j < 4; ++j)
+                    for (int i = 0; i < 4; ++i) ref += at(big, x * 4 + i, y * 4 + j).r;
+                const int got = at(small, x, y).r;
+                if (ref == 0 && got == 0) continue;
+                err += std::abs(got - ref / 16.0);
+                ++n;
+            }
+        const double mean = n ? err / n : 0.0;
+        MESSAGE(size << " px text: mean error against 4x supersampling " << mean << " over " << n << " pixels");
+        // Measured: 50.8 / 40.9 with the base level only, 20.1 / 14.7 with mips
+        // read at HE::kUIFontLodBias.
+        CHECK(mean < (size < 10.0f ? 26.0 : 20.0));
+    }
 }
 
 // ── Dirty rectangles ─────────────────────────────────────────────────────────
@@ -673,4 +722,200 @@ TEST_CASE("Focus ring: it follows a rounded field instead of boxing it")
         std::fclose(f);
         MESSAGE("focus ring sheet written to " << out.string());
     }
+}
+
+// ── Threads, mips ────────────────────────────────────────────────────────────
+// A large region is drawn in stripes on the job pool. Each stripe walks the
+// whole list in order, so the picture must be the single-threaded one, byte
+// for byte — anything else would be a race showing through.
+TEST_CASE("Software raster: drawing in stripes gives the single-threaded picture")
+{
+	std::vector<UIRenderObject> quads;
+	for (int i = 0; i < 40; ++i)
+	{
+		UIRenderObject o = solid(static_cast<float>((i * 37) % 500), static_cast<float>((i * 53) % 330),
+		                         120.0f, 70.0f,
+		                         { (i % 3) / 2.0f, (i % 5) / 4.0f, (i % 7) / 6.0f, 0.6f + 0.01f * i });
+		o.cornerRadius = glm::vec4(static_cast<float>(i % 4) * 6.0f);
+		o.gradient = (i % 2) == 0;
+		o.gradientColor = { 0.2f, 0.9f, 0.4f, 1.0f };
+		o.gradientAngleDeg = static_cast<float>(i * 17);
+		o.blur = (i % 6 == 0) ? 8.0f : 0.0f;
+		o.borderWidth = (i % 4 == 1) ? 3.0f : 0.0f;
+		o.rotation = (i % 5 == 2) ? 0.4f : 0.0f;
+		o.rotationPivot = o.position + o.size * 0.5f;
+		quads.push_back(o);
+	}
+	Image one = canvas(640, 400), many = canvas(640, 400);
+	HE::sw::draw(one, quads, glm::vec4(0.0f), nullptr, nullptr, /*threads=*/false);
+	HE::sw::draw(many, quads);
+	CHECK(one.rgba == many.rgba);
+}
+
+TEST_CASE("Software raster: a mip chain halves down to one texel")
+{
+	std::vector<std::uint8_t> base(5 * 3 * 4, 200);
+	std::vector<std::vector<std::uint8_t>> mips;
+	HE::sw::buildMipChain(base.data(), 5, 3, mips);
+	REQUIRE(mips.size() == 2);            // 5x3 -> 2x1 -> 1x1
+	CHECK(mips[0].size() == 2 * 1 * 4);
+	CHECK(mips[1].size() == 1 * 1 * 4);
+	CHECK(mips[1][0] == 200);             // a flat picture stays flat
+}
+
+TEST_CASE("Software raster: a picture drawn small reads its mips instead of shimmering")
+{
+	// 64x64 one-texel checkerboard drawn into 8x8: 64 texels per pixel. Without
+	// mips each pixel picks four texels out of that and lands near black or
+	// white depending on where it falls; with them every pixel is the average.
+	const int n = 64;
+	std::vector<std::uint8_t> board(static_cast<std::size_t>(n) * n * 4);
+	for (int y = 0; y < n; ++y)
+		for (int x = 0; x < n; ++x)
+		{
+			std::uint8_t* p = &board[(static_cast<std::size_t>(y) * n + x) * 4];
+			p[0] = p[1] = p[2] = ((x + y) % 2) ? 255 : 0;
+			p[3] = 255;
+		}
+	std::vector<std::vector<std::uint8_t>> bytes;
+	HE::sw::buildMipChain(board.data(), n, n, bytes);
+	std::vector<HE::sw::TextureLevel> levels;
+	for (std::size_t i = 0, w = n / 2; i < bytes.size(); ++i, w = std::max<std::size_t>(1, w / 2))
+		levels.push_back({ bytes[i].data(), static_cast<int>(w), static_cast<int>(w) });
+	struct Ctx { HE::sw::TextureView v; } ctx;
+	ctx.v.rgba = board.data(); ctx.v.width = n; ctx.v.height = n;
+	ctx.v.mips = levels.data(); ctx.v.mipCount = static_cast<int>(levels.size());
+
+	UIRenderObject q = solid(4.0f, 4.0f, 8.0f, 8.0f, { 1.0f, 1.0f, 1.0f, 1.0f });
+	q.textureAssetId = HE::UUID{ 7, 7 };
+	q.uvMin = { 0.0f, 0.0f };
+	q.uvMax = { 1.0f, 1.0f };
+	Image img = canvas(16, 16);
+	HE::sw::draw(img, { q }, glm::vec4(0.0f),
+		[](const HE::UUID&, void* u) { return static_cast<Ctx*>(u)->v; }, &ctx);
+	for (int y = 5; y < 11; ++y)
+		for (int x = 5; x < 11; ++x)
+		{
+			const Px p = at(img, x, y);
+			CHECK(std::abs(static_cast<int>(p.r) - 128) < 12);
+		}
+}
+
+// ── Materials on the CPU ─────────────────────────────────────────────────────
+// A quad with a material the CPU can run is shaded by it; a Backdrop material
+// sees what was drawn before it, blurred. Both must come out the same in
+// stripes as on one thread — the backdrop being the one read that crosses rows.
+namespace
+{
+	struct Mats
+	{
+		HE::MatCpuProgram gradient, frosted;
+		HE::UUID gradientId{ 9, 1 }, frostedId{ 9, 2 };
+		Mats()
+		{
+			// BaseColor = (ElementUV.x, ElementUV.y, 0), translucent at 1.
+			HE::MaterialGraph g;
+			const int out = g.addNode(HE::MatNodeType::Output);
+			g.findNode(out)->p[1] = 2; g.findNode(out)->p[3] = 1;
+			const int uv = g.addNode(HE::MatNodeType::ElementUV);
+			REQUIRE(g.connect(uv, 0, out, HE::kMatOutputBaseColorPin));
+			REQUIRE(gradient.compile(g));
+			// BaseColor = Backdrop(12 px).
+			HE::MaterialGraph f;
+			const int fo = f.addNode(HE::MatNodeType::Output);
+			f.findNode(fo)->p[1] = 2; f.findNode(fo)->p[3] = 1;
+			const int bd = f.addNode(HE::MatNodeType::Backdrop);
+			const int r = f.addNode(HE::MatNodeType::ConstFloat);
+			f.findNode(r)->p[0] = 12.0f;
+			REQUIRE(f.connect(r, 0, bd, 0));
+			REQUIRE(f.connect(bd, 0, fo, HE::kMatOutputBaseColorPin));
+			REQUIRE(frosted.compile(f));
+			REQUIRE(frosted.usesBackdrop());
+		}
+	};
+	HE::sw::MaterialView resolveMat(const HE::UUID& id, void* user)
+	{
+		const Mats* m = static_cast<const Mats*>(user);
+		HE::sw::MaterialView v;
+		if (id == m->gradientId) v.program = &m->gradient;
+		if (id == m->frostedId)  v.program = &m->frosted;
+		return v;
+	}
+}
+
+TEST_CASE("Software raster: a material quad is shaded by its graph, a backdrop blurs what is behind")
+{
+	Mats mats;
+	std::vector<UIRenderObject> quads;
+	// Hard black/white stripes, 4 px wide, over the whole canvas: a blur of
+	// them is grey, a copy of them is not.
+	for (int x = 0; x < 640; x += 8)
+		quads.push_back(solid(static_cast<float>(x), 0.0f, 4.0f, 400.0f, { 1, 1, 1, 1 }));
+	UIRenderObject g = solid(20.0f, 20.0f, 200.0f, 100.0f, { 1, 1, 1, 0 });   // transparent tint: still drawn
+	g.materialAssetId = mats.gradientId;
+	quads.push_back(g);
+	UIRenderObject f = solid(300.0f, 150.0f, 240.0f, 160.0f, { 1, 1, 1, 1 });
+	f.materialAssetId = mats.frostedId;
+	quads.push_back(f);
+	quads.push_back(solid(320.0f, 330.0f, 60.0f, 40.0f, { 0.2f, 0.8f, 0.3f, 1 }));
+
+	HE::sw::DrawOptions one, many;
+	one.material = many.material = &resolveMat;
+	one.materialUser = many.materialUser = &mats;
+	one.threads = false;
+	Image a = canvas(640, 400), b = canvas(640, 400);
+	HE::sw::draw(a, quads, one);
+	HE::sw::draw(b, quads, many);
+	CHECK(a.rgba == b.rgba);
+
+	// The gradient: red follows x across the element, green follows y.
+	const Px left = at(a, 22, 70), right = at(a, 217, 70), bottom = at(a, 120, 117);
+	CHECK(left.r < 10);
+	CHECK(right.r > 245);
+	CHECK(bottom.g > 245);
+	// The frosted panel: grey where the stripes were black and white.
+	for (int x = 360; x < 480; x += 3)
+	{
+		const Px p = at(a, x, 230);
+		CHECK(p.r > 60);
+		CHECK(p.r < 200);
+	}
+}
+
+// What a full repaint of a big application window costs, single-threaded and
+// in stripes. A measurement, not a check — run it on purpose:
+//     he_tests -tc="Software raster bench*" --no-skip
+TEST_CASE("Software raster bench: a 2560x1440 repaint" * doctest::skip())
+{
+	// A busy application screen: a page, 40 cards with rounded corners,
+	// borders, gradients and shadows, and 1500 glyph-sized quads of text.
+	std::vector<UIRenderObject> quads;
+	quads.push_back(solid(0.0f, 0.0f, 2560.0f, 1440.0f, { 0.10f, 0.11f, 0.13f, 1.0f }));
+	for (int i = 0; i < 40; ++i)
+	{
+		const float x = static_cast<float>(40 + (i % 8) * 310), y = static_cast<float>(40 + (i / 8) * 270);
+		UIRenderObject sh = solid(x - 12.0f, y - 8.0f, 304.0f, 254.0f, { 0, 0, 0, 0.5f });
+		sh.cornerRadius = glm::vec4(16.0f); sh.blur = 12.0f;
+		quads.push_back(sh);
+		UIRenderObject c = solid(x, y, 280.0f, 230.0f, { 0.22f, 0.25f, 0.32f, 1.0f });
+		c.cornerRadius = glm::vec4(16.0f); c.borderWidth = 2.0f; c.gradient = true;
+		c.gradientColor = { 0.18f, 0.20f, 0.26f, 1.0f };
+		quads.push_back(c);
+	}
+	for (int i = 0; i < 1500; ++i)
+		quads.push_back(solid(static_cast<float>(60 + (i * 13) % 2400), static_cast<float>(60 + (i * 7) % 1320),
+		                      9.0f, 14.0f, { 0.9f, 0.9f, 0.9f, 1.0f }));
+
+	auto time = [&](bool threads)
+	{
+		Image img = canvas(2560, 1440);
+		HE::sw::draw(img, quads, glm::vec4(0.0f), nullptr, nullptr, threads);   // warm
+		const auto t0 = std::chrono::steady_clock::now();
+		constexpr int kRuns = 5;
+		for (int r = 0; r < kRuns; ++r) HE::sw::draw(img, quads, glm::vec4(0.0f), nullptr, nullptr, threads);
+		return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count() / kRuns;
+	};
+	const double one = time(false), many = time(true);
+	MESSAGE("2560x1440 repaint: " << one << " ms on one thread, " << many << " ms in stripes ("
+	        << one / many << "x)");
 }

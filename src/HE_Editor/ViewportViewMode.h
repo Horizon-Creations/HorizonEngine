@@ -8,7 +8,7 @@
 // same reading of the environment.
 //
 //   HE_DUMP_VIEWMODE=lit|unlit|wireframe|basecolor|normals|roughspecmetal|
-//                    emissive   (or the enum's number)
+//                    emissive|rvt   (or the enum's number)
 //   HE_DUMP_GBUFFER=1..4        the older knob — one G-buffer attachment;
 //                               still honoured, VIEWMODE wins when both are set
 //
@@ -38,6 +38,7 @@ inline HE::ViewMode viewModeFromName(const char* name, HE::ViewMode fallback)
 	if (s == "normals")        return HE::ViewMode::GBufferNormal;
 	if (s == "roughspecmetal") return HE::ViewMode::GBufferRoughSpecMetal;
 	if (s == "emissive")       return HE::ViewMode::GBufferEmissive;
+	if (s == "rvt" || s == "rvtdebug" || s == "virtualtexture") return HE::ViewMode::RvtDebug;
 	char* end = nullptr;
 	const long v = std::strtol(name, &end, 10);
 	if (end && *end == '\0' && v >= 0 && v < HE::kViewModeCount)

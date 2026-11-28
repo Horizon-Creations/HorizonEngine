@@ -1,6 +1,7 @@
 #include "HorizonScene/TransformHierarchy.h"
 #include <JobSystem/JobSystem.h>
 #include "HorizonScene/HorizonWorld.h"
+#include "HorizonScene/CookedStatic.h"
 #include "HorizonScene/Components/TransformComponent.h"
 #include "HorizonScene/Components/HierarchyComponent.h"
 #include <Diagnostics/Log.h>
@@ -39,6 +40,19 @@ namespace {
     {
         size_t recomputed = 0;   // world matrices written
         size_t rebuilt    = 0;   // local matrices rebuilt: entities whose position/rotation/scale moved
+        // The cooked static block of this registry, if it has one (HorizonScene/CookedStatic.h): every
+        // world matrix this pass writes is shown to it, so a row whose entity moved leaves the block
+        // before the extract reads it, whoever wrote the position.
+        CookedStatic* cooked = nullptr;
+
+        Work() = default;
+        explicit Work(entt::registry& reg) : cooked(reg.ctx().find<CookedStatic>()) {}
+
+        void wrote(entt::entity e, const glm::mat4& world)
+        {
+            ++recomputed;
+            if (cooked) cooked->worldWritten(e, world);
+        }
     };
 
     bool localCacheMatches(const TransformComponent& t)
@@ -76,7 +90,7 @@ namespace {
             world          = parentWorld * refreshLocal(*t, work);
             t->worldMatrix = world;
             t->dirty       = false;
-            ++work.recomputed;
+            work.wrote(e, world);
         }
         if (auto* h = reg.try_get<HierarchyComponent>(e))
             for (entt::entity child : h->children)
@@ -86,7 +100,7 @@ namespace {
     // The whole hierarchy, then the entities that hang off nothing.
     Work walkAll(entt::registry& reg, entt::entity root)
     {
-        Work work;
+        Work work(reg);
         propagateFrom(reg, root, glm::mat4(1.0f), work);
 
         // Entities outside the root hierarchy (no HierarchyComponent)
@@ -94,7 +108,7 @@ namespace {
         {
             t.worldMatrix = refreshLocal(t, work);
             t.dirty       = false;
-            ++work.recomputed;
+            work.wrote(e, t.worldMatrix);
         }
         return work;
     }
@@ -173,6 +187,38 @@ namespace {
         flagged.clear();
         auto& storage = reg.storage<TransformComponent>();
         const bool compare = !g_switches.ignoreValueCompare;
+        // Cooked entities of a packed cooked scene are not read (HorizonScene/CookedStatic.h, "Frozen
+        // transforms"): a byte per entity index decides, except for the slice of them that is checked
+        // this pass anyway. One that turns out changed is thawed and flagged like any other.
+        CookedStatic* cooked = reg.ctx().find<CookedStatic>();
+        const bool freeze = cooked && cooked->freezeUsable() && !g_switches.ignoreValueCompare;
+        uint8_t* frozen = nullptr;
+        size_t   frozenN = 0;
+        uint32_t slice = 0;
+        if (freeze)
+        {
+            frozen  = cooked->frozen.data();
+            frozenN = cooked->frozen.size();
+            slice   = cooked->scanSlice++ % CookedStatic::kScanSlices;
+        }
+        // True for an entity this pass does not look at.
+        const auto skipped = [&](entt::entity e) -> bool
+        {
+            if (!freeze) return false;
+            const size_t i = static_cast<size_t>(entt::to_entity(e));
+            return i < frozenN && frozen[i] != 0 && (i % CookedStatic::kScanSlices) != slice;
+        };
+        const auto flag = [&](entt::entity e, TransformComponent& t) -> bool
+        {
+            if (!(t.dirty || (compare && !cacheKeyHolds(t)))) return false;
+            t.dirty = true;
+            if (freeze)
+            {
+                const size_t i = static_cast<size_t>(entt::to_entity(e));
+                if (i < frozenN) frozen[i] = 0;   // distinct byte per entity: safe from the blocks below
+            }
+            return true;
+        };
         // A large world is scanned in blocks on the workers: the check reads one component and
         // writes only its own `dirty`, and the blocks' lists are joined in the order the serial
         // walk (storage.each(), last to first) lists them.
@@ -181,11 +227,8 @@ namespace {
         if (n < 2 * kBlock)
         {
             for (auto [e, t] : storage.each())
-                if (t.dirty || (compare && !cacheKeyHolds(t)))
-                {
-                    t.dirty = true;
+                if (!skipped(e) && flag(e, t))
                     flagged.push_back(e);
-                }
             return;
         }
         const entt::entity* ents = storage.data();   // the dense order each() walks backwards
@@ -195,12 +238,10 @@ namespace {
             const size_t from = b * kBlock, to = std::min(n, from + kBlock);
             for (size_t i = to; i-- > from; )
             {
+                if (skipped(ents[i])) continue;
                 TransformComponent& t = storage.get(ents[i]);
-                if (t.dirty || (compare && !cacheKeyHolds(t)))
-                {
-                    t.dirty = true;
+                if (flag(ents[i], t))
                     parts[b].push_back(ents[i]);
-                }
             }
         }, "TransformScan", 1);
         for (size_t b = nBlocks; b-- > 0; )
@@ -231,7 +272,7 @@ namespace {
             // Outside the hierarchy: local IS world.
             t->worldMatrix = refreshLocal(*t, work);
             t->dirty       = false;
-            ++work.recomputed;
+            work.wrote(c, t->worldMatrix);
             return;
         }
 
@@ -515,7 +556,7 @@ void propagateTransforms(HorizonWorld& world)
 
     {
         HE_PROFILE_SCOPE_N("Transforms::subtrees");
-        Work work;
+        Work work(reg);
         for (entt::entity c : st.flagged)
             recomputeFlagged(reg, root, c, work);
         stats.recomputed = work.recomputed;

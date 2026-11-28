@@ -766,7 +766,7 @@ void InputAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 			ImGui::EndCombo();
 		}
 		ImGui::SameLine();
-		if (EditorWidgets::dangerButton("Remove", ImVec2(100.0f, 0.0f))) removeEntry = i;
+		if (EditorWidgets::removeButton("Remove", ImVec2(100.0f, 0.0f))) removeEntry = i;
 
 		// Resolve the action's declared type once (retried only on retarget).
 		// It steers the whole card: which bindings the add menu offers, and
@@ -804,7 +804,7 @@ void InputAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 					keyBindCells("key", "Key name", e.keys[k], st.dirty, assetPath, i, k,
 					             BindSlot::Key);
 					ImGui::TableNextColumn();
-					if (EditorWidgets::dangerButton("\xc3\x97", ImVec2(-FLT_MIN, 0.0f))) removeKey = k;
+					if (EditorWidgets::removeButton("\xc3\x97", ImVec2(-FLT_MIN, 0.0f))) removeKey = k;
 					if (ImGui::IsItemHovered()) ImGui::SetTooltip("Remove this key");
 					ImGui::PopID();
 				}
@@ -839,7 +839,7 @@ void InputAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 					               "Press a button\xE2\x80\xA6",
 					               "Press the gamepad button you want in this row.");
 					ImGui::TableNextColumn();
-					if (EditorWidgets::dangerButton("\xc3\x97", ImVec2(-FLT_MIN, 0.0f))) removePadButton = k;
+					if (EditorWidgets::removeButton("\xc3\x97", ImVec2(-FLT_MIN, 0.0f))) removePadButton = k;
 					if (ImGui::IsItemHovered()) ImGui::SetTooltip("Remove this button");
 					ImGui::PopID();
 				}
@@ -877,7 +877,7 @@ void InputAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 					               "Click a button\xE2\x80\xA6",
 					               "Click the mouse button you want in this row.");
 					ImGui::TableNextColumn();
-					if (EditorWidgets::dangerButton("\xc3\x97", ImVec2(-FLT_MIN, 0.0f))) removeMouseButton = k;
+					if (EditorWidgets::removeButton("\xc3\x97", ImVec2(-FLT_MIN, 0.0f))) removeMouseButton = k;
 					if (ImGui::IsItemHovered()) ImGui::SetTooltip("Remove this button");
 					ImGui::PopID();
 				}
@@ -1016,7 +1016,7 @@ void InputAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 					if (ImGui::IsItemHovered())
 						ImGui::SetTooltip("Scale — -1 inverts, a mouse row uses it as sensitivity");
 					ImGui::TableNextColumn();
-					if (EditorWidgets::dangerButton("\xc3\x97", ImVec2(-FLT_MIN, 0.0f))) remove = k;
+					if (EditorWidgets::removeButton("\xc3\x97", ImVec2(-FLT_MIN, 0.0f))) remove = k;
 					if (ImGui::IsItemHovered()) ImGui::SetTooltip("Remove this axis");
 					ImGui::PopID();
 				}

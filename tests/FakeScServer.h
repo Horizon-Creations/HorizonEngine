@@ -288,8 +288,10 @@ struct FakeScServer {
                 std::string out;
                 const auto& log = logOf(p);
                 for (std::uint64_t r = from; r < log.size() && r < from + count; ++r) {
-                    out += "R\t" + std::to_string(r) + "\t" + log[r].member + "\t" + std::to_string(log[r].time) +
-                           "\tSave by " + log[r].member + " (rev " + std::to_string(r) + ")\n";
+                    // The revision's own message when it has one (a restore, a resolved conflict), as the server says it.
+                    out += "R\t" + std::to_string(r) + "\t" + log[r].member + "\t" + std::to_string(log[r].time) + "\t" +
+                           (log[r].message.empty() ? "Save by " + log[r].member + " (rev " + std::to_string(r) + ")"
+                                                   : log[r].message.substr(0, log[r].message.find('\n'))) + "\n";
                     for (const std::string& m : log[r].merges) out += "M\t" + m + "\n";
                 }
                 data(c, id, bytesOf(out));

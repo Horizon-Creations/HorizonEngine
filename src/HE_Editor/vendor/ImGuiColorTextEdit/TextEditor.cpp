@@ -2393,8 +2393,9 @@ void TextEditor::Render(bool aParentIsFocused)
 			}
 		}
 	}
-	mCurrentSpaceHeight = (mLines.size() + Min(mVisibleLineCount - 1, (int)mLines.size())) * mCharAdvance.y;
-	mCurrentSpaceWidth = Max((maxColumnLimited + Min(mVisibleColumnCount - 1, maxColumnLimited)) * mCharAdvance.x, mCurrentSpaceWidth);
+	// HE-PATCH(scroll-past-end): an editor sized to its text (the Planner's code blocks) must not scroll past it.
+	mCurrentSpaceHeight = (mLines.size() + (mScrollPastEnd ? Min(mVisibleLineCount - 1, (int)mLines.size()) : 0)) * mCharAdvance.y;
+	mCurrentSpaceWidth = Max((maxColumnLimited + (mScrollPastEnd ? Min(mVisibleColumnCount - 1, maxColumnLimited) : 1)) * mCharAdvance.x, mCurrentSpaceWidth);
 
 	ImGui::SetCursorPos(ImVec2(0, 0));
 	ImGui::Dummy(ImVec2(mCurrentSpaceWidth, mCurrentSpaceHeight));

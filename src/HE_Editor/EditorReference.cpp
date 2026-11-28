@@ -90,6 +90,7 @@ void install(Docs::Library& lib)
 			return g != 0 ? g < 0 : std::string_view(a.entry->key) < std::string_view(b.entry->key);
 		});
 
+		std::string prevTopic, prevEyebrow;
 		for (const Row& r : rows)
 		{
 			const Help::Entry& e = *r.entry;
@@ -120,7 +121,12 @@ void install(Docs::Library& lib)
 			// library the page is being added to. "More about this: the chapter
 			// it belongs to" is a link that tells the reader nothing about
 			// whether it is worth following.
-			if (e.topic && e.topic[0])
+			// Not again for the next entry of the same group with the same
+			// target: four "More about this: Preferences" per screen were noise.
+			const bool sameLink = e.topic && prevTopic == e.topic && prevEyebrow == sec.eyebrow;
+			prevTopic   = e.topic ? e.topic : "";
+			prevEyebrow = sec.eyebrow;
+			if (e.topic && e.topic[0] && !sameLink)
 			{
 				int page = -1, section = -1;
 				std::string label;

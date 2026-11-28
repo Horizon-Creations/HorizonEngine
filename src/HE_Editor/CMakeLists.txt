@@ -114,6 +114,7 @@ add_executable(HorizonEditor WIN32
 	EditorRewards.cpp
 	EditorMarquee.cpp
 	EditorTabs.cpp
+	AssetIdentity.cpp
 	EditorMultiEdit.cpp
 	OutlinerFilter.cpp
 	EditorCommands.cpp
@@ -223,6 +224,8 @@ add_executable(HorizonEditor WIN32
 	# The Planner as tools (planner_*): databases, rows and pages, through the tab's one workspace.
 	McpToolsPlanner.cpp
 	PlannerMarkdown.cpp
+	# Pages as .docx, dated rows as .ics (the Planner's exports).
+	PlannerExport.cpp
 	# The clients' cameras in the viewport: a frustum with the connection number
 	# (debug lines) and a tag over the frame (ImGui), the presence marker's split.
 	McpCameraGizmos.cpp
@@ -303,6 +306,8 @@ add_executable(HorizonEditor WIN32
 	InspectorPanel.cpp
 	InspectorPrefabKeys.cpp
 	TerrainTools.cpp
+	LandscapeFarBake.cpp
+	LandscapeWorldTools.cpp
 	ViewportPanel.cpp
 	ViewportActions.cpp
 	# The spline tool: what a click, a Delete and a drag do to a SplineComponent
@@ -314,7 +319,10 @@ add_executable(HorizonEditor WIN32
 	EditorToolbar.cpp
 	OutlinerPanel.cpp
 	ProjectHubPanel.cpp
+	ProjectThumbnail.cpp
 	ProjectPreflight.cpp
+	# A team project's newest version from the team server before it opens (the preflight's first step).
+	ProjectTeamGate.cpp
 	SceneDiskWatch.cpp
 	TutorialPanel.cpp
 	TutorialSteps.cpp
@@ -331,6 +339,7 @@ add_executable(HorizonEditor WIN32
 	ToolSetupDialog.cpp
 	GitMissingDialog.cpp
 	GitCloneDialog.cpp
+	GitCloneView.cpp
 	GitHubSignIn.cpp
 	GitHubSignInView.cpp
 	ProjectLaunchOpen.cpp
@@ -344,6 +353,8 @@ add_executable(HorizonEditor WIN32
 	PlayReportPanel.cpp
 	AudioMixerPanel.cpp
 	UndoHistoryPanel.cpp
+	StampHeightmap.cpp
+	StampHeightmapPanel.cpp
 	HcEditorUtil.cpp
 	HcFallbackReport.cpp
 	ExportSdkBuild.cpp
@@ -386,6 +397,7 @@ add_executable(HorizonEditor WIN32
 	SceneRecoveryDialog.cpp
 	AssetAutosave.cpp
 	AssetRecoveryDialog.cpp
+	AutoLodDialog.cpp
 	TextureColourSpaceDialog.cpp
 	EditorPanelState.cpp
 	EditorWidgets.cpp

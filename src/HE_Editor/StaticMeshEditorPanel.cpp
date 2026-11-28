@@ -10,6 +10,8 @@
 #include "EditorCamera.h"           // the Scene window's camera, one per tab
 #include "EditorViewportNav.h"      // …and its navigation grammar, shared
 #include "MeshMaterialSlots.h"      // the material-slot list, shared with the skeletal tab
+#include "AutoLodDialog.h"          // Generate LODs from the Detail levels section
+#include "AutoLod.h"                // merging a mesh's old _LOD<n> files into it
 #include <ContentManager/ContentManager.h>
 #include <Diagnostics/Log.h>
 #include <ContentManager/Assets.h>
@@ -54,6 +56,12 @@ struct State
 
 	UvStats stats;
 	bool    statsDone = false;
+
+	// Which detail level the tab shows: 0 = the mesh, n = its n-th level (the
+	// levels live inside the asset, StaticMeshAsset::lods). Views, stats and the
+	// preview entity follow it; the slots and the bake stay the mesh's own.
+	int     lod      = 0;
+	int     statsLod = -1;       // the level `stats` were computed for
 
 	// ── 3D view ──────────────────────────────────────────────────────────────
 	// A viewer for a mesh has to answer "how does this catch light", which a UV
@@ -331,6 +339,20 @@ void commitSlots(AppContext& ctx, State& st, const HE::Ed::MeshMaterialSlots::Ta
 		HE_LOG_WARN(Editor, "%s", ("StaticMeshEditor: could not save '" + st.relPath + "'").c_str());
 }
 
+// The export-bake switches go into the mesh asset and are saved the moment one
+// flips, like a material slot. Nothing is invalidated: the preview never reads them.
+void commitBake(AppContext& ctx, State& st, const MeshBakeSettings& bake)
+{
+	if (!ctx.contentManager) return;
+	StaticMeshAsset* mesh = ctx.contentManager->getStaticMeshMutable(st.meshId);
+	if (!mesh) return;
+	mesh->bake = bake;
+	if (ctx.contentManager->saveAsset(*mesh))
+		HE_LOG_INFO(Editor, "%s", ("StaticMeshEditor: saved export bake switches of '" + st.relPath + "'").c_str());
+	else
+		HE_LOG_WARN(Editor, "%s", ("StaticMeshEditor: could not save '" + st.relPath + "'").c_str());
+}
+
 // The picker for one slot, as the panels draw it. undo = false: the world's undo
 // system snapshots entities, and a mesh asset's slot is not one — the tab's own
 // Session is what Cmd+Z steps through here.
@@ -400,7 +422,18 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 		ImGui::End();
 		return;
 	}
-	if (!st.statsDone) { st.stats = computeStats(*mesh); st.statsDone = true; }
+	// The level on show: the mesh itself, or one of the levels inside it.
+	st.lod = std::clamp(st.lod, 0, static_cast<int>(mesh->lods.size()));
+	const HE::UUID shownId = st.lod > 0 ? mesh->lods[static_cast<size_t>(st.lod - 1)].id : st.meshId;
+	const StaticMeshAsset* shown = ctx.contentManager->getStaticMesh(shownId);
+	if (!shown) { shown = mesh; st.lod = 0; }
+	if (!st.statsDone || st.statsLod != st.lod)
+	{
+		st.stats = computeStats(*shown); st.statsDone = true; st.statsLod = st.lod;
+	}
+	if (st.world)
+		for (auto [e, mc] : st.world->registry().view<MeshComponent>().each())
+			mc.meshAssetId = shownId;
 
 	// ── Toolbar ──────────────────────────────────────────────────────────────
 	// No Save on the strip: the one edit this tab makes (a material slot, in the
@@ -414,7 +447,10 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 		// Which of the two views the right pane holds. The 3D view is the one you
 		// open a mesh to see; the unwrap is what you switch to when the question
 		// is about texturing.
-		bar.rightGroup(bar.iconGroupWidth(st.showUv ? 5 : 4));
+		// Two of the cells carry a label, so the width is measured, not counted:
+		// counting them as icon cells pushed the last one off the right edge.
+		bar.rightGroup(st.showUv ? bar.labelGroupWidth({ "3D", "UV", nullptr, nullptr, nullptr })
+		                         : bar.labelGroupWidth({ "3D", "UV", nullptr, nullptr }));
 		if (bar.item("##sm3d", T::iconLayers, "3D", !st.showUv, true,
 		             "The mesh in a lit world"))
 			st.showUv = false;
@@ -447,6 +483,31 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 			else           { st.camFramed = false; }
 		}
 		bar.endGroup();
+
+		// The detail levels inside the asset, one cell each — what the runtime swaps
+		// by distance, shown one at a time here. After the view group, so it sits
+		// left of it (right groups stack leftwards) and the view switch stays where
+		// every asset tab has it.
+		if (!mesh->lods.empty())
+		{
+			std::vector<std::string> names;
+			for (size_t i = 0; i <= mesh->lods.size(); ++i) names.push_back("LOD " + std::to_string(i));
+			float w = T::kWellPad * 2.0f + T::kSegGap * static_cast<float>(names.size() - 1);
+			for (const std::string& n : names) w += T::cellWidth(bar.metrics(), n.c_str());
+			bar.rightGroup(w);
+			for (size_t i = 0; i < names.size(); ++i)
+			{
+				const std::string id = "##smlod" + std::to_string(i);
+				const uint32_t tris = i == 0 ? static_cast<uint32_t>(mesh->indices.size() / 3)
+				                             : mesh->lods[i - 1].triangles;
+				const std::string tip = (i == 0 ? std::string("The mesh itself") : "Detail level " + std::to_string(i))
+				                      + ", " + std::to_string(tris) + " triangles";
+				if (bar.item(id.c_str(), nullptr, names[i].c_str(), st.lod == static_cast<int>(i), true,
+				             tip.c_str(), "Mesh Viewer/LOD"))
+					st.lod = static_cast<int>(i);
+			}
+			bar.endGroup();
+		}
 	}
 
 	// ── Left: stats + UV health ──────────────────────────────────────────────
@@ -455,10 +516,10 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 		// 280 px of column with a material path and four full sentences in it.
 		EditorWidgets::WrapText wrap;
 
-		const size_t verts = vertexCount(*mesh);
-		ImGui::SeparatorText("Geometry");
+		const size_t verts = vertexCount(*shown);
+		ImGui::SeparatorText(st.lod > 0 ? ("Geometry, LOD " + std::to_string(st.lod)).c_str() : "Geometry");
 		ImGui::Text("Vertices  %zu", verts);
-		ImGui::Text("Triangles %zu", mesh->indices.size() / 3);
+		ImGui::Text("Triangles %zu", shown->indices.size() / 3);
 		ImGui::Text("Format    %s", mesh->cooked ? "cooked (interleaved)" : "loose (SoA)");
 		ImGui::Text("Bounds X  %.3f .. %.3f", mesh->boundsMin[0], mesh->boundsMax[0]);
 		ImGui::Text("       Y  %.3f .. %.3f", mesh->boundsMin[1], mesh->boundsMax[1]);
@@ -480,6 +541,69 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 			if (changed) commitSlots(ctx, st, table);
 			mesh = ctx.contentManager->getStaticMesh(st.meshId);
 		}
+
+		// ── Export bake ──────────────────────────────────────────────────
+		// Which texture bakes the exporter may apply to this mesh. Saved at once
+		// like a slot change; the editor's own view never uses them.
+		ImGui::SeparatorText("Export bake");
+		{
+			MeshBakeSettings bake = mesh->bake;
+			bool touched = false;
+			touched |= EditorWidgets::checkbox("Vertex colors",   &bake.vertexColors);
+			touched |= EditorWidgets::checkbox("Merge textures",  &bake.mergeTextures);
+			touched |= EditorWidgets::checkbox("One UV texture",  &bake.uvTexture);
+			if (touched) commitBake(ctx, st, bake);
+			mesh = ctx.contentManager->getStaticMesh(st.meshId);
+			ImGui::TextDisabled("Applies to simple texture-only\nmaterials at export.");
+		}
+
+		// ── Detail levels ────────────────────────────────────────────────
+		// Kept inside this asset; the toolbar switches the view between them.
+		ImGui::SeparatorText("Detail levels");
+		if (mesh->lods.empty())
+			EditorWidgets::hint("None. Generate LODs makes simpler versions inside this asset; "
+			                    "every entity that shows the mesh then switches them by distance.");
+		else
+			for (size_t i = 0; i < mesh->lods.size(); ++i)
+				ImGui::Text("LOD %zu  %u tris  %.3f m off", i + 1, mesh->lods[i].triangles, mesh->lods[i].worldError);
+		if (EditorWidgets::button("Generate LODs...##sm"))
+		{
+			AutoLodDialog::Request req;
+			req.kind = AutoLodDialog::Kind::MeshAsset;
+			req.mesh = st.meshId;
+			AutoLodDialog::open(req);
+		}
+		// A mesh from before the levels moved into the asset: its levels are files
+		// beside it. One press rebuilds them inside and removes the files; the ids
+		// stay, so every scene and foliage layer that names a level still finds it.
+		if (mesh->lods.empty() && !mesh->path.empty() && !st.relPath.empty())
+		{
+			const std::string root = ctx.contentManager->contentRoot();
+			const std::vector<std::string> old = AutoLod::findLodSidecars(root, mesh->path);
+			if (!old.empty())
+			{
+				EditorWidgets::hint("%zu level file(s) beside this mesh (%s ...) are from an older "
+				                    "version of the engine.", old.size(), old.front().c_str());
+				if (EditorWidgets::button("Merge Level Files"))
+				{
+					AutoLod::Settings set;
+					set.ratios = AutoLod::ratiosFor(static_cast<int>(old.size()), 0.5f, 0.1f);
+					const StaticMeshAsset src = *mesh;   // a copy: the refresh below moves the pool
+					const AutoLod::Chain chain = AutoLod::generate(src, root, set);
+					if (chain.error.empty())
+					{
+						ctx.contentManager->refreshMeshLods(st.meshId);
+						ctx.contentRefreshPending = true;
+					}
+					else
+						HE_LOG_WARN(Editor, "%s", ("Merge Level Files: " + chain.error).c_str());
+					mesh = ctx.contentManager->getStaticMesh(st.meshId);
+				}
+			}
+		}
+		// Re-taken like `mesh`: a merge registers levels, which can move the pool.
+		shown = ctx.contentManager->getStaticMesh(shownId);
+		if (!shown) shown = mesh;
 
 		ImGui::SeparatorText("UVs");
 		if (!st.stats.haveUVs)
@@ -575,8 +699,8 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 		// computed position, which no wrap position can reach. What this scope is
 		// for is the one sentence drawUvView emits when it truncates.
 		EditorWidgets::WrapText wrap;
-		if (st.showUv) drawUvView  (ctx, *mesh, st, ImGui::GetContentRegionAvail());
-		else           drawMeshView(ctx, *mesh, st, ImGui::GetContentRegionAvail());
+		if (st.showUv) drawUvView  (ctx, *shown, st, ImGui::GetContentRegionAvail());
+		else           drawMeshView(ctx, *shown, st, ImGui::GetContentRegionAvail());
 	}
 	ImGui::EndChild();
 

@@ -58,7 +58,9 @@ Action drawBody(const View& v, const Fonts& fonts)
 	ImGui::PushID("github-signin");
 	Action action = Action::None;
 
-	switch (v.phase)
+	// No code yet is still "asking": an empty box with live Copy buttons would copy nothing.
+	const Phase phase = v.phase == Phase::WaitingForUser && v.userCode.empty() ? Phase::RequestingCode : v.phase;
+	switch (phase)
 	{
 	case Phase::Idle:
 		break;
@@ -79,10 +81,10 @@ Action drawBody(const View& v, const Fonts& fonts)
 		drawCode(v.userCode, fonts);
 		ImGui::Spacing();
 
-		if (EditorWidgets::primaryButton("Copy code & open GitHub", ImVec2(220.0f, 0.0f)))
+		if (EditorWidgets::primaryButton("Copy Code & Open GitHub", ImVec2(220.0f, 0.0f)))
 			action = Action::CopyAndOpen;
 		ImGui::SameLine();
-		if (EditorWidgets::button("Copy code", ImVec2(120.0f, 0.0f))) action = Action::Copy;
+		if (EditorWidgets::button("Copy Code", ImVec2(120.0f, 0.0f))) action = Action::Copy;
 		if (v.copied)
 		{
 			ImGui::SameLine();

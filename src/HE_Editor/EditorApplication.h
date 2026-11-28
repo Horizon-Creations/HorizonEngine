@@ -9,6 +9,7 @@
 #include "EditorSelection.h"
 #include "EditorCamera.h"
 #include "CollabController.h"
+#include "TaskBoardTeamLink.h"
 #include "TeamController.h"
 #include "CollabDocSync.h"   // DocMirror for the two documents the editor owns
 #include "CollabUndo.h"
@@ -20,6 +21,7 @@
 #include <HorizonScene/HorizonScene.h>
 #include <Scripting/ScriptEngine.h>
 #include <HorizonScene/PhysicsWorld.h>
+#include <HorizonScene/RvtLandscape.h>   // RvtLandscape::DebugInfo (the Virtual Texture page's status)
 #include <HorizonScene/FixedStep.h>
 #include <HorizonScene/AudioEngine.h>
 #include <HorizonScene/AudioSystem.h>
@@ -50,6 +52,9 @@
 #include "DeferredHandleRetireList.h" // Vulkan viewport descriptor sets, freed behind the GPU
 #include "EditorCommands.h"
 #include "PlayCellStreaming.h"   // a split scene's cells streamed while playing
+#include <HorizonScene/LandscapeRuntime.h>   // the world-scale tile landscape (Thema 326)
+#include <HorizonScene/LandscapeWorldProxies.h>
+#include <HorizonScene/LandscapeStamps.h>
 #include <atomic>
 #include <filesystem>
 #include <functional>
@@ -57,6 +62,7 @@
 #include <future>
 #include <memory>
 #include <thread>
+#include <chrono>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -69,6 +75,7 @@
 // do not parse McpBridge.h and the tool registry behind it (EDT-1209). Who
 // calls into the bridge includes McpBridge.h itself.
 namespace HE::Ed { class McpBridge; }
+namespace HE::landscape { class RvtLandscape; }
 
 // Stable userdata struct for SDL async dialog callbacks.
 // Lives as a member of EditorApplication — never on the stack.
@@ -103,6 +110,11 @@ struct AppContext
 
 	// Quit callback — called when the user requests exit from the UI
 	std::function<void()> quit;
+
+	// Saves the viewport as the open project's Project Hub picture
+	// (ProjectThumbnail.h). EditorUI::endProjectSession calls it, so closing
+	// and switching projects both leave one; quitting takes it in OnShutdown.
+	std::function<void()> captureProjectThumbnail;
 
 	// Toggle a profiler benchmark capture (same path as the F9 hotkey: disables
 	// vsync on start so frame times reflect true cost, dumps + restores on stop).
@@ -165,6 +177,12 @@ struct AppContext
 	// is read per step, so it needs no push): the Simulation page calls it after
 	// saving, and a crate resting in the preview falls the new way at once.
 	std::function<void()> applyPhysicsSettings;
+	// The Runtime Virtual Texture driver's state for the Project Settings ▸ Virtual Texture page (Thema 333): a SNAPSHOT
+	// made when the page asks, empty (running == false) while the driver is off. A callback rather than a pointer to the
+	// driver, which the editor resets whenever the setting is switched off.
+	std::function<HE::landscape::RvtLandscape::DebugInfo()> rvtDebugInfo;
+	// A stamp's heightmap file was rewritten (the Stamp Heightmap window): the stamps' pictures are read again and their tiles with them.
+	std::function<void()> reloadLandscapeStamps;
 	ScriptEngine*      propScriptEngine = nullptr; // read-only, for inspector property reading
 
 	// Editor scene-view camera (orbit/fly/focus). Owned by EditorApplication;
@@ -274,6 +292,7 @@ struct AppContext
 	std::function<void(const std::string&)> openScene;          // load .hescene, replacing the world
 	std::function<void(const std::string&)> openSceneAdditive; // merge .hescene into the existing world
 	std::function<void()>                    newScene;        // clear to an empty scene
+	std::function<void()>                    endProjectRuntime; // EditorApplication::endProjectRuntime
 
 	// ── Crash recovery ─────────────────────────────────────────────────────
 	// A recovery snapshot an earlier session of this project left behind
@@ -687,6 +706,9 @@ private:
 	// The team server wrote (or removed) `projectRelPath`: what is loaded or
 	// open re-reads it. The open scene is SceneDiskWatch's (it asks).
 	void        applyTeamSyncFile(const std::string& projectRelPath);
+	// A Planner or Task Board file was written: the team-server sync hears of it, and a
+	// running collaboration session gets the file at once (CollabController::kConfigKeyPrefix).
+	void        plannerFileSaved(const std::filesystem::path& file);
 	void        saveOpenTabs();
 	void        restoreOpenTabs();
 	std::string m_lastTabSig; // change detection for the auto-save
@@ -767,11 +789,24 @@ private:
 
 	// Physics simulation — active only while in play mode.
 	std::unique_ptr<PhysicsWorld> m_physicsWorld;
+	// The Runtime Virtual Texture driver of the open landscape (Thema 333 step 4). Made while the project setting (or HE_RVT=1)
+	// asks for it, reset when it does not; shared_ptr so the type may stay incomplete here.
+	std::shared_ptr<HE::landscape::RvtLandscape> m_rvtLandscape;
 	float m_physicsAccum = 0.0f;
 	// A split scene's cells, streamed around the play camera — the game's
 	// CellRuntime with the editor as its host (PlayCellStreaming.h). Made at the
 	// first Play, ended at every Stop before the edited scene is restored.
 	std::unique_ptr<PlayCellStreaming> m_playCells;
+	// The scene's tile landscape (LandscapeWorldComponent): streamed around the play camera, or around the editor's own while editing, and
+	// drawn by the renderer through IRenderer::SetLandscapeProvider (bound at the first update).
+	HE::LandscapeRuntime m_landscape;
+	PhysicsWorld* m_landscapePhysics = nullptr;   // the physics world the landscape gives its ground to (detached BEFORE that world is destroyed)
+	bool m_landscapeNavigation = false;
+	std::string m_landscapeContentRoot;   // ContentManager::contentRoot() last given to m_landscape.setProjectRoot(), to skip repeating it
+	bool        m_landscapeToolsBound = false;   // LandscapeWorldTools::setRuntime(&m_landscape) was called
+	HE::LandscapeStampSync    m_landscapeStamps;    // LandscapeStampComponent entities -> the runtime's overlay
+	HE::LandscapeWorldProxies m_landscapeProxies;   // its foliage and water as entities the renderers draw already
+	bool m_landscapeBound = false;
 	// The headless dump's rings (HE_DUMP_WATERRIPPLE): no physics runs there, so the witness
 	// builds the block itself and pushEnvironment hands it to the renderer instead of the
 	// physics world's. Off outside the dump.
@@ -847,6 +882,10 @@ private:
 	// Saves through the team server when the project says so (topic 199).
 	// Over the three above, so declared after them; pumped after m_team.
 	TeamSyncController m_teamSync{ m_team, m_git, m_collab };
+	// The Planner's Tasks on the team: assignees picked from the roster, "Mine".
+	// TaskBoardPanel holds a pointer to the bridge from start-up to shutdown.
+	TeamControllerTaskLink m_taskTeamLink{ m_team };
+	HE::TaskBoardTeam      m_taskTeam;
 	// The local MCP listener. Pumped once per frame from OnRender, next to the
 	// collaboration pump and for the same reason: both apply things that came
 	// off a socket, and both have to do it on the main thread between the world
@@ -1006,6 +1045,13 @@ private:
 	std::string collabSyncKey(const std::string& tabPath, bool isFolder = false);
 	// Where a key lives locally; empty for a document that has no file of its own.
 	std::string collabLocalPath(const std::string& key);
+	// A collaboration frame names an asset by its subject (derived from the UUID in
+	// its file). This machine's current key for it — wherever the file lives now —
+	// or empty when we do not have that asset. The index behind it is rebuilt when
+	// the content changes, never per frame.
+	std::string keyForCollabSubject(std::uint64_t subject);
+	// What this project contains, for the join's content check.
+	HE::Net::ProjectFingerprint collabProjectFingerprint();
 	// The project directory (currentProject().path may name the .heproj itself).
 	std::string projectRoot();
 	// Bindings for a tab, including the two documents the editor owns rather than
@@ -1071,6 +1117,12 @@ private:
 	// Syncable asset tabs that were open last pass, so the ones that closed can
 	// drop what the host told them about their lock.
 	std::unordered_set<std::string> m_docMirrorPaths;
+	// collaboration subject → the asset's UUID, for keyForCollabSubject. The PATH is
+	// not stored: it is asked of the ContentManager each time, so a rename needs no
+	// invalidation here.
+	std::unordered_map<std::uint64_t, HE::UUID> m_collabSubjectIndex;
+	std::uint64_t                               m_collabSubjectEpoch = ~0ull;
+	std::chrono::steady_clock::time_point       m_collabSubjectRebuilt{};
 	// Last transform we recorded for the held subject, so an undo entry spans a
 	// whole edit rather than one entry per frame of a drag.
 	std::uint64_t    m_undoBaselineSubject = 0;
@@ -1138,6 +1190,21 @@ private:
 	// application project. keepState carries what the widgets were holding across
 	// the rebuild (docs/he-apps-plan.md E4, Stufe 3).
 	void restartAppPreview(bool keepState);
+	// The down half of the above: OnShutdown, widgets, timers, and the sounds the
+	// preview started. Shared with endProjectRuntime.
+	void stopAppPreview();
+	// Everything the closed project left running beyond its world: the app preview,
+	// its sounds and timers, the source-control worker on its repository. Reached
+	// through AppContext::endProjectRuntime from EditorUI::endProjectSession, the
+	// one funnel for Close Project and every project switch, and again (a no-op
+	// then) at the top of onProjectLoaded for a project created over an open one.
+	void endProjectRuntime();
+	// The editor camera per project (<project>/Saved/EditorView.json). It was one
+	// global view: a new project opened where the last one was left, 8 km from
+	// its origin, and its first landscape was nowhere to be seen.
+	void saveProjectCameraView();
+	void loadProjectCameraView(const std::string& projectPath);
+	std::string m_cameraViewProject;    // the project whose view the camera holds
 	// Transport pause + single step. The pause GATES THE WORLD TICK; it must never
 	// write time::setTimeScale, because that knob belongs to the game — a title
 	// with its own pause menu sets it itself, and two owners of one variable fight
@@ -1177,6 +1244,7 @@ private:
 	// is the undo revision at that point; the scene is dirty when it differs.
 	std::string m_currentScenePath;
 	uint64_t    m_savedRevision = 0;
+	bool        sceneHasUnsavedChanges() const;   // the undo history moved, or a tile landscape has unsaved edits
 	// Both answer whether the file was actually written / read. The UI callers
 	// ignore it (the editor log and the title bar already say so); the MCP scene
 	// tools are the caller that HAS to know, because the client on the other end
@@ -1193,6 +1261,7 @@ private:
 	// tile. A scene has nothing to render a preview FROM, so its picture is
 	// taken at save time instead of generated on demand.
 	void captureSceneThumbnail(const std::string& scenePath);
+	void captureProjectThumbnail();
 	bool openScene(const std::string& path);
 	void openSceneAdditive(const std::string& path);
 	void newScene();
@@ -1252,7 +1321,10 @@ private:
 	// Build the node-graph material pipelines referenced by the current world ahead
 	// of the first draw (no first-frame cross-compile hitch). Materials are resident
 	// by call time (preloadAssetRefs ran); a no-op for backends that build eagerly.
-	void warmupWorldMaterials();
+	// waitForBuilds: block (repainting the splash) until the background shader builds are
+	// done. Only the startup scene does; openScene returns at once and the viewport shows
+	// "Compiling shaders" until the last build lands.
+	void warmupWorldMaterials(bool waitForBuilds = false);
 	// Auto-advances (dt > 0) and pushes the World root's EnvironmentComponent to
 	// the renderer via SetEnvironmentSettings. The environment is scene data now,
 	// not an editor preference.

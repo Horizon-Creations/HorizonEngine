@@ -4689,3 +4689,26 @@ Zone, über der sie gerade hing, ist ein anderes, lebendes Widget, hat bei Enter
 aufgeleuchtet, und bekommt jetzt ihr `OnDragLeave`. Ein Test mit zwei Widgets fährt genau
 das: Karte in Widget A über eine Zone in Widget B, A zerstören, B zählt ein Leave, und das
 Loslassen danach ist nichts mehr.
+
+---
+
+### Materialien auf dem Software-Renderer (25.11.2026)
+
+„Advanced Shader Effects aus" heißt nicht mehr „keine Materialien", sondern „nur die
+Materialien, die der Software-Renderer selbst rechnet". `HE::MatCpuProgram`
+(`MaterialGraph/MatCpuEval.h`) übersetzt einen Graphen einmal in eine flache Op-Liste und
+rechnet sie pro Pixel, nach denselben Regeln wie `generateFragment` (Pin-Umwandlung,
+Vorgaben, Funktionen, Static Switches, Divide-Schutz). `matCpuSupports` ist der
+Widget-Knotensatz: Konstanten, Parameter, die Element-Eingänge (Size, UV, State, SDFs,
+Backdrop), Texture Sample, Mathe, Logik, Panner, Checker, Funktionen. Mesh-, Welt- und
+Licht-Knoten sowie die Rauschknoten (GPU-Hash nicht bitgleich nachrechenbar) bleiben draußen.
+Der Material-Editor bietet in solchen Projekten genau diesen Satz an, MCP ebenso.
+
+**Geprüft:**
+- `HE_DUMP_UITEST=materials`: elf von zwölf Kacheln auf Metal, GL und Software ±1/255.
+- Frosted Glass ±9 wegen anderer Fenstergröße der Software-Aufnahme.
+- Echter Export der Tamagochi-Kopie: das Material zeichnet und bewegt sich (Pulse).
+
+Dazu Sprite-Sheets auf dem Image-Element und Font-Atlas-Mips (`HE::uiFontMips`, Bias −1)
+auf allen drei prüfbaren Backends.
+Handoff: `docs/software-renderer-materials-2026-11-25.md`.

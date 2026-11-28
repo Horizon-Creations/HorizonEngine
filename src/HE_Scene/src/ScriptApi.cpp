@@ -3,6 +3,7 @@
 #include "HorizonScene/HorizonWorld.h"
 #include "HorizonScene/PhysicsWorld.h"
 #include "HorizonScene/Components/TransformComponent.h"
+#include "HorizonScene/CookedStatic.h"
 #include "HorizonScene/Components/NameComponent.h"
 #include "HorizonScene/Components/MaterialComponent.h"
 #include "HorizonScene/Components/UIElementComponent.h"
@@ -22,6 +23,17 @@ TransformComponent* transformOf(HorizonWorld& world, uint32_t entityId)
 	auto& reg = world.registry();
 	entt::entity e = toEntity(entityId);
 	return reg.valid(e) ? reg.try_get<TransformComponent>(e) : nullptr;
+}
+
+// For a write: the entity leaves the cooked block first, so its transform is scanned again from the next
+// pass on (HorizonScene/CookedStatic.h, "Frozen transforms").
+TransformComponent* transformForWrite(HorizonWorld& world, uint32_t entityId)
+{
+	auto& reg = world.registry();
+	entt::entity e = toEntity(entityId);
+	if (!reg.valid(e)) return nullptr;
+	HE::uncookEntity(reg, e);
+	return reg.try_get<TransformComponent>(e);
 }
 
 } // namespace
@@ -61,7 +73,7 @@ glm::vec3 getPosition(HorizonWorld& world, uint32_t entityId)
 
 void setPosition(HorizonWorld& world, uint32_t entityId, const glm::vec3& p)
 {
-	if (auto* t = transformOf(world, entityId)) { t->position = p; t->dirty = true; }
+	if (auto* t = transformForWrite(world, entityId)) { t->position = p; t->dirty = true; }
 }
 
 glm::vec3 getRotation(HorizonWorld& world, uint32_t entityId)
@@ -72,7 +84,7 @@ glm::vec3 getRotation(HorizonWorld& world, uint32_t entityId)
 
 void setRotation(HorizonWorld& world, uint32_t entityId, const glm::vec3& r)
 {
-	if (auto* t = transformOf(world, entityId)) { t->rotation = r; t->dirty = true; }
+	if (auto* t = transformForWrite(world, entityId)) { t->rotation = r; t->dirty = true; }
 }
 
 glm::vec3 getScale(HorizonWorld& world, uint32_t entityId)
@@ -83,7 +95,7 @@ glm::vec3 getScale(HorizonWorld& world, uint32_t entityId)
 
 void setScale(HorizonWorld& world, uint32_t entityId, const glm::vec3& s)
 {
-	if (auto* t = transformOf(world, entityId)) { t->scale = s; t->dirty = true; }
+	if (auto* t = transformForWrite(world, entityId)) { t->scale = s; t->dirty = true; }
 }
 
 uint32_t spawn(HorizonWorld& world, uint32_t parentId, const std::string& name)

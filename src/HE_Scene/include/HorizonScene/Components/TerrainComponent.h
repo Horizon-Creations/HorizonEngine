@@ -1,11 +1,12 @@
 #pragma once
 #include <Types/UUID.h>
 #include "HorizonScene/WaterField.h"
+#include <algorithm>
 #include <cstdint>
 #include <memory>
 #include <vector>
 
-// Paintable landscape layers: two RGBA8 weightmap pages of four channels each.
+// Paintable landscape layers: three RGBA8 weightmap pages of four channels each.
 // Must equal HE::kMatMaxLandscapeLayers (MaterialGraph.h) — test_terrain pins it.
 // The largest resolution a landscape can have: 1025 = 2^10 + 1, the top of the 2ⁿ+1
 // ladder every landscape is snapped to (TerrainSystem / TerrainSculpt::ensureHeights).
@@ -15,7 +16,7 @@
 // read as flat, and the "snap" ran again every frame (dirty → all 256 chunks rebuilt
 // and re-uploaded per frame).
 inline constexpr uint32_t kTerrainMaxResolution = 1025;
-inline constexpr int kTerrainWeightPages = 2;
+inline constexpr int kTerrainWeightPages = 3;
 inline constexpr int kTerrainMaxLayers   = 4 * kTerrainWeightPages;
 
 struct TerrainComponent {
@@ -85,10 +86,30 @@ struct TerrainComponent {
     // zero, which is every landscape painted before there were eight layers —
     // they load without it and render exactly as before. Allocated by the first
     // stroke on layer 4+, never without layerWeights; the weights of one texel
-    // sum to 255 across BOTH pages. Uploaded as the right half of a 2:1
-    // weightmap in the same texture (TerrainPaint::buildWeightTexture), so the
-    // shader needs no second sampler or binding on any backend.
+    // sum to 255 across ALL pages. Uploaded as the right half of a 2:1 weightmap
+    // (the middle third of a 3:1 one) in the same texture (TerrainPaint::
+    // buildWeightTexture), so the shader needs no second sampler or binding on
+    // any backend.
     std::vector<uint8_t>  layerWeights2;
+    // Layers 8..11 (R=8 … A=11), same layout again. Empty = all four zero, which
+    // is every landscape painted before there were twelve layers: it saves and
+    // uploads exactly as it did, and loads without the key. Allocated by the
+    // first stroke on layer 8+, never without layerWeights2 beside it. Uploaded
+    // as the right third of a 3:1 weightmap, and only once a byte in it is set.
+    std::vector<uint8_t>  layerWeights3;
+
+    // ── Mixed texture groups (Thema 233) ─────────────────────────────────────
+    // A terrain's group is its landscape material (MaterialComponent::materialAssetId). With
+    // groupMix on, up to all four groups show on the one terrain: weight layers 8..11 are no
+    // paint layers then but the SHARE of group 0..3 (AutoLandscapeGroupId) of every texel,
+    // summing to 255. They are kept out of the 255-sum of the paint layers (TerrainPaint),
+    // and only the group brush writes them. Off (every landscape before this field, and the
+    // default) the layers are plain paint layers again. Saved only once it is on.
+    bool groupMix = false;
+    // The group the terrain was (an AutoLandscapeGroupId) when the mix went on, -1 while it is off. With
+    // the mix on the terrain's material is the mix material and no longer names its group; this does,
+    // and it is the group the material returns to when the mix goes off.
+    int  baseGroup = -1;
 
     // ── Water ────────────────────────────────────────────────────────────────
     // The water bodies on this landscape and the raster that says where they are
@@ -103,6 +124,15 @@ struct TerrainComponent {
     // the chunks' draw calls so the layer-blend node can sample it.
     HE::UUID weightmapTextureId{};
     bool     weightsDirty = false;   // re-upload the texture on the next tick
+    // Set alongside weightsDirty by paint()/paintGroup() ONLY, carrying forward false if a
+    // wide edit (fillLayer/fillGroup/enableGroupMix/disableGroupMix, TerrainSync) was already
+    // pending when the stroke ran — a stroke on top of one must not narrow the journal back
+    // down. Every known wide writer clears it explicitly, which is the signal TerrainSystem
+    // needs to call rvtJournal.noteAll() even if a stroke's rect is already pending from the
+    // same tick (Thema 333 step 29). A writer that mutates layerWeights/weightsDirty directly
+    // without going through one of those (or a fresh load, where it defaults false already)
+    // is not covered — none exists today, but one would need to clear this flag too.
+    bool     weightsDirtyFromStroke = false;
     // Mean of layerWeights over the whole terrain, normalised (Σ = 1). Recomputed
     // with the texture upload — consumers that shade the landscape FLAT, with no
     // texel to sample (the GI ray kernels colour a hit per instance), blend the
@@ -116,7 +146,72 @@ struct TerrainComponent {
     // regenerates only the touched chunks (not all 64+) per stroke. Cleared after.
     bool     regionDirty = false;
     float    dirtyMinX = 0.0f, dirtyMinZ = 0.0f, dirtyMaxX = 0.0f, dirtyMaxZ = 0.0f;
+    // What changed in the ground PICTURE (heights, layer weights) since the Runtime Virtual Texture driver last drained
+    // it (Thema 333 step 4). Not serialised, and NOT cleared by TerrainSystem (it clears dirty/regionDirty/weightsDirty
+    // when it has rebuilt): the stroke, the rebuild and the driver are three different moments, and callers other than
+    // the world tick call updateTerrains too (the editor's brush tools do). Edits with a known extent note a rect
+    // (terrain-local XZ), everything else notes "all"; TerrainSystem notes "all" itself for a rebuild or a weight upload
+    // no edit announced, so a writer that never heard of this still gets its pages repainted.
+    // RVT 2.0 step 3: every note also says WHAT changed (kHeight: sculpt, rebuild; kWeights: paint, weight upload), because a
+    // page repaints only when its subgraph reads that kind of ground (RvtSplit.h matRvtEditReaches). `any/all/min..max` stay the
+    // union of both kinds (the scratch copy and older readers); `height` and `weights` are the same record per kind.
+    struct RvtJournal
+    {
+        enum : uint8_t { kHeight = 1, kWeights = 2, kBoth = kHeight | kWeights };
+        struct Part
+        {
+            bool  any = false, all = false;
+            float minX = 0.0f, minZ = 0.0f, maxX = 0.0f, maxZ = 0.0f;
+            void noteAll() { any = all = true; }
+            void noteRect(float mnX, float mnZ, float mxX, float mxZ)
+            {
+                if (all) return;
+                if (!any) { minX = mnX; minZ = mnZ; maxX = mxX; maxZ = mxZ; any = true; return; }
+                minX = std::min(minX, mnX); minZ = std::min(minZ, mnZ); maxX = std::max(maxX, mxX); maxZ = std::max(maxZ, mxZ);
+            }
+            void merge(const Part& o)
+            {
+                if (!o.any) return;
+                if (o.all) { noteAll(); return; }
+                noteRect(o.minX, o.minZ, o.maxX, o.maxZ);
+            }
+        };
+        bool  any = false, all = false;
+        float minX = 0.0f, minZ = 0.0f, maxX = 0.0f, maxZ = 0.0f;
+        Part  height, weights;
+
+        void noteAll(uint8_t kinds = kBoth)
+        {
+            any = all = true;
+            if (kinds & kHeight)  height.noteAll();
+            if (kinds & kWeights) weights.noteAll();
+        }
+        void noteRect(float mnX, float mnZ, float mxX, float mxZ, uint8_t kinds = kBoth)
+        {
+            if (kinds & kHeight)  height.noteRect(mnX, mnZ, mxX, mxZ);
+            if (kinds & kWeights) weights.noteRect(mnX, mnZ, mxX, mxZ);
+            if (all) return;
+            if (!any) { minX = mnX; minZ = mnZ; maxX = mxX; maxZ = mxZ; any = true; return; }
+            minX = std::min(minX, mnX); minZ = std::min(minZ, mnZ); maxX = std::max(maxX, mxX); maxZ = std::max(maxZ, mxZ);
+        }
+        // What changed in the kinds in `kinds`, as one record (none: any == false).
+        Part selected(uint8_t kinds) const
+        {
+            Part p;
+            if (kinds & kHeight)  p.merge(height);
+            if (kinds & kWeights) p.merge(weights);
+            return p;
+        }
+        void clear() { *this = RvtJournal{}; }
+    } rvtJournal;
     // Chunk grid the chunk entities were last built for — a change (resolution/size)
     // forces a full rebuild of the chunk set.
     uint32_t builtRes = 0, builtChunksPerSide = 0;
+    // The UV tiling the chunk meshes were built with: uvTiling, but 1 under a material with a
+    // Landscape Layer Blend node, which samples the painted weights at the raw UV and so needs
+    // it to run 0..1 over the whole landscape (TerrainSystem decides, every tick). 0 = not
+    // decided yet; consumers that must agree with the meshes (GI) read effectiveUvTiling().
+    float    uvTilingBuilt = 0.0f;
+    float    effectiveUvTiling() const
+    { return uvTilingBuilt > 0.0f ? uvTilingBuilt : (uvTiling > 0.0f ? uvTiling : 1.0f); }
 };

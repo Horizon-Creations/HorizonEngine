@@ -429,7 +429,7 @@ TEST_CASE("task tools: two editors — Anna assigns through the tool, Bob's noti
 	frame(server.latencyMs);
 	const ToolResult back = anna.call("task_notices");
 	REQUIRE(back.content["notices"].size() == 1);
-	CHECK(back.content["notices"][0]["text"] == "Bob set “Retexture the crates” to In Progress");
+	CHECK(back.content["notices"][0]["text"] == "Bob set “Retexture the crates” to In progress");
 	CHECK(back.content["notices"][0]["status"] == "in-progress");
 	CHECK(back.content["notices"][0]["comment"] == "On it");
 	REQUIRE(annaBell.snapshot().size() == 1);

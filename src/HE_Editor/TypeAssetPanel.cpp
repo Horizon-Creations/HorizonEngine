@@ -497,7 +497,7 @@ void TypeAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 				if (ImGui::DragInt("##value", &e.value, 0.25f)) st.dirty = true;
 				if (ImGui::IsItemHovered()) ImGui::SetTooltip("Value");
 				ImGui::TableNextColumn();
-				if (EditorWidgets::dangerButton("\xc3\x97", ImVec2(-FLT_MIN, 0.0f))) removeAt = i;
+				if (EditorWidgets::removeButton("\xc3\x97", ImVec2(-FLT_MIN, 0.0f))) removeAt = i;
 				if (ImGui::IsItemHovered()) ImGui::SetTooltip("Remove this entry");
 				ImGui::PopID();
 			}
@@ -587,7 +587,7 @@ void TypeAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 			if (ImGui::IsItemHovered()) ImGui::SetTooltip("Duplicate field name.");
 		}
 		ImGui::SameLine();
-		if (EditorWidgets::dangerButton("Remove", ImVec2(100.0f, 0.0f))) removeAt = i;
+		if (EditorWidgets::removeButton("Remove", ImVec2(100.0f, 0.0f))) removeAt = i;
 		if (!f.formerNames.empty())
 		{
 			ImGui::TextDisabled("%s", formerNamesLabel(f.formerNames).c_str());

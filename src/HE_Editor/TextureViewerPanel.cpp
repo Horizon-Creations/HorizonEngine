@@ -231,7 +231,7 @@ void drawInfo(AppContext& ctx, const std::string& assetPath, State& st)
 		{
 			ImGui::Text("Format    %s, %u channel%s", formatName(st.format), st.channels,
 			            st.channels == 1 ? "" : "s");
-			ImGui::Text("Colour    %s", st.srgb ? "sRGB (colour)" : "Linear (data)");
+			ImGui::Text("Color     %s", st.srgb ? "sRGB (color)" : "Linear (data)");
 			ImGui::Text("Mips      %u", st.mipLevels);
 			formatBytes(st.bytes, buf, sizeof(buf));
 			ImGui::Text("Memory    %s", buf);
@@ -277,7 +277,7 @@ void drawInfo(AppContext& ctx, const std::string& assetPath, State& st)
 	}
 	const bool importable = st.error.empty();
 	if (!importable) ImGui::BeginDisabled();
-	if (EditorWidgets::button("Import as Texture Asset", ImVec2(-FLT_MIN, 0.0f)))
+	if (EditorWidgets::primaryButton("Import as Texture Asset", ImVec2(-FLT_MIN, 0.0f)))
 	{
 		const std::string written = importImage(src, root, relDir);
 		if (!written.empty())
@@ -299,7 +299,7 @@ void drawInfo(AppContext& ctx, const std::string& assetPath, State& st)
 		ImGui::TextDisabled("Engine content is read-only, so this goes to the project instead.");
 	ImGui::TextDisabled("Imported as %s, guessed from the file name. The picture keeps the "
 	                    "orientation shown here.",
-	                    st.srgb ? "sRGB (colour)" : "linear (data)");
+	                    st.srgb ? "sRGB (color)" : "linear (data)");
 }
 
 void drawCanvas(State& st)

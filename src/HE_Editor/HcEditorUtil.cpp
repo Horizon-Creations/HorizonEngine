@@ -12,6 +12,7 @@
 #include <HorizonCode/HorizonCode.h>
 #include <HorizonScene/EngineApi.h>
 #include <UIWidget/UIWidgetAnim.h>   // the easing + direction vocabularies, for their dropdowns
+#include <UIWidget/UIElement.h>      // control classes in the type picker
 #include <SDL3/SDL_gamepad.h>        // …and SDL's own spelling of the pad buttons and axes
 #include <Types/Enums.h>
 #include <filesystem>
@@ -309,7 +310,7 @@ std::string drawNodeDoc(const HorizonCode::Node& n)
 	{
 		ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::TextDim);
 		ImGui::TextUnformatted(fn->isExec ? "Runs when executed."
-		                                  : "Pure - evaluated whenever an output is used.");
+		                                  : "Pure — evaluated whenever an output is used.");
 		ImGui::PopStyleColor();
 	}
 
@@ -498,7 +499,10 @@ bool drawTypePicker(const char* label, ContentManager* cm,
 {
 	using P = HorizonCode::PinType;
 	bool changed = false;
-	std::string cur = (type == P::Ref && className && !className->empty())
+	HE::UIWidgetType uiType{};
+	std::string cur = (type == P::Ref && className && HE::uiClassFromKey(*className, uiType))
+		? std::string(HE::uiWidgetTypeName(uiType))
+		: (type == P::Ref && className && !className->empty())
 		? std::filesystem::path(*className).stem().string()
 		: ((type == P::Enum || type == P::Struct) && typeName && !typeName->empty())
 		? std::filesystem::path(*typeName).stem().string()
@@ -578,6 +582,17 @@ bool drawTypePicker(const char* label, ContentManager* cm,
 			for (const ClassRef& c : s_objects)
 				if (hit(c.label) && ImGui::Selectable(c.label.c_str(), type == P::Ref && *className == c.path))
 				{ type = P::Ref; *className = c.path; if (typeName) typeName->clear(); changed = true; }
+			// Widget elements as classes: a variable of one holds a Get Element's
+			// reference, and dragging off it lists that type's properties.
+			ImGui::Separator();
+			ImGui::TextDisabled("Controls");
+			for (HE::UIWidgetType t : HE::uiWidgetTypeRegistry())
+			{
+				const std::string key = HE::uiClassKey(t);
+				const std::string lbl = std::string(HE::uiWidgetTypeName(t)) + "##ui";
+				if (hit(HE::uiWidgetTypeName(t)) && ImGui::Selectable(lbl.c_str(), type == P::Ref && *className == key))
+				{ type = P::Ref; *className = key; if (typeName) typeName->clear(); changed = true; }
+			}
 		}
 		ImGui::EndCombo();
 	}
@@ -1706,12 +1721,16 @@ float pinInlineEditorWidth(const HorizonCode::Node& n, int unifiedPin)
 	HorizonCode::PinDesc pd{};
 	const int di = dataInIndexOf(n, unifiedPin, pd);
 	if (di < 0) return 0.0f;
-	// A number or a checkbox is happy in the default slot. A NAME is not: it has
+	// A number is happy in the default slot. A NAME is not: it has
 	// to be readable to be checkable, and as a dropdown it also has an arrow to
 	// put somewhere. Wide enough for "Ping Pong" and most element names, capped
 	// because a node is not a panel — the list that opens is sized to its
 	// entries, so a long path is one click from being read in full.
-	return pd.type == P::String ? 112.0f : 0.0f;
+	if (pd.type == P::String) return 112.0f;
+	// A checkbox is a square the height of the label (13 + 2 × 1 padding); a
+	// number-box slot around it only made the node wider.
+	if (pd.type == P::Bool) return 16.0f;
+	return 0.0f;
 }
 
 void drawPinDefaultEditor(HorizonCode::Node& n, int unifiedPin, bool& committed,
@@ -1731,12 +1750,19 @@ void drawPinDefaultEditor(HorizonCode::Node& n, int unifiedPin, bool& committed,
 	if (pinDefaultsToSelf(n, di) &&
 	    (n.pinDefaults.find(di) == n.pinDefaults.end() || n.pinDefaults[di].i == 0))
 	{
+		ImGui::AlignTextToFramePadding();   // on the label's baseline, not above it
 		ImGui::TextDisabled("Self");
 		if (ImGui::IsItemHovered())
 			ImGui::SetTooltip("Empty means the entity this object sits on.\n"
 			                  "Wire another entity in to act on that one instead.");
 		return;
 	}
+	// A pin shown for the first time starts at the registry's default, not at 0
+	// (ApiParam::def): drawing it is what writes the value into the graph.
+	if (n.pinDefaults.find(di) == n.pinDefaults.end() && pd.type == P::Float &&
+	    n.type == HorizonCode::NodeType::EngineCall)
+		if (const HE::api::ApiFn* fn = HE::api::find(n.s); fn && di < (int)fn->params.size())
+			n.pinDefaults[di] = V::ofFloat(fn->params[(size_t)di].def);
 	// The stored default keeps the PIN's type (retypes re-seed on next edit).
 	V& v = n.pinDefaults[di];
 	// Float → Double keeps the number: the datetime/fs rows moved from one to
@@ -1902,7 +1928,7 @@ namespace
 	}
 
 	// The fields of the project's default SaveGame Template that a save.* call
-	// can carry. The accessor's TYPE decides which fields it may touch: Save Get
+	// can carry. The accessor's TYPE decides which fields it may touch: Get Saved
 	// Number offers the numbers, and offering it a string field would be
 	// offering a call that cannot work.
 	//

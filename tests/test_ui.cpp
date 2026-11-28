@@ -1,4 +1,5 @@
 #include "doctest.h"
+#include "TestFsUtil.h"
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/UISystem.h>
 #include <Renderer/UIFont.h>
@@ -9,6 +10,10 @@
 #include <HorizonScene/Components/UITextComponent.h>
 #include <HorizonScene/Components/UIImageComponent.h>
 #include <HorizonScene/Components/UIButtonComponent.h>
+#include <ContentManager/ContentManager.h>
+#include <ContentManager/Assets.h>
+#include <filesystem>
+#include <fstream>
 
 // ── Component default values ─────────────────────────────────────────────────
 
@@ -43,6 +48,9 @@ TEST_CASE("UITextComponent defaults")
     CHECK(t.fontSize == doctest::Approx(14.0f));
     CHECK(t.color.r  == doctest::Approx(1.0f));
     CHECK(t.color.a  == doctest::Approx(1.0f));
+    CHECK(t.font.empty());
+    CHECK(t.fontAtlasKey == 0u);
+    CHECK(t.resolvedFont.empty());
 }
 
 TEST_CASE("UIButtonComponent defaults")
@@ -211,6 +219,154 @@ TEST_CASE("UISystem::extract text element at TopLeft anchor, zero offset")
         CHECK(ro.position.x >= -1.0f);
         CHECK(ro.position.x < 200.0f);
     }
+}
+
+TEST_CASE("UISystem::extract resolves UITextComponent::font to a baked atlas key")
+{
+    // A real TTF, not synthetic bytes: UIFontCache::keyFor bakes it with
+    // stb_truetype, which fails (and returns key 0) on anything that does not
+    // parse as a font. Reused across many *_ui.cpp tests for the editor's own
+    // font — on disk, so it is available without an HE_ENABLE_ASSIMP-style gate.
+    const std::string ttfPath = std::string(HE_EDITOR_DEPS_DIR) + "/Fonts/Roboto_Condensed-Bold.ttf";
+    std::ifstream ttfFile(ttfPath, std::ios::binary);
+    REQUIRE(ttfFile.is_open());
+    const std::vector<uint8_t> ttf((std::istreambuf_iterator<char>(ttfFile)),
+                                    std::istreambuf_iterator<char>());
+    REQUIRE_FALSE(ttf.empty());
+
+    const auto dir = std::filesystem::temp_directory_path() / "he_ui_text_font_test";
+    he_test::removeAllQuiet(dir);
+    std::filesystem::create_directories(dir);
+    ContentManager cm(dir.string());
+
+    // Saved like any other project asset — loadAsset below reads it back from
+    // disk through the real import/load path, not a hand-built registration.
+    FontAsset font;
+    font.type = HE::AssetType::Font;
+    font.name = "label_font";
+    font.path = "label_font.hasset";
+    font.size = 32;
+    font.fontData = ttf;
+    REQUIRE(cm.saveAsset(font));
+
+    HorizonWorld world;
+    auto& reg = world.registry();
+    auto ce = world.createEntity("canvas");
+    reg.emplace<UICanvasComponent>(ce);
+    auto ee = world.createEntity("label");
+    reg.emplace<UIElementComponent>(ee);
+
+    UITextComponent txt;
+    txt.text = "Hi";
+    txt.font  = font.path;
+    reg.emplace<UITextComponent>(ee, txt);
+
+    std::vector<UIRenderObject> out;
+    UISystem::extract(world, 1920.0f, 1080.0f, out, &cm);
+
+    REQUIRE(out.size() == 2); // "Hi"
+    for (const auto& ro : out)
+        CHECK(ro.fontAtlasKey != 0u);
+
+    // The component's own transient key was written, not just the render
+    // objects' — the same place a widget element's fontAtlasKey lives.
+    const auto* stored = reg.try_get<UITextComponent>(ee);
+    REQUIRE(stored != nullptr);
+    CHECK(stored->fontAtlasKey != 0u);
+    CHECK(HE::UIFontCache::find(stored->fontAtlasKey) != nullptr);
+
+    // Without a ContentManager (no resolver passed) the font path is left
+    // unresolved and the entity falls back to the shared default, same as
+    // before this component had a font field at all.
+    out.clear();
+    UISystem::extract(world, 1920.0f, 1080.0f, out);
+    REQUIRE(out.size() == 2);
+    for (const auto& ro : out)
+        CHECK(ro.fontAtlasKey == 0u);
+
+    // That one no-ContentManager call must not be permanent: the font was
+    // already resolved, so a stale resolvedFont would make the next call with
+    // a ContentManager skip re-resolution and leave the key at 0 forever.
+    out.clear();
+    UISystem::extract(world, 1920.0f, 1080.0f, out, &cm);
+    REQUIRE(out.size() == 2);
+    CHECK(stored->fontAtlasKey != 0u);
+    for (const auto& ro : out)
+        CHECK(ro.fontAtlasKey != 0u);
+}
+
+TEST_CASE("UISystem::extract does not retry a font that failed to resolve")
+{
+    const auto dir = std::filesystem::temp_directory_path() / "he_ui_text_font_retry_test";
+    he_test::removeAllQuiet(dir);
+    std::filesystem::create_directories(dir);
+    ContentManager cm(dir.string());
+
+    HorizonWorld world;
+    auto& reg = world.registry();
+    auto ce = world.createEntity("canvas");
+    reg.emplace<UICanvasComponent>(ce);
+    auto ee = world.createEntity("label");
+    reg.emplace<UIElementComponent>(ee);
+
+    UITextComponent txt;
+    txt.text = "Hi";
+    txt.font = "missing_font.hasset"; // never saved: loadAsset fails every time it is tried
+    reg.emplace<UITextComponent>(ee, txt);
+
+    std::vector<UIRenderObject> out;
+    UISystem::extract(world, 1920.0f, 1080.0f, out, &cm);
+    auto* stored = reg.try_get<UITextComponent>(ee);
+    REQUIRE(stored != nullptr);
+    CHECK(stored->fontAtlasKey == 0u);
+    // The failed resolution was recorded, not just the key: this is what makes
+    // the next extract() skip loadAsset instead of probing the (still missing)
+    // path again.
+    CHECK(stored->resolvedFont == "missing_font.hasset");
+
+    // The asset exists now, where it did not a moment ago. A system that
+    // re-resolves every call would pick it up on the very next extract(); one
+    // that caches by path (as extract() now does) keeps the cached failure
+    // until `font` itself changes — proven below by the key staying 0 even
+    // though loadAsset would succeed if it were retried.
+    const std::string ttfPath = std::string(HE_EDITOR_DEPS_DIR) + "/Fonts/Roboto_Condensed-Bold.ttf";
+    std::ifstream ttfFile(ttfPath, std::ios::binary);
+    REQUIRE(ttfFile.is_open());
+    const std::vector<uint8_t> ttf((std::istreambuf_iterator<char>(ttfFile)),
+                                    std::istreambuf_iterator<char>());
+    REQUIRE_FALSE(ttf.empty());
+    FontAsset font;
+    font.type = HE::AssetType::Font;
+    font.name = "late_font";
+    font.path = "missing_font.hasset";
+    font.size = 32;
+    font.fontData = ttf;
+    REQUIRE(cm.saveAsset(font));
+
+    out.clear();
+    UISystem::extract(world, 1920.0f, 1080.0f, out, &cm);
+    CHECK(stored->fontAtlasKey == 0u); // still the cached failure, not retried
+    for (const auto& ro : out)
+        CHECK(ro.fontAtlasKey == 0u);
+
+    // Changing `font` is the real trigger for re-resolution (mirrors
+    // WidgetManager::refreshElementAssets being called when its "Font"
+    // property changes). First to empty (a trivial, always-successful
+    // resolve)...
+    stored->font.clear();
+    out.clear();
+    UISystem::extract(world, 1920.0f, 1080.0f, out, &cm);
+    CHECK(stored->fontAtlasKey == 0u);
+    CHECK(stored->resolvedFont.empty());
+
+    // ...then back to the path that now resolves, proving the cache is a
+    // "same value as last time" check and not a permanent lockout.
+    stored->font = "missing_font.hasset";
+    out.clear();
+    UISystem::extract(world, 1920.0f, 1080.0f, out, &cm);
+    CHECK(stored->fontAtlasKey != 0u);
+    for (const auto& ro : out)
+        CHECK(ro.fontAtlasKey != 0u);
 }
 
 TEST_CASE("UISystem::extract MiddleCenter anchor centers element")

@@ -236,6 +236,17 @@ namespace
 		settle(ctx);
 	}
 
+	// A calendar is a timeline shown as a month: the + of TIMELINES & CALENDARS, the data, then Month.
+	void newCalendar(AppContext& ctx, const std::string& data)
+	{
+		REQUIRE(click(ctx, "New Timeline"));
+		settle(ctx);
+		REQUIRE(click(ctx, data));
+		settle(ctx);
+		REQUIRE(click(ctx, "mode:Calendar"));
+		settle(ctx);
+	}
+
 	void dragTo(AppContext& ctx, ImVec2 from, ImVec2 to)
 	{
 		ImGuiIO& io = ImGui::GetIO();
@@ -271,7 +282,7 @@ namespace
 
 	void idle(AppContext& ctx, int n = 3);
 
-	// Tasks open as the board (By status); most of these tests work in the table, so they show it.
+	// Tasks open as the board (named Tasks); most of these tests work in the table, so they show it.
 	void showTasksTable(AppContext& ctx)
 	{
 		idle(ctx, 3);
@@ -776,6 +787,12 @@ TEST_CASE("planner ui: Assignees only with a signed-in team; a pick assigns on d
 	REQUIRE(click(ctx, assignees));
 	REQUIRE(PlannerPanel::controlRect("member:Bob").x1 > 0);
 	shotTo(ctx, "planner_team_assignee_list");
+	// Typing narrows the team down (the search has the keyboard when the list opens).
+	ImGui::GetIO().AddInputCharactersUTF8("bo");
+	settle(ctx);
+	CHECK(PlannerPanel::controlRect("member:Anna").x1 <= 0);
+	REQUIRE(PlannerPanel::controlRect("member:Bob").x1 > 0);
+	shotTo(ctx, "planner_team_assignee_search");
 	REQUIRE(click(ctx, "member:Bob"));
 	{
 		TaskBoard disk;
@@ -997,6 +1014,18 @@ namespace
 	{
 		Workspace* ws = PlannerPanel::workspace(ctx);
 		return ws ? ws->findPage(PlannerPanel::selectedPage()) : nullptr;
+	}
+
+	// The language picker is a combo; the tests set the word as the picker does.
+	bool ws_edit_language(AppContext& ctx, const UUID& pageId, const UUID& blockId, const std::string& word)
+	{
+		Workspace* ws = PlannerPanel::workspace(ctx);
+		return ws && ws->editPage(pageId, [&](Page& p) {
+			Block* b = p.findBlock(blockId);
+			if (!b) return false;
+			b->language = word;
+			return true;
+		});
 	}
 }
 
@@ -1251,9 +1280,7 @@ TEST_CASE("planner ui: a calendar shows rows on their days, a drag moves one, a 
 		return true;
 	}));
 	idle(ctx);
-	REQUIRE(click(ctx, "New Calendar"));
-	idle(ctx);
-	REQUIRE(click(ctx, "data:Untitled table"));
+	newCalendar(ctx, "data:Untitled table");
 	REQUIRE(ws->edit(dbId, [&](Database& db) { db.findView(PlannerPanel::selectedView())->endProperty = end; return true; }));
 	PlannerPanel::showCalendarMonth(2026, 10);
 	idle(ctx);
@@ -1262,6 +1289,21 @@ TEST_CASE("planner ui: a calendar shows rows on their days, a drag moves one, a 
 	CHECK(v->kind == ViewKind::Calendar);
 	CHECK(v->dateProperty == when);
 	shotTo(ctx, "planner_calendar");
+
+	// Export: the dated rows as all-day events in an .ics file (Gamma has no date and is not in it).
+	REQUIRE(click(ctx, "calendar:export"));
+	REQUIRE(click(ctx, "export:ics"));
+	{
+		const std::filesystem::path ics = proj.root() / "Export" / "Planner" / (v->name + ".ics");
+		REQUIRE(std::filesystem::exists(ics));
+		const std::string text = readText(ics);
+		CHECK(text.find("SUMMARY:Alpha\r\n") != std::string::npos);
+		CHECK(text.find("SUMMARY:Beta\r\n") != std::string::npos);
+		CHECK(text.find("Gamma") == std::string::npos);
+		CHECK(text.find("DTSTART;VALUE=DATE:20261020\r\nDTEND;VALUE=DATE:20261023\r\n") != std::string::npos);
+		if (const char* d = std::getenv("HE_UI_DUMP_DIR"); d && *d)
+			std::filesystem::copy_file(ics, std::filesystem::path(d) / "planner_calendar.ics", std::filesystem::copy_options::overwrite_existing);
+	}
 
 	auto inside = [](const PlannerPanel::Rect& inner, const PlannerPanel::Rect& outer) {
 		return inner.x0 >= outer.x0 && inner.x1 <= outer.x1 && inner.y0 >= outer.y0 && inner.y1 <= outer.y1;
@@ -2524,15 +2566,17 @@ TEST_CASE("planner ui: tables, timelines, boards and calendars are made on their
 	// There is no kanban category: boards are the whiteboards. The data of a timeline is shown as a calendar too.
 	CHECK(PlannerPanel::controlRect("New Kanban").x1 <= 0);
 	REQUIRE(ws->edit(roadmap, [&](Database& db) { db.addRow("Ship alpha", "Tester", 1000); return true; }));
-	REQUIRE(click(ctx, "New Calendar"));
-	settle(ctx);
-	REQUIRE(click(ctx, "data:Untitled timeline"));
-	settle(ctx);
+	newCalendar(ctx, "data:Untitled timeline");
 	CHECK(PlannerPanel::selectedDatabase() == roadmap);
 	REQUIRE(ws->find(roadmap)->views.size() == 2);
 	CHECK(ws->find(roadmap)->views[1].kind == ViewKind::Calendar);
 	CHECK(ws->databases().size() == 2);   // Tasks and the one just made: no second database
-	CHECK(PlannerPanel::controlRect("item:Untitled timeline calendar").x1 > 0);
+	CHECK(PlannerPanel::controlRect("item:Untitled timeline timeline").x1 > 0);
+	// Back to the time axis: the same view, its kind switched, nothing else changed.
+	REQUIRE(click(ctx, "mode:Timeline"));
+	settle(ctx);
+	CHECK(ws->find(roadmap)->views[1].kind == ViewKind::Timeline);
+	CHECK(ws->find(roadmap)->views.size() == 2);
 }
 
 TEST_CASE("planner ui: tabs hold what is open once; New Step, New Event and New Card make something at once")
@@ -2552,9 +2596,9 @@ TEST_CASE("planner ui: tabs hold what is open once; New Step, New Event and New 
 	settle(ctx);
 	REQUIRE(click(ctx, "data:Untitled table"));
 	settle(ctx);
-	REQUIRE(click(ctx, "New Calendar"));
-	settle(ctx);
-	REQUIRE(click(ctx, "data:Untitled table"));
+	newCalendar(ctx, "data:Untitled table");
+	// Both dated views start out named after the data and "timeline"; the second is told apart by name.
+	REQUIRE(ws->edit(data, [&](Database& d) { d.findView(PlannerPanel::selectedView())->name = "Untitled table calendar"; return true; }));
 	settle(ctx);
 	CHECK(ws->databases().size() == 2);
 	CHECK(ws->find(data)->views.size() == 3);
@@ -2708,7 +2752,7 @@ TEST_CASE("planner ui board: dragging with the right button pans")
 	CHECK(f.ws->findBoard(f.id)->nodes.empty());   // and made nothing
 }
 
-TEST_CASE("planner ui: Tasks opens as By status, with no separate table entry; the table is one + away")
+TEST_CASE("planner ui: Tasks opens as its board, named Tasks, with no separate table entry; the table is one + away")
 {
 	Harness harness;
 	Project proj("he_planner_ui_tasks_board");
@@ -2721,7 +2765,8 @@ TEST_CASE("planner ui: Tasks opens as By status, with no separate table entry; t
 	const View* open = tasks->findView(PlannerPanel::selectedView());
 	REQUIRE(open != nullptr);
 	CHECK(open->kind == ViewKind::Board);
-	CHECK(open->name == "By status");
+	CHECK(open->name == "Tasks");
+	CHECK(open->id == derivedId("view", "By status"));   // the id from before the rename: no second board in old files
 	CHECK(PlannerPanel::controlRect("item:Tasks").x1 > 0);
 	CHECK(PlannerPanel::controlRect("item:All tasks").x1 <= 0);
 	CHECK(PlannerPanel::controlRect("New Row").x1 > 0);   // "New Item" on a board
@@ -2732,4 +2777,230 @@ TEST_CASE("planner ui: Tasks opens as By status, with no separate table entry; t
 	idle(ctx);
 	CHECK(tasks->findView(PlannerPanel::selectedView())->kind == ViewKind::Table);
 	CHECK(PlannerPanel::controlRect("view:All tasks").x1 > 0);
+}
+
+TEST_CASE("planner ui layout: the details of a card with a long history stay inside the planner and scroll")
+{
+	Harness harness;
+	Project proj("he_planner_ui_layout_details");
+	ContextBits bits;
+	AppContext ctx = bits.make(proj.pm);
+	REQUIRE(TaskBoardPanel::edit(ctx, [&](TaskBoard& b) {
+		Task* t = b.add("Long story", "Tester", taskNowMs());
+		for (int i = 0; i < 30; ++i) b.comment(t->id, "Tester", "comment " + std::to_string(i), taskNowMs());
+		return true;
+	}));
+	idle(ctx, 3);
+	REQUIRE(click(ctx, "item:Tasks"));
+	settle(ctx);
+	shotTo(ctx, "planner_layout_board");
+	// A click low on the card's lane: the flyover opens beside the click, which is near the bottom.
+	REQUIRE(click(ctx, "card:Long story"));
+	idle(ctx, 4);
+	const PlannerPanel::Rect fly = PlannerPanel::controlRect("flyover");
+	REQUIRE(fly.x1 > fly.x0);
+	ImGuiWindow* w = ImGui::FindWindowByName("##rowflyover");
+	REQUIRE(w != nullptr);
+	CHECK(w->Pos.y >= 10.0f);
+	CHECK(w->Pos.y + w->Size.y <= float(H) - 10.0f + 0.5f);
+	CHECK(w->Pos.x + w->Size.x <= float(W) - 10.0f + 0.5f);
+	CHECK(w->ScrollMax.y > 0.0f);   // the history scrolls inside it
+	shotTo(ctx, "planner_layout_details");
+}
+
+TEST_CASE("planner ui pages: Markdown turns into blocks while typing; Enter splits, Backspace joins; ``` is a code block")
+{
+	Harness harness;
+	Project proj("he_planner_ui_page_fluid");
+	ContextBits bits;
+	AppContext ctx = bits.make(proj.pm);
+	idle(ctx);
+	REQUIRE(click(ctx, "New Page"));
+	idle(ctx);
+	REQUIRE(click(ctx, "add-block"));
+	settle(ctx);
+	auto key = [&](ImGuiKey k) {
+		ImGui::GetIO().AddKeyEvent(k, true);
+		frame(ctx, false);
+		ImGui::GetIO().AddKeyEvent(k, false);
+		settle(ctx);
+	};
+
+	// "## " is a heading the moment the space is typed, and the writing goes on in it.
+	typeText(ctx, "## ");
+	REQUIRE(currentPage(ctx)->blocks.size() == 1);
+	CHECK(currentPage(ctx)->blocks[0].type == BlockType::Heading2);
+	typeText(ctx, "Goals");
+	pressEnter(ctx);
+	REQUIRE(currentPage(ctx)->blocks.size() == 2);
+	CHECK(currentPage(ctx)->blocks[0].text == "Goals");
+
+	// Enter in the middle of a line splits it at the cursor.
+	typeText(ctx, "HelloWorld");
+	for (int i = 0; i < 5; ++i) key(ImGuiKey_LeftArrow);
+	pressEnter(ctx);
+	REQUIRE(currentPage(ctx)->blocks.size() == 3);
+	CHECK(currentPage(ctx)->blocks[1].text == "Hello");
+	CHECK(currentPage(ctx)->blocks[2].text == "World");
+
+	// Backspace at the start of "World" (where the cursor went) joins it to the line above.
+	key(ImGuiKey_Backspace);
+	REQUIRE(currentPage(ctx)->blocks.size() == 2);
+	CHECK(currentPage(ctx)->blocks[1].text == "HelloWorld");
+	// ...and the cursor sits where they met: Enter there splits them again.
+	typeText(ctx, " ");
+	pressEnter(ctx);
+	REQUIRE(currentPage(ctx)->blocks.size() == 3);
+	CHECK(currentPage(ctx)->blocks[1].text == "Hello ");
+	CHECK(currentPage(ctx)->blocks[2].text == "World");
+
+	// "- " in front of "World" makes it a list item; Backspace at its start makes it a paragraph again, text kept.
+	typeText(ctx, "- ");
+	CHECK(currentPage(ctx)->blocks[2].type == BlockType::Bullet);
+	CHECK(currentPage(ctx)->blocks[2].text == "World");
+	key(ImGuiKey_Home);
+	key(ImGuiKey_Backspace);
+	CHECK(currentPage(ctx)->blocks[2].type == BlockType::Paragraph);
+	CHECK(currentPage(ctx)->blocks[2].text == "World");
+	key(ImGuiKey_End);
+	pressEnter(ctx);
+	REQUIRE(currentPage(ctx)->blocks.size() == 4);
+
+	// Three backticks: a code block with a language, where Enter is a new line.
+	typeText(ctx, "```");
+	settle(ctx);
+	REQUIRE(currentPage(ctx)->blocks.size() == 4);
+	CHECK(currentPage(ctx)->blocks[3].type == BlockType::Code);
+	CHECK(PlannerPanel::controlRect("code-lang:3").x1 > 0);
+	typeText(ctx, "int x = 1;");
+	key(ImGuiKey_Enter);
+	typeText(ctx, "return x;");
+	settle(ctx, 60);   // written a moment after typing stops
+	CHECK(currentPage(ctx)->blocks[3].text == "int x = 1;\nreturn x;");
+	REQUIRE(currentPage(ctx)->blocks.size() == 4);   // Enter stayed inside the code
+	REQUIRE(ws_edit_language(ctx, currentPage(ctx)->id, currentPage(ctx)->blocks[3].id, "cpp"));
+	settle(ctx);
+	shotTo(ctx, "planner_page_fluid");
+
+	Page onDisk;
+	REQUIRE(loadPage(proj.root(), currentPage(ctx)->id, onDisk).ok);
+	REQUIRE(onDisk.blocks.size() == 4);
+	CHECK(onDisk.blocks[0].type == BlockType::Heading2);
+	CHECK(onDisk.blocks[3].language == "cpp");
+}
+
+TEST_CASE("planner ui pages: Export writes the page as Markdown and as Word into Export/Planner")
+{
+	Harness harness;
+	Project proj("he_planner_ui_page_export");
+	ContextBits bits;
+	AppContext ctx = bits.make(proj.pm);
+	idle(ctx);
+	REQUIRE(click(ctx, "New Page"));
+	idle(ctx);
+	Workspace* ws = PlannerPanel::workspace(ctx);
+	const UUID pageId = PlannerPanel::selectedPage();
+	REQUIRE(ws->editPage(pageId, [&](Page& p) {
+		p.title = "Design";
+		p.addBlock(BlockType::Heading1, "Pillars", 1);
+		p.addBlock(BlockType::Bullet, "Fast", 1);
+		return true;
+	}));
+	idle(ctx);
+
+	REQUIRE(click(ctx, "page:export"));
+	REQUIRE(click(ctx, "export:md"));
+	const std::filesystem::path md = proj.root() / "Export" / "Planner" / "Design.md";
+	REQUIRE(std::filesystem::exists(md));
+	CHECK(readText(md) == "# Design\n\n# Pillars\n- Fast\n");
+
+	REQUIRE(click(ctx, "page:export"));
+	REQUIRE(click(ctx, "export:docx"));
+	const std::filesystem::path docx = proj.root() / "Export" / "Planner" / "Design.docx";
+	REQUIRE(std::filesystem::exists(docx));
+	CHECK(readText(docx).rfind("PK\x03\x04", 0) == 0);
+	if (const char* d = std::getenv("HE_UI_DUMP_DIR"); d && *d)
+		std::filesystem::copy_file(docx, std::filesystem::path(d) / "planner_page_export.docx", std::filesystem::copy_options::overwrite_existing);
+}
+
+TEST_CASE("planner ui: Mine shows only the tasks assigned to the name this editor writes under")
+{
+	Harness harness;
+	Project proj("he_planner_ui_mine");
+	ContextBits bits;
+	AppContext ctx = bits.make(proj.pm);
+	REQUIRE(TaskBoardPanel::edit(ctx, [&](TaskBoard& b) {
+		b.assign(b.add("Mine A", "Tester", taskNowMs())->id, { "tester" }, "Tester", taskNowMs());
+		b.assign(b.add("Other", "Tester", taskNowMs())->id, { "Zed" }, "Tester", taskNowMs());
+		b.add("Nobody's", "Tester", taskNowMs());
+		return true;
+	}));
+	idle(ctx, 3);
+	REQUIRE(click(ctx, "item:Tasks"));
+	settle(ctx);
+	CHECK(PlannerPanel::controlRect("card:Other").x1 > 0);
+	REQUIRE(click(ctx, "mine"));
+	settle(ctx);
+	CHECK(PlannerPanel::controlRect("card:Mine A").x1 > 0);   // names compare in any case, as on the team server
+	CHECK(PlannerPanel::controlRect("card:Other").x1 <= 0);
+	CHECK(PlannerPanel::controlRect("card:Nobody's").x1 <= 0);
+	shotTo(ctx, "planner_tasks_mine");
+	REQUIRE(click(ctx, "mine"));
+	settle(ctx);
+	CHECK(PlannerPanel::controlRect("card:Other").x1 > 0);
+}
+
+TEST_CASE("planner ui pages: after Enter ends a list, the paragraph it leaves still takes Enter")
+{
+	Harness harness;
+	Project proj("he_planner_ui_page_list_end");
+	ContextBits bits;
+	AppContext ctx = bits.make(proj.pm);
+	idle(ctx);
+	REQUIRE(click(ctx, "New Page"));
+	idle(ctx);
+	REQUIRE(click(ctx, "add-block"));
+	settle(ctx);
+	typeText(ctx, "- one");
+	pressEnter(ctx);
+	REQUIRE(currentPage(ctx)->blocks.size() == 2);
+	CHECK(currentPage(ctx)->blocks[1].type == BlockType::Bullet);
+	pressEnter(ctx);   // the empty item ends the list: the same block, now a paragraph
+	REQUIRE(currentPage(ctx)->blocks.size() == 2);
+	CHECK(currentPage(ctx)->blocks[1].type == BlockType::Paragraph);
+	typeText(ctx, "after");
+	pressEnter(ctx);
+	REQUIRE(currentPage(ctx)->blocks.size() == 3);
+	CHECK(currentPage(ctx)->blocks[1].text == "after");
+}
+
+TEST_CASE("planner ui: a Tasks board saved under its old name \"By status\" shows as Tasks after a reload")
+{
+	Harness harness;
+	Project proj("he_planner_ui_tasks_old_name");
+	ContextBits bits;
+	AppContext ctx = bits.make(proj.pm);
+	settle(ctx);
+	Workspace* ws = PlannerPanel::workspace(ctx);
+	REQUIRE(ws->find(tasksDatabaseId()) != nullptr);
+	const UUID board = derivedId("view", "By status");
+	// What an older editor wrote: the Tasks views file with the board under its old name.
+	{
+		Database old = *ws->find(tasksDatabaseId());
+		View* v = old.findView(board);
+		REQUIRE(v != nullptr);
+		v->name = "By status";
+		std::string err;
+		REQUIRE(saveDatabase(proj.root(), old, &err));
+		REQUIRE(readText(databasePath(proj.root(), tasksDatabaseId())).find("By status") != std::string::npos);
+	}
+
+	// A new editor session reads it.
+	PlannerPanel::reset();
+	settle(ctx, 4);
+	ws = PlannerPanel::workspace(ctx);
+	const View* v = ws->find(tasksDatabaseId())->findView(board);
+	REQUIRE(v != nullptr);
+	CHECK(v->name == "Tasks");
+	CHECK(PlannerPanel::controlRect("view:Tasks").x1 > 0);   // the tab
 }

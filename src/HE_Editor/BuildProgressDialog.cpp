@@ -34,7 +34,7 @@ struct Step
 	int         state         = Pending;
 	float       progress      = 0.0f;  // 0..1, meaningless while indeterminate
 	bool        indeterminate = true;  // no length known yet
-	std::string detail;                // "128 / 340", "62 %" — under the label
+	std::string detail;                // "128 / 340", "62%" — under the label
 };
 
 struct LogLine
@@ -176,7 +176,7 @@ void stepProgress(float fraction)
 	st.indeterminate = false;
 	st.progress      = fraction;
 	char buf[16];
-	std::snprintf(buf, sizeof(buf), "%d %%", static_cast<int>(fraction * 100.0f + 0.5f));
+	std::snprintf(buf, sizeof(buf), "%d%%", static_cast<int>(fraction * 100.0f + 0.5f));   // as the footer bar writes it
 	st.detail = buf;
 }
 

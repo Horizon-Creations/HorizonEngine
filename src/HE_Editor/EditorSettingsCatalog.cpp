@@ -105,6 +105,16 @@ std::vector<SettingDesc> buildCatalog()
 	                    "Content Browser", "cpucache", &EditorConfig::KeepCPUAssets,
 	                    "Keep mesh/texture data in RAM after upload. Costs memory, "
 	                    "saves a re-read."));
+	t.push_back(boolRow("contentBrowser.autoLodOnImport", "Generate LODs on Import",
+	                    "Content Browser", "autolodimport", &EditorConfig::AutoLodOnImport,
+	                    "Importing a static mesh also makes simplified versions of it, "
+	                    "kept inside the mesh's asset."));
+	t.push_back(enumRow("landscape.farBake", "Far Landscape Bake", "Content Browser", "farbake",
+	                    &EditorConfig::LandscapeFarBake,
+	                    { "Off", "Manual", "Automatic" },
+	                    "When the editor bakes a landscape's far tiles: never (only the "
+	                    "export does), with the Bake button in Landscape Setup, or on its "
+	                    "own a few seconds after a landscape was last changed."));
 	t.push_back(intRow("contentBrowser.refreshRate", "Refresh Rate",
 	                   "Content Browser", "cbrefresh",
 	                   &EditorConfig::ContentBrowserRefreshRate, 1, 600,
@@ -342,6 +352,13 @@ std::vector<SettingDesc> buildCatalog()
 	                    "CPU software occlusion culling: objects entirely hidden "
 	                    "behind nearer opaque geometry are not drawn. OpenGL and "
 	                    "Metal; the image does not change, only the draw count."));
+
+	t.push_back(boolRow("display.runtimeVirtualTextures", "Runtime Virtual Texture", "Display",
+	                    "rvt", &EditorConfig::RuntimeVirtualTextures,
+	                    "RVT Write / RVT Read material nodes: on = the Write node paints pages "
+	                    "and the Read node reads them; off = the Write node is skipped and the "
+	                    "graph computes directly. Stays off on a backend that cannot hold a "
+	                    "virtual texture. The export follows it; HE_RVT=1/0 overrides."));
 
 	// ── Rendering ▸ Post-Processing ─────────────────────────────────────────
 	t.push_back(enumRow("postProcess.antiAliasing", "Anti-Aliasing",

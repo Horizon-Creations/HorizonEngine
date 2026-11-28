@@ -58,7 +58,7 @@ void DrawEnvironmentWindow(AppContext& ctx, bool& open)
             ImGui::TextUnformatted("Sky is in the scene.");
             if (EditorWidgets::button("Select##sky")) ctx.selection.set(sky);
             ImGui::SameLine();
-            if (EditorWidgets::dangerButton("Remove##sky"))
+            if (EditorWidgets::removeButton("Remove##sky"))
             {
                 snapshot();
                 ctx.selection.remove(sky);
@@ -84,7 +84,7 @@ void DrawEnvironmentWindow(AppContext& ctx, bool& open)
                 ImGui::TextDisabled("(needs a Sky to drive — add one above)");
             if (EditorWidgets::button("Select##weather")) ctx.selection.set(weather);
             ImGui::SameLine();
-            if (EditorWidgets::dangerButton("Remove##weather"))
+            if (EditorWidgets::removeButton("Remove##weather"))
             {
                 snapshot();
                 ctx.selection.remove(weather);

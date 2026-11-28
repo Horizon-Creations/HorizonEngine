@@ -1,14 +1,21 @@
 #include "EditorApplication.h"
 #include "EditorGraphics.h"   // the project's copy of the graphics fields
+#include "ImporterCommon.h"   // Importer::setAutoLodOnImport
+#include "LandscapeFarBake.h"  // the baked far landscape in the editor
 #include <Window/Window.h>           // hiddenWindowRequested — no OS windows of ImGui's own
 #include <ContentManager/HAsset.h>   // asset type of a just-saved file
+#include <ContentManager/GpuArrayCook.h>   // texture arrays cooked for the GPU on load
 #include <cstring>
 #include <Diagnostics/EngineProfiler.h> // HE_DUMP_GPUTIME turns live GPU timing on
 #include "AssetThumbnailCache.h" // renderer-owned Content-Browser tiles (freed on shutdown)
+#include "ProjectHubPanel.h"     // the Hub's card pictures (freed on shutdown)
+#include "ProjectThumbnail.h"    // the picture a project is closed on
 #include "CollabPresenceBar.h"   // ditto for the collaboration avatars
 #include "EditorUI.h"
 #include "EditorTabs.h"            // retarget / dedupe the open asset tabs
+#include "AssetIdentity.h"        // an asset's identity is its UUID, not the tab's path string
 #include "ProjectPreflight.h"      // engine-content check in front of the first project open
+#include "TeamSyncView.h"          // a conflict notification opens its window
 #include "SceneDiskWatch.h"        // the open scene's file stamp: our own save is not a pull
 #include "EditorTheme.h"           // the brand palette every piece of chrome derives from
 #include "LevelScriptPanel.h"      // kTabPath — the level script is a virtual tab
@@ -30,11 +37,13 @@
 #include "CinematicPanel.h"                  // …and the sequence tools this one
 #include "PlannerBoardView.h"
 #include "PlannerPanel.h"                    // ...and the Planner tools reach the tab's workspace through this one
+#include "PlannerWorkspace.h"                // its saved hook: planner edits sync like saves
 #include "TaskBoardPanel.h"                  // …and the task tools edit through this one's board
 #include "ViewportPanel.h"         // appendGroundGrid — the scene view's scale reference
 #include <HorizonScene/CellPhysics.h>  // cellHolds: the play physics world waits for unbuilt cells
 #include <HorizonScene/CellSplit.h>    // the HE_DUMP_PLAYCELLS witness splits its own scene
 #include "StreamingDebugView.h"    // a split scene's streaming cells in the scene view
+#include "LandscapeWorldTools.h"   // a finished tile-landscape pack build is taken in here
 #include "CameraBookmarks.h"       // the digit-key views, persisted with the camera
 #include "EditorShortcuts.h"       // the rebound keys, persisted the same way
 #include "ShortcutsPage.h"         // …under the key the Preferences page writes them to
@@ -66,6 +75,7 @@
 #include <Diagnostics/Log.h>
 #ifdef HE_HAVE_LIBSSH2
 #include <ContentSync/EngineContentSync.h> // EngineContent manifest fetch, driven by the SFTP probe
+#include <ContentSync/ContentServerClient.h> // Thema 194: the new HTTP content server, checked alongside the SFTP probe
 #include "EngineContentPublishDialog.h"    // takeRunSucceeded / shutdown
 #endif
 #ifdef HE_HAVE_LIBSSH2
@@ -94,6 +104,7 @@ static void onProjectWriteRefused(const char* what);   // ProjectWriteGate handl
 #include <material/MaterialShaderBake.h>
 #include <glm/gtc/quaternion.hpp>
 #include <HorizonScene/TerrainSystem.h>
+#include <HorizonScene/TrailSystem.h>
 #include <HorizonScene/TerrainPaint.h>
 #include <HorizonScene/TerrainSculpt.h>
 #include <HorizonScene/TerrainGenerate.h>
@@ -101,9 +112,18 @@ static void onProjectWriteRefused(const char* what);   // ProjectWriteGate handl
 #include <HorizonScene/WaterLake.h>
 #include <HorizonScene/WaterMesh.h>
 #include <HorizonScene/Components/TerrainComponent.h>
+#include <HorizonScene/Components/LandscapeWorldComponent.h>   // HE_DUMP_TILEWORLD
+#include <HorizonScene/Components/LandscapeStampComponent.h>   // HE_DUMP_STAMP
 #include <HorizonScene/Components/FoliageComponent.h>   // HE_DUMP_FOLIAGETEST witness
 #include <HorizonScene/FoliageSystem.h>
 #include <HorizonScene/LayerMeshPresets.h>   // HE_DUMP_AUTOLANDMESHES witness
+#include "AutoLodDialog.h"                    // HE_AUTOLOD_BAKE witness
+#include <HorizonScene/LandscapeHlod.h>        // HE_DUMP_HLODBAKE / HE_DUMP_HLODFAR witnesses
+#include <HorizonScene/LandscapeHlodBaker.h>
+#include <HorizonScene/RvtProducer.h>
+#include <HorizonScene/RvtLandscape.h>
+#include <HorizonScene/RvtBaseBake.h>           // HE_DUMP_RVTBASE witness
+#include <MaterialGraph/RvtSplit.h>   // matSetRvtEnabled
 #include <HorizonScene/AnimationSystem.h>
 #include <HorizonScene/AnimationBlendSystem.h>
 #include <HorizonScene/AnimationStateMachineSystem.h>
@@ -139,6 +159,9 @@ static void onProjectWriteRefused(const char* what);   // ProjectWriteGate handl
 #include <HorizonScene/FlyCameraController.h>  // free-fly PIE camera (shared with the game runtime)
 #include <HorizonScene/CameraRigController.h>  // first/third person rig (shared with the game runtime)
 #include <HorizonScene/Components/ScriptComponent.h>
+#include <HorizonScene/Components/CameraRigComponent.h>  // HE_DUMP_COOKTEST witness
+#include <HorizonScene/Components/SaveStateComponent.h>  // HE_DUMP_COOKTEST witness
+#include <HorizonScene/CookedStatic.h>                   // HE_DUMP_COOKTEST row witness
 #include <ContentManager/Assets.h>
 #include <Renderer/RendererFactory.h>
 #include <DebugDraw/DebugDraw.h>
@@ -455,6 +478,22 @@ HE::ApplicationConfig EditorApplication::GetConfig() const
 	// The config's RHI, unless HE_DUMP_RHI forces another one (EditorBackendChoice.h).
 	cfg.backend = HE::Ed::resolveEditorBackend(m_globalState->getSelectedRHI(),
 	                                           std::getenv("HE_DUMP_RHI"));
+	// Every editor build on this machine shares one config.json, so a dev build with
+	// Vulkan can leave RHI=Vulkan behind for a release build without it — whose window
+	// then asked SDL for Vulkan and aborted on start. Such a choice falls back.
+	if (!RendererFactory::Available(cfg.backend))
+	{
+#ifdef __APPLE__
+		const HE::RendererBackend fallback = HE::RendererBackend::Metal;
+#else
+		const HE::RendererBackend fallback = HE::RendererBackend::OpenGL;
+#endif
+		static bool warned = false;   // GetConfig runs more than once per start
+		if (!std::exchange(warned, true))
+			HE_LOG_WARN(Editor, "EditorApplication: RHI '%s' is not in this build — using '%s'",
+			            getRHIName(cfg.backend).c_str(), getRHIName(fallback).c_str());
+		cfg.backend = fallback;
+	}
 
 	// ── Startup splash ──────────────────────────────────────────────────────
 	// The EDITOR asks for one; it is off by default in HorizonCore so that a
@@ -562,6 +601,15 @@ void EditorApplication::OnInit()
 	m_collab.setNotifications(&m_notifications);
 	m_team.setNotifications(&m_notifications);
 	m_teamSync.setNotifications(&m_notifications);
+	// A conflict notification's Resolve opens the conflict window (in Source Control).
+	m_teamSync.setOnResolve([](const HE::Sc::TeamSyncService::Lost& l) { TeamSyncView::openConflict(l); });
+	m_taskTeam.setLink(&m_taskTeamLink);
+	m_taskTeam.setNotifications(&m_notifications);
+	TaskBoardPanel::setTeam(&m_taskTeam);
+	// A planner or task board edit writes its file at once: that is a save, and with the team
+	// server keeping the project it goes to the team like a scene save (debounced there).
+	TaskBoardPanel::setSavedHook([this](const std::filesystem::path& f) { plannerFileSaved(f); });
+	HE::Planner::Workspace::setSavedHook([this](const std::filesystem::path& f) { plannerFileSaved(f); });
 	m_teamSync.setOpenFolder([](const std::filesystem::path& dir) {
 		const std::string url = "file://" + dir.generic_string();
 		SDL_OpenURL(url.c_str());
@@ -574,7 +622,7 @@ void EditorApplication::OnInit()
 		const std::string root = projectRoot();
 		if (root.empty()) return false;
 		const std::filesystem::path full = (std::filesystem::path(root) / projectRelPath).lexically_normal();
-		if (!m_currentScenePath.empty() && m_undo.revision() != m_savedRevision &&
+		if (!m_currentScenePath.empty() && sceneHasUnsavedChanges() &&
 		    std::filesystem::path(m_currentScenePath).lexically_normal() == full)
 			return true;
 		return EditorUI::tabHasUnsavedEdits(full.generic_string());
@@ -801,6 +849,9 @@ void EditorApplication::OnInit()
 	// Every asset type funnels through ContentManager::saveAsset, so one hook
 	// covers HorizonCode graphs, materials, UI widgets, particle and animator
 	// graphs and scenes alike.
+	// Which asset a panel state or a peer's key means is decided by its UUID, and
+	// where that asset lives right now is this ContentManager's answer.
+	HE::Ed::AssetIdentity::bind(&contentManager());
 	contentManager().setOnAssetSaved(
 		[this](const std::string& relPath, const std::string& fullPath) {
 			m_collab.publishAsset(relPath, fullPath);
@@ -870,6 +921,18 @@ void EditorApplication::OnInit()
 	m_collab.setLocalPathResolver([this](const std::string& key) {
 		return collabLocalPath(key);
 	});
+
+	// An asset is addressed by the UUID in its file, not by its path: a lock, a
+	// claim and a frame survive a rename, and a peer's edit finds the file wherever
+	// it lives here now. Both directions answer from the same place the peers
+	// share — the file's own header, via the ContentManager's registry.
+	m_collab.setAssetIdentityResolvers(
+		[this](const std::string& key) -> HE::UUID {
+			const std::string full = collabLocalPath(key);
+			return full.empty() ? HE::UUID{} : HE::Ed::AssetIdentity::uuidFor(full);
+		},
+		[this](std::uint64_t subject) { return keyForCollabSubject(subject); });
+	m_collab.setProjectFingerprintProvider([this] { return collabProjectFingerprint(); });
 
 	// An approved delete or rename. Fires on every peer INCLUDING the host, so
 	// there is one implementation of "this happened" rather than two that have
@@ -1080,6 +1143,19 @@ void EditorApplication::OnInit()
 			Logger::Log(Logger::LogLevel::Info, "Collab: applied the session's GameInstance graph");
 			return;
 		}
+		// A planner file: written where it lives; the Planner reads files that changed on disk by
+		// itself (Workspace::poll, TaskBoardPanel), as it does after a pull.
+		if (relPath.rfind(CollabController::kConfigKeyPrefix, 0) == 0)
+		{
+			const std::string full = collabLocalPath(relPath);
+			if (full.empty()) return;
+			std::error_code ec;
+			std::filesystem::create_directories(std::filesystem::path(full).parent_path(), ec);
+			std::ofstream out(full, std::ios::binary | std::ios::trunc);
+			if (!out) return;
+			out.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+			return;
+		}
 		applyAssetBytes(relPath, bytes);
 		// An open editor tab keeps showing its in-memory state — tell whichever
 		// panel holds this asset to re-read the file, so the peer's edit is
@@ -1111,6 +1187,8 @@ void EditorApplication::OnInit()
 		}
 	});
 
+	// Same reason as openScene: clear() recycles entt ids, so an RVT segment would alias the snapshot's entities.
+	m_collab.onWorldReplacing([this] { if (m_rvtLandscape) m_rvtLandscape->detach(); });
 	m_collab.onWorldReplaced([this] {
 		// Wire identity is each entity's uuid, which the snapshot carried — so
 		// seeding just warms the uuid↔handle cache (deletions need it, see
@@ -1166,6 +1244,9 @@ void EditorApplication::OnInit()
 	IMGUI_CHECKVERSION();
 	ImGui::CreateContext();
 	HE::Ed::applyHorizonDarkTheme();
+	// Tooltips only after the pointer has rested ~5 s (imgui.cpp BeginTooltipEx). Set here, not in the theme: the
+	// headless UI tests apply the theme and expect a tooltip after a short rest.
+	ImGui::GetStyle().TooltipShowDelay = 5.0f;
 	ImGuiIO& io = ImGui::GetIO();
 	io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
 	io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
@@ -1244,6 +1325,15 @@ void EditorApplication::OnInit()
 			ImFontConfig monoCfg;
 			monoCfg.SizePixels = sizeBody;
 			m_fontMono = io.Fonts->AddFontDefaultVector(&monoCfg);
+			// ProggyForever has no "…", "—" or arrows, which logs and export steps
+			// print: merged in from the body font so they stop showing as '?'.
+			// Monospace columns only use ASCII, which stays Proggy's.
+			if (std::filesystem::exists(fontPath))
+			{
+				ImFontConfig mergeCfg = cfg;
+				mergeCfg.MergeMode = true;
+				io.Fonts->AddFontFromFileTTF(fontPath.c_str(), sizeBody, &mergeCfg);
+			}
 		}
 
 		// No io.Fonts->Build() here — since ImGui 1.92 the renderer backends
@@ -1267,6 +1357,21 @@ void EditorApplication::OnInit()
 		m_globalState->refreshEngineFolder(engineContentPath);
 	}
 
+	// ── Texture arrays go to the GPU block-compressed (GpuArrayCook.h) ──────────
+	// Shared EngineContent holds the landscape's texture arrays as platform-neutral RGBA8 (291 MB each).
+	// Like an export does for its target, cook them for the GPU this editor runs on when they are read:
+	// BC7 on D3D/Vulkan/GL, ASTC on Metal, BC3 on macOS GL, cached beside the EngineContent download
+	// cache so the encoder runs once per download. HE_EDITOR_ARRAY_COMPRESS=none turns it off.
+	{
+		HE::GpuArrayCookSettings cook;
+		cook.format   = HE::gpuArrayCookFormatFor(static_cast<int>(m_backend));
+		cook.quality  = cook.format == 2 ? 1 : 0;   // BC7 balanced; ASTC and BC3 fast
+		cook.cacheDir = (GlobalState::userDataDir() / "EngineContentCookCache").string();
+		HE::setGpuArrayCook(cook);
+		HE_LOG_INFO(Editor, "Texture arrays for the GPU: %s",
+		            cook.format == 2 ? "BC7" : cook.format == 1 ? "ASTC 4x4" : cook.format == 3 ? "BC3" : "RGBA8 (not compressed)");
+	}
+
 	switch (m_backend)
 	{
 	// ── OpenGL ────────────────────────────────────────────────────────────────
@@ -1278,7 +1383,16 @@ void EditorApplication::OnInit()
 		// macOS is capped at OpenGL 4.1 / GLSL 410
 		ImGui_ImplOpenGL3_Init("#version 410");
 #else
-		ImGui_ImplOpenGL3_Init("#version 460");
+		{
+			// Window descends 4.6 -> 4.1 until the driver accepts a context (Mesa/WSLg
+			// stops at 4.5), so ask for the GLSL that context really speaks.
+			int major = 4, minor = 6;
+			SDL_GL_GetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, &major);
+			SDL_GL_GetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, &minor);
+			char glsl[24];
+			std::snprintf(glsl, sizeof glsl, "#version %d", major * 100 + minor * 10);
+			ImGui_ImplOpenGL3_Init(glsl);
+		}
 #endif
 		m_imguiReady = true;
 		HE_LOG_INFO(Editor, "%s", "Initialized ImGui OpenGL backend");
@@ -1576,6 +1690,8 @@ void EditorApplication::OnInit()
 	GlobalState& globalstate = GlobalState::getInstance();
 	m_editorConfig.ContentBrowserRefreshRate   = globalstate.getCustomConfigInt("ContentBrowserRefreshRate",   m_editorConfig.ContentBrowserRefreshRate);
 	m_editorConfig.KeepCPUAssets               = globalstate.getCustomConfigBool("KeepCPUAssets",               m_editorConfig.KeepCPUAssets);
+	m_editorConfig.AutoLodOnImport             = globalstate.getCustomConfigBool("AutoLodOnImport",             m_editorConfig.AutoLodOnImport);
+	m_editorConfig.LandscapeFarBake            = std::clamp(globalstate.getCustomConfigInt("LandscapeFarBake", m_editorConfig.LandscapeFarBake), 0, 2);
 	// The persisted key was misspelled "KeepCPUAssetsInfoAcknoleged" until the
 	// 2026-07 rework. Read the old spelling FIRST and hand it in as the default for
 	// the corrected key, so a user who already dismissed the info box keeps that
@@ -1705,6 +1821,9 @@ void EditorApplication::OnInit()
 	m_editorConfig.GIReflBounces               = globalstate.getCustomConfigInt("GIReflBounces",              m_editorConfig.GIReflBounces);
 	m_editorConfig.RenderPath                  = globalstate.getCustomConfigInt("RenderPath",           m_editorConfig.RenderPath);
 	m_editorConfig.OcclusionCulling            = globalstate.getCustomConfigBool("OcclusionCulling",    m_editorConfig.OcclusionCulling);
+	m_editorConfig.RuntimeVirtualTextures      = globalstate.getCustomConfigBool("RuntimeVirtualTextures", m_editorConfig.RuntimeVirtualTextures);
+	// Before any material is generated: the capability of the backend corrects it on the first tick (the renderer is not up yet).
+	HE::matSetRvtEnabled(HE::landscape::RvtLandscape::wanted(m_editorConfig.RuntimeVirtualTextures, true));
 	m_editorConfig.SSREnabled                  = globalstate.getCustomConfigBool("SSREnabled",          m_editorConfig.SSREnabled);
 	m_editorConfig.SSRIntensity                = globalstate.getCustomConfigFloat("SSRIntensity",       m_editorConfig.SSRIntensity);
 	m_editorConfig.SSRQuality                  = globalstate.getCustomConfigInt("SSRQuality",           m_editorConfig.SSRQuality);
@@ -2111,6 +2230,9 @@ void EditorApplication::OnInit()
 	setWorld(m_editorWorld.get());
 	m_propScriptEngine = std::make_unique<ScriptEngine>();
 	m_undo.setWorld(m_editorWorld.get());
+	// Same reason as openScene/m_collab.onWorldReplacing: restore()'s clear()
+	// recycles entt ids, so an RVT segment would alias the loaded snapshot's entities.
+	m_undo.onWorldReplacing([this] { if (m_rvtLandscape) m_rvtLandscape->detach(); });
 
 	if (!m_audioEngine.init())
 		HE_LOG_WARN(Editor, "%s", "EditorApplication: audio engine init failed (no audio playback)");
@@ -2121,6 +2243,9 @@ void EditorApplication::OnInit()
 	// the startup scene is already loaded when OnInit returns.
 	m_projectManager.setOnProjectLoaded([this](const std::string& sceneAbsPath)
 	{
+		// A no-op after endProjectSession; the one teardown for the loads that do
+		// not pass through it (a project created over an open one).
+		endProjectRuntime();
 		setWorld(m_editorWorld.get());
 
 		// The recovery snapshot changes hands with the project. The previous
@@ -2264,6 +2389,21 @@ void EditorApplication::OnInit()
 		// Restore the editor tabs that were open the last time this project was used.
 		restoreOpenTabs();
 
+		// An empty world for the project's scene. serializer.load ADDS to a world,
+		// and File ▸ New Project over an open project gets here without
+		// endProjectSession (which clears it through newScene): the old project's
+		// entities stayed, a 100 km landscape among them, so the new project had
+		// no Landscape create grid and its own landscape drew underneath. After
+		// endProjectSession this clears an already empty world. Not newScene
+		// itself: the recovery snapshots above have already changed hands.
+		if (m_isPlaying) setPlayMode(false);
+		if (m_rvtLandscape) m_rvtLandscape->detach();   // see newScene: clear() recycles entt ids
+		m_editorWorld->clear();
+		m_selection.clear();
+		m_editorWorld->markHierarchyDirty();
+		m_undo.clearHistory();
+		m_savedRevision = m_undo.revision();
+
 		m_currentScenePath.clear();
 		if (!sceneAbsPath.empty())
 		{
@@ -2285,8 +2425,8 @@ void EditorApplication::OnInit()
 				const Clock::time_point tPreload = Clock::now();
 				SceneSystems::preloadAssetRefs(*m_editorWorld, contentManager());
 				const Clock::time_point tWarmup = Clock::now();
-				splashStatus("Compiling material pipelines", 0.95f);
-				warmupWorldMaterials(); // build custom-material pipelines before the first draw
+				splashStatus("Compiling shaders", 0.90f);
+				warmupWorldMaterials(/*waitForBuilds=*/true); // pipelines compile in the background; wait for them behind the splash
 				const Clock::time_point tEnd = Clock::now();
 				// The entity count is on the SceneLoadTiming line just before.
 				HE_LOG_INFO(Editor, "SceneOpenTiming: loadMs=%.2f prefabSyncMs=%.2f "
@@ -2304,6 +2444,9 @@ void EditorApplication::OnInit()
 		{
 			HE_LOG_INFO(Editor, "%s", "EditorApplication: no startup scene defined for this project");
 		}
+		// After the scene, so a project without a view of its own can be framed
+		// on its landscape rather than started inside its hills.
+		loadProjectCameraView(m_projectManager.currentProject().path);
 
 		m_editorWorld->markHierarchyDirty();
 		m_undo.clearHistory();
@@ -2640,12 +2783,24 @@ void EditorApplication::startSftpProbe()
 		m_sftpProbe = probe;
 		m_sftpChecked.store(true, std::memory_order_release);
 
+		// Thema 194: the new HTTP content server is a second, independent way the remote
+		// library can be "available" — probeSftp() only ever checks the SFTP side, so a build
+		// configured ONLY with config.json's EngineContentServerUrl (no SFTP credentials) would
+		// otherwise never even attempt a refresh. refreshManifestBlocking() itself already
+		// prefers the content server when it is configured (EngineContentSync.cpp).
+		const bool contentServerConfigured = HE::Cs::contentServerEndpoint().configured();
+
 		// Manifest fetch + Engine-tree re-merge run on this same worker thread —
 		// GlobalState's setters/refresh only touch their own mutex-guarded tree
 		// and the filesystem, never ImGui, so this is safe off the main thread
 		// (the existing m_contentRefreshFuture async path relies on the same fact).
-		bool haveManifest = probe.ready() &&
+		// Whether refreshManifestBlocking() itself succeeded, before the cache
+		// fallback below can turn a failed refresh back into "have a manifest" —
+		// the notes need this to tell "fetched fine" from "fell back to yesterday's
+		// copy", which `haveManifest` alone can no longer say once it is set.
+		const bool manifestRefreshed = (probe.ready() || contentServerConfigured) &&
 		                    HE::Cs::EngineContentSync::instance().refreshManifestBlocking();
+		bool haveManifest = manifestRefreshed;
 		// No server this session — fall back to the catalogue the last successful
 		// refresh wrote beside the downloads. Without it an offline editor shows
 		// NO EngineContent at all: not the assets that are still on the server,
@@ -2667,15 +2822,29 @@ void EditorApplication::startSftpProbe()
 		// (SftpCredentials.h), so an empty one means a build that was never meant
 		// to reach the server, and nagging about it every start would train the
 		// user to ignore the bell before it has ever carried anything real.
-		if (probe.configured && !probe.reachable)
+		// refreshManifestBlocking() always prefers the HTTP content server once it is
+		// configured (EngineContentSync.cpp), so once contentServerConfigured is true that
+		// is the transport that actually ran here, regardless of what the SFTP probe found.
+		// Basing the note on `probe` in that case would either stay silent on an HTTP
+		// failure next to a reachable SFTP endpoint, or blame SFTP ("accepted the login")
+		// for a fault that is really on the HTTP server — lastManifestError() is the one
+		// thing that reports what this refresh actually did, on whichever transport ran.
+		const bool httpFailed      = contentServerConfigured && !manifestRefreshed;
+		const bool sftpUnreachable = !contentServerConfigured && probe.configured && !probe.reachable;
+		if (httpFailed || sftpUnreachable)
 		{
+			const std::string reason = httpFailed
+				? HE::Cs::EngineContentSync::instance().lastManifestError() : probe.detail;
 			HE::Ed::NoteSpec note;
 			note.level = haveManifest ? HE::Ed::NoteLevel::Important : HE::Ed::NoteLevel::Critical;
-			note.title = "EngineContent server unreachable";
-			note.text  = "The EngineContent server could not be reached.";
-			note.detail = (probe.detail.empty()
+			// HTTP failures besides an unreachable server also land here (e.g. a manifest
+			// that failed to parse), so "unreachable" is only accurate for the SFTP case.
+			note.title = httpFailed ? "EngineContent catalogue unavailable" : "EngineContent server unreachable";
+			note.text  = httpFailed ? "The EngineContent catalogue could not be fetched."
+			                        : "The EngineContent server could not be reached.";
+			note.detail = (reason.empty()
 					? std::string("The connection was refused or timed out.")
-					: probe.detail)
+					: reason)
 				+ (haveManifest
 					? "  Working from the catalogue of the last successful connection: "
 					  "assets already downloaded still work, anything else cannot be "
@@ -2687,7 +2856,7 @@ void EditorApplication::startSftpProbe()
 			note.actions.push_back({ "Try again", [this] { refreshEngineContentManifest(); }, true });
 			HE::Ed::notify(std::move(note));
 		}
-		else if (probe.configured && !haveManifest)
+		else if (!contentServerConfigured && probe.configured && !haveManifest)
 		{
 			// Reached and authenticated, but the catalogue itself did not arrive —
 			// a different fault (manifest missing, unreadable, or unparseable) and
@@ -3180,7 +3349,14 @@ void EditorApplication::OnRender(float dt)
 	//
 	// Deliberately not "simulating || app": for a game nothing changes at all,
 	// and for an app there is no second state that could disagree with this one.
-	const bool uiLive = simulating || m_projectManager.currentProject().appProject;
+	const bool uiLive = simulating || (m_projectLoaded && m_projectManager.currentProject().appProject);
+	// The live preview of an application plays no sound (the user's decision,
+	// 25.11.2026): the preview runs without anyone asking for it, and every edit
+	// rebuilds it, so a Play Sound in OnInit would play on every keystroke. Set
+	// before the preview start and restart below, so OnInit is held too. The
+	// packaged app and a game's Play session are untouched; auditions and the
+	// weather beds go to the engine directly and are not script sounds.
+	HE::api::audio::setPlaybackHeld(uiLive && !m_isPlaying);
 
 	// ── The multiplayer session, on `m_isPlaying` and NOT on `simulating` ────
 	// Before everything that reads world state (plan §5.2), and deliberately
@@ -3203,7 +3379,9 @@ void EditorApplication::OnRender(float dt)
 	// project whose UI has not been started yet fires the GameInstance's OnInit —
 	// which is what creates the root widget. Keyed by project path so opening a
 	// different project starts that one instead of assuming one ever runs.
-	if (m_editorWorld && m_projectManager.currentProject().appProject &&
+	// m_projectLoaded too: a switch whose load failed leaves the old project in
+	// the ProjectManager after endProjectSession has stopped its preview.
+	if (m_projectLoaded && m_editorWorld && m_projectManager.currentProject().appProject &&
 	    m_appUiStartedFor != m_projectManager.currentProject().path)
 	{
 		m_appUiStartedFor = m_projectManager.currentProject().path;
@@ -3411,7 +3589,7 @@ void EditorApplication::OnRender(float dt)
 	// ── Window title ─────────────────────────────────────────────────────
 	{
 		const std::string& projName = m_projectManager.currentProject().name;
-		const bool dirty = m_undo.revision() != m_savedRevision;
+		const bool dirty = sceneHasUnsavedChanges();
 		// Only rebuild the title (string concats + filesystem path-stem parse + the
 		// SDL_SetWindowTitle syscall) when an input actually changed — this whole block
 		// ran every editor frame otherwise.
@@ -3434,6 +3612,9 @@ void EditorApplication::OnRender(float dt)
 			window()->SetTitle(title);
 		}
 	}
+	// The importers read the preference through a process default (they have no
+	// AppContext), so it is handed over every frame: live, no restart.
+	Importer::setAutoLodOnImport(m_editorConfig.AutoLodOnImport);
 	// ── Automatic asynchronous content refresh ────────────────────────────────
 	if (m_projectLoaded && m_editorConfig.ContentBrowserRefreshRate > 0)
 	{
@@ -4034,11 +4215,55 @@ void EditorApplication::OnRender(float dt)
 			// opposite order from the shipped game.
 			const bool gpuParticles = m_editorConfig.GpuParticles &&
 			                          renderer()->GetCapabilities().supportsGpuParticles;
+			// The baked far landscape: saved tiles picked up, stale ones put away,
+			// the Automatic bake. Before the tick, which rebuilds what it marks dirty.
+			if (m_projectLoaded && !m_isPlaying)
+			{
+				AppContext fbCtx = makeContext();
+				LandscapeFarBake::tick(fbCtx, ImGui::GetCurrentContext() && ImGui::IsAnyMouseDown());
+			}
 			HE_PROFILE_SCOPE_N("SceneSystemsTick");
 			SceneSystems::tickWorld(*m_editorWorld, contentManager(), renderer(),
 			                        m_editorCamera.position(), gameDt,
 			                        (m_isPlaying && m_physicsWorld) ? m_physicsWorld.get() : nullptr,
 			                        gpuParticles);
+			// The virtual texture of the landscape, after the terrain update of the tick: the global switch (Preferences ▸
+			// Rendering ▸ Runtime Virtual Texture) on a backend that can hold one, or HE_RVT=1 / 0 over it. Switched off, the
+			// landscapes go back to their own material and the RVT nodes of every material are inlined (matSetRvtEnabled).
+			{
+				const bool rvtOn = HE::landscape::RvtLandscape::wanted(
+					m_editorConfig.RuntimeVirtualTextures, renderer() && renderer()->GetCapabilities().supportsRvt);
+				if (rvtOn != HE::matRvtEnabled())
+				{
+					HE::matSetRvtEnabled(rvtOn);
+					const size_t n = contentManager().regenerateRvtMaterials();
+					HE_LOG_INFO(Editor, "EditorApplication: Runtime Virtual Texture %s, %zu RVT material(s) regenerated", rvtOn ? "on" : "off", n);
+				}
+				if (renderer() && rvtOn)
+				{
+					if (!m_rvtLandscape) m_rvtLandscape = std::make_shared<HE::landscape::RvtLandscape>(contentManager(), *renderer());
+					m_rvtLandscape->setSettings(HE::landscape::RvtLandscape::settingsFromProject(m_projectManager.currentProject().settings.rvt));
+					// The near radius against the camera's field of view and the scene viewport's pixel height (the window's
+					// until the viewport has a size: taller, so a larger radius, the safe side).
+#ifdef HE_IMGUI_ENABLED
+					{
+						int vpW = 0, vpH = 0;
+						ViewportPanel::renderSizePx(vpW, vpH);
+						const float h = vpH > 0 ? float(vpH) : ImGui::GetIO().DisplaySize.y * ImGui::GetIO().DisplayFramebufferScale.y;
+						m_rvtLandscape->setView(glm::radians(m_editorCamera.fovDegrees()), h);
+					}
+#endif
+					HE_PROFILE_SCOPE_N("RvtLandscape");
+					// The viewport's "Virtual Texture" view mode: the tables carry the stale marks while it is on.
+					m_rvtLandscape->setDebugView(renderer()->GetViewMode() == HE::ViewMode::RvtDebug);
+					m_rvtLandscape->tick(*m_editorWorld, m_editorCamera.position());
+				}
+				else if (m_rvtLandscape)
+				{
+					m_rvtLandscape->detach();
+					m_rvtLandscape.reset();
+				}
+			}
 		}
 
 		// Step physics at a fixed rate during play mode
@@ -4066,6 +4291,53 @@ void EditorApplication::OnRender(float dt)
 		{
 			HE_PROFILE_SCOPE_N("CellStreaming");
 			m_playCells->update(*m_editorWorld, gameDt);
+		}
+
+		// The tile landscape of the scene, if it has one: around the play camera, or around the editor's while editing (it is not an entity).
+		if (m_editorWorld)
+		{
+			HE_PROFILE_SCOPE_N("Landscape");
+			// Every call, not just the first bind below: RenderExtractor reads this to build the GI
+			// shadow kernel's height clipmap (step 4).
+			m_editorWorld->setLandscapeRuntime(&m_landscape);
+			if (!m_landscapeToolsBound) { LandscapeWorldTools::setRuntime(&m_landscape); m_landscapeToolsBound = true; }   // the tile brush edits this runtime
+			LandscapeWorldTools::pump(*m_editorWorld);   // before the update: a rebuilt pack is opened again this frame
+			if (contentManager().contentRoot() != m_landscapeContentRoot)
+			{
+				m_landscapeContentRoot = contentManager().contentRoot();
+				m_landscape.setProjectRoot(m_landscapeContentRoot.empty() ? std::filesystem::path{}
+				                                                          : std::filesystem::path(m_landscapeContentRoot).parent_path());
+			}
+			if (!m_landscapeBound && renderer())
+			{
+				renderer()->SetLandscapeProvider([this](const glm::dmat4& vp, bool zeroToOne, HE::LandscapeRenderFrame& out) {
+					if (m_editorWorld) m_landscape.buildRenderFrame(vp, m_editorWorld->origin(), zeroToOne, out);
+				});
+				// A backend that can swap the far data alone lets a render window move without emptying the tile atlas.
+				m_landscape.setWindowKeepsAtlas(renderer()->GetCapabilities().landscapeCoarseRevision);
+				m_landscapeBound = true;
+			}
+			if (m_landscapePhysics != m_physicsWorld.get())
+			{
+				m_landscape.setPhysics(m_physicsWorld.get());   // ground for the play session's bodies; none while editing
+				m_landscapePhysics = m_physicsWorld.get();
+			}
+			if (m_isPlaying != m_landscapeNavigation)
+			{
+				// Only while playing: the runtime swaps the scene's NavMeshComponent over to its tiled mesh, which an editor
+				// that is just looking at the scene must not do to a navmesh somebody baked.
+				const HE::LandscapeNavConfig nav;
+				m_landscape.setNavigation(m_isPlaying ? &nav : nullptr);
+				m_landscapeNavigation = m_isPlaying;
+			}
+			if (m_isPlaying) m_landscape.update(*m_editorWorld, gameDt);
+			else
+			{
+				const glm::dvec3 eye = glm::dvec3(m_editorCamera.makeOverride().position) + m_editorWorld->origin();
+				m_landscape.update(*m_editorWorld, gameDt, 1.0, &eye);
+			}
+			m_landscapeStamps.sync(*m_editorWorld, m_landscape, contentManager());   // stamp entities that moved: their tiles are read again
+			m_landscapeProxies.sync(*m_editorWorld, m_landscape, contentManager(), renderer());
 		}
 
 		// Keep spatial audio sources and listener in sync each play-mode frame
@@ -5047,8 +5319,11 @@ void EditorApplication::OnRender(float dt)
 			project.teamServer = sc.teamServer();
 			project.team       = sc.team;
 			project.project    = sc.project;
+			// A project about to open gets the team's newest version first (ProjectPreflight):
+			// the sync works on its folder, and what it writes needs no reload (nothing is open).
+			const bool preflight = ProjectPreflight::teamProject(project);
 			for (const std::string& rel : m_teamSync.update(nowMs, project, m_isPlaying))
-				applyTeamSyncFile(rel);
+				if (!preflight) applyTeamSyncFile(rel);
 		}
 
 		// ── The MCP bridge ────────────────────────────────────────────────
@@ -5240,6 +5515,63 @@ void EditorApplication::OnRender(float dt)
 		// And after the UI for the asset tabs too: a Save pressed this frame has
 		// already cleared its tab, so its copy is pruned in the same frame.
 		updateAssetAutosave(nowMs, ctx);
+	}
+
+	// ── HE_AUTOLOD_BAKE witness (Thema 331 S3/S4) ─────────────────────────────
+	// HE_AUTOLOD_BAKE=<out.hescene>:<chain|card|impostor> runs the REAL Generate LODs / Bake
+	// Impostor code (AutoLodDialog::run) over every foliage layer of the project's scene the
+	// editor just opened, writes the scene to <out.hescene> and quits. The scene is the input
+	// of scripts/he_perf_capture.py --scene and of an HE_CAPTURE_FRAME picture, which is how
+	// the far level is seen in the editor loop rather than in a synthetic world:
+	//   chain     the LOD chain only
+	//   card      ...ended on the engine's cross card, drawn with the layer's material
+	//   impostor  ...ended on the baked impostor card
+	// The project's own files get the sidecars, so point it at a COPY of the project.
+	if (const char* ab = std::getenv("HE_AUTOLOD_BAKE"); ab && *ab && m_projectLoaded && m_editorWorld && !m_isPlaying)
+	{
+		static int s_autoLodBakeWait = 0;
+		static bool s_autoLodBakeDone = false;
+		if (!s_autoLodBakeDone && ++s_autoLodBakeWait > 30)
+		{
+			s_autoLodBakeDone = true;
+			std::string spec = ab;
+			std::string mode = "impostor";
+			if (const size_t colon = spec.rfind(':'); colon != std::string::npos && colon > 1)
+			{
+				mode = spec.substr(colon + 1);
+				spec.resize(colon);
+			}
+			AutoLodDialog::Options o;
+			o.foliage       = true;
+			o.crossCard     = mode != "chain";
+			o.bakeImpostor  = mode == "impostor";
+			o.impostorSize  = 1;
+			if (const char* sz = std::getenv("HE_AUTOLOD_IMPOSTOR_SIZE"); sz && *sz) o.impostorSize = std::clamp(std::atoi(sz), 0, 2);
+			int layers = 0, ok = 0;
+			auto& reg = m_editorWorld->registry();
+			for (auto e : reg.view<FoliageComponent>())
+			{
+				const size_t count = reg.get<FoliageComponent>(e).layers.size();
+				for (size_t li = 0; li < count; ++li)
+				{
+					AutoLodDialog::Request req;
+					req.kind   = AutoLodDialog::Kind::FoliageLayer;
+					req.entity = e;
+					req.layer  = static_cast<int>(li);
+					const AutoLodDialog::Outcome r = AutoLodDialog::run(ctx, req, o);
+					++layers;
+					ok += r.ok ? 1 : 0;
+					HE_LOG_INFO(Editor, "EditorApplication: HE_AUTOLOD_BAKE %s layer %zu: %s%s", mode.c_str(), li,
+						r.ok ? "" : "FAILED ", r.message.c_str());
+				}
+			}
+			SceneSerializer saver;
+			const bool saved = saver.save(*m_editorWorld, spec, SerializeFormat::JSON);
+			HE_LOG_INFO(Editor, "EditorApplication: HE_AUTOLOD_BAKE %d of %d layer(s) ok, scene %s -> %s",
+				ok, layers, saved ? "written" : "NOT written", spec.c_str());
+			m_quitConfirmed = true;
+			Quit();
+		}
 	}
 
 	// ── FPS counter ───────────────────────────────────────────────────────
@@ -5478,7 +5810,15 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 		// Otherwise make sure there IS a Sky entity to configure — the world/scene may
 		// have started empty (only the Game/Simulation templates seed a sky).
 		else if (m_editorWorld->environmentEntity() == entt::null)
+		{
 			m_editorWorld->addSky();
+			// addSky() starts new skies on the volumetric fog (step 7); a witness dump keeps
+			// the analytic default so HE_DUMP_FOGDENSITY alone stays the pre-existing A/B
+			// baseline — HE_DUMP_FOGMODE=1 below opts into the volume.
+			if (auto* fresh = m_editorWorld->registry().try_get<EnvironmentComponent>(
+			        m_editorWorld->environmentEntity()))
+				fresh->fogMode = 0;
+		}
 		Entity dumpSky = m_editorWorld->environmentEntity();
 		if (auto* e = dumpSky == entt::null ? nullptr
 		            : m_editorWorld->registry().try_get<EnvironmentComponent>(dumpSky))
@@ -5494,9 +5834,12 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 			e->cirrusAmount   = static_cast<float>(envF("HE_DUMP_CIRRUS", 0.0f));
 			e->cirrusSeed     = static_cast<float>(envF("HE_DUMP_CIRRUSSEED", 0.0f));
 			e->cloudHeight    = static_cast<float>(envF("HE_DUMP_CLOUDHEIGHT", 200.0f));
+			e->cloudDomeHeight = static_cast<float>(envF("HE_DUMP_CLOUDDOMEHEIGHT", 1.0f));
+			e->cloudQuality    = static_cast<int>(envF("HE_DUMP_CLOUDQUALITY", static_cast<float>(e->cloudQuality)));   // 0 Low, 1 Medium, 2 High
 			e->cloudShadows        = envF("HE_DUMP_CLOUDSHADOWS", e->cloudShadows ? 1.0f : 0.0f) > 0.5f;
 			e->cloudShadowStrength = static_cast<float>(envF("HE_DUMP_CLOUDSHADOWSTR", e->cloudShadowStrength));
 			e->cloudStyle          = static_cast<int>(envF("HE_DUMP_CLOUDSTYLE", static_cast<float>(e->cloudStyle)));
+			e->cloudType           = static_cast<int>(envF("HE_DUMP_CLOUDTYPE", static_cast<float>(e->cloudType)));
 			e->cloudInterShadows   = envF("HE_DUMP_INTERSHADOWS", e->cloudInterShadows ? 1.0f : 0.0f) > 0.5f;
 			e->cloudEvolution      = static_cast<float>(envF("HE_DUMP_CLOUDEVOLUTION", e->cloudEvolution));
 			e->windSpeed           = static_cast<float>(envF("HE_DUMP_WINDSPEED", e->windSpeed));
@@ -5529,6 +5872,21 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 			e->godRays           = static_cast<float>(envF("HE_DUMP_GODRAYS", e->godRays));
 			e->shootingStars     = static_cast<float>(envF("HE_DUMP_METEORS", e->shootingStars));
 			e->lensFlare         = static_cast<float>(envF("HE_DUMP_LENSFLARE", e->lensFlare));
+			// Fog (docs/volumetric-fog-plan.md): the analytic knobs plus the volume's, so a
+			// mode-0 / mode-1 pair of dumps differs only by FOGMODE. The loaded scene
+			// carries serialized values, hence the explicit overrides.
+			e->fogDensity        = static_cast<float>(envF("HE_DUMP_FOGDENSITY", e->fogDensity));
+			e->fogHeightFalloff  = static_cast<float>(envF("HE_DUMP_FOGFALLOFF", e->fogHeightFalloff));
+			e->fogMode           = static_cast<int>(envF("HE_DUMP_FOGMODE", static_cast<float>(e->fogMode)));
+			e->fogQuality        = static_cast<int>(envF("HE_DUMP_FOGQUALITY", static_cast<float>(e->fogQuality)));
+			e->fogVolumeDistance = static_cast<float>(envF("HE_DUMP_FOGDIST", e->fogVolumeDistance));
+			e->fogAnisotropy     = static_cast<float>(envF("HE_DUMP_FOGANISO", e->fogAnisotropy));
+			e->fogNoiseAmount    = static_cast<float>(envF("HE_DUMP_FOGNOISE", e->fogNoiseAmount));
+			e->fogNoiseScale     = static_cast<float>(envF("HE_DUMP_FOGNOISESCALE", e->fogNoiseScale));
+			e->fogBankDensity    = static_cast<float>(envF("HE_DUMP_FOGBANK", e->fogBankDensity));
+			e->fogBankBaseY      = static_cast<float>(envF("HE_DUMP_FOGBANKY", e->fogBankBaseY));
+			e->fogBankThickness  = static_cast<float>(envF("HE_DUMP_FOGBANKH", e->fogBankThickness));
+			e->fogLocalLightScatter = static_cast<float>(envF("HE_DUMP_FOGLIGHTS", e->fogLocalLightScatter));
 		}
 		// Look slightly up toward the sky from a low vantage. HE_DUMP_YAW rotates the
 		// heading (0 = toward -Z, 180 = toward +Z) so e.g. the aurora band can be framed.
@@ -6362,6 +6720,65 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 			"EditorApplication: HE_DUMP_SSRTEST witness scene added");
 	}
 
+	// ── Volumetric fog witness (HE_DUMP_FOGTEST, Thema 225): a grey ground slab with a
+	// row of tall pillars 12 m ahead of the default dump camera (a shadow caster for the
+	// shafts) and a few cubes nearer. =point additionally hangs a shadow-casting point
+	// light between the cubes. Pair with SKYTEST (sun position via TOD/YAW), the FOG*
+	// keys and HE_DUMP_WATERTEST=floor for the bank-over-water shot. Fixed world
+	// coordinates near the origin, like the other witnesses.
+	if (const char* ft = std::getenv("HE_DUMP_FOGTEST"); ft && *ft && m_editorWorld)
+	{
+		auto& reg = m_editorWorld->registry();
+		auto addBox = [&](const char* name, const glm::vec3& pos, const glm::vec3& scale,
+		                  float r, float g, float b)
+		{
+			MaterialAsset m;
+			m.type = HE::AssetType::Material;
+			m.name = name;
+			m.baseColor[0] = r; m.baseColor[1] = g; m.baseColor[2] = b;
+			m.roughness = 0.85f;
+			auto e = m_editorWorld->createEntity(name);
+			TransformComponent tc;
+			tc.position = pos;
+			tc.scale    = scale;
+			reg.emplace<TransformComponent>(e, tc);
+			reg.emplace<MeshComponent>(e, MeshComponent{ HE::kDefaultCubeMeshId });
+			reg.emplace<MaterialComponent>(e,
+				MaterialComponent{ contentManager().registerMaterial(std::move(m)) });
+		};
+		addBox("FogGround", glm::vec3(0.0f, -0.1f, -10.0f), glm::vec3(60.0f, 0.2f, 60.0f), 0.45f, 0.45f, 0.42f);
+		const bool slits = std::string(ft) == "slits";
+		if (slits)
+		{
+			// A 14 m wall 14 m ahead with three 1.2 m slits: the sun behind it throws parallel
+			// shafts through the fog toward the camera (the volumetric-shadow witness).
+			const float edges[4][2] = { { -24.0f, -9.6f }, { -8.4f, -0.6f }, { 0.6f, 8.4f }, { 9.6f, 24.0f } };
+			for (const auto& e : edges)
+				addBox("FogWall", glm::vec3(0.5f * (e[0] + e[1]), 7.0f, -14.0f),
+				       glm::vec3(e[1] - e[0], 14.0f, 0.6f), 0.55f, 0.52f, 0.48f);
+		}
+		for (int i = 0; i < (slits ? 0 : 5); ++i)
+			addBox("FogPillar", glm::vec3(-8.0f + 4.0f * static_cast<float>(i), 4.0f, -12.0f),
+			       glm::vec3(1.2f, 8.0f, 1.2f), 0.7f, 0.65f, 0.55f);
+		addBox("FogCubeA", glm::vec3(-2.0f, 0.6f, -6.0f), glm::vec3(1.2f), 0.8f, 0.3f, 0.25f);
+		addBox("FogCubeB", glm::vec3( 2.5f, 0.6f, -7.5f), glm::vec3(1.2f), 0.25f, 0.45f, 0.8f);
+		if (std::string(ft) == "point")
+		{
+			auto le = m_editorWorld->createEntity("FogLamp");
+			TransformComponent ltc;
+			ltc.position = glm::vec3(0.0f, 2.0f, -7.0f);
+			reg.emplace<TransformComponent>(le, ltc);
+			LightComponent lc;
+			lc.type        = HE::LightType::Point;
+			lc.color       = glm::vec3(1.0f, 0.75f, 0.45f);
+			lc.intensity   = 8.0f;
+			lc.range       = 14.0f;
+			lc.castsShadow = true;
+			reg.emplace<LightComponent>(le, lc);
+		}
+		HE_LOG_INFO(Editor, "%s", "EditorApplication: HE_DUMP_FOGTEST witness scene added");
+	}
+
 	// ── Engine water witness (HE_DUMP_WATERTEST, Thema 152): the SHIPPED
 	// Engine/Materials/Water.hasset on the engine plane (one quad — the waves are
 	// normals only), 40 m square at y = 0, and no other graph material — the case
@@ -7177,6 +7594,8 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 	// three discs plus yellow (layer 3, page 0), magenta (4), white (6) and
 	// orange (7) — the last three on the weightmap's SECOND page, which the
 	// renderer uploads as the right half of the one heLandscapeWeights texture.
+	// =12 adds lime (8), pink (9), brown (10) and navy (11) on the THIRD page,
+	// the right third of a 3:1 texture.
 	if (const char* ll = std::getenv("HE_DUMP_LANDSCAPELAYERS"); ll && *ll && m_editorWorld)
 	{
 		auto& reg = m_editorWorld->registry();
@@ -7187,18 +7606,24 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 		HE::MaterialGraph g;
 		const int out = g.addNode(HE::MatNodeType::Output);
 		const int lb  = g.addNode(HE::MatNodeType::LandscapeLayerBlend);
-		const bool eight = std::string_view(ll) == "8";
-		g.findNode(lb)->s = eight ? "Red\nGreen\nBlue\nYellow\nMagenta\nCyan\nWhite\nOrange"
-		                          : "Red\nGreen\nBlue";
-		const float rgb[8][3] = { { 0.90f, 0.10f, 0.10f },
-		                          { 0.10f, 0.85f, 0.15f },
-		                          { 0.15f, 0.25f, 0.95f },
-		                          { 0.95f, 0.90f, 0.10f },
-		                          { 0.90f, 0.10f, 0.90f },
-		                          { 0.10f, 0.90f, 0.90f },
-		                          { 0.95f, 0.95f, 0.95f },
-		                          { 0.95f, 0.50f, 0.05f } };
-		for (int i = 0; i < (eight ? 8 : 3); ++i)
+		const bool twelve = std::string_view(ll) == "12";
+		const bool eight  = twelve || std::string_view(ll) == "8";
+		g.findNode(lb)->s = twelve ? "Red\nGreen\nBlue\nYellow\nMagenta\nCyan\nWhite\nOrange\nLime\nPink\nBrown\nNavy"
+		                  : eight  ? "Red\nGreen\nBlue\nYellow\nMagenta\nCyan\nWhite\nOrange"
+		                           : "Red\nGreen\nBlue";
+		const float rgb[12][3] = { { 0.90f, 0.10f, 0.10f },
+		                           { 0.10f, 0.85f, 0.15f },
+		                           { 0.15f, 0.25f, 0.95f },
+		                           { 0.95f, 0.90f, 0.10f },
+		                           { 0.90f, 0.10f, 0.90f },
+		                           { 0.10f, 0.90f, 0.90f },
+		                           { 0.95f, 0.95f, 0.95f },
+		                           { 0.95f, 0.50f, 0.05f },
+		                           { 0.60f, 0.95f, 0.10f },
+		                           { 1.00f, 0.60f, 0.75f },
+		                           { 0.45f, 0.25f, 0.10f },
+		                           { 0.05f, 0.05f, 0.40f } };
+		for (int i = 0; i < (twelve ? 12 : eight ? 8 : 3); ++i)
 		{
 			const int c = g.addNode(HE::MatNodeType::ConstColor);
 			g.findNode(c)->p[0] = rgb[i][0];
@@ -7243,6 +7668,13 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 			TerrainPaint::paint(ltc, -34.0f, -30.0f, /*White*/   6, 9.0f, 3.0f, 1.0f);
 			TerrainPaint::paint(ltc,   0.0f,  40.0f, /*Orange*/  7, 7.0f, 2.0f, 1.0f);
 		}
+		if (twelve)   // the third weight page: the right third of the 3:1 map
+		{
+			TerrainPaint::paint(ltc,   0.0f, -36.0f, /*Lime*/    8, 7.0f, 2.0f, 1.0f);
+			TerrainPaint::paint(ltc, -36.0f,  -5.0f, /*Pink*/    9, 7.0f, 3.0f, 1.0f);
+			TerrainPaint::paint(ltc,  34.0f,   0.0f, /*Brown*/  10, 8.0f, 2.0f, 1.0f);
+			TerrainPaint::paint(ltc,  20.0f,  46.0f, /*Navy*/   11, 4.0f, 2.0f, 1.0f);
+		}
 		reg.emplace<TerrainComponent>(land, ltc);
 		reg.emplace<MaterialComponent>(land, MaterialComponent{ lmId });
 		// The headless dump renders from OnInit, BEFORE the main loop's
@@ -7250,8 +7682,8 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 		// entities yet and there is simply nothing to draw.
 		TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
 		HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_LANDSCAPELAYERS witness landscape added "
-			"(%d layers, weightmap %ux%u)", eight ? 8 : 3,
-			TerrainPaint::usesSecondPage(ltc) ? 2 * ltc.weightRes : ltc.weightRes,
+			"(%d layers, weightmap %ux%u)", twelve ? 12 : eight ? 8 : 3,
+			static_cast<unsigned>(TerrainPaint::weightPageCount(ltc)) * ltc.weightRes,
 			ltc.weightRes);
 	}
 
@@ -7702,6 +8134,31 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 			}
 			HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_FOLIAGELOD %zu level(s) from '%s'", fl.lods.size(), fd);
 		}
+		// HE_DUMP_FOLIAGEIMPOSTOR=<from>:<card path>:<material path> adds a baked impostor level
+		// (Thema 331 S4): the card and its cut-out material are project files, loaded by
+		// path, so the dump needs the project in the config (LastProjectPath). The log line
+		// says whether the three assets (card, material, its atlas) resolved; this is how
+		// the far level is seen on a backend the editor loop cannot drive headless (GL).
+		if (const char* ip = std::getenv("HE_DUMP_FOLIAGEIMPOSTOR"); ip && *ip && fl.lods.size() < FoliageLayer::kMaxLods)
+		{
+			const std::string spec(ip);
+			const size_t c1 = spec.find(':'), c2 = c1 == std::string::npos ? c1 : spec.find(':', c1 + 1);
+			if (c2 != std::string::npos)
+			{
+				FoliageLod d;
+				d.distance = static_cast<float>(std::atof(spec.c_str()));
+				d.meshAssetId     = contentManager().loadAsset(spec.substr(c1 + 1, c2 - c1 - 1));
+				d.materialAssetId = contentManager().loadAsset(spec.substr(c2 + 1));
+				const MaterialAsset* im = contentManager().getMaterial(d.materialAssetId);
+				const std::string atlas = im && !im->texturePaths.empty() ? im->texturePaths[0] : std::string{};
+				const HE::UUID atlasId = atlas.empty() ? HE::UUID{} : contentManager().loadAsset(atlas);
+				HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_FOLIAGEIMPOSTOR card %s, material %s, atlas '%s' %s",
+				            d.meshAssetId == HE::UUID{} ? "NOT loaded" : "loaded",
+				            d.materialAssetId == HE::UUID{} ? "NOT loaded" : "loaded", atlas.c_str(),
+				            atlasId == HE::UUID{} ? "NOT loaded" : "loaded");
+				fl.lods.push_back(d);
+			}
+		}
 		reg.emplace<FoliageComponent>(land, fol);
 		TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
 		const auto t0 = std::chrono::steady_clock::now();
@@ -7737,6 +8194,24 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 	//              between backends from the material's
 	//   =plaingraph a lit graph material that is only a constant grey: the
 	//              graph lighting path without textures or normal map
+	// HE_DUMP_TILEWORLD=<pack file>[,<texture group 0..3>]: a TILE landscape in the dump scene (LandscapeWorldComponent, Thema 326),
+	// through the editor's own runtime, provider and renderer. The pack is any landscape pack (landscape_gpu_check --write-pack
+	// writes a small painted one). The tiles are streamed in before the capture, further down.
+	if (const char* tw = std::getenv("HE_DUMP_TILEWORLD"); tw && *tw && m_editorWorld)
+	{
+		std::string packFile(tw);
+		int group = 1;
+		if (const size_t comma = packFile.rfind(','); comma != std::string::npos)
+		{
+			group = std::atoi(packFile.c_str() + comma + 1);
+			packFile.resize(comma);
+		}
+		const Entity e = m_editorWorld->createEntity("TileLandscape");
+		LandscapeWorldComponent lw;
+		lw.pack = packFile;
+		lw.textureGroup = group;
+		m_editorWorld->registry().emplace<LandscapeWorldComponent>(e, lw);
+	}
 	if (const char* al = std::getenv("HE_DUMP_AUTOLAND"); al && *al && m_editorWorld)
 	{
 		auto& reg = m_editorWorld->registry();
@@ -7747,6 +8222,14 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 		const bool builtin = mode == "builtin";
 		const bool normalV = mode == "normal";
 		const bool surface = mode == "surface";
+		const bool baseCol = mode == "basecolor";   // unlit albedo: what the far-landscape bake photographs
+		// HE_DUMP_AUTOLANDGROUP=Forest|Grassland|Desert (Thema 233): the texture group the witness shows
+		// (default Mountains = the shipped material). Its arrays are its own, so a group without them
+		// in the cache or EngineContent draws the white fallback, like Mountains does without its own.
+		const HE::AutoLandscapeGroup* group = &HE::autoLandscapeGroup(HE::AutoLandscapeGroupId::Mountains);
+		if (const char* gn = std::getenv("HE_DUMP_AUTOLANDGROUP"); gn && *gn)
+			for (const HE::AutoLandscapeGroup& g : HE::kAutoLandscapeGroups)
+				if (std::string_view(gn) == g.name) group = &g;
 		constexpr float kBaseY = 300.0f;
 		// HE_DUMP_AUTOLANDHEIGHT / HE_DUMP_AUTOLANDRAMP (metres): the plateau height and the
 		// width of the smoothstep ramp. The defaults (40 / 32) are the steep ramp every
@@ -7760,19 +8243,30 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 		};
 		const float kPlateau = envMetres("HE_DUMP_AUTOLANDHEIGHT", 40.0f);
 		const float kRamp    = envMetres("HE_DUMP_AUTOLANDRAMP", 32.0f);
-		const float snowHeight = kBaseY + 20.0f;
+		const bool mixWitnessSnow = [] { const char* v = std::getenv("HE_DUMP_AUTOLANDMIX"); return v && *v && *v != '0'; }();
+		const float snowHeight = kBaseY + (mixWitnessSnow ? 400.0f : 20.0f);   // the mix witness shows ground, not snow
 
+		// HE_DUMP_AUTOLANDMIX=1 (Thema 233): the mix material on a terrain with groupMix on, Mountains in the
+		// middle, Forest painted on the left and Desert on the right (placeholder fat arrays unless real ones
+		// are in EngineContent). Needs the fat arrays: landscape_tex_gen <dir> --mix --from <group arrays>.
+		const bool mixWitness = [] { const char* v = std::getenv("HE_DUMP_AUTOLANDMIX"); return v && *v && *v != '0'; }();
 		HE::UUID amId{};
 		std::string what;
 		if (builtin)
 			what = "default terrain material";
-		else if (mode == "plaingraph")
+		else if (mode == "plaingraph" || mode == "rawconst")
 		{
 			// A lit graph material with nothing but a constant grey: the graph
 			// lighting path (heLitP) without textures or a perturbed normal.
+			// "rawconst": the same UNLIT with the colour (0.2, 0.4, 0.6), the oracle of HE_DUMP_RAWTEST.
 			HE::MaterialGraph g;
 			const int out = g.addNode(HE::MatNodeType::Output);
 			const int col = g.addNode(HE::MatNodeType::ConstColor);
+			if (mode == "rawconst")
+			{
+				g.findNode(out)->p[0] = 0.0f;
+				g.findNode(col)->p[0] = 0.2f; g.findNode(col)->p[1] = 0.4f; g.findNode(col)->p[2] = 0.6f;
+			}
 			g.connect(col, 0, out, HE::kMatOutputBaseColorPin);
 			MaterialAsset am;
 			am.type = HE::AssetType::Material;
@@ -7782,12 +8276,13 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 			contentManager().regenerateMaterialFromGraph(amId);
 			what = "plain lit graph material";
 		}
-		else if (masks || ground || normalV || surface)
+		else if (masks || ground || normalV || surface || baseCol)
 		{
 			HE::AutoLandscapeGraph built = HE::buildAutoLandscapeGraph(
 				masks   ? HE::AutoLandscapeView::MasksRockSnowWater :
 				ground  ? HE::AutoLandscapeView::MasksDirtWet :
-				normalV ? HE::AutoLandscapeView::Normal : HE::AutoLandscapeView::Surface);
+				baseCol ? HE::AutoLandscapeView::BaseColor :
+				normalV ? HE::AutoLandscapeView::Normal : HE::AutoLandscapeView::Surface, group->id);
 			for (HE::MatGraphNode& n : built.graph.nodes)
 				if (n.type == HE::MatNodeType::ParamFloat && n.s == HE::kAutoLandscapeParamSnowHeight)
 					n.p[0] = snowHeight;
@@ -7798,15 +8293,18 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 			amId = contentManager().registerMaterial(std::move(am));
 			contentManager().regenerateMaterialFromGraph(amId);
 			what = masks ? "masks rock/snow/water" : ground ? "masks dirt/wet/flat"
-			     : normalV ? "final normal" : "AO/roughness";
+			     : baseCol ? "unlit albedo" : normalV ? "final normal" : "AO/roughness";
 		}
 		else
 		{
-			const HE::UUID parent = contentManager().loadAsset(HE::kAutoLandscapeMaterialPath);
+			// The mix witness is an instance of the mix material (Snow Height moved like the group ones).
+			const char* parentPath = mixWitness ? HE::kAutoLandscapeMixMaterialPath : group->materialPath;
+			const HE::UUID parentId = mixWitness ? HE::kAutoLandscapeMixMaterialId : group->materialId;
+			const HE::UUID parent = contentManager().loadAsset(parentPath);
 			MaterialAsset inst;
 			inst.type = HE::AssetType::Material;
 			inst.name = "AutoLandscapeWitness";
-			inst.parentMaterialPath       = HE::kAutoLandscapeMaterialPath;
+			inst.parentMaterialPath       = parentPath;
 			inst.graphParamNames          = { HE::kAutoLandscapeParamSnowHeight };
 			inst.shaderParamData          = { snowHeight, 0.0f, 0.0f, 0.0f };
 			inst.instanceOverriddenParams = { HE::kAutoLandscapeParamSnowHeight };
@@ -7817,7 +8315,8 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 			}
 			amId = contentManager().registerMaterial(std::move(inst));
 			contentManager().syncMaterialInstance(amId);
-			what = std::string(parent == HE::kAutoLandscapeMaterialId ? "shipped asset" : "ASSET NOT FOUND")
+			what = std::string(parent == parentId ? "shipped asset" : "ASSET NOT FOUND")
+			     + (mixWitness ? " (mix)" : std::string(" (") + group->name + ")")
 			     + (noBomb ? ", bombing off" : ", bombing on");
 		}
 
@@ -7826,24 +8325,84 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 		ltf.position = glm::vec3(0.0f, kBaseY, 0.0f);
 		reg.emplace<TransformComponent>(land, ltf);
 		TerrainComponent ltc;
-		ltc.sizeX = ltc.sizeZ = 128.0f;
-		ltc.resolution = 129;      // 2^n + 1: no resample, one vertex per metre
+		// HE_DUMP_AUTOLANDSIZE=<m>: a power of two, 128 (default) up to 2048: 4 .. 1024 chunks, for the cost of a page against
+		// the size of the landscape the scratch world holds (Thema 333).
+		float landSize = 128.0f;
+		if (const char* ls = std::getenv("HE_DUMP_AUTOLANDSIZE"); ls && *ls)
+			landSize = std::clamp(static_cast<float>(std::atof(ls)), 128.0f, 2048.0f);
+		ltc.sizeX = ltc.sizeZ = landSize;
+		ltc.resolution = static_cast<uint32_t>(landSize) + 1;   // 2^n + 1: no resample, one vertex per metre
 		ltc.heightScale = 0.0f;
 		ltc.seed = 0;
 		ltc.sculptHeights.resize(static_cast<size_t>(ltc.resolution) * ltc.resolution);
 		for (uint32_t zi = 0; zi < ltc.resolution; ++zi)
 			for (uint32_t xi = 0; xi < ltc.resolution; ++xi)
 			{
-				const float x = -64.0f + static_cast<float>(xi);
+				const float x = -0.5f * landSize + static_cast<float>(xi);
 				const float t = std::clamp((x + 24.0f) / kRamp, 0.0f, 1.0f);
 				ltc.sculptHeights[static_cast<size_t>(zi) * ltc.resolution + xi] =
 					kPlateau * t * t * (3.0f - 2.0f * t);
 			}
 		ltc.dirty = true;
+		// HE_DUMP_TRAILTEST (Thema 328): the refined ground carries the trails as real geometry; one vertex per metre
+		// refined four times is the field's 0.25 m.
+		// HE_DUMP_TRAILDRAG=<frames> (the cost witness, below) uses the same refined ground; HE_DUMP_TRAILTESS=1|2|4
+		// overrides the factor (1 = no refinement, the baseline).
+		const char* tdw = std::getenv("HE_DUMP_TRAILDRAG");
+		const char* ttw = std::getenv("HE_DUMP_TRAILTEST");
+		if ((tdw && *tdw && *tdw != '0') || (ttw && *ttw && *ttw != '0'))
+		{
+			const char* tf = std::getenv("HE_DUMP_TRAILTESS");
+			ltc.tessellationFactor   = (tf && *tf) ? std::atoi(tf) : 4;
+			ltc.tessellationDistance = 80.0f;
+		}
+		if (mixWitness)
+		{
+			ltc.weightRes = 256;
+			TerrainPaint::ensureWeightmap(ltc);
+			TerrainPaint::enableGroupMix(ltc, static_cast<int>(HE::AutoLandscapeGroupId::Mountains));
+			TerrainPaint::paintGroup(ltc, -34.0f, 0.0f, static_cast<int>(HE::AutoLandscapeGroupId::Forest),    26.0f, 8.0f, 1.0f);
+			TerrainPaint::paintGroup(ltc,  34.0f, 0.0f, static_cast<int>(HE::AutoLandscapeGroupId::Desert),    26.0f, 8.0f, 1.0f);
+			TerrainPaint::paintGroup(ltc,   0.0f, 44.0f, static_cast<int>(HE::AutoLandscapeGroupId::Grassland), 16.0f, 8.0f, 1.0f);
+		}
 		reg.emplace<TerrainComponent>(land, ltc);
 		if (!builtin) // without one, TerrainSystem attaches kDefaultTerrainMaterialId
 			reg.emplace<MaterialComponent>(land, MaterialComponent{ amId });
 		TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
+		// HE_DUMP_TRAILTEST=1 (Thema 328 step 5b): over the snow plateau (x 12..60) and the plain (x -100..-30, sand)
+		// boot-sized footprints along parallel lines (a press: a pit and nothing else), two tracks DRAGGED through
+		// (z = -8 and z = -16: a groove with a heap on both sides) and a set-down tyre line (z = -22, a pit only). The
+		// pose looks toward -Z. Stamped
+		// once here; the scene tick heals them with the (calm) weather.
+		if (const char* tt = std::getenv("HE_DUMP_TRAILTEST"); tt && *tt && *tt != '0')
+		{
+			HE::TrailField& tf = TrailSystem::runtime(*m_editorWorld).field;
+			auto walk = [&](float x0, float x1, float z, HE::TrailSurface kind) {
+				int i = 0;
+				for (float x = x0; x < x1; x += 0.8f, ++i)
+					tf.stampEllipse(x, z + ((i & 1) ? 0.25f : -0.25f), 0.4f, 0.17f, 0.0f, 0.9f, kind);
+			};
+			auto drag = [&](float x0, float x1, float z, HE::TrailSurface kind) {
+				// One short segment per "frame", as gameplay will call it.
+				for (float x = x0; x < x1; x += 0.35f)
+					tf.plowCapsule(x, z, x + 0.35f, z, 0.35f, 0.7f, 0.55f, 0.55f, kind);
+			};
+			for (float z = -16.0f; z <= 16.0f; z += 4.0f)
+			{
+				if (z == -8.0f || z == -16.0f)
+				{
+					drag(12.0f, 60.0f, z, HE::TrailSurface::Snow);
+					drag(-100.0f, -30.0f, z, HE::TrailSurface::Sand);
+					continue;
+				}
+				walk(12.0f, 60.0f, z, HE::TrailSurface::Snow);
+				walk(-100.0f, -30.0f, z, HE::TrailSurface::Sand);
+			}
+			tf.stampCapsule(12.0f, -22.0f, 60.0f, -22.0f, 0.3f, 0.8f, HE::TrailSurface::Snow);
+			tf.stampCapsule(-100.0f, -22.0f, -30.0f, -22.0f, 0.3f, 0.8f, HE::TrailSurface::Sand);
+			HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_TRAILTEST stamped %zu texels on %zu pages",
+			            tf.activeTexels(), tf.pageCount());
+		}
 		const MaterialAsset* ma = contentManager().getMaterial(amId);
 		HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_AUTOLAND witness landscape added "
 			"(mode %s, %s, %zu graph textures, array mask %u, %zu params, snow at y=%.0f)",
@@ -7851,7 +8410,7 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 			ma ? HE::matGlslTextureArrayMask(ma->customShaderFragGlsl) : 0u,
 			ma ? ma->graphParamNames.size() : size_t(0), snowHeight);
 
-		// HE_DUMP_AUTOLANDMESHES=tuft,pebble,rocka,rockb,rockc,snowdrift (Thema 180 Schritt 5): a
+		// HE_DUMP_AUTOLANDMESHES=tuft,pebble,rocka,rockb,rockc,snowdrift,fern,.. (Thema 180 Schritt 5, any kind's stem): a
 		// Foliage component on this landscape with one layer per named kind, each filled by its
 		// preset (LayerMeshPresets.h) and so drawn through the foliage cluster path. Every level
 		// file is loaded here (engine files are not resident by themselves, and a mesh the
@@ -7880,17 +8439,15 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 				std::string item = spec.substr(at, end - at);
 				at = end + 1;
 				for (char& ch : item) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
-				static const std::pair<const char*, HE::LayerMeshKind> kinds[] = {
-					{ "tuft", HE::LayerMeshKind::Tuft },     { "pebble", HE::LayerMeshKind::Pebble },
-					{ "rocka", HE::LayerMeshKind::RockA },   { "rockb", HE::LayerMeshKind::RockB },
-					{ "rockc", HE::LayerMeshKind::RockC },   { "snowdrift", HE::LayerMeshKind::SnowDrift } };
-				const HE::LayerMeshKind* kind = nullptr;
-				for (const auto& kv : kinds) if (item == kv.first) kind = &kv.second;
+				// A kind's file stem, any case (tuft, pebble, rocka .. snowdrift, fern, foreststump,
+				// fallenlog, mossrock, tallgrass, flowertuft, screechip).
+				const HE::LayerMeshKind kindOfItem = HE::layerMeshKindOfStem(item);
+				const HE::LayerMeshKind* kind = kindOfItem == HE::LayerMeshKind::Count ? nullptr : &kindOfItem;
 				if (!kind) continue;
 				FoliageLayer* layer = made == 0 ? &fol.layers[0] : fol.addLayer();
 				if (!layer) break;
 				++made;
-				HE::applyLayerMeshPreset(*layer, *kind);
+				HE::applyLayerMeshPreset(*layer, *kind, group->id);   // the witness's HE_DUMP_AUTOLANDGROUP
 				layer->density *= densMul;
 				if (const char* ru = std::getenv("HE_DUMP_AUTOLANDMESHRULES"); ru && *ru && std::atoi(ru) == 0)
 				{
@@ -9121,8 +9678,12 @@ void EditorApplication::dumpFrameHeadless()
 	auto arriveArrays = [&](const char* when)
 	{
 		namespace fs = std::filesystem;
-		for (const char* rel : { HE::kAutoLandscapeAlbedoArray, HE::kAutoLandscapeNormalArray,
-		                         HE::kAutoLandscapeMaskArray })
+		// The arrays of the texture group HE_DUMP_AUTOLANDGROUP names (default Mountains), Thema 233.
+		const HE::AutoLandscapeGroup* arriveGroup = &HE::autoLandscapeGroup(HE::AutoLandscapeGroupId::Mountains);
+		if (const char* gn = std::getenv("HE_DUMP_AUTOLANDGROUP"); gn && *gn)
+			for (const HE::AutoLandscapeGroup& g : HE::kAutoLandscapeGroups)
+				if (std::string_view(gn) == g.name) arriveGroup = &g;
+		for (const char* rel : arriveGroup->arrayPaths)
 		{
 			const std::string relPath(rel);
 			const std::string leaf = fs::path(relPath).filename().string();
@@ -9217,6 +9778,7 @@ void EditorApplication::dumpFrameHeadless()
 				mat->blendMode            = gen.blendMode;
 				mat->domain               = gen.domain;
 				mat->graphLayerNames      = gen.layerNames;
+				mat->foliageSetId         = gen.foliageSetId;
 			}
 			HE_LOG_INFO(Editor, "%s",
 				("EditorApplication: HE_DUMP_LAYEREDIT re-authored the layers (" + mode + ")").c_str());
@@ -9614,7 +10176,226 @@ void EditorApplication::dumpFrameHeadless()
 	// Everything here goes through the ordinary path — a widget asset, the
 	// widget manager, the extractor, the backend's UI shader — so what the
 	// capture shows is what an application would get, not a demo drawn beside it.
-	if (const char* ui = std::getenv("HE_DUMP_UITEST"); ui && *ui && m_editorWorld)
+	// HE_DUMP_UITEST=materials: twelve tiles, each a widget MATERIAL — plain
+	// math, logic, a checker, a texture read with tiling, parameters, the
+	// element inputs, and the shipped UI effects (State Tint, Inner Border,
+	// Edge Fade, Soft Rounded Mask, Scanlines, Frosted Glass over stripes).
+	// The same sheet on Metal, GL and Software is the proof that the CPU
+	// interpreter (MatCpuProgram) draws what the GPU draws. Nothing here reads
+	// Time: two captures could not agree on the clock.
+	if (const char* ui = std::getenv("HE_DUMP_UITEST"); ui && std::string_view(ui) == "materials" && m_editorWorld)
+	{
+		using MT = HE::MatNodeType;
+		HE::UIWidgetTree t;
+		t.canvasWidth = 1280.0f; t.canvasHeight = 720.0f;
+		t.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+		auto panel = [&](float x, float y, float w, float h, glm::vec4 c) -> HE::UIElement&
+		{
+			HE::UIElement& e = *t.find(t.add(HE::UIWidgetType::Panel));
+			HE::uiSetAnchorPreset(e, 0);
+			e.pivotX = e.pivotY = 0.0f;
+			e.posX = x; e.posY = y; e.sizeX = w; e.sizeY = h;
+			e.setProp("Color", HE::UIPropValue::ofColor(c));
+			return e;
+		};
+		// An opaque page, so a backdrop reads the UI and not the sky behind it.
+		panel(0, 0, 1280, 720, { 0.12f, 0.13f, 0.16f, 1.0f });
+		for (float x = 350.0f; x < 610.0f; x += 8.0f)   // stripes under the frosted tile
+			panel(x, 410.0f, 4.0f, 130.0f, { 1.0f, 1.0f, 1.0f, 1.0f });
+
+		// An asymmetric 8x4 picture, sRGB like an imported colour texture.
+		{
+			TextureAsset ta;
+			ta.name = "__matWitnessTex"; ta.path = "__matWitnessTex.hasset";
+			ta.width = 8; ta.height = 4; ta.channels = 4; ta.srgb = true;
+			ta.data.resize(8 * 4 * 4);
+			for (uint32_t y = 0; y < 4; ++y)
+				for (uint32_t x = 0; x < 8; ++x)
+				{
+					uint8_t* p = &ta.data[(y * 8 + x) * 4];
+					p[0] = static_cast<uint8_t>(30 + 28 * x);
+					p[1] = static_cast<uint8_t>(40 + 60 * y);
+					p[2] = (x + y) % 3 == 0 ? 220 : 40;
+					p[3] = 255;
+				}
+			contentManager().registerTexture(std::move(ta));
+		}
+
+		int idx = 0;
+		auto materialTile = [&](HE::MaterialGraph g, int blend)
+		{
+			for (auto& n : g.nodes)
+				if (n.type == MT::Output) { n.p[1] = static_cast<float>(blend); n.p[3] = 1.0f; }
+			MaterialAsset ma;
+			ma.name = "__matWitness" + std::to_string(idx);
+			ma.path = ma.name + ".hasset";
+			ma.nodeGraphJson = HE::materialGraphToJson(g);
+			const std::string path = ma.path;
+			const HE::UUID mid = contentManager().registerMaterial(std::move(ma));
+			contentManager().regenerateMaterialFromGraph(mid);
+			const int col = idx % 4, row = idx / 4;
+			HE::UIElement& e = panel(60.0f + col * 300.0f, 80.0f + row * 170.0f, 240.0f, 110.0f,
+			                         { 1.0f, 1.0f, 1.0f, 1.0f });
+			e.material = path;
+			++idx;
+		};
+		auto graph = [](int& out) { HE::MaterialGraph g; out = g.addNode(MT::Output); return g; };
+		auto fnCall = [](HE::MaterialGraph& g, const char* name)
+		{
+			const int c = g.addNode(MT::FunctionCall);
+			g.findNode(c)->s = std::string("Engine/MaterialFunctions/") + name + ".hasset";
+			return c;
+		};
+		auto constant = [](HE::MaterialGraph& g, MT type, float a, float b = 0, float c = 0)
+		{
+			const int n = g.addNode(type);
+			g.findNode(n)->p[0] = a; g.findNode(n)->p[1] = b; g.findNode(n)->p[2] = c;
+			return n;
+		};
+		const int kBase = HE::kMatOutputBaseColorPin, kOpacity = HE::kMatOutputOpacityPin;
+		{   // 0: the element UV as colour
+			int o; HE::MaterialGraph g = graph(o);
+			g.connect(g.addNode(MT::ElementUV), 0, o, kBase);
+			materialTile(g, 0);
+		}
+		{   // 1: a checker between two colours
+			int o; HE::MaterialGraph g = graph(o);
+			const int a = constant(g, MT::ConstColor, 0.9f, 0.4f, 0.1f), b = constant(g, MT::ConstColor, 0.1f, 0.3f, 0.8f);
+			const int ch = g.addNode(MT::Checker), s = constant(g, MT::ConstFloat, 6.0f), l = g.addNode(MT::Lerp);
+			g.connect(s, 0, ch, 1); g.connect(a, 0, l, 0); g.connect(b, 0, l, 1); g.connect(ch, 0, l, 2);
+			g.connect(l, 0, o, kBase);
+			materialTile(g, 0);
+		}
+		{   // 2: If (u > 0.5) times a smoothstep over v
+			int o; HE::MaterialGraph g = graph(o);
+			const int uv = g.addNode(MT::ElementUV), sp = g.addNode(MT::SplitRGBA);
+			g.connect(uv, 0, sp, 0);
+			const int gt = g.addNode(MT::Greater), half = constant(g, MT::ConstFloat, 0.5f);
+			g.connect(sp, 0, gt, 0); g.connect(half, 0, gt, 1);
+			const int iff = g.addNode(MT::If);
+			g.connect(gt, 0, iff, 0);
+			g.connect(constant(g, MT::ConstColor, 0.2f, 0.9f, 0.4f), 0, iff, 1);
+			g.connect(constant(g, MT::ConstColor, 0.9f, 0.2f, 0.5f), 0, iff, 2);
+			const int ss = g.addNode(MT::Smoothstep);
+			g.connect(constant(g, MT::ConstFloat, 0.2f), 0, ss, 0);
+			g.connect(constant(g, MT::ConstFloat, 0.8f), 0, ss, 1);
+			g.connect(sp, 1, ss, 2);
+			const int m = g.addNode(MT::Multiply);
+			g.connect(iff, 0, m, 0); g.connect(ss, 0, m, 1);
+			g.connect(m, 0, o, kBase);
+			materialTile(g, 0);
+		}
+		{   // 3: a texture read, tiled twice across
+			int o; HE::MaterialGraph g = graph(o);
+			const int uv = constant(g, MT::UV, 2.0f, 1.0f);
+			const int tx = g.addNode(MT::TextureSample);
+			g.findNode(tx)->s = "__matWitnessTex.hasset";
+			g.connect(uv, 0, tx, 0);
+			g.connect(tx, 0, o, kBase);
+			materialTile(g, 0);
+		}
+		{   // 4: State Tint on a colour
+			int o; HE::MaterialGraph g = graph(o);
+			const int c = fnCall(g, "StateTint");
+			g.connect(constant(g, MT::ConstColor, 0.3f, 0.5f, 0.9f), 0, c, 0);
+			g.connect(c, 0, o, kBase);
+			materialTile(g, 0);
+		}
+		for (const char* maskFn : { "InnerBorder", "EdgeFade", "SoftRoundedMask" })
+		{   // 5-7: a colour, its opacity from the effect's mask
+			int o; HE::MaterialGraph g = graph(o);
+			g.connect(constant(g, MT::ConstColor, 0.95f, 0.75f, 0.3f), 0, o, kBase);
+			g.connect(fnCall(g, maskFn), 0, o, kOpacity);
+			materialTile(g, 2);
+		}
+		{   // 8: Scanlines as a multiplier
+			int o; HE::MaterialGraph g = graph(o);
+			const int m = g.addNode(MT::Multiply);
+			g.connect(constant(g, MT::ConstColor, 0.4f, 0.9f, 0.6f), 0, m, 0);
+			g.connect(fnCall(g, "Scanlines"), 0, m, 1);
+			g.connect(m, 0, o, kBase);
+			materialTile(g, 0);
+		}
+		{   // 9: Frosted Glass over the stripes
+			int o; HE::MaterialGraph g = graph(o);
+			g.connect(fnCall(g, "FrostedGlass"), 0, o, kBase);
+			materialTile(g, 0);
+		}
+		{   // 10: the element's own shapes: Rounded Rect mask, border distance
+			int o; HE::MaterialGraph g = graph(o);
+			const int rr = g.addNode(MT::RoundedRectSDF), bd = g.addNode(MT::BorderDistance);
+			const int k = constant(g, MT::ConstFloat, 0.05f), mul = g.addNode(MT::Multiply);
+			g.connect(bd, 0, mul, 0); g.connect(k, 0, mul, 1);
+			const int sat = g.addNode(MT::Saturate);
+			g.connect(mul, 0, sat, 0);
+			const int c3 = g.addNode(MT::Combine3), sp = g.addNode(MT::SplitRGBA);
+			g.connect(sat, 0, sp, 0);
+			g.connect(rr, 1, c3, 0); g.connect(sp, 0, c3, 1);
+			g.connect(c3, 0, o, kBase);
+			materialTile(g, 0);
+		}
+		{   // 11: a colour parameter times the element UV
+			int o; HE::MaterialGraph g = graph(o);
+			const int p = constant(g, MT::ParamColor, 0.2f, 0.7f, 0.9f);
+			g.findNode(p)->s = "Tint";
+			const int m = g.addNode(MT::Multiply);
+			g.connect(p, 0, m, 0); g.connect(g.addNode(MT::ElementUV), 0, m, 1);
+			g.connect(m, 0, o, kBase);
+			materialTile(g, 0);
+		}
+
+		UIWidgetAsset wa;
+		wa.type = HE::AssetType::Widget;
+		wa.name = "__uiMaterialWitness";
+		wa.path = "__uiMaterialWitness.hasset";
+		wa.treeJson = HE::uiWidgetTreeToJson(t);
+		if (contentManager().registerWidget(std::move(wa)) != HE::UUID{})
+			if (const int inst = m_editorWorld->widgets().createWidget(contentManager(), "__uiMaterialWitness.hasset"))
+				m_editorWorld->widgets().showWidget(inst);
+	}
+	// HE_DUMP_UITEST=text: one line of text at 9, 10, 12, 14, 18 and 24 px, light
+	// on dark and dark on light — what small text looks like on each backend,
+	// for comparing the software rasterizer's glyphs with the GPU's.
+	else if (const char* ui = std::getenv("HE_DUMP_UITEST"); ui && std::string_view(ui) == "text" && m_editorWorld)
+	{
+		HE::UIWidgetTree t;
+		t.canvasWidth = 1280.0f; t.canvasHeight = 720.0f;
+		t.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+		auto add = [&](HE::UIWidgetType type, float x, float y, float w, float h) -> HE::UIElement&
+		{
+			HE::UIElement& e = *t.find(t.add(type));
+			HE::uiSetAnchorPreset(e, 0);
+			e.pivotX = e.pivotY = 0.0f;
+			e.posX = x; e.posY = y; e.sizeX = w; e.sizeY = h;
+			return e;
+		};
+		add(HE::UIWidgetType::Panel, 0, 0, 1280, 720)
+			.setProp("Color", HE::UIPropValue::ofColor({ 0.10f, 0.11f, 0.13f, 1.0f }));
+		add(HE::UIWidgetType::Panel, 640, 0, 640, 720)
+			.setProp("Color", HE::UIPropValue::ofColor({ 0.95f, 0.95f, 0.93f, 1.0f }));
+		float y = 40.0f;
+		for (const float size : { 9.0f, 10.0f, 12.0f, 14.0f, 18.0f, 24.0f })
+		{
+			for (int side = 0; side < 2; ++side)
+			{
+				HE::UIElement& e = add(HE::UIWidgetType::Text, 40.0f + side * 640.0f, y, 580.0f, size * 2.0f);
+				e.setProp("Text", HE::UIPropValue::ofString("Settings: Volume 75% - Quick brown fox 0123"));
+				e.setProp("FontSize", HE::UIPropValue::ofFloat(size));
+				e.setProp("Color", HE::UIPropValue::ofColor(side ? glm::vec4(0.1f, 0.1f, 0.12f, 1.0f)
+				                                                 : glm::vec4(0.92f, 0.92f, 0.95f, 1.0f)));
+			}
+			y += size * 2.0f + 30.0f;
+		}
+		UIWidgetAsset wa;
+		wa.type = HE::AssetType::Widget;
+		wa.name = "__uiTextWitness";
+		wa.path = "__uiTextWitness.hasset";
+		wa.treeJson = HE::uiWidgetTreeToJson(t);
+		if (contentManager().registerWidget(std::move(wa)) != HE::UUID{})
+			if (const int inst = m_editorWorld->widgets().createWidget(contentManager(), "__uiTextWitness.hasset"))
+				m_editorWorld->widgets().showWidget(inst);
+	}
+	else if (const char* ui = std::getenv("HE_DUMP_UITEST"); ui && *ui && m_editorWorld)
 	{
 		HE::UIWidgetTree t;
 		t.canvasWidth = 1280.0f; t.canvasHeight = 720.0f;
@@ -9668,9 +10449,12 @@ void EditorApplication::dumpFrameHeadless()
 		// Kept off the plain "=1" sheet so the Thema-133 baselines stay as measured.
 		// The widget refers to its picture by path and the manager resolves it
 		// again on instantiation, so the texture is registered under that path.
-		if (std::string_view(ui) == "image")
+		// HE_DUMP_UITEST=pixelated is the same tile from a 4x4 picture with
+		// Pixelated on: the colour seams must be hard steps, not 60 px fades.
+		const bool pixelatedTile = std::string_view(ui) == "pixelated";
+		if (std::string_view(ui) == "image" || pixelatedTile)
 		{
-			constexpr uint32_t kSz = 64;
+			const uint32_t kSz = pixelatedTile ? 4u : 64u;
 			TextureAsset ta;
 			ta.name = "__uiImageWitness";
 			ta.path = "__uiImageWitness.hasset";
@@ -9702,6 +10486,7 @@ void EditorApplication::dumpFrameHeadless()
 			e.sizeX = 240.0f; e.sizeY = 110.0f;
 			e.texture = "__uiImageWitness.hasset";
 			e.setProp("Tint", HE::UIPropValue::ofColor({ 1.0f, 1.0f, 1.0f, 1.0f }));
+			if (pixelatedTile) e.setProp("Pixelated", HE::UIPropValue::ofBool(true));
 		}
 
 		UIWidgetAsset wa;
@@ -9717,6 +10502,17 @@ void EditorApplication::dumpFrameHeadless()
 			if (inst) m_editorWorld->widgets().showWidget(inst);
 			else HE_LOG_WARN(Editor, "%s",
 				"EditorApplication: the UI style witness could not be instantiated");
+			// HE_UIPREVIEW_DUMP=<file.ppm>: the same sheet once more through
+			// RenderUIPreview, the widget designer's path, which the backend
+			// writes out (see its implementation) — the headless proof that the
+			// designer's target holds the frame's picture.
+			if (const char* pv = std::getenv("HE_UIPREVIEW_DUMP"); inst && pv && *pv && renderer())
+			{
+				std::vector<UIRenderObject> quads;
+				m_editorWorld->widgets().extract(1280.0f, 720.0f, quads);
+				renderer()->RenderUIPreview(quads, 1280, 720,
+					glm::vec4(12.0f / 255.0f, 12.0f / 255.0f, 14.0f / 255.0f, 1.0f), 0);
+			}
 		}
 	}
 
@@ -9875,6 +10671,67 @@ void EditorApplication::dumpFrameHeadless()
 		}
 		HE_LOG_INFO(Editor, "%s",
 			"EditorApplication: HE_DUMP_ROPETEST tube + ribbon rope and a swept trail added");
+	}
+
+	// ── Entity-cooking witness (HE_DUMP_COOKTEST=1, Thema 343 Schritt 14): the
+	// three cases Schritt 13 changed, in one scene — compare a dump with
+	// HE_COOK_STATIC=0 against one with =1, the pixels must match. A floor
+	// catches their shadows so the shadow pass (fitDirectionalShadow, which
+	// reads a cooked row's worldBounds/castsShadow) is exercised too.
+	//   • CookTestRopeChild0/1, mesh CHILDREN of a RopeComponent parent: the
+	//     parent's Geometry blocker does not pass to the children
+	//     (kAncestorIgnored in CookAnalysis.cpp), so they still cook.
+	//   • CookTestRig, a mesh entity carrying CameraRigComponent itself: the
+	//     Locomotion blocker keeps it OUT of the cooked block (no row at all).
+	//   • CookTestSaveState, a mesh entity carrying SaveStateComponent: Regel 7
+	//     is gone, so it cooks like any other static mesh.
+	// The rope parent's own geometry is not driven through RopeTrailSystem here
+	// — it draws through RopeComponent::runtimeMeshId, a path cooking never
+	// touches, so it adds nothing to this check and is left out.
+	if (const char* ct = std::getenv("HE_DUMP_COOKTEST"); ct && *ct && m_editorWorld)
+	{
+		auto& reg = m_editorWorld->registry();
+		const float cp = std::cos(m_editorCamera.pitch()), sp = std::sin(m_editorCamera.pitch());
+		const float cy = std::cos(m_editorCamera.yaw()),   sy = std::sin(m_editorCamera.yaw());
+		const glm::vec3 camFwd(cp * sy, sp, -cp * cy);
+		const glm::vec3 right = glm::normalize(glm::cross(camFwd, glm::vec3(0.0f, 1.0f, 0.0f)));
+		const glm::vec3 origin = m_editorCamera.position() + camFwd * 10.0f;
+
+		auto makeCube = [&](const char* name, const glm::vec3& pos, const glm::vec3& scale = glm::vec3(0.8f)) {
+			auto e = m_editorWorld->createEntity(name);
+			TransformComponent tc; tc.position = pos; tc.scale = scale;
+			reg.emplace<TransformComponent>(e, tc);
+			reg.emplace<MeshComponent>(e, MeshComponent{ HE::kDefaultCubeMeshId });
+			return e;
+		};
+
+		// A floor for the three cubes' shadows to land on (TOD/COVERAGE pick the
+		// sun; without a floor the shadow pass has nothing to show a difference on).
+		makeCube("CookTestFloor", origin + glm::vec3(0.0f, -1.1f, 0.0f), glm::vec3(16.0f, 0.2f, 6.0f));
+
+		auto ropeParent = m_editorWorld->createEntity("CookTestRopeParent");
+		TransformComponent rtc; rtc.position = origin - right * 4.0f;
+		reg.emplace<TransformComponent>(ropeParent, rtc);
+		RopeComponent rope;
+		rope.controlPoints = { { 0.0f, 0.0f, 0.0f }, { 1.0f, 0.5f, 0.0f } };
+		reg.emplace<RopeComponent>(ropeParent, rope);
+		// Two children: "a Trail/Rope parent with mesh children", plural.
+		for (int i = 0; i < 2; ++i)
+		{
+			const glm::vec3 local(static_cast<float>(i) * 1.0f - 0.5f, 1.2f, 0.0f);
+			const Entity ropeChild = makeCube(i == 0 ? "CookTestRopeChild0" : "CookTestRopeChild1", local);
+			m_editorWorld->reparentEntity(ropeChild, ropeParent);
+			reg.get<TransformComponent>(ropeChild).position = local;
+		}
+
+		const Entity rig = makeCube("CookTestRig", origin);
+		reg.emplace<CameraRigComponent>(rig, CameraRigComponent{});
+
+		const Entity saved = makeCube("CookTestSaveState", origin + right * 4.0f);
+		reg.emplace<SaveStateComponent>(saved, SaveStateComponent{});
+
+		HE_LOG_INFO(Editor, "%s",
+			"EditorApplication: HE_DUMP_COOKTEST floor / rope+2 children / camera-rig / save-state entities added");
 	}
 
 	// ── Selection / collider witness (HE_DUMP_SELBOXTEST=1): entities that sit
@@ -10176,6 +11033,251 @@ void EditorApplication::dumpFrameHeadless()
 	int settleFrames = 3;
 	if (const char* sf = std::getenv("HE_DUMP_FRAMES"); sf && *sf)
 		settleFrames = std::clamp(std::atoi(sf), 1, 240);
+	// HE_DUMP_TILEWORLD: the dump renders without scene ticks, so the tile landscape is started and streamed in here, with the same
+	// calls the frame loop makes (the runtime on the world, the provider on the renderer, update around the editor camera).
+	if (const char* tw = std::getenv("HE_DUMP_TILEWORLD"); tw && *tw && m_editorWorld && r)
+	{
+		m_editorWorld->setLandscapeRuntime(&m_landscape);
+		if (!m_landscapeBound)
+		{
+			r->SetLandscapeProvider([this](const glm::dmat4& vp, bool zeroToOne, HE::LandscapeRenderFrame& out) {
+				if (m_editorWorld) m_landscape.buildRenderFrame(vp, m_editorWorld->origin(), zeroToOne, out);
+			});
+			m_landscape.setWindowKeepsAtlas(r->GetCapabilities().landscapeCoarseRevision);
+			m_landscapeBound = true;
+		}
+		const glm::dvec3 eye = glm::dvec3(m_editorCamera.position()) + m_editorWorld->origin();
+		// HE_DUMP_STAMP=x,z,size,height: a Landscape Stamp entity at that absolute place, with a generated heightmap (a cone with
+		// two rings: a shape no ground has), laid over the tiles by the same sync the frame loop runs.
+		if (const char* st = std::getenv("HE_DUMP_STAMP"); st && *st)
+		{
+			float sx = 0.0f, sz = 0.0f, size = 300.0f, height = 100.0f;
+			if (std::sscanf(st, "%f,%f,%f,%f", &sx, &sz, &size, &height) >= 2)
+			{
+				TextureAsset tex;
+				tex.width = tex.height = 128;
+				tex.channels = 4;
+				tex.data.resize(128 * 128 * 4);
+				for (int y = 0; y < 128; ++y)
+					for (int x = 0; x < 128; ++x)
+					{
+						const float d = std::min(1.0f, std::hypot(x - 63.5f, y - 63.5f) / 63.5f);
+						const float v = (1.0f - d) * (0.75f + 0.25f * std::cos(d * 18.85f));
+						for (int c = 0; c < 4; ++c) tex.data[(static_cast<size_t>(y) * 128 + x) * 4 + c] = static_cast<uint8_t>(std::clamp(v, 0.0f, 1.0f) * 255.0f);
+					}
+				const Entity se = m_editorWorld->createEntity("Landscape Stamp");
+				TransformComponent& stf = m_editorWorld->registry().get_or_emplace<TransformComponent>(se);
+				stf.position = glm::vec3(glm::dvec3(sx, 0.0, sz) - m_editorWorld->origin());
+				stf.dirty = true;
+				LandscapeStampComponent sc;
+				sc.textureId = contentManager().registerTexture(std::move(tex));
+				sc.sizeM = size;
+				sc.heightM = height;
+				// HE_DUMP_STAMPBITS=8 / 16: a smooth cone of 1024 x 1024 instead, as a texture asset (8 bits) or written as a .r16
+				// file beside the dump and named in the component (16 bits): the same shape, to see the height steps of each.
+				if (const char* bits = std::getenv("HE_DUMP_STAMPBITS"); bits && *bits)
+				{
+					const int n = 1024;
+					std::vector<uint16_t> cone(static_cast<size_t>(n) * n);
+					for (int y = 0; y < n; ++y)
+						for (int x = 0; x < n; ++x)
+						{
+							const float d = std::min(1.0f, std::hypot(x - (n - 1) * 0.5f, y - (n - 1) * 0.5f) / ((n - 1) * 0.5f));
+							cone[static_cast<size_t>(y) * n + x] = static_cast<uint16_t>(std::lround((1.0f - d) * 65535.0f));
+						}
+					if (std::atoi(bits) == 16)
+					{
+						const char* dump = std::getenv("HE_DUMP_PATH");
+						const std::string file = std::string(dump ? dump : "stamp") + ".stamp.r16";
+						std::ofstream out(file, std::ios::binary);
+						out.write(reinterpret_cast<const char*>(cone.data()), static_cast<std::streamsize>(cone.size() * 2));
+						sc.heightmapFile = file;
+						sc.textureId = HE::UUID{};
+					}
+					else
+					{
+						TextureAsset t8;
+						t8.width = t8.height = static_cast<uint32_t>(n);
+						t8.channels = 4;
+						t8.data.resize(cone.size() * 4);
+						for (size_t i = 0; i < cone.size(); ++i)
+							for (int c = 0; c < 4; ++c) t8.data[i * 4 + static_cast<size_t>(c)] = static_cast<uint8_t>(cone[i] >> 8);
+						sc.textureId = contentManager().registerTexture(std::move(t8));
+					}
+				}
+				m_editorWorld->registry().emplace<LandscapeStampComponent>(se, sc);
+			}
+		}
+		if (std::getenv("HE_DUMP_TILEWATER")) LandscapeWorldTools::setRuntime(&m_landscape);   // editable before it begins: an overlay to paint into
+		bool settled = false;
+		size_t stampTiles = 0;
+		for (const auto t0 = std::chrono::steady_clock::now(); std::chrono::steady_clock::now() - t0 < std::chrono::seconds(60);)
+		{
+			m_landscape.update(*m_editorWorld, 0.016f, 5.0, &eye);
+			stampTiles += m_landscapeStamps.sync(*m_editorWorld, m_landscape, contentManager());
+			if (m_landscape.active() && m_landscape.store()->settled() && m_landscape.atlas()->stats().used == m_landscape.store()->residentKeys().size()
+			    && m_landscape.giHeightfield().active())
+			{ settled = true; break; }
+			std::this_thread::sleep_for(std::chrono::milliseconds(1));
+		}
+		HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_TILEWORLD %s: %zu tile(s) resident, renderer draws the ground with %s, %zu tile(s) read again for stamps",
+		            settled ? "streamed in" : "DID NOT SETTLE", m_landscape.active() ? m_landscape.store()->residentKeys().size() : size_t(0),
+		            r->GetCapabilities().landscapeMaterial ? "its material" : "the fixed blend", stampTiles);
+		// HE_DUMP_TILEWATER=x,z,radius: one stroke of the tile brush's Water tool there, then the frame loop's calls until the water
+		// sheet of the new lake is an entity (LandscapeWorldProxies).
+		if (const char* twa = std::getenv("HE_DUMP_TILEWATER"); twa && *twa && settled)
+		{
+			float wx = 0.0f, wz = 0.0f, wr = 60.0f;
+			std::sscanf(twa, "%f,%f,%f", &wx, &wz, &wr);
+			LandscapeWorldTools::setRuntime(&m_landscape);
+			const bool painted = LandscapeWorldTools::paintLake(wx, wz, wr);
+			for (int i = 0; i < 3000; ++i)
+			{
+				m_landscape.update(*m_editorWorld, 0.016f, 5.0, &eye);
+				m_landscapeProxies.sync(*m_editorWorld, m_landscape, contentManager(), r);
+				if (i > 200 && m_landscape.store()->settled() && m_landscape.atlas()->stats().used == m_landscape.store()->residentKeys().size()) break;
+				std::this_thread::sleep_for(std::chrono::milliseconds(1));
+			}
+			const HE::LandscapeWaterTable* table = m_landscape.edits() ? m_landscape.edits()->water() : nullptr;
+			HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_TILEWATER %s: %zu edited tile(s), %zu water bod(ies) in the overlay's table",
+			            painted ? "painted" : "NOT PAINTED", m_landscape.edits() ? m_landscape.edits()->editedKeys().size() : size_t(0),
+			            table ? table->bodies.size() : size_t(0));
+		}
+		// What the stamps cost a frame in which nothing moves: the sync alone, a thousand times.
+		if (std::getenv("HE_DUMP_STAMP"))
+		{
+			// The far levels take a stamp once it has rested (LandscapeStampSync): let it, so the picture has them.
+			std::this_thread::sleep_for(std::chrono::milliseconds(320));
+			m_landscapeStamps.sync(*m_editorWorld, m_landscape, contentManager());
+			const auto i0 = std::chrono::steady_clock::now();
+			size_t again = 0;
+			for (int i = 0; i < 1000; ++i) again += m_landscapeStamps.sync(*m_editorWorld, m_landscape, contentManager());
+			const double us = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - i0).count() / 1000.0;
+			HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_STAMP idle: %.3f us a frame for the sync, %zu tile(s) read again in 1000 idle frames", us, again);
+			// And what one step of a drag costs on the main thread (HE_DUMP_STAMPMOVE=1): the stamp 40 m further, the sync that takes it.
+			if (std::getenv("HE_DUMP_STAMPMOVE"))
+				for (auto [se, stf, sc] : m_editorWorld->registry().view<TransformComponent, LandscapeStampComponent>().each())
+				{
+					stf.position.x += 40.0f;
+					stf.dirty = true;
+					std::this_thread::sleep_for(std::chrono::milliseconds(120));
+					const auto m0 = std::chrono::steady_clock::now();
+					const size_t moved = m_landscapeStamps.sync(*m_editorWorld, m_landscape, contentManager());
+					const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - m0).count();
+					HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_STAMPMOVE: a %.0f m stamp moved by 40 m: %.1f ms on the main thread, %zu tile(s) read again", sc.sizeM, ms, moved);
+					stf.position.x -= 40.0f;
+					stf.dirty = true;
+					break;
+				}
+		}
+	}
+	// The dump renders without scene ticks, so the trail clipmap (HE_DUMP_TRAILTEST's footprints) is brought in
+	// line with the camera's final pose here, once.
+	if (const char* tt = std::getenv("HE_DUMP_TRAILTEST"); tt && *tt && *tt != '0' && m_editorWorld)
+	{
+		TrailSystem::update(*m_editorWorld, contentManager(), r, m_editorCamera.position(), 0.0f, nullptr);
+		// The refined chunks near the camera pick the trails up as geometry (two builds per tick), then LOD and seams.
+		const glm::vec3 camPos = m_editorCamera.position();
+		for (int i = 0; i < 40; ++i)
+		{
+			TerrainSystem::updateTessellation(*m_editorWorld, contentManager(), r, camPos);
+			LODSystem::update(*m_editorWorld, camPos);
+			TerrainSystem::stitchSeams(*m_editorWorld, contentManager(), r);
+		}
+	}
+
+	// HE_DUMP_TRAILDRAG=<frames> (Thema 328, the cost witness): a snow plough is dragged along the plateau, one
+	// segment per frame at HE_DUMP_TRAILDRAGSPEED metres per frame (default 0.25, about 15 m/s at 60 fps), and every
+	// frame runs what the scene tick runs for trails (TrailSystem::update, the terrain refinement, LOD, seams) and
+	// then renders. HE_DUMP_TRAILDRAGOFF=1 runs the same frames without dragging (the idle baseline). The log line
+	// is the per-frame time of each phase in ms (mean / p95 / max) and how many refined chunks were rebuilt.
+	if (const char* td = std::getenv("HE_DUMP_TRAILDRAG"); td && *td && *td != '0' && m_editorWorld)
+	{
+		using Clock = std::chrono::steady_clock;
+		const int frames = std::max(1, std::atoi(td));
+		const char* sp = std::getenv("HE_DUMP_TRAILDRAGSPEED");
+		const float speed = (sp && *sp) ? static_cast<float>(std::atof(sp)) : 0.25f;
+		const bool idle = [] { const char* o = std::getenv("HE_DUMP_TRAILDRAGOFF"); return o && *o && *o != '0'; }();
+		const glm::vec3 camPos = m_editorCamera.position();
+		TrailSystem::Runtime& rt = TrailSystem::runtime(*m_editorWorld);
+		const float x0 = 12.0f, z = camPos.z - 6.0f;
+		// HE_DUMP_TRAILDRAGPRE=1: the whole track is stamped BEFORE the first frame (so the refined chunks are built once,
+		// from the finished field) and the frames run idle: the picture to compare the dragged, updated-in-place one with.
+		const bool pre = [] { const char* o = std::getenv("HE_DUMP_TRAILDRAGPRE"); return o && *o && *o != '0'; }();
+		if (pre)
+			for (int i = 0; i < frames; ++i)
+			{
+				const float xa = x0 + static_cast<float>(i) * speed;
+				rt.field.plowCapsule(xa, z, xa + speed, z, 0.35f, 0.7f, 0.55f, 0.55f, HE::TrailSurface::Snow);
+			}
+		std::vector<double> tTrail, tTess, tLod, tStitch, tRender;
+		const uint32_t builds0 = meshStreamCounters().tessBuilds.load();
+		auto ms = [](Clock::time_point a, Clock::time_point b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
+		for (int i = 0; i < frames; ++i)
+		{
+			if (!idle && !pre)
+			{
+				const float xa = x0 + static_cast<float>(i) * speed, xb = xa + speed;
+				rt.field.plowCapsule(xa, z, xb, z, 0.35f, 0.7f, 0.55f, 0.55f, HE::TrailSurface::Snow);
+			}
+			const auto a = Clock::now();
+			TrailSystem::update(*m_editorWorld, contentManager(), r, camPos, 1.0f / 60.0f, nullptr);
+			const auto b = Clock::now();
+			TerrainSystem::updateTessellation(*m_editorWorld, contentManager(), r, camPos);
+			const auto b2 = Clock::now();
+			LODSystem::update(*m_editorWorld, camPos);
+			const auto b3 = Clock::now();
+			TerrainSystem::stitchSeams(*m_editorWorld, contentManager(), r);
+			const auto c = Clock::now();
+			r->Render();
+			const auto d = Clock::now();
+			if (i >= 8)   // first frames: warm-up
+			{
+				tTrail.push_back(ms(a, b)); tTess.push_back(ms(b, b2)); tLod.push_back(ms(b2, b3));
+				tStitch.push_back(ms(b3, c)); tRender.push_back(ms(c, d));
+			}
+		}
+		// A fingerprint of what the frames ended with (the clipmap's pixels, every refined chunk's mesh and its seam copy):
+		// a dragged track updated in place and the same track built at once must give the same numbers.
+		{
+			auto fnv = [](uint64_t h, const void* d, size_t n) {
+				const uint8_t* p = static_cast<const uint8_t*>(d);
+				for (size_t i = 0; i < n; ++i) { h ^= p[i]; h *= 1099511628211ull; }
+				return h;
+			};
+			uint64_t hc = 1469598103934665603ull;
+			if (const TextureAsset* ct = contentManager().getTexture(rt.clipmap.textureId()))
+				hc = fnv(hc, ct->data.data(), ct->data.size());
+			HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_TRAILDRAG fingerprint clipmap %016llx", static_cast<unsigned long long>(hc));
+			for (auto [ce, cc] : m_editorWorld->registry().view<TerrainChunkComponent>().each())
+			{
+				for (const HE::UUID& id : { cc.tessMeshId, cc.stitchMeshId })
+				{
+					const StaticMeshAsset* m = id != HE::UUID{} ? contentManager().getStaticMesh(id) : nullptr;
+					if (!m || m->vertices.empty()) continue;
+					uint64_t h = 1469598103934665603ull;
+					h = fnv(h, m->vertices.data(), m->vertices.size() * 4);
+					h = fnv(h, m->normals.data(), m->normals.size() * 4);
+					HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_TRAILDRAG fingerprint chunk %u,%u %s %016llx (%zu verts)",
+						cc.cx, cc.cz, id == cc.tessMeshId ? "refined" : "seams  ", static_cast<unsigned long long>(h), m->vertices.size() / 3);
+				}
+			}
+		}
+		auto stat = [](std::vector<double> v) {
+			std::sort(v.begin(), v.end());
+			double sum = 0.0; for (double x : v) sum += x;
+			const double mean = v.empty() ? 0.0 : sum / static_cast<double>(v.size());
+			return std::array<double, 3>{ mean, v.empty() ? 0.0 : v[static_cast<size_t>(static_cast<double>(v.size() - 1) * 0.95)], v.empty() ? 0.0 : v.back() };
+		};
+		const auto st = stat(tTrail), se = stat(tTess), sl = stat(tLod), ss = stat(tStitch), sr = stat(tRender);
+		HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_TRAILDRAG %d frames, %s, %.2f m/frame, factor %d: "
+			"trails %.3f/%.3f/%.3f ms, refine %.3f/%.3f/%.3f, lod %.3f/%.3f/%.3f, seams %.3f/%.3f/%.3f ms, render %.3f/%.3f/%.3f ms (mean/p95/max), "
+			"%u refined chunk builds, %zu pages",
+			frames, idle ? "idle (no drag)" : "dragging", speed,
+			[&] { int f = 0; for (auto [e, tc] : m_editorWorld->registry().view<TerrainComponent>().each()) { f = tc.tessellationFactor; break; } return f; }(),
+			st[0], st[1], st[2], se[0], se[1], se[2], sl[0], sl[1], sl[2], ss[0], ss[1], ss[2], sr[0], sr[1], sr[2],
+			meshStreamCounters().tessBuilds.load() - builds0, rt.field.pageCount());
+	}
 
 	// HE_DUMP_MBYAWSTEP / HE_DUMP_MBPITCHSTEP (degrees): the motion-blur
 	// witness. A headless dump has no camera history — every settle frame
@@ -10388,6 +11490,1731 @@ void EditorApplication::dumpFrameHeadless()
 	// (30, -25) in the capture; a stale cache keeps the red field there.
 	const char* repaintMid = std::getenv("HE_DUMP_LAYERREPAINT");
 	const bool  repaintMidWitness = repaintMid && std::string(repaintMid) == "mid" && m_editorWorld;
+	// HE_DUMP_RAWTEST=1 (with HE_DUMP_AUTOLAND=rawconst): the oracle of EditorCameraOverride::rawOutput. The
+	// landscape is an unlit constant (0.2, 0.4, 0.6); a raw orthographic capture from above has to give 51 102 153
+	// in every pixel, and the ordinary capture of the same view does not (tonemap).
+	if (const char* rt = std::getenv("HE_DUMP_RAWTEST"); rt && *rt && *rt != '0' && r)
+	{
+		for (int pass = 0; pass < 3; ++pass)
+		{
+			EditorCameraOverride cam;
+			cam.active = true; cam.orthographic = true; cam.rawOutput = (pass >= 1); cam.rawSrgb = (pass == 2);
+			cam.editorIcons = false;
+			cam.orthoHalfHeight = 20.0f;
+			cam.position = glm::vec3(-40.0f, 450.0f, 0.0f);
+			cam.view = glm::lookAt(cam.position, cam.position + glm::vec3(0, -1, 0), glm::vec3(0, 0, -1));
+			cam.farPlane = 300.0f;
+			std::vector<uint8_t> img;
+			const bool ok = r->RenderSceneImage(cam, 64, 64, img) && img.size() == 64u * 64u * 4u;
+			unsigned lo[3] = { 255, 255, 255 }, hi[3] = { 0, 0, 0 };
+			for (size_t i = 0; ok && i < 64u * 64u; ++i)
+				for (int c = 0; c < 3; ++c)
+				{
+					lo[c] = std::min<unsigned>(lo[c], img[i * 4 + size_t(c)]);
+					hi[c] = std::max<unsigned>(hi[c], img[i * 4 + size_t(c)]);
+				}
+			HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RAWTEST %s: %s r %u..%u g %u..%u b %u..%u (expected %s)",
+			            pass == 0 ? "ordinary" : pass == 1 ? "raw" : "raw sRGB", ok ? "ok" : "FAILED",
+			            lo[0], hi[0], lo[1], hi[1], lo[2], hi[2],
+			            pass == 2 ? "124 169 203 (the sRGB curve of 0.2 0.4 0.6)" : "51 102 153 when raw");
+		}
+	}
+	// HE_DUMP_HLODBAKE=<side>[,<cx>,<cz>] (Thema 228): the far-landscape bake on the first landscape of the
+	// scene (the HE_DUMP_AUTOLAND witness), one chunk, written as <dump>.hlod_<view>.bmp (albedo, normal,
+	// surface). The log has the timing and the mean colour of each picture.
+	// HE_DUMP_RVTTEST_LIT (Thema 333 step 3d): what the HLODBAKE block leaves for the live-world comparison after it.
+	struct { bool ready = false; HE::UUID consumer; } rvtLive;
+	if (const char* hb = std::getenv("HE_DUMP_HLODBAKE"); hb && *hb && m_editorWorld && r)
+	{
+		unsigned side = 64, bcx = 0, bcz = 0;
+		(void)std::sscanf(hb, "%u,%u,%u", &side, &bcx, &bcz);
+		entt::entity land = entt::null;
+		for (auto [e, tc] : m_editorWorld->registry().view<TerrainComponent>().each())
+			if (!m_editorWorld->registry().all_of<TerrainChunkComponent>(e)) { land = e; break; }
+		std::string why;
+		HE::landscape::HlodBaker baker(*m_editorWorld, contentManager(), *r);
+		const auto t0 = std::chrono::steady_clock::now();
+		if (land == entt::null || !baker.begin(land, &why))
+			HE_LOG_WARN(Editor, "EditorApplication: HE_DUMP_HLODBAKE: begin failed (%s)", why.c_str());
+		else
+		{
+			const auto t1 = std::chrono::steady_clock::now();
+			HE::landscape::HlodChunkImages img;
+			const bool ok = baker.bake(bcx, bcz, side, 2, img);
+			const auto t2 = std::chrono::steady_clock::now();
+			HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_HLODBAKE %s: %ux%u chunks, chunk %u,%u at %u px, begin %.0f ms, bake %.0f ms",
+			            ok ? "ok" : "FAILED", baker.chunksPerSide(), baker.chunksPerSide(), bcx, bcz, side,
+			            std::chrono::duration<double, std::milli>(t1 - t0).count(),
+			            std::chrono::duration<double, std::milli>(t2 - t1).count());
+			if (ok)
+			{
+				const std::vector<uint8_t>* views[3] = { &img.albedo, &img.normal, &img.surface };
+				const char* names[3] = { "albedo", "normal", "surface" };
+				for (int v = 0; v < 3; ++v)
+				{
+					double mean[3] = { 0, 0, 0 };
+					const size_t n = static_cast<size_t>(img.side) * img.side;
+					for (size_t i = 0; i < n; ++i)
+						for (int c = 0; c < 3; ++c) mean[c] += (*views[v])[i * 4 + static_cast<size_t>(c)];
+					HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_HLODBAKE %s mean rgb %.1f %.1f %.1f", names[v],
+					            mean[0] / double(n), mean[1] / double(n), mean[2] / double(n));
+					writeBMP(m_dumpPath + ".hlod_" + names[v] + ".bmp", *views[v], img.side, img.side);
+				}
+			}
+			// HE_DUMP_HLODMOSAIC=1: every chunk at `side`, stitched, against the whole landscape in one picture of the
+			// same size. The two come from the same renderer and camera maths, so what differs is exactly the
+			// placement and orientation of the chunk rectangles and the seams between them.
+			if (const char* hm = std::getenv("HE_DUMP_HLODMOSAIC"); hm && *hm && *hm != '0' && ok)
+			{
+				const uint32_t cps = baker.chunksPerSide();
+				const uint32_t full = cps * side;
+				HE::landscape::HlodChunkRect first, last, whole;
+				baker.chunkRect(0, 0, first);
+				baker.chunkRect(cps - 1, cps - 1, last);
+				whole.min  = first.min;
+				whole.size = glm::vec2(last.min.x + last.size.x - first.min.x, last.min.y + last.size.y - first.min.y);
+				HE::landscape::HlodChunkImages ref;
+				const bool refOk = baker.bakeRect(whole, full, 2, ref);
+				std::vector<uint8_t> mosaic[3];
+				for (auto& m : mosaic) m.assign(static_cast<size_t>(full) * full * 4, 0);
+				bool allOk = refOk;
+				for (uint32_t cz = 0; cz < cps && allOk; ++cz)
+					for (uint32_t cx = 0; cx < cps && allOk; ++cx)
+					{
+						HE::landscape::HlodChunkImages t;
+						allOk = baker.bake(cx, cz, side, 2, t);
+						if (!allOk) break;
+						const std::vector<uint8_t>* src[3] = { &t.albedo, &t.normal, &t.surface };
+						for (int v = 0; v < 3; ++v)
+							for (uint32_t y = 0; y < side; ++y)
+								std::copy_n(&(*src[v])[static_cast<size_t>(y) * side * 4], static_cast<size_t>(side) * 4,
+								            &mosaic[v][(static_cast<size_t>(cz * side + y) * full + cx * side) * 4]);
+					}
+				if (!allOk)
+					HE_LOG_WARN(Editor, "EditorApplication: HE_DUMP_HLODMOSAIC: a bake failed");
+				else
+				{
+					const std::vector<uint8_t>* refv[3] = { &ref.albedo, &ref.normal, &ref.surface };
+					const char* names[3] = { "albedo", "normal", "surface" };
+					for (int v = 0; v < 3; ++v)
+					{
+						double sum = 0; unsigned mx = 0;
+						for (size_t i = 0; i < mosaic[v].size(); ++i)
+						{
+							if (i % 4 == 3) continue;
+							const unsigned d = static_cast<unsigned>(std::abs(int(mosaic[v][i]) - int((*refv[v])[i])));
+							sum += d; mx = std::max(mx, d);
+						}
+						HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_HLODMOSAIC %s %ux%u: mean |mosaic - whole| %.3f /255, max %u",
+						            names[v], full, full, sum / double(mosaic[v].size() / 4 * 3), mx);
+						writeBMP(m_dumpPath + ".hlod_mosaic_" + names[v] + ".bmp", mosaic[v], full, full);
+						writeBMP(m_dumpPath + ".hlod_whole_" + names[v] + ".bmp", *refv[v], full, full);
+					}
+				}
+			}
+
+			// HE_DUMP_RVTTEST=1 (Thema 333, step 2): the page producer against the readback path. Pages around the camera are
+			// painted into the renderer's RVT pool; each slice must equal bakeRect() of the same rectangle and size byte for
+			// byte (same renderer, same camera maths: what differs is only the GPU copy), a page's border texels must equal the
+			// neighbour's payload texels (same world positions, so the texel grid and the Y flip agree), and a second update
+			// with the camera where it was must ask for nothing.
+			if (const char* rv = std::getenv("HE_DUMP_RVTTEST"); rv && *rv && *rv != '0' && ok)
+			{
+				using namespace HE::rvt;
+				const uint32_t cps = baker.chunksPerSide();
+				HE::landscape::HlodChunkRect first, last;
+				baker.chunkRect(0, 0, first);
+				baker.chunkRect(cps - 1, cps - 1, last);
+				VolumeDesc vd;
+				vd.origin = first.min;
+				vd.sizeM  = last.min.x + last.size.x - first.min.x;
+				vd.finestMetersPerTexel = vd.sizeM / (4.0f * float(vd.pageSize));   // 4 x 4 pages at mip 0
+				if (const char* tx = std::getenv("HE_DUMP_RVTTEST_TEXEL"); tx && *tx)   // metres per texel at mip 0, e.g. 0.25 (32 m pages)
+					vd.finestMetersPerTexel = std::max(0.01f, static_cast<float>(std::atof(tx)));
+				RvtManager mgr(64, 64, 2);
+				const uint16_t vol = mgr.addVolume(vd);
+				const uint32_t px = static_cast<uint32_t>(mgr.layout(vol).physicalPageSize());
+				if (!r->CreateRvtPool(512, px))
+					HE_LOG_WARN(Editor, "EditorApplication: HE_DUMP_RVTTEST: CreateRvtPool failed on this backend");
+				else
+				{
+					ViewDesc view;
+					view.cameraXZ    = vd.origin + glm::vec2(vd.sizeM * 0.5f);
+					view.nearRadiusM = mgr.layout(vol).pageMeters(0) * 0.6f;
+					mgr.beginFrame();
+					const auto pages = mgr.update(vol, view);
+					const auto t0r = std::chrono::steady_clock::now();
+					const uint32_t painted = paintPages(baker, pages, px);
+					const auto t1r = std::chrono::steady_clock::now();
+					HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTTEST: %zu pages asked, %u painted, %.1f ms (%.1f ms/page), %u px pages",
+					            pages.size(), painted, std::chrono::duration<double, std::milli>(t1r - t0r).count(),
+					            pages.empty() ? 0.0 : std::chrono::duration<double, std::milli>(t1r - t0r).count() / double(pages.size()), px);
+
+					// 1) slice == readback path
+					unsigned checked = 0, exact = 0, worst = 0;
+					for (const PageRender& pr : pages)
+					{
+						HE::landscape::HlodChunkRect rect; rect.min = pr.rectMin; rect.size = pr.rectMax - pr.rectMin;
+						HE::landscape::HlodChunkImages ref;
+						if (!baker.bakeRect(rect, px, 1, ref)) continue;
+						const std::vector<uint8_t>* want[3] = { &ref.albedo, &ref.normal, &ref.surface };
+						for (int layer = 0; layer < 3; ++layer)
+						{
+							std::vector<uint8_t> got;
+							if (!r->ReadbackRvtSlot(layer, pr.slot, got) || got.size() != want[layer]->size()) continue;
+							unsigned d = 0;
+							const uint32_t keep = r->RvtLayerChannels(layer);   // a packed layer holds fewer channels: compare those
+							for (size_t i = 0; i < got.size(); ++i)
+								if ((keep >> (i % 4)) & 1u)
+									d = std::max(d, static_cast<unsigned>(std::abs(int(got[i]) - int((*want[layer])[i]))));
+							++checked; exact += d == 0 ? 1u : 0u; worst = std::max(worst, d);
+						}
+					}
+					HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTTEST slice vs readback: %u of %u slices byte-identical, worst difference %u /255",
+					            exact, checked, worst);
+
+					// 1b) the same pages inside an RVT bracket (one page set kept across the calls, the live viewport given back
+					// once): byte-identical to the per-call path above. They are painted into slots +100 (empty until now), so a
+					// bracket that painted nothing cannot pass by leaving the old pages in place.
+					{
+						std::vector<std::vector<uint8_t>> before;
+						for (const PageRender& pr : pages)
+							for (int layer = 0; layer < 3; ++layer)
+							{
+								std::vector<uint8_t> g;
+								r->ReadbackRvtSlot(layer, pr.slot, g);
+								before.push_back(std::move(g));
+							}
+						std::vector<PageRender> moved = pages;
+						for (PageRender& pr : moved) pr.slot += 100;
+						const auto b0 = std::chrono::steady_clock::now();
+						r->BeginRvtPages(px);
+						const uint32_t again = paintPages(baker, moved, px);
+						r->EndRvtPages();
+						const auto b1 = std::chrono::steady_clock::now();
+						unsigned n = 0, same = 0, differ = 0, blank = 0;
+						for (size_t k = 0; k < pages.size(); ++k)
+							for (int layer = 0; layer < 3; ++layer)
+							{
+								std::vector<uint8_t> g;
+								if (!r->ReadbackRvtSlot(layer, moved[k].slot, g)) continue;
+								const std::vector<uint8_t>& w = before[k * 3 + size_t(layer)];
+								++n;
+								if (g == w) ++same; else ++differ;
+								if (std::all_of(g.begin(), g.end(), [](uint8_t v) { return v == 0; })) ++blank;
+							}
+						HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTTEST bracket: %u pages in %.1f ms (%.1f ms/page; per call above %.1f), %u of %u slices byte-identical to the per-call path, %u differ, %u blank",
+						            again, std::chrono::duration<double, std::milli>(b1 - b0).count(),
+						            moved.empty() ? 0.0 : std::chrono::duration<double, std::milli>(b1 - b0).count() / double(moved.size()),
+						            pages.empty() ? 0.0 : std::chrono::duration<double, std::milli>(t1r - t0r).count() / double(pages.size()),
+						            same, n, differ, blank);
+					}
+
+					// 2) border == neighbour's payload: page (x,y) texel columns 128..135 are page (x+1,y) columns 0..7
+					for (const PageRender& a : pages)
+					{
+						if (a.key.mip != 0) continue;
+						for (const PageRender& b : pages)
+						{
+							if (b.key.mip != 0 || b.key.y != a.key.y || b.key.x != a.key.x + 1) continue;
+							const uint32_t ps = static_cast<uint32_t>(vd.pageSize);
+							for (int layer = 0; layer < 2; ++layer)
+							{
+								std::vector<uint8_t> ga, gb;
+								if (!r->ReadbackRvtSlot(layer, a.slot, ga) || !r->ReadbackRvtSlot(layer, b.slot, gb)) continue;
+								double sum = 0; unsigned mx = 0, n = 0;
+								for (uint32_t y = 0; y < px; ++y)
+									for (uint32_t i = ps; i < px; ++i)
+										for (int c = 0; c < 3; ++c)
+										{
+											const unsigned d = static_cast<unsigned>(std::abs(
+												int(ga[(size_t(y) * px + i) * 4 + size_t(c)]) - int(gb[(size_t(y) * px + (i - ps)) * 4 + size_t(c)])));
+											sum += d; mx = std::max(mx, d); ++n;
+										}
+								HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTTEST border seam page(%u,%u)|(%u,%u) layer %d: mean %.3f /255, max %u",
+								            a.key.x, a.key.y, b.key.x, b.key.y, layer, n ? sum / double(n) : 0.0, mx);
+							}
+							break;
+						}
+					}
+
+					// 3) nothing changed: nothing to paint
+					mgr.beginFrame();
+					const size_t again = mgr.update(vol, view).size();
+					HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTTEST second update: %zu pages (expected 0)", again);
+
+					// 3b) the page table the landscape shader reads: upload every mip, read it back, compare entry for entry
+					{
+						std::vector<std::vector<uint32_t>> up, back;
+						for (int m = 0; m < mgr.layout(vol).mipCount(); ++m) up.push_back(mgr.pageTable(vol, m));
+						const HE::UUID tableKey{ 1, 1 };                 // any key: one table, read back under the same name
+						const bool upOk = r->SetRvtPageTable(tableKey, up);
+						const bool rbOk = upOk && r->ReadbackRvtPageTable(tableKey, back);
+						size_t entries = 0, wrong = 0, valid = 0;
+						if (rbOk && back.size() == up.size())
+							for (size_t m = 0; m < up.size(); ++m)
+								for (size_t i = 0; i < up[m].size() && i < back[m].size(); ++i)
+								{
+									++entries; wrong += up[m][i] != back[m][i] ? 1u : 0u; valid += up[m][i] != HE::rvt::kPageTableInvalid ? 1u : 0u;
+								}
+						HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTTEST page table: upload %s, readback %s, %zu mips, %zu entries (%zu valid), %zu differ",
+						            upOk ? "ok" : "FAILED", rbOk ? "ok" : "FAILED", up.size(), entries, valid, wrong);
+					}
+					{
+						std::vector<uint8_t> dbg;
+						if (!pages.empty() && r->ReadbackRvtSlot(0, pages.front().slot, dbg))
+							writeBMP(m_dumpPath + ".rvt_page0.bmp", dbg, px, px);
+					}
+
+					// 4) position test (analytic): the three views are replaced by an unlit material whose colour is
+					// fract(worldPos * 1/period) and every texel of a page is compared with that value computed on the CPU at
+					// the texel's centre, rectMin + (i + 0.5) * texelM, row 0 = the min-Z edge. A flipped axis, the D3D Y flip,
+					// a half-texel offset or a misplaced border all show up as errors of many /255 (period 8 m, texel 0.5 m:
+					// one texel is 16/255, half a texel 8/255). R holds x, B holds z (G would be the terrain height).
+					{
+						constexpr float kPeriod = 8.0f;
+						HE::MaterialGraph g;
+						const int out = g.addNode(HE::MatNodeType::Output);
+						const int wp  = g.addNode(HE::MatNodeType::WorldPos);
+						const int sc  = g.addNode(HE::MatNodeType::ConstFloat);
+						const int mul = g.addNode(HE::MatNodeType::Multiply);
+						const int fr  = g.addNode(HE::MatNodeType::Fract);
+						g.findNode(out)->p[0] = 0.0f;                    // unlit
+						g.findNode(sc)->p[0]  = 1.0f / kPeriod;
+						g.connect(wp, 0, mul, 0);
+						g.connect(sc, 0, mul, 1);
+						g.connect(mul, 0, fr, 0);
+						g.connect(fr, 0, out, HE::kMatOutputBaseColorPin);
+						MaterialAsset am;
+						am.type = HE::AssetType::Material;
+						am.name = "RvtPositionWitness";
+						am.nodeGraphJson = HE::materialGraphToJson(g);
+						const HE::UUID mid = contentManager().registerMaterial(std::move(am));
+						contentManager().regenerateMaterialFromGraph(mid);
+						HE::UUID saved[3], mats[3] = { mid, mid, mid };
+						baker.viewMaterials(saved);
+						baker.setViewMaterials(mats);
+
+						RvtManager pm(64, 64, 0);   // every mip of the volume fits one update, mip 0 included
+						VolumeDesc pd = vd;
+						pd.finestMetersPerTexel = 0.5f;                   // an exact binary fraction: the texel centres are exact in float
+						const uint16_t pv = pm.addVolume(pd);
+						const uint32_t ppx = static_cast<uint32_t>(pm.layout(pv).physicalPageSize());
+						if (ppx != px) r->CreateRvtPool(8, ppx);
+						ViewDesc pview;
+						pview.cameraXZ = vd.origin + glm::vec2(vd.sizeM * 0.5f);
+						pview.nearRadiusM = 1.0f;
+						pm.beginFrame();
+						std::vector<PageRender> ppages = pm.update(pv, pview);
+						ppages.erase(std::remove_if(ppages.begin(), ppages.end(), [](const PageRender& pr) { return pr.key.mip != 0; }), ppages.end());
+						paintPages(baker, ppages, ppx);
+						const float tm = pm.layout(pv).texelMeters(0);
+						const auto srgbEnc = [](float v) { return v <= 0.0031308f ? v * 12.92f : 1.055f * std::pow(v, 1.0f / 2.4f) - 0.055f; };
+						const std::string fault = [] { const char* f = std::getenv("HE_DUMP_RVTTEST_FAULT"); return f ? std::string(f) : std::string(); }();
+						const auto circ = [](float a, float b) { float d = std::fabs(a - b); return std::min(d, 1.0f - d); };
+						for (int layer = 0; layer < 3; ++layer)
+						{
+							unsigned n = 0, bad = 0, worst = 0, skipped = 0;
+							for (const PageRender& pr : ppages)
+							{
+								std::vector<uint8_t> got;
+								if (!r->ReadbackRvtSlot(layer, pr.slot, got)) continue;
+								// HE_DUMP_RVTTEST_SLICES=<dir>: every position page as a PPM (a look at what a backend drew, when the numbers are wrong).
+								if (const char* sd = std::getenv("HE_DUMP_RVTTEST_SLICES"); sd && *sd)
+								{
+									char name[512];
+									std::snprintf(name, sizeof(name), "%s/pos_l%d_slot%u.ppm", sd, layer, pr.slot);
+									if (FILE* f = std::fopen(name, "wb"))
+									{
+										std::fprintf(f, "P6\n%u %u\n255\n", ppx, ppx);
+										for (size_t k = 0; k < size_t(ppx) * ppx; ++k) std::fwrite(&got[k * 4], 1, 3, f);
+										std::fclose(f);
+									}
+								}
+								for (uint32_t j = 0; j < ppx; ++j)
+									for (uint32_t i = 0; i < ppx; ++i)
+									{
+										// HE_DUMP_RVTTEST_FAULT=half|flipz|swapxz: the negative control, the expectation itself made wrong on purpose
+										// (the test must then report errors, or it would not see a real half-texel / flip / swap).
+										float wx = pr.rectMin.x + (float(i) + 0.5f) * tm, wz = pr.rectMin.y + (float(j) + 0.5f) * tm;
+										if (fault == "half") wx += 0.5f * tm;
+										else if (fault == "flipz") wz = pr.rectMin.y + (float(ppx - 1 - j) + 0.5f) * tm;
+										else if (fault == "swapxz") std::swap(wx, wz);
+										if (wx < vd.origin.x + 0.5f || wz < vd.origin.y + 0.5f ||
+										    wx > vd.origin.x + vd.sizeM - 0.5f || wz > vd.origin.y + vd.sizeM - 0.5f) { ++skipped; continue; }   // outside the landscape
+										float ex = wx / kPeriod, ez = wz / kPeriod;
+										ex -= std::floor(ex); ez -= std::floor(ez);
+										if (layer == 0) { ex = srgbEnc(ex); ez = srgbEnc(ez); }
+										const uint8_t* px4 = &got[(size_t(j) * ppx + i) * 4];
+										// 8 bit of the value; right at the wrap (0 / 1) the neighbouring texel decides, so compare circularly
+										const float gx = float(px4[0]) / 255.0f, gz = float(px4[2]) / 255.0f;
+										// A layer that keeps no blue (the packed surface: R and G) cannot show z; x still checks the columns.
+										const bool hasZ = (r->RvtLayerChannels(layer) & 4u) != 0;
+										const unsigned d = static_cast<unsigned>(std::lround((hasZ ? std::max(circ(gx, ex), circ(gz, ez)) : circ(gx, ex)) * 255.0f));
+										++n; worst = std::max(worst, d); bad += d > 3 ? 1u : 0u;
+									}
+							}
+							HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTTEST position layer %d: %u texels on %zu pages, %u wrong by > 3/255, worst %u /255 (%u outside the landscape skipped)",
+							            layer, n, ppages.size(), bad, worst, skipped);
+						}
+						baker.setViewMaterials(saved);
+					}
+
+					// 6) the consumer (Thema 333 step 3c): the landscape drawn from the page pool through the RvtSample node.
+					// Every page of a volume is painted with an analytic ramp, (u, v, 0) = ((x - ox) / ext, (z - oz) / ext, 0), in all
+					// three layers. A ramp is linear, so bilinear filtering of it is EXACT at any mip: the consumer must reproduce
+					// it at every pixel (within 8-bit rounding), through the page table, the effective-mip page cell, the border
+					// and the page seams. Two cases: every page resident (mip 0 is read), and only the top page resident (the
+					// table sends every lookup to a coarser page: the effective-mip math is the likeliest bug). Layers: 2 =
+					// (AO, roughness) carries u and v; 0 = the sRGB Load path; 1 = the normal, normalize(2 * (u, v, 0) - 1).
+					{
+						using HE::MatNodeType;
+						const std::string cfault = [] { const char* f = std::getenv("HE_DUMP_RVTTEST_FAULT"); return f ? std::string(f) : std::string(); }();
+						RvtManager cm(512, 512, 1);
+						VolumeDesc cd = vd;
+						cd.finestMetersPerTexel = 0.5f;
+						const uint16_t cvol = cm.addVolume(cd);
+						const VolumeLayout& cl = cm.layout(cvol);
+						const uint32_t cpx = static_cast<uint32_t>(cl.physicalPageSize());
+						const float ext = cl.extentM();
+						if (cpx != px) r->CreateRvtPool(512, cpx);
+
+						// the ramp view material: (u, 0, v) = WorldPos * K + C, then (u, v, 0)
+						HE::MaterialGraph rg;
+						{
+							const int out = rg.addNode(MatNodeType::Output);
+							const int wp  = rg.addNode(MatNodeType::WorldPos);
+							const int kk  = rg.addNode(MatNodeType::ConstColor);
+							const int cc  = rg.addNode(MatNodeType::ConstColor);
+							const int mul = rg.addNode(MatNodeType::Multiply);
+							const int add = rg.addNode(MatNodeType::Add);
+							const int spl = rg.addNode(MatNodeType::SplitRGBA);
+							const int zer = rg.addNode(MatNodeType::ConstFloat);
+							const int c3  = rg.addNode(MatNodeType::Combine3);
+							rg.findNode(out)->p[0] = 0.0f;
+							rg.findNode(kk)->p[0] = 1.0f / ext; rg.findNode(kk)->p[1] = 0.0f; rg.findNode(kk)->p[2] = 1.0f / ext;
+							rg.findNode(cc)->p[0] = -cd.origin.x / ext; rg.findNode(cc)->p[1] = 0.0f; rg.findNode(cc)->p[2] = -cd.origin.y / ext;
+							rg.findNode(zer)->p[0] = 0.0f;
+							rg.connect(wp, 0, mul, 0); rg.connect(kk, 0, mul, 1);
+							rg.connect(mul, 0, add, 0); rg.connect(cc, 0, add, 1);
+							rg.connect(add, 0, spl, 0);
+							rg.connect(spl, 0, c3, 0); rg.connect(spl, 2, c3, 1); rg.connect(zer, 0, c3, 2);
+							rg.connect(c3, 0, out, HE::kMatOutputBaseColorPin);
+						}
+						MaterialAsset ram;
+						ram.type = HE::AssetType::Material;
+						ram.name = "RvtRampWitness";
+						ram.nodeGraphJson = HE::materialGraphToJson(rg);
+						const HE::UUID rampId = contentManager().registerMaterial(std::move(ram));
+						contentManager().regenerateMaterialFromGraph(rampId);
+
+						// the consumers: kind 0 -> (AO, roughness, valid), 1 -> base colour, 2 -> normal * 0.5 + 0.5
+						HE::UUID consumer[3];
+						for (int kind = 0; kind < 3; ++kind)
+						{
+							HE::MaterialGraph g;
+							const int out = g.addNode(MatNodeType::Output);
+							const int pa  = g.addNode(MatNodeType::ParamVec4); g.findNode(pa)->s = "RvtVolumeA";
+							const int pb  = g.addNode(MatNodeType::ParamVec4); g.findNode(pb)->s = "RvtVolumeB";
+							const int rv  = g.addNode(MatNodeType::RvtSample);
+							g.findNode(out)->p[0] = 0.0f;
+							g.findNode(pa)->p[0] = cd.origin.x; g.findNode(pa)->p[1] = cd.origin.y;
+							g.findNode(pa)->p[2] = ext;         g.findNode(pa)->p[3] = cl.texelMeters(0);
+							g.findNode(pb)->p[0] = float(cd.pageSize); g.findNode(pb)->p[1] = float(cd.border);
+							g.findNode(pb)->p[2] = float(cl.pagesPerSide(0)); g.findNode(pb)->p[3] = float(cl.mipCount());
+							g.connect(pa, 0, rv, 0); g.connect(pb, 0, rv, 1);
+							if (kind == 0)
+							{
+								const int c3 = g.addNode(MatNodeType::Combine3);
+								g.connect(rv, 2, c3, 0); g.connect(rv, 3, c3, 1); g.connect(rv, 4, c3, 2);
+								g.connect(c3, 0, out, HE::kMatOutputBaseColorPin);
+							}
+							else if (kind == 1)
+								g.connect(rv, 0, out, HE::kMatOutputBaseColorPin);
+							else
+							{
+								const int h = g.addNode(MatNodeType::ConstFloat); g.findNode(h)->p[0] = 0.5f;
+								const int m = g.addNode(MatNodeType::Multiply);
+								const int a = g.addNode(MatNodeType::Add);
+								g.connect(rv, 1, m, 0); g.connect(h, 0, m, 1); g.connect(m, 0, a, 0); g.connect(h, 0, a, 1);
+								g.connect(a, 0, out, HE::kMatOutputBaseColorPin);
+							}
+							MaterialAsset ca;
+							ca.type = HE::AssetType::Material;
+							ca.name = "RvtConsumerWitness" + std::to_string(kind);
+							ca.nodeGraphJson = HE::materialGraphToJson(g);
+							consumer[kind] = contentManager().registerMaterial(std::move(ca));
+							contentManager().regenerateMaterialFromGraph(consumer[kind]);
+						}
+
+						// the fine pattern for the third case: fract(worldPos / 8 m), 16 texels per period at 0.5 m. A ramp is blind to
+						// a sub-texel shift (half a texel moves it by < 1/255); this one moves 8/255 for it.
+						HE::MaterialGraph fg;
+						{
+							const int out = fg.addNode(MatNodeType::Output);
+							const int wp  = fg.addNode(MatNodeType::WorldPos);
+							const int sc  = fg.addNode(MatNodeType::ConstFloat);
+							const int mul = fg.addNode(MatNodeType::Multiply);
+							const int fr  = fg.addNode(MatNodeType::Fract);
+							fg.findNode(out)->p[0] = 0.0f;
+							fg.findNode(sc)->p[0] = 1.0f / 8.0f;
+							fg.connect(wp, 0, mul, 0); fg.connect(sc, 0, mul, 1); fg.connect(mul, 0, fr, 0);
+							fg.connect(fr, 0, out, HE::kMatOutputBaseColorPin);
+						}
+						MaterialAsset fma;
+						fma.type = HE::AssetType::Material;
+						fma.name = "RvtFineWitness";
+						fma.nodeGraphJson = HE::materialGraphToJson(fg);
+						const HE::UUID fineId = contentManager().registerMaterial(std::move(fma));
+						contentManager().regenerateMaterialFromGraph(fineId);
+
+						HE::UUID savedC[3], rampMats[3] = { rampId, rampId, rampId }, fineMats[3] = { fineId, fineId, fineId };
+						baker.viewMaterials(savedC);
+
+						// the picture: the central part of the landscape, 0.5 m per pixel, at most 1024 px
+						const float shotM = std::min(cd.sizeM, 512.0f);
+						const uint32_t shotPx = static_cast<uint32_t>(shotM / 0.5f);
+						HE::landscape::HlodChunkRect shot;
+						shot.size = glm::vec2(shotM);
+						shot.min  = cd.origin + glm::vec2((cd.sizeM - shotM) * 0.5f);
+
+						// The consumers' pipelines build in the background on Metal and a draw whose pipeline is not ready is skipped:
+						// warm them and wait, or the first scenario would photograph an empty frame.
+						r->WarmupMaterials({ consumer[0], consumer[1], consumer[2], rampId, fineId });
+						for (int i = 0; i < 4000 && r->PumpShaderBuilds().pending != 0; ++i)
+							std::this_thread::sleep_for(std::chrono::milliseconds(5));
+
+						// scenarios: 0 = every page resident, ramp; 1 = only the top page, ramp; 2 = every page, the fine pattern
+						for (int scenario = 0; scenario < 3; ++scenario)
+						{
+							baker.setViewMaterials(scenario == 2 ? fineMats : rampMats);
+							RvtManager sm(512, 512, scenario == 1 ? 1 : 0);
+							const uint16_t sv = sm.addVolume(cd);
+							ViewDesc vw;
+							if (scenario != 1) { vw.cameraXZ = cd.origin + glm::vec2(cd.sizeM * 0.5f); vw.nearRadiusM = cd.sizeM; }   // every mip-0 page
+							else               { vw.cameraXZ = cd.origin - glm::vec2(1.0e6f); vw.nearRadiusM = 1.0f; }                  // only the pinned top page
+							sm.beginFrame();
+							const auto pg = sm.update(sv, vw);
+							paintPages(baker, pg, cpx);
+							std::vector<std::vector<uint32_t>> tbl;
+							for (int m = 0; m < sm.layout(sv).mipCount(); ++m) tbl.push_back(sm.pageTable(sv, m));
+							bool tblOk = true;
+							for (int k = 0; k < 3; ++k) tblOk = r->SetRvtPageTable(consumer[k], tbl) && tblOk;   // one table, read by three materials
+							const int topMip = sm.layout(sv).mipCount() - 1;
+							const float edge = (scenario != 1 ? 1.5f : 1.5f * sm.layout(sv).texelMeters(topMip));   // the first coarse texel at the volume edge mixes in the unpainted border
+
+							for (int kind = 0; kind < 3; ++kind)
+							{
+								if (scenario == 2 && kind != 1) continue;   // the fine pattern is read through the sRGB layer only
+								std::vector<uint8_t> img;
+								const bool imgOk = tblOk && baker.renderMaterialImage(consumer[kind], shot, shotPx, img) && img.size() == size_t(shotPx) * shotPx * 4;
+								unsigned n = 0, bad = 0, worst = 0;
+								if (imgOk)
+									for (uint32_t j = 0; j < shotPx; ++j)
+										for (uint32_t i = 0; i < shotPx; ++i)
+										{
+											float wx = shot.min.x + (float(i) + 0.5f) * (shotM / float(shotPx));
+											float wz = shot.min.y + (float(j) + 0.5f) * (shotM / float(shotPx));
+											if (cfault == "half") wx += 0.25f;
+											else if (cfault == "flipz") wz = shot.min.y + (float(shotPx - 1 - j) + 0.5f) * (shotM / float(shotPx));
+											else if (cfault == "swapxz") std::swap(wx, wz);
+											if (wx < cd.origin.x + edge || wz < cd.origin.y + edge ||
+											    wx > cd.origin.x + cd.sizeM - edge || wz > cd.origin.y + cd.sizeM - edge) continue;
+											const float u = (wx - cd.origin.x) / ext, v = (wz - cd.origin.y) / ext;
+											float ex[3];
+											if (scenario == 2)
+											{
+												// fract(x / 8), fract(z / 8) in R and B (G is the terrain height); the pixels next to a wrap of the
+												// sawtooth are skipped, where a texel pair straddles the jump and bilinear is not the analytic value
+												ex[0] = wx / 8.0f - std::floor(wx / 8.0f); ex[1] = 0.0f; ex[2] = wz / 8.0f - std::floor(wz / 8.0f);
+												if (ex[0] < 0.1f || ex[0] > 0.9f || ex[2] < 0.1f || ex[2] > 0.9f) continue;
+											}
+											else if (kind == 0) { ex[0] = u; ex[1] = v; ex[2] = 1.0f; }
+											else if (kind == 1) { ex[0] = u; ex[1] = v; ex[2] = 0.0f; }
+											else
+											{
+												const float nx = 2.0f * u - 1.0f, nz = -1.0f;
+												// A backend that packs the normal as x and z rebuilds y from the unit length (RvtLookup.h).
+												const float ny = r->RvtLayerChannels(1) != 0xFu ? std::sqrt(std::max(0.0f, 1.0f - nx * nx - nz * nz)) : 2.0f * v - 1.0f;
+												const float il = 1.0f / std::sqrt(nx * nx + ny * ny + nz * nz);
+												ex[0] = nx * il * 0.5f + 0.5f; ex[1] = ny * il * 0.5f + 0.5f; ex[2] = nz * il * 0.5f + 0.5f;
+											}
+											const uint8_t* px4 = &img[(size_t(j) * shotPx + i) * 4];
+											unsigned d = 0;
+											for (int c = 0; c < 3; ++c)
+											{
+												if (scenario == 2 && c == 1) continue;
+												d = std::max(d, static_cast<unsigned>(std::lround(std::fabs(float(px4[c]) / 255.0f - ex[c]) * 255.0f)));
+											}
+											++n; worst = std::max(worst, d); bad += d > 3 ? 1u : 0u;
+										}
+								HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTTEST consumer %s, view %s: %u pixels, %u wrong by > 3/255, worst %u /255 (%zu pages, table %s, image %s)",
+								            scenario == 0 ? "all pages" : scenario == 1 ? "top page only" : "all pages, fine pattern", kind == 0 ? "AO/rough/valid" : kind == 1 ? "base colour" : "normal",
+								            n, bad, worst, pg.size(), tblOk ? "ok" : "FAILED", imgOk ? "ok" : "FAILED");
+								if (imgOk && scenario == 1 && kind == 1) writeBMP(m_dumpPath + ".rvt_consumer_top.bmp", img, shotPx, shotPx);
+								if (imgOk && scenario == 0 && kind == 1) writeBMP(m_dumpPath + ".rvt_consumer_all.bmp", img, shotPx, shotPx);
+							}
+						}
+						baker.setViewMaterials(savedC);
+					}
+
+					// 5) HE_DUMP_RVTTEST_PERF=<reps>: the cost of painting a page. The pages of step 1 are painted again `reps`
+					// times (a stroke's repaint looks the same: the same slots, new content); CPU = until paintPages returns,
+					// total = until the GPU has finished (a readback of the last slice).
+					if (const char* pf = std::getenv("HE_DUMP_RVTTEST_PERF"); pf && *pf && !pages.empty())
+					{
+						const int reps = std::max(1, std::atoi(pf));
+						std::vector<uint8_t> sink;
+						paintPages(baker, pages, px);
+						r->ReadbackRvtSlot(0, pages.back().slot, sink);   // warm-up: pipelines built, GPU idle
+						const auto a = std::chrono::steady_clock::now();
+						for (int k = 0; k < reps; ++k) paintPages(baker, pages, px);
+						const auto b = std::chrono::steady_clock::now();
+						r->ReadbackRvtSlot(0, pages.back().slot, sink);
+						const auto c = std::chrono::steady_clock::now();
+						const double n = double(reps) * double(pages.size());
+						HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTTEST perf: %d x %zu pages of %u px: CPU %.3f ms/page, total %.3f ms/page (GPU wait after the CPU: %.2f ms)",
+						            reps, pages.size(), px, std::chrono::duration<double, std::milli>(b - a).count() / n,
+						            std::chrono::duration<double, std::milli>(c - a).count() / n, std::chrono::duration<double, std::milli>(c - b).count());
+					}
+					// 7a) HE_DUMP_RVTTEST_LIT=1: the REAL landscape's three views painted into every page of its volume (0.25 m per
+					// texel), the table uploaded, and a LIT consumer material (RvtSample -> base colour, normal, AO, roughness) made.
+					// The comparison with the direct material happens after baker.end(), in the live world (sun, sky, camera).
+					if (const char* lit = std::getenv("HE_DUMP_RVTTEST_LIT"); lit && *lit && *lit != '0')
+					{
+						RvtManager lm(512, 512, 0);
+						VolumeDesc ld = vd;
+						ld.finestMetersPerTexel = 0.25f;
+						const uint16_t lv = lm.addVolume(ld);
+						const VolumeLayout& ll = lm.layout(lv);
+						const uint32_t lpx = static_cast<uint32_t>(ll.physicalPageSize());
+						if (lpx != px) r->CreateRvtPool(512, lpx);
+						ViewDesc lw;
+						lw.cameraXZ = ld.origin + glm::vec2(ld.sizeM * 0.5f);
+						lw.nearRadiusM = ld.sizeM;
+						lm.beginFrame();
+						const auto lpg = lm.update(lv, lw);
+						const auto l0 = std::chrono::steady_clock::now();
+						const uint32_t lpainted = paintPages(baker, lpg, lpx);
+						std::vector<uint8_t> lsink;
+						r->ReadbackRvtSlot(0, lpg.back().slot, lsink);   // wait for the GPU
+						const auto l1 = std::chrono::steady_clock::now();
+						std::vector<std::vector<uint32_t>> ltbl;
+						for (int m = 0; m < ll.mipCount(); ++m) ltbl.push_back(lm.pageTable(lv, m));
+						const bool lpainted_ok = lpainted == lpg.size();
+
+						using HE::MatNodeType;
+						HE::MaterialGraph g;
+						const int out = g.addNode(MatNodeType::Output);              // lit
+						const int pa  = g.addNode(MatNodeType::ParamVec4); g.findNode(pa)->s = "RvtVolumeA";
+						const int pb  = g.addNode(MatNodeType::ParamVec4); g.findNode(pb)->s = "RvtVolumeB";
+						const int rv  = g.addNode(MatNodeType::RvtSample);
+						g.findNode(pa)->p[0] = ld.origin.x; g.findNode(pa)->p[1] = ld.origin.y;
+						g.findNode(pa)->p[2] = ll.extentM(); g.findNode(pa)->p[3] = ll.texelMeters(0);
+						g.findNode(pb)->p[0] = float(ld.pageSize); g.findNode(pb)->p[1] = float(ld.border);
+						g.findNode(pb)->p[2] = float(ll.pagesPerSide(0)); g.findNode(pb)->p[3] = float(ll.mipCount());
+						g.connect(pa, 0, rv, 0); g.connect(pb, 0, rv, 1);
+						g.connect(rv, 0, out, HE::kMatOutputBaseColorPin);
+						g.connect(rv, 1, out, HE::kMatOutputNormalPin);
+						g.connect(rv, 2, out, HE::kMatOutputAOPin);
+						g.connect(rv, 3, out, HE::kMatOutputRoughnessPin);
+						MaterialAsset ca;
+						ca.type = HE::AssetType::Material;
+						ca.name = "RvtLitConsumer";
+						ca.nodeGraphJson = HE::materialGraphToJson(g);
+						rvtLive.consumer = contentManager().registerMaterial(std::move(ca));
+						contentManager().regenerateMaterialFromGraph(rvtLive.consumer);
+						rvtLive.ready = lpainted_ok && r->SetRvtPageTable(rvtLive.consumer, ltbl);
+						const bool lok = rvtLive.ready;
+						HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTTEST lit: %zu pages of the real landscape painted in %.1f ms (%u painted), table %s",
+						            lpg.size(), std::chrono::duration<double, std::milli>(l1 - l0).count(), lpainted, lok ? "ok" : "FAILED");
+					}
+					if (!rvtLive.ready) r->DestroyRvtPool();
+				}
+			}
+		}
+		baker.end();
+	}
+	// 7b) the live world, back after baker.end(): the landscape drawn lit with its direct material and with the RVT consumer,
+	// from one camera above it. Differences are expected (the pages hold the view graphs at 0.25 m, the direct material
+	// computes per pixel): the numbers say how big, the pictures where. Then the cost: alternating full-frame captures
+	// (each waits for the GPU through its readback, the same in both), median of N.
+	if (rvtLive.ready && m_editorWorld && r)
+	{
+		auto& wreg = m_editorWorld->registry();
+		entt::entity land = entt::null;
+		for (auto [e, tc] : wreg.view<TerrainComponent>().each())
+			if (!wreg.all_of<TerrainChunkComponent>(e)) { land = e; break; }
+		if (land != entt::null && wreg.all_of<MaterialComponent>(land))
+		{
+			const HE::UUID directMat = wreg.get<MaterialComponent>(land).materialAssetId;
+			const auto setMaterial = [&](const HE::UUID& id) {
+				wreg.get<MaterialComponent>(land).materialAssetId = id;
+				for (auto [ce, cc, mc] : wreg.view<TerrainChunkComponent, MaterialComponent>().each()) mc.materialAssetId = id;
+				r->InvalidateMaterial(id);
+			};
+			const glm::vec3 centre = HE::worldPositionOf(*m_editorWorld, land);
+			EditorCameraOverride cam;
+			cam.active = true;
+			cam.editorIcons = false;
+			cam.fovDegrees = 60.0f;
+			cam.nearPlane = 0.1f;
+			cam.farPlane = 2000.0f;
+			const glm::vec3 eye = centre + glm::vec3(0.0f, 110.0f, 0.0f);
+			cam.position = eye;
+			cam.view = glm::lookAt(eye, eye + glm::vec3(0.0f, -1.0f, 0.0f), glm::vec3(0.0f, 0.0f, -1.0f));
+			constexpr uint32_t W = 1280, H = 720;
+			std::vector<uint8_t> direct, rvt;
+			const auto capture = [&](std::vector<uint8_t>& img) { return r->RenderSceneImage(cam, W, H, img) && img.size() == size_t(W) * H * 4; };
+			// A backend that builds material pipelines in the background (Metal) skips a draw whose pipeline is not ready: warm
+			// both materials and wait, or both pictures would be the empty frame and the comparison a perfect 0.
+			r->WarmupMaterials({ directMat, rvtLive.consumer });
+			for (int i = 0; i < 4000 && r->PumpShaderBuilds().pending != 0; ++i)
+				std::this_thread::sleep_for(std::chrono::milliseconds(5));
+			// A material's instanced twin and its textures arrive a few frames after the first draw (Metal): capture until two
+			// pictures in a row are identical (at most 60), and keep pumping the builds in between.
+			const auto settle = [&](std::vector<uint8_t>& img)
+			{
+				std::vector<uint8_t> prev;
+				for (int k = 0; k < 60; ++k)
+				{
+					if (!capture(img)) return false;
+					if (k > 0 && img == prev) return true;
+					prev = img;
+					r->PumpShaderBuilds();
+					std::this_thread::sleep_for(std::chrono::milliseconds(20));
+				}
+				return true;
+			};
+			bool ok = settle(direct);                       // first: builds the pipelines, uploads the textures
+			setMaterial(rvtLive.consumer);
+			ok = ok && settle(rvt);
+			setMaterial(directMat);
+			ok = ok && settle(direct);
+			if (!ok) HE_LOG_WARN(Editor, "EditorApplication: HE_DUMP_RVTTEST lit: a capture failed");
+			else
+			{
+				std::vector<uint8_t> diff(direct.size(), 255);
+				double sum = 0; size_t big = 0, n = 0; unsigned mx = 0;
+				for (size_t i = 0; i < direct.size(); i += 4)
+				{
+					unsigned d = 0;
+					for (size_t c = 0; c < 3; ++c) d = std::max(d, static_cast<unsigned>(std::abs(int(direct[i + c]) - int(rvt[i + c]))));
+					sum += d; mx = std::max(mx, d); big += d > 16 ? 1u : 0u; ++n;
+					for (size_t c = 0; c < 3; ++c) diff[i + c] = static_cast<uint8_t>(std::min(255u, d * 4u));
+				}
+				HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTTEST lit compare %ux%u: mean |direct - rvt| %.2f /255, max %u, %.2f %% of the pixels differ by more than 16",
+				            W, H, sum / double(n), mx, 100.0 * double(big) / double(n));
+				writeBMP(m_dumpPath + ".rvt_lit_direct.bmp", direct, W, H);
+				writeBMP(m_dumpPath + ".rvt_lit_rvt.bmp", rvt, W, H);
+				writeBMP(m_dumpPath + ".rvt_lit_diffx4.bmp", diff, W, H);
+
+				// the cost: alternate, median
+				const int N = std::max(5, std::atoi(std::getenv("HE_DUMP_RVTTEST_LIT_REPS") ? std::getenv("HE_DUMP_RVTTEST_LIT_REPS") : "15"));
+				std::vector<double> td, tr, gd, gr;   // wall ms per capture, and the GPU's own frame ms where the backend measures it
+				std::vector<uint8_t> sink;
+				for (int k = 0; k < N; ++k)
+				{
+					setMaterial(directMat);
+					const auto a = std::chrono::steady_clock::now(); capture(sink); const auto b = std::chrono::steady_clock::now();
+					gd.push_back(r->GetFrameGpuStats().gpuFrameMs);
+					setMaterial(rvtLive.consumer);
+					capture(sink); const auto c = std::chrono::steady_clock::now();
+					gr.push_back(r->GetFrameGpuStats().gpuFrameMs);
+					td.push_back(std::chrono::duration<double, std::milli>(b - a).count());
+					tr.push_back(std::chrono::duration<double, std::milli>(c - b).count());
+				}
+				std::sort(td.begin(), td.end()); std::sort(tr.begin(), tr.end());
+				std::sort(gd.begin(), gd.end()); std::sort(gr.begin(), gr.end());
+				HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTTEST lit cost (%d alternating full-frame captures, readback included in both): direct median %.2f ms (min %.2f), rvt median %.2f ms (min %.2f)",
+				            N, td[td.size() / 2], td.front(), tr[tr.size() / 2], tr.front());
+				HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTTEST lit GPU frame ms (the backend's own timestamps, -1 = not measured): direct median %.2f (min %.2f), rvt median %.2f (min %.2f)",
+				            gd[gd.size() / 2], gd.front(), gr[gr.size() / 2], gr.front());
+			}
+			setMaterial(directMat);
+		}
+		r->DestroyRvtPool();
+	}
+	// HE_DUMP_RVTBASE=1 (RVT 2.0 step 6, HorizonScene/RvtBaseBake.h): the export's baked base, end to end on the live AUTOLAND
+	// landscape. Drives the landscape from its page graphs (the reference), bakes the base the way the export does
+	// (bakeRvtBaseWorld), loads the three textures as the pak mount would, and drives a second driver that must find them: it paints
+	// its pages from the pictures (counted: the page graphs are not built) and is compared with the reference and with the whole
+	// material. Then a ground edit and a change before the Write node must each end the baked base for good (the same landscape
+	// is drawn from the page graphs again and still matches the material).
+	if (const char* bv = std::getenv("HE_DUMP_RVTBASE"); bv && *bv && *bv != '0' && m_editorWorld && r && r->GetCapabilities().supportsRvt)
+	{
+		auto& wreg = m_editorWorld->registry();
+		entt::entity land = entt::null;
+		for (auto [e, tc] : wreg.view<TerrainComponent>().each())
+			if (!wreg.all_of<TerrainChunkComponent>(e)) { land = e; break; }
+		if (land == entt::null || !wreg.all_of<MaterialComponent>(land))
+			HE_LOG_WARN(Editor, "EditorApplication: HE_DUMP_RVTBASE: no landscape with a material");
+		else
+		{
+			if (m_editorWorld->entityId(land) == HE::UUID{})
+				m_editorWorld->setEntityId(land, HE::UUID{ 0x5256544241534500ull, 0x1ull });
+			const glm::vec3 centre = HE::worldPositionOf(*m_editorWorld, land);
+			const glm::vec3 camPos = centre + glm::vec3(0.0f, 110.0f, 0.0f);
+			constexpr uint32_t W = 1280, H = 720;
+			HE::landscape::RvtLandscape::Settings cfg;
+			cfg.nearRadiusM = wreg.get<TerrainComponent>(land).sizeX > 200.0f ? 48.0f : 160.0f;
+			const auto lookDown = [&]() {
+				EditorCameraOverride cam;
+				cam.active = true; cam.editorIcons = false; cam.fovDegrees = 60.0f; cam.nearPlane = 0.1f; cam.farPlane = 2000.0f;
+				cam.position = camPos;
+				cam.view = glm::lookAt(cam.position, cam.position + glm::vec3(0.0f, -1.0f, 0.0f), glm::vec3(0.0f, 0.0f, -1.0f));
+				return cam;
+			};
+			const auto diff = [&](const std::vector<uint8_t>& a, const std::vector<uint8_t>& b, double& mean, unsigned& mx) {
+				double sum = 0; mx = 0; size_t n = 0;
+				for (size_t i = 0; i < a.size() && i < b.size(); i += 4)
+				{
+					unsigned d = 0;
+					for (size_t c = 0; c < 3; ++c) d = std::max(d, static_cast<unsigned>(std::abs(int(a[i + c]) - int(b[i + c]))));
+					sum += d; mx = std::max(mx, d); ++n;
+				}
+				mean = n ? sum / double(n) : 0.0;
+			};
+			// One driver run: ticks until the landscape is drawn from pages, then captures the pages and the whole material.
+			struct Run { bool filled = false; uint32_t painted = 0, bakedAttaches = 0; bool baked = false; uint32_t materials = 0; std::vector<uint8_t> pages, direct; };
+			const auto drive = [&](HE::landscape::RvtLandscape& d, Run& out, int maxFrames) {
+				for (int i = 0; i < maxFrames && !d.active(); ++i)
+				{
+					TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
+					const auto st = d.tick(*m_editorWorld, camPos);
+					out.painted += st.pagesPainted; out.bakedAttaches += st.bakedAttaches;
+				}
+				out.filled = d.active();
+				out.baked = d.bakedBase(land);
+				out.materials = d.materialsRegistered();
+				const auto cap = [&](std::vector<uint8_t>& img) { return r->RenderSceneImage(lookDown(), W, H, img) && img.size() == size_t(W) * H * 4; };
+				cap(out.pages);
+				d.pauseSwap(true); cap(out.direct); d.pauseSwap(false);
+			};
+			Run live;
+			{
+				HE::landscape::RvtLandscape drv(contentManager(), *r);
+				drv.setSettings(cfg);
+				drive(drv, live, 300);
+				double m = 0; unsigned x = 0; diff(live.direct, live.pages, m, x);
+				HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTBASE reference (page graphs): filled %d, baked %d, %u pages painted, %u view materials; pages vs whole material mean %.2f /255, max %u",
+				            live.filled, live.baked, live.painted, live.materials, m, x);
+				writeBMP(m_dumpPath + ".rvt_base_live.bmp", live.pages, W, H);
+			}   // ~RvtLandscape gives the landscape back
+			std::vector<HE::landscape::HlodAssetBlob> blobs;
+			std::vector<HE::UUID> seen;
+			HE::landscape::RvtBaseOptions bo;
+			bo.budgetBytes = 0;
+			if (const char* mt = std::getenv("HE_DUMP_RVTBASE_MAXTEXELS"); mt && *mt) bo.maxTexels = std::clamp(std::atoi(mt), 128, 8192);
+			const HE::landscape::RvtBaseStats bs = HE::landscape::bakeRvtBaseWorld(
+				*m_editorWorld, m_editorWorld.get(), contentManager(), *r, bo, blobs, seen,
+				[&](const std::string& s) { HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTBASE export: %s", s.c_str()); });
+			size_t blobBytes = 0; for (const auto& b : blobs) blobBytes += b.bytes.size();
+			HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTBASE bake: %u landscape(s), %zu blob(s), %.1f MB raw, %.0f ms", bs.landscapes, blobs.size(), double(blobBytes) / (1024.0 * 1024.0), bs.ms);
+			const size_t loaded = HE::landscape::loadHlodAssets(contentManager(), blobs);
+			HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTBASE pak mount: %zu texture(s) resident", loaded);
+			if (loaded == 3)
+			{
+				Run baked;
+				HE::landscape::RvtLandscape drv(contentManager(), *r);
+				drv.setSettings(cfg);
+				drive(drv, baked, 300);
+				double mLive = 0, mDirect = 0; unsigned xLive = 0, xDirect = 0;
+				diff(live.pages, baked.pages, mLive, xLive); diff(baked.direct, baked.pages, mDirect, xDirect);
+				// (the material counters are equal on purpose: three baked texture-sampling views stand where the three page graphs were; the
+				// proof that the page graphs are not built is the driver's "baked base" attach line and bakedBase())
+				HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTBASE baked: filled %d, from the baked base %d (%u attach(es)), %u pages painted, %u view materials (reference %u); vs reference pages mean %.2f /255 max %u; vs whole material mean %.2f max %u",
+				            baked.filled, baked.baked, baked.bakedAttaches, baked.painted, baked.materials, live.materials,
+				            mLive, xLive, mDirect, xDirect);
+				writeBMP(m_dumpPath + ".rvt_base_baked.bmp", baked.pages, W, H);
+
+				// A ground edit ends it for good: the journal says the pages' ground changed, the landscape starts over from the graphs.
+				TerrainComponent& tc = wreg.get<TerrainComponent>(land);
+				tc.rvtJournal.noteRect(0.0f, 0.0f, 10.0f, 10.0f, TerrainComponent::RvtJournal::kHeight);
+				HE::landscape::RvtLandscape::FrameStats st;
+				bool dropped = false;
+				for (int i = 0; i < 300 && !dropped; ++i)
+				{
+					TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
+					st = drv.tick(*m_editorWorld, camPos);
+					dropped = st.bakedDropped > 0;
+				}
+				Run after;
+				drive(drv, after, 300);
+				double mA = 0; unsigned xA = 0; diff(after.direct, after.pages, mA, xA);
+				HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTBASE ground edit: baked base dropped %d, baked now %d, filled again %d; pages vs whole material mean %.2f max %u (the page graphs are drawn again)",
+				            dropped, drv.bakedBase(land), after.filled, mA, xA);
+				// A driver that was not running when the ground changed has no memory of an edit; the key is what keeps it honest: with
+				// the ground really different (one vertex raised) the pictures are not found, with the ground as exported they are.
+				drv.detach();
+				{
+					Run same;
+					HE::landscape::RvtLandscape drv2(contentManager(), *r);
+					drv2.setSettings(cfg);
+					drive(drv2, same, 300);
+					HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTBASE fresh driver, ground as exported: baked %d (expected 1)", same.baked);
+				}
+				TerrainSculpt::ensureHeights(tc);
+				tc.sculptHeights[size_t(tc.resolution) * (tc.resolution / 2) + tc.resolution / 2] += 3.0f;
+				TerrainSculpt::markRegionDirty(tc, -2.0f, -2.0f, 2.0f, 2.0f);
+				TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
+				{
+					Run edited;
+					HE::landscape::RvtLandscape drv3(contentManager(), *r);
+					drv3.setSettings(cfg);
+					drive(drv3, edited, 300);
+					double mE = 0; unsigned xE = 0; diff(edited.direct, edited.pages, mE, xE);
+					HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTBASE fresh driver, one vertex raised: baked %d (expected 0); pages vs whole material mean %.2f max %u", edited.baked, mE, xE);
+				}
+			}
+		}
+	}
+	// HE_DUMP_RVTDRIVER=1 (Thema 333 step 4): the per-frame driver on the live AUTOLAND landscape, the way the application
+	// runs it (terrain update, then RvtLandscape::tick). Checks, in order: the first fill; an idle frame paints nothing and
+	// uploads nothing; a sculpt stroke marks exactly the resident pages its bordered rect touches and repaints exactly those;
+	// a paint stroke the same; a camera move paints only new pages; a change of the landscape material's parameters re-attaches.
+	// After each edit the landscape is drawn lit from the pages and from its own material, and the picture of the pages BEFORE
+	// the driver caught up is the control: a stale scratch copy or stale pages passes every counter and fails only there.
+	// A backend without Runtime Virtual Textures (Software, Metal until it is ported, a GL context with too few texture units,
+	// a Vulkan device at the sampler minimum) has nothing to witness: say so instead of driving a pool that cannot exist.
+	if (r && !r->GetCapabilities().supportsRvt)
+		for (const char* name : { "HE_DUMP_RVTDRIVER", "HE_DUMP_RVTTILES" })
+			if (const char* v = std::getenv(name); v && *v && *v != '0')
+				HE_LOG_WARN(Editor, "EditorApplication: %s: this backend has no Runtime Virtual Textures (Capabilities::supportsRvt), witness skipped", name);
+	if (const char* dv = std::getenv("HE_DUMP_RVTDRIVER"); dv && *dv && *dv != '0' && m_editorWorld && r && r->GetCapabilities().supportsRvt)
+	{
+		auto& wreg = m_editorWorld->registry();
+		entt::entity land = entt::null;
+		for (auto [e, tc] : wreg.view<TerrainComponent>().each())
+			if (!wreg.all_of<TerrainChunkComponent>(e)) { land = e; break; }
+		if (land == entt::null || !wreg.all_of<MaterialComponent>(land))
+			HE_LOG_WARN(Editor, "EditorApplication: HE_DUMP_RVTDRIVER: no landscape with a material");
+		else
+		{
+			HE::landscape::RvtLandscape drv(contentManager(), *r);
+			HE::landscape::RvtLandscape::Settings cfg;
+			// every mip-0 page of the 128 m landscape is wanted; on a bigger one the ring is a part of it (the camera test needs that)
+			cfg.nearRadiusM = wreg.get<TerrainComponent>(land).sizeX > 200.0f ? 48.0f : 160.0f;
+			// HE_DUMP_RVTDRIVER_TEXEL=<m>: the finest texel size (default 0.25), e.g. 0.0625 to see a fine volume fill the pool.
+			if (const char* tx = std::getenv("HE_DUMP_RVTDRIVER_TEXEL"); tx && *tx) cfg.metersPerTexel = std::clamp(float(std::atof(tx)), 0.01f, 4.0f);
+			drv.setSettings(cfg);
+			const glm::vec3 centre = HE::worldPositionOf(*m_editorWorld, land);
+			glm::vec3 camPos = centre + glm::vec3(0.0f, 110.0f, 0.0f);
+			const HE::UUID directMat = wreg.get<MaterialComponent>(land).materialAssetId;
+			const auto sceneTick = [&]() {
+				TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);       // the world tick's terrain update
+				return drv.tick(*m_editorWorld, camPos);
+			};
+			const auto lookDown = [&]() {
+				EditorCameraOverride cam;
+				cam.active = true; cam.editorIcons = false; cam.fovDegrees = 60.0f; cam.nearPlane = 0.1f; cam.farPlane = 2000.0f;
+				cam.position = centre + glm::vec3(0.0f, 110.0f, 0.0f);
+				cam.view = glm::lookAt(cam.position, cam.position + glm::vec3(0.0f, -1.0f, 0.0f), glm::vec3(0.0f, 0.0f, -1.0f));
+				return cam;
+			};
+			constexpr uint32_t W = 1280, H = 720;
+			const auto capture = [&](std::vector<uint8_t>& img) { return r->RenderSceneImage(lookDown(), W, H, img) && img.size() == size_t(W) * H * 4; };
+			// the landscape drawn from its own material: the swap off for one capture, then on again
+			const auto captureDirect = [&](std::vector<uint8_t>& img) {
+				drv.pauseSwap(true);
+				const bool ok = capture(img);
+				drv.pauseSwap(false);
+				return ok;
+			};
+			// mean |a - b| over the whole picture and over the pixels where the control differs from the reference (the stroke)
+			const auto diffStats = [&](const std::vector<uint8_t>& a, const std::vector<uint8_t>& b, double& mean, unsigned& mx) {
+				double sum = 0; mx = 0; size_t n = 0;
+				for (size_t i = 0; i < a.size(); i += 4)
+				{
+					unsigned d = 0;
+					for (size_t c = 0; c < 3; ++c) d = std::max(d, static_cast<unsigned>(std::abs(int(a[i + c]) - int(b[i + c]))));
+					sum += d; mx = std::max(mx, d); ++n;
+				}
+				mean = sum / double(n);
+			};
+			// the same, only over the box of a stroke (terrain-local centre and radius), where a stale page shows
+			const auto regionMean = [&](const std::vector<uint8_t>& a, const std::vector<uint8_t>& b, float lx, float lz, float rad) {
+				const float mpp = 2.0f * 110.0f * std::tan(glm::radians(30.0f)) / float(H);   // metres per pixel of lookDown()
+				const int x0 = std::clamp(int(float(W) * 0.5f + (lx - rad) / mpp), 0, int(W) - 1), x1 = std::clamp(int(float(W) * 0.5f + (lx + rad) / mpp), 0, int(W) - 1);
+				const int y0 = std::clamp(int(float(H) * 0.5f + (lz - rad) / mpp), 0, int(H) - 1), y1 = std::clamp(int(float(H) * 0.5f + (lz + rad) / mpp), 0, int(H) - 1);
+				double sum = 0; size_t n = 0;
+				for (int y = y0; y <= y1; ++y)
+					for (int x = x0; x <= x1; ++x)
+					{
+						const size_t i = (size_t(y) * W + size_t(x)) * 4;
+						unsigned d = 0;
+						for (size_t c = 0; c < 3; ++c) d = std::max(d, static_cast<unsigned>(std::abs(int(a[i + c]) - int(b[i + c]))));
+						sum += d; ++n;
+					}
+				return n ? sum / double(n) : 0.0;
+			};
+			// how many resident pages' bordered rect touches a world rect: the independent count the journal path must match
+			const auto residentTouching = [&](glm::vec2 mn, glm::vec2 mx) {
+				uint32_t n = 0;
+				const HE::rvt::RvtManager& m = *drv.manager();
+				const HE::rvt::VolumeLayout& L = m.layout(drv.volumeOf(land));
+				for (int mip = 0; mip < L.mipCount(); ++mip)
+					for (int y = 0; y < L.pagesPerSide(mip); ++y)
+						for (int x = 0; x < L.pagesPerSide(mip); ++x)
+						{
+							glm::vec2 a, b;
+							L.pageRect(mip, x, y, a, b, true);
+							if (m.isResident(HE::rvt::PageKey{ drv.volumeOf(land), uint8_t(mip), uint16_t(x), uint16_t(y) }) &&
+							    !(b.x <= mn.x || a.x >= mx.x || b.y <= mn.y || a.y >= mx.y)) ++n;
+						}
+				return n;
+			};
+
+			// HE_DUMP_RVTDRIVER_FRAMES=<n>: n NORMAL frames (driver tick + Render, 50 ms apart), the live loop the other steps skip:
+			// what only real frames do (the idle release of big texture arrays on Metal, the ageing of retired textures) happens here.
+			// Run before the sculpt stroke (so the strokes after it repaint pages whose arrays had to be reloaded) and again at the end.
+			const auto normalFrames = [&](const char* when) {
+				const char* nf = std::getenv("HE_DUMP_RVTDRIVER_FRAMES");
+				if (!nf || !*nf) return;
+				const int n = std::clamp(std::atoi(nf), 1, 5000);
+					// HE_DUMP_RVTDRIVER_DIRECT=1: the frames draw the landscape from its whole material (the RVT-off shader) instead of the
+					// pages, so one run per setting gives the cost of the live part against the whole material (RVT 2.0 step 4).
+					const char* dd = std::getenv("HE_DUMP_RVTDRIVER_DIRECT");
+					const bool direct = dd && *dd && *dd != '0';
+					if (direct) drv.pauseSwap(true);
+					struct Resume { HE::landscape::RvtLandscape& d; bool on; ~Resume() { if (on) d.pauseSwap(false); } } resume{ drv, direct };
+				double worst = 0.0, sum = 0.0, gpuSum = 0.0; int gpuN = 0;
+				for (int i = 0; i < n; ++i)
+				{
+					const auto f0 = std::chrono::steady_clock::now();
+					sceneTick();
+					r->Render();
+					const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - f0).count();
+					worst = std::max(worst, ms); sum += ms;
+						// the GPU time of the previous frame (published when its command buffer completed, long before this one: 50 ms sleep)
+						if (const double g = r->GetFrameGpuStats().gpuFrameMs; g > 0.0) { gpuSum += g; ++gpuN; }
+					std::this_thread::sleep_for(std::chrono::milliseconds(50));
+				}
+				HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTDRIVER normal frames (%s): %d frames, mean %.2f ms, worst %.2f ms (driver tick + Render), GPU frame mean %.3f ms over %d frames", when, n, sum / n, worst, gpuN ? gpuSum / gpuN : -1.0, gpuN);
+			};
+			// A) the first fill
+			HE::landscape::RvtLandscape::FrameStats st;
+			int frames = 0; uint32_t filled = 0;
+			for (; frames < 300 && !drv.active(); ++frames) { st = sceneTick(); filled += st.pagesPainted; }
+			HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTDRIVER fill: active after %d frames, %u pages painted (%u at most per frame)", frames, filled, cfg.maxPagesPerFrame);
+
+			// B) idle
+			uint32_t idlePainted = 0; int idleUploads = 0;
+			for (int i = 0; i < 10; ++i) { st = sceneTick(); idlePainted += st.pagesPainted; idleUploads += st.tablesUploaded; }
+			HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTDRIVER idle: 10 frames, %u pages painted, %d table uploads (expected 0, 0)", idlePainted, idleUploads);
+
+			std::vector<uint8_t> direct, pages, stale, ref;
+			bool ok = capture(ref);
+			double meanBase = 0; unsigned maxBase = 0;
+			ok = ok && captureDirect(direct) && capture(pages);
+			if (ok) diffStats(direct, pages, meanBase, maxBase);
+			HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTDRIVER baseline pages vs own material: mean %.2f /255, max %u", meanBase, maxBase);
+
+			// The same comparison on the OTHER render path (the game defaults to deferred): the consumer's G-buffer tail binds the
+			// same table and pool, and a draw in the G-buffer pass skips the shader-key fast path.
+			{
+				const HE::RenderPath livePath = r->GetRenderPath();
+				for (const HE::RenderPath rp : { HE::RenderPath::Forward, HE::RenderPath::Deferred })
+				{
+					r->SetRenderPath(rp);
+					std::vector<uint8_t> d2, p2;
+					double m2 = 0; unsigned x2 = 0;
+					const bool ok2 = captureDirect(d2) && capture(p2) && capture(p2);
+					if (ok2) diffStats(d2, p2, m2, x2);
+					HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTDRIVER render path %s: pages vs own material mean %.2f /255, max %u (%s)",
+					            rp == HE::RenderPath::Forward ? "forward" : "deferred", m2, x2, ok2 ? "ok" : "capture FAILED");
+					if (ok2 && rp == HE::RenderPath::Deferred) writeBMP(m_dumpPath + ".rvt_drv_deferred_pages.bmp", p2, W, H);
+				}
+				r->SetRenderPath(livePath);
+			}
+
+			normalFrames("after the idle step");
+			// C) a sculpt stroke: a bump of 8 m, 14 m wide, the way a brush edits (heights, then the dirty rect, then the tick)
+			{
+				TerrainComponent& tc = wreg.get<TerrainComponent>(land);
+				TerrainSculpt::ensureHeights(tc);
+				const float cx = 20.0f, cz = -15.0f, rad = 14.0f;
+				const float step = tc.sizeX / float(tc.resolution - 1);
+				for (uint32_t zi = 0; zi < tc.resolution; ++zi)
+					for (uint32_t xi = 0; xi < tc.resolution; ++xi)
+					{
+						const float x = -tc.sizeX * 0.5f + float(xi) * step, z = -tc.sizeZ * 0.5f + float(zi) * step;
+						const float d = std::sqrt((x - cx) * (x - cx) + (z - cz) * (z - cz)) / rad;
+						if (d < 1.0f) tc.sculptHeights[size_t(zi) * tc.resolution + xi] += 8.0f * 0.5f * (1.0f + std::cos(d * 3.14159265f));
+					}
+				TerrainSculpt::markRegionDirty(tc, cx - rad - step, cz - rad - step, cx + rad + step, cz + rad + step);
+				TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);       // the tool's own immediate update
+				const uint32_t expect = residentTouching(glm::vec2(centre.x + cx - rad - step, centre.z + cz - rad - step),
+				                                         glm::vec2(centre.x + cx + rad + step, centre.z + cz + rad + step));
+				ok = capture(stale);                                                         // the pages BEFORE the driver ran: the control
+				st = drv.tick(*m_editorWorld, camPos);                                       // (the tick after the terrain update)
+				uint32_t painted = st.pagesPainted;
+				for (int i = 0; i < 40 && drv.manager()->stats().dirty > 0; ++i) painted += sceneTick().pagesPainted;
+				HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTDRIVER sculpt stroke: %u pages marked stale (independent count %u), %u repainted, %u still dirty, journal %s",
+				            st.pagesStale, expect, painted, drv.manager()->stats().dirty, wreg.get<TerrainComponent>(land).rvtJournal.any ? "NOT drained" : "drained");
+				std::vector<uint8_t> after, afterDirect;
+				ok = ok && capture(after) && captureDirect(afterDirect);
+				double mStale = 0, mFresh = 0; unsigned xs = 0, xf = 0;
+				if (ok) { diffStats(afterDirect, stale, mStale, xs); diffStats(afterDirect, after, mFresh, xf); }
+				HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTDRIVER sculpt stroke picture: own material vs stale pages mean %.2f (max %u), vs repainted pages mean %.2f (max %u); inside the stroke: stale %.2f, repainted %.2f  [the control must be clearly worse]",
+				            mStale, xs, mFresh, xf, ok ? regionMean(afterDirect, stale, 20.0f, -15.0f, 14.0f) : 0.0, ok ? regionMean(afterDirect, after, 20.0f, -15.0f, 14.0f) : 0.0);
+				writeBMP(m_dumpPath + ".rvt_drv_sculpt_stale.bmp", stale, W, H);
+				writeBMP(m_dumpPath + ".rvt_drv_sculpt_after.bmp", after, W, H);
+			}
+
+			// C2) the viewport's Virtual Texture view mode (RVT 2.0 step 5): the page map of the landscape, then the same after a
+			// sculpt stroke with a one-page budget, so the stale pages stay stale for a few frames and show their mark.
+			{
+				for (int i = 0; i < 40 && drv.manager()->stats().dirty > 0; ++i) sceneTick();
+				drv.setDebugView(true);
+				r->SetViewMode(HE::ViewMode::RvtDebug);
+				sceneTick();                                                                 // the table again, with the marks column
+				std::vector<uint8_t> dbgClean, dbgStale, lit;
+				bool ok2 = capture(dbgClean);
+				auto di = drv.debugInfo();
+				HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTDRIVER debug view: clean state: %u resident, %u stale (grid %d x %d)", di.resident, di.stale, di.gridSide, di.gridSide);
+				HE::landscape::RvtLandscape::Settings slow = cfg; slow.maxPagesPerFrame = 1; drv.setSettings(slow);
+				TerrainComponent& tc = wreg.get<TerrainComponent>(land);
+				TerrainSculpt::ensureHeights(tc);
+				const float cx = -30.0f, cz = 25.0f, rad = 14.0f;
+				const float step = tc.sizeX / float(tc.resolution - 1);
+				for (uint32_t zi = 0; zi < tc.resolution; ++zi)
+					for (uint32_t xi = 0; xi < tc.resolution; ++xi)
+					{
+						const float x = -tc.sizeX * 0.5f + float(xi) * step, z = -tc.sizeZ * 0.5f + float(zi) * step;
+						const float d = std::sqrt((x - cx) * (x - cx) + (z - cz) * (z - cz)) / rad;
+						if (d < 1.0f) tc.sculptHeights[size_t(zi) * tc.resolution + xi] += 4.0f * 0.5f * (1.0f + std::cos(d * 3.14159265f));
+					}
+				TerrainSculpt::markRegionDirty(tc, cx - rad - step, cz - rad - step, cx + rad + step, cz + rad + step);
+				TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
+				drv.tick(*m_editorWorld, camPos);                                            // marks the pages, paints one
+				ok2 = ok2 && capture(dbgStale);
+				di = drv.debugInfo();
+				unsigned grid2 = 0; for (uint8_t c : di.grid) grid2 += c == 2 ? 1u : 0u;
+				HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTDRIVER debug view: after a stroke (1 page per frame): %u stale pages in the manager, %u stale cells in the mip-0 grid", di.stale, grid2);
+				double mDbg = 0; unsigned xDbg = 0;
+				if (ok2) diffStats(dbgClean, dbgStale, mDbg, xDbg);
+				HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTDRIVER debug view: clean vs stale picture mean %.2f /255 (max %u), inside the stroke %.2f  [stale marks change the picture]",
+				            mDbg, xDbg, ok2 ? regionMean(dbgClean, dbgStale, cx, cz, rad) : 0.0);
+				if (ok2) { writeBMP(m_dumpPath + ".rvt_drv_debug_clean.bmp", dbgClean, W, H); writeBMP(m_dumpPath + ".rvt_drv_debug_stale.bmp", dbgStale, W, H); }
+				// the debug view off again: the same pages, no marks, the picture is the normal one
+				for (int i = 0; i < 60 && drv.manager()->stats().dirty > 0; ++i) sceneTick();
+				drv.setSettings(cfg);
+				drv.setDebugView(false);
+				r->SetViewMode(HE::ViewMode::Lit);
+				sceneTick();
+			}
+
+			// D) a paint stroke on layer 2, 10 m radius
+			{
+				TerrainComponent& tc = wreg.get<TerrainComponent>(land);
+				TerrainPaint::ensureWeightmap(tc);
+				for (int i = 0; i < 3; ++i) sceneTick();      // the allocation of a weightmap is itself a change (all): let it settle
+				for (int i = 0; i < 60 && drv.manager()->stats().dirty > 0; ++i) sceneTick();
+				const float px_ = -25.0f, pz_ = 20.0f, prad = 10.0f, pfall = 4.0f;
+				TerrainPaint::paint(tc, px_, pz_, 2, prad, pfall, 1.0f);
+				TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
+				const float reach = prad + pfall + tc.sizeX / float(tc.weightRes) * 2.0f;
+				const uint32_t expect = residentTouching(glm::vec2(centre.x + px_ - reach, centre.z + pz_ - reach), glm::vec2(centre.x + px_ + reach, centre.z + pz_ + reach));
+				std::vector<uint8_t> staleP, afterP, afterDirectP;
+				bool okP = capture(staleP);
+				st = drv.tick(*m_editorWorld, camPos);
+				uint32_t painted = st.pagesPainted;
+				for (int i = 0; i < 40 && drv.manager()->stats().dirty > 0; ++i) painted += sceneTick().pagesPainted;
+				HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTDRIVER paint stroke: %u pages marked stale (independent count about %u), %u repainted, %u still dirty",
+				            st.pagesStale, expect, painted, drv.manager()->stats().dirty);
+				okP = okP && capture(afterP) && captureDirect(afterDirectP);
+				double mStale = 0, mFresh = 0; unsigned xs = 0, xf = 0;
+				if (okP) { diffStats(afterDirectP, staleP, mStale, xs); diffStats(afterDirectP, afterP, mFresh, xf); }
+				HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTDRIVER paint stroke picture: own material vs stale pages mean %.2f (max %u), vs repainted pages mean %.2f (max %u); inside the stroke: stale %.2f, repainted %.2f",
+				            mStale, xs, mFresh, xf, okP ? regionMean(afterDirectP, staleP, -25.0f, 20.0f, 14.0f) : 0.0, okP ? regionMean(afterDirectP, afterP, -25.0f, 20.0f, 14.0f) : 0.0);
+			}
+
+			// E) the camera moves 30 m with a 40 m near radius: only pages that came into view are painted, none are stale, never more
+			// than the budget in one frame
+			{
+				cfg.nearRadiusM = wreg.get<TerrainComponent>(land).sizeX > 200.0f ? 48.0f : 40.0f;
+				drv.setSettings(cfg);
+				uint32_t settle = 0;
+				for (int i = 0; i < 30; ++i) settle += sceneTick().pagesPainted;      // the ring around the start position
+				const uint32_t resident0 = drv.manager()->stats().resident;
+				camPos.x += 30.0f;
+				uint32_t painted = 0, stale0 = 0, perFrame = 0;
+				for (int i = 0; i < 30; ++i) { st = sceneTick(); painted += st.pagesPainted; stale0 += st.pagesStale; perFrame = std::max(perFrame, st.pagesPainted); }
+				HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTDRIVER camera +30 m (near radius 40 m): %u pages to settle the start, then %u painted for the move (at most %u in one frame, budget %u), %u marked stale (expected 0), resident %u -> %u",
+				            settle, painted, perFrame, cfg.maxPagesPerFrame, stale0, resident0, drv.manager()->stats().resident);
+			}
+
+			// F) a change of the landscape material's parameters: the view graphs cannot be patched, the driver starts over
+			{
+				// the snow line: the slot of the parameter by NAME (a sync lays the block out like the parent's, slot 0 is not it)
+				MaterialAsset* ma = contentManager().getMaterialMutable(directMat);
+				size_t snowSlot = ~size_t(0);
+				if (ma)
+					for (size_t i = 0; i < ma->graphParamNames.size(); ++i)
+						if (ma->graphParamNames[i] == HE::kAutoLandscapeParamSnowHeight) snowSlot = i * 4;
+				if (ma && snowSlot < ma->shaderParamData.size())
+				{
+					const float before = ma->shaderParamData[snowSlot];
+					ma->shaderParamData[snowSlot] += 15.0f;
+					contentManager().syncMaterialInstance(directMat);
+					HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTDRIVER material: snow line %.1f -> %.1f, after sync %.1f (slot %zu of %zu floats, parent '%s')", before, before + 15.0f, ma->shaderParamData[snowSlot], snowSlot, ma->shaderParamData.size(), ma->parentMaterialPath.c_str());
+					r->InvalidateMaterial(directMat);
+					bool rescanned = false; uint32_t painted = 0, liveOnly = 0, rebuilds = 0, staleF = 0, staleL[3] = { 0, 0, 0 }; int refill = 0;
+					for (; refill < 300; ++refill)
+					{
+						st = sceneTick(); rescanned = rescanned || st.rescanned; painted += st.pagesPainted;
+							liveOnly += st.liveOnlyChanges; rebuilds += st.pageRebuilds; staleF += st.pagesStale;
+							for (int k = 0; k < 3; ++k) staleL[k] += st.layersStale[k];
+						if (refill > 2 && drv.active() && drv.manager() && drv.manager()->stats().wantedMissing == 0 && drv.manager()->stats().dirty == 0) break;
+					}
+					std::vector<uint8_t> a, b;
+					bool okF = captureDirect(a) && capture(b);
+					double mF = 0; unsigned xF = 0;
+					if (okF) diffStats(a, b, mF, xF);
+					HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTDRIVER material parameter change (snow line, after the Read; expected: no re-attach, 0 rebuilds, 0 stale, 0 painted, 1+ live-only): re-attached %s, %u page rebuild(s), %u stale (layers colour/normal/AO+rough: %u/%u/%u), %u painted over %d frames, %u live-only change(s), pages vs own material mean %.2f (max %u)",
+					            rescanned ? "yes" : "NO", rebuilds, staleF, staleL[0], staleL[1], staleL[2], painted, refill, liveOnly, mF, xF);
+				}
+				// ... and the rock slope is BEFORE the Write node: the page materials are rebuilt in place (no re-attach) and the
+				// resident pages repainted.
+				{
+					MaterialAsset* ma2 = contentManager().getMaterialMutable(directMat);
+					size_t rockSlot = ~size_t(0);
+					if (ma2)
+						for (size_t i = 0; i < ma2->graphParamNames.size(); ++i)
+							if (ma2->graphParamNames[i] == HE::kAutoLandscapeParamRockSlope) rockSlot = i * 4;
+					if (ma2 && rockSlot < ma2->shaderParamData.size())
+					{
+						if (std::find(ma2->instanceOverriddenParams.begin(), ma2->instanceOverriddenParams.end(), HE::kAutoLandscapeParamRockSlope) == ma2->instanceOverriddenParams.end())
+							ma2->instanceOverriddenParams.push_back(HE::kAutoLandscapeParamRockSlope);
+						ma2->shaderParamData[rockSlot] += 0.08f;
+						contentManager().syncMaterialInstance(directMat);
+						r->InvalidateMaterial(directMat);
+						bool rescanned = false; uint32_t painted = 0, liveOnly = 0, rebuilds = 0, staleF = 0, staleL[3] = { 0, 0, 0 }; int refill = 0;
+						for (; refill < 300; ++refill)
+						{
+							st = sceneTick(); rescanned = rescanned || st.rescanned; painted += st.pagesPainted;
+							liveOnly += st.liveOnlyChanges; rebuilds += st.pageRebuilds; staleF += st.pagesStale;
+							for (int k = 0; k < 3; ++k) staleL[k] += st.layersStale[k];
+							if (refill > 2 && drv.active() && drv.manager() && drv.manager()->stats().wantedMissing == 0 && drv.manager()->stats().dirty == 0) break;
+						}
+						std::vector<uint8_t> a, b;
+						const bool okF = captureDirect(a) && capture(b);
+						double mF = 0; unsigned xF = 0;
+						if (okF) diffStats(a, b, mF, xF);
+						HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTDRIVER material parameter change (rock slope, before the Write; expected: no re-attach, 1 rebuild, only the layers whose Write pins read it stale and painted): re-attached %s, %u page rebuild(s), %u stale (layers colour/normal/AO+rough: %u/%u/%u), %u painted over %d frames, %u live-only change(s), pages vs own material mean %.2f (max %u)",
+						            rescanned ? "yes" : "NO", rebuilds, staleF, staleL[0], staleL[1], staleL[2], painted, refill, liveOnly, mF, xF);
+					}
+				}
+				// G) per-layer stale flags (RVT 2.0 step 8): every shipped Auto Landscape parameter feeds the layer blend, which all three
+				// layers read, so none of them can show a single layer. A witness parameter can: a "Witness Rough" float is multiplied into
+				// the graph in front of the Write node's Roughness pin only. Editing the graph starts the segment over (a graph edit);
+				// moving the parameter afterwards must mark the AO/roughness layer of the resident pages and no other layer.
+				{
+					const MaterialAsset* inst = contentManager().getMaterial(directMat);
+					const HE::UUID parentId = inst ? contentManager().loadAsset(inst->parentMaterialPath) : HE::UUID{};
+					MaterialAsset* parent = parentId != HE::UUID{} ? contentManager().getMaterialMutable(parentId) : nullptr;
+					HE::MaterialGraph g;
+					bool edited = false;
+					if (parent && materialGraphFromJson(parent->nodeGraphJson, g))
+					{
+						int writeId = 0, srcNode = 0, srcPin = 0;
+						for (const HE::MatGraphNode& n : g.nodes) if (n.type == HE::MatNodeType::RvtWrite) writeId = n.id;
+						for (const HE::MatGraphLink& l : g.links)
+							if (l.dstNode == writeId && l.dstPin == HE::kRvtWriteRoughnessPin) { srcNode = l.srcNode; srcPin = l.srcPin; }
+						if (writeId != 0 && srcNode != 0)
+						{
+							const int pf = g.addNode(HE::MatNodeType::ParamFloat);
+							g.findNode(pf)->s = "Witness Rough";
+							g.findNode(pf)->p[0] = 1.0f;
+							const int mul = g.addNode(HE::MatNodeType::Multiply);
+							g.connect(srcNode, srcPin, mul, 0);
+							g.connect(pf, 0, mul, 1);
+							g.connect(mul, 0, writeId, HE::kRvtWriteRoughnessPin);
+							parent->nodeGraphJson = materialGraphToJson(g);
+							contentManager().regenerateMaterialFromGraph(parentId);
+							contentManager().syncMaterialInstance(directMat);
+							r->InvalidateMaterial(parentId);
+							r->InvalidateMaterial(directMat);
+							edited = true;
+						}
+					}
+					if (!edited) HE_LOG_WARN(Editor, "EditorApplication: HE_DUMP_RVTDRIVER layers: could not add the witness parameter");
+					else
+					{
+						bool rescanned = false; int refill = 0;
+						for (; refill < 300; ++refill)
+						{
+							st = sceneTick(); rescanned = rescanned || st.rescanned;
+							if (refill > 2 && drv.active() && drv.manager() && drv.manager()->stats().wantedMissing == 0 && drv.manager()->stats().dirty == 0) break;
+						}
+						MaterialAsset* ma3 = contentManager().getMaterialMutable(directMat);
+						size_t slot = ~size_t(0);
+						if (ma3)
+							for (size_t i = 0; i < ma3->graphParamNames.size(); ++i)
+								if (ma3->graphParamNames[i] == "Witness Rough") slot = i * 4;
+						if (ma3 && slot < ma3->shaderParamData.size())
+						{
+							if (std::find(ma3->instanceOverriddenParams.begin(), ma3->instanceOverriddenParams.end(), "Witness Rough") == ma3->instanceOverriddenParams.end())
+								ma3->instanceOverriddenParams.push_back("Witness Rough");
+							ma3->shaderParamData[slot] = 0.35f;
+							contentManager().syncMaterialInstance(directMat);
+							r->InvalidateMaterial(directMat);
+							const HE::rvt::Stats before = drv.manager()->stats();
+							bool reattached = false; uint32_t painted = 0, rebuilds = 0, staleF = 0, staleL[3] = { 0, 0, 0 }, maxDirty[3] = { 0, 0, 0 };
+							int frames = 0;
+							for (; frames < 300; ++frames)
+							{
+								st = sceneTick(); reattached = reattached || st.rescanned; painted += st.pagesPainted;
+								rebuilds += st.pageRebuilds; staleF += st.pagesStale;
+								for (int k = 0; k < 3; ++k) { staleL[k] += st.layersStale[k]; maxDirty[k] = std::max(maxDirty[k], drv.manager()->stats().dirtyLayer[k]); }
+								if (frames > 2 && drv.active() && drv.manager() && drv.manager()->stats().wantedMissing == 0 && drv.manager()->stats().dirty == 0) break;
+							}
+							HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTDRIVER layers (Witness Rough, only in front of the Roughness pin; expected: no re-attach, 1 rebuild, stale in the AO+rough layer only, colour/normal 0): re-attached %s, %u page rebuild(s), %u page(s) marked stale, per layer colour/normal/AO+rough marked %u/%u/%u, stale at the start %u/%u/%u and at most at once %u/%u/%u (of %u resident), %u painted over %d frames, 0 still dirty %s",
+							            reattached ? "yes" : "NO", rebuilds, staleF, staleL[0], staleL[1], staleL[2], before.dirtyLayer[0], before.dirtyLayer[1], before.dirtyLayer[2], maxDirty[0], maxDirty[1], maxDirty[2],
+							            before.resident, painted, frames, drv.manager()->stats().dirty == 0 ? "yes" : "NO");
+						}
+						else HE_LOG_WARN(Editor, "EditorApplication: HE_DUMP_RVTDRIVER layers: the witness parameter has no slot (re-attached %s)", rescanned ? "yes" : "no");
+					}
+				}
+			}
+			// HE_DUMP_RVTDRIVER_MIRRORSHOT=<prefix> (with HE_DUMP_AUTOLANDMIRROR=1 and GI reflections on): the mirrors of the
+			// auto-landscape witness from its camera, once with the landscape's own colour in the GI (the swap paused: the
+			// per-layer means) and once drawn from the pages (the GI reads the RVT at the hit): <prefix>.own.bmp / .rvt.bmp.
+			if (const char* ms = std::getenv("HE_DUMP_RVTDRIVER_MIRRORSHOT"); ms && *ms)
+			{
+				EditorCameraOverride mc;
+				mc.active = true; mc.editorIcons = false; mc.fovDegrees = 60.0f; mc.nearPlane = 0.1f; mc.farPlane = 4000.0f;
+				mc.position = glm::vec3(-40.0f, 304.0f, 14.0f);
+				const float pitch = glm::radians(-4.0f);
+				mc.view = glm::lookAt(mc.position, mc.position + glm::vec3(0.0f, std::sin(pitch), -std::cos(pitch)), glm::vec3(0.0f, 1.0f, 0.0f));
+				camPos = mc.position;
+				// The pages this view reads: rendered frames from this camera report them (the feedback), ticks paint them.
+				std::vector<uint8_t> warm;
+				for (int i = 0; i < 120; ++i) { r->RenderSceneImage(mc, W, H, warm); sceneTick(); }
+				std::vector<uint8_t> own, pages;
+				drv.pauseSwap(true);
+				const bool okOwn = r->RenderSceneImage(mc, W, H, own);
+				drv.pauseSwap(false);
+				const bool okPages = r->RenderSceneImage(mc, W, H, pages);
+				if (okOwn)   writeBMP(std::string(ms) + ".own.bmp", own, W, H);
+				if (okPages) writeBMP(std::string(ms) + ".rvt.bmp", pages, W, H);
+				// (With HE_GI_RVT_MAP=1 the mirrors of .rvt.bmp show the page map instead: the mip each reflection reads.)
+				HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTDRIVER mirror shot: own %s, pages %s (%s.*.bmp)", okOwn ? "ok" : "FAILED",
+				            okPages ? "ok" : "FAILED", ms);
+			}
+			drv.detach();
+			normalFrames("end");
+			HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTDRIVER done: %llu pages painted in total, detached", static_cast<unsigned long long>(drv.pagesPaintedTotal()));
+		}
+	}
+	// HE_DUMP_RVTTILES=1 (Thema 333 step 5, with HE_DUMP_AUTOLAND=1 and HE_DUMP_AUTOLANDSIZE=128): four 128 m landscapes side by side
+	// (2 x 2, one smooth ground across them) as a STAND-IN for the tiles of a tiled landscape, each its own volume in one pool.
+	// (The real tiles of Thema 326, LandscapeStore and kLandscapeFS, are not on this branch.) Checks: all four fill from the
+	// one pool, one attach per frame; the lit picture against the landscapes' own material, seam strips against the interior;
+	// a stroke inside one tile repaints only that tile's pages, a stroke across a border both tiles'; destroying one tile frees
+	// exactly its volume; walking away and back registers no material; a pool that is too small settles instead of thrashing.
+	if (const char* tv = std::getenv("HE_DUMP_RVTTILES"); tv && *tv && *tv != '0' && m_editorWorld && r && r->GetCapabilities().supportsRvt)
+	{
+		auto& wreg = m_editorWorld->registry();
+		entt::entity land = entt::null;
+		for (auto [e, tc] : wreg.view<TerrainComponent>().each())
+			if (!wreg.all_of<TerrainChunkComponent>(e)) { land = e; break; }
+		if (land == entt::null || !wreg.all_of<MaterialComponent>(land))
+			HE_LOG_WARN(Editor, "EditorApplication: HE_DUMP_RVTTILES: no landscape with a material");
+		else
+		{
+			constexpr float kTile = 128.0f;
+			const auto groundAt = [](float x, float z) { return 5.0f * std::sin(x * 0.045f) * std::cos(z * 0.038f) + 3.0f * std::sin(0.11f * x + 0.09f * z); };
+			std::vector<entt::entity> tiles{ land };
+			for (int k = 1; k < 4; ++k)
+			{
+				const entt::entity e = m_editorWorld->createEntity("Tile");
+				wreg.emplace<TransformComponent>(e, wreg.get<TransformComponent>(land));
+				TerrainComponent copy = wreg.get<TerrainComponent>(land);
+				copy.builtRes = 0; copy.builtChunksPerSide = 0; copy.weightmapTextureId = HE::UUID{}; copy.rvtJournal.clear();
+				wreg.emplace<TerrainComponent>(e, std::move(copy));
+				wreg.emplace<MaterialComponent>(e, wreg.get<MaterialComponent>(land));
+				tiles.push_back(e);
+			}
+			const HE::UUID directMat = wreg.get<MaterialComponent>(land).materialAssetId;
+			const float baseY = wreg.get<TransformComponent>(land).position.y;
+			const auto centreOf = [&](int k) { return glm::vec2((float(k % 2) - 0.5f) * kTile, (float(k / 2) - 0.5f) * kTile); };
+			for (int k = 0; k < 4; ++k)
+			{
+				TransformComponent& tf = wreg.get<TransformComponent>(tiles[size_t(k)]);
+				tf.position = glm::vec3(centreOf(k).x, baseY, centreOf(k).y);
+				tf.dirty = true;
+				TerrainComponent& tc = wreg.get<TerrainComponent>(tiles[size_t(k)]);
+				tc.sizeX = tc.sizeZ = kTile;
+				tc.resolution = 129;
+				tc.heightScale = 0.0f;
+				tc.sculptHeights.assign(size_t(129) * 129, 0.0f);
+				for (uint32_t zi = 0; zi < 129; ++zi)
+					for (uint32_t xi = 0; xi < 129; ++xi)
+						tc.sculptHeights[size_t(zi) * 129 + xi] = groundAt(centreOf(k).x - kTile * 0.5f + float(xi), centreOf(k).y - kTile * 0.5f + float(zi));
+				tc.dirty = true;
+			}
+			HE::propagateTransformsFull(*m_editorWorld);
+			TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
+			TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
+
+			HE::landscape::RvtLandscape drv(contentManager(), *r);
+			HE::landscape::RvtLandscape::Settings cfg;
+			cfg.nearRadiusM = 160.0f;
+			cfg.activationRadiusM = 400.0f;
+			drv.setSettings(cfg);
+			glm::vec3 camPos(0.0f, baseY + 225.0f, 0.0f);
+			const auto sceneTick = [&]() {
+				TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
+				return drv.tick(*m_editorWorld, camPos);
+			};
+			constexpr uint32_t W = 1024, H = 1024;
+			const auto lookDown = [&]() {
+				EditorCameraOverride cam;
+				cam.active = true; cam.editorIcons = false; cam.fovDegrees = 60.0f; cam.nearPlane = 0.1f; cam.farPlane = 3000.0f;
+				cam.position = glm::vec3(0.0f, baseY + 225.0f, 0.0f);
+				cam.view = glm::lookAt(cam.position, cam.position + glm::vec3(0.0f, -1.0f, 0.0f), glm::vec3(0.0f, 0.0f, -1.0f));
+				return cam;
+			};
+			const float mpp = 2.0f * 225.0f * std::tan(glm::radians(30.0f)) / float(H);   // metres per pixel of lookDown()
+			const auto capture = [&](std::vector<uint8_t>& img) { return r->RenderSceneImage(lookDown(), W, H, img) && img.size() == size_t(W) * H * 4; };
+			const auto residentOf = [&](uint16_t vol, glm::vec2 mn, glm::vec2 mx) {
+				uint32_t n = 0;
+				const HE::rvt::RvtManager& m = *drv.manager();
+				if (!m.hasVolume(vol)) return n;
+				const HE::rvt::VolumeLayout& L = m.layout(vol);
+				for (int mip = 0; mip < L.mipCount(); ++mip)
+					for (int y = 0; y < L.pagesPerSide(mip); ++y)
+						for (int x = 0; x < L.pagesPerSide(mip); ++x)
+						{
+							glm::vec2 a, b;
+							L.pageRect(mip, x, y, a, b, true);
+							if (m.isResident(HE::rvt::PageKey{ vol, uint8_t(mip), uint16_t(x), uint16_t(y) }) &&
+							    !(b.x <= mn.x || a.x >= mx.x || b.y <= mn.y || a.y >= mx.y)) ++n;
+						}
+				return n;
+			};
+			const glm::vec2 everything(-1.0e6f), everywhere(1.0e6f);
+
+			// A) the fill: one attach per frame, nearest first, one pool
+			HE::landscape::RvtLandscape::FrameStats st;
+			int frames = 0; uint32_t maxAttach = 0, totalAttach = 0, painted = 0;
+			const auto activeCount = [&]() { uint32_t a = 0; for (auto t : tiles) a += drv.active(t) ? 1u : 0u; return a; };
+			for (; frames < 600; ++frames)
+			{
+				if (frames > 0 && activeCount() == 4u) break;
+				st = sceneTick();
+				maxAttach = std::max(maxAttach, st.attaches); totalAttach += st.attaches; painted += st.pagesPainted;
+			}
+			uint32_t activeTiles = 0; for (auto t : tiles) activeTiles += drv.active(t) ? 1u : 0u;
+			HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTTILES fill: %u of 4 tiles drawn from pages after %d frames, %u attaches (at most %u in a frame), %u pages painted, %u resident in one pool of %u, %u materials registered",
+			            activeTiles, frames, totalAttach, maxAttach, painted, drv.manager()->stats().resident, drv.settings().poolSlots, drv.materialsRegistered());
+			for (int k = 0; k < 4; ++k)
+				HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTTILES   tile %d: volume %u, %u pages resident", k, unsigned(drv.volumeOf(tiles[size_t(k)])), residentOf(drv.volumeOf(tiles[size_t(k)]), everything, everywhere));
+
+			// B) the picture, with seam strips: |world x| < 1 or |world z| < 1 is where tiles meet (the ground is continuous there)
+			std::vector<uint8_t> direct, pages;
+			drv.pauseSwap(true);
+			bool ok = capture(direct);
+			drv.pauseSwap(false);
+			ok = ok && capture(pages) && capture(pages);
+			if (ok)
+			{
+				double sumAll = 0, sumSeam = 0, sumInner = 0; size_t nAll = 0, nSeam = 0, nInner = 0; unsigned mx = 0;
+				for (uint32_t py = 0; py < H; ++py)
+					for (uint32_t pxl = 0; pxl < W; ++pxl)
+					{
+						const float wx = (float(pxl) + 0.5f - float(W) * 0.5f) * mpp, wz = (float(py) + 0.5f - float(H) * 0.5f) * mpp;
+						if (std::fabs(wx) > kTile - 2.0f || std::fabs(wz) > kTile - 2.0f) continue;     // the outer edge of the 2 x 2 area
+						const size_t i = (size_t(py) * W + pxl) * 4;
+						unsigned d = 0;
+						for (size_t c = 0; c < 3; ++c) d = std::max(d, static_cast<unsigned>(std::abs(int(direct[i + c]) - int(pages[i + c]))));
+						sumAll += d; ++nAll; mx = std::max(mx, d);
+						if (std::fabs(wx) < 1.0f || std::fabs(wz) < 1.0f) { sumSeam += d; ++nSeam; }
+						else if (std::fabs(wx) > 8.0f && std::fabs(wz) > 8.0f) { sumInner += d; ++nInner; }
+					}
+				HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTTILES picture %ux%u of the 2 x 2 area (%.2f m per pixel): own material vs pages mean %.2f /255 (max %u); inside the tiles %.2f, in the seam strips (+-1 m at the borders) %.2f",
+				            W, H, mpp, sumAll / double(nAll), mx, nInner ? sumInner / double(nInner) : 0.0, nSeam ? sumSeam / double(nSeam) : 0.0);
+				writeBMP(m_dumpPath + ".rvt_tiles_pages.bmp", pages, W, H);
+				writeBMP(m_dumpPath + ".rvt_tiles_direct.bmp", direct, W, H);
+			}
+
+			// C) a stroke: a bump of 8 m, radius 12 m, at a WORLD position; every tile it reaches edits its own heights
+			const auto stroke = [&](glm::vec2 c, float rad, std::vector<int>& touched) {
+				touched.clear();
+				for (int k = 0; k < 4; ++k)
+				{
+					TerrainComponent& tc = wreg.get<TerrainComponent>(tiles[size_t(k)]);
+					const glm::vec2 o = centreOf(k);
+					if (c.x + rad < o.x - kTile * 0.5f || c.x - rad > o.x + kTile * 0.5f || c.y + rad < o.y - kTile * 0.5f || c.y - rad > o.y + kTile * 0.5f) continue;
+					TerrainSculpt::ensureHeights(tc);
+					for (uint32_t zi = 0; zi < tc.resolution; ++zi)
+						for (uint32_t xi = 0; xi < tc.resolution; ++xi)
+						{
+							const float wx = o.x - kTile * 0.5f + float(xi), wz = o.y - kTile * 0.5f + float(zi);
+							const float d = std::sqrt((wx - c.x) * (wx - c.x) + (wz - c.y) * (wz - c.y)) / rad;
+							if (d < 1.0f) tc.sculptHeights[size_t(zi) * tc.resolution + xi] += 8.0f * 0.5f * (1.0f + std::cos(d * 3.14159265f));
+						}
+					TerrainSculpt::markRegionDirty(tc, c.x - o.x - rad - 1.0f, c.y - o.y - rad - 1.0f, c.x - o.x + rad + 1.0f, c.y - o.y + rad + 1.0f);
+					touched.push_back(k);
+				}
+				TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
+			};
+			for (int pass = 0; pass < 2; ++pass)
+			{
+				const glm::vec2 c = pass == 0 ? glm::vec2(-90.0f, -90.0f) : glm::vec2(0.0f, -60.0f);      // inside tile 0 / across the border of tiles 0 and 1
+				std::vector<int> touched;
+				for (int i = 0; i < 40 && drv.manager()->stats().dirty > 0; ++i) sceneTick();
+				stroke(c, 12.0f, touched);
+				uint32_t expect = 0;
+				for (int k : touched)
+				{
+					const glm::vec2 o = centreOf(k);
+					(void)o;
+					expect += residentOf(drv.volumeOf(tiles[size_t(k)]), c - glm::vec2(12.0f + 1.0f), c + glm::vec2(12.0f + 1.0f));
+				}
+				st = drv.tick(*m_editorWorld, camPos);
+				uint32_t repainted = st.pagesPainted;
+				for (int i = 0; i < 40 && drv.manager()->stats().dirty > 0; ++i) repainted += sceneTick().pagesPainted;
+				HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTTILES stroke %s: reached %zu tile(s), %u pages marked stale (independent count over those tiles %u), %u repainted, %u still stale",
+				            pass == 0 ? "inside tile 0" : "across the border of tiles 0 and 1", touched.size(), st.pagesStale, expect, repainted, drv.manager()->stats().dirty);
+			}
+
+			// D) one tile is destroyed: exactly its volume goes
+			{
+				const uint16_t vol3 = drv.volumeOf(tiles[3]);
+				const uint32_t own = residentOf(vol3, everything, everywhere);
+				const uint32_t before = drv.manager()->stats().resident;
+				m_editorWorld->destroyEntity(tiles[3]);
+				st = sceneTick();
+				HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTTILES tile 3 destroyed: %u pages resident before (tile 3 held %u), %u after (expected %u), %zu segment(s), %u drawn from pages, free slots %u",
+				            before, own, drv.manager()->stats().resident, before - own, drv.segmentCount(), st.activeSegments, drv.manager()->freeSlots());
+			}
+
+			// E) walking away and back: pages and tables come and go, materials do not
+			{
+				const uint32_t mats0 = drv.materialsRegistered();
+				const glm::vec3 camHome = camPos;
+				camPos.x = 5000.0f;                                                       // beyond every activation radius
+				for (int i = 0; i < 5; ++i) st = sceneTick();
+				const uint32_t resAway = drv.manager()->stats().resident;
+				const uint32_t activeAway = st.activeSegments;
+				camPos = camHome;
+				int back = 0;
+				for (; back < 600; ++back)
+				{
+					st = sceneTick();
+					uint32_t a = 0; for (int k = 0; k < 3; ++k) a += drv.active(tiles[size_t(k)]) ? 1u : 0u;
+					if (a == 3) break;
+				}
+				HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTTILES away and back: %u pages resident and %u tile(s) drawn from pages while away, 3 tiles drawn again after %d frames, materials registered %u -> %u (expected equal)",
+				            resAway, activeAway, back, mats0, drv.materialsRegistered());
+			}
+			drv.detach();
+
+			// F) a pool that is too tinyDrv: it fills, says so, and a static view then paints nothing
+			{
+				HE::landscape::RvtLandscape tinyDrv(contentManager(), *r);
+				HE::landscape::RvtLandscape::Settings sc = cfg;
+				sc.poolSlots = 40;
+				tinyDrv.setSettings(sc);
+				const auto tick2 = [&]() { TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r); return tinyDrv.tick(*m_editorWorld, camPos); };
+				for (int i = 0; i < 40; ++i) tick2();
+				const HE::rvt::Stats before = tinyDrv.manager() ? tinyDrv.manager()->stats() : HE::rvt::Stats{};
+				uint32_t paintedLater = 0;
+				for (int i = 0; i < 30; ++i) paintedLater += tick2().pagesPainted;
+				const HE::rvt::Stats after = tinyDrv.manager() ? tinyDrv.manager()->stats() : HE::rvt::Stats{};
+				HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTTILES pool of 40 pages for 3 tiles: %u resident, %u evictions after the fill, then %u pages painted in 30 static frames and %u more evictions (expected 0 and 0), starved %u",
+				            before.resident, before.evictions, paintedLater, after.evictions - before.evictions, after.starved);
+				tinyDrv.detach();
+			}
+		}
+	}
+	// HE_DUMP_AUTOLANDSAVE=<file.hescene> (Thema 228): the HE_DUMP_AUTOLAND witness world written out as a scene, so a
+	// scratch project can hold an Auto Landscape for HE_DUMP_HLODEXPORT and a real export (the water witness has its own
+	// HE_DUMP_SAVESCENE).
+	if (const char* sv = std::getenv("HE_DUMP_AUTOLANDSAVE"); sv && *sv && m_editorWorld)
+	{
+		// The witness's material only exists in memory: it goes into the project's Content (same id) or the saved scene
+		// would name a material the project does not have.
+		for (const auto e : m_editorWorld->registry().view<TerrainComponent, MaterialComponent>())
+		{
+			const HE::UUID mid = m_editorWorld->registry().get<MaterialComponent>(e).materialAssetId;
+			if (const MaterialAsset* ma = contentManager().getMaterial(mid))
+			{
+				MaterialAsset copy = *ma;
+				copy.path = "Materials/AutoLandscapeWitness.hasset";
+				const bool wrote = contentManager().saveAsset(copy);
+				HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_AUTOLANDSAVE material %s", wrote ? "saved" : "FAILED to save");
+			}
+		}
+		// A game needs a main camera: one at the witness camera's place (HE_DUMP_CAMX/Y/Z, looking along HE_DUMP_PITCH).
+		{
+			auto& reg = m_editorWorld->registry();
+			const auto envF = [](const char* k, float d) { const char* v = std::getenv(k); return v && *v ? static_cast<float>(std::atof(v)) : d; };
+			const auto cam = m_editorWorld->createEntity("AutoLandscapeCamera");
+			auto& t = reg.emplace_or_replace<TransformComponent>(cam);
+			t.position = glm::vec3(static_cast<float>(envF("HE_DUMP_CAMX", 0.0f)), static_cast<float>(envF("HE_DUMP_CAMY", 2.0f)),
+			                       static_cast<float>(envF("HE_DUMP_CAMZ", 0.0f)));
+			t.rotation = glm::vec3(static_cast<float>(envF("HE_DUMP_PITCH", 22.0f)), static_cast<float>(envF("HE_DUMP_YAW", 0.0f)), 0.0f);
+			CameraComponent cc; cc.isMain = true; cc.farPlane = 5000.0f;
+			reg.emplace<CameraComponent>(cam, cc);
+		}
+		SceneSerializer saver;
+		const bool saved = saver.save(*m_editorWorld, sv, SerializeFormat::JSON);
+		HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_AUTOLANDSAVE %s -> %s", saved ? "wrote" : "FAILED to write", sv);
+	}
+	// HE_DUMP_HLODEXPORT=<dir> (Thema 228): what the export dialog does for the far landscape, on the open project: every
+	// scene under Content/ is loaded into a scratch world and its Auto Landscapes are baked (HE_DUMP_HLODBUDGET = MB,
+	// default 512). The assets go to <dir>/<their addressed path> and <dir>/index.txt lists them ("<hi> <lo> <type> <path>",
+	// ids in hex) for HE_REACH_EXTRA of the export bench; the log has the same lines the export log would have.
+	if (const char* hx = std::getenv("HE_DUMP_HLODEXPORT"); hx && *hx && m_editorWorld && r && m_projectLoaded)
+	{
+		namespace fs = std::filesystem;
+		const fs::path outDir(hx);
+		std::error_code ec;
+		fs::create_directories(outDir, ec);
+		const fs::path root = fs::path(m_projectManager.currentProject().path).parent_path();
+		HE::landscape::HlodExportOptions o;
+		if (const char* hb = std::getenv("HE_DUMP_HLODBUDGET"); hb && *hb)
+			o.budgetBytes = static_cast<uint64_t>(std::max(1, std::atoi(hb))) << 20;
+		std::vector<HE::landscape::HlodAssetBlob> blobs;
+		std::vector<HE::UUID> seen;
+		HE::landscape::HlodExportStats total;
+		fs::recursive_directory_iterator it(root / "Content", fs::directory_options::skip_permission_denied, ec), end;
+		for (; !ec && it != end; it.increment(ec))
+		{
+			if (!it->is_regular_file(ec) || it->path().extension() != ".hescene") continue;
+			HorizonWorld w;
+			SceneSerializer ser;
+			if (!ser.load(w, it->path(), SerializeFormat::JSON)) continue;
+			const std::string label = it->path().filename().string();
+			const HE::landscape::HlodExportStats st = HE::landscape::bakeWorldLandscapes(
+				w, m_editorWorld.get(), contentManager(), *r, o, blobs, seen,
+				[&](const std::string& s) { HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_HLODEXPORT %s: %s", label.c_str(), s.c_str()); });
+			total.terrains += st.terrains; total.chunks += st.chunks; total.skipped += st.skipped; total.ms += st.ms;
+			total.downscaled += st.downscaled; total.plannedBytes += st.plannedBytes;
+		}
+		std::ofstream index(outDir / "index.txt");
+		uint64_t bytes = 0;
+		for (const HE::landscape::HlodAssetBlob& b : blobs)
+		{
+			const fs::path file = outDir / b.relPath;
+			fs::create_directories(file.parent_path(), ec);
+			std::ofstream f(file, std::ios::binary);
+			f.write(reinterpret_cast<const char*>(b.bytes.data()), static_cast<std::streamsize>(b.bytes.size()));
+			bytes += b.bytes.size();
+			char line[256];
+			std::snprintf(line, sizeof(line), "%016llx %016llx %u ", static_cast<unsigned long long>(b.id.hi),
+			              static_cast<unsigned long long>(b.id.lo), static_cast<unsigned>(b.type));
+			index << line << b.relPath << "\n";
+		}
+		HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_HLODEXPORT %u landscape(s), %u chunk(s) baked, %u skipped, %u below what the screen wants, "
+		            "%zu asset file(s), %.1f MiB raw loose, planned cooked %.1f MiB, %.0f ms",
+		            total.terrains, total.chunks, total.skipped, total.downscaled, blobs.size(),
+		            double(bytes) / (1024.0 * 1024.0), double(total.plannedBytes) / (1024.0 * 1024.0), total.ms);
+	}
+	// HE_DUMP_HLODFAR=<side> (Thema 228): the baked far landscape against the real one. The landscape's LOD distances are
+	// pulled in (HE_DUMP_HLODFARSCALE, default 0.1) so the chunks draw their far levels at the witness camera; the
+	// frame with the real material goes to <dump>.far_real.bmp, then every chunk is baked at <side>, the assets are
+	// loaded the way a pak mount would give them, the chunks rebuild (they find the baked material by id) and the
+	// frame with it goes to <dump>.far_baked.bmp. The log has the difference between the two and how many far levels
+	// carried the baked material.
+	if (const char* hf = std::getenv("HE_DUMP_HLODFAR"); hf && *hf && m_editorWorld && r)
+	{
+		const unsigned side = static_cast<unsigned>(std::max(8, std::atoi(hf)));
+		const char* hs = std::getenv("HE_DUMP_HLODFARSCALE");
+		const float lodScale = (hs && *hs) ? static_cast<float>(std::atof(hs)) : 0.1f;
+		auto& wreg = m_editorWorld->registry();
+		entt::entity land = entt::null;
+		for (auto [e, tc] : wreg.view<TerrainComponent>().each())
+			if (!wreg.all_of<TerrainChunkComponent>(e)) { land = e; break; }
+		const glm::vec3 camPos = m_editorCamera.position();
+		auto settleCapture = [&](std::vector<uint8_t>& px, uint32_t& pw, uint32_t& ph) {
+			for (int i = 0; i < 6; ++i)
+			{
+				r->Render();
+				std::this_thread::sleep_for(std::chrono::milliseconds(150));
+			}
+			return r->CaptureViewport(px, pw, ph);
+		};
+		if (land == entt::null)
+			HE_LOG_WARN(Editor, "EditorApplication: HE_DUMP_HLODFAR: no landscape in the scene");
+		else
+		{
+			wreg.get<TerrainComponent>(land).lodDistanceScale = lodScale;
+			wreg.get<TerrainComponent>(land).dirty = true;
+			TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
+			LODSystem::update(*m_editorWorld, camPos);
+			std::vector<uint8_t> realPx, bakedPx;
+			uint32_t rw = 0, rh = 0, bw = 0, bh = 0;
+			const bool realOk = settleCapture(realPx, rw, rh) && writeBMP(m_dumpPath + ".far_real.bmp", realPx, rw, rh);
+			size_t farLevels = 0, baked = 0;
+			for (auto [ce, cc, lod] : wreg.view<TerrainChunkComponent, LODComponent>().each())
+				if (lod.current > 0) ++farLevels;
+			// The bake: every chunk, the assets loaded into the content manager.
+			{
+				HE::landscape::HlodBaker baker(*m_editorWorld, contentManager(), *r);
+				std::string why;
+				if (!baker.begin(land, &why))
+					HE_LOG_WARN(Editor, "EditorApplication: HE_DUMP_HLODFAR: bake failed (%s)", why.c_str());
+				else
+				{
+					// The witness landscape is made on the fly and has no saved id; a scene's landscape has one.
+					if (m_editorWorld->entityId(land) == HE::UUID{})
+						m_editorWorld->setEntityId(land, HE::UUID{ 0x48454C4F44ull, 0x1ull });
+					const HE::UUID terrainId = m_editorWorld->entityId(land);
+					const auto t0 = std::chrono::steady_clock::now();
+					for (uint32_t cz = 0; cz < baker.chunksPerSide(); ++cz)
+						for (uint32_t cx = 0; cx < baker.chunksPerSide(); ++cx)
+						{
+							HE::landscape::HlodChunkImages img;
+							HE::landscape::HlodChunkRect rect;
+							std::vector<HE::landscape::HlodAssetBlob> blobs;
+							std::string err;
+							if (baker.bake(cx, cz, side, 2, img) && baker.chunkRect(cx, cz, rect)
+							    && HE::landscape::buildHlodAssets(img, rect, terrainId, cx, cz, blobs, &err))
+							{
+								HE::landscape::loadHlodAssets(contentManager(), blobs);
+								++baked;
+							}
+							else
+								HE_LOG_WARN(Editor, "EditorApplication: HE_DUMP_HLODFAR: chunk %u,%u failed (%s)", cx, cz, err.c_str());
+						}
+					HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_HLODFAR baked %zu chunk(s) at %u px in %.0f ms",
+					            baked, side, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+				}
+			}
+			// The chunks rebuild and find the baked material by id.
+			wreg.get<TerrainComponent>(land).dirty = true;
+			TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
+			LODSystem::update(*m_editorWorld, camPos);
+			size_t withMat = 0;
+			std::vector<HE::UUID> mats;
+			for (auto [ce, cc, lod] : wreg.view<TerrainChunkComponent, LODComponent>().each())
+				for (const LODLevel& lv : lod.levels)
+					if (lv.materialId != HE::UUID{}) { ++withMat; mats.push_back(lv.materialId); }
+			r->WarmupMaterials(mats);
+			for (int i = 0; i < 4000; ++i)
+			{
+				if (r->PumpShaderBuilds().pending == 0) break;
+				std::this_thread::sleep_for(std::chrono::milliseconds(5));
+			}
+			const bool bakedOk = settleCapture(bakedPx, bw, bh) && writeBMP(m_dumpPath + ".far_baked.bmp", bakedPx, bw, bh);
+			double sum = 0.0; unsigned mx = 0; size_t n = 0;
+			if (realOk && bakedOk && realPx.size() == bakedPx.size())
+				for (size_t i = 0; i < realPx.size(); ++i)
+				{
+					if (i % 4 == 3) continue;
+					const unsigned d = static_cast<unsigned>(std::abs(int(realPx[i]) - int(bakedPx[i])));
+					sum += d; mx = std::max(mx, d); ++n;
+				}
+			HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_HLODFAR chunks on a far level %zu, far levels with the baked material %zu, "
+			            "frame difference real vs baked: mean %.3f /255, max %u (%zu samples)",
+			            farLevels, withMat, n ? sum / double(n) : -1.0, mx, n);
+		}
+	}
 	for (int i = 0; i < settleFrames; ++i)
 	{
 		if (arriveWitness && !arriveEarly && i == settleFrames / 2)
@@ -10421,6 +13248,32 @@ void EditorApplication::dumpFrameHeadless()
 				 + std::to_string(i)).c_str());
 		}
 		r->Render();
+		// HE_DUMP_SETTLEMS: a pause after each settle frame, so material pipelines that build in the
+		// background (a freshly registered graph material) are ready for the captured frame.
+		if (const char* sm = std::getenv("HE_DUMP_SETTLEMS"); sm && *sm)
+			std::this_thread::sleep_for(std::chrono::milliseconds(std::clamp(std::atoi(sm), 0, 5000)));
+	}
+
+	// HE_DUMP_COOKTEST row witness: after the settle frames, log what the cooked
+	// block actually did with CookTest* — `reg.ctx().find` only LOOKS, it never
+	// creates the block (cookedStaticOf would, which'd cook the HE_COOK_STATIC=0
+	// run just by asking). No block at all is as meaningful an answer as a row.
+	if (const char* ct = std::getenv("HE_DUMP_COOKTEST"); ct && *ct && m_editorWorld)
+	{
+		auto& reg = m_editorWorld->registry();
+		const HE::CookedStatic* cooked = reg.ctx().find<HE::CookedStatic>();
+		for (auto [e, name] : reg.view<NameComponent>().each())
+		{
+			if (name.name.rfind("CookTest", 0) != 0) continue;
+			const int32_t row = cooked ? cooked->rowOf(e) : -1;
+			const char* state = row < 0 ? "no row"
+				: cooked->state[static_cast<size_t>(row)] == HE::CookedStatic::State::Ready   ? "Ready"
+				: cooked->state[static_cast<size_t>(row)] == HE::CookedStatic::State::Pending ? "Pending"
+				: "Walk";
+			HE_LOG_INFO(Editor, "%s",
+				("EditorApplication: HE_DUMP_COOKTEST " + name.name + " row=" + std::to_string(row) +
+				 " state=" + state).c_str());
+		}
 	}
 
 	std::vector<uint8_t> rgba;
@@ -10776,6 +13629,21 @@ std::string EditorApplication::collabLocalPath(const std::string& key)
 	if (key.empty()) return {};
 	if (key == LevelScriptPanel::kTabPath) return {};   // lives in the world
 	if (key == GameInstancePanel::kTabPath) return gameInstancePath();
+	// A planner file (CollabController::kConfigKeyPrefix): only Config/Planner/*.json and
+	// Config/TaskBoard.json, whatever the key claims; never the project's settings.
+	if (key.rfind(CollabController::kConfigKeyPrefix, 0) == 0)
+	{
+		const std::string root = projectRoot();
+		const std::string rel  = key.substr(std::strlen(CollabController::kConfigKeyPrefix));
+		if (root.empty() || !CollabController::isConfigSyncKey(key) || !HE::isRelativePathContained(rel))
+		{
+			HE_LOG_WARN(Editor, "Collab: refusing a planner path: '%s'", key.c_str());
+			return {};
+		}
+		const std::string full = root + "/Config/" + rel;
+		if (!HE::isPathWithin(std::filesystem::path(root) / "Config", full)) return {};
+		return full;
+	}
 
 	// This key can come off the wire, so it is not trusted to stay where it says
 	// it is: "Materials/../../../../.ssh/authorized_keys" concatenates as
@@ -10804,6 +13672,42 @@ std::string EditorApplication::collabLocalPath(const std::string& key)
 		return full;
 	}
 	return contentManager().resolveSavePath(key);
+}
+
+std::string EditorApplication::keyForCollabSubject(std::uint64_t subject)
+{
+	ContentManager& cm = contentManager();
+	const auto lookup = [&]() -> std::string {
+		const auto it = m_collabSubjectIndex.find(subject);
+		return it == m_collabSubjectIndex.end() ? std::string() : cm.pathForId(it->second);
+	};
+	const auto rebuild = [&] {
+		m_collabSubjectIndex.clear();
+		for (const HE::UUID& id : cm.projectAssetIds())
+			m_collabSubjectIndex[HE::Net::assetUuidSubject(id.hi, id.lo)] = id;
+		m_collabSubjectEpoch   = cm.contentEpoch();
+		m_collabSubjectRebuilt = std::chrono::steady_clock::now();
+	};
+	if (m_collabSubjectEpoch != cm.contentEpoch()) rebuild();
+	std::string key = lookup();
+	if (!key.empty()) return key;
+	// A miss may be an asset that arrived since the index was built without the
+	// epoch moving; look again, but not for every frame of a flood of strangers.
+	constexpr auto kMinRebuildGap = std::chrono::milliseconds(500);
+	if (std::chrono::steady_clock::now() - m_collabSubjectRebuilt >= kMinRebuildGap)
+	{
+		rebuild();
+		key = lookup();
+	}
+	return key;
+}
+
+HE::Net::ProjectFingerprint EditorApplication::collabProjectFingerprint()
+{
+	std::vector<std::uint64_t> hashes;
+	for (const HE::UUID& id : contentManager().projectAssetIds())
+		hashes.push_back(HE::Net::ProjectFingerprint::fold(id.hi, id.lo));
+	return HE::Net::ProjectFingerprint::fromHashes(std::move(hashes));
 }
 
 CollabDocSync::DocBindings EditorApplication::collabDocsForTab(const std::string& tabPath)
@@ -11108,7 +14012,7 @@ void EditorApplication::setupMcpTools()
 	hooks.scenePath   = [this] { return m_currentScenePath; };
 	// The same expression AppContext uses (see makeContext): the scene is dirty
 	// when the undo revision has moved past the one it was saved at.
-	hooks.sceneDirty  = [this] { return m_undo.revision() != m_savedRevision; };
+	hooks.sceneDirty  = [this] { return sceneHasUnsavedChanges(); };
 	hooks.isPlaying   = [this] { return m_isPlaying; };
 	hooks.inSession   = [this] { return m_collab.inSession(); };
 	hooks.entityCount = [this]() -> int {
@@ -11159,7 +14063,7 @@ void EditorApplication::setupMcpTools()
 		if (m_editorWorld)
 			out.push_back({ std::string(HE::Ed::kMcpDocLevelScript),
 			                "Level Script", "level",
-			                m_undo.revision() != m_savedRevision,
+			                sceneHasUnsavedChanges(),
 			                {}, kLevelScriptExcluded });
 		if (!m_projectManager.currentProject().name.empty())
 			out.push_back({ std::string(HE::Ed::kMcpDocGameInstance),
@@ -11348,8 +14252,8 @@ void EditorApplication::setupMcpTools()
 	};
 	// What the Content Browser's create menu would offer in THIS project. Same
 	// rule as kLevelScriptExcluded above: MCP must not create what the menu
-	// refuses. The two gates are the project's scripting language (one language
-	// per project) and Advanced Shader Effects.
+	// refuses. The gate is the project's scripting language (one language per
+	// project).
 	assets.creatableTypes = [this] {
 		const auto& proj = m_projectManager.currentProject();
 		std::vector<HE::AssetType> out {
@@ -11367,11 +14271,10 @@ void EditorApplication::setupMcpTools()
 			HE::AssetType::EnumType,
 			HE::AssetType::SaveGameTemplate,
 		};
-		if (proj.advancedShaderEffects)
-		{
-			out.push_back(HE::AssetType::Material);
-			out.push_back(HE::AssetType::MaterialFunction);
-		}
+		// Materials in every project: with Advanced Shader Effects off they are
+		// limited to the nodes the software renderer runs, not refused.
+		out.push_back(HE::AssetType::Material);
+		out.push_back(HE::AssetType::MaterialFunction);
 		switch (proj.scriptLanguage)
 		{
 		case ProjectScriptLanguage::HorizonCode:
@@ -11435,7 +14338,7 @@ void EditorApplication::setupMcpTools()
 	// save prompt — that guard is replicated inside the tools (see McpSceneHooks).
 	HE::Ed::McpSceneHooks scene;
 	scene.currentScenePath = [this] { return m_currentScenePath; };
-	scene.sceneDirty       = [this] { return m_undo.revision() != m_savedRevision; };
+	scene.sceneDirty       = [this] { return sceneHasUnsavedChanges(); };
 	scene.isPlaying        = [this] { return m_isPlaying; };
 	scene.inSession        = [this] { return m_collab.inSession(); };
 	scene.entityCount      = [this]() -> int {
@@ -11533,10 +14436,11 @@ void EditorApplication::setupMcpTools()
 	material.reloadFromDisk = [](const std::string& rel) {
 		return MaterialEditorPanel::reloadByContentPath(rel);
 	};
-	// The same gate the Content Browser's create menu and its "Create Material
-	// Instance" row sit behind (cbAllowMaterials).
-	material.materialsAllowed = [this] {
-		return m_projectManager.currentProject().advancedShaderEffects;
+	// The same node set the Material Editor's add menu offers (MaterialEditorPanel
+	// ::cpuNodesOnly): with Advanced Shader Effects off, what the CPU can run.
+	material.cpuNodesOnly = [this] {
+		const auto& proj = m_projectManager.currentProject();
+		return proj.appProject && !proj.advancedShaderEffects;
 	};
 	material.publishCreate = [this](const std::string& rel, const std::string& abs) {
 		if (m_collab.inSession()) m_collab.publishAssetCreate(rel, abs);
@@ -12384,6 +15288,20 @@ void EditorApplication::applyAssetBytes(const std::string& relativePath,
 	cm.loadAsset(relativePath);
 }
 
+void EditorApplication::plannerFileSaved(const std::filesystem::path& file)
+{
+	// Planner pages write at every Enter: grouped longer than a scene save into one revision.
+	m_teamSync.noteSaved(TeamSyncController::kPlannerDebounceMs);
+	if (!m_collab.inSession()) return;
+	const std::string root = projectRoot();
+	if (root.empty()) return;
+	std::error_code ec;
+	const std::filesystem::path rel = std::filesystem::relative(file, std::filesystem::path(root) / "Config", ec);
+	if (ec || rel.empty()) return;
+	const std::string key = std::string(CollabController::kConfigKeyPrefix) + rel.generic_string();
+	if (CollabController::isConfigSyncKey(key)) m_collab.publishAsset(key, file.string());
+}
+
 void EditorApplication::applyTeamSyncFile(const std::string& projectRelPath)
 {
 	// TeamSyncService has written the file already (on this thread, after
@@ -12735,6 +15653,7 @@ AppContext EditorApplication::makeContext()
 	return AppContext{
 		.imguiReady          = m_imguiReady,
 		.quit                = [this]{ m_quitConfirmed = true; Quit(); },
+		.captureProjectThumbnail = [this]{ captureProjectThumbnail(); },
 		.toggleProfilerCapture = [this]{ toggleProfilerCapture(); },
 		.setVSync              = [this](bool v){ setVSync(v); m_vsync = v; },
 		.setMaxFps             = [this](float f){ setMaxFps(f); m_editorConfig.MaxFps = f; },
@@ -12782,6 +15701,10 @@ AppContext EditorApplication::makeContext()
 				m_physicsWorld->setBudget({ physics.budgetMs, static_cast<uint32_t>(physics.eventsPerPoll) });
 			}
 		},
+		.rvtDebugInfo = [this]() -> HE::landscape::RvtLandscape::DebugInfo {
+			return m_rvtLandscape ? m_rvtLandscape->debugInfo() : HE::landscape::RvtLandscape::DebugInfo{};
+		},
+		.reloadLandscapeStamps = [this]() { m_landscapeStamps.reset(); },
 		.propScriptEngine    = m_propScriptEngine.get(),
 		.editorCamera        = &m_editorCamera,
 		.selection           = m_selection,
@@ -12884,12 +15807,13 @@ AppContext EditorApplication::makeContext()
 			m_uiPanelWindow = win;
 		},
 		.currentScenePath    = m_currentScenePath,
-		.sceneDirty          = m_undo.revision() != m_savedRevision,
+		.sceneDirty          = sceneHasUnsavedChanges(),
 		.exitRequested       = m_exitRequested,
 		.saveSceneToPath     = [this](const std::string& p){ return saveSceneToPath(p); },
 		.openScene           = [this](const std::string& p){ openScene(p); },
 		.openSceneAdditive   = [this](const std::string& p){ openSceneAdditive(p); },
 		.newScene            = [this]{ newScene(); },
+		.endProjectRuntime   = [this]{ endProjectRuntime(); },
 		.recoveryOffer       = m_recoveryOffer ? &*m_recoveryOffer : nullptr,
 		.restoreRecovery     = [this]{
 			const bool ok = restoreRecoveredScene();
@@ -13731,6 +16655,10 @@ void EditorApplication::setPlayMode(bool play)
 		// The streamed cells go first, while the physics world their bodies are in
 		// still stands; the snapshot below brings back the base the split left.
 		if (m_playCells) m_playCells->end(*m_editorWorld);
+		// Segments are keyed by entt::entity of the outgoing world; clear() recycles
+		// those ids, so a stale segment would alias an unrelated entity in the restored
+		// snapshot (same reason GameApplication::loadScene detaches before its clear()).
+		if (m_rvtLandscape) m_rvtLandscape->detach();
 		m_editorWorld->clear();
 		if (!serializer.load(*m_editorWorld, snapshot, SerializeFormat::Binary))
 		{
@@ -13791,6 +16719,8 @@ void EditorApplication::setPlayMode(bool play)
 		// the play world and the snapshot restored the scene as it was authored.
 		// So a play session leaves neither a body without an entity nor an entity
 		// with a body it should not have.
+		m_landscape.setPhysics(nullptr);   // its ground lives in that world: give it back first
+		m_landscapePhysics = nullptr;
 		m_physicsWorld.reset();
 		m_physicsAccum = 0.0f;
 
@@ -13842,22 +16772,13 @@ void EditorApplication::restartAppPreview(bool keepState)
 	WidgetManager::StateSnapshot snapshot;
 	if (keepState) snapshot = m_editorWorld->widgets().captureState();
 
-	// A run stopped at a breakpoint belongs to the preview that is going down.
-	m_gameInstance.runtime().debugAbort();
-	HcExecTrace::clearPaused();
-	// Down in the reverse order it came up. fireShutdown before the widgets go,
-	// so a graph's OnShutdown still finds the things it is about to let go of.
-	m_gameInstance.fireShutdown();
-	m_editorWorld->widgets().clear();
-	// The timers the old OnInit started die with it: now that the preview
-	// dispatches them (TimerSystem in the frame), a timer.every left standing
-	// would fire into the restarted graph as a handle it never issued.
-	HE::api::timer::cancelAll();
+	stopAppPreview();
 
 	// Re-register the graph rather than assuming the host still holds the right
 	// one: the edit that triggered this restart may BE a GameInstance edit, and
 	// setGraph is also what resets its variables to their authored defaults.
 	m_gameInstance.setGraph(HorizonCode::toJson(m_gameInstanceGraph));
+	// Silent: OnRender holds script playback for the whole preview.
 	m_gameInstance.fireInit();
 
 	// …and back on, AFTER OnInit has built the new widgets. Anything the edit
@@ -13876,6 +16797,129 @@ void EditorApplication::restartAppPreview(bool keepState)
 		               "Text, scroll positions and selections are back to what the assets "
 		               "were authored with. Elements that were deleted or retyped cannot "
 		               "be matched up again.");
+}
+
+void EditorApplication::stopAppPreview()
+{
+	// A run stopped at a breakpoint belongs to the preview that is going down.
+	m_gameInstance.runtime().debugAbort();
+	HcExecTrace::clearPaused();
+	// Down in the reverse order it came up. fireShutdown before the widgets go,
+	// so a graph's OnShutdown still finds the things it is about to let go of.
+	m_gameInstance.fireShutdown();
+	if (m_editorWorld) m_editorWorld->widgets().clear();
+	// The timers the old OnInit started die with it: now that the preview
+	// dispatches them (TimerSystem in the frame), a timer.every left standing
+	// would fire into the restarted graph as a handle it never issued.
+	HE::api::timer::cancelAll();
+	// So do its sounds. A looping Play Sound in OnInit otherwise kept playing
+	// through every rebuild (one more copy each time) and through Close Project
+	// into the Hub. All of them, as leaving play mode does: the engine does not
+	// know which voice a graph started.
+	WeatherAudio::stop(m_weatherAudio, m_audioEngine);
+	m_audioEngine.stopAll();
+}
+
+void EditorApplication::saveProjectCameraView()
+{
+	if (m_cameraViewProject.empty() || !m_editorCamera.initialised()) return;
+	namespace fs = std::filesystem;
+	fs::path dir = fs::path(m_cameraViewProject);
+	if (fs::is_regular_file(dir)) dir = dir.parent_path();
+	dir /= "Saved";
+	std::error_code ec;
+	fs::create_directories(dir, ec);
+	const glm::vec3 p = m_editorCamera.position();
+	const nlohmann::json j = {
+		{ "position", { p.x, p.y, p.z } },
+		{ "yaw",      m_editorCamera.yaw() },
+		{ "pitch",    m_editorCamera.pitch() },
+		{ "pivot",    m_editorCamera.pivotDistance() },
+		{ "ortho",    m_editorCamera.orthographic() },
+	};
+	std::ofstream out(dir / "EditorView.json", std::ios::trunc);
+	if (out) out << j.dump(2);
+}
+
+void EditorApplication::loadProjectCameraView(const std::string& projectPath)
+{
+	namespace fs = std::filesystem;
+	fs::path dir = fs::path(projectPath);
+	if (fs::is_regular_file(dir)) dir = dir.parent_path();
+	bool restored = false;
+	if (std::ifstream in(dir / "Saved" / "EditorView.json"); in)
+	{
+		const nlohmann::json j = nlohmann::json::parse(in, nullptr, false);
+		const auto pos = j.is_object() ? j.find("position") : j.end();
+		if (pos != j.end() && pos->is_array() && pos->size() == 3 &&
+		    (*pos)[0].is_number() && (*pos)[1].is_number() && (*pos)[2].is_number())
+		try
+		{
+			m_editorCamera.restoreView(glm::vec3((*pos)[0].get<float>(), (*pos)[1].get<float>(),
+			                                     (*pos)[2].get<float>()),
+			                           j.value("yaw", 0.0f), j.value("pitch", 0.0f),
+			                           j.value("pivot", 8.7f));
+			m_editorCamera.setOrthographic(j.value("ortho", false));
+			restored = true;
+		}
+		catch (const nlohmann::json::exception&) {}   // a hand-edited file: the default view
+	}
+	// No view of its own: the first-run view. (Not the config.json one, even for
+	// the project it was left in: after a big world that is kilometres from a new
+	// project's origin, which is the case this exists for.)
+	if (!restored)
+	{
+		m_editorCamera.resetToDefault();
+		m_editorCamera.setOrthographic(false);
+		// A landscape in the scene: framed whole (the largest one), since the
+		// origin view stands inside any landscape with hills.
+		const TerrainComponent* best = nullptr;
+		glm::vec3 at(0.0f);
+		for (auto [e, tc] : m_editorWorld->registry().view<TerrainComponent>().each())
+			if (!best || tc.sizeX * tc.sizeZ > best->sizeX * best->sizeZ)
+			{
+				best = &tc;
+				const auto* xf = m_editorWorld->registry().try_get<TransformComponent>(e);
+				at = xf ? xf->position : glm::vec3(0.0f);
+			}
+		if (best)
+			m_editorCamera.frameArea(at + glm::vec3(0.0f, best->heightScale * 0.25f, 0.0f),
+			                         best->sizeX * 0.5f, best->sizeZ * 0.5f);
+	}
+	m_cameraViewProject = projectPath;
+}
+
+void EditorApplication::endProjectRuntime()
+{
+	// The view goes with the project it was used in. Idempotent like the rest:
+	// m_cameraViewProject still names the OLD project when the onProjectLoaded
+	// callback calls this again.
+	saveProjectCameraView();
+	// Play first: it owns a game's GameInstance run (and the graph reset below
+	// must not pull that graph out from under its OnShutdown). Idempotent, so the
+	// onProjectLoaded callback can call this again for the paths that switch
+	// without endProjectSession (File ▸ New Project, the tutorial).
+	if (m_isPlaying) setPlayMode(false);
+	// Only a preview that was started is stopped: a game project's GameInstance
+	// has had no OnInit outside play, and an OnShutdown without one is a lie to
+	// the graph. Before the world is cleared, which takes the widgets with it.
+	if (!m_appUiStartedFor.empty()) stopAppPreview();
+	// Cleared, so opening the SAME application project again starts its preview
+	// again; it stayed keyed to that path and the reopened app showed nothing.
+	m_appUiStartedFor.clear();
+	m_appPreviewRestartPending = false;
+	HE::api::timer::cancelAll();
+	// Edit-mode sounds (the weather beds, an audition) are the project's too.
+	WeatherAudio::stop(m_weatherAudio, m_audioEngine);
+	m_audioEngine.stopAll();
+	// The old graph is no longer registered as "the" GameInstance; the next
+	// project's onProjectLoaded registers its own.
+	m_gameInstanceGraph = HorizonCode::Graph{};
+	m_gameInstance.setGraph(HorizonCode::toJson(m_gameInstanceGraph));
+	// The source-control worker kept polling (and fetching) the closed project's
+	// repository behind the Hub: only a switch reached GitController::openProject,
+	// which closes the old one first. Close Project never closed it.
+	m_git.closeProject();
 }
 
 std::string EditorApplication::gameInstancePath()
@@ -14336,6 +17380,14 @@ bool EditorApplication::pushToPrefab(Entity root)
 	return true;
 }
 
+// What "the scene has unsaved changes" means everywhere (title, close prompt, autosave): the undo history moved since the last save, or a
+// tile landscape has sculpted or painted tiles no file holds yet. Those are not undo steps of the scene (they live beside the pack), and
+// without this a quit after a brush stroke dropped them without a question.
+bool EditorApplication::sceneHasUnsavedChanges() const
+{
+	return m_undo.revision() != m_savedRevision || LandscapeWorldTools::editsUnsaved();
+}
+
 bool EditorApplication::saveSceneToPath(const std::string& path)
 {
 	if (!m_editorWorld || path.empty()) return false;
@@ -14344,6 +17396,10 @@ bool EditorApplication::saveSceneToPath(const std::string& path)
 	// serialisation, and without the "Could not save" dialog below: nothing is wrong,
 	// the save simply has to wait, and the gate has already said so.
 	if (HE::ProjectWriteGate::refuse("save the scene")) return false;
+
+	// Sculpted and painted tiles of a tile landscape live beside its pack, not in the scene: saving the scene saves them too.
+	if (const std::string why = LandscapeWorldTools::saveEdits(); !why.empty())
+		HE_LOG_WARN(Editor, "Tile landscape edits were not saved: %s", why.c_str());
 
 	// The file must not lag the assets it was built from — see the header.
 	// Before the write, so the sync's result IS what lands on disk; the world
@@ -14438,7 +17494,7 @@ void EditorApplication::updateAutosave(std::uint64_t nowMs)
 	info.scenePath   = m_currentScenePath;
 	info.projectPath = m_projectManager.currentProject().path;
 
-	const bool dirty = m_undo.revision() != m_savedRevision;
+	const bool dirty = sceneHasUnsavedChanges();
 	m_autosave.update(nowMs, dirty, m_undo.revision(), info,
 		[this](const std::string& path)
 		{
@@ -14484,6 +17540,9 @@ bool EditorApplication::restoreRecoveredScene()
 	m_undo.snapshotNow("Restore Recovered Scene");   // the file's state; Undo brings it back
 
 	SceneSerializer serializer;
+	// See openScene: clear() recycles entt ids, so a segment from the scene opened
+	// above would alias an unrelated entity in the snapshot loaded over it.
+	if (m_rvtLandscape) m_rvtLandscape->detach();
 	m_editorWorld->clear();
 	m_levelScriptMirror = {};   // as in openScene: another scene, another level script
 	if (!serializer.load(*m_editorWorld, pending->snapshotPath, SerializeFormat::JSON))
@@ -14546,6 +17605,22 @@ void EditorApplication::captureSceneThumbnail(const std::string& scenePath)
 	AssetThumbnailCache::storeCapture(scenePath, rgba, w, h);
 }
 
+// The project's Project Hub card: the viewport as it was when the project was
+// closed or the editor quit (EditorUI::endProjectSession, OnShutdown). Unlike
+// the scene tile, Play counts — what the user last looked at is the point.
+void EditorApplication::captureProjectThumbnail()
+{
+	IRenderer* r = renderer();
+	const std::string& project = m_projectManager.currentProject().path;
+	// A headless dump builds its own witness scene; that is not this project's picture.
+	if (!r || project.empty() || !m_dumpPath.empty()) return;
+	std::vector<uint8_t> rgba;
+	uint32_t w = 0, h = 0;
+	if (r->CaptureViewport(rgba, w, h) && ProjectThumbnail::save(project, rgba, w, h))
+		HE_LOG_INFO(Editor, "%s", ("EditorApplication: project thumbnail saved ("
+			+ ProjectThumbnail::fileFor(project).string() + ")").c_str());
+}
+
 void EditorApplication::pushEnvironment(float dt)
 {
 	if (!renderer() || !m_editorWorld) return;
@@ -14578,7 +17653,7 @@ void EditorApplication::pushEnvironment(float dt)
 	m_editorWorld->syncEnvironmentLights();
 }
 
-void EditorApplication::warmupWorldMaterials()
+void EditorApplication::warmupWorldMaterials(bool waitForBuilds)
 {
 	if (!m_editorWorld || !renderer()) return;
 	HE_PROFILE_SCOPE_N("WarmupWorldMaterials");   // 6.7 s of the editor's cold first frame (Thema 238)
@@ -14591,6 +17666,32 @@ void EditorApplication::warmupWorldMaterials()
 	                              HE::kEditorIconAudioSourceMaterialId })
 		ids.push_back(icon);
 	renderer()->WarmupMaterials(ids);
+	// HE_SHADER_BUILD_NOWAIT=1 opens the window without waiting: the scene then fills in
+	// as its pipelines land, which is what a scene opened mid-session does.
+	if (!waitForBuilds || std::getenv("HE_SHADER_BUILD_NOWAIT")) return;
+
+	// The startup step. Builds run on the backend's own threads, so a window that is
+	// up already would be drawing a scene without its materials; the splash is the
+	// place to wait, and it can say how far along it is. Bounded: a build that never
+	// reports back must not keep the editor from opening.
+	HE_PROFILE_SCOPE_N("WaitForShaderBuilds");
+	using SteadyClock = std::chrono::steady_clock;
+	const SteadyClock::time_point deadline = SteadyClock::now() + std::chrono::seconds(120);
+	for (;;)
+	{
+		const IRenderer::ShaderBuildStatus st = renderer()->PumpShaderBuilds();
+		if (st.pending <= 0) break;
+		if (SteadyClock::now() >= deadline)
+		{
+			HE_LOG_WARN(Editor, "%s", ("EditorApplication: " + std::to_string(st.pending)
+				+ " shader build(s) still running after 120 s, opening anyway").c_str());
+			break;
+		}
+		splashStatus("Compiling shaders  " + std::to_string(st.total - st.pending) + " / "
+		                 + std::to_string(st.total),
+		             0.90f + 0.09f * static_cast<float>(st.total - st.pending) / static_cast<float>(st.total));
+		std::this_thread::sleep_for(std::chrono::milliseconds(10));
+	}
 }
 
 bool EditorApplication::openScene(const std::string& path)
@@ -14600,6 +17701,10 @@ bool EditorApplication::openScene(const std::string& path)
 	if (m_isPlaying) setPlayMode(false); // leave play mode before switching scenes
 
 	SceneSerializer serializer;
+	// Segments are keyed by entt::entity; clear() recycles those ids, so a segment
+	// from the old scene would alias an unrelated entity in the new one (same
+	// reason GameApplication::loadScene detaches before its clear()).
+	if (m_rvtLandscape) m_rvtLandscape->detach();
 	m_editorWorld->clear();
 	// A different scene brings a different level script — see onWorldReplaced.
 	m_levelScriptMirror = {};
@@ -14687,6 +17792,9 @@ void EditorApplication::newScene()
 
 	if (m_isPlaying) setPlayMode(false);
 
+	// See openScene: clear() recycles entt ids, so a segment from the old scene
+	// would alias an unrelated entity in the new empty one.
+	if (m_rvtLandscape) m_rvtLandscape->detach();
 	m_editorWorld->clear(); // keeps the root entity, drops all children
 	m_currentScenePath.clear();
 	m_selection.clear();
@@ -14817,6 +17925,12 @@ bool EditorApplication::reloadGameLogic()
 
 void EditorApplication::OnShutdown()
 {
+	// First, while the viewport still holds the last frame the user saw.
+	captureProjectThumbnail();
+	saveProjectCameraView();
+	// The virtual texture driver gives its pool back to the renderer, so it must go while the renderer still exists: left to
+	// the destructor it would call into a renderer that has been shut down and crash on the way out.
+	m_rvtLandscape.reset();
 	ProjectPreflight::shutdown();   // joins a still-running engine-content check
 	// Give the network back what a session took, FIRST and synchronously: the
 	// UPnP port forward, the IPv6 pinhole, the directory entry. A user who quits
@@ -14826,6 +17940,9 @@ void EditorApplication::OnShutdown()
 	// item in this function that outlives the process if it is skipped.
 	// Ends our announcements (the server would notice in a minute anyway). Not
 	// signOut(): quitting keeps the saved sign-in for the next start.
+	TaskBoardPanel::setTeam(nullptr);
+	TaskBoardPanel::setSavedHook({});
+	HE::Planner::Workspace::setSavedHook({});
 	m_team.disconnect();
 	m_collab.shutdown();
 
@@ -15031,6 +18148,7 @@ void EditorApplication::OnShutdown()
 		renderer()->DestroyImGuiTexture(reinterpret_cast<void*>(static_cast<uintptr_t>(m_logoTexture)));
 		m_logoTexture = 0;
 	}
+	ProjectHubPanel::releaseTextures(renderer());   // the recent-project cards' pictures
 	// Same for the Content Browser's rendered asset tiles — they are renderer-owned
 	// textures, so they have to go while the renderer is still alive. The
 	// collaboration avatars are uploaded the same way and go with them.
@@ -15052,6 +18170,8 @@ void EditorApplication::writeEditorConfig()
 {
 	GlobalState& globalstate = GlobalState::getInstance();
 	globalstate.setCustomConfigEntry("KeepCPUAssets",               m_editorConfig.KeepCPUAssets);
+	globalstate.setCustomConfigEntry("AutoLodOnImport",             m_editorConfig.AutoLodOnImport);
+	globalstate.setCustomConfigEntry("LandscapeFarBake",            m_editorConfig.LandscapeFarBake);
 	globalstate.setCustomConfigEntry("KeepCPUAssetsInfoAcknowledged", m_editorConfig.KeepCPUAssetsInfoAcknowledged);
 	globalstate.setCustomConfigEntry("ContentBrowserRefreshRate",   m_editorConfig.ContentBrowserRefreshRate);
 	globalstate.setCustomConfigEntry("CbTreeWidth",                 m_editorConfig.CbTreeWidth);
@@ -15179,6 +18299,7 @@ void EditorApplication::writeEditorConfig()
 	globalstate.setCustomConfigEntry("GIReflBounces",             m_editorConfig.GIReflBounces);
 	globalstate.setCustomConfigEntry("RenderPath",                m_editorConfig.RenderPath);
 	globalstate.setCustomConfigEntry("OcclusionCulling",          m_editorConfig.OcclusionCulling);
+	globalstate.setCustomConfigEntry("RuntimeVirtualTextures",    m_editorConfig.RuntimeVirtualTextures);
 	globalstate.setCustomConfigEntry("SSREnabled",                m_editorConfig.SSREnabled);
 	globalstate.setCustomConfigEntry("SSRIntensity",              m_editorConfig.SSRIntensity);
 	globalstate.setCustomConfigEntry("SSRQuality",                m_editorConfig.SSRQuality);
@@ -15505,7 +18626,7 @@ bool EditorApplication::OnEvent(const SDL_Event& event)
 		 event.window.windowID == SDL_GetWindowID(window()->GetNativeWindow()));
 	if (osCloseRequest && m_dumpPath.empty() && m_projectLoaded)
 	{
-		const bool sceneDirty = m_undo.revision() != m_savedRevision;
+		const bool sceneDirty = sceneHasUnsavedChanges();
 		// Panel-driven, not m_tabs-driven: a dirty tab the user CLOSED keeps its
 		// panel state but is gone from m_tabs, so walking m_tabs would let those
 		// edits be thrown away silently.

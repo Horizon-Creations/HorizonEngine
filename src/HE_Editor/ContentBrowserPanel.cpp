@@ -48,6 +48,8 @@
 #include <HorizonCode/HorizonCode.h>     // starter graph for freshly created HorizonCode classes
 #include <Types/Enums.h>
 #include "MeshImporter.h"
+#include "AutoLodDialog.h"      // Generate LODs...
+#include "AutoLod.h"            // isLodSidecarPath
 #include "SkeletalMeshImporter.h"
 #include "AnimationClipImporter.h"
 #include "TextureImporter.h"
@@ -2063,12 +2065,6 @@ void render(AppContext& ctx, int& tabSelectRequest,
 	// Source root (its .h/.cpp classes + the h/cpp viewer).
 	const bool cbShowSource = ctx.projectManager &&
 		ctx.projectManager->currentProject().scriptLanguage == ProjectScriptLanguage::Cpp;
-	// Same shape of restriction as the language above: a project with Advanced
-	// Shader Effects switched off never authors a material, so it is not offered
-	// one. Existing material FILES stay visible on purpose — a file that exists
-	// and cannot be seen only confuses source control and the reference scan.
-	const bool cbAllowMaterials = !ctx.projectManager ||
-		ctx.projectManager->currentProject().advancedShaderEffects;
     if (ctx.fontHeading) ImGui::PushFont(ctx.fontHeading);
     ImGui::Begin("Content Browser", nullptr, ImGuiWindowFlags_NoTitleBar);
     if (ctx.fontHeading) ImGui::PopFont();
@@ -2616,8 +2612,11 @@ void render(AppContext& ctx, int& tabSelectRequest,
 				const bool         isLast = (ci + 1 == crumbs.size());
 				const std::string  id     = "##bc_" + std::to_string(ci);
 				// The folder you are IN is armed rather than disabled: it is where
-				// you are, not something that failed to be available.
-				if (bar.item(id.c_str(), nullptr, crumb->name.c_str(), isLast, !isLast,
+				// you are, not something that failed to be available. (It was passed
+				// as disabled too, which wins in the cell, so every folder after the
+				// root read grey.) Every crumb is a folder like the root, icon included
+				// — cellWidth already counts the icon's room.
+				if (bar.item(id.c_str(), T::iconFolder, crumb->name.c_str(), isLast, true,
 				             isLast ? nullptr : "Go up to this folder"))
 				{
 					s_gridFolder         = crumb;
@@ -2660,6 +2659,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			{ "Blend Space",       HE::AssetType::BlendSpace },
 			{ "Property Animation", HE::AssetType::PropertyAnimClip },
 			{ "Sequence",          HE::AssetType::Sequence },
+			{ "Landscape Foliage", HE::AssetType::LandscapeFoliageLayer },
 			{ "Input Action",      HE::AssetType::InputAction },
 			{ "Input Mapping",     HE::AssetType::InputMappingContext },
 			{ "Audio",             HE::AssetType::Audio },
@@ -2758,6 +2758,8 @@ void render(AppContext& ctx, int& tabSelectRequest,
 				// The property clip's glyph — a timeline — tinted apart until a
 				// cinematic sequence earns its own .tga.
 				case HE::AssetType::Sequence:            return { I.propertyAnimClip,     {0.70f, 0.80f, 1.00f, 1.0f} };
+				// No glyph of its own yet: the foliage tool's colour family (green).
+				case HE::AssetType::LandscapeFoliageLayer: return { I.model3d,            {0.55f, 0.90f, 0.45f, 1.0f} };
 				case HE::AssetType::Unknown: break; // not an HAsset — try the extension
 			}
 
@@ -3963,14 +3965,10 @@ void render(AppContext& ctx, int& tabSelectRequest,
 					break;
 				}
 
-				// Only with Advanced Shader Effects — the same gate as everywhere else.
-				if (cbAllowMaterials)
-				{
-					if (EditorWidgets::menuItem("Material"))
-						tryCreate("NewMaterial", ".hasset", HE::AssetType::Material);
-					if (EditorWidgets::menuItem("Material Function"))
-						tryCreate("NewMaterialFunction", ".hasset", HE::AssetType::MaterialFunction);
-				}
+				if (EditorWidgets::menuItem("Material"))
+					tryCreate("NewMaterial", ".hasset", HE::AssetType::Material);
+				if (EditorWidgets::menuItem("Material Function"))
+					tryCreate("NewMaterialFunction", ".hasset", HE::AssetType::MaterialFunction);
 
 				ImGui::Separator();
 				if (EditorWidgets::menuItem("Folder")) createFolderIn(targetFolder);
@@ -4055,12 +4053,8 @@ void render(AppContext& ctx, int& tabSelectRequest,
 
 			if (ImGui::BeginMenu("Rendering"))
 			{
-				// Materials only where the project allows them (cbAllowMaterials).
-				if (cbAllowMaterials)
-				{
-					if (EditorWidgets::menuItem("Material"))          tryCreate("NewMaterial", ".hasset", HE::AssetType::Material);
-					if (EditorWidgets::menuItem("Material Function")) tryCreate("NewMaterialFunction", ".hasset", HE::AssetType::MaterialFunction);
-				}
+				if (EditorWidgets::menuItem("Material"))          tryCreate("NewMaterial", ".hasset", HE::AssetType::Material);
+				if (EditorWidgets::menuItem("Material Function")) tryCreate("NewMaterialFunction", ".hasset", HE::AssetType::MaterialFunction);
 				if (EditorWidgets::menuItem("Particle System"))   tryCreate("NewParticleSystem", ".hasset", HE::AssetType::ParticleSystem);
 				ImGui::EndMenu();
 			}
@@ -4661,7 +4655,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 				// Allowed even for an engine-default material: it creates a NEW,
 				// separate asset (a plain project one, not "Engine/..."-namespaced)
 				// rather than mutating the default.
-				if (ext == ".hasset" && ctx.contentManager && cbAllowMaterials &&
+				if (ext == ".hasset" && ctx.contentManager &&
 				    MaterialEditorPanel::isMaterialAsset(s_ctxMenuItem) &&
 				    EditorWidgets::menuItem("Create Material Instance"))
 				{
@@ -4692,6 +4686,28 @@ void render(AppContext& ctx, int& tabSelectRequest,
 							("Editor: created material instance of '" + parentRel + "'").c_str());
 					}
 					ImGui::CloseCurrentPopup();
+				}
+
+				// ── Generate LODs (Thema 331, step 3) ─────────────────────
+				// Simpler versions of a static mesh, kept inside its asset. Not on
+				// engine ground (read-only, and the engine meshes ship their own
+				// levels) and not on an old _LOD<n> sidecar file.
+				if (!engineLocked && ext == ".hasset" && ctx.contentManager &&
+				    EditorAssetTypeCache::is(s_ctxMenuItem, HE::AssetType::StaticMesh) &&
+				    !AutoLod::isLodSidecarPath(srcPath.string()))
+				{
+					const std::string rel = ctx.contentManager->toContentRelativePath(srcPath.string());
+					// An asset outside the content root (e.g. one referenced from
+					// another project) is not this project's to rewrite;
+					// offering a menu item that would then silently do nothing reads
+					// as a broken editor, so it is hidden instead.
+					if (!rel.empty() && EditorWidgets::menuItem("Generate LODs..."))
+					{
+						AutoLodDialog::Request req;
+						req.kind = AutoLodDialog::Kind::MeshAsset;
+						req.mesh = ctx.contentManager->loadAsset(rel);
+						AutoLodDialog::open(req);
+					}
 				}
 
 				// ── Add a StaticMesh .hasset to the scene ─────────────────

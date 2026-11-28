@@ -1,9 +1,12 @@
 #pragma once
 #include <vector>
 #include <cstdint>
+#include <memory>
+#include <unordered_set>
 #include <Renderer/IRenderer.h>
 #include <Renderer/GpuPassAccumulator.h>
 #include "MetalShaderManager.h"
+#include "MetalLandscape.h"   // the world-scale landscape (Thema 326)
 #include <HorizonRendering/RenderWorld.h>
 #include <HorizonRendering/RenderExtractor.h>
 #include <HorizonRendering/FrustumCuller.h>
@@ -12,6 +15,8 @@
 #include <HorizonRendering/RenderGraph.h>
 #include <HorizonRendering/CommandBuffer.h>
 #include <HorizonRendering/FrameUploadRing.h>
+#include <HorizonRendering/RvtNearChunks.h>
+#include <HorizonRendering/FogVolume.h>
 #include <HorizonRendering/RenderConstants.h> // HE::kShadowMapResolution
 #include <HorizonRendering/GiBvh.h>
 #include <HorizonRendering/GIProbeGrid.h>
@@ -19,6 +24,7 @@
 #include <Types/UUID.h>
 #include <material/MaterialShaderLibrary.h> // shared cross-backend material shader layer
 #include <unordered_map>
+#include <unordered_set>
 #include <atomic>
 #include <limits>
 #include <memory>
@@ -99,8 +105,25 @@ public:
 	bool  CaptureViewport(std::vector<uint8_t>& rgba, uint32_t& width, uint32_t& height) override;
 	bool  RenderSceneImage(const EditorCameraOverride& camera, uint32_t width, uint32_t height,
 	                       std::vector<uint8_t>& rgba) override;
+	// Runtime Virtual Texture (Thema 333, docs/rvt-design-2026-11-04.md). The contract is IRenderer.h's, D3D11's the reference.
+	// The pool is three BGRA8 texture2d_array (the format of the viewport target a page is drawn into, so the page goes in with
+	// a plain blit; BaseColor is read through an sRGB view), the tables one R32Uint mipmapped texture per consumer material.
+	bool  CreateRvtPool(uint32_t slots, uint32_t pagePx) override;
+	void  DestroyRvtPool() override;
+	bool  ReadbackRvtSlot(int layer, uint32_t slot, std::vector<uint8_t>& rgba) override;
+	bool  SetRvtPageTable(const HE::UUID& consumerMaterial, const std::vector<std::vector<uint32_t>>& mips) override;
+	bool  ReadbackRvtPageTable(const HE::UUID& consumerMaterial, std::vector<std::vector<uint32_t>>& mips) override;
+	void  SetRvtLandscape(uint32_t terrainEntity, const HE::UUID& landscapeMaterial, const HE::UUID& consumerMaterial) override;
+	void  ReleaseRvtConsumer(const HE::UUID& consumerMaterial) override;
+	void  SetRvtNearChunks(uint32_t terrainEntity, const std::vector<uint32_t>& chunkEntities) override;
+	void  SetRvtTileGround(const HE::UUID& consumerMaterial, const glm::dvec2& minXZ, const glm::dvec2& maxXZ, float nativeNearM) override
+	{ m_tileRvtConsumer = consumerMaterial; m_tileRvtMin = minXZ; m_tileRvtMax = maxXZ; m_tileRvtNearM = nativeNearM; }
+	void  SetSceneVisible(bool visible) override { m_sceneHidden = !visible; }
+	bool  m_sceneHidden = false;   // SetSceneVisible: the offscreen viewport is not shown this frame, its scene passes are skipped
+	bool  ReadRvtFeedback(std::vector<uint32_t>& keys) override;
 	void  InvalidateMaterial(const HE::UUID& materialId) override;
 	void  WarmupMaterials(const std::vector<HE::UUID>& materialIds) override;
+	ShaderBuildStatus PumpShaderBuilds() override;
 	void* RenderMaterialPreview(ContentManager& cm, const HE::UUID& materialId,
 	                            uint32_t size, float yaw, float pitch, float dist,
 	                            int shape = 0, const HE::UUID& meshId = HE::UUID{},
@@ -128,6 +151,9 @@ public:
 	                              uint32_t size, std::vector<uint8_t>& outRgba8) override;
 	bool  RenderWidgetThumbnail(const std::vector<UIRenderObject>& uiObjects,
 	                            uint32_t size, std::vector<uint8_t>& outRgba8) override;
+	void* RenderUIPreview(const std::vector<UIRenderObject>& uiObjects,
+	                      uint32_t width, uint32_t height,
+	                      const glm::vec4& clear, uint32_t slot) override;
 	void  InvalidateMesh    (const HE::UUID& meshId)     override;
 	void  InvalidateTexture (const HE::UUID& textureId)  override;
 	void  SetBloomSettings(const BloomSettings& settings) override;
@@ -149,8 +175,11 @@ public:
 	// and the flat one reads far better against the sky.
 	bool  UnlitViewActive() const
 	{
-		return m_viewMode == HE::ViewMode::Unlit || m_viewMode == HE::ViewMode::Wireframe;
+		// The RVT debug view is drawn unlit too: its page colours must reach the screen as they are.
+		return m_viewMode == HE::ViewMode::Unlit || m_viewMode == HE::ViewMode::Wireframe
+		    || m_viewMode == HE::ViewMode::RvtDebug;
 	}
+	bool  RvtDebugViewActive() const { return m_viewMode == HE::ViewMode::RvtDebug; }
 	bool  WireframeViewActive() const { return m_viewMode == HE::ViewMode::Wireframe; }
 
 	// Multi-window support
@@ -216,8 +245,13 @@ private:
 	// lighting resolve is drawn (plus the forward-routed opaque replay), and the
 	// transparency list is taken from the hand-off. Everything else (skinned,
 	// sky, transparency, particles) is the SAME code as forward.
+	// fogCmdBuf / fogScenePass: only when the volumetric fog is on this frame. EncodeScene then
+	// ends the encoder after the sky, runs the full-screen Apply pass on fogCmdBuf and opens
+	// a second encoder from fogScenePass (colour + depth Load) for the translucent tail; the
+	// encoder that is live on return is left in m_fogSceneEncoder (retained — the caller takes it).
 	void EncodeScene(void* renderEncoder, int width, int height,
-	                 MetalDeferredFrame* deferred = nullptr);
+	                 MetalDeferredFrame* deferred = nullptr,
+	                 void* fogCmdBuf = nullptr, void* fogScenePass = nullptr);
 	bool EncodeWaterReflPrepass(void* cmdBuf, int width, int height, const std::vector<TPDraw>& draws);
 
 	// ── Deferred render path (G-buffer + lighting resolve) ───────────────────
@@ -471,7 +505,20 @@ private:
 	void* m_skyReflPipeline = nullptr; // id<MTLRenderPipelineState> skyFragment, RGBA16F, no depth
 	void* m_skyReflCube     = nullptr; // id<MTLTexture> cube RGBA16F, kSkyReflCubeSize²
 	bool  m_skyReflValid    = false;   // the cube holds THIS frame's sky
+	// One of the six faces per frame after the first full bake (the whole cube every 6 frames); an undrawn face keeps its
+	// picture. Was two, at 512² (see the cost note at kSkyReflCubeSize, MetalRenderer.mm).
+	static constexpr int kSkyReflFacesPerFrame = 1;
+	bool  m_skyReflBaked    = false;
+	int   m_skyReflPhase    = 0;
+	bool  m_skyReflThisFrame = false;   // baked in this EncodeFrame already: the water pass's second trace reuses it
 	void  EncodeSkyReflCube(void* cmdBuf);
+	// The cube graph materials bind as heSkyEnv (slot 14). Transparent surfaces (water) never reach the
+	// GI-reflection trace, so their specular lookup is the only place the real sky (aurora, stars,
+	// clouds) can show in them; m_skyEnvCube is the CPU bake without any of it.
+	void* MaterialSkyCube() const
+	{
+		return (m_giReflEnabled && m_skyReflValid && m_skyReflCube) ? m_skyReflCube : m_skyEnvCube;
+	}
 	// Sky-View LUT (perf audit A4): atmoScatter for the current sun baked into
 	// two 256×128 RGBA16F targets (skyViewLutFragment in kSkyMSL: Rayleigh +
 	// multiple-scatter fill, and the phase-free Mie term), so the sky pass reads
@@ -637,6 +684,72 @@ private:
 	void* m_skyDepthState   = nullptr; // id<MTLDepthStencilState> (sky: LessEqual, no write)
 	void* m_dummyTexture    = nullptr; // id<MTLTexture>, 1×1 white — bound when shadow/AO/moon texture is absent
 	void* m_whiteArrayTexture = nullptr; // id<MTLTexture>, 1×1×1 white texture2d_array (empty array slot)
+	// Runtime Virtual Texture (Thema 333): the page pool (BGRA8 arrays; [0] is read through the sRGB view below), the page
+	// tables per consumer material, the per-landscape material swap, and the inert defaults bound while a draw has no table.
+	void*    m_rvtPool[3]        = { nullptr, nullptr, nullptr };   // id<MTLTexture> 2D array, BGRA8Unorm, PixelFormatView
+	void*    m_rvtPoolAlbedoSrgb = nullptr;                         // id<MTLTexture> view of m_rvtPool[0] as BGRA8Unorm_sRGB
+	uint32_t m_rvtSlots = 0, m_rvtPagePx = 0;   // the manager's slot count (the most pages that can be resident) and the page size
+	uint32_t m_rvtAllocSlots = 0;               // HOT slices the three BGRA arrays hold: they start small and grow with the pages in use
+	bool     m_rvtPack = false;              // layers 1 and 2 are RG8 (normal x and z, surface R and G): a compute copy writes the page, 8 bytes per texel instead of 12
+	void*    m_rvtPackPso = nullptr;         // id<MTLComputePipelineState> of that copy, built on first use
+	uint32_t RvtLayerChannels(int layer) const override;
+	bool     GrowRvtPool(uint32_t needHot);
+	// A page's slot (what the manager hands out) is NOT its slice any more (step 6j): a page that has not been painted for a
+	// while is block-compressed (ASTC 4x4) into the COLD arrays, slice = slot, and its hot slice goes back to a small free list;
+	// the table the shader reads is the manager's table with every entry rewritten to say which array and which slice.
+	// tex: id<MTLTexture> R32Uint with mips, the ring entry written last; src: the manager's table as given; dirty: src changed since
+	// tex was made (uploaded by the next real frame, UpdateRvtCold step 4, so a table set several times a frame is written once).
+	// ring: kRvtTableRing private textures written in turn; staging: the shared buffer the entries are copied from, reused once the GPU
+	// has done its last copy (stagingDone), else replaced (UploadRvtTable).
+	static constexpr int kRvtTableRing = 4;
+	struct RvtTable
+	{
+		void* tex = nullptr; uint32_t side = 0, mips = 0; std::vector<std::vector<uint32_t>> src; uint64_t stateVer = 0; bool dirty = false;
+		void* ring[kRvtTableRing] = {}; int ringNext = 0;
+		void* staging = nullptr; std::shared_ptr<std::atomic<bool>> stagingDone;
+	};
+	void RetireRvtTable(RvtTable& t);   // its textures and buffers, released once no frame in flight can use them
+	std::unordered_map<HE::UUID, RvtTable> m_rvtTables;
+	bool     m_rvtColdOn = false;                  // ASTC cold pool in use (Apple GPU, encoder present, HE_RVT_COLD != 0)
+	void*    m_rvtCold[3] = { nullptr, nullptr, nullptr };   // id<MTLTexture> ASTC_4x4 arrays (albedo sRGB), Shared storage, slice = slot
+	uint32_t m_rvtColdAlloc = 0;
+	std::vector<int32_t>  m_rvtSlotHot;            // per slot: its hot slice, or -1
+	std::vector<uint8_t>  m_rvtSlotCold;           // per slot: the cold arrays hold its page
+	std::vector<uint8_t>  m_rvtSlotBusy;           // per slot: a readback or an encode of it is in flight
+	std::vector<uint32_t> m_rvtSlotVer;            // per slot: bumped by every paint (an encode of an older picture is dropped)
+	std::vector<uint64_t> m_rvtSlotPainted;        // per slot: m_rvtRealFrames at its last paint
+	std::vector<uint32_t> m_rvtHotFree;            // hot slices not in use
+	uint64_t m_rvtStateVer = 1;                    // bumped when a slot changes between hot and cold, tables are re-uploaded
+	uint64_t m_rvtRealFrames = 0;
+	double   m_rvtNextShrinkAt = 0.0, m_rvtNextColdLogAt = 0.0;
+	struct RvtColdWork;                            // the encoder thread and the readbacks in flight (MetalRenderer.mm)
+	RvtColdWork* m_rvtWork = nullptr;
+	uint32_t RvtHotFor(uint32_t slot);             // the hot slice of a slot, taking one when it has none
+	bool     GrowRvtCold(uint32_t needSlices);
+	void     UploadRvtTable(RvtTable& t);
+	void     UpdateRvtCold(bool realFrame);        // once per frame: refresh tables, harvest cold pages, apply encodes, shrink the hot arrays
+	void     StopRvtColdWork();
+	struct RvtSwap { HE::UUID landscapeMat, consumerMat; };
+	std::unordered_map<uint32_t, RvtSwap>  m_rvtSwaps;                   // per landscape entity
+	HE::RvtNearChunks m_rvtNear;                                         // SetRvtNearChunks: chunks that keep their material
+	// The lookup's feedback (HE_RVT_FEEDBACK, RvtLookup.h): a ring of Shared buffers of kRvtFeedbackSlots uints, one bound per
+	// frame at fragment buffer kRvtFeedbackBufferIndex; the frame's completion handler harvests it (the keys go to a shared list
+	// ReadRvtFeedback drains) and clears it for reuse. A frame that finds no free buffer binds the sink (written, never read).
+	static constexpr int kRvtFeedbackBufferIndex = 7;
+	struct RvtFeedbackShared;
+	std::shared_ptr<RvtFeedbackShared> m_rvtFb;
+	void*    m_rvtFbCurrent = nullptr;         // id<MTLBuffer> bound this frame (a ring buffer or the sink)
+	int      m_rvtFbCurrentIdx = -1;           // its ring index, -1 = the sink
+	uint32_t m_rvtFbPhase = 0;                 // frame & 63: which pixel of each 8x8 cell reports (heLight.viewMode.z)
+	void*    RvtFeedbackBindTarget();          // what a material encoder binds at kRvtFeedbackBufferIndex (made on first use)
+	void     BeginRvtFeedbackFrame();          // picks this frame's buffer (start of the frame)
+	void     EndRvtFeedbackFrame(void* cmdBuf); // hands it to the frame's completion
+	void*    m_rvtDummyTable     = nullptr;                         // id<MTLTexture> 1x1 R32Uint (0xFFFFFFFF = no page)
+	// Binds the consumer's table and the pool at fragment textures 18..21 (the pins of MaterialShaderLibrary) for a draw whose
+	// material owns a table; the defaults otherwise. Called at the opaque material draw sites.
+	void     BindRvtForDraw(void* renderEncoder, const HE::UUID& material);
+	// After a walk (ExtractFrame and the passes that extract on their own): the swapped landscapes' chunks take the consumer.
+	void     ApplyRvtSwaps();
 	void* m_linearSampler   = nullptr; // id<MTLSamplerState>
 	// Graph-material project textures (heTexP0..3, MSL texture/sampler 1..4):
 	// linear + mips like m_linearSampler, but REPEAT. Every other backend tiles
@@ -734,6 +847,35 @@ private:
 	// shader use the built-in PBR m_scenePipeline. Value may be null (build failed →
 	// cached so we don't retry every frame).
 	std::unordered_map<uint64_t, void*> m_materialPipelineCache; // hash → id<MTLRenderPipelineState>
+	// Builds in flight (key = the final, salted cache key). A key is in the cache OR here,
+	// never both for long: a null in the cache means "failed", this set means "not yet".
+	std::unordered_set<uint64_t>        m_materialPipelinePending;
+	// What Metal's compiler threads hand back. The completion handlers never touch the
+	// renderer, only this box, which they hold by shared_ptr so one that fires after
+	// Shutdown writes into a closed box instead of a freed `this`.
+	struct MatPipelineDone
+	{
+		uint64_t    key = 0;
+		void*       pso = nullptr;        // CFBridgingRetain'ed, null = failed
+		void*       desc = nullptr;       // retained descriptor, only when a binary archive is in use
+		std::string error, warn, info;    // logged on the main thread by the drain
+	};
+	struct MatPipelineMailbox
+	{
+		std::mutex                   mtx;
+		std::vector<MatPipelineDone> done;
+		bool                         closed = false;
+	};
+	std::shared_ptr<MatPipelineMailbox> m_matMailbox;
+	int  m_matBuildScheduled = 0;   // since m_materialPipelinePending was last empty
+	int  m_matBuildFinished  = 0;
+	// Moves finished async builds into m_materialPipelineCache. Main thread, top of every
+	// frame and before anything that reads or clears the cache.
+	void DrainMaterialPipelines();
+	// Starts the Metal-side build of already cross-compiled MSL. Main thread.
+	void StartMaterialPipelineBuild(uint64_t key, const std::string& vertMSL, const std::string& fragMSL,
+	                                const std::string& fragFallbackMSL, bool precompiled, bool bakedClustered,
+	                                bool blend, bool gbuffer);
 	HE::MaterialShaderLibrary           m_matShaderLib;          // shared GLSL→MSL cross-compile + cache
 	// On-disk pipeline cache (MTLBinaryArchive): persists compiled material pipeline
 	// functions across launches so the Metal compiler doesn't re-run every start.
@@ -813,6 +955,11 @@ private:
 	void* m_thumbUIColorTex = nullptr; // id<MTLTexture> (retained), BGRA8
 	void* m_thumbUIDepthTex = nullptr; // id<MTLTexture> (retained)
 	int   m_thumbUISize     = 0;
+	// RenderUIPreview's targets, one per slot (IRenderer::kUIPreviewSlots): the
+	// swapchain format for the same reason as the thumbnail target above, plus
+	// the depth attachment the UI pipelines declare.
+	struct UIPreviewTarget { void* color = nullptr; void* depth = nullptr; int w = 0, h = 0; };
+	UIPreviewTarget m_uiPreview[IRenderer::kUIPreviewSlots];
 	// Unskinned mesh pipeline shared by the mesh thumbnails and by materials that
 	// have no node graph (built-in PBR): the counterpart of m_skelPreviewPipeline
 	// with the bone buffers removed and a metallic/roughness-driven highlight.
@@ -894,11 +1041,18 @@ private:
 	// ({mvp, model} per instance at vertex buffer 5) for one draw per batch; own
 	// salt. Null for a precompiled variant (no baked instanced vertex): the
 	// caller then loops with the plain PSO.
+	// pending != null → the two newLibraryWithSource and the PSO build run on Metal's own
+	// compiler threads (the cross-compile stays on the caller). The call then returns
+	// null with *pending = true while the build runs, and the finished pipeline is in the
+	// cache from the next DrainMaterialPipelines on; a caller that sees *pending skips
+	// the draw instead of falling back to the default material. pending == null (or
+	// HE_MATERIAL_PIPELINE_ASYNC=0) is the blocking build, for callers with no frame to
+	// spare it from (the material preview).
 	void* GetOrBuildMaterialPipeline(uint64_t key, const std::string& fragGlsl,
 	                                 const std::string& vertBody = {},
 	                                 const MaterialShaderVariant* precompiled = nullptr,
 	                                 bool blend = false, bool gbuffer = false,
-	                                 bool instanced = false);
+	                                 bool instanced = false, bool* pending = nullptr);
 	// Resolve a material's custom shader: true + (key,frag) if it has customShaderFragGlsl.
 	bool  ResolveMaterialShader(const HE::UUID& materialId, uint64_t& key, std::string& frag,
 	                            std::string& vertBody);
@@ -919,6 +1073,7 @@ private:
 	int m_aaMethodRequested = static_cast<int>(HE::AAMethod::FXAA);
 	HE::AAMethod ActiveAAMethod() const
 	{
+		if (m_rawCapture) return HE::AAMethod::Off;   // RenderSceneImage with rawOutput: nothing smoothed
 		return IRenderer::ResolveAAMethod(m_aaMethodRequested, GetCapabilities());
 	}
 	float m_aaSharpness     = 0.35f;  // temporal modes (A3+)
@@ -1141,6 +1296,45 @@ private:
 	void  DestroyCloudShadowTarget();
 	void  EncodeCloudShadow(void* cmdBuf);
 
+	// ── Volumetric fog (Thema 225, docs/volumetric-fog-plan.md) ──────────────
+	// fogMode 1: Inject (density + light + shadows + history) and Integrate (front-to-back
+	// scan) as two compute dispatches before the scene encoder, Apply as a full-screen pass
+	// between the sky and the translucent draws (the scene encoder is split there), and
+	// heApplyFogT on translucent graph materials reading the integrated volume at fragment
+	// texture 17. All of it only while m_fogFrameActive; with fogMode 0 nothing below runs
+	// and every shader sees fogVol = 0 (the analytic fog, pixel for pixel as before).
+	// Kernels: MaterialShaderLibrary::fogInject/fogIntegrate/fogApply (one GLSL source).
+	bool       EnsureFogPipelines();
+	void       EnsureFogTargets(const glm::ivec3& grid);
+	void       DestroyFogTargets();
+	void       EncodeFogVolume(void* cmdBuf, float aspect);          // Inject + Integrate
+	void*      EncodeFogApplyAndReopen(void* sceneEncoder, void* cmdBuf, void* scenePass, int width, int height);
+	void       FillFogLighting(HE::MaterialShaderLibrary::Lighting& lit) const;
+	void*      m_fogInjectPipe    = nullptr; // id<MTLComputePipelineState>
+	void*      m_fogIntegratePipe = nullptr; // id<MTLComputePipelineState>
+	void*      m_fogApplyPipe     = nullptr; // id<MTLRenderPipelineState>
+	bool       m_fogTried         = false;   // the pipelines are built once; a failure keeps the analytic fog
+	void*      m_fogInject[2]     = { nullptr, nullptr }; // id<MTLTexture> 3D RGBA16F, ping-pong (S, sigma_t)
+	void*      m_fogIntegrated    = nullptr; // id<MTLTexture> 3D RGBA16F (L, T at each slice's far edge)
+	void*      m_fogNoise         = nullptr; // id<MTLTexture> 3D RG16Unorm 64^3: HE::BuildSkyNoise3D(64), the same generator as the sky's 256^3 volume, small enough to stay in cache
+	void*      m_fogDummy3D       = nullptr; // id<MTLTexture> 1x1x1 3D: what texture 17 holds when the volume is off
+	glm::ivec3 m_fogGrid          = glm::ivec3(0);
+	int        m_fogHist          = 0;       // index of the inject volume holding LAST frame's result
+	bool       m_fogHistValid     = false;
+	uint32_t   m_fogFrameIndex    = 0;
+	glm::vec3  m_fogNoiseOffset   = glm::vec3(0.0f); // wind-accumulated (plan §6.2)
+	float      m_fogNoiseTime     = 0.0f;
+	glm::mat4  m_fogPrevViewProj  = glm::mat4(1.0f);
+	glm::vec3  m_fogPrevCam       = glm::vec3(0.0f);
+	float      m_fogPrevFocal     = 0.0f;    // projection[1][1], a FOV change resets the history
+	double     m_fogLastTime      = 0.0;     // steady clock seconds of the last inject
+	bool       m_fogFrameActive   = false;   // this frame runs the volume (set in EncodeFrame, read by every fill)
+	HE::FogVolumeConstants m_fogApplyConstants; // this frame's constants, for the Apply pass
+	HE::FogVolumeData m_fogFrame;            // this frame's data (copy of the walk's, for the fills)
+	glm::mat4  m_fogViewProjFlip  = glm::mat4(1.0f); // y-flipped unjittered viewProj for heApplyFogT
+	uint32_t   m_fogSceneTimerBase = 0xFFFFFFFFu; // ftBeginMulti("Scene") pair spanning the split scene encoders
+	void*      m_fogSceneEncoder  = nullptr; // CFBridgingRetain'd: the encoder EncodeScene left open after the split
+
 	// ── SSAO (screen-space ambient occlusion) ───────────────────────────────
 	// Mirrors the GL backend: a view-space position pre-pass feeds a hemisphere-
 	// kernel occlusion estimate, blurred and then sampled by the scene shader to
@@ -1248,14 +1442,18 @@ private:
 		glm::vec4 autoWet{0.0f};   // auto only — HE::GiLandscape::autoWet / autoSlope / autoSnow
 		glm::vec4 autoSlope{0.0f};
 		glm::vec4 autoSnow{0.0f};
+		// Drawn from the RVT: the consumer's RvtVolumeA/B (RvtLookup.h; rvtB.w = mip count, 0 = not from pages). The table
+		// is bound per entry at the kernels' rvtTables slot, the pools beside it.
+		glm::vec4 rvtA{0.0f};
+		glm::vec4 rvtB{0.0f};
 	};
-	static_assert(sizeof(GILandGpu) == 64 + 8 * 16, "must match the MSL GILand layout");
+	static_assert(sizeof(GILandGpu) == 64 + 10 * 16, "must match the MSL GILand layout");
 	void* m_giLandBuf         = nullptr; // id<MTLBuffer> (retained), rebuilt per frame
 	void* m_giInstanceLandBuf = nullptr; // id<MTLBuffer> (retained), HW per-instance index
 	// Packs RenderWorld::landscapes into m_giLandBuf and returns how many made it
 	// (capped at HE::kGiMaxLandscapes); `outWeightTex` receives each one's
 	// weightmap texture in the same order, for the kernel's texture array.
-	int BuildGILandscapeTable(std::vector<void*>& outWeightTex);
+	int BuildGILandscapeTable(std::vector<void*>& outWeightTex, std::vector<void*>* outRvtTables = nullptr);
 	std::unordered_map<HE::UUID, GISwBlasRange> m_giSwBlasCache;
 	std::vector<HE::GiBvhNode>     m_giSwNodesCpu;
 	std::vector<HE::GiBvhTriangle> m_giSwTrisCpu;
@@ -1381,6 +1579,15 @@ private:
 	// InvalidateMaterial retires the texture and drops the entry.
 	std::unordered_map<HE::UUID, void*>    m_materialTexCache;
 	std::unordered_map<std::string, void*> m_graphTexCache; // node-graph textures by UUID/path key
+	// Runtime Virtual Texture (Thema 333): the big texture arrays of a landscape material are read by the page pass only once its
+	// landscape is drawn from the pool, so they sit idle in VRAM (~770 MB for the Mix material). When no normal frame and no
+	// page frame has touched an array of >= 64 MB for HE_RVT_ARRAY_IDLE_S seconds (default 20, 0 = never) it is released
+	// and reloaded on its next use (the first page after a long pause pays the reload). Keyed like m_graphTexCache.
+	struct GraphTexUse { double normal = 0.0, page = 0.0; };
+	std::unordered_map<std::string, GraphTexUse> m_graphTexUse;
+	double m_graphTexEvictAt = 0.0;
+	bool   m_logAfterArrayRelease = false;   // log the device's size once the retired arrays are really gone
+	void   EvictIdleGraphArrays();
 	uint64_t m_graphTexMissEpoch = 0; // contentEpoch its nullptr misses were taken at (HE::forgetGraphTextureMisses)
 	std::unordered_map<std::string, void*> m_uiTexCache;    // UI quad images, same keys, never sRGB
 
@@ -1394,6 +1601,10 @@ private:
 	// overlay, present) is skipped — a still on request must not flash a black
 	// frame on the window it was not asked to touch.
 	bool     m_captureOnly     = false;
+	// EditorCameraOverride::rawOutput for the frame RenderSceneImage draws: the tonemap writes the HDR colour
+	// as it is, and the post effects that would change it are off for that one frame.
+	bool     m_rawCapture      = false;
+	bool     m_rawSrgb         = false;   // EditorCameraOverride::rawSrgb
 	// The primary window's drawable, acquired by WaitForFrame before the frame
 	// polled its input and consumed by the swapchain pass of EncodeFrame.
 	// id<CAMetalDrawable> (retained) or null. Outlives EncodeFrame's
@@ -1469,6 +1680,32 @@ private:
 	void  SimulateGpuParticles(void* cmdBuf);                            // compute dispatch
 	void  DrawGpuParticles(void* renderEncoder, const glm::mat4& viewProj,
 	                       const glm::vec3& camPos);                     // billboard draw
+
+	// ── World-scale landscape (Thema 326, step 2 part B) ─────────────────────
+	// EncodeScene asks the application's provider (IRenderer::SetLandscapeProvider) once for the frame of the camera the scene pass rasterises
+	// with, and EncodeLandscape encodes it into that pass, after the skinned meshes and before the sky. Forward geometry: no shadows, SSAO or GI, not in the G-buffer.
+	void EncodeLandscape(void* renderEncoder, const glm::mat4& viewProj, HE::LandscapeRenderFrame& frame);
+	// SetRvtTileGround: the consumer and the absolute XZ rectangle its pages cover. TakeRvtTilePatches moves the frame's patches that
+	// lie wholly inside into `inside` (drawn with the consumer); false: none, or the consumer cannot be drawn now.
+	HE::UUID   m_tileRvtConsumer{};
+	glm::dvec2 m_tileRvtMin{ 0.0 }, m_tileRvtMax{ 0.0 };
+	float      m_tileRvtNearM = 0.0f;   // patches nearer than this keep the ground's own material (native near view)
+	bool TakeRvtTilePatches(HE::LandscapeRenderFrame& frame, bool gbuffer, std::vector<HE::LandscapeRenderPatch>& inside);
+	GpuMesh  m_giLandMesh;                       // the tile landscape's GI height clipmap as a mesh with its BLAS (EncodeGIAccelBuild)
+	uint64_t m_giLandMeshVersion = 0;            // GiHeightfield::version it was made from
+	HE::UUID m_landscapeMaterialLoadTried{};     // the group material this renderer tried to load from its path
+	bool EnsureLandscape();
+	static constexpr int kLandscapePassKinds = 5;   // shadow, GI pre-pass, SSAO position, SSAO position + normal + depth, velocity
+	void EncodeLandscapePass(void* renderEncoder, const glm::mat4& clip, int kind, const glm::mat4& aux0 = glm::mat4(1.0f), const glm::mat4& aux1 = glm::mat4(1.0f));
+	void* m_landscapePassPipeline[kLandscapePassKinds] = {};   // the ground's vertex stage for each of those targets
+	bool  m_landscapePassTried[kLandscapePassKinds] = {};
+	void* GetOrBuildLandscapeMaterialPipeline(const HE::UUID& materialId, bool gbuffer = false);
+	void* BindLandscapeMaterial(void* renderEncoder, const HE::LandscapeRenderFrame& frame, bool gbuffer, const HE::UUID* use = nullptr);
+	bool  EncodeLandscapeGBuffer(void* renderEncoder, const glm::mat4& viewProj);
+	bool  m_landscapeInGBuffer = false;          // this frame's G-buffer pass drew the ground: the scene pass does not draw it again
+	std::unordered_map<uint64_t, void*> m_landscapeMaterialPipelines;   // key = the material's shader key, salted; null = does not build
+	MetalLandscape m_landscape;
+	bool           m_landscapeFailed = false;   // init failed once: not tried again
 
 	MetalShaderManager m_shaderManager;
 };

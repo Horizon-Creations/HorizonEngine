@@ -1,5 +1,6 @@
 #include "doctest.h"
 #include <imgui.h>
+#include <cmath>
 #include <string>
 #include <vector>
 
@@ -249,10 +250,9 @@ TEST_CASE("GraphEditor shortcuts: a key hit mid link-drag spawns pre-wired")
 	Harness h;
 	ctx.settle(h, emptySpot(ctx, h));
 
-	// Grab node 1's exec-OUT pin. Pin rows sit below the title bar; the layout
-	// puts the first output at the node's right edge, half a row down.
-	const ImVec2 pin = ctx.toScreen(h, 40.0f + GraphEditor::kNodeW,
-	                                   40.0f + GraphEditor::kTitleH + GraphEditor::kRowH * 0.5f);
+	// Grab node 1's exec-OUT pin (id 1), wherever the canvas lays it out.
+	const ImVec2 off = GraphEditor::pinGraphOffset(h.model, 1, 1, false);
+	const ImVec2 pin = ctx.toScreen(h, 40.0f + off.x, 40.0f + off.y);
 	ctx.mouse(pin);
 	ctx.frame(h);
 	ctx.button(true);
@@ -420,17 +420,26 @@ TEST_CASE("GraphEditor shortcuts: a text field takes the keyboard away")
 
 namespace
 {
-// Centre of a node's Nth input pin, in screen space: the left edge, half a row
-// below the title bar. Same rule the canvas lays pins out with.
+// Centre of a node's Nth input / output pin, in screen space, from the
+// canvas' own layout (pinGraphOffset) rather than a copy of its rules.
+ImVec2 pinOnRow(const Ctx& c, const Harness& h, const TestNode& n, int row, bool input)
+{
+	int k = 0;
+	for (const auto& p : h.model.pins(n.id))
+		if (p.input == input && k++ == row)
+		{
+			const ImVec2 off = GraphEditor::pinGraphOffset(h.model, n.id, p.id, input);
+			return c.toScreen(h, n.x + off.x, n.y + off.y);
+		}
+	return c.toScreen(h, n.x, n.y);
+}
 ImVec2 inputPin(const Ctx& c, const Harness& h, const TestNode& n, int row)
 {
-	return c.toScreen(h, n.x,
-		n.y + GraphEditor::kTitleH + (static_cast<float>(row) + 0.5f) * GraphEditor::kRowH);
+	return pinOnRow(c, h, n, row, true);
 }
 ImVec2 outputPin(const Ctx& c, const Harness& h, const TestNode& n, int row)
 {
-	return c.toScreen(h, n.x + GraphEditor::kNodeW,
-		n.y + GraphEditor::kTitleH + (static_cast<float>(row) + 0.5f) * GraphEditor::kRowH);
+	return pinOnRow(c, h, n, row, false);
 }
 } // namespace
 
@@ -442,9 +451,11 @@ TEST_CASE("GraphEditor hit-test: the outer half of an input pin is live")
 
 	const TestNode* n3 = h.find(3);
 	REQUIRE(n3 != nullptr);
-	// 8 px LEFT of the pin's centre: inside the hit radius, outside the node
-	// box. Before the pin test moved out of the node loop this press fell
-	// through to the canvas and started a box-select.
+	// 8 px LEFT of the pin's centre: inside the hit radius, between the pin and
+	// the node's edge (pins sit kPinInset inside the box now). When pins sat ON
+	// the edge this spot was outside the box, and before the pin test moved out
+	// of the node loop the press fell through to a box-select. Either way the
+	// press must take the pin, not the canvas and not a node drag.
 	const ImVec2 pin = inputPin(ctx, h, *n3, 0);
 	REQUIRE(8.0f < GraphEditor::pinHitRadius(h.state.zoom));
 	ctx.mouse(ImVec2(pin.x - 8.0f, pin.y));
@@ -832,4 +843,102 @@ TEST_CASE("GraphEditor drag cues: the drag does the same with and without them")
 	CHECK(with.selection == without.selection);
 	CHECK(with.xs == without.xs);
 	CHECK(with.changed == without.changed);
+}
+
+// ── Node layout ──────────────────────────────────────────────────────────────
+// Nodes are as wide as their content (rounded up to half a grid cell), pins sit
+// inside the box, and a node's width does not depend on whether a pin is wired.
+TEST_CASE("GraphEditor layout: width fits the content, pins sit inside")
+{
+	Ctx ctx;
+	Harness h;
+	ctx.frame(h);   // a frame first: measuring needs the font
+
+	const GraphEditor::NodeLayout small = GraphEditor::nodeLayout(h.model, 1);
+	CHECK(small.size.x < GraphEditor::kNodeW);                  // "N1", two exec pins
+	CHECK(std::fmod(small.size.x, 16.0f) == doctest::Approx(0.0f));
+
+	// A long title grows the node past the old fixed width instead of
+	// running out of it.
+	h.model.title = [](int id) {
+		return id == 1 ? std::string("A Rather Long Engine Call Title Here") : "N" + std::to_string(id); };
+	const GraphEditor::NodeLayout wide = GraphEditor::nodeLayout(h.model, 1);
+	CHECK(wide.size.x > GraphEditor::kNodeW);
+
+	const ImVec2 in  = GraphEditor::pinGraphOffset(h.model, 1, 0, true);
+	const ImVec2 out = GraphEditor::pinGraphOffset(h.model, 1, 1, false);
+	CHECK(in.x > 0.0f);
+	CHECK(out.x < wide.size.x);
+	CHECK(in.y == doctest::Approx(out.y));   // first row on both sides
+
+	// Wiring a pin that has an inline editor hides the editor, not the room.
+	h.model.pinHasInlineEditor  = [](int, int pin) { return pin == 0; };
+	h.model.drawPinInlineEditor = [](int, int) {};
+	h.links.clear();
+	const float unwired = GraphEditor::nodeLayout(h.model, 2).size.x;
+	h.links.push_back({ 1, 1, 2, 0 });
+	CHECK(GraphEditor::nodeLayout(h.model, 2).size.x == unwired);
+}
+
+// A pin is the dot AND its label: pressing on the label starts the wire, the
+// way a Blueprint row does. The empty middle of the node is still the node's.
+TEST_CASE("GraphEditor hit-test: a pin's label is part of the pin")
+{
+	Ctx ctx;
+	Harness h;
+	ctx.settle(h, emptySpot(ctx, h));
+
+	const TestNode* n3 = h.find(3);
+	REQUIRE(n3 != nullptr);
+	const ImVec2 pin = inputPin(ctx, h, *n3, 0);
+	// On the "In" label: past the dot's hit circle, so only the band can take it.
+	const ImVec2 onLabel(pin.x + GraphEditor::pinHitRadius(h.state.zoom) + 3.0f, pin.y);
+	ctx.mouse(onLabel);
+	ctx.frame(h);
+	ctx.button(true);
+	ctx.frame(h);
+	CHECK(h.state.linkSrcNode == 3);
+	CHECK(h.state.linkSrcPin == 0);
+	CHECK(h.state.linkSrcInput);
+	ctx.button(false);
+	ctx.frame(h);
+	ctx.frame(h);
+
+	// The middle of the node, between the input and the output label: no pin.
+	const ImVec2 size = GraphEditor::nodeLayout(h.model, 3).size;
+	const ImVec2 mid = ctx.toScreen(h, n3->x + size.x * 0.5f, n3->y + GraphEditor::kTitleH + GraphEditor::kRowH * 0.5f);
+	ctx.mouse(mid);
+	ctx.frame(h);
+	ctx.button(true);
+	ctx.frame(h);
+	CHECK(h.state.linkSrcNode == 0);
+	ctx.button(false);
+	ctx.frame(h);
+}
+
+// A host body that calls pushWidgetScale (material, particle, animator) gets
+// the zoomed style ONCE: draw() has already pushed it for the body.
+TEST_CASE("GraphEditor layout: a node body's widgets are not zoomed twice")
+{
+	Ctx ctx;
+	Harness h;
+	h.state.zoom = 0.5f;
+	float framePadX = -1.0f, outside = -1.0f;
+	h.model.nodeBodyHeight = [](int id) { return id == 1 ? 30.0f : 0.0f; };
+	h.model.drawNodeBody = [&](int, ImVec2, ImVec2, float zoom) {
+		GraphEditor::pushWidgetScale(zoom);
+		framePadX = ImGui::GetStyle().FramePadding.x;
+		GraphEditor::popWidgetScale();
+	};
+	ctx.frame(h);
+	CHECK(framePadX == doctest::Approx(4.0f * 0.5f));   // the body's padding × zoom, not × zoom²
+	CHECK(GraphEditor::widgetScaleNesting() == 0);
+
+	// Outside a body the pair still scales the style.
+	ImGui::NewFrame();
+	GraphEditor::pushWidgetScale(0.5f);
+	outside = ImGui::GetStyle().FramePadding.x;
+	GraphEditor::popWidgetScale();
+	ImGui::EndFrame();
+	CHECK(outside == doctest::Approx(ImGui::GetStyle().FramePadding.x * 0.5f));
 }

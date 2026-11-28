@@ -5,6 +5,9 @@
 #include <ContentManager/TextureBlockDecode.h> // CPU BC1/BC3/BC4/BC5 expand when the device cannot sample them
 #include <Renderer/UIFont.h>
 #include <HorizonRendering/RenderWorld.h>
+#include <HorizonRendering/GiHeightfield.h>   // the tile landscape's height clipmap for the GI shadow kernels
+#include <HorizonRendering/RvtTilePatches.h>  // the tile ground's patches a virtual texture's consumer serves
+#include <HorizonRendering/RvtNearChunks.h>
 #include <HorizonRendering/GiCasterRange.h>
 #include <Diagnostics/EngineProfiler.h>
 #include <HorizonRendering/RenderExtractor.h>
@@ -26,6 +29,13 @@
 #include <ContentManager/DefaultAssets.h>    // GI: default-cube occluder fallback
 #include <material/MaterialShaderLibrary.h> // A4: shared cross-backend material shader layer (unguarded, like Vulkan/GL)
 #include <MaterialGraph/MaterialGraph.h>     // kMatMaxGraphTextures (heTexP0..3)
+#include <MaterialGraph/RvtLookup.h>        // kRvtTableBinding (t40..t43), kRvtAlbedoColdBinding (t44..t46)
+#include <ContentManager/BlockEncode.h>     // RVT cold pages: BC7 encode on a worker thread (Thema 333 step 9)
+#include <chrono>
+#include <condition_variable>
+#include <deque>
+#include <mutex>
+#include <thread>
 // ── Cross-backend renderer helpers (audit 1a) ────────────────────────────────
 // Each of these replaced a private copy that every backend carried; the copies
 // were byte-identical by contract (the GPU reads the packed bytes positionally),
@@ -49,11 +59,14 @@
 #include <HorizonRendering/InstanceArena.h>   // instance-arena sizing (shared with Vulkan)
 #include <HorizonRendering/GraphTextureMisses.h> // graph-texture misses forgotten per content epoch
 #include <HorizonRendering/UnderwaterCausticsShared.h> // shared wave trains for the caustic pass
+#include <HorizonRendering/UnderwaterSurfaceShared.h>  // the tessellated surface height for the post passes
 #include <Diagnostics/Profiler.h>             // HE_PROFILE_SCOPE_N — GI accel split of Render()
 #include <Renderer/GpuPassTimeline.h>         // per-pass GPU timing: GpuPassScope
 #include "Backends/D3D_Shared/HlslSources.h"  // HLSL byte-identical to the D3D11 backend
 #include "Backends/D3D_Shared/D3DStartupTiming.h" // [startup] phase/compile timing (Thema 196)
+#include "Backends/D3D_Shared/DxgiAdapterLog.h"   // names the GPU in the log
 #include "Backends/D3D12/D3D12MaterialRootSignature.h" // A4: the material root signature, shared with he_tests (Thema 56)
+#include "Backends/D3D12/D3D12Landscape.h"            // the world-scale landscape (Thema 326)
 #include <SDL3/SDL.h>
 #include <d3d12.h>
 #include <d3d12sdklayers.h>
@@ -467,7 +480,8 @@ cbuffer PerFrame : register(b1)
     float4   uCascadeSplits;
     float4   uCameraFwd;    // xyz = world forward, w = 1 / shadow map size
     float4   uShadowBias;
-    int4     uShadowEnabled; // x = 0/1, y = 1 → tint fragments by cascade (debug)
+    int4     uShadowEnabled; // x = 0/1, y = 1 → tint fragments by cascade (debug),
+                              // z = 1 → Unlit/Wireframe view (heLitP's twin below)
     float4   uSunDir;    // xyz = sun direction
     float4   uFog;       // x=fogDensity, y=fogHeightFalloff
     float4   uViewport;  // x=W, y=H, z=ssaoEnabled
@@ -762,6 +776,12 @@ float4 PSMain(VSOut i) : SV_TARGET
     // Mirrors GL/Metal/D3D11: a base-color texture (when present, flagged by uColor.a)
     // replaces the flat colour; PBR scalars still come from uPBR.
     float3 base  = (uColor.a > 0.5) ? uAlbedo.Sample(uAlbedoSamp, i.uv).rgb : uColor.rgb;
+    // Unlit view mode: the material's base colour and nothing else — before
+    // any lighting, shadow or weather term. Twin of GL's uUnlit/Metal's
+    // scene.unlit/D3D11's kSceneHLSL; heLitP in MaterialShaderLibrary.cpp
+    // covers graph materials and the deferred resolve the same way.
+    if (uShadowEnabled.z != 0)
+        return float4(base, uPBR.z);
     float  met   = uPBR.x, rough = max(uPBR.y, 0.04);
     float3 N     = normalize(i.normal);
     // Flat-shade fallback for a scene without any light. With clustering on
@@ -1243,7 +1263,7 @@ namespace
         glm::vec4  cascadeSplits;   // xyz = planar view-space far distances, w = count
         glm::vec4  cameraFwd;       // xyz = world forward, w = 1 / shadow map size
         glm::vec4  shadowBias;      // x = slope-scaled factor, y = minimum
-        glm::ivec4 shadowEnabled;   // x = 0/1, y = cascade debug tint
+        glm::ivec4 shadowEnabled;   // x = 0/1, y = cascade debug tint, z = Unlit/Wireframe view
         glm::vec4  sunDir;     // xyz = sun direction
         glm::vec4  fog;        // x=fogDensity, y=fogHeightFalloff
         glm::vec4  viewport;   // x=W, y=H, z=ssaoEnabled
@@ -1871,6 +1891,10 @@ struct D3D12RendererImpl
     float bloomThreshold = 1.0f;
     float bloomKnee      = 0.1f;
     bool  bloomEnabled   = true;
+    // EditorCameraOverride::rawOutput for the frame RenderSceneImage draws: the tonemap writes the HDR colour
+    // clamped (sRGB-encoded with rawSrgb) instead of exposure + ACES + gamma.
+    bool  rawCapture     = false;
+    bool  rawSrgb        = false;
     // Anti-aliasing method in force, already resolved against this backend's
     // capabilities (docs/anti-aliasing-plan.md). Off swaps the PSO for the
     // passthrough — the pass always draws, it is what fills viewportRT.
@@ -1919,6 +1943,8 @@ struct D3D12RendererImpl
     // image by a subpixel every frame with nothing to average it out.
     bool      taaFrame = false;
     glm::mat4 taaPrevViewProj{ 1.0f };
+    glm::dvec3 taaPrevOrigin{ 0.0 };     // the floating origin taaPrevViewProj was built for (HE::taaPrevViewProjAt)
+    bool       taaPrevOriginKnown = false;
     std::unordered_map<uint32_t, glm::mat4> taaPrevTransforms, taaCurTransforms;
 
     bool taaReady() const { return postFxReady && taaVelocityPSO && taaResolvePSO && taaSharpenPSO; }
@@ -2226,13 +2252,14 @@ struct D3D12RendererImpl
         // Underwater fog (Thema 185 Schritt 2): its own root sig + PSO, see the
         // member declaration for why it does not share postFxRootSig.
         ComPtr<ID3DBlob> uwB;
-        if (compile(kUnderwaterFogHLSL, "main", "ps_5_0", uwB))
+        const std::string fogSrc = HE::withUnderwaterSurface(kUnderwaterFogHLSL, HE::SurfaceLang::HLSL);
+        if (compile(fogSrc.c_str(), "main", "ps_5_0", uwB))
         {
             D3D12_DESCRIPTOR_RANGE r0{}; r0.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
             r0.NumDescriptors = 1; r0.BaseShaderRegister = 0;
             D3D12_ROOT_PARAMETER params[2]{};
             params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-            params[0].Constants = { 0, 0, 28 };   // mat4 + 3×float4, see kUnderwaterFogHLSL
+            params[0].Constants = { 0, 0, 36 };   // mat4 + 5×float4, see kUnderwaterFogHLSL
             params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
             params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
             params[1].DescriptorTable = { 1, &r0 };
@@ -2277,7 +2304,7 @@ struct D3D12RendererImpl
         // does. Optional like the fog: a failure here leaves underwaterCausticsReady false and
         // the rest of the chain alone.
         ComPtr<ID3DBlob> ucB;
-        std::string causticsSrc = kUnderwaterCausticsHLSL;
+        std::string causticsSrc = HE::withUnderwaterSurface(kUnderwaterCausticsHLSL, HE::SurfaceLang::HLSL);
         const size_t trainsAt = causticsSrc.find("@TRAINS@");
         if (trainsAt != std::string::npos)
             causticsSrc.replace(trainsAt, 8, HE::causticsWaveTrainsList());
@@ -2287,7 +2314,7 @@ struct D3D12RendererImpl
             r0.NumDescriptors = 1; r0.BaseShaderRegister = 0;
             D3D12_ROOT_PARAMETER params[2]{};
             params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-            params[0].Constants = { 0, 0, 36 };   // mat4 + 5×float4, see kUnderwaterCausticsHLSL
+            params[0].Constants = { 0, 0, 44 };   // mat4 + 7×float4, see kUnderwaterCausticsHLSL
             params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
             params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
             params[1].DescriptorTable = { 1, &r0 };
@@ -2526,9 +2553,11 @@ struct D3D12RendererImpl
                 float sun[4];
                 float sunColor[4];
                 float caustics[4];
+                float surfWave[4];
+                float surfParams[4];
             } ucb{};
-            static_assert(sizeof(UnderwaterCausticsConstants) == 144,
-                          "36 root constants: must match the cbuffer of kUnderwaterCausticsHLSL");
+            static_assert(sizeof(UnderwaterCausticsConstants) == 176,
+                          "44 root constants: must match the cbuffer of kUnderwaterCausticsHLSL");
             std::memcpy(ucb.invViewProj, &invViewProjUc[0][0], 16 * sizeof(float));
             ucb.depthParams[0] = -1.0f; ucb.depthParams[1] = 1.0f; ucb.depthParams[2] = 0.0f;   // same as the fog
             ucb.camSurface[0] = m_renderWorld.camera.position.x;
@@ -2541,6 +2570,11 @@ struct D3D12RendererImpl
             ucb.caustics[1] = ucCam.causticsScale;
             ucb.caustics[2] = ucSeconds * ucCam.causticsSpeed;
             ucb.caustics[3] = ucCam.causticsDepth;
+            {
+                const HE::UnderwaterSurfaceUniforms su = HE::underwaterSurfaceUniforms(ucCam, ucSeconds);
+                std::memcpy(ucb.surfWave, su.wave, sizeof(su.wave));
+                std::memcpy(ucb.surfParams, su.params, sizeof(su.params));
+            }
 
             ID3D12DescriptorHeap* ucHeaps[] = { postFxSrvHeap.Get() };
             cl->SetDescriptorHeaps(1, ucHeaps);
@@ -2549,7 +2583,7 @@ struct D3D12RendererImpl
             cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
             setVP(w, h);
             setRTV(hdrRtvHeap);
-            cl->SetGraphicsRoot32BitConstants(0, 36, &ucb, 0);
+            cl->SetGraphicsRoot32BitConstants(0, 44, &ucb, 0);
             // Depth off the DSV before it is readable as an SRV — the fog's own dance, round trip.
             barrier12(cl, viewportDepth.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE,
                       D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
@@ -2577,7 +2611,11 @@ struct D3D12RendererImpl
                 float depthParams[4];
                 float camPosSurfaceY[4];
                 float tintDensity[4];
+                float surfWave[4];
+                float surfParams[4];
             } cb{};
+            static_assert(sizeof(UnderwaterFogConstants) == 144,
+                          "36 root constants: must match the cbuffer of kUnderwaterFogHLSL");
             std::memcpy(cb.invViewProj, &invViewProjUw[0][0], 16 * sizeof(float));
             cb.depthParams[0] = -1.0f; cb.depthParams[1] = 1.0f; cb.depthParams[2] = 0.0f; cb.depthParams[3] = 0.0f;
             cb.camPosSurfaceY[0] = m_renderWorld.camera.position.x;
@@ -2586,6 +2624,14 @@ struct D3D12RendererImpl
             cb.camPosSurfaceY[3] = uwCam.surfaceY;
             cb.tintDensity[0] = uwCam.tintColor.x; cb.tintDensity[1] = uwCam.tintColor.y;
             cb.tintDensity[2] = uwCam.tintColor.z; cb.tintDensity[3] = uwCam.density;
+            {
+                static const char* s_uwTimeOv = std::getenv("HE_SKY_TIME");   // pins the wave clock for captures
+                const float uwSeconds = (s_uwTimeOv && *s_uwTimeOv) ? static_cast<float>(std::atof(s_uwTimeOv))
+                                                                    : static_cast<float>(SDL_GetTicks()) / 1000.0f;
+                const HE::UnderwaterSurfaceUniforms su = HE::underwaterSurfaceUniforms(uwCam, uwSeconds);
+                std::memcpy(cb.surfWave, su.wave, sizeof(su.wave));
+                std::memcpy(cb.surfParams, su.params, sizeof(su.params));
+            }
 
             ID3D12DescriptorHeap* uwHeaps[] = { postFxSrvHeap.Get() };
             cl->SetDescriptorHeaps(1, uwHeaps);
@@ -2594,7 +2640,7 @@ struct D3D12RendererImpl
             cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
             setVP(w, h);
             setRTV(hdrRtvHeap);
-            cl->SetGraphicsRoot32BitConstants(0, 28, &cb, 0);
+            cl->SetGraphicsRoot32BitConstants(0, 36, &cb, 0);
             // Depth off the DSV before it is readable as an SRV — same dance EncodeDecals uses.
             barrier12(cl, viewportDepth.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE,
                       D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
@@ -2656,7 +2702,8 @@ struct D3D12RendererImpl
         ldrState = D3D12_RESOURCE_STATE_RENDER_TARGET;
         setRTV(ldrRtvHeap); setVP(w, h);
         cl->SetPipelineState(tonemapPSO.Get());
-        { const float cb[4]={exposure, bloomEnabled?bloomStrength:0.0f, 0,0};
+        { const float cb[4]={rawCapture ? (rawSrgb ? -2.0f : -1.0f) : exposure,   // x < 0: raw (see kTonemapHLSL)
+                             bloomEnabled?bloomStrength:0.0f, 0,0};
           cl->SetGraphicsRoot32BitConstants(0,4,cb,0); }
         cl->SetGraphicsRootDescriptorTable(1, srvGpuHandle(1)); // t0=hdrSRV
         cl->SetGraphicsRootDescriptorTable(2, srvGpuHandle(2)); // t1=bloomSRV[0]
@@ -2893,10 +2940,11 @@ struct D3D12RendererImpl
         const UINT flags = startupCompileFlags();
         // createPostFXPipelines / createTaaPipelines: sourceName = entry.
         for (const char* src : { kTonemapHLSL, kFxaaHLSL12, kSmaaHLSL12, kAABlitHLSL12,
-                                 kBloomBrightHLSL12, kBloomBlurHLSL12, kUnderwaterFogHLSL })
+                                 kBloomBrightHLSL12, kBloomBlurHLSL12 })
             submit(src, "main", "main", "ps_5_0", flags);
+        submit(HE::withUnderwaterSurface(kUnderwaterFogHLSL, HE::SurfaceLang::HLSL), "main", "main", "ps_5_0", flags);
         {
-            std::string causticsSrc = kUnderwaterCausticsHLSL;
+            std::string causticsSrc = HE::withUnderwaterSurface(kUnderwaterCausticsHLSL, HE::SurfaceLang::HLSL);
             const size_t trainsAt = causticsSrc.find("@TRAINS@");
             if (trainsAt != std::string::npos)
             {
@@ -2929,7 +2977,7 @@ struct D3D12RendererImpl
         for (const char* e : { "VSMain", "VSMainInstanced", "VSDepth", "VSDepthInstanced" })
             submit(sceneSource, "scene", e, "vs_5_0", flags);
         // createGiPipelines
-        submit(std::string(kGiTraversalHLSL) + kGiShadowCSHLSL, "gi", "GiShadowCS", "cs_5_0", flags);
+        submit(std::string(kGiTraversalHLSL) + kGiHeightfieldHLSL + kGiShadowCSHLSL, "gi", "GiShadowCS", "cs_5_0", flags);
         submit(std::string(kGiTraversalHLSL) + kGiProbeCSHLSL,  "gi", "GiProbeCS",  "cs_5_0", flags);
         submit(kGiGBufHLSL, "gi", "GiGBufVS", "vs_5_0", flags);
         submit(kGiGBufHLSL, "gi", "GiGBufPS", "ps_5_0", flags);
@@ -3760,6 +3808,25 @@ struct D3D12RendererImpl
     bool m_tessSupported = false;
     std::unordered_map<uint64_t, std::string> m_tessDispByKey;
     std::unordered_set<ID3D12PipelineState*>  m_tessPSOs;
+    // The graph material's resolved key (hash with the displacement folded in, fragment source, vertex body), made ONCE per
+    // DrawScene call per material: resolveShaders copies the whole fragment source and hashes it, and a landscape drawn as
+    // dozens of chunk draws paid that for every one of them (D3D11 found the same, see matKeyCache there). Trusted only within
+    // one DrawScene (drawSceneSerial): the Material Editor assigns an edited source into the same string without telling the
+    // renderer, so nothing longer-lived may be assumed. Null = the material has no graph shader.
+    struct MatKey { uint64_t serial = 0; bool ok = false; uint64_t hash = 0; uint32_t texArrays = 0; std::string frag, vert; };
+    std::unordered_map<HE::UUID, MatKey> m_matKeys;
+    uint64_t drawSceneSerial = 0;
+    const MatKey* resolveMatKey(const ContentManager& cm, const HE::UUID& materialId)
+    {
+        MatKey& k = m_matKeys[materialId];
+        if (k.serial != drawSceneSerial)
+        {
+            k.serial = drawSceneSerial;
+            k.ok = m_matShaderLib.resolveShaders(cm, materialId, k.hash, k.frag, k.vert);
+            if (k.ok) { foldDisplacement(cm, materialId, k.hash); k.texArrays = HE::matGlslTextureArrayMask(k.frag); }
+        }
+        return k.ok ? &k : nullptr;
+    }
     void foldDisplacement(const ContentManager& cm, const HE::UUID& materialId, uint64_t& hash)
     {
         if (!m_tessSupported) return;
@@ -3813,6 +3880,141 @@ struct D3D12RendererImpl
         h.ptr += static_cast<SIZE_T>(slot) * m_matSrvInc;
         return h;
     }
+    // ── Runtime Virtual Texture (Thema 333, docs/rvt-design-2026-11-04.md) ──────────────────────────────────────────
+    // The pool: three RGBA8 arrays (BaseColor read through an sRGB view, Normal, Surface), one slice per pool slot, in
+    // PIXEL_SHADER_RESOURCE between copies; their views live in the material template (slots kSlotRvtAlbedo..), so every
+    // draw block inherits them. The page tables are per CONSUMER material (one volume each): R32_UINT, one mip per table
+    // mip, their SRV in a CPU-only heap and copied into the draw's block (slot kSlotRvtTable) when the draw's material is
+    // that consumer. A page is RenderSceneImage's raw frame copied into a slice (RenderSceneImage, rvtSlot >= 0).
+    static_assert(HE::kRvtTableBinding == 40 && HE::kRvtSurfaceBinding == 43, "the root table's t40..t43 are the RVT registers");
+    ComPtr<ID3D12Resource> rvtPool[3];
+    uint32_t               rvtSlots = 0, rvtPagePx = 0;   // rvtSlots: the manager's ceiling
+    uint32_t               rvtAlloc = 0;                  // slices the arrays hold now (they start small and grow with the pages in use)
+    // HE_RVT_PACK (Thema 333 step 10, counterpart of Metal 6k / D3D11's step 10): layers 1/2 hold two channels
+    // (R8G8_UNORM) instead of four. A page can't get there with CopyTextureRegion (the format changes), so a tiny
+    // fullscreen draw — recorded into the SAME command list as the page copy it replaces — reads the just-drawn page
+    // (viewportRT, RGBA8, via a one-slot SRV heap made fresh each page) and writes the two kept channels into a
+    // one-slice RTV of the destination array.
+    bool                           rvtPack = false;
+    bool                           rvtPackTried = false;
+    ComPtr<ID3D12RootSignature>    rvtPackRootSig;
+    ComPtr<ID3D12PipelineState>    rvtPackPSO;
+    ComPtr<ID3D12DescriptorHeap>   rvtPackSrvHeap;   // 1 slot, SHADER_VISIBLE: the source page (viewportRT)
+    ComPtr<ID3D12DescriptorHeap>   rvtPackRtvHeap;   // 1 slot, not shader-visible: the destination slice
+    struct RvtTable
+    {
+        ComPtr<ID3D12Resource> tex; uint32_t side = 0, mips = 0; UINT heapIndex = 0;
+        std::vector<std::vector<uint32_t>> src;   // the manager's own form (ReadbackRvtPageTable's answer)
+        uint64_t                            stateVer = 0;
+    };
+    std::unordered_map<HE::UUID, RvtTable> rvtTables;
+    // ── Cold pages (Thema 333 step 9, counterpart of Metal 6j / D3D11's identical scheme): a page not repainted for
+    // HE_RVT_COLD_AFTER real frames is read back from its hot slice, BC7-encoded on a worker thread and kept in a
+    // second, slot-indexed array set; its hot slice returns to the free list. Readback here is SYNCHRONOUS
+    // (rvtBegin/rvtEnd already wait for every frame for any RVT admin op on this backend; rate-limited to bound the stall).
+    ComPtr<ID3D12Resource>           rvtCold[3];      // BC7_UNORM_SRGB (albedo) / BC7_UNORM (normal, surface), slice = slot
+    uint32_t                         rvtColdAlloc = 0;
+    std::vector<int32_t>             rvtSlotHot;
+    std::vector<uint8_t>             rvtSlotCold;
+    std::vector<uint8_t>             rvtSlotBusy;      // a readback or encode of this slot is in flight
+    std::vector<uint32_t>            rvtSlotVer;
+    std::vector<uint64_t>            rvtSlotPainted;
+    std::vector<uint32_t>            rvtHotFree;
+    uint64_t                         rvtStateVer   = 1;
+    uint64_t                         rvtRealFrames = 0;
+    bool                             rvtColdOn     = false;
+    struct RvtColdWork;              // the encoder thread and its result queue (defined near D3D12Renderer::CreateRvtPool)
+    RvtColdWork* rvtWork = nullptr;
+    ~D3D12RendererImpl();
+    ComPtr<ID3D12DescriptorHeap>           rvtTableHeap;     // CPU-only, one SRV per table
+    std::vector<UINT>                      rvtTableFree;
+    static constexpr UINT                  kRvtMaxTables = 256;
+    struct RvtSwap { HE::UUID landscapeMat, consumerMat; };
+    std::unordered_map<uint32_t, RvtSwap>  rvtSwaps;         // per landscape entity
+    HE::RvtNearChunks                      rvtNear;          // SetRvtNearChunks: chunks that keep their material
+    // The live state a still sets aside (RenderSceneImage): everything its frame reads that the request changes.
+    struct RvtStill
+    {
+        bool active = false;     // a still's set is in place, the live one is in the members below
+        bool kept   = false;     // ... and it is held ACROSS calls by an RVT bracket (BeginRvtPages)
+        UINT w = 0, h = 0;       // the still's size
+        ComPtr<ID3D12Resource>       liveRT, liveDepth, liveReadback;
+        ComPtr<ID3D12DescriptorHeap> liveRtvHeap, liveDsvHeap;
+        UINT liveW = 0, liveH = 0, liveReqW = 0, liveReqH = 0;
+        D3D12_RESOURCE_STATES liveState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        bool liveResChanged = false, liveUsingHDR = false;
+        EditorCameraOverride liveCam;
+        uint32_t liveDraws = 0, liveTris = 0, liveVisible = 0, liveTotal = 0;
+        bool liveRaw = false, liveSrgb = false, liveBloom = false, liveSsao = false, liveSsr = false, liveGi = false, liveGiRefl = false;
+        HE::AAMethod   liveAa   = HE::AAMethod::Off;
+        HE::RenderPath livePath = HE::RenderPath::Forward;
+    };
+    RvtStill rvtStill;
+    UINT     rvtBracketPx = 0;       // BeginRvtPages: the page size whose set is kept across calls (0 = no bracket open)
+    // Inside a bracket the page layers are submitted WITHOUT waiting, each on its own frame slot (the per-frame rings, the
+    // descriptor blocks, the lighting buffer are all indexed by frameIndex, which is what lets the real frames overlap): the
+    // k-th unwaited layer runs on slot (rvtBaseFrame + k) % kFramesInFlight, and the GPU is waited for once the slots are used
+    // up or the bracket closes. The shared target set needs nothing: one queue executes the lists in the order they were made.
+    UINT     rvtPending   = 0;       // layers submitted since the last wait
+    UINT     rvtBaseFrame = 0;       // the frame slot the first of them used
+    D3D12_CPU_DESCRIPTOR_HANDLE rvtTableCpu(UINT i) const
+    {
+        D3D12_CPU_DESCRIPTOR_HANDLE h = rvtTableHeap->GetCPUDescriptorHandleForHeapStart();
+        h.ptr += static_cast<SIZE_T>(i) * m_matSrvInc;
+        return h;
+    }
+    // The template's RVT slots hold null views of the dimension the shader declares (a null view of the wrong dimension is
+    // undefined, not zero) until a pool is there. A null table reads entry 0 = slot 0, mip 0: the first-fill latch of the
+    // driver keeps such a draw from ever being the consumer (the same as D3D11's null SRV).
+    void writeRvtNullViews()
+    {
+        if (!m_matSrvStaging) return;
+        D3D12_SHADER_RESOURCE_VIEW_DESC nv{};
+        nv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        nv.Format                  = DXGI_FORMAT_R32_UINT;
+        nv.ViewDimension           = D3D12_SRV_DIMENSION_TEXTURE2D;
+        nv.Texture2D.MipLevels     = 1;
+        device->CreateShaderResourceView(nullptr, &nv, matSrvStagingCpu(HE::d3d12mat::kSlotRvtTable));
+        nv.Format                       = DXGI_FORMAT_R8G8B8A8_UNORM;
+        nv.ViewDimension                = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+        nv.Texture2DArray.MipLevels     = 1;
+        nv.Texture2DArray.ArraySize     = 1;
+        for (UINT k = 0; k < 3; ++k)
+            device->CreateShaderResourceView(nullptr, &nv, matSrvStagingCpu(HE::d3d12mat::kSlotRvtAlbedo + k));
+        // Cold (BC7) pages, step 9: same null-view shape, read with Load like the hot three — the format only matters
+        // for a real view, so a BC7 null view is unnecessary; the hot format is already a legal placeholder dimension.
+        for (UINT k = 0; k < 3; ++k)
+            device->CreateShaderResourceView(nullptr, &nv, matSrvStagingCpu(HE::d3d12mat::kSlotRvtAlbedoCold + k));
+    }
+    // A one-shot command list between two full flushes (the CaptureViewport pattern): everything of earlier frames is done
+    // before it records, and done again before it returns, so a resource it touches is idle on both sides.
+    ID3D12GraphicsCommandList* rvtBegin()
+    {
+        waitForAllFrames();
+        cmdAllocators[0]->Reset();
+        cmdList->Reset(cmdAllocators[0].Get(), nullptr);
+        return cmdList.Get();
+    }
+    void rvtEnd()
+    {
+        cmdList->Close();
+        ID3D12CommandList* lists[] = { cmdList.Get() };
+        cmdQueue->ExecuteCommandLists(1, lists);
+        waitForAllFrames();
+    }
+    // A READBACK buffer of `bytes`.
+    ComPtr<ID3D12Resource> rvtReadbackBuffer(UINT64 bytes)
+    {
+        D3D12_HEAP_PROPERTIES hp{}; hp.Type = D3D12_HEAP_TYPE_READBACK;
+        D3D12_RESOURCE_DESC rd{};
+        rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER; rd.Width = bytes; rd.Height = 1; rd.DepthOrArraySize = 1;
+        rd.MipLevels = 1; rd.SampleDesc.Count = 1; rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        ComPtr<ID3D12Resource> res;
+        if (FAILED(device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                                   IID_PPV_ARGS(&res)))) return nullptr;
+        return res;
+    }
+
     // A Texture2D view over a texture uploaded by uploadTexture2D: its own format
     // (the _SRGB twin included) and its whole mip chain.
     // asArray (Thema 158) = a Texture2DArray view over every slice, for a
@@ -3871,7 +4073,7 @@ struct D3D12RendererImpl
         if (auto it = m_graphTexCache.find(key); it != m_graphTexCache.end())
             return it->second.Get();
         ComPtr<ID3D12Resource> res;
-        uploadTexture2D(cl, cm->resolveTextureRef(id, path), res, array); // null stays null
+        uploadTexture2DReleasing(cl, cm, cm->resolveTextureRef(id, path), res, array); // null stays null
         ID3D12Resource* raw = res.Get();
         m_graphTexCache.emplace(key, std::move(res));
         return raw;
@@ -3897,7 +4099,7 @@ struct D3D12RendererImpl
     bool                         m_matReady      = false;            // true once createMaterialResources() succeeded
     bool                         m_matHlslLogged = false;            // one-time dump of generated HLSL for HW verify
     static constexpr UINT        k_matMaxDraws   = 1024;             // U/HeParams ring slots per frame
-    static constexpr UINT        k_matSlot       = 256;              // 256-B stride/slot (U=176, HeParams=256)
+    static constexpr UINT        k_matSlot       = HE::kMatParamBytes; // stride/slot of the U and HeParams rings (U=176, HeParams=kMatParamBytes)
 
     // Image-based-ambient sky cube for graph materials (heSkyEnv, t15 = SRV block
     // slot kSlotSkyEnv, static sampler s15) — Thema 126. The SAME
@@ -3925,7 +4127,10 @@ struct D3D12RendererImpl
         sv.Shader4ComponentMapping     = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
         sv.TextureCube.MostDetailedMip = 0;
         sv.TextureCube.MipLevels       = 1;
-        device->CreateShaderResourceView(m_skyEnvCube.Get(), &sv, h);
+        // GI reflections on: the real-sky cube (aurora, stars, clouds). Transparent water never
+        // reaches the GI trace, so this specular lookup is the only place the sky shows in it.
+        const bool realSky = giReflEnabled && skyReflValid && skyReflTex;
+        device->CreateShaderResourceView(realSky ? skyReflTex.Get() : m_skyEnvCube.Get(), &sv, h);
     }
 
     void createMaterialResources();
@@ -3934,6 +4139,87 @@ struct D3D12RendererImpl
                                                const MaterialShaderVariant* precompiled,
                                                bool hdr, bool transparent, bool gbuffer = false,
                                                bool instanced = false);
+
+    // The tile landscape's variant of a material (Thema 326): the landscape's vertex stage (the grid from SV_VertexID, heights
+    // from the tile atlas) with the material's fragment, its layer weights read from the tile weight pages, against
+    // m_lsMatRootSig (the material signature plus b12 / b13 / t47..t55, D3D12MaterialRootSignature.h). No input layout, no
+    // tessellation stages. A miss is remembered: the ground keeps its fixed blend.
+    ComPtr<ID3D12RootSignature> m_lsMatRootSig;
+    std::unordered_map<uint64_t, ComPtr<ID3D12PipelineState>> m_lsMatPSOs;   // key = hash ^ hdr
+    HE::UUID landscapeMaterialLoadTried;                                      // the ground's material was asked for by its path, once
+    // `gbuffer`: `frag` is the material's G-buffer tail (resolveGBufferShaders), drawn into the three MRTs of the deferred pass;
+    // its own key, never clustered.
+    ID3D12PipelineState* GetOrBuildLandscapeMaterialPSO(uint64_t hash, const std::string& frag, bool hdr, bool gbuffer = false)
+    {
+        if (!m_lsMatRootSig) return nullptr;
+        if (gbuffer) { hash ^= 0x7A11E56B0FFE2000ULL; hdr = false; }
+        const uint64_t key = hash ^ (hdr ? 0x9E3779B97F4A7C15ULL : 0ULL);
+        if (auto it = m_lsMatPSOs.find(key); it != m_lsMatPSOs.end()) return it->second.Get();
+        using Backend = HE::MaterialShaderLibrary::Backend;
+        UINT cflags = 0;
+#ifdef _DEBUG
+        cflags |= D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
+#endif
+        const HE::MaterialShaderLibrary::Compiled& vc = m_matShaderLib.landscapeVertex(Backend::HLSL);
+        ComPtr<ID3DBlob> vs, ps, cerr;
+        std::string why = vc.log;
+        bool built = vc.ok && !vc.source.empty()
+            && SUCCEEDED(D3DCompile(vc.source.c_str(), vc.source.size(), "landscapeMatVS", nullptr, nullptr, "main", "vs_5_0", cflags, 0, &vs, &cerr));
+        if (!built && cerr) why += static_cast<const char*>(cerr->GetBufferPointer());
+        // Clustered first, like a mesh draw of the material; the 8-light window variant when that one does not build.
+        for (int pass = (matClustered() && !gbuffer) ? 0 : 1; built && pass < 2 && !ps; ++pass)
+        {
+            const HE::MaterialShaderLibrary::Compiled& fc = m_matShaderLib.landscapeFragment(hash, frag, Backend::HLSL, /*clustered=*/pass == 0);
+            cerr.Reset();
+            if (!fc.ok || fc.source.empty()
+                || FAILED(D3DCompile(fc.source.c_str(), fc.source.size(), "landscapeMatPS", nullptr, nullptr, "main", "ps_5_0", cflags, 0, &ps, &cerr)))
+            {
+                why += fc.log;
+                if (cerr) why += static_cast<const char*>(cerr->GetBufferPointer());
+                ps.Reset();
+            }
+        }
+        ComPtr<ID3D12PipelineState> pso;
+        if (built && ps)
+        {
+            D3D12_GRAPHICS_PIPELINE_STATE_DESC pd{};
+            pd.pRootSignature        = m_lsMatRootSig.Get();
+            pd.VS                    = { vs->GetBufferPointer(), vs->GetBufferSize() };
+            pd.PS                    = { ps->GetBufferPointer(), ps->GetBufferSize() };
+            pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+            pd.NumRenderTargets      = 1;
+            pd.RTVFormats[0]         = hdr ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_R8G8B8A8_UNORM;
+            pd.DSVFormat             = DXGI_FORMAT_D32_FLOAT;
+            pd.SampleDesc.Count      = 1;
+            pd.SampleMask            = UINT_MAX;
+            pd.RasterizerState.FillMode        = D3D12_FILL_MODE_SOLID;
+            pd.RasterizerState.CullMode        = D3D12_CULL_MODE_NONE;
+            pd.RasterizerState.DepthClipEnable = TRUE;
+            pd.DepthStencilState.DepthEnable    = TRUE;
+            pd.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+            pd.DepthStencilState.DepthFunc      = D3D12_COMPARISON_FUNC_LESS;
+            pd.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+            if (gbuffer)   // the three G-buffer targets, as GetOrBuildMaterialPSO describes them
+            {
+                pd.NumRenderTargets = 3;
+                for (UINT i = 0; i < 3; ++i)
+                {
+                    pd.RTVFormats[i] = k_gbFormats[i];
+                    pd.BlendState.RenderTarget[i].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+                }
+            }
+            if (FAILED(device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&pso))))
+            {
+                why += " CreateGraphicsPipelineState failed";
+                pso.Reset();
+            }
+        }
+        if (!pso)
+            HE_LOG_WARN(RHI, "D3D12Renderer: the landscape keeps its fixed blend, its material's variant did not build: %s", why.c_str());
+        else
+            HE_LOG_INFO(RHI, "%s", "D3D12Renderer: built a material's tile landscape variant");
+        return m_lsMatPSOs.emplace(key, pso).first->second.Get();
+    }
 
     // ── Screen-space decals (forward) ───────────────────────────────────────
     // docs/decals-cross-backend-plan.md §6c. D3D12 has no G-buffer, so a decal is
@@ -4017,6 +4303,518 @@ struct D3D12RendererImpl
                       int width, int height, ContentManager* cm,
                       const D3D12_CPU_DESCRIPTOR_HANDLE* gb0Rtv = nullptr);
 
+    // ── Volumetric fog (Thema 225 step 9; D3D11's step 8 is the template) ───────
+    // Inject/Integrate (compute) + Apply (fullscreen, between Decals and the transparent
+    // draws) on the HLSL kernels step 6 cross-compiled. Register contract:
+    // docs/volumetric-fog-d3d-acceptance-2026-11-06.md. HDR viewport frames only (the Apply
+    // PSO's RTV is R16G16B16A16_FLOAT); every other frame keeps the analytic fog.
+    // Own shader-visible heap, one k_fogSlots range per frame slot (written on the CPU at
+    // record time, so a range is never rewritten while its frame is in flight).
+    static constexpr UINT k_fogSlots      = 16;
+    static constexpr UINT k_fogInjectSrv0 = 0;   // t0..t5
+    static constexpr UINT k_fogInjectUav  = 6;   // u0
+    static constexpr UINT k_fogIntSrv     = 7;   // t0
+    static constexpr UINT k_fogIntUav     = 8;   // u0
+    static constexpr UINT k_fogApplySrv0  = 9;   // t0..t2
+    ComPtr<ID3D12RootSignature>  fogInjectRS, fogIntegrateRS, fogApplyRS;
+    ComPtr<ID3D12PipelineState>  fogInjectPSO, fogIntegratePSO, fogApplyPSO;
+    ComPtr<ID3D12DescriptorHeap> fogHeap;
+    UINT                         fogDescSize = 0;
+    ComPtr<ID3D12Resource>       fogVolCB[k_frameCount];   uint8_t* fogVolCBPtr[k_frameCount]{};
+    ComPtr<ID3D12Resource>       fogLightCB[k_frameCount]; uint8_t* fogLightCBPtr[k_frameCount]{};
+    ComPtr<ID3D12Resource>       fogInjectTex[2];          // ping-pong: [cur] = Inject output, [1-cur] = history
+    ComPtr<ID3D12Resource>       fogIntegratedTex;
+    D3D12_RESOURCE_STATES        fogInjectState[2] = { D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                                                       D3D12_RESOURCE_STATE_UNORDERED_ACCESS };
+    D3D12_RESOURCE_STATES        fogIntegratedState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    bool        fogPipelinesTried = false;
+    bool        fogPipelinesOk    = false;
+    glm::ivec3  fogGridAlloc      = glm::ivec3(0);
+    int         fogHist           = 0;
+    bool        fogHistValid      = false;
+    double      fogLastTime       = 0.0;
+    uint32_t    fogFrameIndex     = 0;
+    glm::vec3   fogNoiseOffset    = glm::vec3(0.0f);
+    float       fogNoiseTime      = 0.0f;
+    glm::mat4   fogPrevViewProj   { 1.0f };
+    glm::vec3   fogPrevCam        { 0.0f };
+    float       fogPrevFocal      = 0.0f;
+    bool        m_fogFrameActive  = false;   // this frame's Apply is valid (fillPerFrame zeroes the analytic fog)
+    HE::FogVolumeData m_fogFrame{};
+    glm::mat4   m_fogViewProj     { 1.0f };  // unjittered world->clip, y-flip pre-baked (lit.fogViewProj)
+
+    bool EnsureFogVolumePipelines()
+    {
+        if (fogPipelinesTried) return fogPipelinesOk;
+        fogPipelinesTried = true;
+#if !defined(HE_HAVE_SHADERC)
+        return false;
+#else
+        using Backend = HE::MaterialShaderLibrary::Backend;
+        const HE::MaterialShaderLibrary::Compiled& fi = m_matShaderLib.fogInject(Backend::HLSL);
+        const HE::MaterialShaderLibrary::Compiled& fg = m_matShaderLib.fogIntegrate(Backend::HLSL);
+        const HE::MaterialShaderLibrary::Compiled& fa = m_matShaderLib.fogApply(Backend::HLSL);
+        const HE::MaterialShaderLibrary::Compiled& vc = m_matShaderLib.fullscreenVertex(Backend::HLSL);
+        if (!fi.ok || !fg.ok || !fa.ok || !vc.ok)
+        {
+            HE_LOG_ERROR(RHI, "%s", (std::string("D3D12Renderer: volumetric fog HLSL cross-compile failed: ")
+                + (!fi.ok ? fi.log : !fg.ok ? fg.log : !fa.ok ? fa.log : vc.log)).c_str());
+            return false;
+        }
+        auto compile = [&](const std::string& src, const char* entry, const char* profile,
+                           ComPtr<ID3DBlob>& b) -> bool
+        {
+            ComPtr<ID3DBlob> err;
+            if (FAILED(timedD3DCompile(src.c_str(), src.size(), "fog", nullptr, nullptr,
+                                       entry, profile, startupCompileFlags(), 0, &b, &err)))
+            {
+                HE_LOG_ERROR(RHI, "%s",
+                    (std::string("D3D12Renderer: fog shader compile failed (") + profile + "): "
+                     + (err ? static_cast<const char*>(err->GetBufferPointer()) : "unknown")).c_str());
+                return false;
+            }
+            return true;
+        };
+        ComPtr<ID3DBlob> csI, csG, psA, vsF;
+        bool ok = compile(fi.source, "main", "cs_5_0", csI)
+               && compile(fg.source, "main", "cs_5_0", csG)
+               && compile(fa.source, "main", "ps_5_0", psA)
+               && compile(vc.source, "main", "vs_5_0", vsF);
+
+        auto makeRS = [&](const D3D12_ROOT_PARAMETER* params, UINT n,
+                          const D3D12_STATIC_SAMPLER_DESC* samplers, UINT ns,
+                          ComPtr<ID3D12RootSignature>& out) -> bool
+        {
+            D3D12_ROOT_SIGNATURE_DESC rsd{};
+            rsd.NumParameters = n; rsd.pParameters = params;
+            rsd.NumStaticSamplers = ns; rsd.pStaticSamplers = samplers;
+            ComPtr<ID3DBlob> sig, err;
+            if (FAILED(D3D12SerializeRootSignature(&rsd, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &err)))
+            {
+                HE_LOG_ERROR(RHI, "%s", (std::string("D3D12Renderer: fog root signature: ")
+                    + (err ? static_cast<const char*>(err->GetBufferPointer()) : "?")).c_str());
+                return false;
+            }
+            return SUCCEEDED(device->CreateRootSignature(0, sig->GetBufferPointer(), sig->GetBufferSize(),
+                                                         IID_PPV_ARGS(&out)));
+        };
+        auto range = [](D3D12_DESCRIPTOR_RANGE_TYPE type, UINT n) {
+            D3D12_DESCRIPTOR_RANGE r{};
+            r.RangeType = type; r.NumDescriptors = n; r.BaseShaderRegister = 0;
+            r.OffsetInDescriptorsFromTableStart = 0;
+            return r;
+        };
+        auto sampler = [](UINT reg, D3D12_FILTER f, D3D12_TEXTURE_ADDRESS_MODE m, D3D12_SHADER_VISIBILITY vis) {
+            D3D12_STATIC_SAMPLER_DESC s{};
+            s.Filter = f; s.AddressU = s.AddressV = s.AddressW = m;
+            s.ComparisonFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+            s.MaxLOD = D3D12_FLOAT32_MAX;
+            s.ShaderRegister = reg; s.ShaderVisibility = vis;
+            return s;
+        };
+        const D3D12_DESCRIPTOR_RANGE srv6 = range(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 6);
+        const D3D12_DESCRIPTOR_RANGE srv3 = range(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 3);
+        const D3D12_DESCRIPTOR_RANGE srv1 = range(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1);
+        const D3D12_DESCRIPTOR_RANGE uav1 = range(D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1);
+        auto cbv = [](UINT reg, D3D12_SHADER_VISIBILITY vis) {
+            D3D12_ROOT_PARAMETER p{};
+            p.ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV; p.Descriptor = { reg, 0 }; p.ShaderVisibility = vis;
+            return p;
+        };
+        auto table = [](const D3D12_DESCRIPTOR_RANGE* r, D3D12_SHADER_VISIBILITY vis) {
+            D3D12_ROOT_PARAMETER p{};
+            p.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+            p.DescriptorTable = { 1, r }; p.ShaderVisibility = vis;
+            return p;
+        };
+        const D3D12_SHADER_VISIBILITY all = D3D12_SHADER_VISIBILITY_ALL;
+        if (ok)
+        {
+            // Inject: b0 HeLighting, b1 HeFogVol, t0..t5, u0, s0..s5 in the order D3D11 binds them.
+            const D3D12_ROOT_PARAMETER pr[4] = { cbv(0, all), cbv(1, all), table(&srv6, all), table(&uav1, all) };
+            const D3D12_STATIC_SAMPLER_DESC ss[6] = {
+                sampler(0, D3D12_FILTER_MIN_MAG_MIP_POINT,  D3D12_TEXTURE_ADDRESS_MODE_CLAMP, all), // CSM taps
+                sampler(1, D3D12_FILTER_MIN_MAG_MIP_POINT,  D3D12_TEXTURE_ADDRESS_MODE_CLAMP, all), // local atlas taps
+                sampler(2, D3D12_FILTER_MIN_MAG_MIP_LINEAR, D3D12_TEXTURE_ADDRESS_MODE_CLAMP, all), // sky cube
+                sampler(3, D3D12_FILTER_MIN_MAG_MIP_POINT,  D3D12_TEXTURE_ADDRESS_MODE_CLAMP, all), // cloud shadow
+                sampler(4, D3D12_FILTER_MIN_MAG_MIP_LINEAR, D3D12_TEXTURE_ADDRESS_MODE_WRAP,  all), // sky noise 3D
+                sampler(5, D3D12_FILTER_MIN_MAG_MIP_LINEAR, D3D12_TEXTURE_ADDRESS_MODE_CLAMP, all), // history
+            };
+            ok = makeRS(pr, 4, ss, 6, fogInjectRS);
+        }
+        if (ok)
+        {
+            // Integrate: b0 HeFogVol, t0 (the injected volume, texelFetch), u0.
+            const D3D12_ROOT_PARAMETER pr[3] = { cbv(0, all), table(&srv1, all), table(&uav1, all) };
+            ok = makeRS(pr, 3, nullptr, 0, fogIntegrateRS);
+        }
+        if (ok)
+        {
+            // Apply: b0 HeFogVol, t0 integrated volume, t1 sky cube, t2 scene depth, s0/s1 linear clamp.
+            const D3D12_SHADER_VISIBILITY ps = D3D12_SHADER_VISIBILITY_PIXEL;
+            const D3D12_ROOT_PARAMETER pr[2] = { cbv(0, ps), table(&srv3, ps) };
+            const D3D12_STATIC_SAMPLER_DESC ss[2] = {
+                sampler(0, D3D12_FILTER_MIN_MAG_MIP_LINEAR, D3D12_TEXTURE_ADDRESS_MODE_CLAMP, ps),
+                sampler(1, D3D12_FILTER_MIN_MAG_MIP_LINEAR, D3D12_TEXTURE_ADDRESS_MODE_CLAMP, ps),
+            };
+            ok = makeRS(pr, 2, ss, 2, fogApplyRS);
+        }
+        if (ok)
+        {
+            D3D12_COMPUTE_PIPELINE_STATE_DESC cd{};
+            cd.pRootSignature = fogInjectRS.Get();
+            cd.CS = { csI->GetBufferPointer(), csI->GetBufferSize() };
+            ok = SUCCEEDED(device->CreateComputePipelineState(&cd, IID_PPV_ARGS(&fogInjectPSO)));
+            cd.pRootSignature = fogIntegrateRS.Get();
+            cd.CS = { csG->GetBufferPointer(), csG->GetBufferSize() };
+            ok = ok && SUCCEEDED(device->CreateComputePipelineState(&cd, IID_PPV_ARGS(&fogIntegratePSO)));
+        }
+        if (ok)
+        {
+            // Shader output is rgb = radiance to ADD, a = transmittance of the scene behind:
+            // dst' = src*1 + dst*a (plan §6), the same blend as D3D11's fogApplyBlendState.
+            D3D12_GRAPHICS_PIPELINE_STATE_DESC pd{};
+            pd.pRootSignature = fogApplyRS.Get();
+            pd.VS = { vsF->GetBufferPointer(), vsF->GetBufferSize() };
+            pd.PS = { psA->GetBufferPointer(), psA->GetBufferSize() };
+            D3D12_RENDER_TARGET_BLEND_DESC& rt = pd.BlendState.RenderTarget[0];
+            rt.BlendEnable = TRUE;
+            rt.SrcBlend = D3D12_BLEND_ONE;       rt.DestBlend = D3D12_BLEND_SRC_ALPHA;
+            rt.SrcBlendAlpha = D3D12_BLEND_ONE;  rt.DestBlendAlpha = D3D12_BLEND_SRC_ALPHA;
+            rt.BlendOp = rt.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+            rt.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+            pd.SampleMask = UINT_MAX;
+            pd.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+            pd.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+            pd.DepthStencilState.DepthEnable = FALSE;
+            pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+            pd.NumRenderTargets = 1; pd.RTVFormats[0] = DXGI_FORMAT_R16G16B16A16_FLOAT;
+            pd.SampleDesc.Count = 1;
+            ok = SUCCEEDED(device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&fogApplyPSO)));
+        }
+        if (ok)
+        {
+            D3D12_DESCRIPTOR_HEAP_DESC hd{};
+            hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+            hd.NumDescriptors = k_frameCount * k_fogSlots;
+            hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+            ok = SUCCEEDED(device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&fogHeap)));
+            fogDescSize = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+        }
+        for (UINT f = 0; ok && f < k_frameCount; ++f)
+        {
+            fogVolCB[f]   = createUploadBuffer(alignUp(static_cast<UINT>(sizeof(HE::FogVolumeConstants)), k_cbSlot),
+                                               reinterpret_cast<void**>(&fogVolCBPtr[f]));
+            fogLightCB[f] = createUploadBuffer(alignUp(static_cast<UINT>(sizeof(HE::MaterialShaderLibrary::Lighting)), k_cbSlot),
+                                               reinterpret_cast<void**>(&fogLightCBPtr[f]));
+            ok = fogVolCB[f] && fogLightCB[f] && fogVolCBPtr[f] && fogLightCBPtr[f];
+        }
+        if (!ok)
+        {
+            HE_LOG_ERROR(RHI, "%s", "D3D12Renderer: volumetric fog pipeline build failed — analytic fog stays active");
+            fogInjectRS.Reset(); fogIntegrateRS.Reset(); fogApplyRS.Reset();
+            fogInjectPSO.Reset(); fogIntegratePSO.Reset(); fogApplyPSO.Reset();
+            fogHeap.Reset();
+            for (UINT f = 0; f < k_frameCount; ++f) { fogVolCB[f].Reset(); fogLightCB[f].Reset(); }
+            return false;
+        }
+        fogPipelinesOk = true;
+        HE_LOG_INFO(RHI, "%s", "D3D12Renderer: volumetric fog pipelines built (Inject/Integrate/Apply, HLSL SM 5.0)");
+        return true;
+#endif
+    }
+
+    void destroyFogVolumeTargets()
+    {
+        fogInjectTex[0].Reset(); fogInjectTex[1].Reset(); fogIntegratedTex.Reset();
+        fogInjectState[0] = fogInjectState[1] = fogIntegratedState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        fogGridAlloc = glm::ivec3(0);
+        fogHistValid = false;
+    }
+
+    bool ensureFogVolumeTargets(const glm::ivec3& grid)
+    {
+        if (fogIntegratedTex && grid == fogGridAlloc) return true;
+        if (fogIntegratedTex) waitForAllFrames(); // a grid-tier change: the old volumes may still be in flight
+        destroyFogVolumeTargets();
+        auto make3D = [&](ComPtr<ID3D12Resource>& tex) -> bool
+        {
+            D3D12_HEAP_PROPERTIES hp{}; hp.Type = D3D12_HEAP_TYPE_DEFAULT;
+            D3D12_RESOURCE_DESC rd{};
+            rd.Dimension        = D3D12_RESOURCE_DIMENSION_TEXTURE3D;
+            rd.Width            = static_cast<UINT64>(grid.x);
+            rd.Height           = static_cast<UINT>(grid.y);
+            rd.DepthOrArraySize = static_cast<UINT16>(grid.z);
+            rd.MipLevels        = 1;
+            rd.Format           = DXGI_FORMAT_R16G16B16A16_FLOAT;
+            rd.SampleDesc.Count = 1;
+            rd.Flags            = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+            return SUCCEEDED(device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd,
+                D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(&tex)));
+        };
+        if (!(make3D(fogInjectTex[0]) && make3D(fogInjectTex[1]) && make3D(fogIntegratedTex)))
+        {
+            destroyFogVolumeTargets();
+            return false;
+        }
+        fogGridAlloc = grid;
+        fogHistValid = false; // fresh textures: no usable history
+        return true;
+    }
+
+    // Inject + Integrate, recorded after the shadow passes and the sky cube bake, before
+    // the geometry pass (so fillPerFrame / fillMatLight see m_fogFrameActive). Mirrors
+    // D3D11RendererImpl::RenderFogVolume; builds its OWN HeLighting fill (fogLightCB[f])
+    // because the scene's fill zeroes the CSM on GI frames and fog wants real sun shadows.
+    void RenderFogVolume(ID3D12GraphicsCommandList* cl, const IRenderer::EnvironmentSettings& env,
+                         bool shadows, int nCascades, const glm::mat4* cascadeClip,
+                         const glm::vec4& cascadeSplits, bool localShadows, int nLocalLayers,
+                         const glm::mat4* localClip, const glm::vec3& camFwd)
+    {
+        m_fogFrameActive = false;
+#if defined(HE_HAVE_SHADERC)
+        if (!cl || !fogPipelinesOk || !m_renderWorld.fogVolume.enabled) return;
+        if (!(usingHDR && hdrRtvHeap && viewportDsvHeap && viewportDepth)) return; // Apply is HDR-viewport only
+        const HE::FogVolumeData fd = m_renderWorld.fogVolume;
+        if (!ensureFogVolumeTargets(fd.grid)) return;
+
+        static const char* s_pinned = std::getenv("HE_SKY_TIME");
+        const bool   pinned = s_pinned && *s_pinned;
+        const double now    = pinned ? (fogFrameIndex / 60.0) : static_cast<double>(SDL_GetTicks()) / 1000.0;
+        float dt = (fogLastTime > 0.0 || pinned) ? static_cast<float>(now - fogLastTime) : 0.0f;
+        if (pinned && fogFrameIndex == 0) dt = 0.0f;
+        fogLastTime = now;
+        const CameraData& cam = m_renderWorld.camera;
+        const glm::mat4 viewProj    = cam.projection * cam.view;
+        const glm::mat4 invViewProj = glm::inverse(viewProj);
+        const float focal = cam.projection[1][1];
+        const bool historyOk = fogHistValid && dt > 0.0f && dt < 0.5f
+                            && glm::distance(cam.position, fogPrevCam) < 10.0f
+                            && std::abs(focal - fogPrevFocal) < 1e-4f * std::max(1.0f, std::abs(focal));
+        const float rad = glm::radians(env.windDirection);
+        fogNoiseOffset += glm::vec3(std::sin(rad), 0.0f, -std::cos(rad)) * std::max(env.windSpeed, 0.0f) * dt * 0.5f;
+        fogNoiseTime   += dt;
+
+        HE::FogVolumeTemporalState ts;
+        ts.jitter01     = HE::fogJitter(fogFrameIndex);
+        ts.historyAlpha = historyOk ? HE::fogHistoryAlpha(dt) : 1.0f;
+        ts.historyValid = historyOk;
+        ts.frameIndex   = fogFrameIndex;
+        ts.noiseOffset  = fogNoiseOffset;
+        ts.noiseTime    = fogNoiseTime;
+        const HE::FogVolumeConstants fc = HE::FillFogVolumeConstants(
+            fd, invViewProj, fogPrevViewProj, cam.position, camFwd, ts, 0.0f);
+        std::memcpy(fogVolCBPtr[frameIndex], &fc, sizeof(fc));
+
+        {
+            HE::MaterialShaderLibrary::Lighting lit{};
+            glm::vec3 sunDir, sunColor;
+            m_renderWorld.dominantDirectionalLight(sunDir, sunColor);
+            lit.sunDir[0] = sunDir.x; lit.sunDir[1] = sunDir.y; lit.sunDir[2] = sunDir.z;
+            lit.sunColor[0] = sunColor.r; lit.sunColor[1] = sunColor.g; lit.sunColor[2] = sunColor.b;
+            HE::FillMaterialLightWindow(m_renderWorld, lit, localShadows);
+            if (localShadows)
+            {
+                glm::mat4 lsFlipY(1.0f); lsFlipY[1][1] = -1.0f;
+                for (int v = 0; v < nLocalLayers; ++v)
+                {
+                    const glm::mat4 m = lsFlipY * localClip[v];
+                    std::memcpy(lit.localShadowVP[v], &m[0][0], 16 * sizeof(float));
+                }
+            }
+            if (shadows)
+            {
+                glm::mat4 uvFlipY(1.0f); uvFlipY[1][1] = -1.0f;
+                for (int c = 0; c < nCascades; ++c)
+                {
+                    const glm::mat4 m = uvFlipY * cascadeClip[c];
+                    std::memcpy(lit.csmVP[c], &m[0][0], 16 * sizeof(float));
+                }
+                lit.csmSplits[0] = cascadeSplits.x; lit.csmSplits[1] = cascadeSplits.y;
+                lit.csmSplits[2] = cascadeSplits.z; lit.csmSplits[3] = cascadeSplits.w;
+                lit.camFwd[0] = camFwd.x; lit.camFwd[1] = camFwd.y; lit.camFwd[2] = camFwd.z;
+                lit.shadowBias[0] = shadowSettings.slopeBias;
+                lit.shadowBias[1] = shadowSettings.minBias;
+            }
+            lit.fog[2] = m_skyEnvValid ? 1.0f : 0.0f;
+            lit.ambient[0] = m_renderWorld.ambient.r; lit.ambient[1] = m_renderWorld.ambient.g; lit.ambient[2] = m_renderWorld.ambient.b;
+            lit.camPos[0] = cam.position.x; lit.camPos[1] = cam.position.y; lit.camPos[2] = cam.position.z;
+            std::memcpy(fogLightCBPtr[frameIndex], &lit, sizeof(lit));
+        }
+
+        // This frame slot's descriptors (CPU-written: the slot's previous use has retired).
+        const UINT base = frameIndex * k_fogSlots;
+        auto cpuAt = [&](UINT s) {
+            D3D12_CPU_DESCRIPTOR_HANDLE h = fogHeap->GetCPUDescriptorHandleForHeapStart();
+            h.ptr += static_cast<SIZE_T>(base + s) * fogDescSize; return h; };
+        auto gpuAt = [&](UINT s) {
+            D3D12_GPU_DESCRIPTOR_HANDLE h = fogHeap->GetGPUDescriptorHandleForHeapStart();
+            h.ptr += static_cast<UINT64>(base + s) * fogDescSize; return h; };
+        auto srv3D = [&](ID3D12Resource* r, DXGI_FORMAT fmt, D3D12_CPU_DESCRIPTOR_HANDLE h) {
+            D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
+            sv.Format = fmt; sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE3D;
+            sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            sv.Texture3D.MipLevels = 1;
+            device->CreateShaderResourceView(r, &sv, h); };
+        auto uav3D = [&](ID3D12Resource* r, D3D12_CPU_DESCRIPTOR_HANDLE h) {
+            D3D12_UNORDERED_ACCESS_VIEW_DESC uv{};
+            uv.Format = DXGI_FORMAT_R16G16B16A16_FLOAT; uv.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE3D;
+            uv.Texture3D.WSize = static_cast<UINT>(fd.grid.z);
+            device->CreateUnorderedAccessView(r, nullptr, &uv, h); };
+        auto skyCube = [&](D3D12_CPU_DESCRIPTOR_HANDLE h) {
+            D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
+            sv.Format = DXGI_FORMAT_R16G16B16A16_FLOAT; sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBE;
+            sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            sv.TextureCube.MipLevels = 1;
+            device->CreateShaderResourceView(m_skyEnvValid ? m_skyEnvCube.Get() : nullptr, &sv, h); };
+
+        const int cur = 1 - fogHist;
+        const D3D12_RESOURCE_STATES kNPSR = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+        const D3D12_RESOURCE_STATES kBoth = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | kNPSR;
+
+        // Inject's sources are pixel-shader-readable everywhere else: allow the compute read, restore after.
+        ID3D12Resource* srcRes[5]; int nSrc = 0;
+        if (shadows && shadowDepth)           srcRes[nSrc++] = shadowDepth.Get();
+        if (localShadows && localShadowDepth) srcRes[nSrc++] = localShadowDepth.Get();
+        if (m_skyEnvValid && m_skyEnvCube)    srcRes[nSrc++] = m_skyEnvCube.Get();
+        if (skyNoiseTex12)                    srcRes[nSrc++] = skyNoiseTex12.Get();
+        if (ssaoWhiteTex)                     srcRes[nSrc++] = ssaoWhiteTex.Get();
+        for (int i = 0; i < nSrc; ++i)
+            barrier12(cl, srcRes[i], D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, kBoth);
+
+        writeShadowArraySrv(shadows ? shadowDepth.Get() : nullptr, cpuAt(k_fogInjectSrv0 + 0));
+        writeShadowArraySrv(localShadows ? localShadowDepth.Get() : nullptr, cpuAt(k_fogInjectSrv0 + 1), kLocalShadowLayers);
+        skyCube(cpuAt(k_fogInjectSrv0 + 2));
+        {
+            D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
+            sv.Format = DXGI_FORMAT_R8_UNORM; sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+            sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            sv.Texture2D.MipLevels = 1;
+            device->CreateShaderResourceView(ssaoWhiteTex.Get(), &sv, cpuAt(k_fogInjectSrv0 + 3)); // cloud shadow: white = none
+        }
+        srv3D(skyNoiseTex12.Get(), DXGI_FORMAT_R16G16_UNORM, cpuAt(k_fogInjectSrv0 + 4));
+        srv3D(fogInjectTex[fogHist].Get(), DXGI_FORMAT_R16G16B16A16_FLOAT, cpuAt(k_fogInjectSrv0 + 5)); // history
+        uav3D(fogInjectTex[cur].Get(), cpuAt(k_fogInjectUav));
+        srv3D(fogInjectTex[cur].Get(), DXGI_FORMAT_R16G16B16A16_FLOAT, cpuAt(k_fogIntSrv));
+        uav3D(fogIntegratedTex.Get(), cpuAt(k_fogIntUav));
+
+        auto toState = [&](ID3D12Resource* r, D3D12_RESOURCE_STATES& st, D3D12_RESOURCE_STATES to) {
+            if (st != to) { barrier12(cl, r, st, to); st = to; } };
+
+        ID3D12DescriptorHeap* heaps[] = { fogHeap.Get() };
+        cl->SetDescriptorHeaps(1, heaps);
+
+        toState(fogInjectTex[cur].Get(),  fogInjectState[cur],  D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        toState(fogInjectTex[fogHist].Get(), fogInjectState[fogHist], kNPSR);
+        cl->SetComputeRootSignature(fogInjectRS.Get());
+        cl->SetPipelineState(fogInjectPSO.Get());
+        cl->SetComputeRootConstantBufferView(0, fogLightCB[frameIndex]->GetGPUVirtualAddress());
+        cl->SetComputeRootConstantBufferView(1, fogVolCB[frameIndex]->GetGPUVirtualAddress());
+        cl->SetComputeRootDescriptorTable(2, gpuAt(k_fogInjectSrv0));
+        cl->SetComputeRootDescriptorTable(3, gpuAt(k_fogInjectUav));
+        cl->Dispatch((static_cast<UINT>(fd.grid.x) + 7u) / 8u, (static_cast<UINT>(fd.grid.y) + 7u) / 8u,
+                     (static_cast<UINT>(fd.grid.z) + 3u) / 4u);
+
+        // Inject's UAV write -> Integrate's texelFetch read (the transition is the sync point).
+        toState(fogInjectTex[cur].Get(), fogInjectState[cur], kNPSR);
+        toState(fogIntegratedTex.Get(), fogIntegratedState, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        cl->SetComputeRootSignature(fogIntegrateRS.Get());
+        cl->SetPipelineState(fogIntegratePSO.Get());
+        cl->SetComputeRootConstantBufferView(0, fogVolCB[frameIndex]->GetGPUVirtualAddress());
+        cl->SetComputeRootDescriptorTable(1, gpuAt(k_fogIntSrv));
+        cl->SetComputeRootDescriptorTable(2, gpuAt(k_fogIntUav));
+        cl->Dispatch((static_cast<UINT>(fd.grid.x) + 7u) / 8u, (static_cast<UINT>(fd.grid.y) + 7u) / 8u, 1u);
+        // Integrated volume: written by compute, read by Apply (and later the materials) in pixel shaders.
+        toState(fogIntegratedTex.Get(), fogIntegratedState, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+
+        for (int i = 0; i < nSrc; ++i)
+            barrier12(cl, srcRes[i], kBoth, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+
+        fogHist         = cur;
+        fogHistValid    = true;
+        fogPrevViewProj = viewProj;
+        fogPrevCam      = cam.position;
+        fogPrevFocal    = focal;
+        ++fogFrameIndex;
+        m_fogFrame        = fd;
+        glm::mat4 flipY(1.0f); flipY[1][1] = -1.0f;
+        m_fogViewProj      = flipY * viewProj;
+        m_fogFrameActive   = true;
+        static bool s_fogLogged = false; // the runtime witness (HE_DUMP_FOGTEST: required at fogMode 1, forbidden at 0)
+        if (!s_fogLogged)
+        {
+            s_fogLogged = true;
+            HE_LOG_INFO(RHI, "D3D12Renderer: volumetric fog frame (grid %dx%dx%d, range %.0f m, %s)",
+                        fd.grid.x, fd.grid.y, fd.grid.z, fd.distance, fd.parity ? "parity" : "full");
+        }
+#else
+        (void)cl; (void)env; (void)shadows; (void)nCascades; (void)cascadeClip; (void)cascadeSplits;
+        (void)localShadows; (void)nLocalLayers; (void)localClip; (void)camFwd;
+#endif
+    }
+
+    // Apply: full-screen pass onto the HDR scene colour between Decals and the transparent
+    // draws. Same depth dance as EncodeDecals / the underwater pass: the DSV leaves the OM
+    // before the depth is readable as an SRV. The CALLER rebuilds the scene root state.
+    void RenderFogApply(ID3D12GraphicsCommandList* cl, int width, int height)
+    {
+#if defined(HE_HAVE_SHADERC)
+        if (!cl || !m_fogFrameActive || !fogApplyPSO || !fogIntegratedTex) return;
+        if (!(usingHDR && hdrRtvHeap && viewportDsvHeap && viewportDepth)) return;
+        const D3D12_CPU_DESCRIPTOR_HANDLE rtv = hdrRtvHeap->GetCPUDescriptorHandleForHeapStart();
+        const D3D12_CPU_DESCRIPTOR_HANDLE dsv = viewportDsvHeap->GetCPUDescriptorHandleForHeapStart();
+
+        const UINT base = frameIndex * k_fogSlots;
+        auto cpuAt = [&](UINT s) {
+            D3D12_CPU_DESCRIPTOR_HANDLE h = fogHeap->GetCPUDescriptorHandleForHeapStart();
+            h.ptr += static_cast<SIZE_T>(base + s) * fogDescSize; return h; };
+        {
+            D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
+            sv.Format = DXGI_FORMAT_R16G16B16A16_FLOAT; sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE3D;
+            sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            sv.Texture3D.MipLevels = 1;
+            device->CreateShaderResourceView(fogIntegratedTex.Get(), &sv, cpuAt(k_fogApplySrv0 + 0));
+        }
+        {
+            D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
+            sv.Format = DXGI_FORMAT_R16G16B16A16_FLOAT; sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBE;
+            sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            sv.TextureCube.MipLevels = 1;
+            device->CreateShaderResourceView(m_skyEnvValid ? m_skyEnvCube.Get() : nullptr, &sv, cpuAt(k_fogApplySrv0 + 1));
+        }
+        {
+            D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
+            sv.Format = DXGI_FORMAT_R32_FLOAT; sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+            sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            sv.Texture2D.MipLevels = 1;
+            device->CreateShaderResourceView(viewportDepth.Get(), &sv, cpuAt(k_fogApplySrv0 + 2));
+        }
+
+        cl->OMSetRenderTargets(1, &rtv, FALSE, nullptr);                  // release the depth FIRST
+        barrier12(cl, viewportDepth.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE,
+                  D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);            // then make it readable
+        ID3D12DescriptorHeap* heaps[] = { fogHeap.Get() };
+        cl->SetDescriptorHeaps(1, heaps);
+        cl->SetGraphicsRootSignature(fogApplyRS.Get());
+        cl->SetPipelineState(fogApplyPSO.Get());
+        cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        const D3D12_VIEWPORT vp{ 0.0f, 0.0f, static_cast<float>(width), static_cast<float>(height), 0.0f, 1.0f };
+        const D3D12_RECT     sc{ 0, 0, width, height };
+        cl->RSSetViewports(1, &vp);
+        cl->RSSetScissorRects(1, &sc);
+        cl->SetGraphicsRootConstantBufferView(0, fogVolCB[frameIndex]->GetGPUVirtualAddress());
+        D3D12_GPU_DESCRIPTOR_HANDLE tbl = fogHeap->GetGPUDescriptorHandleForHeapStart();
+        tbl.ptr += static_cast<UINT64>(base + k_fogApplySrv0) * fogDescSize;
+        cl->SetGraphicsRootDescriptorTable(1, tbl);
+        cl->DrawInstanced(3, 1, 0, 0);
+        barrier12(cl, viewportDepth.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                  D3D12_RESOURCE_STATE_DEPTH_WRITE);                      // depth writable again …
+        cl->OMSetRenderTargets(1, &rtv, FALSE, &dsv);                     // … only THEN back on the OM
+#else
+        (void)cl; (void)width; (void)height;
+#endif
+    }
+
     GpuMesh cube;
 
     // ── Sky pipeline ─────────────────────────────────────────────────────────
@@ -4032,6 +4830,13 @@ struct D3D12RendererImpl
     // ImGui editor textures (logo + content-browser icons). Held here so the GPU
     // resources outlive ImGui's use of the SRVs the editor creates over them.
     std::vector<ComPtr<ID3D12Resource>> m_imguiTextures;
+    // ── World-scale landscape (Thema 326, step 2 part B) ──────────────────
+    // DrawScene asks the application's provider (IRenderer::SetLandscapeProvider) once per scene frame, records the frame's uploads at once
+    // and keeps the frame until the opaque pass draws it. Not in the G-buffer: no shadows, SSAO or GI.
+    D3D12Landscape               landscape;
+    bool                         landscapeFailed = false;    // init failed once: not tried again
+    bool                         landscapeFrameLive = false; // landscapeFrame belongs to the scene frame in progress
+    HE::LandscapeRenderFrame     landscapeFrame;
     bool                         skyReady   = false;
     // True when the sky PSOs run the GL sky cross-compiled through he::shaderc
     // (skyCBuf then holds a whole HE::SkyFrameParams); false on the kSkyPSHLSL12
@@ -4279,7 +5084,7 @@ struct D3D12RendererImpl
             return it->second.slot;
         UIImage12 entry;
         if (m_uiImageNextSlot < k_maxUIImages &&
-            uploadTexture2D(cmd, cm->resolveTextureRef(id, {}), entry.tex, /*asArray=*/false, /*honourSrgb=*/false))
+            uploadTexture2DReleasing(cmd, cm, cm->resolveTextureRef(id, {}), entry.tex, /*asArray=*/false, /*honourSrgb=*/false))
         {
             entry.slot = static_cast<int>(k_maxUIFontAtlases + m_uiImageNextSlot++);
             srvForTexture(entry.tex.Get(), uiAtlasCpu(static_cast<UINT>(entry.slot)));
@@ -4409,19 +5214,34 @@ struct D3D12RendererImpl
     // tonemap's gamma encode re-curves them. The twins share block/byte layout, so
     // GetCopyableFootprints and the support check are unchanged.
     int allocAlbedoSlot(ID3D12GraphicsCommandList* cl, const TextureAsset* tex,
-                        ComPtr<ID3D12Resource>& outTex)
+                        ComPtr<ID3D12Resource>& outTex, ContentManager* cm = nullptr)
     {
         if (!cl || !sceneSrvHeap || !tex) return -1;
         // A recycled slot (freed by invalidation, past frames in flight) or the next fresh one.
         if (m_freeSlots.empty() && meshTexNextSlot >= k_sceneStaticSrvs + k_maxMeshTextures)
             return -1; // heap full → flat
-        if (!uploadTexture2D(cl, tex, outTex)) return -1;
+        if (!uploadTexture2DReleasing(cl, cm, tex, outTex)) return -1;
 
         UINT slot;
         if (!m_freeSlots.empty()) { slot = m_freeSlots.back(); m_freeSlots.pop_back(); }
         else                      { slot = meshTexNextSlot++; }
         srvForTexture(outTex.Get(), sceneSrvCpu(slot));
         return static_cast<int>(slot);
+    }
+
+    // The upload every call site goes through: brings back bytes an earlier upload released,
+    // uploads, and lets the content manager free a block-compressed texture's CPU copy (the
+    // shipped game holds each texture once; see ContentManager::releaseCpuPixels). Safe at
+    // this point: uploadTexture2D memcpys every subresource into its own upload buffer before
+    // it returns and the GPU copy reads that buffer (parked in meshTexUploads), never tex->data.
+    bool uploadTexture2DReleasing(ID3D12GraphicsCommandList* cl, ContentManager* cm, const TextureAsset* tex,
+                                  ComPtr<ID3D12Resource>& outTex, bool asArray = false,
+                                  bool honourSrgb = true)
+    {
+        if (cm && tex && tex->data.empty()) tex = cm->restoreCpuPixels(tex->id);
+        const bool ok = uploadTexture2D(cl, tex, outTex, asArray, honourSrgb);
+        if (cm && tex && ok) cm->releaseCpuPixels(tex->id);
+        return ok;
     }
 
     // The upload half of allocAlbedoSlot, without a scene-heap slot: creates the DEFAULT
@@ -4550,7 +5370,7 @@ struct D3D12RendererImpl
         const StaticMeshAsset* asset = cm->getStaticMesh(assetId);
         if (!asset) return;
         const TextureAsset* tex = resolveAlbedoAsset(asset->materialId, asset->materialPath, cm);
-        mesh.albedoSlot = allocAlbedoSlot(cl, tex, mesh.albedoTex);
+        mesh.albedoSlot = allocAlbedoSlot(cl, tex, mesh.albedoTex, cm);
     }
 
     // Same as ensureMeshAlbedo for a skeletal mesh's baked material.
@@ -4562,7 +5382,7 @@ struct D3D12RendererImpl
         const SkeletalMeshAsset* asset = cm->getSkeletalMesh(assetId);
         if (!asset) return;
         const TextureAsset* tex = resolveAlbedoAsset(asset->materialId, asset->materialPath, cm);
-        mesh.albedoSlot = allocAlbedoSlot(cl, tex, mesh.albedoTex);
+        mesh.albedoSlot = allocAlbedoSlot(cl, tex, mesh.albedoTex, cm);
     }
 
     // Resolve + upload an OVERRIDE material's base-color texture (dc.materialAssetId), cached
@@ -4585,7 +5405,7 @@ struct D3D12RendererImpl
         const std::string texPath0 = mat->texturePaths.empty() ? std::string{} : mat->texturePaths[0];
         const TextureAsset* tex = cm->resolveTextureRef(texId0, texPath0);
         MaterialTex entry;
-        entry.slot = allocAlbedoSlot(cl, tex, entry.tex); // -1 if the material has no usable texture
+        entry.slot = allocAlbedoSlot(cl, tex, entry.tex, cm); // -1 if the material has no usable texture
         outSlot = entry.slot;
         m_materialTexCache.emplace(materialId, std::move(entry));
         return true;
@@ -4892,6 +5712,30 @@ struct D3D12RendererImpl
         }
         // Every slot is now safe up to this value.
         for (UINT i = 0; i < k_frameCount; ++i) fenceValues[i] = val;
+    }
+
+    // The debug layer's validation messages (gpuDebug only) to the Logger. Render() drains them every healthy frame; a frame that does not go
+    // through Render() (RenderSceneImage, the landscape check's engine run) drains them after its own wait.
+    void drainGpuDebugMessages()
+    {
+        if (!gpuDebug || !infoQueue) return;
+        const UINT64 n = infoQueue->GetNumStoredMessages();
+        for (UINT64 i = 0; i < n; ++i)
+        {
+            SIZE_T len = 0;
+            if (FAILED(infoQueue->GetMessage(i, nullptr, &len)) || len == 0) continue;
+            std::vector<char> buf(len);
+            auto* dm = reinterpret_cast<D3D12_MESSAGE*>(buf.data());
+            if (SUCCEEDED(infoQueue->GetMessage(i, dm, &len)) && dm->pDescription)
+            {
+                const bool err = dm->Severity == D3D12_MESSAGE_SEVERITY_ERROR ||
+                                 dm->Severity == D3D12_MESSAGE_SEVERITY_CORRUPTION;
+                const std::string line = std::string("D3D12 debug layer: ") + dm->pDescription;
+                Logger::LogTo(HE::Log::Cat::RHI, err ? Logger::LogLevel::Error : Logger::LogLevel::Warning,
+                            line.c_str());
+            }
+        }
+        infoQueue->ClearStoredMessages();
     }
 
     // Keep the swapchain at the window's client size. Without this the buffers
@@ -6864,7 +7708,8 @@ struct D3D12RendererImpl
                  const glm::mat4& viewProj,
                  int w, int h,
                  ContentManager* cm,
-                 bool reflMrt = false, bool aoWanted = true)
+                 bool reflMrt = false, bool aoWanted = true,
+                 const std::function<void(bool mrt)>& drawGround = {})
     {
         GpuPassScope _passTimer(this, "SSAO");
         // `reflMrt` and `aoWanted` are SEPARATE gates (plan C2, the same shape
@@ -6982,6 +7827,9 @@ struct D3D12RendererImpl
             else
                 drawPosOne(dc->transform);
         }
+        // The tile landscape's ground (Thema 326), into the position-only target or, with its three-target pipeline, into the
+        // reflection pre-pass. It leaves its own root signature, pipeline and heap set; everything after this point binds its own.
+        if (drawGround) drawGround(reflMrt);
 
         // ── Transition pos RT to SRV, bind ssaoSrvHeap ─────────────────────
         barrier12(cl, ssaoPosRT.Get(), ssaoPosRTState, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
@@ -7159,6 +8007,77 @@ struct D3D12RendererImpl
     // Per-frame CBs (persistently mapped upload buffers, one slot per frame in flight).
     ComPtr<ID3D12Resource> giShadowCB[k_frameCount];   uint8_t* giShadowCBPtr[k_frameCount]{};
     ComPtr<ID3D12Resource> giCountCB[k_frameCount];    uint8_t* giCountCBPtr[k_frameCount]{};
+    // The tile landscape's GI height clipmap for the two shadow kernels (Thema 326; kGiHeightfieldHLSL and
+    // gi_shadow_hw.hlsl: b2 + t5). An R32F texture with a max pyramid in its mips; a replaced one waits out the frames
+    // in flight in giHfRetired. The block (b2) is bound on every dispatch, with w = 0 while there is no clipmap.
+    ComPtr<ID3D12Resource> giHfCB[k_frameCount];       uint8_t* giHfCBPtr[k_frameCount]{};
+    ComPtr<ID3D12Resource> giHfTex, giHfUpload;
+    uint64_t giHfVersion = 0, giHfKey = 0;
+    int      giHfTopLevel = 0;
+    float    giHfMaxH = 0.0f;
+    struct GiHfRetired { ComPtr<ID3D12Resource> tex, upload; int frames; };
+    std::vector<GiHfRetired> giHfRetired;
+    // Uploads `hf` when it is another one than the texture holds. False: no texture (the kernel then gets w = 0).
+    bool ensureGiHeightfield(ID3D12GraphicsCommandList* cl, const GiHeightfield& hf)
+    {
+        for (auto it = giHfRetired.begin(); it != giHfRetired.end();)
+            it = --it->frames <= 0 ? giHfRetired.erase(it) : it + 1;
+        if (giHfTex && giHfVersion == hf.version && giHfKey == hf.key) return true;
+        const HE::GiHeightPyramid pyr = HE::BuildGiHeightPyramid(hf);   // GiHeightfield.h
+        if (pyr.levels.empty()) return false;
+        const UINT mips = static_cast<UINT>(pyr.levels.size());
+        D3D12_HEAP_PROPERTIES hp{}; hp.Type = D3D12_HEAP_TYPE_DEFAULT;
+        D3D12_RESOURCE_DESC rd{};
+        rd.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        rd.Width = hf.res; rd.Height = hf.res;
+        rd.DepthOrArraySize = 1;
+        rd.MipLevels = static_cast<UINT16>(mips);
+        rd.Format = DXGI_FORMAT_R32_FLOAT;
+        rd.SampleDesc.Count = 1;
+        ComPtr<ID3D12Resource> tex;
+        if (FAILED(device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&tex))))
+            return false;
+        std::vector<D3D12_PLACED_SUBRESOURCE_FOOTPRINT> fp(mips);
+        std::vector<UINT> rows(mips);
+        std::vector<UINT64> rowBytes(mips);
+        UINT64 total = 0;
+        device->GetCopyableFootprints(&rd, 0, mips, 0, fp.data(), rows.data(), rowBytes.data(), &total);
+        uint8_t* mapped = nullptr;
+        ComPtr<ID3D12Resource> upload = createUploadBuffer(total, reinterpret_cast<void**>(&mapped));
+        if (!upload || !mapped) return false;
+        for (UINT k = 0; k < mips; ++k)
+        {
+            const size_t w = static_cast<size_t>(pyr.dims[k]) * sizeof(float);
+            if (pyr.levels[k].size() != static_cast<size_t>(pyr.dims[k]) * pyr.dims[k] || rowBytes[k] < w || rows[k] != static_cast<UINT>(pyr.dims[k]))
+                return false;
+            for (UINT y = 0; y < rows[k]; ++y)
+                std::memcpy(mapped + fp[k].Offset + static_cast<size_t>(y) * fp[k].Footprint.RowPitch,
+                            pyr.levels[k].data() + static_cast<size_t>(y) * pyr.dims[k], w);
+            D3D12_TEXTURE_COPY_LOCATION to{};
+            to.pResource = tex.Get();
+            to.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+            to.SubresourceIndex = k;
+            D3D12_TEXTURE_COPY_LOCATION from{};
+            from.pResource = upload.Get();
+            from.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+            from.PlacedFootprint = fp[k];
+            cl->CopyTextureRegion(&to, 0, 0, 0, &from, nullptr);
+        }
+        barrier12(cl, tex.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        if (giHfTex) giHfRetired.push_back({ giHfTex, giHfUpload, static_cast<int>(k_frameCount) + 2 });
+        giHfTex = tex; giHfUpload = upload;
+        giHfVersion = hf.version; giHfKey = hf.key;
+        giHfTopLevel = static_cast<int>(mips) - 1;
+        giHfMaxH = pyr.maxHeight;
+        D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
+        sv.Format = DXGI_FORMAT_R32_FLOAT;
+        sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        sv.Texture2D.MipLevels = mips;
+        device->CreateShaderResourceView(giHfTex.Get(), &sv, giSrvCpu(k_giHfTable + 2));
+        HE_LOG_INFO(RHI, "D3D12Renderer: GI height field %ux%u, %u mips, max height %.2f", hf.res, hf.res, mips, giHfMaxH);
+        return true;
+    }
     ComPtr<ID3D12Resource> giTemporalCB[k_frameCount]; uint8_t* giTemporalCBPtr[k_frameCount]{};
     ComPtr<ID3D12Resource> giAtrousCB[k_frameCount];   uint8_t* giAtrousCBPtr[k_frameCount]{}; // one k_cbSlot per a-trous iteration
     ComPtr<ID3D12Resource> giProbeCB[k_frameCount];    uint8_t* giProbeCBPtr[k_frameCount]{};
@@ -7290,7 +8209,10 @@ struct D3D12RendererImpl
     //  [38..40] mix with blur:                    raw,  blur, gbufNorm
     //  [41..44] landscape weightmaps, the trace's table 2 (t8..t11; null views for an auto entry / none)
     //  [45] the GI-reflection sky cube (TextureCube, t12): the real sky a missed ray reads (renderSkyReflCube)
-    static constexpr UINT k_giSrvSlots   = 46;
+    //  [46..49] the shadow kernel's table while the tile landscape's height clipmap is in: gbufPos (t0), gbufNorm (t1),
+    //           the clipmap (t5), a null view (t6)
+    static constexpr UINT k_giSrvSlots   = 50;
+    static constexpr UINT k_giHfTable    = 46;
     static constexpr UINT k_giReflLand   = 41;
     static constexpr UINT k_giReflSky    = 45;
     static constexpr UINT k_giReflCompute = 23; // table base of the trace dispatch
@@ -7727,7 +8649,11 @@ struct D3D12RendererImpl
             landRange.BaseShaderRegister                = 8;
             landRange.OffsetInDescriptorsFromTableStart = 0;
 
-            D3D12_ROOT_PARAMETER params[10]{};
+            D3D12_ROOT_PARAMETER params[11]{};
+            // [10] CBV b2 = the height clipmap's block of the two shadow kernels (GiHfCB). The other kernels never name it.
+            params[10].ParameterType    = D3D12_ROOT_PARAMETER_TYPE_CBV;
+            params[10].Descriptor       = { 2, 0 };
+            params[10].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
             params[0].ParameterType    = D3D12_ROOT_PARAMETER_TYPE_CBV;
             params[0].Descriptor       = { 0, 0 };
             params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
@@ -7781,7 +8707,7 @@ struct D3D12RendererImpl
             linSamp.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
             linSamp.MaxLOD           = D3D12_FLOAT32_MAX;
             D3D12_ROOT_SIGNATURE_DESC rsd{};
-            rsd.NumParameters = 10; rsd.pParameters = params;
+            rsd.NumParameters = 11; rsd.pParameters = params;
             rsd.NumStaticSamplers = 1; rsd.pStaticSamplers = &linSamp;
             ComPtr<ID3DBlob> sig, e;
             ok = SUCCEEDED(D3D12SerializeRootSignature(&rsd, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &e))
@@ -7828,7 +8754,7 @@ struct D3D12RendererImpl
         ComPtr<ID3DBlob> gbufVS, gbufPS, shadowCS, probeCS, fsVS, temporalPS, atrousPS;
         ok = ok && compile(kGiGBufHLSL, "GiGBufVS", "vs_5_0", gbufVS)
                 && compile(kGiGBufHLSL, "GiGBufPS", "ps_5_0", gbufPS)
-                && compile(std::string(kGiTraversalHLSL) + kGiShadowCSHLSL, "GiShadowCS", "cs_5_0", shadowCS)
+                && compile(std::string(kGiTraversalHLSL) + kGiHeightfieldHLSL + kGiShadowCSHLSL, "GiShadowCS", "cs_5_0", shadowCS)
                 && compile(std::string(kGiTraversalHLSL) + kGiProbeCSHLSL, "GiProbeCS", "cs_5_0", probeCS)
                 && compile(kFSTriangleVS, "main", "vs_5_0", fsVS)
                 && compile(kGiTemporalHLSL, "main", "ps_5_0", temporalPS)
@@ -7913,6 +8839,8 @@ struct D3D12RendererImpl
         {
             giShadowCB[f]   = createUploadBuffer(k_cbSlot, reinterpret_cast<void**>(&giShadowCBPtr[f]));
             giCountCB[f]    = createUploadBuffer(k_cbSlot, reinterpret_cast<void**>(&giCountCBPtr[f]));
+            giHfCB[f]       = createUploadBuffer(k_cbSlot, reinterpret_cast<void**>(&giHfCBPtr[f]));
+            if (giHfCBPtr[f]) std::memset(giHfCBPtr[f], 0, k_cbSlot);   // w = 0: no height clipmap
             giTemporalCB[f] = createUploadBuffer(k_cbSlot, reinterpret_cast<void**>(&giTemporalCBPtr[f]));
             giAtrousCB[f]   = createUploadBuffer(HE::kGIShadowAtrousIterations * k_cbSlot,
                                                  reinterpret_cast<void**>(&giAtrousCBPtr[f]));
@@ -8536,7 +9464,7 @@ struct D3D12RendererImpl
     // sky - clouds, weather - drawn around the camera into six 128x128 faces; a reflection ray that hits nothing reads it, so a
     // mirror shows clouds instead of the cloudless analytic cube. Only kSkyReflFacesPerFrame of the six faces are redrawn per
     // frame (the clouds drift slowly; all six cost 0.3 ms), the first frame draws all of them. HE_GIREFL_SKY=0 turns it off.
-    static constexpr UINT k_skyReflSize = 128;
+    static constexpr UINT k_skyReflSize = 512;
     static constexpr UINT k_skyReflFacesPerFrame = 2;
     ComPtr<ID3D12Resource>       skyReflTex;       // Texture2DArray x6, RGBA16F
     ComPtr<ID3D12DescriptorHeap> skyReflRtvHeap;   // 6 face RTVs
@@ -8830,7 +9758,8 @@ struct D3D12RendererImpl
     bool runGiShadow(ID3D12GraphicsCommandList* cl, UINT fi,
                      const std::vector<const DrawCall*>& opaqueDCs,
                      const glm::mat4& viewProj, int w, int h,
-                     const RenderWorld& rw, ContentManager* cm, bool maskPasses = true)
+                     const RenderWorld& rw, ContentManager* cm, bool maskPasses = true,
+                     const std::function<void()>& drawGround = {})
     {
         GpuPassScope _passTimer(this, "GIShadow");
         createGiPipelines();
@@ -8936,6 +9865,10 @@ struct D3D12RendererImpl
                 else
                     drawOne(dc->transform);
             }
+            // The tile landscape's ground (Thema 326): its pixels get a position and a normal, so the shadow rays below
+            // start from them and the ground takes the ray-traced sun shadow like any mesh. It leaves its own root
+            // signature, pipeline and heap set; the compute stage that follows binds its own.
+            if (drawGround) drawGround();
             const auto kBoth = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE
                              | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
             barrier12(cl, giGBufPosTex.Get(),  giGBufPosState,  kBoth);
@@ -8966,6 +9899,26 @@ struct D3D12RendererImpl
             if (giShadowCBPtr[fi]) std::memcpy(giShadowCBPtr[fi], &scb, sizeof(scb));
             glm::ivec4 cnt(giInstanceCount, 0, 0, 0);
             if (giCountCBPtr[fi]) std::memcpy(giCountCBPtr[fi], &cnt, sizeof(cnt));
+            // The tile landscape's height clipmap (never a TerrainComponent's field: its chunks are in the BVH and the TLAS
+            // here). On: the kernels' own table with the clipmap at t5; off: the usual one and w = 0 in the block.
+            static const bool s_hfOn = [] { const char* v = std::getenv("HE_GI_HEIGHTFIELD"); return !(v && v[0] == '0'); }();
+            const GiHeightfield* tileHf = (s_hfOn && rw.heightfields.size() == 1 && rw.heightfields[0].key == kLandscapeGiHeightfieldKey)
+                                              ? &rw.heightfields[0] : nullptr;
+            const bool hfOn = tileHf && ensureGiHeightfield(cl, *tileHf);
+            {
+                struct { glm::mat4 worldToLocal; glm::vec4 p, p2; } hcb{};
+                if (hfOn)
+                {
+                    hcb.worldToLocal = tileHf->worldToLocal;
+                    hcb.p  = glm::vec4(1.0f / std::max(tileHf->size.x, 1e-4f), 1.0f / std::max(tileHf->size.y, 1e-4f),
+                                       float(tileHf->res - 1), 1.0f);
+                    hcb.p2 = glm::vec4(float(giHfTopLevel), giHfMaxH, 0.0f, 512.0f);
+                    srvIntoHeapSlot(giGBufPosTex.Get(),  kGiGBufPosFormat,               giSrvCpu(k_giHfTable + 0));
+                    srvIntoHeapSlot(giGBufNormTex.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT, giSrvCpu(k_giHfTable + 1));
+                    srvIntoHeapSlot(nullptr,             DXGI_FORMAT_R16G16_FLOAT,       giSrvCpu(k_giHfTable + 3));
+                }
+                if (giHfCBPtr[fi]) std::memcpy(giHfCBPtr[fi], &hcb, sizeof(hcb));
+            }
 
             if (giRawState != D3D12_RESOURCE_STATE_UNORDERED_ACCESS)
             {
@@ -8988,11 +9941,12 @@ struct D3D12RendererImpl
             cl->SetPipelineState(shadowPso);
             cl->SetComputeRootConstantBufferView(0, giShadowCB[fi]->GetGPUVirtualAddress());
             cl->SetComputeRootConstantBufferView(1, giCountCB[fi]->GetGPUVirtualAddress());
-            cl->SetComputeRootDescriptorTable(2, giSrvGpu(0));
+            cl->SetComputeRootDescriptorTable(2, giSrvGpu(hfOn ? k_giHfTable : 0u));
             cl->SetComputeRootShaderResourceView(3, giNodeSB->GetGPUVirtualAddress());
             cl->SetComputeRootShaderResourceView(4, giTriSB->GetGPUVirtualAddress());
             cl->SetComputeRootShaderResourceView(5, giInstanceSB[fi]->GetGPUVirtualAddress());
             cl->SetComputeRootDescriptorTable(6, giSrvGpu(4)); // u0 = raw
+            cl->SetComputeRootConstantBufferView(10, giHfCB[fi]->GetGPUVirtualAddress()); // b2 = GiHfCB (w = 0: off)
 #if HE_D3D12_DXR
             if (giUseHwThisFrame) // t7 = the TLAS, bound as a raw GPU VA
                 cl->SetComputeRootShaderResourceView(7, giTlasBuf[fi]->GetGPUVirtualAddress());
@@ -9911,6 +10865,21 @@ void D3D12RendererImpl::createMaterialResources()
         m_matRootSig.Reset();
         return;
     }
+    {
+        // The tile landscape's (GetOrBuildLandscapeMaterialPSO). Without it the ground keeps its fixed blend, nothing else changes.
+        static_assert(HE::d3d12mat::kLandscapeGlobalsReg == HE::MaterialShaderLibrary::kHlslLandscapeGlobalsReg
+                      && HE::d3d12mat::kLandscapeFirstSrv == HE::MaterialShaderLibrary::kHlslLandscapeFirstSrv,
+                      "D3D12MaterialRootSignature.h's landscape registers must be the kHlslLandscape* contract");
+        HE::d3d12mat::LandscapeRootSignature lsRs;
+        HE::d3d12mat::DescribeLandscapeRootSignature(lsRs);
+        ComPtr<ID3DBlob> lsSig, lsErr;
+        if (FAILED(D3D12SerializeRootSignature(&lsRs.desc, D3D_ROOT_SIGNATURE_VERSION_1, &lsSig, &lsErr)) ||
+            FAILED(device->CreateRootSignature(0, lsSig->GetBufferPointer(), lsSig->GetBufferSize(), IID_PPV_ARGS(&m_lsMatRootSig))))
+        {
+            HE_LOG_WARN(RHI, "%s", "D3D12Renderer: the tile landscape's material root signature failed, the ground keeps its fixed blend");
+            m_lsMatRootSig.Reset();
+        }
+    }
 
     // Two heaps, kept separate from sceneSrvHeap so the material draw doesn't disturb the
     // A1/A2/A3 mesh-texture slot allocator (the draw path switches the bound heap and
@@ -9997,8 +10966,18 @@ void D3D12RendererImpl::createMaterialResources()
                 nv.ViewDimension       = D3D12_SRV_DIMENSION_TEXTURECUBE;
                 nv.TextureCube.MipLevels = 1;
             }
+            else if (slot == HE::d3d12mat::kSlotFogVolume)
+            {
+                // heFogVolume (t34) is a sampler3D: a null view of that dimension. The draw
+                // writes the live integrated volume over it when fogVol.w is raised.
+                nv.Format              = DXGI_FORMAT_R16G16B16A16_FLOAT;
+                nv.ViewDimension       = D3D12_SRV_DIMENSION_TEXTURE3D;
+                nv.Texture3D.MipLevels = 1;
+            }
             device->CreateShaderResourceView(nullptr, &nv, h); h.ptr += inc;
         }
+        // [18..24]: the Runtime Virtual Texture's table and pool (Thema 333), null until CreateRvtPool.
+        writeRvtNullViews();
     }
 
     // Per-frame rings: HeLighting (once/frame) + U ring + HeParams ring (per draw, 256-B slots).
@@ -10202,8 +11181,12 @@ ID3D12PipelineState* D3D12RendererImpl::GetOrBuildMaterialPSO(uint64_t hash, con
             if (!m_matHlslLogged)
             {
                 m_matHlslLogged = true;
-                HE_LOG_INFO(RHI, "%s", (std::string("D3D12 A4 material VS HLSL:\n") + vsSrc).c_str());
-                HE_LOG_INFO(RHI, "%s", (std::string("D3D12 A4 material PS HLSL:\n") + psSrc).c_str());
+                // Only on request (HE_DUMP_MATERIAL_HLSL=1): two whole shaders in every launch's log buried the lines that matter.
+                if (const char* dump = std::getenv("HE_DUMP_MATERIAL_HLSL"); dump && dump[0] == '1')
+                {
+                    HE_LOG_INFO(RHI, "%s", (std::string("D3D12 A4 material VS HLSL:\n") + vsSrc).c_str());
+                    HE_LOG_INFO(RHI, "%s", (std::string("D3D12 A4 material PS HLSL:\n") + psSrc).c_str());
+                }
             }
             return true;
         };
@@ -10623,7 +11606,7 @@ int D3D12RendererImpl::resolveDecalTexture(ID3D12GraphicsCommandList* cl,
     if (auto it = decalTexCache.find(textureId); it != decalTexCache.end())
         return it->second.second;
     ComPtr<ID3D12Resource> tex;
-    const int slot = allocAlbedoSlot(cl, cm->resolveTextureRef(textureId, {}), tex);
+    const int slot = allocAlbedoSlot(cl, cm->resolveTextureRef(textureId, {}), tex, cm);
     // Cached even on failure (slot -1, null resource): no per-frame retry.
     decalTexCache.emplace(textureId, std::make_pair(std::move(tex), slot));
     return slot;
@@ -11023,10 +12006,19 @@ void D3D12Renderer::Initialize(HE::Window* window)
     // Opt-in: on in _DEBUG builds, or in any build when HE_GPU_DEBUG is set. These add a
     // per-GPU-op cost (esp. DRED auto-breadcrumbs) that is fine at vsync-capped FPS but
     // tanks the editor at the uncapped FPS you get with vsync off — so keep it gated.
+    // HE_GPU_D3D12_MULTI_DEVICE opts back OUT even in a _DEBUG build: a process that creates more
+    // than one D3D12 device while the debug layer is on (landscape_gpu_check's own offscreen probe,
+    // then this renderer) crashes later inside the driver's layered-device loader
+    // (D3D12CoreCreateLayeredDevice/nvapi) — not something this renderer can fix, so a tool that
+    // knows it will create a second device in-process sets this instead of risking it.
+    // Read via the Win32 API, not the CRT's getenv: landscape_gpu_check sets this with
+    // SetEnvironmentVariableA from its own executable before this renderer (in a separate DLL,
+    // a separate CRT-cached environment) ever runs, and only the Win32 call sees that write.
+    const bool multiDevice = GetEnvironmentVariableA("HE_GPU_D3D12_MULTI_DEVICE", nullptr, 0) != 0;
 #ifdef _DEBUG
-    m_impl->gpuDebug = true;
+    m_impl->gpuDebug = !multiDevice;
 #else
-    m_impl->gpuDebug = (std::getenv("HE_GPU_DEBUG") != nullptr);
+    m_impl->gpuDebug = (std::getenv("HE_GPU_DEBUG") != nullptr) && !multiDevice;
 #endif
     if (m_impl->gpuDebug)
     {
@@ -11069,6 +12061,13 @@ void D3D12Renderer::Initialize(HE::Window* window)
     if (FAILED(D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&m_impl->device))))
         throw std::runtime_error("D3D12Renderer: D3D12CreateDevice failed");
     laps.mark("D3D12CreateDevice");
+    {   // Which adapter the default device landed on (a laptop's iGPU vs its dGPU, WARP).
+        Microsoft::WRL::ComPtr<IDXGIFactory4> factory;
+        Microsoft::WRL::ComPtr<IDXGIAdapter>  adapter;
+        if (SUCCEEDED(CreateDXGIFactory1(IID_PPV_ARGS(&factory))))
+            factory->EnumAdapterByLuid(m_impl->device->GetAdapterLuid(), IID_PPV_ARGS(&adapter));
+        HE::d3d::logAdapter("D3D12Renderer", adapter.Get());
+    }
     {   // Hull/domain shaders come with feature level 11_0, the floor above.
         const char* tessEnv = std::getenv("HE_TESSELLATION");
         m_impl->m_tessSupported = !(tessEnv && std::strcmp(tessEnv, "0") == 0);
@@ -11191,6 +12190,18 @@ void D3D12Renderer::Initialize(HE::Window* window)
     // it feeds is read together with postFxReady (GetCapabilities).
     m_impl->createDeferredPipelines();
     laps.mark("createDeferredPipelines");
+    // Volumetric fog (Thema 225 step 9): built eagerly, like the GI pipelines —
+    // MakeFogVolumeData's `enabled` gate needs the extractor capability flag truthful
+    // BEFORE the first fog-enabled frame. Needs postFxReady's HDR path at draw time only.
+    {
+        const bool fogOk = m_impl->EnsureFogVolumePipelines();
+        m_impl->m_extractor.setVolumetricFogCapable(fogOk);
+        // HE_FOG_VOLUME for HLSL graph materials (heFogVolume t34, heApplyFogT): only once the
+        // dispatch above and the t34 slot in the material root signature are real, and before
+        // the first material fragment ever compiles (the shader cache is keyed by source hash).
+        m_impl->m_matShaderLib.setHlslFogVolume(fogOk);
+    }
+    laps.mark("EnsureFogVolumePipelines");
     m_impl->createCube();
     laps.mark("createCube");
     // Deferred-path debug/headless knobs, GL's, Metal's and D3D11's:
@@ -11216,6 +12227,9 @@ void D3D12Renderer::Shutdown()
     HE_LOG_INFO(RHI, "%s", "D3D12Renderer: shutdown — waiting for GPU");
     HE::d3dprefetch::drain();   // no prefetch job may outlive the renderer
     m_impl->waitForAllFrames();
+    m_impl->landscape.shutdown();   // its images and buffers, while the fence it waits on is still usable
+    m_impl->landscapeFrame = HE::LandscapeRenderFrame{};
+    m_impl->landscapeFrameLive = false;
     if (m_impl->fenceEvent) { CloseHandle(m_impl->fenceEvent); m_impl->fenceEvent = nullptr; }
 
     m_impl->meshCache.clear();
@@ -11287,6 +12301,13 @@ void D3D12Renderer::Shutdown()
     m_impl->destroyGiAccel();
     m_impl->destroyGiTargets();
     m_impl->m_retiredTextures.clear(); // includes GI buffers just retired above
+    // Volumetric fog (Thema 225 step 9): the GPU is idle here (waitForAllFrames above).
+    m_impl->destroyFogVolumeTargets();
+    m_impl->fogInjectRS.Reset(); m_impl->fogIntegrateRS.Reset(); m_impl->fogApplyRS.Reset();
+    m_impl->fogInjectPSO.Reset(); m_impl->fogIntegratePSO.Reset(); m_impl->fogApplyPSO.Reset();
+    m_impl->fogHeap.Reset();
+    for (UINT i = 0; i < k_frameCount; ++i) { m_impl->fogVolCB[i].Reset(); m_impl->fogLightCB[i].Reset(); }
+    m_impl->fogPipelinesTried = false; m_impl->fogPipelinesOk = false;
     m_impl->giGBufRS.Reset(); m_impl->giComputeRS.Reset(); m_impl->giFsRS.Reset();
     m_impl->giGBufPSO.Reset(); m_impl->giGBufPSOInstanced.Reset(); m_impl->giShadowPSO.Reset(); m_impl->giProbePSO.Reset();
     m_impl->giTemporalPSO.Reset(); m_impl->giAtrousPSO.Reset();
@@ -11299,6 +12320,7 @@ void D3D12Renderer::Shutdown()
         m_impl->giReflFsCB[i].Reset();   m_impl->giReflFsCBPtr[i]   = nullptr;
         m_impl->giShadowCB[i].Reset();   m_impl->giShadowCBPtr[i]   = nullptr;
         m_impl->giCountCB[i].Reset();    m_impl->giCountCBPtr[i]    = nullptr;
+        m_impl->giHfCB[i].Reset();       m_impl->giHfCBPtr[i]       = nullptr;
         m_impl->giTemporalCB[i].Reset(); m_impl->giTemporalCBPtr[i] = nullptr;
         m_impl->giAtrousCB[i].Reset();     m_impl->giAtrousCBPtr[i]     = nullptr;
         m_impl->giProbeCB[i].Reset();    m_impl->giProbeCBPtr[i]    = nullptr;
@@ -11407,6 +12429,7 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
     if (!m_world || !m_impl->pso || width <= 0 || height <= 0) return;
     auto& p = *m_impl;
     auto* cl = static_cast<ID3D12GraphicsCommandList*>(cmdListPtr);
+    ++p.drawSceneSerial;   // the material keys made by an earlier call are not trusted by this one
 
     // Drop caches for materials/meshes edited since last frame (before the mesh-resolve
     // pre-pass below re-creates them fresh). Safe here: render thread, no draws recorded yet.
@@ -11446,6 +12469,26 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
     // call every UI pass below sees an empty list and draws nothing.
     p.m_extractor.extractUI(*m_world, static_cast<float>(width), static_cast<float>(height),
                             p.m_renderWorld);
+    // A virtual texture page (RenderSceneImage with rvtSlot >= 0): the layer's view material replaces every object's own,
+    // after the walk. Section lists would override it; terrain has none.
+    if (m_editorCamera.rvtMaterial != HE::UUID{})
+        for (RenderObject& o : p.m_renderWorld.objects)
+        {
+            o.materialAssetId = m_editorCamera.rvtMaterial;
+            o.sections.clear();
+        }
+    // The landscape drawn from the virtual texture (SetRvtLandscape): its terrain chunks take the consumer material, and
+    // not the object's own parameter block (laid out for the old material; it would overwrite RvtVolumeA/B).
+    else if (!p.rvtSwaps.empty() && p.rvtPool[0])
+        for (RenderObject& o : p.m_renderWorld.objects)
+            if (o.terrainChunk)
+                if (const auto sw = p.rvtSwaps.find(o.terrainEntity); sw != p.rvtSwaps.end() && o.materialAssetId == sw->second.landscapeMat
+                    && !p.rvtNear.keeps(o))   // the native near view keeps the chunk's own material
+                {
+                    o.materialAssetId = sw->second.consumerMat;
+                    o.paramOverride.clear();
+                    o.sections.clear();
+                }
 
     // ── TAA: this frame's jitter (A2) ───────────────────────────────────────
     // Chosen BEFORE anything builds a matrix, because every rasterising pass of
@@ -11464,14 +12507,69 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
     // Sky is independent of scene geometry — draw it before any early returns so
     // it always renders even when objects/sortedIndices is empty.
     {
-        const glm::mat4& svp = viewProj;
+        // The sky's rays from the camera's rotation alone (HE::SkyViewProj): the translation lost them far from the origin.
+        const glm::mat4 svpClean = HE::SkyViewProj(p.m_renderWorld.camera.projection, p.m_renderWorld.camera.view);
+        const glm::mat4 svp = p.taaFrame ? HE::taaJitteredViewProj(svpClean, p.taaJitter, width, height) : svpClean;
         p.drawSky(cl, p.frameIndex, glm::inverse(svp), p.m_renderWorld.sunDirection, m_environment,
                   p.m_renderWorld.camera.position, p.m_wallTime, p.usingHDR);
     }
 
+    // ── World-scale landscape (Thema 326): the provider is asked HERE, before the early returns below, and its uploads recorded at once.
+    // A frame the runtime built has to be executed whether or not the scene has objects: the runtime counts its uploads as done. It is
+    // drawn later (opaque pass, after the G-buffer resolve), or right here on the two paths that leave before the pass.
+    p.landscapeFrameLive = false;
+    if (m_landscapeProvider && !p.landscapeFailed)
+    {
+        p.landscapeFrame = HE::LandscapeRenderFrame{};
+        m_landscapeProvider(glm::dmat4(viewProj), /*zeroToOne=*/false, p.landscapeFrame);   // viewProj is origin-relative, GL clip (the scene pass does not fix the depth)
+        if (p.landscapeFrame.active)
+        {
+            if (!p.landscape.ready())
+            {
+                std::string err;
+                auto* impl = &p;
+                if (!p.landscape.init(p.device.Get(), [impl]() { impl->waitForAllFrames(); }, &err))
+                {
+                    HE_LOG_WARN(RHI, "D3D12Renderer: the world-scale landscape is off: %s", err.c_str());
+                    p.landscapeFailed = true;
+                }
+            }
+            if (p.landscape.ready())
+            {
+                p.landscape.upload(cl, p.landscapeFrame);
+                p.landscapeFrameLive = true;
+            }
+        }
+    }
+    // The sun the lit shaders use: the scene's dominant directional light (colour x intensity), else a neutral one.
+    auto drawLandscape = [&]()
+    {
+        if (!p.landscapeFrameLive) return;
+        D3D12Landscape::Shading sh;
+        sh.sunDir = glm::normalize(p.m_renderWorld.sunDirection);
+        sh.ambient = p.m_renderWorld.ambient;
+        for (const LightData& l : p.m_renderWorld.lights)
+            if (l.type == static_cast<uint8_t>(HE::LightType::Directional)) { sh.sunColor = l.color * l.intensity; break; }
+        if (p.landscapeFrame.world && !p.landscapeFrame.world->albedoArrayPath.empty())
+        {
+            // The texture group's albedo array (the world-UV ground), resolved and uploaded like a material's texture array; not loaded (yet) = null = flat colours.
+            sh.albedoArray = p.resolveGraphTexture(cl, HE::UUID{}, p.landscapeFrame.world->albedoArrayPath, m_contentManager, /*array=*/true);
+            // Its normal and mask arrays, the same way; only resolved once the albedo array is there, like GL/Vulkan/Metal.
+            if (sh.albedoArray && !p.landscapeFrame.world->normalArrayPath.empty())
+                sh.normalArray = p.resolveGraphTexture(cl, HE::UUID{}, p.landscapeFrame.world->normalArrayPath, m_contentManager, /*array=*/true);
+            if (sh.albedoArray && !p.landscapeFrame.world->maskArrayPath.empty())
+                sh.maskArray = p.resolveGraphTexture(cl, HE::UUID{}, p.landscapeFrame.world->maskArrayPath, m_contentManager, /*array=*/true);
+        }
+        p.landscape.draw(cl, p.landscapeFrame, viewProj, sh, p.usingHDR ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_R8G8B8A8_UNORM);
+    };
+
     // Trails live in their own per-frame band list, not in `objects`, so a scene
-    // that has nothing BUT a trail still has something to draw past here.
-    if (p.m_renderWorld.objects.empty() && p.m_renderWorld.ribbonBatches.empty()) return;
+    // that has nothing BUT a trail still has something to draw past here. So has a
+    // scene with nothing but a tile landscape that is drawn with its material: that
+    // draw needs the scene pass (its lighting block, its shadow maps).
+    const bool groundNeedsPass = p.landscapeFrameLive && p.m_matReady && p.m_lsMatRootSig && m_contentManager
+                              && p.landscapeFrame.materialId != HE::UUID{};
+    if (p.m_renderWorld.objects.empty() && p.m_renderWorld.ribbonBatches.empty() && !groundNeedsPass) { drawLandscape(); return; }
 
     const uint64_t walk = p.m_extractor.fullExtractCount();
     {
@@ -11503,7 +12601,7 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
     }
     p.statTotal   = static_cast<uint32_t>(p.m_renderWorld.objects.size());
     p.statVisible = static_cast<uint32_t>(p.m_sortedIndices.size());
-    if (p.m_sortedIndices.empty() && p.m_renderWorld.ribbonBatches.empty()) return;
+    if (p.m_sortedIndices.empty() && p.m_renderWorld.ribbonBatches.empty() && !groundNeedsPass) { drawLandscape(); return; }
 
     if (p.m_renderGraph.empty())
     {
@@ -11627,9 +12725,14 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
         f.cascadeSplits = cascadeSplits;
         f.cameraFwd     = glm::vec4(camFwd, 1.0f / static_cast<float>(std::max(p.shadowSize, 1)));
         f.shadowBias    = glm::vec4(p.shadowSettings.slopeBias, p.shadowSettings.minBias, 0.0f, 0.0f);
-        f.shadowEnabled = glm::ivec4(shadows ? 1 : 0, p.debugShadowCascades ? 1 : 0, 0, 0);
+        f.shadowEnabled = glm::ivec4(shadows ? 1 : 0, p.debugShadowCascades ? 1 : 0,
+                                     UnlitViewActive() ? 1 : 0, 0);
         f.sunDir = glm::vec4(p.m_renderWorld.sunDirection, 0.0f);
-        f.fog    = glm::vec4(m_environment.fogDensity, m_environment.fogHeightFalloff, 0, 0);
+        // Volumetric fog owns the opaque fog this frame (Thema 225 step 9): the full-screen
+        // Apply pass fogs the finished opaque scene + sky instead; the analytic term on top
+        // would fog twice.
+        f.fog    = glm::vec4(p.m_fogFrameActive ? 0.0f : m_environment.fogDensity,
+                             m_environment.fogHeightFalloff, 0, 0);
         f.viewport = glm::vec4(float(width), float(height), aoActive ? 1.0f : 0.0f, 0.0f);
         f.giParams     = glm::vec4(giActive ? 1.0f : 0.0f, p.giIndirectIntensity, 0.0f, 0.0f);
         f.ambient      = glm::vec4(p.m_renderWorld.ambient, 0.0f); // GI-branch floor only
@@ -11777,6 +12880,26 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
         lit.fog[1] = m_environment.fogHeightFalloff;
         lit.fog[2] = skyEnvBound ? 1.0f : 0.0f;
         lit.fog[3] = aoActive    ? 1.0f : 0.0f;
+        // Viewport view mode (v3.2): Unlit/Wireframe hand heLitP's base colour
+        // back untouched — graph materials, the deferred resolve (rl copies
+        // frameMatLight) and the forward replay all read this. Mirrors GL/Metal/D3D11.
+        lit.viewMode[0] = UnlitViewActive() ? 1.0f : 0.0f;
+        lit.viewMode[1] = m_viewMode == HE::ViewMode::RvtDebug ? 1.0f : 0.0f;   // RVT debug view (RvtLookup.h)
+        // Volumetric fog (HeLighting v3.6, Thema 225 step 9): fogVol.x gates the opaque
+        // heApplyFog (Apply owns it instead). fogVol.w (heFogVolume bound) stays 0 and
+        // fogVol.w: heFogVolume (t34) is bound in every forward material block this frame, so
+        // translucent graph materials read the volume themselves (heApplyFogT).
+        if (p.m_fogFrameActive)
+        {
+            lit.fogVol[0] = 1.0f;
+            lit.fogVol[1] = p.m_fogFrame.distance;
+            lit.fogVol[2] = p.m_fogFrame.sliceC;
+            lit.fogVol[3] = 1.0f;
+            lit.fogVolGrid[0] = static_cast<float>(p.m_fogFrame.grid.x);
+            lit.fogVolGrid[1] = static_cast<float>(p.m_fogFrame.grid.y);
+            lit.fogVolGrid[2] = static_cast<float>(p.m_fogFrame.grid.z);
+            std::memcpy(lit.fogViewProj, &p.m_fogViewProj[0][0], 16 * sizeof(float));
+        }
         frameMatLight = lit;
         std::memcpy(p.m_matLightPtr[p.frameIndex], &lit, sizeof(lit));
     };
@@ -11967,6 +13090,33 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                         ++drawIdx;
                     });
                 }
+                // The tile landscape's ground casts into the same layer (Thema 326). Written on the Mac and NOT RUN there: on by
+                // default on Windows (HE::landscapeD3dPassesOn), HE_LANDSCAPE_D3D_PASSES=0 takes it out. `landscape_gpu_check
+                // --only d3d12` judges it with the line "the ground casts (fixed blend)" (Windows handoff, section 8). The provider culls for this layer's matrix (D3D clip, depth 0..1)
+                // and hands over the tiles that arrived, which are uploaded whether or not the ground is drawn. The landscape sets
+                // its own root signature, heap and pipeline, so what the layers' mesh draws rely on is bound again afterwards:
+                // the same calls as before the graph ran.
+                if (HE::landscapeD3dPassesOn() && m_landscapeProvider && !p.landscapeFailed && p.landscape.ready())
+                {
+                    HE::LandscapeRenderFrame lf;
+                    m_landscapeProvider(glm::dmat4(clip), /*zeroToOne=*/true, lf);
+                    if (lf.active)
+                    {
+                        p.landscape.upload(cl, lf);
+                        if (HE::landscapePassesOn()) p.landscape.drawDepth(cl, lf, clip);
+                        cl->SetGraphicsRootSignature(p.rootSig.Get());
+                        p.bindClusterRoots(cl);
+                        cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+                        cl->SetGraphicsRootConstantBufferView(1, p.perFrameCB[p.frameIndex]->GetGPUVirtualAddress());
+                        if (p.sceneSrvHeap)
+                        {
+                            ID3D12DescriptorHeap* backHeaps[] = { p.sceneSrvHeap.Get() };
+                            cl->SetDescriptorHeaps(1, backHeaps);
+                            cl->SetGraphicsRootDescriptorTable(5, p.sceneSrvGpu(ssrFwdSlot));
+                        }
+                        cl->SetPipelineState(p.depthPSO.Get());
+                    }
+                }
             };
             // One barrier over ALL subresources before each array's loop and
             // one after — the slices are written back to back.
@@ -12050,7 +13200,18 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
             const bool maskOk = p.runGiShadow(cl, p.frameIndex, giPrepassDCs, viewProjClean,
                                               std::max(1, width / 2), std::max(1, height / 2),
                                               p.m_renderWorld, m_contentManager,
-                                              /*maskPasses=*/p.giEnabled);
+                                              /*maskPasses=*/p.giEnabled,
+                                              [&]()
+                                              {
+                                                  // The provider culls for THIS pass's matrix (unjittered) and hands over the
+                                                  // tiles that arrived, which are uploaded whether or not the ground is drawn.
+                                                  if (!HE::landscapeD3dPassesOn() || !m_landscapeProvider || p.landscapeFailed || !p.landscape.ready()) return;
+                                                  HE::LandscapeRenderFrame lf;
+                                                  m_landscapeProvider(glm::dmat4(viewProjClean), /*zeroToOne=*/false, lf);
+                                                  if (!lf.active) return;
+                                                  p.landscape.upload(cl, lf);
+                                                  if (HE::landscapePassesOn()) p.landscape.drawGiGBuf(cl, lf, viewProjClean);
+                                              });
             if (maskOk && p.giEnabled)
                 p.dispatchGiProbeUpdate(cl, p.frameIndex, p.m_renderWorld);
             giShadingActive = p.giEnabled && maskOk && p.giIrrTex && p.giVisTex && p.giProbeGridBuilt;
@@ -12119,7 +13280,19 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
             p.runSSAO(cl, p.frameIndex, opaqueDCs,
                       p.m_renderWorld.camera.view, p.m_renderWorld.camera.projection,
                       viewProjClean, width, height, m_contentManager,
-                      /*reflMrt=*/ssrFrameActive, aoWanted);
+                      /*reflMrt=*/ssrFrameActive, aoWanted,
+                      [&](bool mrt)
+                      {
+                          // The ground in the position pre-pass, so it takes and gives ambient occlusion like any mesh. The
+                          // provider culls for THIS pass's matrix (unjittered) and hands over the tiles that arrived, which are
+                          // uploaded whether or not the ground is drawn.
+                          if (!HE::landscapeD3dPassesOn() || !m_landscapeProvider || p.landscapeFailed || !p.landscape.ready()) return;
+                          HE::LandscapeRenderFrame lf;
+                          m_landscapeProvider(glm::dmat4(viewProjClean), /*zeroToOne=*/false, lf);
+                          if (!lf.active) return;
+                          p.landscape.upload(cl, lf);
+                          if (HE::landscapePassesOn()) p.landscape.drawViewPos(cl, lf, viewProjClean, p.m_renderWorld.camera.view, mrt);
+                      });
             if (ssrFrameActive)
             {
                 ssrResult = p.RenderForwardSSR(cl, p.frameIndex, width, height,
@@ -12145,6 +13318,12 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
         // Same gate shape as GL's and D3D11's: a real trace result AND a
         // non-zero intensity. Off → t16 names the null descriptor and the
         // cascade folds away on uSSRParams.x.
+        // Volumetric fog Inject + Integrate (Thema 225 step 9): after the shadow passes and the
+        // sky cube bake (it reads both), before the fills below — they read m_fogFrameActive
+        // (fillPerFrame zeroes the analytic fog, fillMatLight raises fogVol.x). Compute only; the
+        // geometry-pass block right after rebinds the scene heap and tables.
+        p.RenderFogVolume(cl, m_environment, shadows, nCascades, cascadeClip, cascadeSplits,
+                          localShadows, nLocalLayers, localClip, camFwd);
         fillPerFrame(giShadingActive, aoWanted, ssrResult != nullptr);
         const bool matAOActive = aoWanted && p.ssaoBlurRT != nullptr; // heAO = the built-in's t2 image
         fillMatLight(giShadingActive, matAOActive);
@@ -12242,6 +13421,11 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
         // `deferredForward`, Metal's `forwardOpaque`, D3D11's replay.
         bool gbufferPass = false;
         std::vector<const DrawCall*> deferredForwardDCs;
+        // The tile landscape drawn with its material (Thema 326) goes through drawDC12 as well, so it gets every bind and every
+        // restore a mesh draw of that material gets: with `lsDraw` set, the draw call names the landscape's material, the
+        // pipeline is that material's landscape variant on m_lsMatRootSig, and the patches are drawn instead of a mesh.
+        const HE::LandscapeRenderFrame* lsDraw = nullptr;
+        bool lsDrawn = false;
         auto drawDC12 = [&](const DrawCall& dc) {
             if (drawIdx >= k_maxDraws) { p.noteDrawRingFull(); return; }
             // A trail carries no mesh asset — its geometry sits in this frame's
@@ -12266,11 +13450,11 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
             // through unchanged when the material has no graph shader OR resources are down.
             if (p.m_matReady && m_contentManager)
             {
-                uint64_t matHash = 0; std::string matFrag, matVertBody;
-                if (p.m_matShaderLib.resolveShaders(*m_contentManager, dc.materialAssetId,
-                                                    matHash, matFrag, matVertBody))
+                if (const D3D12RendererImpl::MatKey* matKey = p.resolveMatKey(*m_contentManager, dc.materialAssetId))
                 {
-                    p.foldDisplacement(*m_contentManager, dc.materialAssetId, matHash);
+                    const uint64_t     matHash     = matKey->hash;
+                    const std::string& matFrag     = matKey->frag;
+                    const std::string& matVertBody = matKey->vert;
                     // Transparent graph materials get a blend-on / depth-write-off PSO
                     // variant. MUST use the same predicate the opaque/blended partition
                     // above used, or a draw lands in the blended pass with a
@@ -12290,7 +13474,20 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                     const bool wantTwin = dc.instanceTotal() > 1 && allowInstancing && !matTransp
                                        && instArena && RenderSorter::graphInstancingEnabled();
                     ID3D12PipelineState* matInstPso = nullptr;
-                    if (gbufferPass)
+                    if (lsDraw)
+                    {
+                        if (gbufferPass)
+                        {
+                            // The material's G-buffer tail with the landscape's vertex stage: attributes, lit by the resolve.
+                            uint64_t gbHash = 0; std::string gbFrag, gbVertBody;
+                            if (p.m_matShaderLib.resolveGBufferShaders(*m_contentManager, dc.materialAssetId, gbHash, gbFrag, gbVertBody))
+                                matPso = p.GetOrBuildLandscapeMaterialPSO(gbHash, gbFrag, p.usingHDR, /*gbuffer=*/true);
+                        }
+                        else
+                            matPso = p.GetOrBuildLandscapeMaterialPSO(matHash, matFrag, p.usingHDR);
+                        if (!matPso) return;   // no variant: the caller draws the ground forward, or the fixed blend; never a mesh
+                    }
+                    else if (gbufferPass)
                     {
                         // The G-buffer tail of the same graph (same expressions,
                         // attributes instead of heLitP). No variant, or one that
@@ -12371,7 +13568,7 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                             size_t nTex = 0;
                             if (const MaterialAsset* ma0 = m_contentManager->getMaterial(dc.materialAssetId))
                             {
-                                heTexPArrays = HE::matGlslTextureArrayMask(ma0->customShaderFragGlsl);
+                                heTexPArrays = matKey->texArrays;   // the mask of this very source, scanned once per DrawScene
                                 nTex = std::min<size_t>(HE::kMatMaxGraphTextures,
                                     std::max(ma0->graphTexturePaths.size(), ma0->graphTextureIds.size()));
                                 for (size_t i = 0; i < nTex; ++i)
@@ -12426,6 +13623,13 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                                                            (heTexPArrays >> k) & 1u);
                         if (heWeights)
                             p.srvForTexture(heWeights, p.matSrvCpu(blk + HE::d3d12mat::kSlotLandscapeWeights));
+                        // The consumer's page table (Thema 333): a draw whose material owns a table reads it at t40; the
+                        // pool is in the template already. Anything else keeps the template's null view (never sampled).
+                        if (!p.rvtTables.empty())
+                            if (const auto tb = p.rvtTables.find(dc.materialAssetId); tb != p.rvtTables.end())
+                                p.device->CopyDescriptorsSimple(1, p.matSrvCpu(blk + HE::d3d12mat::kSlotRvtTable),
+                                                                p.rvtTableCpu(tb->second.heapIndex),
+                                                                D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
                         // heSkyEnv (t15) + heAO (t16) (Thema 126): the baked sky cube and
                         // this frame's blurred SSAO (the image the built-in shader reads at
                         // t2, in PIXEL_SHADER_RESOURCE after the blur pass), each under the
@@ -12436,11 +13640,24 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                         if (matAOActive)
                             p.srvIntoHeapSlot(p.ssaoBlurRT.Get(), DXGI_FORMAT_R8_UNORM,
                                               p.matSrvCpu(blk + HE::d3d12mat::kSlotAO));
+                        // heFogVolume (t34, Thema 225 step 9): this frame's integrated volume,
+                        // in PIXEL_SHADER_RESOURCE after RenderFogVolume; the template's null 3D
+                        // view stays where fogVol.w is 0 (read with texelFetch only).
+                        if (p.m_fogFrameActive && p.fogIntegratedTex)
+                        {
+                            D3D12_SHADER_RESOURCE_VIEW_DESC fv{};
+                            fv.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+                            fv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE3D;
+                            fv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+                            fv.Texture3D.MipLevels = 1;
+                            p.device->CreateShaderResourceView(p.fogIntegratedTex.Get(), &fv,
+                                                               p.matSrvCpu(blk + HE::d3d12mat::kSlotFogVolume));
+                        }
 
                         // Switch to the material root sig + ring SRV heap + material PSO.
                         ID3D12DescriptorHeap* mheaps[] = { p.m_matSrvHeap.Get() };
                         cl->SetDescriptorHeaps(1, mheaps);
-                        cl->SetGraphicsRootSignature(p.m_matRootSig.Get());
+                        cl->SetGraphicsRootSignature(lsDraw ? p.m_lsMatRootSig.Get() : p.m_matRootSig.Get());
                         p.bindClusterRoots(cl); // t24..t26 — fragmentClustered's light lists
                         cl->SetPipelineState(matPso);
                         // A Displacement PSO (HS/DS) takes the same index buffer as patches;
@@ -12480,10 +13697,10 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                                 std::memcpy(p.m_matObjPtr[p.frameIndex] + static_cast<size_t>(i) * D3D12RendererImpl::k_matSlot,
                                             &u, sizeof(u));
                             // HeParams (16 vec4 = 64 floats = 256 B) into param-ring slot i, zero-padded.
-                            float padded[64] = { 0.0f };
+                            float padded[HE::kMatParamFloats] = { 0.0f };
                             if (params)
                                 std::memcpy(padded, params->data(),
-                                            std::min(params->size(), size_t(64)) * sizeof(float));
+                                            std::min(params->size(), size_t(HE::kMatParamFloats)) * sizeof(float));
                             if (p.m_matParamPtr[p.frameIndex])
                                 std::memcpy(p.m_matParamPtr[p.frameIndex] + static_cast<size_t>(i) * D3D12RendererImpl::k_matSlot,
                                             padded, sizeof(padded));
@@ -12501,7 +13718,24 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                         };
                         const UINT instCount = static_cast<UINT>(dc.instanceTotal());
                         D3D12RendererImpl::InstSlice isl;
-                        if (matInstPso && p.allocInstances(p.frameIndex, instCount, isl))
+                        if (lsDraw)
+                        {
+                            // The ground: HeParams as for any draw of the material; the landscape's nine images in the NEXT
+                            // block of this frame's ring (the table of root parameter 11), then the patches with the
+                            // landscape's own blocks (D3D12Landscape::drawPatches).
+                            UINT& cur = p.m_matSrvCursor[p.frameIndex];
+                            if (cur < D3D12RendererImpl::k_matMaxDraws && bindMatSlot(viewProj, glm::mat4(1.0f)))
+                            {
+                                const UINT lsBlk = (p.frameIndex * D3D12RendererImpl::k_matMaxDraws + cur++) * D3D12RendererImpl::k_matSrvPerDraw;
+                                if (p.landscape.writeMaterialViews(p.matSrvCpu(lsBlk).ptr, p.m_matSrvInc))
+                                {
+                                    cl->SetGraphicsRootDescriptorTable(HE::d3d12mat::kRootLandscapeTable, p.matSrvGpu(lsBlk));
+                                    lsDrawn = p.landscape.drawPatches(cl, *lsDraw, viewProj, HE::d3d12mat::kRootLandscapeGlobals,
+                                                                      HE::d3d12mat::kRootLandscapePatch);
+                                }
+                            }
+                        }
+                        else if (matInstPso && p.allocInstances(p.frameIndex, instCount, isl))
                         {
                             // The batch: every model into the model half of its arena slot,
                             // ONE U slot with the batch-constant half (U.mvp = viewProj, the
@@ -12549,6 +13783,7 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                     }
                 }
             }
+            if (lsDraw) return;   // no material pipeline for the landscape: the caller draws its fixed blend, never a mesh
             // Base color: an explicit MaterialComponent override (dc.materialAssetId) wins
             // over the mesh's own baked texture; else the mesh's baked texture (A1); else flat.
             if (mesh) p.ensureMeshAlbedo(cl, m, dc.meshAssetId, m_contentManager);
@@ -12661,6 +13896,57 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                 cl->SetGraphicsRootDescriptorTable(5, p.sceneSrvGpu(ssrFwdSlot));
             }
         };
+        // The tile landscape's ground through its material (drawDC12 with lsDraw): `gbuffer` = into the G-buffer pass that is
+        // bound, with the material's G-buffer tail; else lit, forward. False when it has no material or no variant builds.
+        bool groundInGBuffer = false;
+        auto drawGroundMaterial = [&](bool gbuffer) -> bool
+        {
+            // A virtual texture page of meshes: the ground stays out of it (and so does the fixed blend).
+            const bool page = m_editorCamera.rvtSlot >= 0;
+            if (page && !m_editorCamera.rvtTileGround) return true;
+            if (!(p.landscapeFrameLive && p.m_matReady && m_contentManager && p.landscapeFrame.materialId != HE::UUID{})) return false;
+            const HE::LandscapeRenderFrame& lf = p.landscapeFrame;
+            if (!lf.materialPath.empty() && lf.materialId != p.landscapeMaterialLoadTried && !m_contentManager->getMaterial(lf.materialId))
+            {
+                p.landscapeMaterialLoadTried = lf.materialId;   // the texture group's material is named by no entity: from its path, once
+                if (!m_contentManager->resolveMaterialRef(lf.materialId, lf.materialPath)) m_contentManager->loadAsset(lf.materialPath);
+            }
+            const bool wasGBuffer = gbufferPass, wasInstancing = allowInstancing;
+            gbufferPass = gbuffer;
+            allowInstancing = false;
+            const auto drawWith = [&](const HE::UUID& material, const HE::LandscapeRenderFrame& frame) -> bool
+            {
+                if (frame.patches.empty()) return false;
+                DrawCall ground;
+                ground.materialAssetId = material;
+                lsDraw = &frame;
+                lsDrawn = false;
+                drawDC12(ground);
+                lsDraw = nullptr;
+                return lsDrawn;
+            };
+            // What is drawn: on a page of the ground (rvtTileGround) the layer's view; else the extractor's derived material
+            // where the landscape's own cannot be drawn (RenderWorld::tileLandscapeMaterial), else the landscape's own.
+            const HE::UUID own = page ? m_editorCamera.rvtMaterial
+                               : p.m_renderWorld.tileLandscapeMaterial != HE::UUID{} ? p.m_renderWorld.tileLandscapeMaterial : lf.materialId;
+            // Under a virtual texture (SetRvtTileGround) the patches inside its rectangle are drawn with the consumer, which
+            // reads the pages; when the consumer's variant does not build they go back to the ground's own material.
+            HE::LandscapeRenderFrame rest = lf, paged = lf;
+            paged.patches.clear();
+            bool any = false;
+            if (!page && m_tileRvtConsumer != HE::UUID{} && p.rvtPool[0] && p.rvtTables.count(m_tileRvtConsumer))
+            {
+                HE::splitRvtTilePatches(rest, m_tileRvtMin, m_tileRvtMax, m_tileRvtNearM, paged.patches);
+                if (drawWith(m_tileRvtConsumer, paged)) any = true;
+                else rest.patches.insert(rest.patches.end(), paged.patches.begin(), paged.patches.end());
+            }
+            if (drawWith(own, rest)) any = true;
+            gbufferPass = wasGBuffer;
+            allowInstancing = wasInstancing;
+            lsDrawn = any;
+            return any;
+        };
+
         // Decals into GB0 when this frame is deferred and the variant built;
         // otherwise the forward decal over the lit colour, as before.
         const bool gbDecals = deferredActive && !p.m_renderWorld.decals.empty()
@@ -12709,6 +13995,9 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
             gbufferPass    = true;
             cl->SetPipelineState(activeScenePso);
             for (const DrawCall* dc : opaqueDCs) drawDC12(*dc);
+            // The tile landscape's ground into the G-buffer with its material's G-buffer tail (Thema 326), so the resolve lights
+            // it with everything else; without a variant it is drawn forward after the resolve, as before.
+            if (HE::landscapeD3dPassesOn() && HE::landscapePassesOn()) groundInGBuffer = drawGroundMaterial(true);
             gbufferPass    = false;
             activeScenePso = scenePso;
 
@@ -12929,6 +14218,18 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
             cl->SetPipelineState(scenePso);
         }
 
+        // ── World-scale landscape (Thema 326): after the opaque geometry (and, on a deferred frame, the resolve), depth-tested into the same
+        // target. It brings its own root signature, pipeline and descriptor heap, so the scene state is rebuilt the way the skinned pass above does.
+        // With its material when it has one whose landscape variant builds (drawDC12 with lsDraw): lit, shadowed and fogged like
+        // any other surface of that material. Else, and on the paths that leave DrawScene before this pass, the fixed blend.
+        if (p.landscapeFrameLive)
+        {
+            // On a deferred frame the G-buffer pass has drawn it already and the resolve has lit it (groundInGBuffer).
+            if (!groundInGBuffer && !drawGroundMaterial(false)) drawLandscape();
+            restoreSceneRoot();
+            cl->SetPipelineState(scenePso);
+        }
+
         // ── TAA velocity (A2): screen-space motion of the opaque geometry, right
         // after the passes whose depth it tests against and before the decals
         // (which flip that depth to a shader resource). One draw per visible
@@ -12946,6 +14247,16 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                 auto vdsv = p.viewportDsvHeap->GetCPUDescriptorHandleForHeapStart();
                 cl->OMSetRenderTargets(1, &vrtv, FALSE, &vdsv);
             }
+            // The tile landscape's ground stands still; the camera's own motion is its velocity. Before the meshes: the pass
+            // writes no depth, so what stands on the ground overwrites it (vkls::velocityClip). It leaves its own root
+            // signature and heap set; this pass sets its own next and the scene's are rebuilt at its end.
+            // Last frame's matrix for what this frame places (the ground, a cluster's plants, a first-seen object): across a
+            // floating-origin hop it takes the origin's step (HE::taaPrevViewProjAt). A remembered model keeps taaPrevViewProj.
+            const glm::dvec3 originNow = p.m_renderWorld.worldOrigin;
+            const glm::mat4 prevHere = p.taaPrevOriginKnown ? HE::taaPrevViewProjAt(p.taaPrevViewProj, originNow, p.taaPrevOrigin)
+                                                            : p.taaPrevViewProj;
+            if (p.landscapeFrameLive && HE::landscapeD3dPassesOn() && HE::landscapePassesOn())
+                p.landscape.drawVelocity(cl, p.landscapeFrame, viewProj, viewProjClean, prevHere);
             cl->SetGraphicsRootSignature(p.taaVelocityRootSig.Get());
             cl->SetPipelineState(p.taaVelocityPSO.Get());
             cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -12991,7 +14302,7 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                         HE::TaaVelocityConstants c;
                         c.mvpJitter = viewProj * model;
                         c.mvpNow    = viewProjClean * model;
-                        c.mvpPrev   = p.taaPrevViewProj * model;
+                        c.mvpPrev   = prevHere * model;
                         std::memcpy(ringPtr + static_cast<size_t>(drawIdx) * k_cbSlot, &c, sizeof(c));
                         cl->SetGraphicsRootConstantBufferView(
                             0, ringBase + static_cast<UINT64>(drawIdx) * k_cbSlot);
@@ -13004,13 +14315,13 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                 // An object seen for the first time reports no motion — its
                 // "previous" position is where it is now.
                 const auto it = p.taaPrevTransforms.find(obj.entityId);
-                const glm::mat4 prevModel = (it != p.taaPrevTransforms.end()) ? it->second : obj.transform;
+                const bool known = it != p.taaPrevTransforms.end();
                 p.taaCurTransforms[obj.entityId] = obj.transform;
 
                 HE::TaaVelocityConstants c;
                 c.mvpJitter = viewProj * obj.transform;
                 c.mvpNow    = viewProjClean * obj.transform;
-                c.mvpPrev   = p.taaPrevViewProj * prevModel;
+                c.mvpPrev   = known ? p.taaPrevViewProj * it->second : prevHere * obj.transform;
                 std::memcpy(ringPtr + static_cast<size_t>(drawIdx) * k_cbSlot, &c, sizeof(c));
                 cl->SetGraphicsRootConstantBufferView(
                     0, ringBase + static_cast<UINT64>(drawIdx) * k_cbSlot);
@@ -13022,6 +14333,8 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
             // Advance the history HERE, at the end of the one pass that consumed
             // it, so a frame is never compared against itself.
             p.taaPrevViewProj = viewProjClean;
+            p.taaPrevOrigin = originNow;
+            p.taaPrevOriginKnown = true;
             p.taaPrevTransforms.swap(p.taaCurTransforms);
 
             // A root-signature switch wipes every root argument: the scene state
@@ -13059,6 +14372,28 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
             {
                 ID3D12DescriptorHeap* dheaps[] = { p.sceneSrvHeap.Get() };
                 cl->SetDescriptorHeaps(1, dheaps);
+                cl->SetGraphicsRootDescriptorTable(2, p.sceneSrvHeap->GetGPUDescriptorHandleForHeapStart());
+                cl->SetGraphicsRootDescriptorTable(5, p.sceneSrvGpu(ssrFwdSlot));
+            }
+            cl->SetPipelineState(scenePso);
+        }
+
+        // ── Volumetric fog Apply (Thema 225 step 9) ──────────────────────────
+        // Full-screen blend of the integrated volume onto the finished opaque scene + decals +
+        // sky, at the Decals -> Transparent seam. No-op unless RenderFogVolume ran this frame.
+        if (p.m_fogFrameActive)
+        {
+            p.RenderFogApply(cl, width, height);
+            // The Apply pass switched root signature, heap and PSO: rebuild the scene state
+            // exactly as the decals block above does.
+            cl->SetGraphicsRootSignature(p.rootSig.Get());
+            p.bindClusterRoots(cl);
+            cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+            cl->SetGraphicsRootConstantBufferView(1, p.perFrameCB[p.frameIndex]->GetGPUVirtualAddress());
+            if (p.sceneSrvHeap)
+            {
+                ID3D12DescriptorHeap* fheaps[] = { p.sceneSrvHeap.Get() };
+                cl->SetDescriptorHeaps(1, fheaps);
                 cl->SetGraphicsRootDescriptorTable(2, p.sceneSrvHeap->GetGPUDescriptorHandleForHeapStart());
                 cl->SetGraphicsRootDescriptorTable(5, p.sceneSrvGpu(ssrFwdSlot));
             }
@@ -13237,7 +14572,9 @@ static void reapExpired(std::vector<std::pair<T, int>>& items)
 void D3D12Renderer::Render()
 {
     auto& p = *m_impl;
+    if (p.rvtStill.kept) rvtStillLeave();   // a bracket nobody closed: the live viewport comes back before it is drawn
     p.m_wallTime = static_cast<float>(SDL_GetTicks()) * 0.001f;
+    UpdateRvtCold();   // RVT cold pages (Thema 333 step 9): a real frame only, never RenderSceneImage's still
 
     // Free retired viewport RTs once enough frames have passed that the GPU is done
     // with them (countdown set when the RT was retired on resize).
@@ -13475,26 +14812,8 @@ void D3D12Renderer::Render()
 
     // Drain validation messages every healthy frame, and once on the first device
     // removal (the message explaining the hang is often the last thing queued).
-    if (p.gpuDebug && p.infoQueue && (!FAILED(prHr) || firstRemoval))
-    {
-        const UINT64 n = p.infoQueue->GetNumStoredMessages();
-        for (UINT64 i = 0; i < n; ++i)
-        {
-            SIZE_T len = 0;
-            if (FAILED(p.infoQueue->GetMessage(i, nullptr, &len)) || len == 0) continue;
-            std::vector<char> buf(len);
-            auto* dm = reinterpret_cast<D3D12_MESSAGE*>(buf.data());
-            if (SUCCEEDED(p.infoQueue->GetMessage(i, dm, &len)) && dm->pDescription)
-            {
-                const bool err = dm->Severity == D3D12_MESSAGE_SEVERITY_ERROR ||
-                                 dm->Severity == D3D12_MESSAGE_SEVERITY_CORRUPTION;
-                const std::string line = std::string("D3D12 debug layer: ") + dm->pDescription;
-                Logger::LogTo(HE::Log::Cat::RHI, err ? Logger::LogLevel::Error : Logger::LogLevel::Warning,
-                            line.c_str());
-            }
-        }
-        p.infoQueue->ClearStoredMessages();
-    }
+    if (!FAILED(prHr) || firstRemoval)
+        p.drainGpuDebugMessages();
 
     // Signal a UNIQUE monotonic value and remember it for THIS slot. Per-slot counters
     // would collide on the shared fence (both reach 1,2,3…), letting waitForFrame return
@@ -13536,6 +14855,16 @@ IRenderer::Capabilities D3D12Renderer::GetCapabilities() const
     // usingHDR branch); the LDR viewport branch, the direct-swapchain branch
     // and the world previews stay forward.
     c.supportsDeferredRendering = m_impl->postFxReady && m_impl->deferredReady;
+    c.supportsRawCapture        = m_impl->postFxReady;   // RenderSceneImage's rawOutput rides the tonemap pass
+    c.supportsRvt               = m_impl->postFxReady && m_impl->m_matReady;   // a page is that raw capture copied into the pool
+    // The tile landscape's ground in the shadow layers: written, not run (see renderDepthLayer). Said only with the switch on.
+    c.landscapePassMask         = HE::landscapeD3dPassesOn() ? (kLandscapePassShadow | kLandscapePassSsao | kLandscapePassGBuffer | kLandscapePassGi | kLandscapePassVelocity) : 0u;
+    c.landscapeCoarseRevision   = true;   // D3D12Landscape.cpp: new coarse and far images, the atlas stays
+    c.landscapeMaterial         = m_impl->m_matReady && m_impl->m_lsMatRootSig;   // drawDC12 with lsDraw: the ground through its material's landscape variant
+    c.landscapeRvt              = c.landscapeMaterial && c.supportsRvt;   // SetRvtTileGround, rvtTileGround pages (drawGroundMaterial)
+    // Froxel volumetric fog (Thema 225 step 9): Inject/Integrate/Apply built at Initialize. It
+    // draws on the HDR viewport frame only; every other frame keeps the analytic height fog.
+    c.supportsVolumetricFog     = m_impl->fogPipelinesOk;
     return c;
 }
 
@@ -13620,6 +14949,7 @@ void D3D12Renderer::SetSwapchainPostProcessing(bool enabled)
 bool D3D12Renderer::CaptureViewport(std::vector<uint8_t>& rgba, uint32_t& outW, uint32_t& outH)
 {
     auto& p = *m_impl;
+    if (p.rvtStill.kept) rvtStillLeave();   // an outside caller wants the LIVE viewport, not a bracket's page set
     if (!p.viewportRT || !p.viewportReadback || p.viewportW == 0 || p.viewportH == 0)
         return false;
 
@@ -13680,6 +15010,789 @@ bool D3D12Renderer::CaptureViewport(std::vector<uint8_t>& rgba, uint32_t& outW, 
     return true;
 }
 
+// ─── Runtime Virtual Texture (Thema 333, docs/rvt-design-2026-11-04.md) ───────────────────────────────────────
+// The contract is in IRenderer.h; D3D11's is the reference (D3D11Renderer.cpp). Everything here runs between frames, on the
+// CaptureViewport pattern (one-shot command list between two flushes): tables change when a page comes or goes, a few KB.
+
+// mode 1 = normal (x, z = R, B of the page), mode 2 = surface (AO, roughness = R, G of the page) — same convention as
+// D3D11's kRvtPackHLSL. Shares D3D_Shared's kFSTriangleVS for the vertex stage (SV_VertexID, no vertex buffer).
+static const char* kRvtPackHLSL12 = R"(
+Texture2D rvtPackSrc : register(t0);
+cbuffer RvtPackCB : register(b0) { uint rvtPackMode; }
+float2 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD0) : SV_Target
+{
+    float4 c = rvtPackSrc.Load(int3(pos.xy, 0));
+    return rvtPackMode == 1u ? c.rb : c.rg;
+}
+)";
+
+// Built lazily, once (a failure sticks — RenderSceneImage's page copy falls back to "page not packed, not written"
+// rather than retrying every page). Root signature: one 32-bit constant (mode) + one SRV descriptor table (t0, the
+// source page); no sampler, the shader only Loads.
+static bool ensureRvtPackPipeline12(D3D12RendererImpl& p)
+{
+    if (p.rvtPackPSO) return true;
+    if (p.rvtPackTried) return false;
+    p.rvtPackTried = true;
+    if (!p.device) return false;
+    {
+        D3D12_DESCRIPTOR_RANGE r0{}; r0.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV; r0.NumDescriptors = 1; r0.BaseShaderRegister = 0;
+        D3D12_ROOT_PARAMETER params[2]{};
+        params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+        params[0].Constants = { 0, 0, 1 };
+        params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+        params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        params[1].DescriptorTable = { 1, &r0 };
+        params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+        D3D12_ROOT_SIGNATURE_DESC rsd{};
+        rsd.NumParameters = 2; rsd.pParameters = params;
+        ComPtr<ID3DBlob> sig, err;
+        if (FAILED(D3D12SerializeRootSignature(&rsd, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &err)) ||
+            FAILED(p.device->CreateRootSignature(0, sig->GetBufferPointer(), sig->GetBufferSize(),
+                                                 IID_PPV_ARGS(&p.rvtPackRootSig))))
+        {
+            HE_LOG_ERROR(RHI, "%s", "D3D12Renderer: RVT page pack root signature failed");
+            return false;
+        }
+    }
+    ComPtr<ID3DBlob> vsB, psB, err;
+    if (FAILED(D3DCompile(kFSTriangleVS, strlen(kFSTriangleVS), "rvtPackVS", nullptr, nullptr, "main", "vs_5_0", 0, 0, &vsB, &err)))
+    {
+        HE_LOG_ERROR(RHI, "%s", (std::string("D3D12Renderer: RVT page pack VS compile failed: ")
+            + (err ? static_cast<const char*>(err->GetBufferPointer()) : "")).c_str());
+        return false;
+    }
+    if (FAILED(D3DCompile(kRvtPackHLSL12, strlen(kRvtPackHLSL12), "rvtPackPS", nullptr, nullptr, "main", "ps_5_0", 0, 0, &psB, &err)))
+    {
+        HE_LOG_ERROR(RHI, "%s", (std::string("D3D12Renderer: RVT page pack PS compile failed: ")
+            + (err ? static_cast<const char*>(err->GetBufferPointer()) : "")).c_str());
+        return false;
+    }
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC pd{};
+    pd.pRootSignature = p.rvtPackRootSig.Get();
+    pd.VS = { vsB->GetBufferPointer(), vsB->GetBufferSize() };
+    pd.PS = { psB->GetBufferPointer(), psB->GetBufferSize() };
+    pd.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    pd.SampleMask = UINT_MAX;
+    pd.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    pd.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    pd.DepthStencilState.DepthEnable = FALSE;
+    pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    pd.NumRenderTargets = 1; pd.RTVFormats[0] = DXGI_FORMAT_R8G8_UNORM;
+    pd.SampleDesc.Count = 1;
+    if (FAILED(p.device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&p.rvtPackPSO))))
+    {
+        HE_LOG_ERROR(RHI, "%s", "D3D12Renderer: RVT page pack PSO creation failed");
+        return false;
+    }
+    D3D12_DESCRIPTOR_HEAP_DESC sd{}; sd.NumDescriptors = 1; sd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+    sd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    if (FAILED(p.device->CreateDescriptorHeap(&sd, IID_PPV_ARGS(&p.rvtPackSrvHeap)))) { p.rvtPackPSO.Reset(); return false; }
+    D3D12_DESCRIPTOR_HEAP_DESC rd2{}; rd2.NumDescriptors = 1; rd2.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+    if (FAILED(p.device->CreateDescriptorHeap(&rd2, IID_PPV_ARGS(&p.rvtPackRtvHeap)))) { p.rvtPackPSO.Reset(); return false; }
+    return true;
+}
+
+// The pack draw itself, recorded into `cl` — the SAME command list RenderSceneImage's page copy uses, right where
+// the CopyTextureRegion it replaces would have gone. `src` is the just-drawn page (viewportRT, already transitioned
+// to PIXEL_SHADER_RESOURCE by the caller); `dst` is the pool array for this layer, one slice (hotSlice) of it.
+static void packRvtPage12(D3D12RendererImpl& p, ID3D12GraphicsCommandList* cl, ID3D12Resource* src, int layer,
+                          ID3D12Resource* dst, UINT hotSlice, UINT px)
+{
+    D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
+    sv.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    sv.Texture2D.MipLevels = 1;
+    p.device->CreateShaderResourceView(src, &sv, p.rvtPackSrvHeap->GetCPUDescriptorHandleForHeapStart());
+
+    D3D12_RENDER_TARGET_VIEW_DESC rv{};
+    rv.Format = DXGI_FORMAT_R8G8_UNORM;
+    rv.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2DARRAY;
+    rv.Texture2DArray.MipSlice = 0;
+    rv.Texture2DArray.FirstArraySlice = hotSlice;
+    rv.Texture2DArray.ArraySize = 1;
+    const D3D12_CPU_DESCRIPTOR_HANDLE rtv = p.rvtPackRtvHeap->GetCPUDescriptorHandleForHeapStart();
+    p.device->CreateRenderTargetView(dst, &rv, rtv);
+
+    p.barrier12(cl, dst, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+    cl->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+    D3D12_VIEWPORT vp{}; vp.Width = vp.Height = static_cast<float>(px); vp.MaxDepth = 1.0f;
+    D3D12_RECT sr{ 0, 0, static_cast<LONG>(px), static_cast<LONG>(px) };
+    cl->RSSetViewports(1, &vp);
+    cl->RSSetScissorRects(1, &sr);
+    cl->SetPipelineState(p.rvtPackPSO.Get());
+    cl->SetGraphicsRootSignature(p.rvtPackRootSig.Get());
+    const uint32_t mode = layer == 1 ? 1u : 2u;
+    cl->SetGraphicsRoot32BitConstants(0, 1, &mode, 0);
+    ID3D12DescriptorHeap* heaps[] = { p.rvtPackSrvHeap.Get() };
+    cl->SetDescriptorHeaps(1, heaps);
+    cl->SetGraphicsRootDescriptorTable(1, p.rvtPackSrvHeap->GetGPUDescriptorHandleForHeapStart());
+    cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    cl->DrawInstanced(3, 1, 0, 0);
+    p.barrier12(cl, dst, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+}
+
+// One layer of the pool as `count` slices (Thema 333): the resource (made in `state`) and the staging descriptor the material draws copy from.
+// `rg` (Thema 333 step 10, layer 1/2 only, HE_RVT_PACK): two channels instead of four, RENDER_TARGET-capable (the pack
+// pass is the only way data gets into it; a format change rules out CopyTextureRegion).
+static bool makeRvtPoolLayer12(D3D12RendererImpl& p, UINT layer, UINT count, UINT pagePx, bool rg, D3D12_RESOURCE_STATES state, ComPtr<ID3D12Resource>& out)
+{
+    D3D12_HEAP_PROPERTIES hp{}; hp.Type = D3D12_HEAP_TYPE_DEFAULT;
+    D3D12_RESOURCE_DESC rd{};
+    rd.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    rd.Width = rd.Height = pagePx;
+    rd.DepthOrArraySize = static_cast<UINT16>(count);
+    rd.MipLevels = 1;
+    rd.Format = rg ? DXGI_FORMAT_R8G8_UNORM : (layer == 0 ? DXGI_FORMAT_R8G8B8A8_TYPELESS : DXGI_FORMAT_R8G8B8A8_UNORM);   // BaseColor is read through an sRGB view
+    rd.Flags  = rg ? D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET : D3D12_RESOURCE_FLAG_NONE;   // the pack pass renders into it
+    rd.SampleDesc.Count = 1;
+    rd.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+    return SUCCEEDED(p.device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd, state, nullptr, IID_PPV_ARGS(&out)));
+}
+
+static void writeRvtPoolSrv12(D3D12RendererImpl& p, UINT layer, UINT count)
+{
+    D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
+    sv.Format = (p.rvtPack && layer > 0) ? DXGI_FORMAT_R8G8_UNORM
+              : layer == 0 ? DXGI_FORMAT_R8G8B8A8_UNORM_SRGB : DXGI_FORMAT_R8G8B8A8_UNORM;
+    sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+    sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    sv.Texture2DArray.MipLevels = 1;
+    sv.Texture2DArray.ArraySize = count;
+    p.device->CreateShaderResourceView(p.rvtPool[layer].Get(), &sv, p.matSrvStagingCpu(HE::d3d12mat::kSlotRvtAlbedo + layer));
+}
+
+// The arrays hold `rvtAlloc` slices; a page for a slot beyond that grows them: a new array, the old slices copied across on the GPU,
+// the old array dropped once the GPU is idle (rvtBegin/rvtEnd wait for every frame, so nothing in flight still reads it). Called
+// BEFORE the page's own command list is recorded. The manager hands out slots from 0 upwards and reuses freed ones (the highest slot in use never exceeds the peak page count), so a scene that needs 70 pages
+// holds ~100 instead of the configured 512. HE_RVT_GROW=0 allocates the whole pool at once.
+static bool growRvtPool12(D3D12RendererImpl& p, uint32_t slot)
+{
+    if (slot < p.rvtAlloc) return true;
+    if (slot >= p.rvtSlots) return false;
+    const uint32_t grown = std::min(p.rvtSlots, std::max((slot + 32u) & ~31u, p.rvtAlloc + p.rvtAlloc / 2));
+    ComPtr<ID3D12Resource> fresh[3];
+    for (UINT layer = 0; layer < 3; ++layer)
+        if (!makeRvtPoolLayer12(p, layer, grown, p.rvtPagePx, p.rvtPack && layer > 0, D3D12_RESOURCE_STATE_COPY_DEST, fresh[layer])) return false;
+    ID3D12GraphicsCommandList* cl = p.rvtBegin();
+    for (UINT layer = 0; layer < 3; ++layer)
+    {
+        p.barrier12(cl, p.rvtPool[layer].Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        for (UINT i = 0; i < p.rvtAlloc; ++i)
+        {
+            D3D12_TEXTURE_COPY_LOCATION src{}, dst{};
+            src.pResource = p.rvtPool[layer].Get(); src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; src.SubresourceIndex = i;
+            dst.pResource = fresh[layer].Get();     dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; dst.SubresourceIndex = i;
+            cl->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+        }
+        p.barrier12(cl, fresh[layer].Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    }
+    p.rvtEnd();
+    p.rvtPending = 0;   // rvtEnd waited for every frame, the pipelined layers included
+    for (UINT layer = 0; layer < 3; ++layer)
+    {
+        p.rvtPool[layer] = std::move(fresh[layer]);
+        writeRvtPoolSrv12(p, layer, grown);
+    }
+    HE_LOG_INFO(RHI, "D3D12Renderer: RVT pool grew %u -> %u of %u pages (%.0f MB, %s)", p.rvtAlloc, grown, p.rvtSlots,
+                double(grown) * p.rvtPagePx * p.rvtPagePx * (p.rvtPack ? 8.0 : 12.0) / (1024.0 * 1024.0),
+                p.rvtPack ? "RGBA8 + RG8 + RG8" : "RGBA8 x 3");
+    p.rvtAlloc = grown;
+    return true;
+}
+
+// ── Cold pages (Thema 333 step 9, counterpart of Metal 6j / D3D11's step 9): BC7 arrays, slice = slot (no further
+// decoupling — three small BC7 arrays cost little next to the hot ones). Growth mirrors growRvtPool12/makeRvtPoolLayer12
+// but the format is BC7 and the SRV lands on the cold slots (44..46).
+static bool makeRvtColdLayer12(D3D12RendererImpl& p, UINT layer, UINT count, UINT pagePx, D3D12_RESOURCE_STATES state, ComPtr<ID3D12Resource>& out)
+{
+    D3D12_HEAP_PROPERTIES hp{}; hp.Type = D3D12_HEAP_TYPE_DEFAULT;
+    D3D12_RESOURCE_DESC rd{};
+    rd.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    rd.Width = rd.Height = pagePx;
+    rd.DepthOrArraySize = static_cast<UINT16>(count);
+    rd.MipLevels = 1;
+    rd.Format = layer == 0 ? DXGI_FORMAT_BC7_UNORM_SRGB : DXGI_FORMAT_BC7_UNORM;
+    rd.SampleDesc.Count = 1;
+    rd.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+    return SUCCEEDED(p.device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd, state, nullptr, IID_PPV_ARGS(&out)));
+}
+
+static void writeRvtColdSrv12(D3D12RendererImpl& p, UINT layer, UINT count)
+{
+    D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
+    sv.Format = layer == 0 ? DXGI_FORMAT_BC7_UNORM_SRGB : DXGI_FORMAT_BC7_UNORM;
+    sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+    sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    sv.Texture2DArray.MipLevels = 1;
+    sv.Texture2DArray.ArraySize = count;
+    p.device->CreateShaderResourceView(p.rvtCold[layer].Get(), &sv, p.matSrvStagingCpu(HE::d3d12mat::kSlotRvtAlbedoCold + layer));
+}
+
+static bool growRvtCold12(D3D12RendererImpl& p, uint32_t slot)
+{
+    if (slot < p.rvtColdAlloc) return true;
+    if (slot >= p.rvtSlots) return false;
+    const uint32_t grown = std::min(p.rvtSlots, std::max((slot + 32u) & ~31u, p.rvtColdAlloc + std::max(32u, p.rvtColdAlloc / 2)));
+    ComPtr<ID3D12Resource> fresh[3];
+    for (UINT layer = 0; layer < 3; ++layer)
+        if (!makeRvtColdLayer12(p, layer, grown, p.rvtPagePx, D3D12_RESOURCE_STATE_COPY_DEST, fresh[layer])) return false;
+    ID3D12GraphicsCommandList* cl = p.rvtBegin();
+    for (UINT layer = 0; layer < 3; ++layer)
+    {
+        if (p.rvtColdAlloc)
+        {
+            p.barrier12(cl, p.rvtCold[layer].Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_SOURCE);
+            for (UINT i = 0; i < p.rvtColdAlloc; ++i)
+            {
+                D3D12_TEXTURE_COPY_LOCATION src{}, dst{};
+                src.pResource = p.rvtCold[layer].Get(); src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; src.SubresourceIndex = i;
+                dst.pResource = fresh[layer].Get();     dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; dst.SubresourceIndex = i;
+                cl->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+            }
+        }
+        p.barrier12(cl, fresh[layer].Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    }
+    p.rvtEnd();
+    p.rvtPending = 0;
+    for (UINT layer = 0; layer < 3; ++layer)
+    {
+        p.rvtCold[layer] = std::move(fresh[layer]);
+        writeRvtColdSrv12(p, layer, grown);
+    }
+    HE_LOG_INFO(RHI, "D3D12Renderer: RVT cold pool grew %u -> %u of %u pages (%.1f MB, BC7)", p.rvtColdAlloc, grown, p.rvtSlots,
+                double(grown) * HE::blockEncodedBytes(p.rvtPagePx, p.rvtPagePx) * 3.0 / (1024.0 * 1024.0));
+    p.rvtColdAlloc = grown;
+    return true;
+}
+
+// The hot slice of a manager slot, taking one from the free list (or growing the hot arrays) when it has none.
+static uint32_t rvtHotFor12(D3D12RendererImpl& p, uint32_t slot)
+{
+    if (p.rvtSlotHot[slot] >= 0) return uint32_t(p.rvtSlotHot[slot]);
+    if (p.rvtHotFree.empty())
+    {
+        const uint32_t before = p.rvtAlloc;
+        if (!growRvtPool12(p, before) || p.rvtAlloc <= before) return 0xFFFFFFFFu;
+        for (uint32_t i = p.rvtAlloc; i-- > before;) p.rvtHotFree.push_back(i);
+    }
+    const uint32_t hot = p.rvtHotFree.back();
+    p.rvtHotFree.pop_back();
+    p.rvtSlotHot[slot] = int32_t(hot);
+    ++p.rvtStateVer;
+    return hot;
+}
+
+// The table the shader reads: the manager's entries with each slot rewritten to hot slice or bit 23 + slot (same
+// contract as D3D11/Metal). Unlike D3D11, D3D12's existing RVT path is entirely synchronous (rvtBegin/rvtEnd wait for
+// every frame already, for ANY table/pool admin op on this backend) — an upload here pays that same cost, not a new one.
+static void uploadRvtTable12(D3D12RendererImpl& p, D3D12RendererImpl::RvtTable& t)
+{
+    if (t.src.empty() || !t.tex) return;
+    const D3D12_RESOURCE_DESC rd = t.tex->GetDesc();
+    std::vector<D3D12_PLACED_SUBRESOURCE_FOOTPRINT> fp(t.src.size());
+    std::vector<UINT> rows(t.src.size());
+    std::vector<UINT64> rowBytes(t.src.size());
+    UINT64 total = 0;
+    p.device->GetCopyableFootprints(&rd, 0, static_cast<UINT>(t.src.size()), 0, fp.data(), rows.data(), rowBytes.data(), &total);
+    void* mapped = nullptr;
+    ComPtr<ID3D12Resource> up = p.createUploadBuffer(total, &mapped);
+    if (!up || !mapped) return;
+    std::vector<uint32_t> row;
+    for (size_t m = 0; m < t.src.size(); ++m)
+    {
+        const std::vector<uint32_t>& in = t.src[m];
+        row.resize(in.size());
+        for (size_t i = 0; i < in.size(); ++i)
+        {
+            const uint32_t e = in[i];
+            if (e == 0xFFFFFFFFu) { row[i] = e; continue; }
+            const uint32_t slot = e & 0xFFFFFFu, eff = e >> 24;
+            if (slot >= p.rvtSlots)           row[i] = 0xFFFFFFFFu;
+            else if (p.rvtSlotCold[slot])     row[i] = (eff << 24) | 0x800000u | slot;
+            else if (p.rvtSlotHot[slot] >= 0) row[i] = (eff << 24) | uint32_t(p.rvtSlotHot[slot]);
+            else                               row[i] = 0xFFFFFFFFu;
+        }
+        const uint32_t ms = t.side >> m;
+        for (uint32_t y = 0; y < ms; ++y)
+            std::memcpy(static_cast<uint8_t*>(mapped) + fp[m].Offset + size_t(y) * fp[m].Footprint.RowPitch,
+                        &row[size_t(y) * ms], size_t(ms) * sizeof(uint32_t));
+    }
+    up->Unmap(0, nullptr);
+    ID3D12GraphicsCommandList* cl = p.rvtBegin();
+    p.barrier12(cl, t.tex.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
+    for (size_t m = 0; m < t.src.size(); ++m)
+    {
+        D3D12_TEXTURE_COPY_LOCATION src{}, dst{};
+        src.pResource = up.Get();    src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT; src.PlacedFootprint = fp[m];
+        dst.pResource = t.tex.Get(); dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; dst.SubresourceIndex = static_cast<UINT>(m);
+        cl->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+    }
+    p.barrier12(cl, t.tex.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    p.rvtEnd();
+    t.stateVer = p.rvtStateVer;
+}
+
+// The encoder thread (CPU only — D3D12's own synchronisation is the caller's rvtBegin/rvtEnd, not this thread's
+// problem). A readback for D3D12 is already a full GPU flush (rvtBegin/rvtEnd), so unlike D3D11 there is no async
+// query to poll: the RGBA bytes are ready to hand to the worker the moment the synchronous copy below returns.
+struct D3D12RendererImpl::RvtColdWork
+{
+    struct Todo { uint32_t slot, ver; std::vector<uint8_t> rgba[3]; };
+    struct Done { uint32_t slot, ver; std::vector<uint8_t> blocks[3]; };
+    std::mutex              mutex;
+    std::condition_variable cv;
+    std::deque<Todo>        todo;
+    std::deque<Done>        done;
+    std::thread             worker;
+    bool                    quit = false;
+    uint32_t                pagePx = 0;
+
+    void start(uint32_t px)
+    {
+        pagePx = px;
+        worker = std::thread([this] {
+            for (;;)
+            {
+                Todo job;
+                {
+                    std::unique_lock<std::mutex> lock(mutex);
+                    if (!cv.wait_for(lock, std::chrono::seconds(3), [this] { return quit || !todo.empty(); }))
+                    {
+                        lock.unlock();
+                        HE::releaseBlockEncoderCache();
+                        lock.lock();
+                        cv.wait(lock, [this] { return quit || !todo.empty(); });
+                    }
+                    if (quit) return;
+                    job = std::move(todo.front());
+                    todo.pop_front();
+                }
+                Done out; out.slot = job.slot; out.ver = job.ver;
+                bool ok = true;
+                for (int layer = 0; layer < 3 && ok; ++layer)
+                    ok = HE::encodeBlocks(HE::BlockFormat::Bc7, job.rgba[layer].data(), pagePx, pagePx, false, 0, out.blocks[layer]);
+                if (!ok) out.blocks[0].clear();
+                std::lock_guard<std::mutex> lock(mutex);
+                done.push_back(std::move(out));
+            }
+        });
+    }
+    void stop()
+    {
+        { std::lock_guard<std::mutex> lock(mutex); quit = true; }
+        cv.notify_all();
+        if (worker.joinable()) worker.join();
+    }
+    ~RvtColdWork() { stop(); }
+};
+
+D3D12RendererImpl::~D3D12RendererImpl() { delete rvtWork; }
+
+bool D3D12Renderer::CreateRvtPool(uint32_t slots, uint32_t pagePx)
+{
+    auto& p = *m_impl;
+    DestroyRvtPool();
+    if (!p.device || !p.m_matReady || !p.postFxReady || slots == 0 || slots > 2048 || pagePx < 8 || pagePx > 1024) return false;
+    p.waitForAllFrames();
+    static const bool s_grow = [] { const char* e = std::getenv("HE_RVT_GROW"); return !(e && *e == '0'); }();
+    const uint32_t first = s_grow ? std::min(slots, 64u) : slots;
+    static const bool packWanted = [] { const char* e = std::getenv("HE_RVT_PACK"); return !(e && *e == '0'); }();
+    p.rvtPack = packWanted;
+    for (UINT layer = 0; layer < 3; ++layer)
+    {
+        if (!makeRvtPoolLayer12(p, layer, first, pagePx, p.rvtPack && layer > 0, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, p.rvtPool[layer]))
+        {
+            DestroyRvtPool();
+            return false;
+        }
+        writeRvtPoolSrv12(p, layer, first);
+    }
+    p.rvtSlots  = slots;
+    p.rvtAlloc  = first;
+    p.rvtPagePx = pagePx;
+    p.rvtSlotHot.assign(slots, -1);
+    p.rvtSlotCold.assign(slots, 0);
+    p.rvtSlotBusy.assign(slots, 0);
+    p.rvtSlotVer.assign(slots, 0);
+    p.rvtSlotPainted.assign(slots, 0);
+    p.rvtHotFree.clear();
+    for (uint32_t i = first; i-- > 0;) p.rvtHotFree.push_back(i);
+    p.rvtColdOn = false;
+    return true;
+}
+
+void D3D12Renderer::DestroyRvtPool()
+{
+    auto& p = *m_impl;
+    if (!p.device) return;
+    const bool any = p.rvtPool[0] || p.rvtPool[1] || p.rvtPool[2] || !p.rvtTables.empty() || !p.rvtSwaps.empty();
+    if (any) p.waitForAllFrames();     // frames in flight read the pool and the tables
+    if (p.rvtWork) { p.rvtWork->stop(); delete p.rvtWork; p.rvtWork = nullptr; }
+    p.rvtSwaps.clear();                // the pool the consumers read is gone: draw the landscapes themselves again
+    for (auto& kv : p.rvtTables) p.rvtTableFree.push_back(kv.second.heapIndex);
+    p.rvtTables.clear();
+    for (auto& r : p.rvtPool) r.Reset();
+    for (auto& r : p.rvtCold) r.Reset();
+    p.rvtSlots = p.rvtAlloc = p.rvtPagePx = p.rvtColdAlloc = 0;
+    p.rvtColdOn = false;
+    p.rvtPack = false;   // the pack pipeline itself (rvtPackPSO/RootSig/heaps) is renderer-lifetime, not pool-lifetime
+    p.rvtStateVer = 1;
+    p.rvtRealFrames = 0;
+    p.rvtSlotHot.clear(); p.rvtSlotCold.clear(); p.rvtSlotBusy.clear(); p.rvtSlotVer.clear(); p.rvtSlotPainted.clear(); p.rvtHotFree.clear();
+    p.writeRvtNullViews();
+}
+
+void D3D12Renderer::SetRvtLandscape(uint32_t terrainEntity, const HE::UUID& landscapeMaterial, const HE::UUID& consumerMaterial)
+{
+    if (consumerMaterial == HE::UUID{}) m_impl->rvtSwaps.erase(terrainEntity);
+    else                               m_impl->rvtSwaps[terrainEntity] = { landscapeMaterial, consumerMaterial };
+}
+
+void D3D12Renderer::SetRvtNearChunks(uint32_t terrainEntity, const std::vector<uint32_t>& chunkEntities)
+{
+    m_impl->rvtNear.set(terrainEntity, chunkEntities);
+}
+
+void D3D12Renderer::ReleaseRvtConsumer(const HE::UUID& consumerMaterial)
+{
+    auto& p = *m_impl;
+    for (auto it = p.rvtSwaps.begin(); it != p.rvtSwaps.end();)
+        it = it->second.consumerMat == consumerMaterial ? p.rvtSwaps.erase(it) : std::next(it);
+    const auto t = p.rvtTables.find(consumerMaterial);
+    if (t == p.rvtTables.end()) return;
+    p.waitForAllFrames();              // a recorded frame may still read this table
+    p.rvtTableFree.push_back(t->second.heapIndex);
+    p.rvtTables.erase(t);
+}
+
+bool D3D12Renderer::SetRvtPageTable(const HE::UUID& consumerMaterial, const std::vector<std::vector<uint32_t>>& mips)
+{
+    auto& p = *m_impl;
+    if (!p.device || !p.rvtSlots || mips.empty() || mips.size() > 12) return false;
+    uint32_t side = 1;
+    while (uint64_t(side) * side < mips[0].size()) ++side;
+    if (uint64_t(side) * side != mips[0].size() || (side & (side - 1)) != 0 || side > 4096) return false;   // a power of two
+    for (size_t m = 0; m < mips.size(); ++m)
+    {
+        const uint32_t ms = side >> m;
+        if (ms == 0 || mips[m].size() != size_t(ms) * ms) return false;
+    }
+    if (!p.rvtTableHeap)
+    {
+        D3D12_DESCRIPTOR_HEAP_DESC hd{};
+        hd.NumDescriptors = D3D12RendererImpl::kRvtMaxTables;
+        hd.Type  = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+        hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;      // a copy SOURCE: CPU-only
+        if (FAILED(p.device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&p.rvtTableHeap)))) return false;
+        for (UINT i = D3D12RendererImpl::kRvtMaxTables; i > 0; --i) p.rvtTableFree.push_back(i - 1);
+    }
+    p.waitForAllFrames();              // a recorded frame may still read the old table
+    auto found = p.rvtTables.find(consumerMaterial);
+    if (found == p.rvtTables.end())
+    {
+        if (p.rvtTableFree.empty()) return false;
+        found = p.rvtTables.emplace(consumerMaterial, D3D12RendererImpl::RvtTable{}).first;
+        found->second.heapIndex = p.rvtTableFree.back();
+        p.rvtTableFree.pop_back();
+    }
+    D3D12RendererImpl::RvtTable& t = found->second;
+    if (!t.tex || t.side != side || t.mips != mips.size())
+    {
+        t.tex.Reset();
+        D3D12_HEAP_PROPERTIES hp{}; hp.Type = D3D12_HEAP_TYPE_DEFAULT;
+        D3D12_RESOURCE_DESC rd{};
+        rd.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        rd.Width = rd.Height = side;
+        rd.DepthOrArraySize = 1;
+        rd.MipLevels = static_cast<UINT16>(mips.size());
+        rd.Format = DXGI_FORMAT_R32_UINT;
+        rd.SampleDesc.Count = 1;
+        rd.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+        if (FAILED(p.device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                                                     nullptr, IID_PPV_ARGS(&t.tex))))
+        {
+            p.rvtTableFree.push_back(t.heapIndex);
+            p.rvtTables.erase(found);
+            return false;
+        }
+        D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
+        sv.Format = DXGI_FORMAT_R32_UINT;
+        sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        sv.Texture2D.MipLevels = static_cast<UINT>(mips.size());
+        p.device->CreateShaderResourceView(t.tex.Get(), &sv, p.rvtTableCpu(t.heapIndex));
+        t.side = side;
+        t.mips = static_cast<uint32_t>(mips.size());
+    }
+    t.src = mips;
+    uploadRvtTable12(p, t);
+    return true;
+}
+
+bool D3D12Renderer::ReadbackRvtPageTable(const HE::UUID& consumerMaterial, std::vector<std::vector<uint32_t>>& mips)
+{
+    auto& p = *m_impl;
+    const auto found = p.rvtTables.find(consumerMaterial);
+    if (found == p.rvtTables.end() || !found->second.tex) return false;
+    mips = found->second.src;   // the manager's form; the GPU texture holds the rewritten one (hot slice / cold bit)
+    return true;
+}
+
+bool D3D12Renderer::ReadbackRvtSlot(int layer, uint32_t slot, std::vector<uint8_t>& rgba)
+{
+    auto& p = *m_impl;
+    // A cold page lives as BC7 blocks only: the witnesses read pages straight after painting them, hot.
+    if (layer < 0 || layer >= 3 || !p.rvtPool[layer] || slot >= p.rvtSlots || slot >= p.rvtSlotHot.size() || p.rvtSlotHot[slot] < 0)
+        return false;
+    const UINT hotSlice = UINT(p.rvtSlotHot[slot]);
+    const bool rg = p.rvtPack && layer > 0;
+    const UINT rowPitch = alignUp(p.rvtPagePx * (rg ? 2u : 4u), D3D12_TEXTURE_DATA_PITCH_ALIGNMENT);
+    ComPtr<ID3D12Resource> rb = p.rvtReadbackBuffer(static_cast<UINT64>(rowPitch) * p.rvtPagePx);
+    if (!rb) return false;
+    ID3D12GraphicsCommandList* cl = p.rvtBegin();
+    ID3D12Resource* res = p.rvtPool[layer].Get();
+    p.barrier12(cl, res, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    D3D12_TEXTURE_COPY_LOCATION src{}, dst{};
+    src.pResource = res;      src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; src.SubresourceIndex = hotSlice;
+    dst.pResource = rb.Get(); dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    dst.PlacedFootprint.Footprint.Format   = rg ? DXGI_FORMAT_R8G8_UNORM : DXGI_FORMAT_R8G8B8A8_UNORM;
+    dst.PlacedFootprint.Footprint.Width    = p.rvtPagePx;
+    dst.PlacedFootprint.Footprint.Height   = p.rvtPagePx;
+    dst.PlacedFootprint.Footprint.Depth    = 1;
+    dst.PlacedFootprint.Footprint.RowPitch = rowPitch;
+    cl->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+    p.barrier12(cl, res, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    p.rvtEnd();
+    void* mapped = nullptr;
+    D3D12_RANGE readRange{ 0, static_cast<SIZE_T>(rowPitch) * p.rvtPagePx };
+    if (FAILED(rb->Map(0, &readRange, &mapped))) return false;
+    const uint8_t* src2 = static_cast<const uint8_t*>(mapped);
+    if (rg)
+    {
+        // Two channels in the pool: normal (x, z) comes back as R and B, the surface as R and G, the rest zero
+        // (RvtLayerChannels: layer 1 = 0x5, layer 2 = 0x3).
+        rgba.assign(static_cast<size_t>(p.rvtPagePx) * p.rvtPagePx * 4, 0);
+        const int gDst = layer == 1 ? 2 : 1;
+        for (uint32_t y = 0; y < p.rvtPagePx; ++y)
+        {
+            const uint8_t* row = src2 + static_cast<size_t>(y) * rowPitch;
+            for (uint32_t x = 0; x < p.rvtPagePx; ++x)
+            {
+                const size_t di = (static_cast<size_t>(y) * p.rvtPagePx + x) * 4;
+                rgba[di + 0] = row[x * 2 + 0];
+                rgba[di + gDst] = row[x * 2 + 1];
+                rgba[di + 3] = 255;
+            }
+        }
+    }
+    else
+    {
+        rgba.resize(static_cast<size_t>(p.rvtPagePx) * p.rvtPagePx * 4);
+        for (uint32_t y = 0; y < p.rvtPagePx; ++y)
+            std::memcpy(rgba.data() + static_cast<size_t>(y) * p.rvtPagePx * 4, src2 + size_t(y) * rowPitch,
+                        static_cast<size_t>(p.rvtPagePx) * 4);
+    }
+    D3D12_RANGE noWrite{ 0, 0 };
+    rb->Unmap(0, &noWrite);
+    return true;
+}
+
+uint32_t D3D12Renderer::RvtLayerChannels(int layer) const
+{
+    auto& p = *m_impl;
+    if (!p.rvtPack) return 0xFu;
+    return layer == 1 ? 0x5u : layer == 2 ? 0x3u : 0xFu;   // normal: R and B (x, z); surface: R and G; albedo: all
+}
+
+// Once per real frame (Render(), never RenderSceneImage): ages pages, harvests finished BC7 encodes, synchronously
+// reads back ONE page that has stood still (rvtBegin/rvtEnd — a full GPU flush, like every other RVT admin op on this
+// backend; one per frame bounds how often that flush happens), re-uploads tables whose entries changed temperature.
+// Mirrors D3D11Renderer::UpdateRvtCold / MetalRenderer::UpdateRvtCold (step 6j); this backend has no async query to
+// poll, so there is no "flight" list — the readback is synchronous and its bytes go straight to the worker thread.
+void D3D12Renderer::UpdateRvtCold()
+{
+    auto& p = *m_impl;
+    if (!p.rvtSlots || !p.rvtPool[0]) return;
+    ++p.rvtRealFrames;
+
+    static const bool coldWanted = [] { const char* e = std::getenv("HE_RVT_COLD"); return !(e && *e == '0'); }();
+    if (!p.rvtColdOn && coldWanted)
+    {
+        std::vector<uint8_t> probe(16 * 16 * 4, 128), blocks;
+        p.rvtColdOn = HE::encodeBlocks(HE::BlockFormat::Bc7, probe.data(), 16, 16, false, 0, blocks);
+    }
+    if (!p.rvtColdOn) return;
+
+    // bc7enc's tables are a few KB (bc7enc_compress_block_init), nowhere near astcenc's ~40 MB context, so there is no
+    // Metal-style reason to wait for a big working set before compression starts.
+    static const uint32_t coldMin = [] { const char* e = std::getenv("HE_RVT_COLD_MIN"); return e && *e ? uint32_t(std::max(0, std::atoi(e))) : 0u; }();
+    const uint32_t hotUsed = p.rvtAlloc - uint32_t(p.rvtHotFree.size());
+    if (!p.rvtWork && hotUsed >= coldMin)
+    {
+        p.rvtWork = new D3D12RendererImpl::RvtColdWork();
+        p.rvtWork->start(p.rvtPagePx);
+        HE_LOG_INFO(RHI, "D3D12Renderer: RVT cold pool: %u hot pages in use, compressing the pages that stand still", hotUsed);
+    }
+    if (p.rvtWork)
+    {
+        static const uint64_t coldAfter = [] { const char* e = std::getenv("HE_RVT_COLD_AFTER"); return e && *e ? uint64_t(std::max(1, std::atoi(e))) : 120ull; }();
+        auto& w = *p.rvtWork;
+        const uint32_t px = p.rvtPagePx;
+        const size_t pageBytes = size_t(px) * px * 4;
+
+        // 1. Encodes that came back. Capped at one landed page (one rvtBegin/rvtEnd GPU flush) per real frame, like
+        // the readback below — a worker that falls behind and returns several finished encodes in the same frame
+        // must not turn into N consecutive full-pipeline stalls; whatever is left over waits for the next call.
+        std::deque<D3D12RendererImpl::RvtColdWork::Done> finished;
+        { std::lock_guard<std::mutex> lock(w.mutex); finished.swap(w.done); }
+        while (!finished.empty())
+        {
+            D3D12RendererImpl::RvtColdWork::Done d = std::move(finished.front());
+            finished.pop_front();
+            p.rvtSlotBusy[d.slot] = 0;
+            if (d.blocks[0].empty() || d.ver != p.rvtSlotVer[d.slot] || p.rvtSlotHot[d.slot] < 0 || p.rvtSlotCold[d.slot]) continue;
+            if (!growRvtCold12(p, d.slot)) continue;
+            // The block data from BlockEncode.h is tightly packed (bx*16 bytes/row = 544 for 136 px); D3D12's placed
+            // footprint needs the row pitch padded to D3D12_TEXTURE_DATA_PITCH_ALIGNMENT (256) = 768, or
+            // CopyTextureRegion reads/writes outside what it declared (a GPU page fault / TDR, not a clean failure).
+            const uint32_t bx = (px + 3) / 4, tightPitch = bx * 16;
+            const uint32_t rowPitch = alignUp(tightPitch, D3D12_TEXTURE_DATA_PITCH_ALIGNMENT);
+            // The three upload buffers must outlive rvtEnd() (it submits and waits for THIS command list, not the one
+            // that built them): a ComPtr scoped to the loop body below released its buffer the moment the next layer's
+            // iteration started, while the GPU still read it when the list finally closed (a real TDR, caught on hardware).
+            ComPtr<ID3D12Resource> ups[3];
+            ID3D12GraphicsCommandList* cl = p.rvtBegin();
+            // All 3 layers must land, or the page keeps its hot slot and retries next time it stands still
+            // (HotFree'ing the slot and marking the page cold on a partial upload leaves whichever layer
+            // failed pointing at a never-written cold slice forever, with nothing left to trigger a retry).
+            bool allOk = true;
+            for (int layer = 0; layer < 3; ++layer)
+            {
+                void* mapped = nullptr;
+                ups[layer] = p.createUploadBuffer(static_cast<UINT64>(rowPitch) * bx, &mapped);
+                if (!ups[layer] || !mapped) { allOk = false; continue; }
+                for (uint32_t row = 0; row < bx; ++row)
+                    std::memcpy(static_cast<uint8_t*>(mapped) + size_t(row) * rowPitch,
+                                d.blocks[layer].data() + size_t(row) * tightPitch, tightPitch);
+                ups[layer]->Unmap(0, nullptr);
+                p.barrier12(cl, p.rvtCold[layer].Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
+                D3D12_TEXTURE_COPY_LOCATION src{}, dst{};
+                src.pResource = ups[layer].Get(); src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+                src.PlacedFootprint.Footprint.Format   = layer == 0 ? DXGI_FORMAT_BC7_UNORM_SRGB : DXGI_FORMAT_BC7_UNORM;
+                src.PlacedFootprint.Footprint.Width    = px;
+                src.PlacedFootprint.Footprint.Height   = px;
+                src.PlacedFootprint.Footprint.Depth    = 1;
+                src.PlacedFootprint.Footprint.RowPitch = rowPitch;
+                dst.pResource = p.rvtCold[layer].Get(); dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; dst.SubresourceIndex = d.slot;
+                cl->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+                p.barrier12(cl, p.rvtCold[layer].Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            }
+            p.rvtEnd();
+            if (allOk)
+            {
+                p.rvtHotFree.push_back(uint32_t(p.rvtSlotHot[d.slot]));
+                p.rvtSlotHot[d.slot] = -1;
+                p.rvtSlotCold[d.slot] = 1;
+                ++p.rvtStateVer;
+            }
+            break;   // at most one landed encode (one GPU flush) per real frame
+        }
+        if (!finished.empty())
+        {
+            // Give back what did not land yet, ahead of anything the worker queued meanwhile, so order is preserved.
+            std::lock_guard<std::mutex> lock(w.mutex);
+            for (auto it = finished.rbegin(); it != finished.rend(); ++it)
+                w.done.push_front(std::move(*it));
+        }
+
+        // 2. One page that has stood still long enough: read it back now (synchronous) and queue it for encoding.
+        for (uint32_t slot = 0; slot < p.rvtSlots; ++slot)
+        {
+            if (p.rvtSlotHot[slot] < 0 || p.rvtSlotCold[slot] || p.rvtSlotBusy[slot]) continue;
+            if (p.rvtRealFrames - p.rvtSlotPainted[slot] < coldAfter) continue;
+            const UINT hotSlice = UINT(p.rvtSlotHot[slot]);
+            // Per-layer row pitch (Thema 333 step 10): layers 1/2 are RG8 when packed, half the row bytes of RGBA8 —
+            // a single shared pitch (the pre-step-10 shape) would misread them. One buffer, one offset per layer.
+            UINT rowPitch[3]; UINT64 offset[3], total = 0;
+            for (int layer = 0; layer < 3; ++layer)
+            {
+                const bool rg = p.rvtPack && layer > 0;
+                rowPitch[layer] = alignUp(px * (rg ? 2u : 4u), D3D12_TEXTURE_DATA_PITCH_ALIGNMENT);
+                // D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT (512): a placed footprint's offset, not just its row pitch,
+                // must be aligned, or CopyTextureRegion's destination is undefined (the unaligned-pitch D3D12 trap
+                // from step 9, same family — see the BC7 upload buffer above).
+                total = (total + D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT - 1) & ~UINT64(D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT - 1);
+                offset[layer] = total;
+                total += UINT64(rowPitch[layer]) * px;
+            }
+            ComPtr<ID3D12Resource> rb = p.rvtReadbackBuffer(total);
+            if (!rb) break;
+            ID3D12GraphicsCommandList* cl = p.rvtBegin();
+            for (int layer = 0; layer < 3; ++layer)
+            {
+                const bool rg = p.rvtPack && layer > 0;
+                ID3D12Resource* res = p.rvtPool[layer].Get();
+                p.barrier12(cl, res, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_SOURCE);
+                D3D12_TEXTURE_COPY_LOCATION src{}, dst{};
+                src.pResource = res; src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; src.SubresourceIndex = hotSlice;
+                dst.pResource = rb.Get(); dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+                dst.PlacedFootprint.Footprint.Format   = rg ? DXGI_FORMAT_R8G8_UNORM : DXGI_FORMAT_R8G8B8A8_UNORM;
+                dst.PlacedFootprint.Footprint.Width    = px;
+                dst.PlacedFootprint.Footprint.Height   = px;
+                dst.PlacedFootprint.Footprint.Depth    = 1;
+                dst.PlacedFootprint.Footprint.RowPitch = rowPitch[layer];
+                dst.PlacedFootprint.Offset = offset[layer];
+                cl->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+                p.barrier12(cl, res, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            }
+            p.rvtEnd();
+            void* mapped = nullptr;
+            D3D12_RANGE readRange{ 0, static_cast<SIZE_T>(total) };
+            if (SUCCEEDED(rb->Map(0, &readRange, &mapped)))
+            {
+                D3D12RendererImpl::RvtColdWork::Todo job; job.slot = slot; job.ver = p.rvtSlotVer[slot];
+                for (int layer = 0; layer < 3; ++layer)
+                {
+                    job.rgba[layer].resize(pageBytes);
+                    const uint8_t* base = static_cast<const uint8_t*>(mapped) + offset[layer];
+                    if (p.rvtPack && layer > 0)
+                    {
+                        // RG8: expand to RGBA for the BC7 encoder input (R, G; B, A fixed) — matches RvtLookup.h's cold
+                        // branch, which reads t.xy under HE_RVT_RGNORMAL regardless of hot or cold.
+                        for (uint32_t y = 0; y < px; ++y)
+                        {
+                            const uint8_t* row = base + size_t(y) * rowPitch[layer];
+                            uint8_t* d = job.rgba[layer].data() + size_t(y) * px * 4;
+                            for (uint32_t x = 0; x < px; ++x)
+                            {
+                                d[x * 4 + 0] = row[x * 2 + 0];
+                                d[x * 4 + 1] = row[x * 2 + 1];
+                                d[x * 4 + 2] = 0;
+                                d[x * 4 + 3] = 255;
+                            }
+                        }
+                    }
+                    else
+                        for (uint32_t y = 0; y < px; ++y)
+                            std::memcpy(job.rgba[layer].data() + size_t(y) * px * 4, base + size_t(y) * rowPitch[layer], size_t(px) * 4);
+                }
+                D3D12_RANGE noWrite2{ 0, 0 };
+                rb->Unmap(0, &noWrite2);
+                { std::lock_guard<std::mutex> lock(w.mutex); w.todo.push_back(std::move(job)); }
+                w.cv.notify_one();
+                p.rvtSlotBusy[slot] = 1;
+            }
+            break;   // at most one synchronous readback (one GPU flush) per real frame
+        }
+    }
+
+    // 3. Tables whose entries are out of date (a page changed temperature or got a hot slice since the last upload).
+    for (auto& kv : p.rvtTables)
+        if (kv.second.stateVer != p.rvtStateVer) uploadRvtTable12(p, kv.second);
+}
+
 // ─── One still from somebody else's camera ────────────────────────────────────
 // The contract is in IRenderer.h; the shape is D3D11's (D3D11Renderer.cpp,
 // RenderSceneImage), which is Metal's without the flag: the live viewport set is
@@ -13727,6 +15840,104 @@ bool D3D12Renderer::CaptureViewport(std::vector<uint8_t>& rgba, uint32_t& outW, 
 //
 // Not run: the retire sweeps, the timestamp query pair, the counter reset, the
 // overlay, Present — those belong to REAL frames. Per-request path, not per-frame.
+void D3D12Renderer::rvtStillEnter(uint32_t width, uint32_t height)
+{
+    auto& p = *m_impl;
+    auto& st = p.rvtStill;
+    st = D3D12RendererImpl::RvtStill{};
+    // Everything the frame reads that the request changes, saved by value.
+    st.liveRT         = std::move(p.viewportRT);
+    st.liveDepth      = std::move(p.viewportDepth);
+    st.liveReadback   = std::move(p.viewportReadback);
+    st.liveRtvHeap    = std::move(p.viewportRtvHeap);
+    st.liveDsvHeap    = std::move(p.viewportDsvHeap);
+    st.liveW          = p.viewportW;
+    st.liveH          = p.viewportH;
+    st.liveReqW       = p.viewportReqW;
+    st.liveReqH       = p.viewportReqH;
+    st.liveState      = p.viewportState;
+    st.liveResChanged = p.viewportResChanged;
+    st.liveUsingHDR   = p.usingHDR;
+    st.liveCam        = m_editorCamera;
+    // The counters are the profiler's picture of the last real frame; the
+    // screenshot's draws would sit there until the next Render() otherwise.
+    st.liveDraws = p.statDraws; st.liveTris = p.statTris; st.liveVisible = p.statVisible; st.liveTotal = p.statTotal;
+    // A raw capture is the materials' own colour: every effect that would change it is off for the frame
+    // and back afterwards (members the frame reads, saved by value like the camera above).
+    st.liveRaw = p.rawCapture; st.liveSrgb = p.rawSrgb;
+    st.liveBloom = p.bloomEnabled; st.liveSsao = p.ssaoEnabled; st.liveSsr = p.ssrEnabled;
+    st.liveGi = p.giEnabled; st.liveGiRefl = p.giReflEnabled;
+    st.liveAa = p.aaMethod;
+    st.livePath = m_renderPath;
+    st.active = true;
+    st.w = width; st.h = height;
+
+    p.viewportW    = 0;
+    p.viewportH    = 0;
+    p.viewportReqW = static_cast<UINT>(width);
+    p.viewportReqH = static_cast<UINT>(height);
+    // Fresh set at the request (plus HDR & co. at that size; SSR history gone).
+    // Flushes the GPU first, so the slot used below is idle.
+    p.createViewportRT(static_cast<UINT>(width), static_cast<UINT>(height));
+}
+
+void D3D12Renderer::rvtStillLeave()
+{
+    auto& p = *m_impl;
+    auto& st = p.rvtStill;
+    if (!st.active) return;
+    // Nothing of the screenshot may still be in flight when its set goes away.
+    p.waitForAllFrames();
+    p.drainGpuDebugMessages();   // this frame never reaches Render(), which is where they are otherwise logged
+    p.viewportRT.Reset(); p.viewportDepth.Reset(); p.viewportReadback.Reset();
+    p.viewportRtvHeap.Reset(); p.viewportDsvHeap.Reset();
+    p.viewportRT         = std::move(st.liveRT);
+    p.viewportDepth      = std::move(st.liveDepth);
+    p.viewportReadback   = std::move(st.liveReadback);
+    p.viewportRtvHeap    = std::move(st.liveRtvHeap);
+    p.viewportDsvHeap    = std::move(st.liveDsvHeap);
+    p.viewportW          = st.liveW;
+    p.viewportH          = st.liveH;
+    p.viewportReqW       = st.liveReqW;
+    p.viewportReqH       = st.liveReqH;
+    p.viewportState      = st.liveState;
+    p.viewportResChanged = st.liveResChanged;
+    p.usingHDR           = st.liveUsingHDR;
+    m_editorCamera       = st.liveCam;
+    p.rawCapture = st.liveRaw; p.rawSrgb = st.liveSrgb;
+    p.bloomEnabled = st.liveBloom; p.ssaoEnabled = st.liveSsao; p.ssrEnabled = st.liveSsr;
+    p.giEnabled = st.liveGi; p.giReflEnabled = st.liveGiRefl;
+    p.aaMethod = st.liveAa;
+    m_renderPath = st.livePath;
+    p.statDraws = st.liveDraws; p.statTris = st.liveTris;
+    p.statVisible = st.liveVisible; p.statTotal = st.liveTotal;
+    // The decal pass's viewport-depth SRV back to the live depth (null view
+    // when there is no live viewport; the table is bound regardless).
+    p.createDepthSrv(p.viewportDepth.Get(), D3D12RendererImpl::k_decalViewportDepthSlot);
+    // Intermediates back to the live size (see above). No live viewport (the
+    // direct-to-swapchain path) means nothing reads them; leave them.
+    if (st.liveW && st.liveH && (st.liveW != st.w || st.liveH != st.h))
+        p.createPostFXResources(st.liveW, st.liveH);
+    // The SSR history is the screenshot camera's now (a same-size request kept
+    // the targets, and the frame just captured into them). So is TAA's: the
+    // still's resolve marked it valid.
+    p.ssrColorHistValid = false;
+    p.ssrHistValid      = false;
+    p.taaHistoryValid   = false;
+    p.rvtPending = 0;        // the wait at the top of this function covered every layer still in flight
+    st.active = false;
+    st.kept   = false;
+}
+
+void D3D12Renderer::BeginRvtPages(uint32_t pagePx) { m_impl->rvtBracketPx = pagePx; }
+
+void D3D12Renderer::EndRvtPages()
+{
+    auto& p = *m_impl;
+    p.rvtBracketPx = 0;
+    if (p.rvtStill.kept) rvtStillLeave();
+}
+
 bool D3D12Renderer::RenderSceneImage(const EditorCameraOverride& camera, uint32_t width,
                                      uint32_t height, std::vector<uint8_t>& rgba)
 {
@@ -13734,86 +15945,127 @@ bool D3D12Renderer::RenderSceneImage(const EditorCameraOverride& camera, uint32_
     if (!p.device || !p.cmdQueue || !p.cmdList) return false;
     if (width == 0 || height == 0) return false;
 
-    // Everything the frame reads that the request changes, saved by value.
-    ComPtr<ID3D12Resource>       liveRT         = std::move(p.viewportRT);
-    ComPtr<ID3D12Resource>       liveDepth      = std::move(p.viewportDepth);
-    ComPtr<ID3D12Resource>       liveReadback   = std::move(p.viewportReadback);
-    ComPtr<ID3D12DescriptorHeap> liveRtvHeap    = std::move(p.viewportRtvHeap);
-    ComPtr<ID3D12DescriptorHeap> liveDsvHeap    = std::move(p.viewportDsvHeap);
-    const UINT                   liveW          = p.viewportW;
-    const UINT                   liveH          = p.viewportH;
-    const UINT                   liveReqW       = p.viewportReqW;
-    const UINT                   liveReqH       = p.viewportReqH;
-    const D3D12_RESOURCE_STATES  liveState      = p.viewportState;
-    const bool                   liveResChanged = p.viewportResChanged;
-    const bool                   liveUsingHDR   = p.usingHDR;
-    const EditorCameraOverride   liveCam        = m_editorCamera;
-    // The counters are the profiler's picture of the last real frame; the
-    // screenshot's draws would sit there until the next Render() otherwise.
-    const uint32_t liveDraws = p.statDraws, liveTris = p.statTris,
-                   liveVisible = p.statVisible, liveTotal = p.statTotal;
-
-    p.viewportW    = 0;
-    p.viewportH    = 0;
-    p.viewportReqW = static_cast<UINT>(width);
-    p.viewportReqH = static_cast<UINT>(height);
+    // Inside an RVT bracket (BeginRvtPages) the page-size set is built once and kept from one page to the next: it is the
+    // creation (a GPU flush plus the post-FX targets) and the repair at the live size afterwards that cost milliseconds
+    // per page in the editor. Anything else closes a kept set first and runs the one-call path.
+    const bool page = camera.rvtSlot >= 0;
+    const bool keep = page && p.rvtBracketPx != 0 && width == p.rvtBracketPx && height == p.rvtBracketPx;
+    if (p.rvtStill.active && !(keep && p.rvtStill.w == width && p.rvtStill.h == height)) rvtStillLeave();
+    if (!p.rvtStill.active) rvtStillEnter(width, height);
+    p.rvtStill.kept = keep;
     m_editorCamera = camera;
-
-    // Fresh set at the request (plus HDR & co. at that size; SSR history gone).
-    // Flushes the GPU first, so the slot used below is idle.
-    p.createViewportRT(static_cast<UINT>(width), static_cast<UINT>(height));
+    if (camera.rawOutput)
+    {
+        // Forward, because the deferred resolve lights the G-buffer.
+        p.rawCapture = true;
+        p.rawSrgb    = camera.rawSrgb;
+        p.bloomEnabled = p.ssaoEnabled = p.ssrEnabled = false;
+        p.giEnabled = p.giReflEnabled = false;
+        p.aaMethod  = HE::AAMethod::Off;
+        m_renderPath = HE::RenderPath::Forward;
+    }
 
     bool ok = p.viewportRT && p.viewportDepth && p.viewportReadback
            && p.viewportRtvHeap && p.viewportDsvHeap;
+    // The page's hot slice (Thema 333 step 9: a manager slot is no longer the same thing as a hot array index), taken
+    // before the page's own command list is recorded — rvtHotFor12 may grow the pool, which is its own flush.
+    uint32_t hotSlice = 0xFFFFFFFFu;
+    if (ok && page && camera.rvtLayer >= 0 && camera.rvtLayer < 3 && p.rvtPool[camera.rvtLayer] && camera.rvtSlot >= 0
+        && width == p.rvtPagePx && height == p.rvtPagePx && uint32_t(camera.rvtSlot) < p.rvtSlots)
+    {
+        const uint32_t slot = uint32_t(camera.rvtSlot);
+        if (camera.rvtLayer == 0)
+        {
+            // A new picture of this page: an encode of the old one is stale, a cold page is hot again.
+            ++p.rvtSlotVer[slot];
+            p.rvtSlotPainted[slot] = p.rvtRealFrames;
+        }
+        hotSlice = rvtHotFor12(p, slot);
+        // Only clear the cold flag once a hot slice actually backs the slot — if the pool is full,
+        // the slot's BC7 data in rvtCold[] is still the last-known-good page and must stay readable.
+        if (camera.rvtLayer == 0 && hotSlice != 0xFFFFFFFFu && p.rvtSlotCold[slot])
+        {
+            p.rvtSlotCold[slot] = 0;
+            ++p.rvtStateVer;
+        }
+    }
+    // A kept page layer is not waited for: the next one rotates to the next frame slot (see rvtPending).
+    // HE_RVT_PIPELINE=0 waits after every layer again (the A/B guard and the reference of the cross-check).
+    static const bool s_pipeline = []() { const char* e = std::getenv("HE_RVT_PIPELINE"); return !(e && *e == '0'); }();
+    const bool pipelined = ok && keep && s_pipeline;
+    UINT baseFrame = p.frameIndex;
+    if (pipelined)
+    {
+        if (p.rvtPending >= k_frameCount) { p.waitForAllFrames(); p.rvtPending = 0; }
+        if (p.rvtPending == 0) p.rvtBaseFrame = p.frameIndex;
+        baseFrame = p.rvtBaseFrame;
+        p.frameIndex = (p.rvtBaseFrame + p.rvtPending) % k_frameCount;
+    }
     if (ok)
     {
+        // A virtual texture page (Thema 333) goes into its pool slice on the GPU and nothing is read back.
+        const bool pageOk = page && camera.rvtLayer >= 0 && camera.rvtLayer < 3 && p.rvtPool[camera.rvtLayer]
+                         && hotSlice != 0xFFFFFFFFu && width == p.rvtPagePx && height == p.rvtPagePx;
         p.cmdAllocators[p.frameIndex]->Reset();
         p.cmdList->Reset(p.cmdAllocators[p.frameIndex].Get(), nullptr);
         DrawViewportFrame();
+        if (pageOk)
+        {
+            // The copy rides in the frame's own list: one submit, one wait. A packed layer (Thema 333 step 10, HE_RVT_PACK)
+            // cannot take that copy — the format changes — so a tiny fullscreen draw (packRvtPage12) takes its place,
+            // recorded into the same list right here.
+            ID3D12GraphicsCommandList* cl = p.cmdList.Get();
+            ID3D12Resource* dstRes = p.rvtPool[camera.rvtLayer].Get();
+            const bool packed = p.rvtPack && camera.rvtLayer > 0;
+            if (!packed)
+            {
+                p.barrier12(cl, p.viewportRT.Get(), p.viewportState, D3D12_RESOURCE_STATE_COPY_SOURCE);
+                p.barrier12(cl, dstRes, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
+                D3D12_TEXTURE_COPY_LOCATION src{}, dst{};
+                src.pResource = p.viewportRT.Get(); src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; src.SubresourceIndex = 0;
+                dst.pResource = dstRes;             dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; dst.SubresourceIndex = hotSlice;
+                cl->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+                p.barrier12(cl, dstRes, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+                p.barrier12(cl, p.viewportRT.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+                p.viewportState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+            }
+            else if (ensureRvtPackPipeline12(p))
+            {
+                p.barrier12(cl, p.viewportRT.Get(), p.viewportState, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+                p.viewportState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+                packRvtPage12(p, cl, p.viewportRT.Get(), camera.rvtLayer, dstRes, hotSlice, width);
+            }
+            else
+                HE_LOG_WARN(RHI, "D3D12Renderer: RVT page pack unavailable, slot %d layer %d not written this paint",
+                            camera.rvtSlot, camera.rvtLayer);
+        }
         p.cmdList->Close();
         ID3D12CommandList* lists[] = { p.cmdList.Get() };
         p.cmdQueue->ExecuteCommandLists(1, lists);
-        // CaptureViewport flushes, copies to the readback buffer, flushes again
-        // and maps; no world → the cleared target, honestly black, which is what
-        // the viewport would show too.
-        uint32_t gotW = 0, gotH = 0;
-        ok = CaptureViewport(rgba, gotW, gotH) && gotW == width && gotH == height;
+        if (pipelined)
+        {
+            rgba.clear();
+            ++p.rvtPending;           // the next layer rotates to the next frame slot; the wait comes with the slots used up or the close
+            ok = pageOk;
+        }
+        else if (page)
+        {
+            rgba.clear();
+            p.waitForAllFrames();     // the upload rings are rewritten by the next page: it must have run
+            ok = pageOk;
+        }
+        else
+        {
+            // CaptureViewport flushes, copies to the readback buffer, flushes again
+            // and maps; no world → the cleared target, honestly black, which is what
+            // the viewport would show too.
+            uint32_t gotW = 0, gotH = 0;
+            ok = CaptureViewport(rgba, gotW, gotH) && gotW == width && gotH == height;
+        }
     }
 
-    // Nothing of the screenshot may still be in flight when its set goes away
-    // (cheap: the capture already flushed; this also covers the failure paths).
-    p.waitForAllFrames();
-    p.viewportRT.Reset(); p.viewportDepth.Reset(); p.viewportReadback.Reset();
-    p.viewportRtvHeap.Reset(); p.viewportDsvHeap.Reset();
-    p.viewportRT         = std::move(liveRT);
-    p.viewportDepth      = std::move(liveDepth);
-    p.viewportReadback   = std::move(liveReadback);
-    p.viewportRtvHeap    = std::move(liveRtvHeap);
-    p.viewportDsvHeap    = std::move(liveDsvHeap);
-    p.viewportW          = liveW;
-    p.viewportH          = liveH;
-    p.viewportReqW       = liveReqW;
-    p.viewportReqH       = liveReqH;
-    p.viewportState      = liveState;
-    p.viewportResChanged = liveResChanged;
-    p.usingHDR           = liveUsingHDR;
-    m_editorCamera       = liveCam;
-    p.statDraws = liveDraws; p.statTris = liveTris;
-    p.statVisible = liveVisible; p.statTotal = liveTotal;
-    // The decal pass's viewport-depth SRV back to the live depth (null view
-    // when there is no live viewport; the table is bound regardless).
-    p.createDepthSrv(p.viewportDepth.Get(), D3D12RendererImpl::k_decalViewportDepthSlot);
-    // Intermediates back to the live size (see above). No live viewport (the
-    // direct-to-swapchain path) means nothing reads them; leave them.
-    if (liveW && liveH && (liveW != width || liveH != height))
-        p.createPostFXResources(liveW, liveH);
-    // The SSR history is the screenshot camera's now (a same-size request kept
-    // the targets, and the frame just captured into them). So is TAA's: the
-    // still's resolve marked it valid.
-    p.ssrColorHistValid = false;
-    p.ssrHistValid      = false;
-    p.taaHistoryValid   = false;
-
+    if (pipelined) p.frameIndex = baseFrame;   // the real frames and the next call see the slot they expect
+    if (!keep || !ok) rvtStillLeave();
     if (!ok) rgba.clear();
     return ok;
 }

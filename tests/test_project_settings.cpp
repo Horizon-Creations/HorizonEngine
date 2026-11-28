@@ -315,6 +315,27 @@ TEST_CASE("ProjectSettings: the splash rides in the game section and reads back"
 	CHECK(c.game.splashImage.empty());
 }
 
+TEST_CASE("ProjectSettings: cooking static entities is on, rides in the game section and reads back")
+{
+	HE::ProjectSettings a;
+	CHECK(a.game.cookStaticEntities);           // on for every project, new or old
+	a.game.cookStaticEntities = false;
+	CHECK_FALSE(a.isDefault());
+
+	json j;
+	a.toJson(j);
+	CHECK(j["game"]["cookStaticEntities"] == false);
+	HE::ProjectSettings b;
+	b.fromJson(j);
+	CHECK(a == b);
+	CHECK_FALSE(b.game.cookStaticEntities);
+
+	// A file written before it existed: the key is absent, the setting is on.
+	HE::ProjectSettings c;
+	c.fromJson(json::parse(R"({"version":1,"game":{"title":"Old"}})"));
+	CHECK(c.game.cookStaticEntities);
+}
+
 // ─── Anti-cheat (docs/anti-cheat-plan.md §4.4) ───────────────────────────────
 
 TEST_CASE("ProjectAntiCheatSettings: default-constructed is off, with the plan's policy")
@@ -860,6 +881,7 @@ TEST_CASE("ProjectSettings: operator== and isDefault see every field")
 	HE_FIELD(game.splashEnabled);
 	HE_FIELD(game.splashImage);
 	HE_FIELD(game.splashSubtitle);
+	HE_FIELD(game.cookStaticEntities);
 
 	HE_FIELD(shadows.distance);
 	HE_FIELD(shadows.cascadeCount);
@@ -892,6 +914,12 @@ TEST_CASE("ProjectSettings: operator== and isDefault see every field")
 	HE_FIELD(input.enabled);
 	HE_FIELD(input.stickDeadzone);
 	HE_FIELD(input.triggerDeadzone);
+	HE_FIELD(rvt.poolPages);
+	HE_FIELD(rvt.metersPerTexel);
+	HE_FIELD(rvt.nearRadiusM);
+	HE_FIELD(rvt.activationRadiusM);
+	HE_FIELD(rvt.maxPagesPerFrame);
+	HE_FIELD(rvt.nativeNear);
 
 	HE_FIELD(antiCheat.enabled);
 	HE_FIELD(antiCheat.integrityCheck);
@@ -1019,4 +1047,76 @@ TEST_CASE("ProjectSettings::clamp: a NaN or infinite float falls back, field by 
 		CHECK(s.graphics.aaSharpness == def.graphics.aaSharpness);
 		CHECK(s.graphics.dofAperture == def.graphics.dofAperture);
 	}
+}
+
+TEST_CASE("ProjectSettings: the \"rvt\" section is the project's RVT tuning; an old \"enabled\" is read past (Thema 333, 335)")
+{
+	// Default-constructed is the tuning every project starts with.
+	const HE::ProjectSettings d;
+	CHECK(d.rvt.poolPages == 512);
+	CHECK(d.rvt.metersPerTexel == doctest::Approx(0.25f));
+	CHECK(d.rvt.nearRadiusM == doctest::Approx(64.0f));
+	CHECK(d.rvt.activationRadiusM == doctest::Approx(600.0f));
+	CHECK(d.rvt.maxPagesPerFrame == 8);
+	CHECK(d.rvt.nativeNear);
+	CHECK(d.isDefault());
+
+	// Tuning it is a change the saver must see: a project whose ONLY edit is the pool would otherwise count as default,
+	// never get a file, and lose the setting on the next open. (On/off is the global switch since RVT 2.0, Thema 335.)
+	HE::ProjectSettings a;
+	a.rvt.poolPages         = 1024;
+	CHECK_FALSE(a.isDefault());
+	a.rvt.metersPerTexel    = 0.5f;
+	a.rvt.nearRadiusM       = 96.0f;
+	a.rvt.activationRadiusM = 1200.0f;
+	a.rvt.maxPagesPerFrame  = 16;
+	a.rvt.nativeNear        = false;
+	a.shadows.resolution    = 4096;
+
+	json j;
+	a.toJson(j);
+	CHECK_FALSE(j["rvt"].contains("enabled"));
+	CHECK(j["rvt"]["nativeNear"] == false);
+	CHECK(j["rvt"]["poolPages"] == 1024);
+	CHECK(j["rvt"]["maxPagesPerFrame"] == 16);
+	HE::ProjectSettings b;
+	b.fromJson(j);
+	CHECK(b.shadows.resolution == 4096);
+	CHECK(b == a);
+
+	// A file from before RVT 2.0 still carries "enabled": it is read past, the rest loads.
+	json old = j;
+	old["rvt"]["enabled"] = true;
+	HE::ProjectSettings e;
+	e.fromJson(old);
+	CHECK(e == a);
+
+	// A file from before the native near view (no "nativeNear") reads as on, the default.
+	json noNear = j;
+	noNear["rvt"].erase("nativeNear");
+	HE::ProjectSettings n;
+	n.fromJson(noNear);
+	CHECK(n.rvt.nativeNear);
+
+	// Garbage in the section is as harmless as a valid one.
+	HE::ProjectSettings c;
+	c.fromJson(json{ { "rvt", { { "enabled", "yes" }, { "poolPages", "many" } } } });
+	CHECK(c.isDefault());
+}
+
+TEST_CASE("ProjectRvtSettings: out-of-range and wrong-type values are corrected, never trusted (Thema 333)")
+{
+	HE::ProjectSettings s;
+	s.fromJson(json{ { "rvt", { { "poolPages", 1 }, { "metersPerTexel", 1000.0 },
+	                            { "nearRadiusM", -5.0 }, { "activationRadiusM", 1.0e9 }, { "maxPagesPerFrame", 9999 } } } });
+	CHECK(s.rvt.poolPages == HE::ProjectRvtSettings::kMinPoolPages);
+	CHECK(s.rvt.metersPerTexel == doctest::Approx(HE::ProjectRvtSettings::kMaxTexel));
+	CHECK(s.rvt.nearRadiusM == doctest::Approx(HE::ProjectRvtSettings::kMinRadius));
+	CHECK(s.rvt.activationRadiusM == doctest::Approx(HE::ProjectRvtSettings::kMaxRadius));
+	CHECK(s.rvt.maxPagesPerFrame == HE::ProjectRvtSettings::kMaxPagesPerFrame);
+
+	HE::ProjectSettings t;
+	t.fromJson(json{ { "rvt", { { "poolPages", "many" }, { "metersPerTexel", "fine" } } } });
+	CHECK(t.rvt.poolPages == 512);
+	CHECK(t.rvt.metersPerTexel == doctest::Approx(0.25f));
 }

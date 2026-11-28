@@ -109,6 +109,59 @@ namespace
 	  "A generated landscape: a heightfield the size of the entity, split into "
 	  "chunks with their own level of detail, sculptable and paintable.",
 	  "", "scenes#terrain" },
+	{ "Component/Landscape Stamp", "Landscape Stamp",
+	  "A heightmap laid over the Tile Landscape: the texture's red channel is "
+	  "added to the ground under this entity. Move, turn and scale the entity "
+	  "to place it, as often as you like; the landscape is not changed until an "
+	  "export bakes the stamps into the shipped pack. A stamp that is not "
+	  "moved costs nothing while the editor runs.",
+	  "", "scenes#terrain" },
+	{ "Landscape Stamp/Enabled", "",
+	  "Off takes the stamp away without deleting the entity; the ground under "
+	  "it goes back to what it was.",
+	  "", "scenes#terrain" },
+	{ "Landscape Stamp/Heightmap File", "",
+	  "The heightmap as a picture file instead of a texture asset: PNG or PGM at 8 or 16 bits, or a headerless .r16 / .raw. "
+	  "A file is read at 16 bits, 65 536 height steps; a texture asset holds 8 bits, 256 steps, which shows as terraces on a "
+	  "tall stamp. Absolute, or relative to the project's folder. When both are set the file is used. The file is only needed "
+	  "while editing: an export bakes the stamps into the landscape.",
+	  "", "scenes#terrain" },
+	{ "Landscape Stamp/Browse Heightmap...", "",
+	  "Opens a file dialog and puts the chosen heightmap file into the field above.",
+	  "", "scenes#terrain" },
+	{ "Tile Landscape/Stamp Heightmap File", "",
+	  "The heightmap file the next stamp placed by the Stamp tool gets (16-bit PNG, PGM, .r16). Used instead of the texture when set.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Browse Heightmap...", "",
+	  "Opens a file dialog for the Stamp tool's heightmap file.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape Stamp/Channel", "",
+	  "Which channel of the texture or file is the height: red, green, blue, alpha, or the grey value of the colour "
+	  "(Luminance). One packed texture can so hold up to four different stamps. A grey picture gives its grey for red, green "
+	  "and blue; a picture without an alpha channel is white (full height) for Alpha.",
+	  "", "scenes#terrain" },
+	{ "Tile Landscape/Stamp Channel", "",
+	  "The channel of the heightmap the next stamp placed by the Stamp tool reads: red, green, blue, alpha or the grey value.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape Stamp/Size", "",
+	  "Edge length of the stamp's square footprint at scale 1. The entity's X "
+	  "and Z scale stretch it.",
+	  "", "scenes#terrain" },
+	{ "Landscape Stamp/Height", "",
+	  "How many metres a white pixel adds, at scale 1 (the entity's Y scale "
+	  "multiplies it). A negative value digs instead of raising.",
+	  "", "scenes#terrain" },
+	{ "Landscape Stamp/Falloff", "",
+	  "How far in from its edge the stamp fades out, as a share of the way to "
+	  "the centre. 0 is a hard edge, 1 fades over the whole stamp.",
+	  "", "scenes#terrain" },
+	{ "Component/Tile Landscape", "Tile Landscape",
+	  "A landscape too big to hold in memory: a grid of 512 m tiles in a pack "
+	  "file, streamed in around the camera and drawn with a quadtree of "
+	  "levels of detail, out to 100 km. It does not replace the Terrain "
+	  "component, which stays the right tool for one small landscape; use "
+	  "Migrate Terrain to Tiles to turn one into a tile landscape.",
+	  "", "editor#landscape-mode" },
 	{ "Component/Foliage", "Foliage",
 	  "Scatters a mesh across this entity's terrain — grass, rocks, trees. The "
 	  "instances are generated, not saved, so a seed reproduces the same layout.",
@@ -181,6 +234,12 @@ namespace
 	  "Where this entity lives when the scene is split into cells: in a cell that "
 	  "loads around the camera, or always loaded in the base scene.",
 	  "", "scenes#streaming" },
+	{ "Component/Mobility", "Mobility",
+	  "Whether this entity may ever change at run time. Static lets the engine "
+	  "reduce it to flat render/physics data (entity cooking) once nothing else "
+	  "about it objects; Movable keeps it a full entity. With no Mobility "
+	  "component the engine decides on its own from what the entity carries.",
+	  "", "rendering#performance" },
 	{ "Component/LOD", "LOD",
 	  "Swaps this entity's mesh for cheaper versions as the camera gets further "
 	  "away.",
@@ -916,7 +975,7 @@ namespace
 	  "What the layer is called in this list and in the Landscape panel. Empty "
 	  "shows it as \"Layer N\".",
 	  "", "scenes#foliage" },
-	{ "Foliage/Cast Shadows", "",
+	{ "Foliage/Casts Shadow", "",
 	  "Whether the layer casts shadows. Off saves a lot for short grass, whose "
 	  "shadow nobody sees.",
 	  "", "scenes#foliage" },
@@ -1018,6 +1077,69 @@ namespace
 	  "so a camera that hovers on a boundary does not make plants flicker "
 	  "between two levels. The Draw Distance edge is not affected.",
 	  "", "scenes#foliage" },
+	{ "Foliage/Generate LODs", "",
+	  "Makes simpler versions of the layer's mesh, kept inside the mesh's own "
+	  "asset, and replaces this layer's detail levels with them. Each "
+	  "level starts at the distance where its error shrinks to the pixel error "
+	  "you choose, and the far ones draw fewer plants. The layer's Draw Distance "
+	  "is kept; a level that would start beyond it is left out. Undo takes the "
+	  "layer's levels back; the mesh keeps its new versions.",
+	  "", "scenes#foliage" },
+
+	{ "Foliage/Bake Impostor", "",
+	  "Bakes a picture of the layer's plant, seen from two sides, and makes it the "
+	  "layer's farthest detail level: a cross card (two crossed quads, sized to the "
+	  "plant) with a cut-out material over the picture. Writes Name_Impostor, "
+	  "Name_ImpostorMat and Name_ImpostorCard next to the mesh; baking again "
+	  "replaces them in place. The size is the one in Generate LODs. Undo takes "
+	  "the level back; the files stay on disk.",
+	  "", "scenes#foliage" },
+
+	// ── Generate LODs (dialog) ───────────────────────────────────────────────
+	{ "Generate LODs/Levels", "",
+	  "How many simpler copies to make after the original: 3 gives the original "
+	  "plus three, each with fewer triangles.",
+	  "", "rendering#performance" },
+	{ "Generate LODs/Reduction Per Level", "",
+	  "The share of the previous level's triangles each level keeps: 50 % halves "
+	  "the count every step. The last level ignores this and lands on Lowest Level.",
+	  "", "rendering#performance" },
+	{ "Generate LODs/Lowest Level", "",
+	  "The share of the original's triangles the last level keeps, in percent.",
+	  "", "rendering#performance" },
+	{ "Generate LODs/Pixel Error", "",
+	  "How wrong a level may look, in pixels on a 1080 p screen at 60 degrees, "
+	  "where it takes over. Each level's distance is worked out from the error "
+	  "its simplification introduced, so a higher value switches earlier.",
+	  "", "rendering#performance" },
+	{ "Generate LODs/Foliage Mode", "",
+	  "For leaf cards and other thin geometry: whole pieces may disappear, and if "
+	  "the material's texture has an alpha channel a level has to keep most of "
+	  "the original's visible leaf area. Leave off for solid meshes such as rocks.",
+	  "", "rendering#performance" },
+	{ "Generate LODs/End on Cross Card", "",
+	  "Adds the engine's cross card as the last detail level. Without Bake "
+	  "Impostor it draws the layer's material, so it only looks right for "
+	  "materials whose texture already shows one plant.",
+	  "", "scenes#foliage" },
+	{ "Generate LODs/Bake Impostor", "",
+	  "Also bakes a picture of the plant, seen from two sides, and puts it on the "
+	  "last level's cross card (the card is sized to the plant). Implies End on "
+	  "Cross Card. The files are Name_Impostor, Name_ImpostorMat and "
+	  "Name_ImpostorCard next to the mesh.",
+	  "", "scenes#foliage" },
+	{ "Generate LODs/Impostor Size", "",
+	  "Texels along one side of each view; the picture holds both views side by "
+	  "side. 512 suits a plant that is a few pixels tall when the card takes over; "
+	  "1024 for a tree that is still large.",
+	  "", "scenes#foliage" },
+	{ "Generate LODs/Generate", "",
+	  "Writes the simplified meshes next to the original and applies them where "
+	  "this dialog was opened from.",
+	  "", "rendering#performance" },
+	{ "Generate LODs/Cancel", "",
+	  "Closes the dialog without making anything.",
+	  "Esc", "rendering#performance" },
 
 	// ── Navigation ───────────────────────────────────────────────────────────
 	{ "Nav Mesh/Cell Size", "",
@@ -1072,9 +1194,10 @@ namespace
 	{ "Audio Source/Asset ID", "", "The sound this source plays.", "", "systems#audio" },
 	{ "Audio Source/Bus", "",
 	  "Which mixer bus the sound goes through — music, sfx, voice — so a whole "
-	  "group can be turned down at once. Empty uses the bus the clip itself was "
-	  "given in the Audio Editor, or the master bus when it has none. A name the "
-	  "mixer does not have is skipped the same way, with a warning in the log.",
+	  "group can be turned down at once. The Clip's Bus uses the bus the clip "
+	  "itself was given in the Audio Editor, or the master bus when it has none. "
+	  "A bus that was removed from the mixer is shown as missing and skipped the "
+	  "same way.",
 	  "", "systems#audio-bus-eq" },
 	{ "Audio Source/Volume", "", "Playback volume. 1 is the file as recorded.",
 	  "", "systems#audio" },
@@ -1177,9 +1300,19 @@ namespace
 	  "The world height of the cloud deck's base, in metres. Set it above your "
 	  "highest terrain, or the camera ends up above the weather.",
 	  "", "rendering#sky" },
+	{ "Environment/Dome Cloud Height", "",
+	  "How high the sky-dome clouds look. 1 is the classic look; higher puts the "
+	  "clouds further up, so they read smaller and drift slower against their own "
+	  "size; lower brings them close and large. 3D volumetric clouds use Cloud Altitude instead.",
+	  "", "rendering#sky" },
 	{ "Environment/Cloud Style", "",
 	  "Classic is the original flat, drifting layer. Realistic builds cauliflower "
 	  "shapes that tower and dissolve, at a higher cost.",
+	  "", "rendering#sky" },
+	{ "Environment/Cloud Type", "",
+	  "The kind of cloud the Realistic layer grows: mixed cumulus (default), flat "
+	  "cumulus, towering cumulus, stratocumulus sheets or cumulonimbus. Changes cell size "
+	  "and height; Coverage still decides how much sky they fill.",
 	  "", "rendering#sky" },
 	{ "Environment/Evolution", "",
 	  "How fast clouds change shape as they drift. 0 freezes the formation and "
@@ -1219,7 +1352,7 @@ namespace
 	  "Let clouds cast shadows within their own body, so a tall tower darkens what "
 	  "is behind it. Costs a second light march.",
 	  "", "rendering#sky" },
-	{ "Environment/Low-res clouds (quarter-res pass)", "",
+	{ "Environment/Low-res clouds", "",
 	  "Raymarch the clouds at quarter resolution and upscale. Much cheaper on a "
 	  "sky-filled view, slightly softer edges.",
 	  "", "rendering#performance" },
@@ -1248,6 +1381,57 @@ namespace
 	{ "Environment/Ground Hugging", "",
 	  "How much the fog pools near the ground instead of filling the air evenly. "
 	  "High values give valley mist.",
+	  "", "rendering#sky" },
+	{ "Environment/Mode##fogvol", "Volumetric Fog Mode",
+	  "Analytic keeps today's flat per-pixel blend toward the horizon. Volumetric "
+	  "raymarches a real 3D fog volume with sun/light shafts and in-fog shadow, past "
+	  "Volume Distance the analytic fog still takes over. A Sky you add today starts "
+	  "on Volumetric (it draws nothing until Density or Bank Density is above 0); a "
+	  "scene saved before this existed stays Analytic. Greyed out on a backend that "
+	  "has not implemented it yet (Direct3D 11/12 for now): a scene with Volumetric "
+	  "chosen still loads and plays there, with the Density fog standing in.",
+	  "", "rendering#sky" },
+	{ "Environment/Quality##fogvol", "Volumetric Fog Quality",
+	  "Size of the froxel grid the volume is computed on. Higher resolves finer "
+	  "light shafts and sharper bank edges, at a higher GPU cost.",
+	  "", "rendering#performance" },
+	{ "Environment/Volume Distance", "",
+	  "How far the volumetric fog reaches before the Density fog above continues "
+	  "seamlessly. Clamped to the directional shadow distance, so the volume is "
+	  "never asked to shade past where it has a shadow map to sample.",
+	  "", "rendering#sky" },
+	{ "Environment/Albedo##fogvol", "Volumetric Fog Albedo",
+	  "Scattering tint of the volume. White scatters the sky and sun colour "
+	  "unchanged; a tint colours the fog itself, the way dust or smoke would.",
+	  "", "rendering#sky" },
+	{ "Environment/Anisotropy", "",
+	  "Henyey-Greenstein scattering phase. Negative scatters light back toward the "
+	  "camera; positive forms a brighter shaft when looking toward the sun.",
+	  "", "rendering#sky" },
+	{ "Environment/Noise Amount", "",
+	  "How much 3D noise breaks up the volume's height formula. 0 keeps a smooth "
+	  "layer; higher gives drifting wisps and clearer patches. Foggy weather raises "
+	  "it; once you move it the weather leaves it alone until the next preset pick.",
+	  "", "rendering#sky" },
+	{ "Environment/Noise Scale", "",
+	  "World size of one noise period. Small values give fine wisps, large values "
+	  "broad patches of thicker and thinner fog.",
+	  "", "rendering#sky" },
+	{ "Environment/Bank Density", "",
+	  "A ground-hugging fog bank layered on top of the height fog, with its own "
+	  "edges — valley mist or haze sitting over a lake bed. A Weather preset drives "
+	  "it (Foggy a thick bank, Rain a faint one); once you move it the weather leaves "
+	  "it alone until the next preset pick.",
+	  "", "rendering#sky" },
+	{ "Environment/Bank Base", "",
+	  "World Y of the fog bank's lower edge.", "", "rendering#sky" },
+	{ "Environment/Bank Thickness", "",
+	  "How tall the fog bank stands. Its top edge is soft and eroded by noise, "
+	  "never a hard line.",
+	  "", "rendering#sky" },
+	{ "Environment/Local Light Scatter", "",
+	  "How much point and spot lights scatter inside the volume, on top of the "
+	  "sun or moon. 0 switches it off.",
 	  "", "rendering#sky" },
 	{ "Environment/Star Brightness", "",
 	  "How bright the star field is. Stars fade out by themselves as the sky "
@@ -1346,7 +1530,8 @@ namespace
 	  "", "rendering#weather" },
 	{ "Weather/Fog Density##wx", "",
 	  "Atmospheric fog thickness — the Sky's Density. Moving it takes it away from the "
-	  "preset until the next pick.",
+	  "preset until the next pick. With the Sky's Fog Mode on Volumetric the preset "
+	  "also sets the ground bank and its noise (Bank Density, Noise Amount).",
 	  "", "rendering#weather" },
 	{ "Weather/Wind Speed##wx", "",
 	  "Cloud drift and rain slant, 1 = calm. The Sky's Wind Speed, set from here.",
@@ -1397,8 +1582,9 @@ namespace
 	  "inside that: this only turns the whole mix up or down.",
 	  "", "rendering#weather" },
 	{ "Weather/Bus", "",
-	  "The mixer bus the weather plays through (SFX by default). A name the mixer "
-	  "does not have falls back to the clip's own bus, then to master.",
+	  "The mixer bus the weather plays through (SFX by default), picked from the "
+	  "project's buses. A bus that was removed from the mixer is shown as missing "
+	  "and falls back to the clip's own bus, then to master.",
 	  "", "rendering#weather" },
 	{ "Weather/Rain Sound", "Rain Sound",
 	  "The rain bed, a loop that fades in as rain falls and out as it stops. Empty "
@@ -1470,6 +1656,11 @@ namespace
 	{ "UI Text/Color", "",
 	  "Text colour, alpha included. Fading a whole panel is usually better done on "
 	  "the panel's opacity than on each label.",
+	  "", "ui#elements" },
+	{ "UI Text/Font", "",
+	  "The Font asset this text draws with, baked into its own atlas at the "
+	  "font's size. Empty uses the shared default UI font — the same resolution "
+	  "a widget's Font slot goes through.",
 	  "", "ui#elements" },
 	{ "UI Image/Tint", "",
 	  "Multiplied into the image. White leaves the texture alone; the alpha "
@@ -1871,7 +2062,7 @@ namespace
 	  "one of them; drag the handle in the Scene view (Spline mode) or type the "
 	  "numbers here.",
 	  "", "scenes#components" },
-	{ "Spline/+ Point", "",
+	{ "Spline/Add Point", "",
 	  "Adds a control point at the far end, carrying on in the direction of the "
 	  "last segment, so it lands somewhere you can see and grab.",
 	  "", "scenes#components" },
@@ -1883,7 +2074,7 @@ namespace
 	  "Joins the last point back to the first so the line becomes an outline "
 	  "(it needs three points). One undo step.",
 	  "", "editor#viewport" },
-	{ "Spline Tool/Delete Point", "",
+	{ "Spline Tool/Remove Point", "",
 	  "Removes the selected point from the line. The Delete key does the same "
 	  "while the Scene view has the focus; the neighbouring point is selected "
 	  "next, so holding the key eats the line from the end you are at.",
@@ -2018,6 +2209,19 @@ namespace
 	  "waypoint a script looks up by name. Auto leaves the choice to the split. Takes "
 	  "effect the next time the scene is split.",
 	  "", "scenes#streaming" },
+	{ "Mobility/Static", "",
+	  "This entity never moves, scripts or reparents, so it may be cooked into "
+	  "flat render/physics data at export and at startup. Click to make it "
+	  "Movable. Static on an entity that still carries a script, an animator or "
+	  "a dynamic body does not cook it either way; the analysis reports the "
+	  "contradiction instead. Without a choice of its own, an entity shows "
+	  "Static when nothing about it blocks cooking.",
+	  "", "rendering#performance" },
+	{ "Mobility/Movable", "",
+	  "Keeps this entity a full entity, never cooked — use it to pin an entity "
+	  "that is still changed from outside the paths cooking watches (code that "
+	  "writes the transform directly, for instance). Click to make it Static.",
+	  "", "rendering#performance" },
 	{ "Save State/Enabled", "",
 	  "Include this entity in savegames. Off, it is whatever the scene file says "
 	  "every time the game is loaded.",
@@ -2103,6 +2307,13 @@ namespace
 	  "Adds a detail level: a cheaper mesh and the distance from which it takes "
 	  "over.",
 	  "", "rendering#performance" },
+	{ "LOD/Generate LODs", "",
+	  "Makes simpler versions of this entity's mesh, kept inside the mesh's own "
+	  "asset, and replaces the levels here with them: LOD 0 stays the "
+	  "mesh itself, each further level shows from the distance where its error "
+	  "shrinks to the pixel error you choose, scaled by the entity's size. Undo "
+	  "takes the levels here back; the mesh keeps its new versions.",
+	  "", "rendering#performance" },
 	{ "UI Canvas/Screen Space", "",
 	  "The canvas is drawn flat on the screen, at the same size wherever the "
 	  "camera is — a HUD, a menu.",
@@ -2134,7 +2345,7 @@ namespace
 	  "", "editor#project-hub" },
 	{ "File/Import Asset...", "",
 	  "Brings a file from outside into the project — meshes, textures, audio, "
-	  "fonts — converting it on the way in. The same import as Assets ▸ Import "
+	  "fonts — converting it on the way in. The same import as Assets » Import "
 	  "Asset, offered here too because File is where a newcomer looks for it.",
 	  "", "editor#content-browser" },
 	{ "File/Close Project", "",
@@ -2231,6 +2442,201 @@ namespace
 	  "by itself when a run stops; while nothing is stopped it shows the Game "
 	  "Instance's variables live.",
 	  "", "horizoncode#debugging" },
+	{ "Window/Stamp Heightmap", "",
+	  "Opens the tab that makes the heightmap of a Landscape Stamp: generate a landform, or sketch roughly and let "
+	  "Naturalize turn the sketch into ground that looks grown, then erode and filter. A test landscape beside the "
+	  "picture shows the result in 3D; with Live Preview the real landscape follows too.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape Stamp/Edit Heightmap...", "",
+	  "Opens the Stamp Heightmap tab with this stamp's heightmap file in it. Without a file the tab keeps its picture; "
+	  "Assign to Selected Stamp there gives it to this stamp.",
+	  "", "scenes#terrain" },
+	{ "Tile Landscape/Edit Heightmap...", "",
+	  "Opens the Stamp Heightmap tab with the Stamp tool's heightmap file in it.",
+	  "", "editor#landscape-mode" },
+	// ── Stamp Heightmap ──────────────────────────────────────────────────────
+	{ "Stamp Heightmap/Tool", "",
+	  "Raise and Lower add or take height under the brush, Smooth evens it out, Flatten pulls it to Start Height. Line: "
+	  "drag from one point to another, the ground along it is pulled to a height that runs from Start Height to End "
+	  "Height (a ridge, a wall, a road, a valley; a click is a dot). Transition: drag a direction, the whole picture runs "
+	  "from Start Height to End Height along it. Select and Deselect paint the selection that Generate and the filters "
+	  "are limited to. A rough sketch is enough: Naturalize works it out.",
+	  "", "editor#landscape-mode" },
+	{ "Stamp Heightmap/Redo Step", "",
+	  "Brings back the step Undo Step took away.",
+	  "", "editor#landscape-mode" },
+	{ "Stamp Heightmap/Landform", "",
+	  "What Generate makes: rolling hills, a single mountain, a mountain range of ridges, a plateau with a steep edge, "
+	  "a crater, a volcano with its crater, dunes with a long windward and a short lee side, or an island.",
+	  "", "editor#landscape-mode" },
+	{ "Stamp Heightmap/Blend", "",
+	  "How the generated landform meets what is in the picture: replace it, add to it, subtract from it, or keep the "
+	  "higher (Lighten) or the lower (Darken) of the two.",
+	  "", "editor#landscape-mode" },
+	{ "Stamp Heightmap/Seed", "",
+	  "The number the landform, Naturalize and Erode take their randomness from. The same seed gives the same result, "
+	  "another seed a sibling of it.",
+	  "", "editor#landscape-mode" },
+	{ "Stamp Heightmap/Feature Size", "",
+	  "Size of the largest features as a share of the picture: small for many hills, large for one broad form.",
+	  "", "editor#landscape-mode" },
+	{ "Stamp Heightmap/Octaves", "",
+	  "How many times the features repeat at half the size on top of each other. More gives finer detail.",
+	  "", "editor#landscape-mode" },
+	{ "Stamp Heightmap/Roughness", "",
+	  "How much each finer octave keeps of the one above: low is soft, high is craggy.",
+	  "", "editor#landscape-mode" },
+	{ "Stamp Heightmap/Warp", "",
+	  "Bends the form with slow noise, so nothing in it stays straight or perfectly round.",
+	  "", "editor#landscape-mode" },
+	{ "Stamp Heightmap/Peak Height", "",
+	  "The height of the landform's highest point, from 0 to 1 (the stamp's full height).",
+	  "", "editor#landscape-mode" },
+	{ "Stamp Heightmap/Generate", "",
+	  "Makes the landform with the settings above. With a selection only inside it, blended over its soft edge, so one "
+	  "region can be made again while the rest stays.",
+	  "", "editor#landscape-mode" },
+	{ "Stamp Heightmap/New Seed", "",
+	  "Counts the seed up and generates again: another variant of the same landform, in the selection when there is one.",
+	  "", "editor#landscape-mode" },
+	{ "Stamp Heightmap/Smoothing", "",
+	  "How much of the hand Naturalize takes out of the sketch before it works: the blur radius as a share of the picture.",
+	  "", "editor#landscape-mode" },
+	{ "Stamp Heightmap/Relief", "",
+	  "How much ridged detail Naturalize lays over the sketch. It grows with the height: plains stay calm, heights get crags.",
+	  "", "editor#landscape-mode" },
+	{ "Stamp Heightmap/Erosion", "",
+	  "How strongly water and gravity work on the result of Naturalize: channels, fans and slopes that have slid.",
+	  "", "editor#landscape-mode" },
+	{ "Stamp Heightmap/Naturalize Sketch", "",
+	  "Turns what is in the picture into ground that looks grown rather than drawn: brush marks are blurred away, outlines "
+	  "bent, ridged relief added and the result eroded. Sketch where it is high and how high, roughly; this does the rest. "
+	  "Works in the selection when there is one.",
+	  "", "editor#landscape-mode" },
+	{ "Stamp Heightmap/Water", "",
+	  "How many drops Erode lets run downhill. Each takes ground where it is fast and lays it down where it slows.",
+	  "", "editor#landscape-mode" },
+	{ "Stamp Heightmap/Gravity Passes", "",
+	  "How often Erode lets slopes steeper than the angle of repose slide to the neighbour below. More passes, gentler slopes.",
+	  "", "editor#landscape-mode" },
+	{ "Stamp Heightmap/Erode", "",
+	  "Runs water and gravity over the picture (or the selection). A large picture takes a moment.",
+	  "", "editor#landscape-mode" },
+	{ "Stamp Heightmap/Blur Radius", "",
+	  "How far Blur spreads each height, in pixels of the picture.",
+	  "", "editor#landscape-mode" },
+	{ "Stamp Heightmap/Blur", "",
+	  "Softens the picture (or the selection).",
+	  "", "editor#landscape-mode" },
+	{ "Stamp Heightmap/Terrace Steps", "",
+	  "How many levels Terrace cuts the heights into.",
+	  "", "editor#landscape-mode" },
+	{ "Stamp Heightmap/Terrace Sharpness", "",
+	  "From 0 (the ground as it is) to 1 (flat treads with short risers).",
+	  "", "editor#landscape-mode" },
+	{ "Stamp Heightmap/Terrace", "",
+	  "Cuts the picture (or the selection) into steps, as on rice terraces or layered rock.",
+	  "", "editor#landscape-mode" },
+	{ "Stamp Heightmap/Edge Fade Width", "",
+	  "How far in from the border Fade Edges reaches, as a share of half the picture.",
+	  "", "editor#landscape-mode" },
+	{ "Stamp Heightmap/Fade Edges", "",
+	  "Fades the picture to nothing toward its border, so the stamp meets the landscape without a rim.",
+	  "", "editor#landscape-mode" },
+	{ "Stamp Heightmap/Normalize", "",
+	  "Stretches the heights so the lowest becomes 0 and the highest 1: the stamp uses its whole height.",
+	  "", "editor#landscape-mode" },
+	{ "Stamp Heightmap/Invert", "",
+	  "Turns high into low and low into high, in the selection when there is one.",
+	  "", "editor#landscape-mode" },
+	{ "Stamp Heightmap/Clear Selection", "",
+	  "Drops the selection: Generate and the filters work on the whole picture again.",
+	  "", "editor#landscape-mode" },
+	{ "Stamp Heightmap/Invert Selection", "",
+	  "Selects what was not selected and the other way round.",
+	  "", "editor#landscape-mode" },
+	{ "Stamp Heightmap/Feather Selection", "",
+	  "Softens the selection's edge by half the brush radius, so what is made inside it blends into the rest.",
+	  "", "editor#landscape-mode" },
+	{ "Stamp Heightmap/Test Size", "",
+	  "Edge of the test landscape beside the picture, in metres. Set it to the stamp's size to judge slopes as they will be.",
+	  "", "editor#landscape-mode" },
+	{ "Stamp Heightmap/Test Height", "",
+	  "What white is on the test landscape, in metres. Set it to the stamp's height.",
+	  "", "editor#landscape-mode" },
+	{ "Stamp Heightmap/Time of Day", "",
+	  "Where the sun stands over the test landscape. A low sun shows relief best.",
+	  "", "editor#landscape-mode" },
+	{ "Stamp Heightmap/Radius", "",
+	  "Half the width of the brush or the line, in pixels of the picture. The stroke fades out toward it.",
+	  "", "editor#landscape-mode" },
+	{ "Stamp Heightmap/Strength", "",
+	  "How fast the brush works, and how far a line or a transition replaces what is there: 1 sets the height, less blends.",
+	  "", "editor#landscape-mode" },
+	{ "Stamp Heightmap/Start Height", "",
+	  "The height where a line or a transition begins, from 0 (black, nothing added) to 1 (white, the stamp's full height). Fill uses it too.",
+	  "", "editor#landscape-mode" },
+	{ "Stamp Heightmap/End Height", "",
+	  "The height where a line or a transition ends. The same as Start Height gives a level line.",
+	  "", "editor#landscape-mode" },
+	{ "Stamp Heightmap/Undo Step", "",
+	  "Takes back the last stroke, generator, filter, New, Fill or Load. Up to 16 steps.",
+	  "", "editor#landscape-mode" },
+	{ "Stamp Heightmap/New Picture", "",
+	  "Starts a black picture at the size picked. The stamp stretches it over its footprint, so more pixels give finer detail.",
+	  "", "editor#landscape-mode" },
+	{ "Stamp Heightmap/128 x 128", "",
+	  "A small picture: fast, for a simple form.",
+	  "", "editor#landscape-mode" },
+	{ "Stamp Heightmap/256 x 256", "",
+	  "The usual size for one hill or one mountain.",
+	  "", "editor#landscape-mode" },
+	{ "Stamp Heightmap/512 x 512", "",
+	  "For a stamp with fine relief or a large footprint.",
+	  "", "editor#landscape-mode" },
+	{ "Stamp Heightmap/1024 x 1024", "",
+	  "The finest picture. Erode and Naturalize take a moment at this size.",
+	  "", "editor#landscape-mode" },
+	{ "Stamp Heightmap/Brush", "",
+	  "Whether a stroke in the Select mode adds to the selection or takes away from it.",
+	  "", "editor#landscape-mode" },
+	{ "Stamp Heightmap/Ground Colours", "",
+	  "Colours the test landscape as ground: grass low, soil above, rock where it is steep, snow on top. Off shows it in "
+	  "one even grey, to judge the form alone.",
+	  "", "editor#landscape-mode" },
+	{ "Stamp Heightmap/Brightness", "",
+	  "How bright the ground of the test landscape is. Turn it down when the relief burns out in the sun; the sky behind "
+	  "it keeps its own brightness.",
+	  "", "editor#landscape-mode" },
+	{ "Stamp Heightmap/Clouds", "",
+	  "How overcast the sky over the test landscape is. More clouds dim the sun and soften the shadows.",
+	  "", "editor#landscape-mode" },
+	{ "Stamp Heightmap/Frame Test Landscape", "",
+	  "Puts the whole test landscape back in view. F does the same while the mouse is over it.",
+	  "", "editor#landscape-mode" },
+	{ "Stamp Heightmap/Fill", "",
+	  "Sets the whole picture to Start Height.",
+	  "", "editor#landscape-mode" },
+	{ "Stamp Heightmap/Name", "",
+	  "The file's name: the picture is saved as Heightmaps/<Name>.pgm in the project's folder, at 16 bits.",
+	  "", "editor#landscape-mode" },
+	{ "Stamp Heightmap/Save", "",
+	  "Writes the picture to its file. Stamps that use the file show it at once.",
+	  "", "editor#landscape-mode" },
+	{ "Stamp Heightmap/Open", "",
+	  "Reads the file of the name above (Heightmaps/<Name>.pgm) into the editor to go on working on it.",
+	  "", "editor#landscape-mode" },
+	{ "Stamp Heightmap/Live Preview", "",
+	  "Once the picture has been saved or loaded, every stroke is written to the file and the stamps that use it follow "
+	  "on the landscape while you paint. Changing the name stops it until the next Save.",
+	  "", "editor#landscape-mode" },
+	{ "Stamp Heightmap/Assign to Selected Stamp", "",
+	  "Saves the picture and makes it the heightmap file of the selected Landscape Stamp entity.",
+	  "", "editor#landscape-mode" },
+	{ "Stamp Heightmap/Use in Stamp Tool", "",
+	  "Saves the picture and makes it the heightmap file of the Landscape mode's Stamp tool: the next click on the "
+	  "landscape places a stamp with it.",
+	  "", "editor#landscape-mode" },
 	{ "Window/Task Board", "",
 	  "Opens the Planner on its Tasks database: the project's to-do list, with a "
 	  "status and a priority per task, linked to the assets, entities, scenes and "
@@ -2725,6 +3131,14 @@ namespace
 	  "The triangle edges of every mesh, unlit. Shows how dense a model is and "
 	  "where the LOD switches; the sky and particles stay as they are.",
 	  "Alt+2", "editor#viewport" },
+	{ "Viewport View Mode/RVT Mip Levels", "",
+	  "Unlit, with every landscape drawn from the Runtime Virtual Texture coloured "
+	  "by the detail level of the page it reads: red finest (mip 0), then orange, "
+	  "yellow, green, cyan, blue, magenta for ever coarser pages. Dark stripes mark "
+	  "pixels that want a finer page than the pool holds there, so they show a "
+	  "coarser one. Surfaces without RVT stay plain Unlit; with the virtual texture "
+	  "off (Preferences > World > Virtual Texture) nothing is coloured.",
+	  "", "editor#viewport" },
 	{ "Viewport View Mode/Base Color", "",
 	  "The G-buffer's base colour, straight from the material. Needs the "
 	  "Deferred render path (Preferences > Rendering) — the forward path has "
@@ -2743,6 +3157,16 @@ namespace
 	{ "Viewport View Mode/Emissive", "",
 	  "The G-buffer's emissive colour on its own — what glows, and how much, "
 	  "before bloom gets to it. Deferred render path only.",
+	  "", "editor#viewport" },
+	{ "Viewport View Mode/Virtual Texture", "",
+	  "The page map of the Runtime Virtual Texture, drawn unlit. A landscape read "
+	  "from pages is coloured by the mip of the page it shows (green is the "
+	  "finest, each coarser mip steps round the colour wheel); thin white lines "
+	  "are page borders, dark diagonal stripes mark a page that stands in for a "
+	  "finer one that is not painted yet, a pale checker marks a painted page "
+	  "that is stale and waits to be repainted, and flat black is no page at all. "
+	  "Needs the RVT switch on (Preferences > Rendering) and a landscape drawn "
+	  "from pages; anything else is shown unlit.",
 	  "", "editor#viewport" },
 
 	// ── World Outliner ───────────────────────────────────────────────────────
@@ -2817,6 +3241,30 @@ namespace
 	  "Reads the source file again and rebuilds the asset from it — after the "
 	  "model was changed in the program it came from. A texture keeps its "
 	  "color space setting.",
+	  "", "editor#content-browser" },
+	{ "Content Browser/Generate LODs...", "",
+	  "Makes simpler versions of this static mesh, e.g. 100 / 50 / 25 / 10 % of the "
+	  "triangles, and keeps them inside the mesh's asset: no extra files in the "
+	  "Content Browser. They draw with the mesh's material slots. Every entity that "
+	  "shows the mesh switches between them by distance on its own; the Static Mesh "
+	  "tab shows each one. Running it again replaces them and keeps their references. "
+	  "Old Name_LOD1 files beside the mesh are merged in and removed.",
+	  "", "editor#content-browser" },
+	{ "Mesh Viewer/LOD", "Detail level",
+	  "Which detail level the tab shows. LOD 0 is the mesh itself; the others are "
+	  "the simpler versions kept inside this asset, which the game draws from "
+	  "further away. The views and the numbers on the left follow the choice; the "
+	  "material slots are the mesh's and apply to every level.",
+	  "", "editor#content-browser" },
+	{ "Mesh Viewer/Generate LODs...", "",
+	  "Makes (or remakes) the simpler versions of this mesh inside its asset. "
+	  "Existing levels keep their identity, so whatever uses them keeps working.",
+	  "", "editor#content-browser" },
+	{ "Mesh Viewer/Merge Level Files", "",
+	  "This mesh still has its levels as separate Name_LOD1 files from an older "
+	  "engine version. Rebuilds them inside the mesh's asset from the mesh itself "
+	  "and removes the files. The levels keep their identity, so scenes and foliage "
+	  "layers that use them need no change.",
 	  "", "editor#content-browser" },
 	{ "Content Browser/Color Space...", "",
 	  "Says whether the selected textures hold color (sRGB, decoded by the GPU) "
@@ -3104,6 +3552,9 @@ namespace
 	{ "Planner/Open", "Open",
 	  "Lists everything you can open: tables, timelines, boards, calendars, pages and whiteboards. Each is open once; picking one that is open takes you to its tab. The x on a tab closes the tab, not the thing.",
 	  "", "" },
+	{ "Planner/Open Row", "Open Row",
+	  "Opens this row in the side panel: every property and the page the row carries.",
+	  "", "" },
 	{ "Planner/+ Table", "+ Table",
 	  "Adds a table view to this database: rows down, one column per property. "
 	  "Each view keeps its own filters, sorting and hidden columns.",
@@ -3269,6 +3720,36 @@ namespace
 	{ "Planner/Data", "Data",
 	  "The rows and columns behind this view. Rename them here. Tables, timelines, boards and calendars made from the same data show the same rows; change a row in one and it changes in all.",
 	  "", "" },
+	{ "Planner/Timeline or Calendar", "Timeline / Calendar",
+	  "Shows the same dated rows along a time axis (Timeline) or on the days of a month (Calendar). The choice is saved with the view.",
+	  "", "" },
+	{ "Planner/Code Language", "",
+	  "The language this code block is coloured as. A new code block (three backticks) starts in the language picked last.",
+	  "", "" },
+	{ "Planner/Export Page", "Export",
+	  "Writes this page as Markdown (.md) or as a Word document (.docx) into the project's Export/Planner folder. Headings, lists, to-dos, quotes, code and dividers keep their look; links to engine objects, pages and tables become their names.",
+	  "", "" },
+	{ "Planner/Export Calendar", "Export",
+	  "Writes the dated rows this view shows as all-day events into an iCalendar file (.ics) in the project's Export/Planner folder. On macOS, Add to Calendar also opens it in Calendar, which asks which calendar to add them to; doing it again updates the events instead of adding them twice.",
+	  "", "" },
+	{ "Planner/Assigned to me", "Mine",
+	  "Shows only the rows assigned to you: your name in the data's people column (Assignees on Tasks). Signed in to a team server, you are your member name; otherwise the name this editor writes under.",
+	  "", "" },
+	{ "Planner/Markdown (.md)", "",
+	  "Writes this page as Markdown into the project's Export/Planner folder: headings, lists, to-dos, quotes, code and dividers as Markdown marks them.",
+	  "", "" },
+	{ "Planner/Word (.docx)", "",
+	  "Writes this page as a Word document into the project's Export/Planner folder, with Word's own heading styles.",
+	  "", "" },
+	{ "Planner/iCalendar file (.ics)", "",
+	  "Writes the dated rows this view shows as all-day events into an .ics file in the project's Export/Planner folder.",
+	  "", "" },
+	{ "Planner/Add to Calendar", "",
+	  "Writes the .ics file and opens it in Calendar, which asks which calendar to add the events to. Doing it again updates them.",
+	  "", "" },
+	{ "Planner/Group By", "Group",
+	  "Which Select property makes the lanes of this board: one lane per option. Dragging a card to another lane sets that option.",
+	  "", "" },
 	{ "Planner/Delete Data", "Delete Data",
 	  "Deletes the data behind a view that is its only one, with all its rows, after you confirm. Source control has the previous version.",
 	  "", "" },
@@ -3277,6 +3758,18 @@ namespace
 	  "", "" },
 	{ "Planner/New Item", "New Item",
 	  "Adds a card in the first lane and opens it. The + at the top of a lane adds to that lane.",
+	  "", "" },
+	{ "Planner/Add Card to Lane", "Add Card",
+	  "Adds a card to this lane, with the lane's value already set.",
+	  "", "" },
+	{ "Planner/Remove Filter", "Remove Filter",
+	  "Removes this filter from the view.",
+	  "", "" },
+	{ "Planner/Remove Link", "Remove Link",
+	  "Removes this link. What it points at is not changed.",
+	  "", "" },
+	{ "Planner/Remove Page Link", "Remove Page Link",
+	  "Clears the page this block points to. The page itself stays.",
 	  "", "" },
 	{ "Planner/Close Details", "Close Details",
 	  "Closes the details of this row (Esc does too). The row stays as it is.",
@@ -3406,9 +3899,8 @@ namespace
 	{ "Task Board/Footer Task", "",
 	  "Opens the Task Board with this task's details.",
 	  "", "" },
-	{ "Task Board/Open Task Board", "Open Task Board",
-	  "Brings up the Task Board panel (Window ▸ Task Board), where tasks are "
-	  "added, linked and assigned.",
+	{ "Task Board/Open Planner", "Open Planner",
+	  "Opens the Planner on Tasks, where tasks are added, linked and assigned.",
 	  "", "" },
 
 	// ── Audio Mixer ──────────────────────────────────────────────────────────
@@ -3523,12 +4015,13 @@ namespace
 
 	// ── Project Hub and the reader itself ────────────────────────────────────
 	{ "Project Hub/Advanced Shader Effects", "",
-	  "Whether this application may author MATERIALS — shader graphs of its own. "
-	  "Off, the editor offers none and the packaged build ships the small renderer: "
-	  "widgets are still styled with rounded corners, borders, gradients and "
-	  "shadows, which is what an interface actually uses. On, everything a game "
-	  "has is available and the build carries a GPU renderer. Offered for "
-	  "applications only, and it cannot be changed afterwards.",
+	  "Which renderer the packaged application ships. Off, it is the small software "
+	  "renderer: no GPU and no driver needed, and materials are limited to the "
+	  "widget nodes it runs itself (colours, parameters, textures, the element's "
+	  "size, state and shape, maths, logic, Backdrop and the shipped UI effects). "
+	  "On, everything a game has is available, every material node included, and "
+	  "the build carries a GPU renderer. Offered for applications only, and it "
+	  "cannot be changed afterwards.",
 	  "", "editor#project-hub" },
 	{ "Project Hub/Remove from list", "",
 	  "Takes the project off this list. The project itself is untouched on disk "
@@ -3554,7 +4047,7 @@ namespace
 	  "for the next time the tour starts.",
 	  "", "getting-started#first-project" },
 	{ "Project Hub/Not now", "",
-	  "Puts the offer away. It comes back through Help ▸ Interactive Tutorial "
+	  "Puts the offer away. It comes back through Help » Interactive Tutorial "
 	  "whenever you want it.",
 	  "", "getting-started#first-project" },
 	{ "Scene Changed/Reload Scene", "",
@@ -3567,14 +4060,21 @@ namespace
 	  "overwrites the file that came from disk with what is open here. Another "
 	  "change to the file on disk asks again.",
 	  "", "" },
+	{ "Project Hub/Try Again", "",
+	  "Asks the team server for the project's newest version again (and signs in again with the saved session if that had failed).",
+	  "", "" },
+	{ "Project Hub/Open Without Updating", "",
+	  "Opens the project as it is on this machine, without waiting for the team server. Your saves go to the team and the newest version comes once the sync gets through.",
+	  "", "" },
 	{ "Project Hub/Open Anyway", "",
-	  "Opens the project although some of the engine content it uses could not be "
-	  "downloaded. Materials and meshes that use the missing files look wrong until "
-	  "they arrive; the editor keeps trying to fetch them whenever something needs them.",
+	  "Opens the project although something could not be had first. Engine content that "
+	  "could not be downloaded: materials and meshes that use it look wrong until it "
+	  "arrives, the editor keeps trying. The team's newest version: you work on the copy "
+	  "on this machine, and it catches up once the team server is reachable.",
 	  "", "editor#project-hub" },
 	{ "Project Hub/Close Project", "",
 	  "Does not open the project and goes back to the Project Hub. Nothing was loaded, "
-	  "so nothing needs saving; open it again once the EngineContent server is reachable.",
+	  "so nothing needs saving; open it again once the server it waits for is reachable.",
 	  "", "editor#project-hub" },
 	{ "Project Hub/Close Editor", "",
 	  "Quits the editor without opening the project.",
@@ -4098,6 +4598,14 @@ namespace
 	  "and this machine actually support — some features (ray-traced GI) exist "
 	  "on some backends and not on others.",
 	  "", "rendering#backends" },
+	{ "Preferences/Display/Renderer Capabilities", "Renderer Capabilities",
+	  "What the renderer the editor is running on can do on this platform: each line is a feature, yes or no. The answers "
+	  "come from the backend itself, for this machine: a feature can be missing because the graphics API has no way to do "
+	  "it, because the driver is short of something it needs, or because it is not built for this backend yet. A feature "
+	  "that says no is skipped without an error: the frame is drawn without it. The Tile Landscape lines say where its "
+	  "ground takes part (shadows, ambient occlusion, GI, the virtual texture); they differ most between backends. A "
+	  "backend picked in the list above only starts with the next launch, so until then the list is still the running one's.",
+	  "", "rendering#backends" },
 	{ "Preferences/Display/Render Path", "",
 	  "Forward shades each object as it is drawn. Deferred shades the whole screen "
 	  "at once, which is what lifts the light count and turns on SSAO and SSR.",
@@ -4106,6 +4614,16 @@ namespace
 	  "Skips drawing what a wall, a hill or a building is already hiding. The "
 	  "picture stays the same; the draw count drops. Off by default until it "
 	  "has proven itself on real scenes.",
+	  "", "rendering#performance" },
+	{ "Preferences/Display/Runtime Virtual Texture", "",
+	  "The one switch for Runtime Virtual Textures. On: a material with an RVT Write node is painted once into pages of a "
+	  "shared pool, and the RVT Read node only reads them back, so what comes before the Write node runs again only when "
+	  "something there changes. Off: the RVT Write node is skipped, the RVT Read node is replaced by whatever feeds the Write "
+	  "node, and the graph computes directly, the same shader as a graph without the pair.\n\n"
+	  "Needs a graphics backend that can hold a virtual texture (Metal, D3D11, D3D12, Vulkan and OpenGL with enough texture "
+	  "units do; the software renderer, an OpenGL driver with too few texture units or a Vulkan device at the sampler minimum "
+	  "do not): there it stays off whatever this says. The export follows the same switch, so a game exported with it off "
+	  "ships the direct graph. The environment variable HE_RVT=1 or 0 forces it on or off over this switch.",
 	  "", "rendering#performance" },
 	{ "Preferences/Display/VSync", "",
 	  "Waits for the display before showing a frame: no tearing, and the frame "
@@ -4314,6 +4832,13 @@ namespace
 	  "Keeps mesh and texture data in main memory after it has been uploaded to "
 	  "the GPU. It costs RAM and saves a re-read.",
 	  "", "advanced#assets" },
+	{ "Preferences/Content Browser/Generate LODs on Import", "",
+	  "When a static mesh is imported, also make simplified versions of it at 50, "
+	  "25 and 10 % of the triangles, kept inside the mesh's asset. Reimporting "
+	  "a mesh that already has them refreshes them. Off by default: it makes every "
+	  "import slower and every mesh bigger. Generate LODs in the Content Browser does "
+	  "the same for a mesh that is already in the project.",
+	  "", "editor#preferences" },
 	{ "Preferences/Content Browser/Refresh Interval (s)", "",
 	  "How often the Content Browser re-checks the project folder for files "
 	  "changed outside the editor.",
@@ -4377,7 +4902,7 @@ namespace
 	  "rest on the green alone. It is written in a sixth of a second, or "
 	  "appears whole with reduced motion, and fades with the line. Saving "
 	  "again right after does not draw it again. The same check is written "
-	  "into a HorizonCode graph's \"compiles clean\" readout after Compile.",
+	  "into a HorizonCode graph's \"Compiles clean\" readout after Compile.",
 	  "", "editor#preferences" },
 	{ "Preferences/Feedback/Light Edge", "",
 	  "One thin line of light along the top edge of the footer that spreads "
@@ -4637,17 +5162,17 @@ namespace
 	  "git's credential helper (the system keychain), where git finds it for "
 	  "every push and pull.",
 	  "", "editor#github" },
-	{ "Source Control/Sign out", "Sign out",
+	{ "Source Control/Sign Out", "Sign Out",
 	  "Removes the GitHub token from git's credential helper, so neither the "
 	  "editor nor git on this machine uses it any more. GitHub still lists "
 	  "Horizon Engine under Settings \xe2\x96\xb8 Applications until you revoke it "
 	  "there.",
 	  "", "editor#github" },
-	{ "Source Control/Copy code & open GitHub", "Copy code & open GitHub",
+	{ "Source Control/Copy Code & Open GitHub", "Copy Code & Open GitHub",
 	  "Puts the code on the clipboard and opens GitHub's device page in your "
 	  "browser. Paste the code there and approve. The editor notices on its own.",
 	  "", "editor#github" },
-	{ "Source Control/Copy code", "Copy code",
+	{ "Source Control/Copy Code", "Copy Code",
 	  "Puts the code on the clipboard, for when the browser is on another "
 	  "machine or already open.",
 	  "", "editor#github" },
@@ -4658,12 +5183,12 @@ namespace
 	{ "Source Control/Try again", "Try again",
 	  "Starts the sign-in over with a fresh code.",
 	  "", "editor#github" },
-	// The clone dialog's "Load my repositories", shown once signed in. The
-	// suffix stayed from when a token field had a button of the same name.
-	{ "Source Control/Load my repositories##signin", "Load my repositories",
-	  "Asks GitHub for every repository your sign-in can see \xe2\x80\x94 yours, and "
-	  "those of organisations you belong to \xe2\x80\x94 newest first. No token to "
-	  "type: the editor reads the sign-in from git's credential helper.",
+	// The clone dialog loads the list on its own once signed in; this asks again.
+	{ "Source Control/Refresh##repos", "Refresh",
+	  "Asks GitHub again for every repository your sign-in can see \xe2\x80\x94 yours, "
+	  "and those of organisations you belong to \xe2\x80\x94 newest first. The list "
+	  "loads by itself when the dialog opens; use this after creating a repository "
+	  "on GitHub, or when loading failed.",
 	  "", "editor#github" },
 	{ "Source Control/Push automatically after each commit", "",
 	  "Send every commit to the remote as it is made. Convenient alone, and a "
@@ -4684,7 +5209,7 @@ namespace
 	// them (Collision Layers, Permissions, Application, Fonts) write the .heproj
 	// and moved here from Preferences with their keys unchanged.
 	// ── Game ▸ General ───────────────────────────────────────────────────────
-	{ "Project General/Project", "Project",
+	{ "Project General/Project name", "Project name",
 	  "The project's name — the .heproj's file name, and what the export derives "
 	  "the bundle name from. Shown here so the page says whose settings these "
 	  "are; it is changed by renaming the project in the Project Hub, not typed "
@@ -4708,6 +5233,18 @@ namespace
 	  "It only opens when a picture is set: with no logo the splash would draw "
 	  "the engine's own wordmark, and the engine does not advertise itself "
 	  "inside your game. Saved to Config/ProjectSettings.json.",
+	  "", "export#overview" },
+	{ "Project General/Cook static entities", "Cook static entities",
+	  "On by default. When on, the export finds the meshes that never change while the game runs "
+	  "(no script, animation, physics body, replication or level of detail, and no "
+	  "such parent) and ships that list inside each scene. The game then draws them "
+	  "from a flat block of ready data instead of walking every entity each frame, "
+	  "and skips the analysis at load. A scene exported without it loads and draws "
+	  "exactly as before.\n\n"
+	  "An entity that a script or the engine API changes afterwards, or that gets a "
+	  "script, an animator or a body, falls back to normal handling on its own. "
+	  "Saved to Config/ProjectSettings.json as game.cookStaticEntities. The editor "
+	  "viewport is not affected; HE_COOK_STATIC=1 is the editor's switch.",
 	  "", "export#overview" },
 	{ "Project General/Splash image", "Splash image",
 	  "A PNG the splash shows, project-relative (Content/Splash.png). The export "
@@ -4971,7 +5508,7 @@ namespace
 	  "the way every project has worked so far. On, the rows on this page are the "
 	  "project's answer: they are written into Config/ProjectSettings.json, go "
 	  "into the exported build's config.json and are what the viewport previews "
-	  "with, unless the user chose their own values under Preferences ▸ Viewport "
+	  "with, unless the user chose their own values under Preferences » Viewport "
 	  "Quality.\n\n"
 	  "Switching on starts from the values the editor shows right now, so nothing "
 	  "jumps. Switching off leaves the project's values in the file, unused.",
@@ -5038,7 +5575,7 @@ namespace
 	  "Which graphics API the packaged build renders through. The platform "
 	  "default is the right answer almost always; a backend the target machine "
 	  "cannot create falls back to that default at start with a line in the "
-	  "log. The names are the same ones Preferences ▸ Display offers.",
+	  "log. The names are the same ones Preferences » Display offers.",
 	  "", "rendering#backends" },
 	// ── Rendering ▸ Shadows ──────────────────────────────────────────────────
 	{ "Shadows/Shadow distance", "Shadow distance",
@@ -5047,8 +5584,7 @@ namespace
 	  "distance spreads the same texels thinner — 250 is what the engine has "
 	  "always used.\n\n"
 	  "Saved to Config/ProjectSettings.json and read by the renderer as you "
-	  "edit (Metal and OpenGL draw cascades; the other backends still use one "
-	  "whole-scene map and ignore this page).",
+	  "edit.",
 	  "", "rendering#shadows" },
 	{ "Shadows/Cascades", "Cascades",
 	  "How many shadow maps the distance is cut into: a sharp one near the "
@@ -5076,6 +5612,54 @@ namespace
 	  "floor under the slope bias — the number that matters on flat ground under "
 	  "a high sun.",
 	  "", "rendering#shadows" },
+	// ── World ▸ Virtual Texture ──────────────────────────────────────────────
+	{ "Virtual Texture/Native near view on tile landscapes", "Native near view on tile landscapes",
+	  "The native near view for a Tile Landscape: its ground close to the camera is drawn with the material itself instead of "
+	  "from pages, which is sharper from close up. Off by default, because a tile landscape changes material a whole patch "
+	  "(128 m and more) at a time, so much more ground than the near radius is computed in place: about a fifth more frame "
+	  "time for the ground. Turn it on when the ground right at the camera looks soft and the frame time allows it.",
+	  "", "rendering#performance" },
+	{ "Virtual Texture/Native near view", "Native near view",
+	  "Keeps the landscape's own material close to the camera. A page has a fixed ground resolution (the texel size), the "
+	  "material has its textures' resolution, which is far finer: from close up the pages are blurry whatever their level. "
+	  "With this on, every landscape chunk nearer than the distance where one finest-level texel covers one screen pixel draws "
+	  "its own material, and only the chunks beyond it are drawn from pages. That distance follows the texel size and the "
+	  "camera (about 290 m for 0.25 m texels on a 1080-pixel-high image); a finer texel size moves it closer and saves more.\n\n"
+	  "The price: the near chunks run the full material again, and its large texture arrays stay in memory. Off draws every "
+	  "chunk from pages. Applies at once.",
+	  "", "rendering#performance" },
+	{ "Virtual Texture/Pool size", "Pool size",
+	  "How many pages the pool holds, shared by every landscape: each page is 136 x 136 pixels in three layers, about "
+	  "0.22 MB, so 512 pages are 108 MB of video memory. A pool that is too small shows up on this page as a request "
+	  "count and an orange line: the farthest pages are then not painted and that part of the landscape stays on its "
+	  "own material.\n\n"
+	  "Changing it rebuilds the pool and repaints every page, so pick it once.",
+	  "", "rendering#performance" },
+	{ "Virtual Texture/Texel size", "Texel size",
+	  "How much ground one pixel of the finest page covers. 0.25 m is a pixel the size of a hand span on the screen from a "
+	  "walking camera; each finer step (12.5, 6.3, 3.1, 1.6 cm) doubles the detail. The finest level is only kept within a "
+	  "short distance of the camera: up to where one of its texels still covers a screen pixel (about 15 m at 1.6 cm on a "
+	  "1080-pixel image), each coarser level twice as far, so a finer texel costs pages close by, not over the whole landscape. 0.5 m and 1 m are the coarse end. Where the "
+	  "backend reports which pages the image actually reads (Metal), those are painted, within the same distance bands. "
+	  "A landscape too large for the finest choice (over 2048 pages a side) gets the finest texel that fits.\n\n"
+	  "Changing it rebuilds the pool and repaints every page, so pick it once.",
+	  "", "rendering#performance" },
+	{ "Virtual Texture/Near radius", "Near radius",
+	  "How far around the camera the landscape is kept at the finest level, in metres. Beyond it coarser levels are used, "
+	  "four times fewer pages per step. A larger radius needs more pages (see the pool size) and paints more after a "
+	  "change; changes to it apply at once, without rebuilding anything.",
+	  "", "rendering#performance" },
+	{ "Virtual Texture/Activation radius", "Activation radius",
+	  "How near a landscape must be to the camera, measured to its edge, to be drawn from pages. A farther one keeps "
+	  "drawing its own material and holds no pages, so a world of many landscapes only pays for the ones around you. "
+	  "It is drawn from pages again once it comes back in range, from a slightly larger radius than it switched on at, so "
+	  "it does not flicker at the border. Applies at once.",
+	  "", "rendering#performance" },
+	{ "Virtual Texture/Pages per frame", "Pages per frame",
+	  "The most pages one frame may paint, over every landscape together: the budget that spreads a first fill or the "
+	  "repaint after a stroke over several frames instead of one long one. A higher number finishes sooner and makes the "
+	  "frames it works in longer. The status line on this page shows what the last painting cost.",
+	  "", "rendering#performance" },
 	// ── Physics ▸ Simulation ─────────────────────────────────────────────────
 	{ "Physics/Fixed rate", "Fixed rate",
 	  "How many simulation steps a second of game time is cut into, whatever "
@@ -5189,7 +5773,7 @@ namespace
 	  "empty and the export writes no icon at all, which is what it did before "
 	  "this existed.",
 	  "", "editor#preferences" },
-	{ "Application/Plate colour", "Plate colour",
+	{ "Application/Plate color", "Plate color",
 	  "The rounded square the icon sits on. The icon itself is white on a dark "
 	  "plate and near-black on a light one, so this is one choice and not two — "
 	  "white on yellow is not an option somebody should be able to pick by "
@@ -5337,10 +5921,6 @@ namespace
 	  "starts it again. An installer that runs with administrator rights may refuse "
 	  "to end, then the install stays listed as running until it exits.",
 	  "", "horizoncode#compiler" },
-	{ "Tool Setup/Show Log", "Show Log",
-	  "Opens the installer's output below the list, where the last lines say why "
-	  "it stopped.",
-	  "", "horizoncode#compiler" },
 	{ "Tool Setup/Copy Command", "Copy the install command",
 	  "Puts the command on the clipboard, for running it in your own terminal "
 	  "instead of letting the editor do it. Press Recheck afterwards; no restart "
@@ -5373,7 +5953,7 @@ namespace
 	  "then unsaved until you save it yourself; nothing is written to the file "
 	  "here.",
 	  "", "editor#preferences" },
-	{ "Scene Recovery/Delete Snapshot", "Delete Snapshot",
+	{ "Scene Recovery/Delete Copy", "Delete Copy",
 	  "Removes the autosaved copy for good. The scene file is not touched. "
 	  "Choose this when the copy holds nothing you want to keep, for example "
 	  "an experiment you had already decided against.",
@@ -5459,6 +6039,12 @@ namespace
 	  "Adds a paint layer to this blend node, which also adds its pin. The list "
 	  "here IS the set of layers the Landscape tool offers, in this order — up to "
 	  "eight, four per RGBA weightmap page (both pages travel in one texture).",
+	  "", "materials#nodes" },
+	{ "Material Node/Foliage Set", "Landscape Foliage Set",
+	  "The foliage set (a Landscape Foliage asset) this landscape material names for "
+	  "its terrain: which plants grow on which paint layer, and where. Click to pick one "
+	  "or drop it from the Content Browser. The node draws nothing and changes no "
+	  "shader, it only tells the Landscape tool which set belongs to this material.",
 	  "", "materials#nodes" },
 	{ "Material Node/Lit", "",
 	  "Whether the scene's lights reach this material. Off makes it emissive-flat: "
@@ -6464,6 +7050,32 @@ namespace
 	  "question every themed widget raises: does this still read on somebody "
 	  "else's palette?",
 	  "", "ui#designer" },
+	// ── Looking at the selection in another state ───────────────────────────
+	{ "ui.state-preview", "State",
+	  "Shows the selected elements as they look under the pointer, pressed, with "
+	  "the keyboard on them or switched off — hover colours, pressed colours, the "
+	  "focus ring, the disabled grey and every material that reads Element State. "
+	  "Only the picture changes; nothing is written to the widget. Needs the "
+	  "renderer-drawn canvas (any backend with a renderer).",
+	  "", "ui#designer" },
+	{ "UI State Preview/Normal", "",
+	  "The selection as authored, with nothing hovering, pressing or focusing it.",
+	  "", "ui#designer" },
+	{ "UI State Preview/Hovered", "",
+	  "The selection as it looks with the pointer resting on it.",
+	  "", "ui#designer" },
+	{ "UI State Preview/Pressed", "",
+	  "The selection while it is held down: hovered and pressed together, as a "
+	  "click is.",
+	  "", "ui#designer" },
+	{ "UI State Preview/Focused", "",
+	  "The selection with the keyboard or gamepad on it, including the focus ring "
+	  "the running application draws (around the Focus Frame ancestor, if one is set).",
+	  "", "ui#designer" },
+	{ "UI State Preview/Disabled", "",
+	  "The selection switched off: greyed out, together with everything inside it, "
+	  "exactly as Enabled = off makes it at runtime.",
+	  "", "ui#designer" },
 	{ "UI Theme Preview/From the preview", "",
 	  "Draw with the theme the running preview uses, which is what the widget "
 	  "will actually look like when the application runs. The default, and where "
@@ -6636,6 +7248,10 @@ namespace
 	{ "UI Timeline/Delete Key", "",
 	  "Removes this key. The track keeps the others, and a track with one key "
 	  "left is simply a constant.",
+	  "", "ui#elements" },
+	{ "UI Timeline/Remove Track", "Remove Track",
+	  "Takes this property out of the animation, with all of its keys. The "
+	  "element keeps its own value again while the animation plays.",
 	  "", "ui#elements" },
 
 	// ── Components: what a widget offers whoever embeds it ───────────────────
@@ -6873,6 +7489,31 @@ namespace
 	  "whole frame is mirrored, so the Slice Left margin ends up on the right edge. "
 	  "The editor preview and the running game flip the same way.",
 	  "", "ui#elements" },
+	{ "UI Widget/Pixelated", "",
+	  "Draws the image without smoothing: every pixel of the picture stays a sharp "
+	  "square however large the element is, which is what pixel art wants. Off "
+	  "blends neighbouring pixels, which suits photos and icons. The designer "
+	  "preview always draws smoothed; Play and the exported game show the setting "
+	  "(Software, Metal and OpenGL; Vulkan and Direct3D still smooth).",
+	  "", "ui#elements" },
+	{ "UI Widget/Sheet Columns", "",
+	  "Plays the picture as a sprite sheet: how many frames sit side by side in "
+	  "it. 1 column and 1 row is an ordinary picture. Frames play left to right, "
+	  "then row by row, looping.",
+	  "", "ui#elements" },
+	{ "UI Widget/Sheet Rows", "",
+	  "How many rows of frames the sprite sheet has. Together with Sheet Columns "
+	  "it cuts the picture into equal cells.",
+	  "", "ui#elements" },
+	{ "UI Widget/Sheet Frames", "",
+	  "How many of the cells are frames, counted from the top left. 0 uses every "
+	  "cell; fewer leaves the last cells of the grid out, for a sheet whose last "
+	  "row is not full.",
+	  "", "ui#elements" },
+	{ "UI Widget/Sheet FPS", "",
+	  "Frames per second the sheet plays at. 0 holds the first frame. The "
+	  "designer shows the first frame; Play and the exported application animate.",
+	  "", "ui#elements" },
 	{ "UI Widget/Flip Vertical", "",
 	  "Mirrors the image top to bottom inside its box. Combined with Flip "
 	  "Horizontal it is the picture turned half a circle. On a 9-sliced image the "
@@ -6884,7 +7525,7 @@ namespace
 	  "and no further. Text and the layout boxes do not have it, because they have "
 	  "no surface to round.",
 	  "", "ui#elements" },
-	{ "UI Widget/Per corner", "",
+	{ "UI Widget/Per Corner", "",
 	  "Rounds each corner on its own: the four fields are laid out where the "
 	  "corners are, top row first. A tab, a chat bubble and the head of a card are "
 	  "all one rounded and one square pair. Switching back off keeps the top-left "
@@ -7061,29 +7702,29 @@ namespace
 	  "Fades this widget and everything inside it. One value on a root panel "
 	  "fades a whole menu, which is what a menu fade-in is made of.",
 	  "", "ui#widgets" },
-	{ "UI Widget/Hover cursor", "",
+	{ "UI Widget/Hover Cursor", "",
 	  "Which mouse cursor is shown while the pointer is over this widget. It "
 	  "needs the widget to be hit-testable, since a widget the pointer passes "
 	  "through is never hovered.",
 	  "", "ui#runtime" },
-	{ "UI Widget/Hit-testable", "",
+	{ "UI Widget/Hit Testable", "",
 	  "Off makes the widget transparent to the pointer: clicks pass straight "
 	  "through it to whatever is behind. For decoration that must not swallow "
 	  "input.",
 	  "", "ui#runtime" },
-	{ "UI Widget/Window drag", "",
+	{ "UI Widget/Window Drag", "",
 	  "Pressing here moves the WINDOW, the way a title bar does. For an "
 	  "application that draws its own title bar and asked the system for a "
 	  "window without one (window mode Borderless). Independent of hit-testable: "
 	  "a title bar is usually a container the pointer passes through, and "
 	  "anything clickable sitting on it — a close button — keeps its click.",
 	  "", "ui#runtime" },
-	{ "UI Widget/Clip children", "",
+	{ "UI Widget/Clip Children", "",
 	  "Cuts everything inside this widget off at its own edge. Clipped pixels are "
 	  "neither drawn nor clickable — it is what makes a list longer than its box "
 	  "look like a list in a box instead of spilling across the screen.",
 	  "", "ui#widgets" },
-	{ "UI Widget/Focus frame", "",
+	{ "UI Widget/Focus Frame", "",
 	  "While anything INSIDE this element has the keyboard focus, the focus ring "
 	  "is drawn around this element instead of around whatever holds it. A "
 	  "search field is a rounded frame with an icon and a text field inset "
@@ -7091,7 +7732,7 @@ namespace
 	  "sees as the control, and a ring around the field alone is a small "
 	  "rectangle floating inside a pill. Set it on the frame.",
 	  "", "ui#widgets" },
-	{ "UI Widget/Tab index", "",
+	{ "UI Widget/Tab Index", "",
 	  "Where Tab goes next. Left at 0 the route follows the tree on the left, "
 	  "parents before their children, which is the order you arranged and the "
 	  "only one you can predict. A number above 0 pulls the element to the front "
@@ -7100,7 +7741,7 @@ namespace
 	  "0 takes it off the route altogether, and only off the route — a click and "
 	  "the arrow keys still reach it.",
 	  "", "ui#widgets" },
-	{ "UI Widget/Accepts drop", "",
+	{ "UI Widget/Accepts Drop", "",
 	  "Makes this element a drop zone: a file dragged in from the desktop and let "
 	  "go over it fires On File Dropped, once per file, with the file's path. The "
 	  "drop travels UP from whatever the pointer met to the first element that "
@@ -7139,7 +7780,7 @@ namespace
 	  "Drop. Like Accepts drop, this bubbles: pressing the label of a draggable "
 	  "card carries the card.",
 	  "", "ui#widgets" },
-	{ "UI Widget/Drag payload", "",
+	{ "UI Widget/Drag Payload", "",
 	  "What this element calls itself when it is dropped somewhere: the string "
 	  "the target receives with On Drop. A list row writes its index in here, a "
 	  "tool button its tool. Left empty it falls back to the element's name, "
@@ -7153,11 +7794,19 @@ namespace
 	  "", "ui#graph" },
 	{ "UI Graph/Get", "Get",
 	  "Adds a node that READS this property or variable. Dropping something from "
-	  "the hierarchy or the variables list onto the canvas is what offers this.",
+	  "the hierarchy or the variables list onto the canvas is what offers this. "
+	  "For an element it adds two: the element's reference and a Get of the "
+	  "property on it, already wired.",
 	  "", "ui#graph" },
 	{ "UI Graph/Set", "Set",
 	  "Adds a node that WRITES it. A function-local variable can only be used "
-	  "inside its own function, which is why this is sometimes greyed out.",
+	  "inside its own function, which is why this is sometimes greyed out. For "
+	  "an element: its reference and a Set of the property on it, wired.",
+	  "", "ui#graph" },
+	{ "UI Graph/Reference", "Reference",
+	  "Adds the element as an object: a small node with the element's name and "
+	  "one output. Drag off that output for Get or Set of any of its properties, "
+	  "or store it in a variable of the element's type.",
 	  "", "ui#graph" },
 	{ "UI Graph/Get Ref", "Get Ref",
 	  "The same read, but through a REFERENCE: the node takes a widget and the "
@@ -7425,6 +8074,43 @@ namespace
 	  "can paint are the ones named by the material's Landscape Layer Blend "
 	  "node, and with no such node the Paint tool stays greyed out.",
 	  "", "scenes#terrain" },
+	{ "Landscape/Texture Group", "Texture Group",
+	  "The terrain theme the landscape is shaded as: Mountains, Forest, "
+	  "Grassland or Desert. Each is its own landscape material with its own textures and its "
+	  "own names for the paint layers. Switching keeps everything you painted — "
+	  "there is one weightmap per landscape and layer 1 to 4 mean the same role "
+	  "(ground, soil, rock, snow) in every group, so only the look changes. Auto "
+	  "(layer 0) picks the texture by slope and height; painting a layer on top "
+	  "chooses one by hand.",
+	  "", "scenes#terrain" },
+	{ "Landscape/Mix Texture Groups", "",
+	  "Lets this landscape show all four texture groups at once. The group chosen above "
+	  "stays what every spot starts as; the Paint tab's Group row then paints any other "
+	  "group onto it, with that group's own layers underneath. It uses the paint channels "
+	  "8 to 11 for the groups' shares, so a custom material that paints there loses that "
+	  "paint when this is switched on (it is folded into layer 0). Switching it off drops "
+	  "the groups' shares and the landscape is its one group again.",
+	  "", "scenes#terrain" },
+	{ "Landscape/Apply Group Meshes", "",
+	  "Adds a foliage layer for every procedural mesh of the landscape's texture "
+	  "group that it does not scatter yet: ferns, stumps, logs and mossy rocks in "
+	  "the Forest, tall grass, flower tufts and a few stones in the Grassland, dune "
+	  "grass, cacti and sandstone blocks in the Desert, grass "
+	  "tufts, pebbles, boulders and snow drifts in the Mountains. Rock is placed "
+	  "where the group's own material shows rock. It only adds - switching the "
+	  "group never removes or changes a layer, and a layer you already have is left "
+	  "alone.",
+	  "", "scenes#terrain" },
+	{ "Landscape/Apply Foliage", "",
+	  "Materializes the foliage set named on the landscape's material (a Landscape "
+	  "Foliage node in its graph) into this terrain's foliage layers: one layer per "
+	  "entry, with the mesh, material, density and placement rules (slope, height, "
+	  "paint channel) the set author gave it. It only adds and refreshes its own "
+	  "layers - a layer you added by hand, or one from a different foliage set, is "
+	  "never touched, and re-pressing it after editing the set brings its layers up "
+	  "to date without losing their painted density masks or visibility. Disabled "
+	  "while the set is still downloading from the EngineContent server.",
+	  "", "scenes#terrain" },
 	{ "Landscape/Reset to Engine Default", "",
 	  "Puts the built-in landscape material back on the terrain. It is only "
 	  "offered while a material of your own is assigned.",
@@ -7450,6 +8136,13 @@ namespace
 	  "was painted. A starting point for a landscape built by hand: fill with the "
 	  "base layer, then paint the rest over it. One undo step.",
 	  "", "editor#landscape-mode" },
+	{ "Landscape/Active Group", "Group",
+	  "Which texture group this stroke paints, beside the layer below: the terrain's "
+	  "own group or any other, all on the same landscape. Picking a group other than the "
+	  "terrain's own switches Mix Texture Groups on (Setup tab); the layer list below "
+	  "then shows that group's own layers. Ctrl+drag always hands the spot back to the "
+	  "terrain's own group, whichever is picked.",
+	  "", "scenes#terrain" },
 	{ "Landscape/Layer", "Paint Layer",
 	  "Which of the material's layers the brush paints. The names come from the "
 	  "material's Landscape Layer Blend node, in weightmap-channel order — up to "
@@ -7487,8 +8180,8 @@ namespace
 	  "only — sculpting, foliage and water keep the Brush Strength.",
 	  "", "editor#landscape-mode" },
 	{ "Landscape/Weightmap", "Weightmap Resolution",
-	  "How many texels per side the layer weightmap has, from 32 to 2048 — click "
-	  "the field and type a number, 1024 for instance — "
+	  "How many texels per side the layer weightmap has, from 32 to 2048 (drag, or "
+	  "double-click and type a number), "
 	  "stretched over the whole landscape — a large terrain needs more of them "
 	  "before a painted edge stops looking blocky. It is locked as soon as "
 	  "anything has been painted, because changing it would throw the existing "
@@ -7570,11 +8263,66 @@ namespace
 	  "fresh shape with the same settings. Mountains already made stay as "
 	  "they are.",
 	  "", "editor#landscape-mode" },
+	{ "Landscape/Bake Far Landscape", "",
+	  "Bakes the pictures the landscape's distant chunks draw with, the same ones "
+	  "the export makes, so you see the far landscape here as the game will. They "
+	  "are kept in the project's Saved folder (not in git or team sync) and come "
+	  "back when the scene is opened again. A change to the landscape puts them "
+	  "away until the next bake. Only Auto Landscape materials are baked. "
+	  "Preferences decides whether this runs by itself.",
+	  "", "editor#landscape-mode" },
+	{ "Preferences/Content Browser/Far Landscape Bake", "",
+	  "When the editor bakes a landscape's far tiles. Off: only the export does. "
+	  "Manual: with Bake Far Landscape in Landscape Setup. Automatic: by itself, a "
+	  "few seconds after a landscape was last changed; the editor pauses for the "
+	  "length of the bake.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Ridges##mountain", "Mountain Ridges",
+	  "How much of the relief is ridged: sharp crests with V-shaped valleys "
+	  "between them, the ridgelines wandering instead of running straight. At 0 "
+	  "the relief is the round noise of the landscape itself. Needs Roughness "
+	  "above 0 to show.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Erosion##mountain", "Mountain Erosion",
+	  "Lets flanks that are steeper than a scree slope (about 40 degrees) shed "
+	  "material downhill, so spikes and cliffs of the noise become the debris "
+	  "fans a real mountain has. Higher values run more passes. The peak still "
+	  "reaches Max Height and the rim stays where it is.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Terraces##mountain", "Mountain Terraces",
+	  "Cuts the height into this many level steps from the ground up to the "
+	  "peak, like rice terraces or the benches of a quarry. 0 turns it off.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Terrace Sharpness##mountain", "Terrace Sharpness",
+	  "How much of each step is a level bench. At 0 the slope stays as it was, "
+	  "at 1 the mountain is a staircase with steep risers.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Paths##mountain", "Mountain Paths",
+	  "How many trails lead from the rim of the area up to the summit, spread "
+	  "evenly round the mountain. Each is cut into the ground as a level bench "
+	  "and turns back on itself where the flank is steeper than Path Max Grade. "
+	  "0 makes none.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Path Width##mountain", "Path Width",
+	  "How wide the level bench of a path is, in metres. It blends into the "
+	  "slope over another half width on either side.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Path Max Grade##mountain", "Path Max Grade",
+	  "The steepest a path should climb, as rise over run: 0.3 is 30 cm up per "
+	  "metre walked. On a steeper flank the path traverses and turns back "
+	  "instead of going straight up. A low value gives long winding trails.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Create Path Splines##mountain", "Create Path Splines",
+	  "On: every path also becomes a Spline entity named Mountain Path that "
+	  "follows the trail, so a fence, a road or a script can use the line. "
+	  "They are created in the same undo step as the mountain.",
+	  "", "editor#landscape-mode" },
 	{ "Landscape/Clear Paint", "",
 	  "Throws away every painted layer weight, putting the whole landscape back "
 	  "on the first layer. It is one undo step, but it removes the entire "
 	  "weightmap rather than the last stroke — and it is what unlocks the "
-	  "weightmap resolution again.",
+	  "weightmap resolution again. Any Mix Groups are dropped with it, since "
+	  "their shares lived in the same weightmap.",
 	  "", "editor#landscape-mode" },
 	{ "Landscape/Reset Sculpting", "",
 	  "Discards every sculpted height, so the landscape falls back to the shape "
@@ -7605,6 +8353,147 @@ namespace
 	  "16-bit heightmaps the way World Machine and Unreal exchange them, and "
 	  "JPEG, BMP, TGA at 8 bits. Same rules as Apply: black is 0 m, white is "
 	  "Height Scale, the sculpt is replaced, paint and foliage stay.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Enabled", "",
+	  "Switches the whole tile landscape off without losing its settings. Turning it off releases the pack file and every tile in memory.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Pack File", "",
+	  "The pack the landscape streams from (a .hlp file). Changing it opens the new pack at once; a path that cannot be opened is reported in the log and the landscape stays empty. Use an absolute path: the game opens it as written.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Browse...", "",
+	  "Picks an existing pack file for this landscape.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Load Radius", "",
+	  "How far around the camera the tiles are kept in memory, in metres. The tiles beyond are drawn from the coarse world that is always loaded. A larger radius needs more memory; the budget below cuts it down if it does not fit.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Memory Budget", "",
+	  "The most the decoded tiles may take, in megabytes. The load radius shrinks to fit rather than the budget being passed. The Streaming tab of the Profiler shows how much is used.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Height Min", "",
+	  "The height in metres of a stored value of 0. A pack made here writes the right number in; change it only for a pack that came from elsewhere.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Height Range", "",
+	  "The height in metres from a stored value of 0 to the highest (65535). The pack's own header wins when it has one, this is the fallback for older packs.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Texture Group", "",
+	  "The ground textures the landscape is drawn with: Mountains, Forest, Grassland or Desert, tiled in world coordinates, or flat layer colours. A group whose textures are not on this machine yet is drawn flat until they arrive.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Texture Metres", "",
+	  "How many metres one repeat of the ground texture covers.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Output File", "",
+	  "Where Generate, Migrate and Import write the pack. An existing file is replaced only when the build succeeds; a cancelled or failed build leaves it alone. When the build ends, the landscape points at this file.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Choose Output...", "",
+	  "Picks the file the next build writes.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Tiles X", "",
+	  "How many 512 m tiles the generated world has from west to east. 196 tiles are 100 km.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Tiles Z", "",
+	  "How many 512 m tiles the generated world has from north to south.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Seed", "",
+	  "The same seed and size always give the same world.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Octaves", "",
+	  "How many layers of noise the relief is made of. More octaves add finer detail and cost time to generate.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Generated Height Range", "",
+	  "The height in metres between the lowest and the highest ground of the generated world.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/100 km World", "",
+	  "Sets Tiles X and Z to 196: a world a little over 100 km on a side. Generating it takes a few minutes and several gigabytes of disk.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Generate Procedural World", "",
+	  "Builds a pack from the engine's noise: mountains, valleys, and layer paint by height and slope. It runs in the background with a progress bar and can be cancelled. Good for tests and as a starting point.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Migrate Terrain to Tiles", "",
+	  "Cuts the scene's Terrain (its sculpted heights and painted layers) into tiles and writes them as a pack. The Terrain's south-west corner lands at the pack's origin. Its water is not carried over. The Terrain stays in the scene; hide or delete it once the tile landscape looks right.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Metres per Pixel", "",
+	  "How far apart the height map's pixels are on the ground. A 4097 pixel picture at 2 m covers 8 km.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Import Height Min", "",
+	  "The height in metres of a black pixel.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Import Height Range", "",
+	  "The height in metres from a black to a white pixel. A 16-bit picture keeps its full precision.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Flip File Rows", "",
+	  "For a tile set whose first row of files (y0) is the southern-most, as World Machine numbers them. The pictures themselves stay as they are.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Paint Layers from Shape", "",
+	  "Paints the ground layers from the heights: flat ground, steep rock and high ground. Off puts layer 0 everywhere. The paint can be changed afterwards.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Import Height Map File...", "",
+	  "Makes a pack from one height map picture: 16-bit PNG, PGM, or a square .r16/.raw as World Machine and Gaea export them. Pixels become height samples, Metres per Pixel apart.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Import Tiled Height Map Folder...", "",
+	  "Makes a pack from a folder of tiles named name_x0_y0.png (or .r16, .raw, .pgm), as World Machine and Gaea write a tiled build. The files are read as they are needed, so the set can be far larger than memory. A missing file is a hole at height 0; files of different sizes are refused.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Cancel Build", "",
+	  "Stops the build under way. The pack file that was being written is removed and the old one is left as it was.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Stream Tiles", "",
+	  "On: only the tiles within Load Radius of the camera are in memory, and far ground is drawn from the coarse levels. Off: every tile of the world is loaded and kept, whatever the camera does; the far levels are there all the same, so the picture does not change. Off works for worlds of up to 1024 tiles (16 km a side at 512 m tiles), because each loaded tile is a layer of the GPU atlas; a larger world says so in the log and stays unloaded until streaming is on again.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Edit Tiles", "",
+	  "Arms a brush in the Scene viewport that sculpts and paints the tiles under the cursor. Hold the left button to work; each press is one stroke. The pack itself is never changed: edits are kept in a file beside it (<pack>.edits), shown by every editor and game that opens the pack, and baked into the shipped pack by an export.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Tile Brush", "",
+	  "What the brush does: Raise and Lower move the ground (Ctrl turns one into the other), Smooth evens it out, Flatten pulls it to the height where the stroke began, Paint Layer paints one of the twelve ground layers, Roughen adds small bumps, Ramp draws a straight slope from where the stroke began to the cursor, Mountain grows one mountain in the brush's circle with each click, Stamp places a heightmap as an entity that can be moved afterwards, Foliage Mask erases the foliage of every layer under the brush (Ctrl lets it grow back), Water paints a lake at the height of the ground where the stroke began, or continues the water under it (Ctrl erases).",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Dig Water Bed", "",
+	  "On: the Water tool also lowers the ground under the water it paints, so the lake gets a bed instead of lying on the surface. The ground is edited like with the sculpt tools and is saved with the tile edits.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Water Depth", "",
+	  "How deep the Water tool digs the bed below the lake's surface at most, in metres.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Stamp Height", "",
+	  "How many metres a white pixel of the heightmap adds where the Stamp tool places it. Negative digs. The brush radius plus falloff is half the stamp's edge. Each click makes a Landscape Stamp entity: select it in the Scene mode to move, turn or scale the stamp later; an export bakes all stamps into the shipped landscape.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Mountain Height", "",
+	  "How high the Mountain tool's peak rises above the ground, in metres. Negative digs a basin. The brush radius is the mountain's foot, the falloff how softly it meets the ground; every click uses another seed, so no two mountains are alike.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Mountain Ridges", "",
+	  "How much of the mountain's relief is ridged: sharp crests with V-shaped valleys between them. At 0 it is the round noise of a plain hill.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Mountain Erosion", "",
+	  "Lets flanks steeper than a scree slope shed material downhill, so spikes of the noise become debris fans. Higher values run more passes.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Mountain Terraces", "",
+	  "Cuts the mountain's height into this many level steps from the ground up to the peak. 0 turns it off.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Mountain Paths", "",
+	  "How many trails lead from the foot of the mountain up to its summit, spread evenly round it. Each is cut into the ground as a level bench and turns back on itself where the flank is too steep. 0 makes none.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Mountain Path Width", "",
+	  "How wide the level bench of a mountain path is, in metres.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Mountain Path Splines", "",
+	  "On: every path the Mountain tool cuts also becomes a Spline entity named Mountain Path that follows the trail. The splines are scene content with their own undo step; the ground is undone with Undo Stroke.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Brush Radius", "",
+	  "The radius of full strength, in metres. Radius plus falloff can be about 950 m at most: the brush works on a block of up to 4 x 4 tiles around the cursor, and the ring turns red where no block holds it.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Brush Falloff", "",
+	  "The width outside the radius over which the brush fades to nothing, in metres.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Brush Strength", "",
+	  "How fast the brush works: metres a second times twenty for Raise and Lower, the share a second for Smooth and Paint Layer. A change smaller than half a height step (shown below the buttons) is lost, because a tile stores heights in 16 bit.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Paint Layer", "",
+	  "The ground layer the Paint Layer brush paints, 0 to 11. Layers 0 to 3 are the texture group's grass, dirt, rock and snow.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Undo Stroke", "",
+	  "Takes the last stroke back, all of its tiles at once. Up to 32 strokes are kept. This is the tile brush's own history, apart from the editor's undo.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Redo Stroke", "",
+	  "Brings back the stroke that Undo Stroke took away.",
+	  "", "editor#landscape-mode" },
+	{ "Tile Landscape/Save Tile Edits", "",
+	  "Writes the edited tiles to the file beside the pack. Saving the scene does the same.",
 	  "", "editor#landscape-mode" },
 	{ "Landscape/Flip Z", "",
 	  "Mirrors the picture top-to-bottom before laying it over the ground. "
@@ -7769,8 +8658,8 @@ namespace
 	  "How many cells per side the landscape's water is stored in, from 32 to "
 	  "2048, stretched over the whole landscape. The cell size is shown under "
 	  "it: a shore can only be as fine as that, so a large landscape wants more "
-	  "cells for small ponds. Type a number and press Enter (or click away): it "
-	  "is applied then, not on every digit, keeping the shape of what is "
+	  "cells for small ponds. Drag it, or double-click and type: it "
+	  "is applied when you let go, not on every step, keeping the shape of what is "
 	  "painted; one undo step.",
 	  "", "editor#landscape-mode" },
 	{ "Landscape/To Lake", "",
@@ -8077,6 +8966,119 @@ namespace
 	{ "Export/None (RGBA8)", "None (RGBA8)",
 	  "No block compression: RGBA8 with the mip chain baked in. The exact "
 	  "pixels, at roughly four to eight times the size of a compressed texture.",
+	  "", "export#overview" },
+	{ "Export/Pack only referenced assets", "Pack only referenced assets",
+	  "Leave out every asset the game never reaches. The game starts from the "
+	  "startup scene, the scenes something loads, the project manifest, "
+	  "GameInstance and the scripts, and follows what they name: a scene's "
+	  "meshes and their materials and textures, a widget's textures, a "
+	  "graph's classes. Reaching is transitive from those starting points: a "
+	  "mesh that names a material is no reason to keep either when nothing "
+	  "reachable names the mesh. The engine's own needs (input actions, "
+	  "player classes, struct and enum types, weather sounds, layer meshes) "
+	  "always stay. A script that builds a path at run time cannot be "
+	  "followed: list it under Always include. The export log lists what "
+	  "was left out. Saved in the profile.",
+	  "", "export#overview" },
+	{ "Export/Compress texture arrays", "Compress texture arrays",
+	  "Also block-compress texture arrays: the Auto landscape's albedo, normal "
+	  "and mask arrays, about 110 MB each as RGBA8 and by far the largest part "
+	  "of an exported game. They shrink to a quarter, in the pak and in video "
+	  "memory, at the same quality as every other compressed texture. The GI "
+	  "keeps its landscape colours: they are baked into the pak from the "
+	  "uncompressed pixels. Switch it off to ship the arrays as RGBA8. "
+	  "Needs a texture compression other than None. Saved in the profile.",
+	  "", "export#overview" },
+	{ "Export/Bake textures onto meshes", "Bake textures onto meshes",
+	  "A mesh with several materials that only show textures (a plain PBR set: "
+	  "base color, metal/rough/occlusion, normal map, emissive) is exported on ONE "
+	  "material with atlas textures, so it draws in one call with one set of "
+	  "texture binds, and the source materials and textures leave the pak. Each mesh "
+	  "decides in the Mesh Viewer (Export bake) whether and how: Merge textures "
+	  "copies the texels unchanged, One UV texture resamples and resolves tiling "
+	  "and may make the atlas larger. A mesh that an entity in an exported scene "
+	  "draws with a material of its own (a Material component override, whole mesh "
+	  "or one slot) is left as it is, because the override would read its texture "
+	  "through the atlas UVs. The scan covers every scene (placed prefabs are "
+	  "plain entities there) and the component body of every HorizonCode class. "
+	  "A material a script assigns at run time is not seen: switch Export bake "
+	  "off in the Mesh Viewer for such a mesh. Needs Pack only referenced "
+	  "assets. Saved in the profile.",
+	  "", "export#overview" },
+	{ "Export/Bake far landscape", "Bake far landscape",
+	  "Far terrain is drawn from a picture instead of from the landscape's material. "
+	  "For every Auto Landscape in an exported scene the export photographs each "
+	  "chunk from above in three views of its own material (albedo, normal, "
+	  "ambient occlusion + roughness) and ships them as three small textures and "
+	  "one simple material per chunk. The chunk's far levels of detail then draw "
+	  "that material: a few texture reads instead of the layer blend, the noise "
+	  "and the texture bombing. Near terrain keeps the real material. The picture "
+	  "is as sharp as the screen needs at the distance where the far level takes "
+	  "over, and coarser when it would not fit the budget below. The landscape's "
+	  "own parameters (a Material Instance's overrides, its static switches, "
+	  "painted layers) are what is photographed. A custom landscape material that "
+	  "is not an Auto Landscape is left as it is. The picture is taken by the "
+	  "editor's own renderer (Metal, OpenGL, Vulkan, D3D11 and D3D12 all hand back "
+	  "the material's colour without tonemap or post effects); a renderer that "
+	  "cannot makes the export say so and the far levels keep the real material. "
+	  "A Tile Landscape gets a far image too: one picture of the whole world, what "
+	  "its layer blend comes to, written into the shipped copy of its pack and read "
+	  "with one texture access for all ground beyond the streamed tiles. It is made "
+	  "in regions of 8 x 8 tiles and only the regions whose tiles changed since the "
+	  "last export are made again (the last result is kept under Saved/LandscapeFar); "
+	  "the export log's cook step says how many were baked and how many unchanged. "
+	  "Saved in the profile.",
+	  "", "export#overview" },
+	{ "Export/Bake streaming cell proxies", "Bake streaming cell proxies",
+	  "A scene with a Tile Landscape and streaming cells (Streaming tab, Split into Cells) ships the "
+	  "landscape's pack as a loose file in the game's data folder (Landscape/<name>.pack), and the "
+	  "exported scene names that copy. With this on, the export also merges the static meshes of every "
+	  "cell (visible, no skeleton, no animator, no moving body) into one distant proxy per cell and "
+	  "appends them to the shipped copy of the pack: while a cell is not built yet, or has been unloaded, "
+	  "its proxy stands in as a plain silhouette in the right place and size, drawn with the default "
+	  "material. A cell is capped at 20 000 triangles and 4 000 instances, the biggest first. Your "
+	  "project's own pack is never changed. Off: the pack is still shipped, without proxies. Saved in "
+	  "the profile.",
+	  "", "export#overview" },
+	{ "Export/Far landscape budget (MB)", "Far landscape budget (MB)",
+	  "What all baked far-landscape textures of this export may cost once cooked "
+	  "(block-compressed, with mip levels), in megabytes. When the pictures the "
+	  "screen would want do not fit, every chunk's picture is halved in size until "
+	  "they do, down to 16 texels per chunk side; the export log says which "
+	  "landscapes were baked below what the screen wants. Saved in the profile.",
+	  "", "export#overview" },
+	{ "Export/Bake RVT base", "Bake RVT base",
+	  "Landscapes whose material has an RVT Write / RVT Read pair paint what sits "
+	  "before the Write node (layers, groups, texture bombing) into virtual texture "
+	  "pages while the game runs. For a landscape the game never edits that is the "
+	  "same work every run, so the export does it once: it photographs the pages' "
+	  "three layers (colour, normal, ambient occlusion + roughness) over the whole "
+	  "landscape and ships them as three textures. The game then paints its pages "
+	  "from those pictures and never builds the material's page graphs; the snow, "
+	  "sand, puddles and trails after the Read node stay a live shader. The pictures "
+	  "are as sharp as the live pages (0.25 m a texel) up to 4096 texels a side and "
+	  "the budget below, coarser beyond. They are only used when the landscape's "
+	  "ground and the material's page inputs are exactly what the export saw; the "
+	  "first sculpt or paint stroke, or a script that changes a parameter before the "
+	  "Write node, makes the game use the material's own graphs again. Needs the "
+	  "Runtime Virtual Texture switch on (Preferences > Rendering) and a landscape "
+	  "that is square, unrotated and unscaled. Saved in the profile.",
+	  "", "export#overview" },
+	{ "Export/RVT base budget (MB)", "RVT base budget (MB)",
+	  "What the baked RVT base pictures of all landscapes in this export may cost "
+	  "once cooked (block-compressed, with mip levels), in megabytes. When a "
+	  "landscape's picture does not fit, it is halved in size until it does; the "
+	  "export log says which landscapes were baked below the live pages' "
+	  "resolution. Saved in the profile.",
+	  "", "export#overview" },
+	{ "Export/Match the game's backend", "Match the game's backend",
+	  "Bake the precompiled material shaders for the one graphics backend the "
+	  "exported game runs: the one the project's Render Defaults name, else the "
+	  "platform's default (Metal on macOS, OpenGL elsewhere). The other "
+	  "backends' variants would only be dead weight in the pak. Switch it off "
+	  "to pick the backends by hand, for a build that may run on several. A "
+	  "game that ends up on a backend without baked shaders compiles them on "
+	  "first use, as it does with none selected. Saved in the profile.",
 	  "", "export#overview" },
 	{ "Export/Texture quality", "Texture quality",
 	  "How hard the encoder works on each texture. Fast is what every export "
@@ -8628,6 +9630,31 @@ namespace
 	  "Material component on an entity "
 	  "overrides all slots for that entity alone. Cmd/Ctrl+Z steps back over "
 	  "slot changes while this tab is hovered.",
+	  "", "editor#asset-editors" },
+	{ "Mesh Viewer/Vertex colors", "Vertex colors",
+	  "Export bake. For a mesh whose materials only show textures, the export "
+	  "samples each texture at every vertex and stores the color in the mesh, so "
+	  "the material needs no texture lookup at run time and the texture can drop "
+	  "out of the pak. It looks right on a dense mesh or a smooth texture and "
+	  "blurs detail on coarse low-poly. Applied only when the export targets "
+	  "OpenGL and/or Metal; off by default. Does nothing in the editor. At most "
+	  "one bake form is applied per mesh, in the order Vertex colors, Merge "
+	  "textures, One UV texture. Saved in the mesh asset.",
+	  "", "editor#asset-editors" },
+	{ "Mesh Viewer/Merge textures", "Merge textures",
+	  "Export bake. A mesh with several simple texture-only materials gets one "
+	  "material and one atlas texture, so it draws in one call with one texture "
+	  "bind. Lossless: only when every UV lies inside the 0..1 tile, the source "
+	  "texels are copied unchanged. On by default. Does nothing in the editor. "
+	  "Saved in the mesh asset.",
+	  "", "editor#asset-editors" },
+	{ "Mesh Viewer/One UV texture", "One UV texture",
+	  "Export bake. The textures of all simple texture-only sections are "
+	  "resampled into a single texture over the mesh's own UVs, with tiling "
+	  "baked out. The texture can end up larger than the sources (it is capped "
+	  "at 4096 per side) but the mesh draws in one call. Used when Merge "
+	  "textures does not apply, for example because the UVs tile. On by "
+	  "default. Does nothing in the editor. Saved in the mesh asset.",
 	  "", "editor#asset-editors" },
 	{ "Mesh Viewer/Clip:", "Preview Clip",
 	  "An animation clip to pose this skeleton with, dropped from the Content "
@@ -9423,6 +10450,14 @@ namespace
 	  "On: every member sees the session and can join it without an invitation. "
 	  "Off: only the members you invite can join. Can be changed while hosting.",
 	  "", "collaboration" },
+	{ "Team/Stop Hosting", "",
+	  "Ends the session you host. Everyone in it is disconnected, and the team "
+	  "stops seeing it.",
+	  "", "collaboration" },
+	{ "Team/Invite Again", "",
+	  "Sends the invitation to your session again, for a member who missed or "
+	  "dismissed the first one.",
+	  "", "collaboration" },
 	{ "Team/Host Session", "",
 	  "Starts a collaboration session through the team server and announces it "
 	  "to the team. Nobody needs an address or a join code: the session is found "
@@ -9482,7 +10517,7 @@ namespace
 	  "No colour of your own: the team shows you in grey, and in a session the "
 	  "host picks a free colour for you.",
 	  "", "collaboration" },
-	{ "Team/Custom", "",
+	{ "Team/Custom", "Custom colour",
 	  "Any colour, not just the presets. The team sees it shortly after you stop "
 	  "changing it. Two members may have the same colour; in a session the host "
 	  "gives one of them another if they collide.",
@@ -9570,6 +10605,10 @@ namespace
 	  "Commit and push in one step, commit everything even though some files are "
 	  "ticked, or fold what is staged into the last commit.",
 	  "", "" },
+	{ "Team Sync/Open Team Settings", "",
+	  "Opens Preferences, Team, where you sign in to the team this project "
+	  "belongs to.",
+	  "", "collaboration" },
 	{ "Team Sync/Sync Now", "",
 	  "Sends every change in the project folder that the team server does not have "
 	  "yet, and fetches what the others saved. Every save in the editor does this "
@@ -9587,6 +10626,67 @@ namespace
 	  "they differ in different places; where both changed the same thing, and for "
 	  "graphs and binary assets, your version wins and the team's is kept on the "
 	  "server's horizon-conflicts branch.",
+	  "", "" },
+	{ "Team Sync/Branch", "",
+	  "Which version of the project you work on: the project itself (main) or one of its branches. "
+	  "Switching makes your folder exactly that version; it waits until your changes are on the team server. "
+	  "Only you switch; the others stay where they are.",
+	  "", "" },
+	{ "Team Sync/Create Branch", "",
+	  "Makes a branch of the project as it is now on the team server and switches you to it. Your saves then "
+	  "go to the branch until you merge it back.",
+	  "", "" },
+	{ "Team Sync/Merge into Project", "",
+	  "Switches you back to the project and has the team server apply everything the branch changed since it "
+	  "was made, merged with what changed meanwhile like any save. Where both changed the same thing, the "
+	  "branch's version wins and the other is kept to resolve.",
+	  "", "" },
+	{ "Team Sync/Resolve", "",
+	  "Opens this conflict: your version and the one in the project side by side, and you pick or merge.",
+	  "", "" },
+	{ "Team Sync/Restore", "",
+	  "Puts the whole project back to this revision and saves that for the team as a new revision. "
+	  "Nothing in the history is lost; the state from before can be restored the same way.",
+	  "", "" },
+	{ "Team Sync/Cancel", "",
+	  "Leaves everything as it is.",
+	  "", "" },
+	{ "Team Sync/Pick", "",
+	  "Which side this changed block keeps: Yours (your save that lost), Theirs (what the project has now) or Both (yours, then theirs).",
+	  "", "" },
+	{ "Team Sync/All Yours", "",
+	  "Takes your side for every changed block.",
+	  "", "" },
+	{ "Team Sync/All Theirs", "",
+	  "Takes the project's side for every changed block, as it is now.",
+	  "", "" },
+	{ "Team Sync/Use This Result", "",
+	  "Writes the merged file into the project and saves it for the team. Only when the result is still valid "
+	  "(a scene or settings file must stay JSON).",
+	  "", "" },
+	{ "Team Sync/Keep Theirs", "",
+	  "Keeps the project's version as it is and closes the conflict. Your version stays on the team server.",
+	  "", "" },
+	{ "Team Sync/Use Yours", "",
+	  "Puts your version back into the project and saves it for the team; theirs stays on the team server.",
+	  "", "" },
+	{ "Team Sync/Use the Team Server...", "",
+	  "Lets the team server you are signed in to keep this project's history instead of git. "
+	  "Every save then goes there and is merged with the others' saves; nothing is committed, "
+	  "pulled or pushed by hand. Asks for the project's name on the server first.",
+	  "", "" },
+	{ "Team Sync/Switch to the Team Server", "",
+	  "Writes the switch into Config/ProjectSettings.json (everyone who gets the project switches "
+	  "with it) and starts syncing. If the project does not exist on the server yet, a team admin "
+	  "creates it with this copy from the view that follows.",
+	  "", "" },
+	{ "Team Sync/Switch Back to Git...", "",
+	  "Stops sending this project's saves to the team server and uses the local git repository "
+	  "again. Not while a collaboration session is running.",
+	  "", "" },
+	{ "Team Sync/Switch to Git", "",
+	  "Writes the switch back into Config/ProjectSettings.json. The local repository picks up where "
+	  "it stopped; the team server keeps the history it has.",
 	  "", "" },
 	{ "Team Sync/Create Project on Team Server", "",
 	  "Team admins only. Creates this project on the team server and uploads the "
@@ -9717,13 +10817,13 @@ namespace
 	{ "Source Control/Copy Install Command", "Copy the install command",
 	  "Puts the command shown above on the clipboard, to run in your own "
 	  "terminal. This is the way when the editor cannot install git itself, for "
-	  "example on Linux without a graphical password prompt. Press Recheck "
-	  "afterwards; no restart is needed.",
+	  "example on Linux without a graphical password prompt. For Git LFS it is "
+	  "the Git LFS command. Press Recheck afterwards; no restart is needed.",
 	  "", "editor#preferences" },
 	{ "Source Control/Download Page", "Download Page",
 	  "Opens git's download page for this system in a browser, for installing it "
 	  "by hand. On Windows without winget this is the Git for Windows installer, "
-	  "which brings Git LFS along.",
+	  "which brings Git LFS along. For Git LFS alone it opens git-lfs.com.",
 	  "", "editor#preferences" },
 	{ "Source Control/Install Git LFS", "Install Git LFS",
 	  "Installs Git LFS the same way: winget on Windows, Homebrew on macOS, the "
@@ -9732,14 +10832,6 @@ namespace
 	  "drag down every version of every asset. Where the editor cannot install it "
 	  "(Apple's Command Line Tools have no LFS), the command to run yourself is "
 	  "shown instead.",
-	  "", "editor#preferences" },
-	{ "Source Control/Copy LFS Command", "Copy the Git LFS command",
-	  "Puts the Git LFS install command on the clipboard, to run in your own "
-	  "terminal. Press Recheck afterwards rather than restarting.",
-	  "", "editor#preferences" },
-	{ "Source Control/git-lfs.com", "git-lfs.com",
-	  "Opens the Git LFS home page, where it can be downloaded and installed by "
-	  "hand.",
 	  "", "editor#preferences" },
 
 	// ── The issue reporter ───────────────────────────────────────────────────
@@ -9840,7 +10932,7 @@ namespace
 	  "", "collaboration#overview" },
 	{ "panel.team", "Team",
 	  "Your team on the team server: members and who is online, the sessions "
-	  "they host, invitations. Signing in is in Preferences ▸ Team or right here.",
+	  "they host, invitations. Signing in is in Preferences » Team or right here.",
 	  "", "collaboration" },
 	{ "panel.source-control", "Source Control",
 	  "Git for the whole project, large assets included: what has changed, what to "
@@ -9937,11 +11029,13 @@ namespace
 		// The target-folder dialog of "Import to Project...", raised from the same
 		// context menu.
 		{ "Import to Project/", "editor-interface", "Editor Interface", "Content Browser" },
+		{ "Generate LODs/",     "editor-interface", "Editor Interface", "Content Browser" },
 		{ "New Asset/",        "editor-interface", "Editor Interface", "Creating assets" },
 		{ "Console/",          "editor-interface", "Editor Interface", "Console" },
 		{ "Audio Mixer/",      "editor-interface", "Editor Interface", "Audio Mixer" },
 		{ "Undo History/",     "editor-interface", "Editor Interface", "Undo History" },
 		{ "Watch/",            "editor-interface", "Editor Interface", "Watch" },
+		{ "Stamp Heightmap/",  "editor-interface", "Editor Interface", "Stamp Heightmap" },
 		{ "Task Board/",       "editor-interface", "Editor Interface", "Task Board" },
 		{ "Planner/",          "editor-interface", "Editor Interface", "Planner" },
 		{ "Notifications/",    "editor-interface", "Editor Interface", "Notifications" },
@@ -10009,7 +11103,8 @@ namespace
 		{ "Multiplayer/",      "editor-settings", "Settings Reference", "Project: multiplayer" },
 		{ "Render Defaults/",  "editor-settings", "Settings Reference", "Project: render defaults" },
 		{ "Shadows/",          "editor-settings", "Settings Reference", "Project: shadows" },
-		{ "Physics/",          "editor-settings", "Settings Reference", "Project: physics" },
+		{ "Virtual Texture/",  "editor-settings", "Settings Reference", "Project: virtual texture" },
+		{ "Physics/",         "editor-settings", "Settings Reference", "Project: physics" },
 		{ "Audio Buses/",      "editor-settings", "Settings Reference", "Project: audio buses" },
 		{ "Permissions/",    "editor-settings", "Settings Reference", "Project permissions" },
 		{ "Fonts/",          "editor-settings", "Settings Reference", "Project fonts" },
@@ -10038,6 +11133,7 @@ namespace
 		{ "UI Widget/",      "editor-ui", "UI Designer", "Widget properties" },
 		{ "UI Graph/",       "editor-ui", "UI Designer", "Widget logic" },
 		{ "UI Theme Preview/", "editor-ui", "UI Designer", "Previewing a theme" },
+		{ "UI State Preview/", "editor-ui", "UI Designer", "Previewing a state" },
 		{ "UI Align/",       "editor-ui", "UI Designer", "Lining widgets up" },
 		{ "UI Timeline/",    "editor-ui", "UI Designer", "The timeline" },
 		{ "UI Graph Node/",  "editor-ui", "UI Designer", "Nodes in the graph" },
@@ -10112,12 +11208,12 @@ namespace
 		"Transform", "Transform 2D", "Mesh", "Skeletal Mesh", "Material", "Light",
 		"Decal", "Rope", "Spline", "Trail", "Rigid Body", "Collider", "Joint", "Character Controller", "Movement",
 		"Replication",
-		"Camera", "Camera Rig", "Script", "Terrain", "Foliage", "Nav Mesh",
+		"Camera", "Camera Rig", "Script", "Terrain", "Tile Landscape", "Landscape Stamp", "Foliage", "Nav Mesh",
 		"Nav Agent", "Audio Source", "Audio Listener", "Animator", "Animator Blend",
 		"Animator State Machine", "Root Motion", "Animation Layers",
 		"Inverse Kinematics",
 		"Property Animator", "Sequence Player", "Particle System",
-		"Save State", "Streaming", "LOD", "Environment", "Weather", "UI Canvas", "UI Element",
+		"Save State", "Streaming", "Mobility", "LOD", "Environment", "Weather", "UI Canvas", "UI Element",
 		"UI Text", "UI Image", "UI Button",
 	};
 

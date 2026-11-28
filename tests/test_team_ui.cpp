@@ -5,6 +5,7 @@
 #include "CollabController.h"
 #include "EditorTheme.h"
 #include "EditorWidgets.h"
+#include "TaskBoardTeamLink.h"
 #include "TeamController.h"
 #include "NotificationStore.h"
 #include "TeamView.h"
@@ -959,7 +960,8 @@ TEST_CASE("Team UI: the online faces stack; hovering lists every one with Invite
 	const float faceW = face("Bob")->x1 - face("Bob")->x0;
 	CHECK(face("Bob")->x0 < face("Cleo")->x0);
 	CHECK(face("Bob")->x1 > face("Cleo")->x0);
-	CHECK(face("Eli")->x1 - face("Bob")->x0 < 3.0f * faceW);
+	// Overlapped: about 3.25 faces wide (step 0.75, rounded), well short of four side by side.
+	CHECK(face("Eli")->x1 - face("Bob")->x0 < 3.5f * faceW);
 	// No menu while the mouse is elsewhere.
 	CHECK(ui.find("Invite", "Bob") == nullptr);
 	{
@@ -1280,4 +1282,116 @@ TEST_CASE("Team UI: two editors through a real collab_server (HE_TEST_TEAM_SERVE
 	anna.collab.leave();
 	bob.team.signOut();
 	anna.team.signOut();
+}
+
+TEST_CASE("Team: the task board's link answers from the TeamController and carries notices member to member")
+{
+	FakeTeamServer server;
+	REQUIRE(server.t);
+	CollabController collabA, collabB;
+	TeamController   anna(collabA), bob(collabB);
+	TeamControllerTaskLink annaLink(anna), bobLink(bob);
+	CHECK_FALSE(annaLink.connected());
+	CHECK(annaLink.members().empty());
+
+	std::uint64_t now = 1;
+	auto pump = [&] {
+		server.pump();
+		collabA.update(now); anna.update(now);
+		collabB.update(now); bob.update(now);
+		now += 16;
+	};
+	const std::string address = "127.0.0.1:" + std::to_string(server.t->boundPort());
+	REQUIRE(anna.signIn(address, "studio", "Anna", "correct-horse"));
+	REQUIRE(bob.signIn(address, "studio", "Bob", "correct-horse"));
+	REQUIRE(frameUntil(pump, [&] { return annaLink.connected() && bobLink.connected(); }));
+	CHECK(HE::sameTaskMember(annaLink.self(), "Anna"));
+	bool bobOnline = false;
+	auto seeBob = [&] {
+		bobOnline = false;
+		for (const HE::TaskTeamMember& m : annaLink.members()) bobOnline |= HE::sameTaskMember(m.name, "Bob") && m.online;
+		return bobOnline;
+	};
+	REQUIRE(frameUntil(pump, seeBob));
+
+	// Anna's notice reaches Bob's editor, from Anna, word for word; nothing comes back to Anna.
+	const std::string payload = R"({"type":"task-notice","version":1,"kind":"assigned","title":"Crates"})";
+	REQUIRE(annaLink.send("Bob", payload));
+	HE::TaskTeamLink::Incoming in;
+	REQUIRE(frameUntil(pump, [&] { return bobLink.poll(in); }));
+	CHECK(HE::sameTaskMember(in.from, "Anna"));
+	CHECK(in.payload == payload);
+	CHECK(server.noticesCarried == 1);
+	pump();
+	CHECK_FALSE(annaLink.poll(in));
+
+	// The whole way through the task board: Anna assigns, Bob's bridge says so.
+	{
+		HE::TaskBoardTeam annaTeam, bobTeam;
+		annaTeam.setLink(&annaLink);
+		bobTeam.setLink(&bobLink);
+		HE::TaskBoard before, after;
+		HE::Task* t = after.add("Retexture the crates", "Anna", 1000);
+		before = after;
+		after.assign(t->id, { "Bob" }, "Anna", 2000);
+		annaTeam.afterEdit(before, after, "Plan", now);
+		REQUIRE(annaTeam.pending() == 1);
+		const std::uint64_t due = now + HE::TaskBoardTeam::kAssignSettleMs;
+		REQUIRE(frameUntil([&] { pump(); annaTeam.update(due + 1); bobTeam.update(due + 1); },
+		                   [&] { return !bobTeam.recent().empty(); }));
+		CHECK(bobTeam.recent().front().text == "Anna assigned you \xE2\x80\x9CRetexture the crates\xE2\x80\x9D");
+		CHECK(annaTeam.pending() == 0);
+	}
+
+	// An old server without NOTIFY: the first notice is refused, after that the link drops them
+	// as sent, so no outbox fills up for nothing.
+	server.noNotices = true;
+	REQUIRE(annaLink.send("Bob", payload));
+	REQUIRE(frameUntil(pump, [&] { return !anna.noticesSupported(); }));
+	CHECK(annaLink.send("Bob", payload));
+	CHECK(server.noticesCarried == 2);   // the direct one and the assignment, none from the old server
+
+	anna.signOut();
+	bob.signOut();
+	CHECK_FALSE(annaLink.connected());
+}
+
+TEST_CASE("Team: a task notice through a real collab_server (HE_TEST_TEAM_SERVER=host:port)")
+{
+	const char* env = std::getenv("HE_TEST_TEAM_SERVER");
+	if (!env || !*env)
+	{
+		MESSAGE("HE_TEST_TEAM_SERVER not set — skipped (start collab_server and point it there)");
+		return;
+	}
+	CollabController collabA, collabB;
+	TeamController   anna(collabA), bob(collabB);
+	TeamControllerTaskLink annaLink(anna), bobLink(bob);
+	auto pump = [&] {
+		const std::uint64_t now = wallMs();
+		collabA.update(now); anna.update(now);
+		collabB.update(now); bob.update(now);
+	};
+	const std::string teamName = "notice" + std::to_string(wallMs() % 1000000);
+	REQUIRE(anna.createTeam(env, teamName, "Anna", "anna-secret-1"));
+	REQUIRE(frameUntil(pump, [&] { return anna.signedIn() && anna.isAdmin(); }));
+	REQUIRE(anna.addMember("Bob", "bob-secret-1", false));
+	REQUIRE(frameUntil(pump, [&] { return anna.members().size() == 2; }));
+	REQUIRE(bob.signIn(env, teamName, "Bob", "bob-secret-1"));
+	auto online = [](const TeamController& t, const char* who) {
+		for (const auto& m : t.members())
+			if (m.name == who) return m.online;
+		return false;
+	};
+	REQUIRE(frameUntil(pump, [&] { return bobLink.connected() && online(anna, "Bob"); }));
+
+	const std::string payload = R"({"type":"task-notice","version":1,"kind":"comment","text":"über die Kisten"})";
+	REQUIRE(annaLink.send("bob", payload));   // any spelling of the name
+	HE::TaskTeamLink::Incoming in;
+	REQUIRE(frameUntil(pump, [&] { return bobLink.poll(in); }));
+	CHECK(in.from == "Anna");
+	CHECK(in.payload == payload);
+	CHECK(anna.noticesSupported());
+	anna.signOut();
+	bob.signOut();
 }

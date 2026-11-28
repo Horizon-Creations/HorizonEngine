@@ -328,6 +328,8 @@ namespace
 		ImDrawList* dl = ImGui::GetWindowDrawList();
 
 		bool lineStart = true;
+		float prevPad = 0.0f;                     // the code pill drawn past the last word
+		const std::string* prevHref = nullptr;    // the link the last word belonged to
 		for (std::size_t i = 0; i < words.size(); ++i)
 		{
 			const Word& w = words[i];
@@ -341,18 +343,27 @@ namespace
 			const bool isCode = w.style == docs::Style::Code;
 			if (isCode && ctx.code) ImGui::PushFont(ctx.code, 0.0f);
 
-			const float gap = (lineStart || !w.spaceBefore) ? 0.0f : spaceW;
 			const ImVec2 size = ImGui::CalcTextSize(w.text.c_str());
 			const float  pad  = isCode ? 3.0f : 0.0f;
+			// A code pill reaches `pad` past its text on both sides, so a space
+			// between a pill and plain text grows by that much — or the pill
+			// swallowed it ("variableScore"). Two pills in a row keep the plain
+			// space, so "Edit » Preferences" stays one pill; punctuation glued to
+			// a word stays glued.
+			const bool pillEdge = (prevPad > 0.0f) != (pad > 0.0f);
+			const float gap = (lineStart || !w.spaceBefore) ? 0.0f
+			                : spaceW + (pillEdge ? prevPad + pad : 0.0f);
 			// Keep the word on this line only if it still fits. Otherwise simply
 			// do not call SameLine and let it fall to the next one — a single word
 			// wider than the column then overflows rather than looping forever on
-			// an impossible fit.
+			// an impossible fit. A word glued to the one before (the "." after a
+			// name) never breaks off on its own.
+			const ImVec2 prevMax = ImGui::GetItemRectMax();
 			if (!lineStart)
 			{
-				const float x = ImGui::GetItemRectMax().x + gap;
-				if (x + size.x + pad * 2.0f > rightEdge) lineStart = true;
-				else                                     ImGui::SameLine(0.0f, gap);
+				const float x = prevMax.x + gap;
+				if (w.spaceBefore && x + size.x + pad > rightEdge) lineStart = true;
+				else                                               ImGui::SameLine(0.0f, gap);
 			}
 
 			if (isCode)
@@ -367,14 +378,19 @@ namespace
 			ImGui::TextUnformatted(w.text.c_str());
 			ImGui::PopStyleColor();
 			if (isCode && ctx.code) ImGui::PopFont();
+			const bool continuesLink = !lineStart && w.href && prevHref == w.href;
 			lineStart = false;
+			prevPad   = pad;
+			prevHref  = w.href;
 
 			if (w.href)
 			{
 				const ImVec2 mn = ImGui::GetItemRectMin();
 				const ImVec2 mx = ImGui::GetItemRectMax();
 				const bool hovered = ImGui::IsItemHovered();
-				dl->AddLine(ImVec2(mn.x, mx.y - 1.0f), ImVec2(mx.x, mx.y - 1.0f),
+				// One underline under a multi-word link, through the spaces.
+				const float x0 = continuesLink ? prevMax.x : mn.x;
+				dl->AddLine(ImVec2(x0, mx.y - 1.0f), ImVec2(mx.x, mx.y - 1.0f),
 				            ImGui::GetColorU32(colorFor(docs::Style::Link)),
 				            hovered ? 1.4f : 1.0f);
 				if (hovered)
@@ -461,7 +477,52 @@ namespace
 			for (int c = 0; c < cols; ++c)
 			{
 				ImGui::TableSetColumnIndex(c);
-				if (c < static_cast<int>(row.size())) drawRuns(ctx, row[c]);
+				if (c >= static_cast<int>(row.size())) continue;
+				// A cell that is only a mark ("•", or a ✓ the font has no glyph
+				// for) means "supported": drawn as an amber tick, which reads as a
+				// yes where a lone bullet read as a list that never started.
+				std::string text;
+				for (const docs::Run& r : row[c]) text += r.text;
+				const auto first = text.find_first_not_of(' ');
+				const auto last  = text.find_last_not_of(' ');
+				const std::string mark = first == std::string::npos ? std::string() : text.substr(first, last - first + 1);
+				auto isMark = [](const std::string& s) {
+					return s == "\xe2\x80\xa2" || s == "\xe2\x9c\x93" || s == "\xe2\x9c\x94";
+				};
+				auto drawTick = [] {
+					const float  h = ImGui::GetTextLineHeight();
+					const ImVec2 p = ImGui::GetCursorScreenPos();
+					ImGui::Dummy(ImVec2(h, h));
+					ImDrawList* dl = ImGui::GetWindowDrawList();
+					const ImU32 col = ImGui::GetColorU32(HE::Ed::Theme::AccentHi);
+					dl->PathLineTo(ImVec2(p.x + h * 0.18f, p.y + h * 0.52f));
+					dl->PathLineTo(ImVec2(p.x + h * 0.42f, p.y + h * 0.76f));
+					dl->PathLineTo(ImVec2(p.x + h * 0.84f, p.y + h * 0.26f));
+					dl->PathStroke(col, 0, std::max(1.6f, h * 0.12f));
+				};
+				// "• (basic)": the mark plus a qualifier — the tick, then the rest.
+				const std::string& lead = row[c].empty() ? std::string() : row[c][0].text;
+				const auto leadAt = lead.find_first_not_of(' ');
+				const auto leadSp = leadAt == std::string::npos ? std::string::npos : lead.find(' ', leadAt);
+				if (isMark(mark))
+					drawTick();
+				else if (leadSp != std::string::npos && isMark(lead.substr(leadAt, leadSp - leadAt)))
+				{
+					std::vector<docs::Run> rest = row[c];
+					rest[0].text.erase(0, leadSp + 1);
+					// The first word beside the tick only if it fits there; in a
+					// narrow column it goes under it rather than being cut in two.
+					const float firstW = ImGui::CalcTextSize(
+						rest[0].text.substr(0, rest[0].text.find(' ')).c_str()).x;
+					const float avail = ImGui::GetContentRegionAvail().x;
+					drawTick();
+					const float tickW = ImGui::GetItemRectSize().x + ImGui::GetStyle().ItemSpacing.x * 0.5f;
+					if (tickW + firstW <= avail)
+						ImGui::SameLine(0, ImGui::GetStyle().ItemSpacing.x * 0.5f);
+					drawRuns(ctx, rest);
+				}
+				else
+					drawRuns(ctx, row[c]);
 			}
 		}
 		ImGui::EndTable();
@@ -853,7 +914,15 @@ namespace
 			const float avail = ImGui::GetContentRegionAvail().x;
 			const float w = std::min({ avail, kFigureMaxWidth, static_cast<float>(f.w) });
 			const float h = w * static_cast<float>(f.h) / static_cast<float>(f.w);
-			ImGui::Image(f.tex, ImVec2(w, h));
+			// A picture with rounded corners and a hairline frame: a screenshot
+			// dropped edge-to-edge into the text reads as a pasted rectangle.
+			const ImVec2 p = ImGui::GetCursorScreenPos();
+			ImGui::Dummy(ImVec2(w, h));
+			ImDrawList* fdl = ImGui::GetWindowDrawList();
+			fdl->AddImageRounded(f.tex, p, ImVec2(p.x + w, p.y + h), ImVec2(0, 0), ImVec2(1, 1),
+			                     IM_COL32_WHITE, 8.0f);
+			fdl->AddRect(p, ImVec2(p.x + w, p.y + h),
+			             ImGui::GetColorU32(HE::Ed::Theme::warm(0.30f)), 8.0f, 0, 1.0f);
 		}
 		if (!b.alt.empty())
 		{
@@ -884,7 +953,7 @@ namespace
 			break;
 		case docs::BlockKind::Heading:
 			ImGui::Spacing();
-			if (ctx.sub) ImGui::PushFont(ctx.sub, 0.0f);
+			if (ctx.sub) ImGui::PushFont(ctx.sub, ctx.sub->LegacySize);
 			ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::TextHeading);
 			drawRuns(ctx, b.runs);
 			ImGui::PopStyleColor();
@@ -894,17 +963,34 @@ namespace
 		case docs::BlockKind::Bullets:
 		case docs::BlockKind::Numbers:
 		{
+			// Steps get a numbered badge in the accent, bullets an accent dot —
+			// both in a gutter of their own, so the text column stays straight.
+			using namespace HE::Ed::Theme;
+			const bool  numbered = b.kind == docs::BlockKind::Numbers;
+			const float lineH    = ImGui::GetTextLineHeight();
+			const float gutter   = numbered ? lineH + 12.0f : 18.0f;
+			ImDrawList* ldl = ImGui::GetWindowDrawList();
 			int n = 1;
 			for (const docs::Cell& item : b.items)
 			{
-				ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::TextDim);
-				if (b.kind == docs::BlockKind::Numbers) ImGui::Text("%d.", n++);
-				else                                    ImGui::TextUnformatted("\xe2\x80\xa2");
-				ImGui::PopStyleColor();
-				ImGui::SameLine(0.0f, 8.0f);
+				const ImVec2 p = ImGui::GetCursorScreenPos();
+				const float  cy = p.y + lineH * 0.5f;
+				if (numbered)
+				{
+					const float r = lineH * 0.5f + 1.0f;
+					ldl->AddCircleFilled(ImVec2(p.x + r, cy), r, ImGui::GetColorU32(Accent), 20);
+					char num[8]; std::snprintf(num, sizeof num, "%d", n++);
+					const ImVec2 ts = ImGui::CalcTextSize(num);
+					ldl->AddText(ImVec2(std::round(p.x + r - ts.x * 0.5f), std::round(cy - ts.y * 0.5f)),
+					             IM_COL32(24, 20, 16, 255), num);
+				}
+				else
+					ldl->AddCircleFilled(ImVec2(p.x + 6.0f, cy), 2.6f, ImGui::GetColorU32(AccentHi), 12);
+				ImGui::SetCursorScreenPos(ImVec2(p.x + gutter, p.y));
 				ImGui::BeginGroup();
 				drawRuns(ctx, item);
 				ImGui::EndGroup();
+				if (numbered) ImGui::Dummy(ImVec2(1.0f, 4.0f));   // steps breathe
 			}
 			ImGui::Spacing();
 			break;
@@ -950,19 +1036,47 @@ namespace
 		const docs::Library& lib = docs::library();
 		const docs::Page& page = lib.pages()[static_cast<std::size_t>(s_page)];
 
-		if (ctx.head) ImGui::PushFont(ctx.head, 0.0f);
-		ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::TextHeading);
-		ImGui::TextUnformatted(page.title.c_str());
-		ImGui::PopStyleColor();
-		if (ctx.head) ImGui::PopFont();
-		if (!page.summary.empty())
+		// The page opens with a header card: eyebrow, title, summary, an amber
+		// rule along its foot. A page used to start as one more line of text,
+		// which is most of why the manual read like an encyclopedia.
 		{
-			EditorWidgets::WrapText wrap;
-			ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::TextDim);
-			ImGui::TextUnformatted(page.summary.c_str());
+			using namespace HE::Ed::Theme;
+			ImDrawList* hdl = ImGui::GetWindowDrawList();
+			hdl->ChannelsSplit(2);
+			hdl->ChannelsSetCurrent(1);
+			const ImVec2 top = ImGui::GetCursorScreenPos();
+			const float  pad = 18.0f;
+			const float  cardW = ImGui::GetContentRegionAvail().x;
+			ImGui::SetCursorScreenPos(ImVec2(top.x + pad, top.y + pad));
+			ImGui::BeginGroup();
+			ImGui::PushStyleColor(ImGuiCol_Text, Accent);
+			ImGui::TextUnformatted("MANUAL");
 			ImGui::PopStyleColor();
+			// The font's OWN size: with ImGui 1.92 a 0 here keeps the body size,
+			// which is why every heading in the manual used to be body-sized.
+			if (ctx.head) ImGui::PushFont(ctx.head, ctx.head->LegacySize);
+			ImGui::PushStyleColor(ImGuiCol_Text, TextHeading);
+			ImGui::TextUnformatted(page.title.c_str());
+			ImGui::PopStyleColor();
+			if (ctx.head) ImGui::PopFont();
+			if (!page.summary.empty())
+			{
+				ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + cardW - 2.0f * pad);
+				ImGui::PushStyleColor(ImGuiCol_Text, TextDim);
+				ImGui::TextUnformatted(page.summary.c_str());
+				ImGui::PopStyleColor();
+				ImGui::PopTextWrapPos();
+			}
+			ImGui::EndGroup();
+			const float bottom = ImGui::GetItemRectMax().y + pad;
+			hdl->ChannelsSetCurrent(0);
+			hdl->AddRectFilled(top, ImVec2(top.x + cardW, bottom), ImGui::GetColorU32(warm(0.135f)), 10.0f);
+			hdl->AddRectFilled(ImVec2(top.x + 10.0f, bottom - 3.0f), ImVec2(top.x + cardW - 10.0f, bottom - 1.0f),
+			                   ImGui::GetColorU32(Accent), 1.0f);
+			hdl->ChannelsMerge();
+			ImGui::SetCursorScreenPos(ImVec2(top.x, bottom));
+			ImGui::Dummy(ImVec2(cardW, 8.0f));
 		}
-		ImGui::Spacing();
 
 		// ── Sections scrolled out of the body are not drawn (EDT-302) ────────
 		// The Node Reference is one page of some three hundred sections, and every
@@ -1025,21 +1139,30 @@ namespace
 			const float sectionTop = ImGui::GetCursorScreenPos().y;
 			++s_sectionsDrawn;
 			ImGui::PushID(i);
-			ImGui::Separator();
-			ImGui::Spacing();
+			// Air between sections, not a rule: a line under every section is a
+			// table of contents printed down the page.
+			ImGui::Dummy(ImVec2(1.0f, i == 0 ? 4.0f : 22.0f));
 
 			// The scroll lands here, on the section's first item — set while the
 			// section is being submitted, which is the only moment ImGui can turn
 			// "this one" into a scroll offset.
 			if (s_scrollTo == i && s_scrollFrames > 0) ImGui::SetScrollHereY(0.0f);
 
-			if (!sec.eyebrow.empty())
+			// Once per run of sections that share it: the editor reference put
+			// the same "POST-PROCESSING" over every entry of a group.
+			const bool sameEyebrow = i > 0 &&
+				page.sections[static_cast<std::size_t>(i - 1)].eyebrow == sec.eyebrow;
+			if (!sec.eyebrow.empty() && !sameEyebrow)
 			{
-				ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::TextDim);
-				ImGui::TextUnformatted(sec.eyebrow.c_str());
+				// The eyebrow in the accent and in capitals: a label, not a line
+				// of prose that happens to sit above the heading.
+				std::string eb = sec.eyebrow;
+				for (char& c : eb) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+				ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::Accent);
+				ImGui::TextUnformatted(eb.c_str());
 				ImGui::PopStyleColor();
 			}
-			if (ctx.sub) ImGui::PushFont(ctx.sub, 0.0f);
+			if (ctx.sub) ImGui::PushFont(ctx.sub, ctx.sub->LegacySize);
 			ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::TextHeading);
 			ImGui::TextUnformatted(sec.title.c_str());
 			ImGui::PopStyleColor();
@@ -1084,7 +1207,43 @@ namespace
 	}
 
 	// ── Search results ───────────────────────────────────────────────────────
-	void drawResults(const char* query)
+	// The snippet as runs, every query word (case-insensitive, two letters or
+	// more) in the heading gold and the rest dimmed — so the eye finds why a
+	// result matched without reading the sentence.
+	std::vector<docs::Run> highlightRuns(const std::string& text, const char* query)
+	{
+		auto lower = [](std::string s) {
+			for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+			return s;
+		};
+		std::vector<std::string> terms;
+		{
+			std::string q = lower(query ? query : ""), w;
+			for (char c : q + ' ')
+				if (c == ' ') { if (w.size() >= 2) terms.push_back(w); w.clear(); }
+				else w += c;
+		}
+		const std::string lt = lower(text);
+		std::vector<docs::Run> out;
+		auto add = [&](std::size_t from, std::size_t to, docs::Style s) {
+			if (to > from) out.push_back({ text.substr(from, to - from), s, {} });
+		};
+		std::size_t at = 0;
+		while (at < text.size())
+		{
+			std::size_t best = std::string::npos, len = 0;
+			for (const std::string& t : terms)
+				if (const std::size_t f = lt.find(t, at); f < best) { best = f; len = t.size(); }
+			if (best == std::string::npos) break;
+			add(at, best, docs::Style::Italic);
+			add(best, best + len, docs::Style::Bold);
+			at = best + len;
+		}
+		add(at, text.size(), docs::Style::Italic);
+		return out;
+	}
+
+	void drawResults(const Ctx& ctx, const char* query)
 	{
 		const docs::Library& lib = docs::library();
 		std::vector<docs::Hit> hits = lib.search(query);
@@ -1126,8 +1285,8 @@ namespace
 			ImGui::Text("%s \xc2\xb7 %s", p.title.c_str(), s.eyebrow.empty()
 			                                                  ? p.id.c_str()
 			                                                  : s.eyebrow.c_str());
-			ImGui::TextUnformatted(h.snippet.c_str());
 			ImGui::PopStyleColor();
+			drawRuns(ctx, highlightRuns(h.snippet, query));
 			ImGui::Spacing();
 			ImGui::PopID();
 
@@ -1301,13 +1460,16 @@ namespace
 			{
 				const docs::Page& p = lib.pages()[static_cast<std::size_t>(idx)];
 				ImGui::PushID(idx);
-				if (ImGui::Selectable(p.title.c_str(), idx == s_page)) go(idx, -1);
+				// While results are shown, no page is "the open one": the
+				// highlight on the last page read looked like where the hits were.
+				const bool current = idx == s_page && !s_query[0];
+				if (ImGui::Selectable(p.title.c_str(), current)) go(idx, -1);
 
 				// The current page's sections, indented under it — the "on this
 				// page" list, which is how a long reference page is navigated at
 				// all. Only for the open page: all of them at once would be a
 				// hundred and twelve rows.
-				if (idx == s_page) drawSectionList(p);
+				if (current) drawSectionList(p);
 				ImGui::PopID();
 			}
 			ImGui::Spacing();
@@ -1583,7 +1745,7 @@ void draw(const Host& host)
 			// WrapText — this is the BeginChild case, where the guard's own block
 			// ends before EndChild).
 			EditorWidgets::WrapText wrap;
-			if (s_query[0]) drawResults(s_query);
+			if (s_query[0]) drawResults(ctx, s_query);
 			else            drawPage(ctx);
 
 			ImGui::Spacing();

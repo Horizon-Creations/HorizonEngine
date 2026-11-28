@@ -81,6 +81,7 @@ inline constexpr HE::GameBuildConfig kConfig = {
     "windowSec": 3.0
   },
   "game": {
+    "cookStaticEntities": true,
     "splashEnabled": false,
     "splashImage": "",
     "splashSubtitle": "",
@@ -112,7 +113,7 @@ inline constexpr HE::GameBuildConfig kConfig = {
     "motionBlurIntensity": 0.5,
     "motionBlurMax": 24.0,
     "occlusionCulling": false,
-    "renderPath": 0,
+    "renderPath": 1,
     "renderScale": 1.0,
     "specularAA": true,
     "specularAAStrength": 1.0,
@@ -169,6 +170,15 @@ inline constexpr HE::GameBuildConfig kConfig = {
     "windowHeight": 720,
     "windowMode": "Fullscreen",
     "windowWidth": 1280
+  },
+  "rvt": {
+    "activationRadiusM": 600.0,
+    "maxPagesPerFrame": 8,
+    "metersPerTexel": 0.25,
+    "nativeNear": true,
+    "nearRadiusM": 64.0,
+    "poolPages": 512,
+    "tileNativeNear": false
   },
   "shadows": {
     "cascadeCount": 3,

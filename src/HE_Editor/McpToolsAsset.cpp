@@ -405,10 +405,9 @@ void registerAssetTools(McpToolRegistry& registry, ContentManager& content,
 					"material graph; a prefab is made from an entity subtree; a scene is "
 					"created with the scene tools. What this tool makes is an authored "
 					"asset with valid starter contents.");
-			// The project's own gate, mirrored: a project without Advanced Shader
-			// Effects has no Material row in the create menu, and one authored in
-			// Lua has no HorizonCode row. MCP must not create what the menu will
-			// not offer — the same rule the HorizonCode tools follow for node types.
+			// The project's own gate, mirrored: a project authored in Lua has no
+			// HorizonCode row. MCP must not create what the menu will not offer —
+			// the same rule the HorizonCode tools follow for node types.
 			if (h->creatableTypes)
 			{
 				const std::vector<HE::AssetType> allowed = h->creatableTypes();
@@ -416,8 +415,7 @@ void registerAssetTools(McpToolRegistry& registry, ContentManager& content,
 					return ToolResult::fail("invalid_payload",
 						"This project does not offer " + typeName + " assets — the "
 						"Content Browser's create menu does not list them either. The "
-						"gate is usually the project's scripting language or its "
-						"Advanced Shader Effects setting.");
+						"gate is the project's scripting language.");
 			}
 
 			std::string rawPath = strArg(args, "path");
