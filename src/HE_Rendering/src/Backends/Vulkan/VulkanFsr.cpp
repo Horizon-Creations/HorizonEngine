@@ -302,17 +302,17 @@ bool VulkanFsr::replaceSwapchain(VkPhysicalDevice phys, VkDevice device, VkSwapc
 VkResult VulkanFsr::acquireNextImage(VkDevice device, VkSwapchainKHR sc, uint64_t timeout, VkSemaphore sem, VkFence fence,
                                      uint32_t* index)
 {
-    return (m_scContext ? m_pfnAcquire : vkAcquireNextImageKHR)(device, sc, timeout, sem, fence, index);
+    return (m_scContext ? m_pfnAcquire : m_plain.acquire ? m_plain.acquire : vkAcquireNextImageKHR)(device, sc, timeout, sem, fence, index);
 }
 
 VkResult VulkanFsr::queuePresent(VkQueue queue, const VkPresentInfoKHR* info)
 {
-    return (m_scContext ? m_pfnPresent : vkQueuePresentKHR)(queue, info);
+    return (m_scContext ? m_pfnPresent : m_plain.present ? m_plain.present : vkQueuePresentKHR)(queue, info);
 }
 
 VkResult VulkanFsr::getSwapchainImages(VkDevice device, VkSwapchainKHR sc, uint32_t* count, VkImage* images)
 {
-    return (m_scContext ? m_pfnGetImages : vkGetSwapchainImagesKHR)(device, sc, count, images);
+    return (m_scContext ? m_pfnGetImages : m_plain.getImages ? m_plain.getImages : vkGetSwapchainImagesKHR)(device, sc, count, images);
 }
 
 uint64_t VulkanFsr::presentCount(VkSwapchainKHR sc) const
@@ -345,7 +345,7 @@ void VulkanFsr::destroySwapchain(VkDevice device, VkSwapchainKHR& sc)
         return;
     }
 #endif
-    if (sc) vkDestroySwapchainKHR(device, sc, nullptr);
+    if (sc) (m_plain.destroy ? m_plain.destroy : vkDestroySwapchainKHR)(device, sc, nullptr);
     sc = VK_NULL_HANDLE;
 }
 

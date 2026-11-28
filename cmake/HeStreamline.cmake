@@ -44,6 +44,9 @@ elseif(HE_ENABLE_DLSS AND WIN32 AND CMAKE_SYSTEM_PROCESSOR MATCHES "(AMD64|x86_6
         "bin/x64/sl.dlss.dll"             18871eea87c90345da97d8109faa81ea7d5840e8d99b51b55b0e46cfa177f84e
         "bin/x64/nvngx_dlss.dll"          d00b5b0ab29c3ca101b70c3a5ecb3a01b7ef33766a3383a28a18623083e6123e
         "bin/x64/nvngx_dlss.license.txt"  3027f23ca5a46dd9cb8183fbd522983a86f64d7daac5982912bf9f214671f294
+        # sl.common loads it on Vulkan (NVIDIA's low-latency layer; logs an error without it). Its licence is Reflex's.
+        "bin/x64/NvLowLatencyVk.dll"      2a77dc3e1c724b7eea5755be0ae7423752e79a2459fae72181a9f00e3507e5d6
+        "bin/x64/reflex.license.txt"      ebf83c07fb3b2939908c3795d887afde3161c89a28ba391724efc784ce1bdabe
         "license.txt"                     7b6f23e7d6f3ad6292f9308d2b42cdc3d82ae4e9b2abb55f230279d83bedd43d
         "3rd-party-licenses.md"           cb251639994465f31d2178c16acedf1ff4f9cef1c370a09782ed36d4c86c1dca)
     set(_sl_root "${HE_SL_SDK_ROOT}")
@@ -116,11 +119,12 @@ elseif(HE_ENABLE_DLSS AND WIN32 AND CMAKE_SYSTEM_PROCESSOR MATCHES "(AMD64|x86_6
         configure_file("${_sl_root}/license.txt" "${_sl_root}/NVIDIA_STREAMLINE_LICENSE.txt" COPYONLY)
         configure_file("${_sl_root}/3rd-party-licenses.md" "${_sl_root}/NVIDIA_STREAMLINE_3RD_PARTY_LICENSES.md" COPYONLY)
         configure_file("${_sl_root}/bin/x64/nvngx_dlss.license.txt" "${_sl_root}/NVIDIA_DLSS_LICENSE.txt" COPYONLY)
+        configure_file("${_sl_root}/bin/x64/reflex.license.txt" "${_sl_root}/NVIDIA_REFLEX_LICENSE.txt" COPYONLY)
         set(HE_SL_RUNTIME_FILES
             "${_sl_root}/bin/x64/sl.interposer.dll" "${_sl_root}/bin/x64/sl.common.dll" "${_sl_root}/bin/x64/sl.dlss.dll"
-            "${_sl_root}/bin/x64/nvngx_dlss.dll"
+            "${_sl_root}/bin/x64/nvngx_dlss.dll" "${_sl_root}/bin/x64/NvLowLatencyVk.dll"
             "${_sl_root}/NVIDIA_STREAMLINE_LICENSE.txt" "${_sl_root}/NVIDIA_STREAMLINE_3RD_PARTY_LICENSES.md"
-            "${_sl_root}/NVIDIA_DLSS_LICENSE.txt")
+            "${_sl_root}/NVIDIA_DLSS_LICENSE.txt" "${_sl_root}/NVIDIA_REFLEX_LICENSE.txt")
         message(STATUS "HorizonEngine: NVIDIA Streamline ${HE_SL_SDK_VERSION} + DLSS enabled (${_sl_root})")
     else()
         message(WARNING "HorizonEngine: Streamline SDK incomplete under '${_sl_root}' — DLSS left out")

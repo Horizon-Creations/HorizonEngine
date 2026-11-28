@@ -1,4 +1,5 @@
 #include "Backends/Vulkan/VulkanRenderer.h"
+#include "Backends/Streamline/StreamlineDlss.h"   // NVIDIA DLSS through Streamline (AAMethod::DLSS)
 #include <MaterialGraph/RvtLookup.h>   // kRvtTableBinding (40..43), kRvtAlbedoColdBinding (44..46)
 #include <ContentManager/BlockEncode.h> // RVT cold pages: BC7 encode on a worker thread (Thema 333 step 9)
 #include <chrono>
@@ -479,6 +480,10 @@ void VulkanRenderer::Shutdown()
     if (m_renderPass)  vkDestroyRenderPass (m_device,   m_renderPass,  nullptr);
     destroySwapchain();
     savePipelineCache();     // every pipeline is built by now; ImGui shut down before us
+    // Streamline after the swapchain it saw made and destroyed, before the device and the instance.
+    HE::StreamlineDlss::instance().shutdown();
+    m_fsr.setPlainSwapchainFns({});
+    m_slDeviceWaitIdle = nullptr;
     if (m_device)   vkDestroyDevice    (m_device,              nullptr);
     if (m_surface)  vkDestroySurfaceKHR(m_instance, m_surface, nullptr);
     if (m_debugMessenger)
@@ -1025,7 +1030,7 @@ void VulkanRenderer::DrawViewportFrame(VkCommandBuffer cmd)
     // synced to the mode at the top of Render (syncTaaTargets).
     m_taaFrame = useHDR && taaWanted() && m_taaHistoryFB[0] && m_taaVelocityFB
               && m_taaW == sW && m_taaH == sH
-              && !(fsrFrame() && !m_mbRealFrame);   // FSR: a still or an RVT page is drawn unjittered, outside its history
+              && !(upscalerFrame() && !m_mbRealFrame);   // FSR / DLSS: a still or an RVT page is drawn unjittered, outside its history
     // FSR: its context sized scene -> viewport (made again on a size change: rare, a settings change) and its own
     // jitter sequence. FSR gives the offset in pixels the way its dispatch wants it; the Vulkan clip has y down like the
     // pixels, so the engine's clip shift is (x, y) — D3D12's is (x, -y). Witnessed at 0.5: (x, -y) 1.63 vs 1.36 off-diff.
@@ -1684,7 +1689,8 @@ IRenderer::Capabilities VulkanRenderer::GetCapabilities() const
     c.supportsTemporalAA = taaReady();
     // FSR rides on TAA's jitter and velocity; render scale only through it (sceneSizeFor).
     c.supportsFSR         = c.supportsTemporalAA && m_fsr.available();
-    c.supportsRenderScale = c.supportsFSR;
+    c.supportsDLSS        = c.supportsTemporalAA && HE::StreamlineDlss::instance().available();
+    c.supportsRenderScale = c.supportsFSR || c.supportsDLSS;
     // FSR 3.1 frame generation makes one frame per rendered one (the packaged game's swapchain; SetFrameGeneration),
     // given the proxy's own queues (createDevice).
     c.maxFrameGeneration = (c.supportsFSR && m_fgQueues.present.queue && m_fsr.frameGenAvailable(m_physDevice, m_device)) ? 2 : 1;
@@ -1829,6 +1835,34 @@ void VulkanRenderer::createInstance()
                 break;
             }
     }
+
+#ifdef _WIN32
+    // NVIDIA DLSS through Streamline (StreamlineDlss.h): its Vulkan rule is slInit before the instance, and the instance
+    // (then the device, createDevice) carrying what slGetFeatureRequirements lists. A machine without an NVIDIA GPU learns
+    // that at the device (setVulkanInfo) and Streamline is shut down again there.
+    if (m_instanceApiVersion >= VK_API_VERSION_1_2)
+    {
+        HE::StreamlineDlss& sl = HE::StreamlineDlss::instance();
+        HE::StreamlineDlss::VkRequirements req;
+        if (sl.init(HE::StreamlineDlss::Api::Vulkan) && sl.vkRequirements(req))
+        {
+            uint32_t en = 0;
+            vkEnumerateInstanceExtensionProperties(nullptr, &en, nullptr);
+            std::vector<VkExtensionProperties> eprops(en);
+            if (en) vkEnumerateInstanceExtensionProperties(nullptr, &en, eprops.data());
+            std::string line;
+            for (uint32_t i = 0; i < req.numInstanceExtensions; ++i)
+            {
+                const char* want = req.instanceExtensions[i];
+                const bool have = std::any_of(eprops.begin(), eprops.end(), [&](const VkExtensionProperties& e) { return std::strcmp(e.extensionName, want) == 0; });
+                const bool listed = std::any_of(exts.begin(), exts.end(), [&](const char* n) { return std::strcmp(n, want) == 0; });
+                if (have && !listed) exts.push_back(want);
+                line += std::string(" ") + want + (have ? "" : "(missing)");
+            }
+            HE_LOG_INFO(RHI, "VulkanRenderer: Streamline wants instance extensions:%s", line.empty() ? " none" : line.c_str());
+        }
+    }
+#endif
 
     VkApplicationInfo appInfo{};
     appInfo.sType            = VK_STRUCTURE_TYPE_APPLICATION_INFO;
@@ -2103,9 +2137,86 @@ void VulkanRenderer::createDevice()
             vkGetPhysicalDeviceFeatures2(m_physDevice, &feat2);
             timeline = have.timelineSemaphore == VK_TRUE;
         }
-        if (timeline) { timelineEnable.timelineSemaphore = VK_TRUE; timelineEnable.pNext = chain; chain = &timelineEnable; }
     }
 #endif
+
+    // NVIDIA DLSS through Streamline (initialised in createInstance): its device extensions and Vulkan 1.2 features, on an
+    // NVIDIA device that has them all; otherwise Streamline is shut down again here. Its features come as names of
+    // VkPhysicalDeviceVulkan12Features members, and with that struct in the chain the separate 1.2 structs (timeline,
+    // buffer address) must not be: it then carries all of them.
+    VkPhysicalDeviceVulkan12Features v12{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES };
+    bool dlssDevice = false;
+    if (HE::StreamlineDlss::instance().initialized())
+    {
+        HE::StreamlineDlss& sl = HE::StreamlineDlss::instance();
+        HE::StreamlineDlss::VkRequirements req;
+        VkPhysicalDeviceProperties props{};
+        vkGetPhysicalDeviceProperties(m_physDevice, &props);
+        std::string why;
+        if (props.vendorID != 0x10DE) why = "not an NVIDIA GPU";
+        else if (props.apiVersion < VK_API_VERSION_1_2) why = "device below Vulkan 1.2";
+        else if (!sl.vkRequirements(req)) why = "no requirements from Streamline";
+        std::vector<const char*> slExts;
+        if (why.empty())
+        {
+            VkPhysicalDeviceVulkan12Features have12{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES };
+            VkPhysicalDeviceFeatures2 feat2{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2 };
+            feat2.pNext = &have12;
+            vkGetPhysicalDeviceFeatures2(m_physDevice, &feat2);
+            for (uint32_t i = 0; i < req.numFeatures12 && why.empty(); ++i)
+            {
+                const std::string_view n(req.features12[i]);
+                VkBool32* want = n == "timelineSemaphore" ? &v12.timelineSemaphore
+                               : n == "descriptorIndexing" ? &v12.descriptorIndexing
+                               : n == "bufferDeviceAddress" ? &v12.bufferDeviceAddress : nullptr;
+                const VkBool32 has = n == "timelineSemaphore" ? have12.timelineSemaphore
+                                   : n == "descriptorIndexing" ? have12.descriptorIndexing
+                                   : n == "bufferDeviceAddress" ? have12.bufferDeviceAddress : VK_FALSE;
+                if (!want) why = "unknown Vulkan 1.2 feature " + std::string(n);
+                else if (!has) why = "Vulkan 1.2 feature " + std::string(n) + " missing";
+                else *want = VK_TRUE;
+            }
+            if (why.empty() && req.numFeatures13) why = "Vulkan 1.3 features asked for";
+            uint32_t n = 0;
+            vkEnumerateDeviceExtensionProperties(m_physDevice, nullptr, &n, nullptr);
+            std::vector<VkExtensionProperties> avail(n);
+            if (n) vkEnumerateDeviceExtensionProperties(m_physDevice, nullptr, &n, avail.data());
+            auto has = [&](const char* e) { return std::any_of(avail.begin(), avail.end(), [&](const VkExtensionProperties& p) { return std::strcmp(p.extensionName, e) == 0; }); };
+            for (uint32_t i = 0; i < req.numDeviceExtensions && why.empty(); ++i)
+            {
+                const char* e = req.deviceExtensions[i];
+                // KHR and EXT buffer device address may not both be enabled: the KHR one where the device has it.
+                if (std::strcmp(e, "VK_EXT_buffer_device_address") == 0 && has("VK_KHR_buffer_device_address")) continue;
+                if (!has(e)) why = std::string("device extension ") + e + " missing";
+                else slExts.push_back(e);
+            }
+        }
+        if (why.empty())
+        {
+            dlssDevice = true;
+            for (const char* e : slExts)
+                if (!std::any_of(devExts.begin(), devExts.end(), [&](const char* x) { return std::strcmp(x, e) == 0; }))
+                    devExts.push_back(e);
+        }
+        else
+        {
+            HE_LOG_INFO(RHI, "VulkanRenderer: DLSS unavailable (%s)", why.c_str());
+            sl.shutdown();
+        }
+    }
+    if (dlssDevice)
+    {
+        v12.timelineSemaphore   |= timeline ? VK_TRUE : VK_FALSE;
+        v12.bufferDeviceAddress |= wantHwRt ? VK_TRUE : VK_FALSE;
+        timeline = timeline || v12.timelineSemaphore;
+        rqEnable.pNext = nullptr;   // bdaEnable: in v12 now
+        v12.pNext = chain;
+        chain = &v12;
+    }
+    else if (timeline)
+    {
+        timelineEnable.timelineSemaphore = VK_TRUE; timelineEnable.pNext = chain; chain = &timelineEnable;
+    }
 
     VkDeviceCreateInfo dci{};
     dci.sType                   = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
@@ -2118,6 +2229,18 @@ void VulkanRenderer::createDevice()
     vkCheck(vkCreateDevice(m_physDevice, &dci, nullptr, &m_device), "vkCreateDevice");
     vkGetDeviceQueue(m_device, m_graphicsFamily, 0, &m_graphicsQueue);
     vkGetPhysicalDeviceMemoryProperties(m_physDevice, &m_memoryProperties);
+    if (dlssDevice)
+    {
+        // Streamline's queues would start after the host's (DLSS asks for none): the next free slot of each family.
+        uint32_t computeFamily = m_graphicsFamily;
+        for (uint32_t f = 0; f < qCount; ++f)
+            if ((qProps[f].queueFlags & VK_QUEUE_COMPUTE_BIT) && !(qProps[f].queueFlags & VK_QUEUE_GRAPHICS_BIT)) { computeFamily = f; break; }
+        if (!HE::StreamlineDlss::instance().setVulkanInfo(m_instance, m_physDevice, m_device, m_graphicsFamily, qUsed[m_graphicsFamily],
+                                                         computeFamily, qUsed[computeFamily]))
+            HE::StreamlineDlss::instance().shutdown();
+        else
+            bindStreamlineSwapchainHooks();
+    }
     if (timeline && fgPresent.family != UINT32_MAX && fgCompute.family != UINT32_MAX && fgAcquire.family != UINT32_MAX)
     {
         m_fgQueues.game = { m_graphicsQueue, m_graphicsFamily };
@@ -2205,7 +2328,7 @@ void VulkanRenderer::createSwapchain(uint32_t w, uint32_t h)
     if (!(m_fgProxyWanted && m_fsr.replaceSwapchain(m_physDevice, m_device, m_swapchain, sci, m_fgQueues)))
     {
         m_fgProxyWanted = false;
-        vkCheck(vkCreateSwapchainKHR(m_device, &sci, nullptr, &m_swapchain), "vkCreateSwapchainKHR");
+        vkCheck(m_fsr.createPlainSwapchain(m_device, &sci, &m_swapchain), "vkCreateSwapchainKHR");   // Streamline's proxy with DLSS
     }
     uint32_t imgCount = 0;
     m_fsr.getSwapchainImages(m_device, m_swapchain, &imgCount, nullptr);   // the proxy's own images through FFX
@@ -6317,11 +6440,13 @@ bool VulkanRenderer::encodeFsr(VkCommandBuffer cmd)
 {
     const bool upscale = sceneScaled();
     const uint32_t sW = m_sceneW, sH = m_sceneH, dW = m_viewportW, dH = m_viewportH;
-    if (!fsrFrame() || !m_taaFrame || !m_mbRealFrame || !m_fsr.sizedFor(sW, sH, dW, dH)
+    // NVIDIA DLSS (Streamline, StreamlineDlss.h) takes the same place, inputs and output image: only the dispatch differs.
+    const bool dlssOn = dlssFrame();
+    if ((!dlssOn && (!fsrFrame() || !m_fsr.sizedFor(sW, sH, dW, dH))) || !m_taaFrame || !m_mbRealFrame
         || !m_viewportDepthImage || !m_taaVelocityImage) return false;
     if (!upscale && !m_fsrOutImage) createFsrOut(dW, dH);   // native AA: its own output, made once (no descriptor names it)
     if (!m_fsrOutImage) return false;
-    GpuPassScope _passTimer(this, "FSR");
+    GpuPassScope _passTimer(this, dlssOn ? "DLSS" : "FSR");
     auto barrier = [&](VkImage img, VkImageAspectFlags aspect, VkImageLayout from, VkImageLayout to,
                        VkAccessFlags srcAccess, VkAccessFlags dstAccess, VkPipelineStageFlags srcStage, VkPipelineStageFlags dstStage)
     {
@@ -6354,24 +6479,65 @@ bool VulkanRenderer::encodeFsr(VkCommandBuffer cmd)
     const glm::mat4& P = m_renderWorld.camera.projection;
     const float A = P[2][2], B = P[3][2];
     const uint64_t nowNs = SDL_GetTicksNS();
-    HE::VulkanFsr::Dispatch fd;
-    fd.cmd      = cmd;
-    fd.color    = { m_hdrImage, VK_FORMAT_R16G16B16A16_SFLOAT, sW, sH, false };
-    fd.depth    = { m_viewportDepthImage, m_depthFormat, sW, sH, false };
-    fd.velocity = { m_taaVelocityImage, VK_FORMAT_R16G16_SFLOAT, sW, sH, false };
-    fd.output   = { m_fsrOutImage, VK_FORMAT_R16G16B16A16_SFLOAT, dW, dH, true };
-    if (m_fsrReactiveValid) fd.reactive = { m_fsrReactiveImage, VK_FORMAT_R8_UNORM, sW, sH, false };   // SHADER_READ
-    fd.renderW = sW; fd.renderH = sH; fd.displayW = dW; fd.displayH = dH;
-    fd.jitter = m_fsrJitter;
-    // kVulkanClipFix maps GL's whole -1..1 onto 0..1: the depth's planes are the projection's own.
-    fd.nearZ = B / (A - 1.0f); fd.farZ = B / (A + 1.0f);
-    fd.fovY = 2.0f * std::atan(1.0f / P[1][1]);
-    fd.frameMs = m_fsrLastNs ? float(double(nowNs - m_fsrLastNs) * 1e-6) : 16.6f;
-    fd.sharpness = m_aaSharpness;
-    fd.reset = m_fsrReset;
-    m_fsrLastNs = nowNs;
-    // FFX is told the layout each image is in: PIXEL_COMPUTE_READ = SHADER_READ_ONLY, UNORDERED_ACCESS = GENERAL.
-    const bool ok = m_fsr.dispatch(fd);
+    bool ok = false;
+    if (dlssOn)
+    {
+        // Streamline is told each image's layout at the dispatch, and what Vulkan cannot be asked (format, usage).
+        static const bool s_jflip = [] { const char* e = std::getenv("HE_DLSS_JITTERFLIP"); return e && *e == '1'; }();
+        static const bool s_mflip = [] { const char* e = std::getenv("HE_DLSS_MVFLIP"); return e && *e == '1'; }();
+        constexpr uint32_t kRT = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+        const glm::mat4 vp = P * m_renderWorld.camera.view;
+        const glm::mat4 inv = glm::inverse(m_renderWorld.camera.view);
+        HE::StreamlineDlss::Eval ev;
+        ev.cmd = cmd;
+        ev.frameIndex = ++m_dlssFrameIndex;
+        ev.color  = { m_hdrImage, m_hdrView, uint32_t(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL), sW, sH,
+                      uint32_t(VK_FORMAT_R16G16B16A16_SFLOAT), kRT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT };
+        ev.depth  = { m_viewportDepthImage, m_viewportDepthView, uint32_t(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL), sW, sH,
+                      uint32_t(m_depthFormat), VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT };
+        ev.motion = { m_taaVelocityImage, m_taaVelocityView, uint32_t(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL), sW, sH,
+                      uint32_t(VK_FORMAT_R16G16_SFLOAT), kRT };
+        ev.output = { m_fsrOutImage, m_fsrOutView, uint32_t(VK_IMAGE_LAYOUT_GENERAL), dW, dH, uint32_t(VK_FORMAT_R16G16B16A16_SFLOAT),
+                      VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT };
+        ev.renderW = sW; ev.renderH = sH; ev.displayW = dW; ev.displayH = dH;
+        ev.scale = upscale ? m_renderScale : 1.0f;
+        // The Vulkan clip has y down like the pixels: the engine's offset is DLSS's as it is (D3D12 flips y).
+        ev.jitter = glm::vec2(m_taaJitter.x, s_jflip ? -m_taaJitter.y : m_taaJitter.y);
+        // Velocity is uvNow - uvPrev; DLSS wants the way back to the previous frame, in [-1,1] screen units.
+        ev.mvecScale = s_mflip ? glm::vec2(1.0f) : glm::vec2(-1.0f);
+        ev.viewToClip = P;
+        ev.clipToPrevClip = m_mbHasPrev ? m_mbPrevViewProj * glm::inverse(vp) : glm::mat4(1.0f);
+        ev.camPos = glm::vec3(inv[3]); ev.camUp = glm::normalize(glm::vec3(inv[1]));
+        ev.camRight = glm::normalize(glm::vec3(inv[0])); ev.camFwd = -glm::normalize(glm::vec3(inv[2]));
+        ev.nearZ = B / (A - 1.0f); ev.farZ = B / (A + 1.0f);   // kVulkanClipFix: the projection's own planes
+        ev.fovY = 2.0f * std::atan(1.0f / P[1][1]);
+        ev.aspect = float(dW) / float(std::max(1u, dH));
+        ev.reset = m_fsrReset;
+        ok = HE::StreamlineDlss::instance().evaluate(ev);
+        // DLSS left its own pipeline and descriptor sets bound: everything after binds its own again (the restore
+        // manual hooking asks of the host, Streamline's ProgrammingGuideManualHooking 7.2).
+    }
+    else
+    {
+        HE::VulkanFsr::Dispatch fd;
+        fd.cmd      = cmd;
+        fd.color    = { m_hdrImage, VK_FORMAT_R16G16B16A16_SFLOAT, sW, sH, false };
+        fd.depth    = { m_viewportDepthImage, m_depthFormat, sW, sH, false };
+        fd.velocity = { m_taaVelocityImage, VK_FORMAT_R16G16_SFLOAT, sW, sH, false };
+        fd.output   = { m_fsrOutImage, VK_FORMAT_R16G16B16A16_SFLOAT, dW, dH, true };
+        if (m_fsrReactiveValid) fd.reactive = { m_fsrReactiveImage, VK_FORMAT_R8_UNORM, sW, sH, false };   // SHADER_READ
+        fd.renderW = sW; fd.renderH = sH; fd.displayW = dW; fd.displayH = dH;
+        fd.jitter = m_fsrJitter;
+        // kVulkanClipFix maps GL's whole -1..1 onto 0..1: the depth's planes are the projection's own.
+        fd.nearZ = B / (A - 1.0f); fd.farZ = B / (A + 1.0f);
+        fd.fovY = 2.0f * std::atan(1.0f / P[1][1]);
+        fd.frameMs = m_fsrLastNs ? float(double(nowNs - m_fsrLastNs) * 1e-6) : 16.6f;
+        fd.sharpness = m_aaSharpness;
+        fd.reset = m_fsrReset;
+        m_fsrLastNs = nowNs;
+        // FFX is told the layout each image is in: PIXEL_COMPUTE_READ = SHADER_READ_ONLY, UNORDERED_ACCESS = GENERAL.
+        ok = m_fsr.dispatch(fd);
+    }
     if (ok) m_fsrReset = false;
 
     barrier(m_viewportDepthImage, VK_IMAGE_ASPECT_DEPTH_BIT, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
@@ -10127,11 +10293,34 @@ VkResult VulkanRenderer::submitGraphics(const VkSubmitInfo& si, VkFence fence)
     return vkQueueSubmit(m_graphicsQueue, 1, &si, fence);
 }
 
+void VulkanRenderer::bindStreamlineSwapchainHooks()
+{
+    // The hooks Streamline must see under manual hooking (sl_hooks.h), from its vkGetDeviceProcAddr; everything else stays
+    // Vulkan's. The surface ones are not taken: SDL makes and frees the surface, and DLSS Super Resolution does not use it.
+    HE::StreamlineDlss& sl = HE::StreamlineDlss::instance();
+    auto get = [&](const char* n) { return sl.vkDeviceProc(m_device, n); };
+    HE::VulkanFsr::SwapchainFns f;
+    f.create    = reinterpret_cast<PFN_vkCreateSwapchainKHR>(get("vkCreateSwapchainKHR"));
+    f.destroy   = reinterpret_cast<PFN_vkDestroySwapchainKHR>(get("vkDestroySwapchainKHR"));
+    f.getImages = reinterpret_cast<PFN_vkGetSwapchainImagesKHR>(get("vkGetSwapchainImagesKHR"));
+    f.acquire   = reinterpret_cast<PFN_vkAcquireNextImageKHR>(get("vkAcquireNextImageKHR"));
+    f.present   = reinterpret_cast<PFN_vkQueuePresentKHR>(get("vkQueuePresentKHR"));
+    auto* waitIdle = reinterpret_cast<PFN_vkDeviceWaitIdle>(get("vkDeviceWaitIdle"));
+    if (!f.create || !f.destroy || !f.getImages || !f.acquire || !f.present || !waitIdle)
+    {
+        HE_LOG_WARN(RHI, "%s", "VulkanRenderer: Streamline's swapchain hooks missing — DLSS off");
+        sl.shutdown();
+        return;
+    }
+    m_fsr.setPlainSwapchainFns(f);
+    m_slDeviceWaitIdle = waitIdle;
+}
+
 void VulkanRenderer::deviceWaitIdle()
 {
     if (!m_device) return;
     flushUploads();
-    vkDeviceWaitIdle(m_device);
+    (m_slDeviceWaitIdle ? m_slDeviceWaitIdle : vkDeviceWaitIdle)(m_device);
     retireUploads();
 }
 

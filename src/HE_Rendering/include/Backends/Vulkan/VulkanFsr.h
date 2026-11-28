@@ -76,6 +76,21 @@ public:
     bool replaceSwapchain(VkPhysicalDevice phys, VkDevice device, VkSwapchainKHR& sc, const VkSwapchainCreateInfoKHR& ci,
                           const Queues& q);
     bool swapchainReplaced() const { return m_scContext != nullptr; }
+    // The plain (no FG proxy) swapchain calls: Vulkan's own, or NVIDIA Streamline's proxies of them (it must see every
+    // present; VulkanRenderer::bindStreamlineSwapchainHooks). Null members stay Vulkan's.
+    struct SwapchainFns
+    {
+        PFN_vkCreateSwapchainKHR    create = nullptr;
+        PFN_vkDestroySwapchainKHR   destroy = nullptr;
+        PFN_vkGetSwapchainImagesKHR getImages = nullptr;
+        PFN_vkAcquireNextImageKHR   acquire = nullptr;
+        PFN_vkQueuePresentKHR       present = nullptr;
+    };
+    void setPlainSwapchainFns(const SwapchainFns& f) { m_plain = f; }
+    VkResult createPlainSwapchain(VkDevice device, const VkSwapchainCreateInfoKHR* ci, VkSwapchainKHR* sc)
+    {
+        return (m_plain.create ? m_plain.create : vkCreateSwapchainKHR)(device, ci, nullptr, sc);
+    }
     VkResult acquireNextImage(VkDevice device, VkSwapchainKHR sc, uint64_t timeout, VkSemaphore sem, VkFence fence, uint32_t* index);
     VkResult queuePresent(VkQueue queue, const VkPresentInfoKHR* info);
     VkResult getSwapchainImages(VkDevice device, VkSwapchainKHR sc, uint32_t* count, VkImage* images);
@@ -126,5 +141,6 @@ private:
     PFN_vkGetSwapchainImagesKHR m_pfnGetImages = nullptr;
     void*                       m_pfnDestroy = nullptr;        // PFN_vkDestroySwapchainFFXAPI
     void*                       m_pfnPresentCount = nullptr;   // PFN_getLastPresentCountFFXAPI
+    SwapchainFns                m_plain;
 };
 } // namespace HE

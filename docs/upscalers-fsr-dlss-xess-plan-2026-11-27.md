@@ -142,6 +142,25 @@ later). Branch `claude/upscalers-fsr`, on top of `claude/motion-blur-d3d-vulkan`
      Per backend: D3D11 / OpenGL / Software have no render scale (nothing to bias). **Metal** upscales through MetalFX
      with no mip bias anywhere yet (scene albedo, graph materials, and its hand-kept MSL mirror of the lookup at
      MetalRenderer.mm:2986/3519) — Mac work, left open.
+  12. **NVIDIA DLSS (Super Resolution + DLAA) through Streamline, D3D12 and Vulkan** (Hive step 15; owner 28.11.: Streamline
+     now, not NGX directly — DLSS-G and Reflex need it later; download at configure; attribution in the About box).
+     `cmake/HeStreamline.cmake`: release ZIP v2.14.16 (276 MB, SHA-pinned) once per build tree, only the needed files
+     extracted and hash-checked (NVIDIA-signed sl.interposer / sl.common / sl.dlss / nvngx_dlss 310.9.16 /
+     NvLowLatencyVk + licences), ZIP deleted. `he_streamline` (`StreamlineDlss.{h,cpp}`, shared by both backends,
+     process-wide like Streamline): LoadLibrary after `sl::security::verifyEmbeddedSignature`, `slInit` with
+     **manual hooking**, DLSS only, no OTA, `eUseDXGIFactoryProxy`, `eUseFrameBasedResourceTagging`; mode from the render
+     scale (1 DLAA, 0.67 Quality, 0.58 Balanced, 0.5 Performance, 0.33 Ultra Performance); auto exposure; the DLSS
+     functions come from `slGetFeatureFunction` only AFTER the device is set (before that: errors and a crash).
+     The interposer is never unloaded (proxies are released after `slShutdown`).
+     D3D12: Streamline on an NVIDIA adapter after the device; command queue and swapchain made through its proxies
+     (device proxy, factory proxy — kept alive until after `slShutdown`), the renderer and FSR's FG use the NATIVE queue
+     (`slGetNativeInterface`); FSR's FG swapchain is made from a native factory of its own. Vulkan: `slInit` before the
+     instance + its instance extensions; on an NVIDIA device its device extensions and 1.2 features — then ONE
+     `VkPhysicalDeviceVulkan12Features` carries timeline / BDA / descriptor indexing (the separate structs may not be
+     next to it); `slSetVulkanInfo`; the plain swapchain calls and `vkDeviceWaitIdle` through its proxies
+     (`VulkanFsr::SwapchainFns`); surface hooks not taken (SDL owns the surface). Both: DLSS takes FSR's place, inputs
+     and output (`fsrOut`); render scale, TAA targets, Halton jitter and mip bias follow any upscaler (`upscalerFrame`).
+     Signs: jitter = D3D12 (x, −y) / Vulkan (x, +y) of the engine's offset (FSR's convention), mvecScale (−1, −1).
 - **Verified** (NN-WS03, RTX 4070, Release; `HE_DUMP` SHADOWINSTTEST, 40 settle frames, cube band): the loader
   picks **FSR 3.1.6**, `HE_FSR_DEBUG=1` reports nothing. Sign A/B against the AA-off frame of the same pose
   (run-to-run noise 0.040): still FSR 0.754 vs jitter-y flipped 0.855; pan (`HE_DUMP_PANYAW=0.5`) FSR 1.239 vs
@@ -185,6 +204,14 @@ later). Branch `claude/upscalers-fsr`, on top of `claude/motion-blur-d3d-vulkan`
   14.6 % mip 1 / 10.4 % coarser, with 94.5 / 4.8 / 0.7 %, native 1.0 93.4 / 5.8 / 0.8 %; D3D12 and Vulkan identical.
   Lit, mean |luma gradient| far / mid band: 0.706 / 0.531 without, 0.955 / 0.668 with (repeats within 0.003 D3D12,
   0.024 Vulkan), 1.0 1.158 / 0.824; near band unchanged (mip 0 either way). `test_rvt_shader` pins the biased line.
+  **DLSS** (DLSS 310.9.16, `Performance (640x360 -> 1280x720)`): sign A/B vs the AA-off frame, D3D12 / Vulkan — DLAA still
+  0.643 / 0.644 vs jitter-y flipped 0.749 / 0.749, pan 0.844 / 0.849 vs motion vectors flipped 1.151 / 1.062 (noise ≤
+  0.004); at 0.5 the pan still separates (0.87 vs 0.99, noise 0.1), the still does not (1.06 vs 1.06). Starts: an early
+  D3D12 build crashed in sl.interposer in ~30 % (temporary device proxy released + patched factory v-table); after the
+  fix 30/30 and 20/20 clean. FSR FG with Streamline loaded crashed in D3D12Core until the native queue went to FFX;
+  then 7440/7440 = 1.00 (D3D12) and 2160/2160 = 1.00 (Vulkan). Game exports: DLSS 800x450 -> 1600x900 on both, exit 0.
+  D3D12 debug layer: 0 errors. Vulkan validation: 2 messages on NGX's own image (`nv.ngx.dlss.resource`, first use).
+  GPU 2560x1440 D3D12, 3 pairs: DLAA 6.6/7.7/6.7 ms vs Performance 6.2/5.6/5.5 (a light scene).
   **Game DLL trap:** building HorizonGame refreshes `build/engine_bundle/HorizonEngine.dll`, but `deploy/Game` only when
   the exe relinks — copy the bundle's DLL into a test export, or the run measures the old code.
   **Witness trap:** `cap.ps1` clears `HE_DUMP_*` only — an `HE_FSR_*`/`HE_TAA_*` switch set for one capture stays
@@ -205,5 +232,10 @@ later). Branch `claude/upscalers-fsr`, on top of `claude/motion-blur-d3d-vulkan`
   Particles get FSR's reactive mask, not velocity (AMD's guidance for alpha-blended effects).
   Frame generation 2× only: FSR 3.1's swapchain path generates one frame; 3×/4× (DLSS MFG, RTX 50) stay
   unavailable. FG renders at most ~half the frames it would without (pacing), as AMD's.
-- **Next:** Metal's mip bias under MetalFX (step 4's last part, on the Mac); D3D11's albedo sampler MaxLOD; a settings menu in the template wired to the new rows;
-  DLSS / XeSS (steps 4, 5).
+- **Not verified (DLSS):** an RTX 20/30/50 GPU and other drivers; DLSS with DLSS presets other than the default; a
+  user switching DLSS -> FSR -> FSR FG at run time (the FG swapchain is native, Streamline then sees no presents —
+  documented as harmless while DLSS is off, not driven); NVIDIA's marks as images (only text attribution in the
+  About box; the export credits are the game's job, said in the AA help); DLSS on the editor's secondary windows.
+- **Next:** DLSS-G / Reflex on the same Streamline (step 17); Metal's mip bias under MetalFX (step 4's last part, on
+  the Mac); D3D11's albedo sampler MaxLOD; a settings menu in the template wired to the new rows;
+  XeSS (plan step 5).

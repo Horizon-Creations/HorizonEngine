@@ -5,6 +5,7 @@
 #include <MaterialGraph/MaterialParamLimits.h> // kMatParamFloats / kMatParamBytes
 #include "VulkanShaderManager.h"
 #include "VulkanFsr.h"
+#include "Backends/Streamline/StreamlineDlss.h"
 #include "VulkanUploadAlloc.h"
 #include <HorizonRendering/RenderConstants.h>
 #include <HorizonRendering/InstanceArena.h>
@@ -1235,7 +1236,10 @@ private:
 		return m_postFxReady && m_taaVelocityRP && m_taaVelocityPipe && m_taaResolvePipe
 		    && m_taaSharpenPipe && m_taaDSPool;
 	}
-	bool taaWanted() const { return (m_aaMethod == HE::AAMethod::TAA || m_aaMethod == HE::AAMethod::FSR) && taaReady(); }
+	bool taaWanted() const
+	{
+		return (m_aaMethod == HE::AAMethod::TAA || m_aaMethod == HE::AAMethod::FSR || m_aaMethod == HE::AAMethod::DLSS) && taaReady();
+	}
 
 	// ── AMD FSR (AAMethod::FSR; VulkanFsr.h), the D3D12 backend's design ────
 	// Dispatched on the HDR image right after the underwater fog, before motion blur, bloom and the tonemap. Native AA
@@ -1254,10 +1258,17 @@ private:
 	float          m_renderScale = 1.0f;    // AntiAliasingSettings::renderScale, as asked
 	uint32_t       m_sceneW = 0, m_sceneH = 0;   // the scene targets' size (createViewportResources)
 	bool fsrFrame() const { return m_aaMethod == HE::AAMethod::FSR && m_fsr.available(); }
+	// NVIDIA DLSS through Streamline (StreamlineDlss.h): FSR's place in the chain, its targets, jitter and mip bias.
+	// Streamline sees every present: the plain swapchain calls go through its proxies (bindStreamlineSwapchainHooks).
+	bool dlssFrame() const { return m_aaMethod == HE::AAMethod::DLSS && HE::StreamlineDlss::instance().available(); }
+	bool upscalerFrame() const { return fsrFrame() || dlssFrame(); }
+	uint32_t             m_dlssFrameIndex = 0;
+	PFN_vkDeviceWaitIdle m_slDeviceWaitIdle = nullptr;   // Streamline's proxy (sl_hooks.h), nullptr without it
+	void bindStreamlineSwapchainHooks();
 	// The scene size a viewport axis of v wants now: smaller only through FSR, on the post chain, outside a still.
 	uint32_t sceneSizeFor(uint32_t v) const
 	{
-		const bool up = fsrFrame() && m_postFxReady && !m_still.active && m_renderScale < 1.0f;
+		const bool up = upscalerFrame() && m_postFxReady && !m_still.active && m_renderScale < 1.0f;
 		return up ? IRenderer::UpscaleRenderSize(v, m_renderScale) : v;
 	}
 	bool sceneScaled() const { return m_sceneW != m_viewportW || m_sceneH != m_viewportH; }
@@ -1266,7 +1277,7 @@ private:
 	float frameMipBias(uint32_t width, bool hdr) const
 	{
 		static const bool s_off = [] { const char* e = std::getenv("HE_FSR_MIPBIAS"); return e && *e == '0'; }();
-		return (!s_off && hdr && fsrFrame() && (m_taaFrame || sceneScaled()) && width == m_sceneW && m_viewportW)
+		return (!s_off && hdr && upscalerFrame() && (m_taaFrame || sceneScaled()) && width == m_sceneW && m_viewportW)
 		     ? IRenderer::UpscaleMipBias(m_sceneW, m_viewportW) : 0.0f;
 	}
 	// The image the tail after FSR reads: m_fsrOutImage while upscaling, else m_hdrImage.
