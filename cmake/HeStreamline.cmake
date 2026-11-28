@@ -30,6 +30,9 @@ elseif(HE_ENABLE_DLSS AND WIN32 AND CMAKE_SYSTEM_PROCESSOR MATCHES "(AMD64|x86_6
         "include/sl_core_types.h"         ""
         "include/sl_device_wrappers.h"    ""
         "include/sl_dlss.h"               ""
+        "include/sl_dlss_g.h"             ""
+        "include/sl_reflex.h"             ""
+        "include/sl_pcl.h"                ""
         "include/sl_helpers.h"            ""
         "include/sl_helpers_vk.h"         ""
         "include/sl_hooks.h"              ""
@@ -43,6 +46,11 @@ elseif(HE_ENABLE_DLSS AND WIN32 AND CMAKE_SYSTEM_PROCESSOR MATCHES "(AMD64|x86_6
         "bin/x64/sl.common.dll"           38eea3b4209afc455636ea372b5933d65fcc13becec6c84d101dcfc4d8648f75
         "bin/x64/sl.dlss.dll"             18871eea87c90345da97d8109faa81ea7d5840e8d99b51b55b0e46cfa177f84e
         "bin/x64/nvngx_dlss.dll"          d00b5b0ab29c3ca101b70c3a5ecb3a01b7ef33766a3383a28a18623083e6123e
+        # DLSS Frame Generation (D3D12, the game's swapchain) and the Reflex + PC Latency markers it requires.
+        "bin/x64/sl.dlss_g.dll"           3ed9538df724993bea8a050195a6a78b9c8c8a566d5b05ade477aab3c390e90f
+        "bin/x64/nvngx_dlssg.dll"         8d59d49b36410dd6b62fef2503a5871d347415bd85d943fa0848563a95dd50c7
+        "bin/x64/sl.reflex.dll"           443577e869352436ff7ec8f4d9c90418d3e95368436ce219261e0f4f07a38122
+        "bin/x64/sl.pcl.dll"              5698c38e722318681f215c9fe68e45b9bedd51378acc699d8eee26e961e57770
         "bin/x64/nvngx_dlss.license.txt"  3027f23ca5a46dd9cb8183fbd522983a86f64d7daac5982912bf9f214671f294
         # sl.common loads it on Vulkan (NVIDIA's low-latency layer; logs an error without it). Its licence is Reflex's.
         "bin/x64/NvLowLatencyVk.dll"      2a77dc3e1c724b7eea5755be0ae7423752e79a2459fae72181a9f00e3507e5d6
@@ -123,6 +131,8 @@ elseif(HE_ENABLE_DLSS AND WIN32 AND CMAKE_SYSTEM_PROCESSOR MATCHES "(AMD64|x86_6
         set(HE_SL_RUNTIME_FILES
             "${_sl_root}/bin/x64/sl.interposer.dll" "${_sl_root}/bin/x64/sl.common.dll" "${_sl_root}/bin/x64/sl.dlss.dll"
             "${_sl_root}/bin/x64/nvngx_dlss.dll" "${_sl_root}/bin/x64/NvLowLatencyVk.dll"
+            "${_sl_root}/bin/x64/sl.dlss_g.dll" "${_sl_root}/bin/x64/nvngx_dlssg.dll"
+            "${_sl_root}/bin/x64/sl.reflex.dll" "${_sl_root}/bin/x64/sl.pcl.dll"
             "${_sl_root}/NVIDIA_STREAMLINE_LICENSE.txt" "${_sl_root}/NVIDIA_STREAMLINE_3RD_PARTY_LICENSES.md"
             "${_sl_root}/NVIDIA_DLSS_LICENSE.txt" "${_sl_root}/NVIDIA_REFLEX_LICENSE.txt")
         message(STATUS "HorizonEngine: NVIDIA Streamline ${HE_SL_SDK_VERSION} + DLSS enabled (${_sl_root})")

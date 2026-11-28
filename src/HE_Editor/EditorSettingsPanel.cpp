@@ -359,7 +359,7 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const DrawOptions& o
 				{ nullptr, "NVIDIA DLSS", c.supportsDLSS },
 				{ nullptr, "Intel XeSS", c.supportsXeSS },
 				{ nullptr, "Render scale", c.supportsRenderScale },
-				{ nullptr, "Frame generation", c.maxFrameGeneration > 1 },
+				{ nullptr, "Frame generation", c.maxFrameGeneration > 1 || c.maxFrameGenerationDLSS > 1 },
 				{ nullptr, "Screen-space reflections", c.supportsScreenSpaceReflections },
 				{ nullptr, "Volumetric fog", c.supportsVolumetricFog },
 				{ nullptr, "GPU particles", c.supportsGpuParticles },

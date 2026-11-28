@@ -11,10 +11,14 @@
 #include <sl.h>
 #include <sl_consts.h>
 #include <sl_dlss.h>
+#include <sl_dlss_g.h>
+#include <sl_reflex.h>
+#include <sl_pcl.h>
 #include <sl_helpers_vk.h>
 #include <sl_security.h>
 #endif
 
+#include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -49,9 +53,20 @@ struct Fns
     PFun_slGetFeatureVersion*      getFeatureVersion = nullptr;
     PFun_slSetVulkanInfo*          setVulkanInfo = nullptr;
     PFN_vkGetDeviceProcAddr        vkGetDeviceProcAddr = nullptr;
-    PFun_slDLSSGetOptimalSettings* dlssGetOptimalSettings = nullptr;   // feature functions, after slInit
+    PFun_slSetFeatureLoaded*       setFeatureLoaded = nullptr;
+    PFun_slDLSSGetOptimalSettings* dlssGetOptimalSettings = nullptr;   // feature functions, once the device is set
     PFun_slDLSSSetOptions*         dlssSetOptions = nullptr;
+    PFun_slDLSSGGetState*          dlssgGetState = nullptr;
+    PFun_slDLSSGSetOptions*        dlssgSetOptions = nullptr;
+    PFun_slReflexSleep*            reflexSleep = nullptr;
+    PFun_slReflexSetOptions*       reflexSetOptions = nullptr;
+    PFun_slPCLSetMarker*           pclSetMarker = nullptr;
 };
+template <class T> T* featureFn(Fns& f, sl::Feature feature, const char* name)
+{
+    void* fn = nullptr;
+    return f.getFeatureFunction(feature, name, fn) == sl::Result::eOk ? reinterpret_cast<T*>(fn) : nullptr;
+}
 Fns& fns(void* p) { return *static_cast<Fns*>(p); }
 
 bool debugOn() { static const bool on = [] { const char* e = std::getenv("HE_DLSS_DEBUG"); return e && *e == '1'; }(); return on; }
@@ -148,6 +163,7 @@ bool StreamlineDlss::init(Api api)
     get(f->getNativeInterface, "slGetNativeInterface");
     get(f->getFeatureFunction, "slGetFeatureFunction"); get(f->getFeatureRequirements, "slGetFeatureRequirements");
     get(f->getFeatureVersion, "slGetFeatureVersion"); get(f->setVulkanInfo, "slSetVulkanInfo");
+    get(f->setFeatureLoaded, "slSetFeatureLoaded");
     get(f->vkGetDeviceProcAddr, "vkGetDeviceProcAddr");
     if (!f->init || !f->shutdown || !f->isFeatureSupported || !f->setTagForFrame || !f->setConstants || !f->evaluateFeature
         || !f->getNewFrameToken || !f->setD3DDevice || !f->upgradeInterface || !f->getFeatureFunction)
@@ -161,7 +177,11 @@ bool StreamlineDlss::init(Api api)
     s_dir = dir;
     static const wchar_t* s_paths[1];
     s_paths[0] = s_dir.c_str();
-    static const sl::Feature s_features[] = { sl::kFeatureDLSS };
+    // D3D12 also loads DLSS Frame Generation and the Reflex + PC Latency markers it requires (HE_DLSS_FG=0: not);
+    // Vulkan DLSS only.
+    static const sl::Feature s_features[] = { sl::kFeatureDLSS, sl::kFeatureDLSS_G, sl::kFeatureReflex, sl::kFeaturePCL };
+    const char* fgEnv = std::getenv("HE_DLSS_FG");
+    const uint32_t numFeatures = (api == Api::D3D12 && !(fgEnv && *fgEnv == '0')) ? 4u : 1u;
     sl::Preferences pref{};
     pref.showConsole = false;
     pref.logLevel = debugOn() ? sl::LogLevel::eVerbose : sl::LogLevel::eDefault;
@@ -177,7 +197,7 @@ bool StreamlineDlss::init(Api api)
     pref.flags = sl::PreferenceFlags::eDisableCLStateTracking | sl::PreferenceFlags::eUseManualHooking
                | sl::PreferenceFlags::eUseFrameBasedResourceTagging | sl::PreferenceFlags::eUseDXGIFactoryProxy;
     pref.featuresToLoad = s_features;
-    pref.numFeaturesToLoad = 1;
+    pref.numFeaturesToLoad = numFeatures;
     pref.engine = sl::EngineType::eCustom;
     pref.engineVersion = "HorizonEngine";
     pref.projectId = "5f0d6c3a-4e2b-4c8e-9a51-7b3d2e8f1c64";
@@ -266,9 +286,158 @@ bool StreamlineDlss::setD3DDevice(void* nativeDevice, const void* luid, uint32_t
     ai.deviceLUID = static_cast<uint8_t*>(const_cast<void*>(luid));
     ai.deviceLUIDSizeInBytes = luidBytes;
     logSupport(fns(m_fns).isFeatureSupported(sl::kFeatureDLSS, ai), m_version, m_fns, m_available);
+    if (m_available)
+    {
+        // Reflex and PC Latency first (DLSS-G requires them), then DLSS-G itself; each answers for this adapter.
+        Fns& f = fns(m_fns);
+        if (f.isFeatureSupported(sl::kFeatureReflex, ai) == sl::Result::eOk)
+        {
+            f.reflexSleep = featureFn<PFun_slReflexSleep>(f, sl::kFeatureReflex, "slReflexSleep");
+            f.reflexSetOptions = featureFn<PFun_slReflexSetOptions>(f, sl::kFeatureReflex, "slReflexSetOptions");
+            f.pclSetMarker = featureFn<PFun_slPCLSetMarker>(f, sl::kFeaturePCL, "slPCLSetMarker");
+            // Reflex's options must be set once; low latency only while DLSS-G runs (setFrameGenLoaded).
+            sl::ReflexOptions ro{};
+            ro.mode = sl::ReflexMode::eOff;
+            m_reflex = f.reflexSleep && f.reflexSetOptions && f.pclSetMarker && f.reflexSetOptions(ro) == sl::Result::eOk;
+        }
+        const sl::Result fg = f.isFeatureSupported(sl::kFeatureDLSS_G, ai);
+        if (m_reflex && fg == sl::Result::eOk)
+            queryFrameGen();
+        else
+            HE_LOG_INFO(RHI, "Streamline: DLSS Frame Generation unavailable (%s)", m_reflex ? resultName(fg) : "no Reflex");
+    }
     return m_available;
 #else
     (void)nativeDevice; (void)luid; (void)luidBytes;
+    return false;
+#endif
+}
+
+void StreamlineDlss::queryFrameGen()
+{
+#ifdef HE_HAVE_STREAMLINE
+    Fns& f = fns(m_fns);
+    f.dlssgGetState = featureFn<PFun_slDLSSGGetState>(f, sl::kFeatureDLSS_G, "slDLSSGGetState");
+    f.dlssgSetOptions = featureFn<PFun_slDLSSGSetOptions>(f, sl::kFeatureDLSS_G, "slDLSSGSetOptions");
+    if (!f.dlssgGetState || !f.dlssgSetOptions || !f.setFeatureLoaded) return;
+    sl::DLSSGState st{};
+    if (f.dlssgGetState(sl::ViewportHandle(0u), st, nullptr) != sl::Result::eOk) return;
+    m_fgMax = 1 + int(std::max<uint32_t>(st.numFramesToGenerateMax, 1u));
+    // Unloaded until the game wants it: the swapchains made meanwhile (the editor's, the game's without FG) are plain.
+    if (f.setFeatureLoaded(sl::kFeatureDLSS_G, false) != sl::Result::eOk) return;
+    m_fgLoaded = false;
+    m_fgAvailable = true;
+    HE_LOG_INFO(RHI, "Streamline: DLSS Frame Generation available (up to %dx)", m_fgMax);
+#endif
+}
+
+void StreamlineDlss::beginFrame(uint32_t frameIndex)
+{
+#ifdef HE_HAVE_STREAMLINE
+    m_token = nullptr;
+    if (!m_initialized) return;
+    Fns& f = fns(m_fns);
+    sl::FrameToken* token = nullptr;
+    if (f.getNewFrameToken(token, &frameIndex) != sl::Result::eOk || !token) return;
+    m_token = token;
+    if (m_reflex) f.reflexSleep(*token);   // Reflex's frame start (called whether low latency is on or off)
+#else
+    (void)frameIndex;
+#endif
+}
+
+void StreamlineDlss::marker(Marker m)
+{
+#ifdef HE_HAVE_STREAMLINE
+    if (!m_initialized || !m_reflex || !m_token) return;
+    static const sl::PCLMarker map[] = { sl::PCLMarker::eSimulationStart, sl::PCLMarker::eSimulationEnd,
+                                         sl::PCLMarker::eRenderSubmitStart, sl::PCLMarker::eRenderSubmitEnd,
+                                         sl::PCLMarker::ePresentStart, sl::PCLMarker::ePresentEnd };
+    fns(m_fns).pclSetMarker(map[int(m)], *static_cast<sl::FrameToken*>(m_token));
+#else
+    (void)m;
+#endif
+}
+
+bool StreamlineDlss::setFrameGenLoaded(bool loaded)
+{
+#ifdef HE_HAVE_STREAMLINE
+    if (!m_fgAvailable || loaded == m_fgLoaded) return m_fgAvailable;
+    Fns& f = fns(m_fns);
+    if (!loaded) frameGenSetMode(1);
+    if (f.setFeatureLoaded(sl::kFeatureDLSS_G, loaded) != sl::Result::eOk)
+    {
+        HE_LOG_WARN(RHI, "Streamline: DLSS Frame Generation could not be %s", loaded ? "loaded" : "unloaded");
+        return false;
+    }
+    m_fgLoaded = loaded;
+    m_fgMode = 1;
+    // Reflex low latency while frame generation runs (NVIDIA's requirement), off otherwise.
+    sl::ReflexOptions ro{};
+    ro.mode = loaded ? sl::ReflexMode::eLowLatency : sl::ReflexMode::eOff;
+    f.reflexSetOptions(ro);
+    HE_LOG_INFO(RHI, "Streamline: DLSS Frame Generation %s", loaded ? "loaded (swapchain made again)" : "unloaded");
+    return true;
+#else
+    (void)loaded;
+    return false;
+#endif
+}
+
+bool StreamlineDlss::frameGenTag(const FrameGenTags& t)
+{
+#ifdef HE_HAVE_STREAMLINE
+    if (!m_fgLoaded || !m_token || !t.depth.native || !t.motion.native || !t.hudless.native) return false;
+    auto res = [&](const Image& i) {
+        sl::Resource r(sl::ResourceType::eTex2d, i.native, nullptr, i.view, i.state);
+        r.width = i.width; r.height = i.height; r.nativeFormat = i.format; r.mipLevels = 1; r.arrayLayers = 1; r.usage = i.usage;
+        return r;
+    };
+    sl::Resource depth = res(t.depth), mvec = res(t.motion), hudless = res(t.hudless);
+    const sl::Extent renderExt{ 0, 0, t.renderW, t.renderH }, displayExt{ 0, 0, t.displayW, t.displayH };
+    // Valid until Present: the renderer leaves them alone until the next frame starts (NVIDIA's first choice).
+    const sl::ResourceTag tags[] = {
+        sl::ResourceTag(&depth,   sl::kBufferTypeDepth,          sl::ResourceLifecycle::eValidUntilPresent, &renderExt),
+        sl::ResourceTag(&mvec,    sl::kBufferTypeMotionVectors,  sl::ResourceLifecycle::eValidUntilPresent, &renderExt),
+        sl::ResourceTag(&hudless, sl::kBufferTypeHUDLessColor,   sl::ResourceLifecycle::eValidUntilPresent, &displayExt),
+    };
+    return fns(m_fns).setTagForFrame(*static_cast<sl::FrameToken*>(m_token), sl::ViewportHandle(0u), tags, 3, t.cmd) == sl::Result::eOk;
+#else
+    (void)t;
+    return false;
+#endif
+}
+
+bool StreamlineDlss::frameGenSetMode(int multiplier)
+{
+#ifdef HE_HAVE_STREAMLINE
+    if (!m_fgLoaded) return multiplier <= 1;
+    multiplier = std::clamp(multiplier, 1, m_fgMax);
+    if (multiplier == m_fgMode) return true;
+    sl::DLSSGOptions o{};
+    o.mode = multiplier > 1 ? sl::DLSSGMode::eOn : sl::DLSSGMode::eOff;
+    o.numFramesToGenerate = uint32_t(std::max(1, multiplier - 1));
+    o.flags = sl::DLSSGFlags::eRetainResourcesWhenOff;
+    if (fns(m_fns).dlssgSetOptions(sl::ViewportHandle(0u), o) != sl::Result::eOk) return false;
+    m_fgMode = multiplier;
+    HE_LOG_INFO(RHI, "Streamline: DLSS Frame Generation %s", multiplier > 1 ? (std::to_string(multiplier) + "x").c_str() : "off");
+    return true;
+#else
+    (void)multiplier;
+    return false;
+#endif
+}
+
+bool StreamlineDlss::frameGenState(FrameGenState& s)
+{
+#ifdef HE_HAVE_STREAMLINE
+    if (!m_fgLoaded) return false;
+    sl::DLSSGState st{};
+    if (fns(m_fns).dlssgGetState(sl::ViewportHandle(0u), st, nullptr) != sl::Result::eOk) return false;
+    s.status = uint32_t(st.status); s.presented = st.numFramesActuallyPresented; s.maxGenerate = st.numFramesToGenerateMax;
+    return true;
+#else
+    (void)s;
     return false;
 #endif
 }
@@ -380,8 +549,9 @@ bool StreamlineDlss::evaluate(const Eval& e)
 #ifdef HE_HAVE_STREAMLINE
     if (!m_available || !e.cmd || !e.color.native || !e.depth.native || !e.motion.native || !e.output.native) return false;
     Fns& f = fns(m_fns);
-    sl::FrameToken* token = nullptr;
-    if (f.getNewFrameToken(token, &e.frameIndex) != sl::Result::eOk || !token) return false;
+    // The frame's token (beginFrame), so the constants pair with DLSS-G's tags and the present; else one of its own.
+    sl::FrameToken* token = static_cast<sl::FrameToken*>(m_token);
+    if (!token && (f.getNewFrameToken(token, &e.frameIndex) != sl::Result::eOk || !token)) return false;
     const sl::ViewportHandle vp(0u);
 
     sl::Constants c{};

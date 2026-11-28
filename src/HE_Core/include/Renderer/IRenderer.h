@@ -348,7 +348,10 @@ public:
         // answers NativeAA only.
         bool supportsRenderScale = false;
         // Frame generation: the most frames shown per rendered one (2 = one generated in between). 1 = none.
+        // maxFrameGeneration is FSR's (with FSR as the upscaler), maxFrameGenerationDLSS NVIDIA DLSS-G's (with DLSS; more
+        // than 2x on GPUs with multi frame generation).
         int  maxFrameGeneration = 1;
+        int  maxFrameGenerationDLSS = 1;
         // A second window with its own widget tree (docs/he-apps-plan.md §13.3).
         // Reported by the backends that actually DRAW into one: Software (its own
         // SDL surface per window) and Metal (a layer per window). OpenGL, Vulkan

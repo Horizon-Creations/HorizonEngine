@@ -4446,7 +4446,9 @@ namespace
 	  "through NVIDIA Streamline; DLSS at Render Scale 1 is DLAA); XeSS is listed but "
 	  "not built in yet. An entry this machine cannot run is greyed out with the "
 	  "reason; a config that names one falls back (DLSS/XeSS to FSR, FSR to TAA). "
-	  "A game that ships with DLSS must name NVIDIA DLSS in its credits (NVIDIA's licence).",
+	  "A game that ships with DLSS must name NVIDIA DLSS in its credits (NVIDIA's licence). "
+	  "Frame generation in the packaged game follows the upscaler: AMD's with FSR, NVIDIA "
+	  "DLSS Frame Generation (with Reflex) with DLSS.",
 	  "", "rendering#postfx" },
 	{ "Preferences/Post-Processing/AA Sharpness", "",
 	  "How much detail is pulled back after the anti-aliasing pass softened it. "

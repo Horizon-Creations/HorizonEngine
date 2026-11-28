@@ -350,11 +350,14 @@ std::string upscalerMode()
     return std::find(modes.begin(), modes.end(), m) != modes.end() ? m : std::string("NativeAA");
 }
 
-// The most frames per rendered one available NOW: frame generation runs on FSR's inputs, so it needs FSR as the upscaler.
+// The most frames per rendered one available NOW: frame generation belongs to the upscaler — FSR's with FSR, NVIDIA
+// DLSS-G with DLSS (up to 4x on GPUs with multi frame generation).
 static int frameGenerationMax()
 {
-    if (upscaler() != "FSR") return 1;
-    return std::clamp(support().maxFrameGeneration, 1, kFrameGenMax);
+    const std::string u = upscaler();
+    if (u == "FSR")  return std::clamp(support().maxFrameGeneration, 1, kFrameGenMax);
+    if (u == "DLSS") return std::clamp(support().maxFrameGenerationDLSS, 1, kFrameGenMax);
+    return 1;
 }
 
 std::vector<int> frameGenerationModes()
@@ -371,7 +374,7 @@ void setFrameGeneration(int multiplier)
     if (multiplier > 1 && multiplier > frameGenerationMax())
     {
         HE_LOG_WARN(Script, "settings.setFrameGeneration: %dx is not available here — ignored "
-                    "(settings.frameGenerationModes lists what is; it needs FSR as the upscaler)", multiplier);
+                    "(settings.frameGenerationModes lists what is; it needs FSR or DLSS as the upscaler)", multiplier);
         return;
     }
     state().values.frameGeneration = std::max(multiplier, 1);

@@ -85,8 +85,39 @@ public:
     // Constants, options, tags and the DLSS dispatch on `cmd`. The caller restores its own bindings afterwards.
     bool evaluate(const Eval& e);
 
+    // ── One frame token per frame (D3D12) ───────────────────────────────────────────────────────────────────────────
+    // Everything of a frame carries the same token: the constants (evaluate), DLSS-G's tags, and the Reflex / PC Latency
+    // markers that pair them with the frame being presented (DLSS-G requires them). beginFrame at the start of the
+    // renderer's frame also runs Reflex's sleep; the markers must be sent every frame once Streamline runs. No-ops without it.
+    void beginFrame(uint32_t frameIndex);
+    enum class Marker { SimulationStart, SimulationEnd, RenderSubmitStart, RenderSubmitEnd, PresentStart, PresentEnd };
+    void marker(Marker m);
+
+    // ── DLSS Frame Generation (D3D12, the game's swapchain; Hive step 17) ─────────────────────────────────────────────
+    // DLSS-G attaches to the swapchain made through Streamline's factory proxy WHILE it is loaded: it is unloaded after
+    // init, and the renderer makes its swapchain again after setFrameGenLoaded (NVIDIA's pattern: on and off each recreate
+    // the swapchain, so frames without it carry no overhead).
+    bool frameGenAvailable() const { return m_fgAvailable; }
+    int  frameGenMax() const { return m_fgMax; }              // frames shown per rendered one (1 + generated)
+    bool setFrameGenLoaded(bool loaded);
+    bool frameGenLoaded() const { return m_fgLoaded; }
+    struct FrameGenTags
+    {
+        void* cmd = nullptr;
+        Image depth, motion, hudless;   // states as they are at Present (D3D12_RESOURCE_STATES)
+        uint32_t renderW = 0, renderH = 0, displayW = 0, displayH = 0;
+    };
+    bool frameGenTag(const FrameGenTags& t);
+    bool frameGenSetMode(int multiplier);   // 1 = off; before Present, on the presenting thread
+    struct FrameGenState { uint32_t status = 0, presented = 0, maxGenerate = 0; };
+    bool frameGenState(FrameGenState& s);
+
 private:
     StreamlineDlss() = default;
+    void        queryFrameGen();
+    void*       m_token = nullptr;   // sl::FrameToken* of the current frame (beginFrame)
+    bool        m_fgAvailable = false, m_fgLoaded = false, m_reflex = false;
+    int         m_fgMax = 1, m_fgMode = 1;
     void*       m_module = nullptr;
     void*       m_fns = nullptr;   // the resolved function table (Streamline.cpp)
     Api         m_api = Api::D3D12;

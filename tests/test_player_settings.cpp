@@ -336,6 +336,22 @@ TEST_CASE("Player settings: upscaler and frame generation answer what the machin
     settings::setFrameGeneration(1);
     CHECK(settings::frameGeneration() == 1);
 
+    // DLSS brings its own frame generation (NVIDIA DLSS-G) with its own maximum: 3x on a GPU with multi frame generation,
+    // while FSR's stays 2x.
+    g.dlss = true;
+    g.maxFrameGenerationDLSS = 3;
+    settings::setUpscaler("DLSS");
+    CHECK(settings::frameGenerationModes() == std::vector<int>{ 2, 3 });
+    settings::setFrameGeneration(3);
+    CHECK(settings::frameGeneration() == 3);
+    settings::setUpscaler("FSR");
+    CHECK(settings::frameGenerationModes() == std::vector<int>{ 2 });
+    CHECK(settings::frameGeneration() == 1);   // 3x is DLSS-G's: FSR reads it back as off
+    g.maxFrameGenerationDLSS = 1;
+    settings::setUpscaler("DLSS");
+    CHECK(settings::frameGenerationModes().empty());
+    settings::setFrameGeneration(1);
+
     // A saved choice this machine cannot run reads back as the fallback.
     settings::setUpscaler("FSR");
     settings::setFrameGeneration(2);

@@ -2118,6 +2118,35 @@ struct D3D12RendererImpl
     ComPtr<ID3D12Device>  slDeviceProxy;    // Streamline's proxies (Init), kept until after slShutdown
     ComPtr<IDXGIFactory4> slFactoryProxy;
     ComPtr<ID3D12CommandQueue> slQueueProxy;   // the swapchain's queue as Streamline made it; cmdQueue is the native one
+    uint32_t slFrameIndex = 0;                 // Streamline's frame token index (Render)
+    bool     dlssgFrame = false, dlssgWasOn = false;   // DLSS Frame Generation this frame / last frame (Render)
+    uint64_t dlssgRendered = 0, dlssgShown = 0;         // HE_DLSS_FG_STATS
+    uint32_t dlssgPerFrame[4] = {}, dlssgOccluded = 0;  // ... per 240-frame interval
+    // DLSS Frame Generation on / off: Streamline's feature loaded or not, and the swapchain made again through its factory
+    // proxy (NVIDIA's pattern). The GPU idle, the back buffers released, the same description, then the buffers again.
+    void remakeSwapchainForDlssG(bool load)
+    {
+        if (!slFactoryProxy || !swapchain) return;
+        waitForAllFrames();
+        for (UINT i = 0; i < k_frameCount; ++i) renderTargets[i].Reset();
+        DXGI_SWAP_CHAIN_DESC1 d1{};
+        swapchain->GetDesc1(&d1);
+        swapchain.Reset();
+        HE::StreamlineDlss::instance().setFrameGenLoaded(load);
+        ComPtr<IDXGISwapChain1> sc1;
+        ID3D12CommandQueue* q = slQueueProxy ? slQueueProxy.Get() : cmdQueue.Get();
+        if (FAILED(slFactoryProxy->CreateSwapChainForHwnd(q, hwnd, &d1, nullptr, nullptr, &sc1)) || FAILED(sc1.As(&swapchain)))
+            throw std::runtime_error("D3D12Renderer: swapchain could not be made again for DLSS Frame Generation");
+        for (UINT i = 0; i < k_frameCount; ++i)
+        {
+            if (FAILED(swapchain->GetBuffer(i, IID_PPV_ARGS(&renderTargets[i]))))
+                throw std::runtime_error("D3D12Renderer: GetBuffer after the DLSS Frame Generation swapchain failed");
+            device->CreateRenderTargetView(renderTargets[i].Get(), nullptr, rtvHandle(i));
+        }
+        frameIndex = swapchain->GetCurrentBackBufferIndex();
+        dlssgWasOn = false;
+        HE_LOG_INFO(RHI, "D3D12Renderer: swapchain made again (DLSS Frame Generation %s)", load ? "loaded" : "unloaded");
+    }
     // The scene size a viewport of w x h wants now: smaller only through an upscaler, on the post chain, outside a still.
     // The materials' texture reads take its mip bias meanwhile (lit.giParams.w, HE_TEX_BIAS).
     UINT sceneSizeFor(UINT v) const
@@ -6279,6 +6308,10 @@ struct D3D12RendererImpl
         // ResizeBuffers needs every back-buffer reference released and nothing
         // in flight reading them. The flush also makes the frame-slot switch
         // below safe: every slot's fence value is complete afterwards.
+        // DLSS Frame Generation must be off before any window change (NVIDIA: it presents on a thread of its own), and its
+        // options only act at the next Present: it is unloaded instead, the resize runs on the plain swapchain, and the next
+        // game frame that wants it makes the swapchain again with it (NVIDIA's on / off pattern).
+        if (HE::StreamlineDlss::instance().frameGenLoaded()) remakeSwapchainForDlssG(false);
         waitForAllFrames();
         fsr.destroyFrameGen(swapchain.Get());   // sized to the display: made again at the new size by the next FG frame
         for (UINT i = 0; i < k_frameCount; ++i) renderTargets[i].Reset();
@@ -15252,7 +15285,7 @@ void D3D12Renderer::DrawViewportFrame()
         p.runPostFX(p.cmdList.Get(), p.viewportW, p.viewportH);
 
         // Frame generation: the finished frame BEFORE its UI, so FG can keep the UI out of the interpolation.
-        if (p.fgFrame && p.fgHudless)
+        if ((p.fgFrame || p.dlssgFrame) && p.fgHudless)
         {
             p.barrier12(p.cmdList.Get(), p.viewportRT.Get(), p.viewportState, D3D12_RESOURCE_STATE_COPY_SOURCE);
             p.viewportState = D3D12_RESOURCE_STATE_COPY_SOURCE;
@@ -15365,6 +15398,15 @@ void D3D12Renderer::Render()
 
     // Swapchain to the window's client size (flushes the GPU only when it changed).
     p.resizeSwapchainIfNeeded();
+    // Streamline's frame: one token for the constants, DLSS-G's tags and the Reflex / PC Latency markers (DLSS-G pairs
+    // them with the present). The engine's simulation ran before Render(): its markers are this frame's start.
+    HE::StreamlineDlss& sl = HE::StreamlineDlss::instance();
+    if (sl.initialized())
+    {
+        sl.beginFrame(++p.slFrameIndex);
+        sl.marker(HE::StreamlineDlss::Marker::SimulationStart);
+        sl.marker(HE::StreamlineDlss::Marker::SimulationEnd);
+    }
     p.logReactiveStats();   // HE_FSR_REACTIVE_STATS: last frame's mask (a flush, witness runs only)
     p.logVelocityStats();   // HE_TAA_VELOCITY_STATS: last frame's motion (likewise)
 
@@ -15387,6 +15429,13 @@ void D3D12Renderer::Render()
         }
         p.frameIndex = p.swapchain->GetCurrentBackBufferIndex();
     }
+    // DLSS Frame Generation (Streamline, DLSS as the upscaler): loaded while the game wants it, and the swapchain made
+    // again through Streamline's factory on each switch (NVIDIA's pattern: no overhead while it is off). Not on a
+    // swapchain FSR's frame generation already replaced (once per run).
+    const bool dlssgWant = p.fgWanted >= 2 && p.swapchainPostFx && p.postFxReady && p.dlssFrame() && sl.frameGenAvailable()
+                        && !p.fsr.swapchainReplaced();
+    if (sl.frameGenAvailable() && dlssgWant != sl.frameGenLoaded() && !p.fsr.swapchainReplaced())
+        p.remakeSwapchainForDlssG(dlssgWant);
 
     // The packaged game (SetSwapchainPostProcessing): the post chain — HDR,
     // bloom, tonemap, AA, TAA, SSR — exists only in the viewport frame, so the
@@ -15450,8 +15499,11 @@ void D3D12Renderer::Render()
     // Frame generation this frame: its context at the back buffer's size, and the hudless copy target (both outside the
     // recording; a size change makes them again).
     p.fgFrame = false;
-    if (fgWant && gameFrame && p.fsr.swapchainReplaced()
-        && p.fsr.ensureFrameGen(p.device.Get(), bbW, bbH, bbDesc.Format))
+    p.dlssgFrame = false;
+    const bool fsrFg = fgWant && gameFrame && p.fsr.swapchainReplaced()
+                    && p.fsr.ensureFrameGen(p.device.Get(), bbW, bbH, bbDesc.Format);
+    const bool dlssFg = dlssgWant && gameFrame && sl.frameGenLoaded();
+    if (fsrFg || dlssFg)
     {
         if (!p.fgHudless || p.fgHudless->GetDesc().Width != bbW || p.fgHudless->GetDesc().Height != bbH)
         {
@@ -15465,13 +15517,15 @@ void D3D12Renderer::Render()
                 p.fgHudless.Reset();
             p.fgHudlessState = D3D12_RESOURCE_STATE_COPY_DEST;
         }
-        p.fgFrame = p.fgHudless != nullptr;
+        p.fgFrame = fsrFg && p.fgHudless != nullptr;
+        p.dlssgFrame = dlssFg && p.fgHudless != nullptr;
     }
 
     {
         HE_PROFILE_SCOPE_N("WaitFrame");   // the CPU idles here when the GPU is the slower side
         p.waitForFrame(p.frameIndex);
     }
+    sl.marker(HE::StreamlineDlss::Marker::RenderSubmitStart);   // the frame's command list is recorded from here
 
     // Reap this slot's timestamps from k_frameCount frames ago: the fence wait
     // above guarantees the resolve completed, so the mapped read never stalls.
@@ -15583,6 +15637,31 @@ void D3D12Renderer::Render()
             p.fgWasOn = fgOn;
         }
 
+        // DLSS Frame Generation: its inputs tagged with this frame's token (the constants came with DLSS's evaluate),
+        // in the states they are in at Present, where Streamline's swapchain generates; then the mode, before Present.
+        if (sl.frameGenLoaded())
+        {
+            const bool dlssgOn = p.dlssgFrame && p.taaFrame && p.viewportDepth && p.taaVelocityRT;
+            if (dlssgOn)
+            {
+                constexpr D3D12_RESOURCE_STATES kRead = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+                HE::StreamlineDlss::FrameGenTags t;
+                t.cmd = p.cmdList.Get();
+                t.depth   = { p.viewportDepth.Get(), nullptr, uint32_t(D3D12_RESOURCE_STATE_DEPTH_WRITE), p.sceneW, p.sceneH };
+                t.motion  = { p.taaVelocityRT.Get(), nullptr, uint32_t(p.taaVelocityState), p.sceneW, p.sceneH };
+                t.hudless = { p.fgHudless.Get(), nullptr, uint32_t(kRead), bbW, bbH };
+                t.renderW = p.sceneW; t.renderH = p.sceneH; t.displayW = bbW; t.displayH = bbH;
+                if (!sl.frameGenTag(t))
+                {
+                    static bool s_tagLogged = false;
+                    if (!s_tagLogged) { s_tagLogged = true; HE_LOG_WARN(RHI, "%s", "D3D12Renderer: DLSS Frame Generation tags failed"); }
+                }
+            }
+            sl.frameGenSetMode(dlssgOn ? p.fgWanted : 1);
+            if (dlssgOn && !p.dlssgWasOn) { p.dlssgRendered = p.dlssgShown = 0; }
+            p.dlssgWasOn = dlssgOn;
+        }
+
         // The overlay (if any) draws on top of the copied image.
         p.cmdList->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
         D3D12_VIEWPORT vp{ 0, 0, static_cast<float>(bbW), static_cast<float>(bbH), 0.0f, 1.0f };
@@ -15660,12 +15739,39 @@ void D3D12Renderer::Render()
     {
         HE_PROFILE_SCOPE_N("SubmitPresent");
         p.cmdQueue->ExecuteCommandLists(1, lists);
+        sl.marker(HE::StreamlineDlss::Marker::RenderSubmitEnd);
+        sl.marker(HE::StreamlineDlss::Marker::PresentStart);
         // PRESENT_ALLOW_TEARING is only valid on a swapchain created with the matching
         // flag AND when unsynced (sync interval 0). Gate it on the queried capability.
         if (p.vsync)
             prHr = p.swapchain->Present(1, 0);
         else
             prHr = p.swapchain->Present(0, p.allowTearing ? DXGI_PRESENT_ALLOW_TEARING : 0);
+        sl.marker(HE::StreamlineDlss::Marker::PresentEnd);
+    }
+    // HE_DLSS_FG_STATS=1: frames DLSS-G showed per rendered one (its own count, slDLSSGGetState), every 240 game frames.
+    if (sl.frameGenLoaded() && p.swapchainPostFx)
+    {
+        static const bool s_dgStats = [] { const char* e = std::getenv("HE_DLSS_FG_STATS"); return e && *e == '1'; }();
+        HE::StreamlineDlss::FrameGenState st;
+        if (s_dgStats && sl.frameGenState(st))
+        {
+            p.dlssgShown += st.presented;
+            ++p.dlssgPerFrame[std::min<uint32_t>(st.presented, 3)];
+            if (prHr == DXGI_STATUS_OCCLUDED) ++p.dlssgOccluded;
+            if (++p.dlssgRendered % 240 == 0)
+            {
+                // Per interval: how many frames showed 0 / 1 / 2 / 3+, Present's occluded answers, and the window's state.
+                HE_LOG_INFO(RHI, "D3D12Renderer: DLSS-G (%s): %llu shown / %llu rendered = %.2f, status 0x%x; last 240: "
+                            "%u x0 %u x1 %u x2 %u x3+, %u occluded; foreground %d visible %d",
+                            p.dlssgWasOn ? "on" : "off", static_cast<unsigned long long>(p.dlssgShown),
+                            static_cast<unsigned long long>(p.dlssgRendered), double(p.dlssgShown) / double(p.dlssgRendered), st.status,
+                            p.dlssgPerFrame[0], p.dlssgPerFrame[1], p.dlssgPerFrame[2], p.dlssgPerFrame[3], p.dlssgOccluded,
+                            GetForegroundWindow() == p.hwnd ? 1 : 0, IsWindowVisible(p.hwnd) ? 1 : 0);
+                for (uint32_t& c : p.dlssgPerFrame) c = 0;
+                p.dlssgOccluded = 0;
+            }
+        }
     }
 
     // HE_FSR_FG_STATS=1: frames FSR generated against frames rendered, every 240 game frames (DXGI's PresentCount is
@@ -15746,6 +15852,9 @@ IRenderer::Capabilities D3D12Renderer::GetCapabilities() const
     c.supportsRenderScale = (c.supportsFSR || c.supportsDLSS) && m_impl->postFxReady;
     // FSR 3.1 frame generation makes one frame per rendered one (the packaged game's swapchain; SetFrameGeneration).
     c.maxFrameGeneration = (c.supportsFSR && m_impl->fsr.frameGenAvailable(m_impl->device.Get())) ? 2 : 1;
+    // NVIDIA DLSS Frame Generation through Streamline (with DLSS as the upscaler): as many as the GPU offers.
+    c.maxFrameGenerationDLSS = (c.supportsDLSS && HE::StreamlineDlss::instance().frameGenAvailable())
+                             ? HE::StreamlineDlss::instance().frameGenMax() : 1;
     // Deferred (Thema 150): G-buffer PSOs + resolve built at Initialize. Like
     // SSR/TAA it lives on the viewport frame's HDR target (Render()'s
     // usingHDR branch); the LDR viewport branch, the direct-swapchain branch

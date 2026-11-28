@@ -161,6 +161,20 @@ later). Branch `claude/upscalers-fsr`, on top of `claude/motion-blur-d3d-vulkan`
      (`VulkanFsr::SwapchainFns`); surface hooks not taken (SDL owns the surface). Both: DLSS takes FSR's place, inputs
      and output (`fsrOut`); render scale, TAA targets, Halton jitter and mip bias follow any upscaler (`upscalerFrame`).
      Signs: jitter = D3D12 (x, −y) / Vulkan (x, +y) of the engine's offset (FSR's convention), mvecScale (−1, −1).
+  13. **NVIDIA DLSS Frame Generation (DLSS-G) + Reflex, D3D12** (Hive step 17): Streamline also loads `sl.dlss_g`,
+     `sl.reflex`, `sl.pcl` (+ `nvngx_dlssg`, all SHA-pinned, NVIDIA-signed; `HE_DLSS_FG=0`: not). DLSS-G is unloaded
+     right after init and loaded only while the game wants it (`fgWanted >= 2`, DLSS as the upscaler, swapchain post
+     chain, not after FSR's FG replaced the swapchain); each switch makes the swapchain again through Streamline's
+     factory proxy (`remakeSwapchainForDlssG`, NVIDIA's on/off pattern). A resize unloads it first (its options act only
+     at the next Present; a mode-off right before `ResizeBuffers` gave "Repeated slDLSSGSetOptions" and FG never came
+     back), the next frame loads it again. Per frame ONE token (`StreamlineDlss::beginFrame`, Render's start, with
+     `slReflexSleep`): DLSS SR's constants, DLSS-G's tags (depth, velocity at render size, hudless = viewport RGBA8 copy
+     before the UI, `eValidUntilPresent`, states at Present) and the PCL markers (simulation start/end at Render's start,
+     render submit start after the frame wait / end after ExecuteCommandLists, present start/end around Present).
+     Reflex low latency while DLSS-G is loaded, off otherwise (markers always). `Capabilities::maxFrameGenerationDLSS`
+     (1 + `numFramesToGenerateMax`), `settings.frameGenerationModes` follows the upscaler (FSR's 2x / DLSS-G's max).
+     `HE_DLSS_FG_STATS=1`: shown / rendered every 240 frames, per-interval 0/1/2/3+ histogram, occluded presents,
+     foreground / visible.
 - **Verified** (NN-WS03, RTX 4070, Release; `HE_DUMP` SHADOWINSTTEST, 40 settle frames, cube band): the loader
   picks **FSR 3.1.6**, `HE_FSR_DEBUG=1` reports nothing. Sign A/B against the AA-off frame of the same pose
   (run-to-run noise 0.040): still FSR 0.754 vs jitter-y flipped 0.855; pan (`HE_DUMP_PANYAW=0.5`) FSR 1.239 vs
@@ -212,6 +226,14 @@ later). Branch `claude/upscalers-fsr`, on top of `claude/motion-blur-d3d-vulkan`
   then 7440/7440 = 1.00 (D3D12) and 2160/2160 = 1.00 (Vulkan). Game exports: DLSS 800x450 -> 1600x900 on both, exit 0.
   D3D12 debug layer: 0 errors. Vulkan validation: 2 messages on NGX's own image (`nv.ngx.dlss.resource`, first use).
   GPU 2560x1440 D3D12, 3 pairs: DLAA 6.6/7.7/6.7 ms vs Performance 6.2/5.6/5.5 (a light scene).
+  **DLSS-G** (exported D3D12 game, DLSS Performance 800x450 -> 1600x900, `HE_GAME_FRAMEGEN=2`): Streamline reports DLSS-G
+  available up to 2x (RTX 4070: no multi frame), status 0x0 throughout, the swapchain made again with it loaded,
+  resources allocated, PCL / Reflex accepted. **Run 1: from frame 1795 on exactly 2x** (+480 shown per +240 rendered,
+  steady to the end, ~250 rendered fps paced by Reflex), before that 1x. **Runs 2 and 3: 1x for the whole run** (every
+  frame presented once, ~560 fps, no pacer), with the window visible, NOT foreground, never occluded (Streamline's
+  verbose log names no reason; it toggles "fullscreen iFlip 1 -> 0" after ~7 s). Working hypothesis: DLSS-G only
+  interpolates for the foreground window; not confirmed — the witness never takes the user's focus. Resize (run 3):
+  unload, resize, load again, 2x set again, exit 0. FG 1: DLSS-G never loaded, exit 0.
   **Game DLL trap:** building HorizonGame refreshes `build/engine_bundle/HorizonEngine.dll`, but `deploy/Game` only when
   the exe relinks — copy the bundle's DLL into a test export, or the run measures the old code.
   **Witness trap:** `cap.ps1` clears `HE_DUMP_*` only — an `HE_FSR_*`/`HE_TAA_*` switch set for one capture stays
@@ -236,6 +258,10 @@ later). Branch `claude/upscalers-fsr`, on top of `claude/motion-blur-d3d-vulkan`
   user switching DLSS -> FSR -> FSR FG at run time (the FG swapchain is native, Streamline then sees no presents —
   documented as harmless while DLSS is off, not driven); NVIDIA's marks as images (only text attribution in the
   About box; the export credits are the game's job, said in the AA help); DLSS on the editor's secondary windows.
-- **Next:** DLSS-G / Reflex on the same Streamline (step 17); Metal's mip bias under MetalFX (step 4's last part, on
+- **Open (DLSS-G):** why it does not interpolate in a background window (confirm with the game window in front, which
+  needs the user's OK or a human run); DLSS-G on Vulkan (extra queues, native optical flow); multi frame generation
+  (needs an RTX 50); UI alpha / recomposition (not tagged: the UI canvas is drawn into the frame); Reflex settings in the
+  game UI (on with DLSS-G, else off); the Reflex Test Utility checklist; FrameView pacing measurement.
+- **Next:** finish step 17's open point; Metal's mip bias under MetalFX (step 4's last part, on
   the Mac); D3D11's albedo sampler MaxLOD; a settings menu in the template wired to the new rows;
   XeSS (plan step 5).

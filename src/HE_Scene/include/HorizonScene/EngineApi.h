@@ -2404,7 +2404,8 @@ namespace settings {
     {
         bool fsr = false, dlss = false, xess = false, metalFX = false;
         bool renderScale = false;        // the backend sizes its scene targets by the scale
-        int  maxFrameGeneration = 1;     // 1 = no frame generation
+        int  maxFrameGeneration = 1;     // 1 = no frame generation (FSR's, with FSR as the upscaler)
+        int  maxFrameGenerationDLSS = 1; // NVIDIA DLSS-G's, with DLSS as the upscaler
     };
     // The upscaler names (the AAMethod each stands for) and the quality modes,
     // with the per-axis render scale ffx_upscale.h documents for each.

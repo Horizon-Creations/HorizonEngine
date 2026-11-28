@@ -16651,6 +16651,7 @@ void EditorApplication::setPlayMode(bool play)
 				g.fsr = c.supportsFSR; g.dlss = c.supportsDLSS; g.xess = c.supportsXeSS; g.metalFX = c.supportsMetalFX;
 				g.renderScale        = c.supportsRenderScale;
 				g.maxFrameGeneration = c.maxFrameGeneration;
+				g.maxFrameGenerationDLSS = c.maxFrameGenerationDLSS;
 				return g;
 			};
 			HE::api::settings::install(std::move(host));
