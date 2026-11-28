@@ -726,6 +726,12 @@ bool branchPure(MatNodeType t)
     }
 }
 
+// The integer-hash Fbm (p[0] = 1) takes its pixel footprint from dFdx / dFdy: a screen derivative.
+bool branchPure(const MatGraphNode& n)
+{
+    return branchPure(n.type) && !(n.type == MatNodeType::Fbm && n.p[0] > 0.5f);
+}
+
 bool isBombRead(MatNodeType t)
 {
     return t == MatNodeType::TextureBombSample || t == MatNodeType::TextureArrayBombSample
@@ -770,7 +776,7 @@ void computeBranchGuards(EmitCtx& c, const MaterialGraph& g)
     std::function<std::string(int)> guardOf = [&](int id) -> std::string {
         if (auto it = memo.find(id); it != memo.end()) return it->second;
         const MatGraphNode* n = g.findNode(id);
-        if (!n || !branchPure(n->type) || visiting.count(id)) return {};
+        if (!n || !branchPure(*n) || visiting.count(id)) return {};
         // A node that reads an impure node (an implicit-LOD texture read, a function)
         // stays out too: were its only use inside a branch, the driver may sink that read
         // into the branch with it (measured on macOS OpenGL: the plain-read permutation
@@ -787,7 +793,7 @@ void computeBranchGuards(EmitCtx& c, const MaterialGraph& g)
         }
         for (const MatGraphLink& l : g.links)
             if (l.dstNode == id && (onlyPin < 0 || l.dstPin == onlyPin))
-                if (const MatGraphNode* src = g.findNode(l.srcNode); src && !branchPure(src->type))
+                if (const MatGraphNode* src = g.findNode(l.srcNode); src && !branchPure(*src))
                     return memo[id] = std::string{};
         visiting.insert(id);
         std::string common;
@@ -1901,7 +1907,16 @@ HE_MG_NOINLINE bool emitPatternNode(EmitCtx& c, const Scope& sc, const MatGraphN
             const bool robust = n.p[0] > 0.5f;
             (robust ? c.usesNoiseI : c.usesNoise) = true;
             const std::string freq = inputExpr(c, sc, n, 1, F::Float), uv = uvInput(c, sc, n, 0);
-            decl = "float " + v + " = " + (robust ? "heFbmI(" : "heFbm(") + uv + " * " + freq + ");"; break;
+            if (!robust) { decl = "float " + v + " = heFbm(" + uv + " * " + freq + ");"; break; }
+            // The footprint of one pixel in noise cells, along its SHORT side: an octave finer than that is
+            // a different random value per pixel (a thresholded field, the auto landscape's puddles, drew as
+            // grain from a distance). The short side, so ground seen at a flat angle keeps its streaks.
+            // No pixel in the vertex and domain stages: unfiltered there.
+            const bool noPixel = dsStage(sc) || sc.key == "vs" || sc.key.rfind("vs/", 0) == 0;
+            const std::string p = v + "_p";
+            decl = "vec2 " + p + " = " + uv + " * " + freq + "; float " + v + " = heFbmI(" + p + ", "
+                 + (noPixel ? std::string("0.0") : "min(length(dFdx(" + p + ")), length(dFdy(" + p + ")))") + ");";
+            break;
         }
         case MatNodeType::Checker:
         {
@@ -2425,8 +2440,11 @@ std::string emitDeclarations(const EmitCtx& c, bool uiDomain, bool domainStage, 
             " float a = heHashI2(i); float b = heHashI2(i + ivec2(1, 0));"
             " float cc = heHashI2(i + ivec2(0, 1)); float d = heHashI2(i + ivec2(1, 1));"
             " return mix(mix(a, b, u.x), mix(cc, d, u.x), u.y); }\n"
-            "float heFbmI(vec2 p) { float v = 0.0; float a = 0.5;"
-            " for (int k = 0; k < 4; k++) { v += a * heValueNoiseI(p); p *= 2.0; a *= 0.5; }"
+            // fp: the pixel's footprint in cells of the first octave. An octave fades to its mean (0.5) between
+            // a quarter and half a cell per pixel; at fp = 0 every mix() returns the noise itself.
+            "float heFbmI(vec2 p, float fp) { float v = 0.0; float a = 0.5;"
+            " for (int k = 0; k < 4; k++) { v += a * mix(heValueNoiseI(p), 0.5, smoothstep(0.25, 0.5, fp));"
+            " p *= 2.0; fp *= 2.0; a *= 0.5; }"
             " return v; }\n";
     if (c.usesNoiseIGrad)
         // heFbmI and its gradient from the same corner hashes: the value noise is

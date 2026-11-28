@@ -3021,6 +3021,9 @@ TEST_CASE("Fbm p[0] = 1 hashes on integers; the default keeps the float hash")
 	CHECK(robust.find("float heHashI2(ivec2 i)") != std::string::npos);
 	CHECK(robust.find("heHash21") == std::string::npos);
 	CHECK(robust.find("heFbm(") == std::string::npos);
+	// It is filtered by the pixel's footprint (puddles seen from far away drew as grain), the float one is not.
+	CHECK(robust.find("_p, min(length(dFdx(") != std::string::npos);
+	CHECK(plain.find("dFdx") == std::string::npos);
 
 	// The flag lives in p[], which the JSON keeps although Fbm shows no widget.
 	MaterialGraph back;
