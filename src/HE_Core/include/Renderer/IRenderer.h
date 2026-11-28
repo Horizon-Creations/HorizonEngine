@@ -176,7 +176,7 @@ enum class AAMethod : int
     MetalFX = 4, // MTLFXTemporalScaler (Apple Silicon) — TAA quality from the OS
     FSR     = 5, // AMD FSR (FidelityFX API: FSR 3.1.x, FSR 4 on RDNA 4), D3D12 / Vulkan; the SDK's runtime DLLs
                  // (docs/upscalers-fsr-dlss-xess-plan-2026-11-27.md)
-    DLSS    = 6, // NVIDIA DLSS Super Resolution (RTX) — listed, no backend has it yet (supportsDLSS)
+    DLSS    = 6, // NVIDIA DLSS Super Resolution / DLAA (RTX) through NVIDIA Streamline, D3D12 / Vulkan (supportsDLSS)
     XeSS    = 7, // Intel XeSS Super Resolution — listed, no backend has it yet (supportsXeSS)
 };
 
@@ -339,7 +339,8 @@ public:
         // AMD FSR upscaling / native AA: the FSR runtime DLLs loaded and a context made for this device. Implies
         // supportsTemporalAA (the same jitter and velocity feed it).
         bool supportsFSR = false;
-        // NVIDIA DLSS / Intel XeSS super resolution: no backend reports them yet; the editor lists them greyed out.
+        // NVIDIA DLSS (D3D12 / Vulkan through Streamline, RTX GPUs) / Intel XeSS (no backend yet) super resolution; the
+        // editor lists an unsupported one greyed out.
         bool supportsDLSS = false;
         bool supportsXeSS = false;
         // AntiAliasingSettings::renderScale sizes the scene targets (render below the window, upscale after). Off =

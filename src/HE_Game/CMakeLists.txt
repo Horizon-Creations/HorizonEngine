@@ -172,6 +172,12 @@ if(HE_HAVE_FSR)
 		COMMAND ${CMAKE_COMMAND} -E copy_if_different ${HE_FSR_RUNTIME_FILES} "${_he_game_engine_dir}"
 		VERBATIM)
 endif()
+if(HE_HAVE_STREAMLINE)
+	# Streamline + DLSS (loaded at run time beside the engine library, signature checked) and NVIDIA's licences.
+	add_custom_command(TARGET HorizonGame POST_BUILD
+		COMMAND ${CMAKE_COMMAND} -E copy_if_different ${HE_SL_RUNTIME_FILES} "${_he_game_engine_dir}"
+		VERBATIM)
+endif()
 if(WIN32)
 	# Whatever else HorizonEngine.dll imports from an imported target (a vcpkg
 	# lz4/zstd/OpenSSL), beside it.

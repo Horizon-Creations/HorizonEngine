@@ -274,8 +274,10 @@ bool D3D12Fsr::replaceSwapchain(Microsoft::WRL::ComPtr<IDXGISwapChain3>& sc, ID3
     HWND hwnd = nullptr;
     DXGI_SWAP_CHAIN_DESC1 d1{};
     DXGI_SWAP_CHAIN_FULLSCREEN_DESC fs{};
+    // A native factory of its own, not sc's parent: with NVIDIA's Streamline loaded, sc and its parent are Streamline's
+    // proxies, and FSR's swapchain must be made natively (Streamline's proxy would otherwise reach native DXGI calls).
     ComPtr<IDXGIFactory2> factory;
-    if (FAILED(sc->GetHwnd(&hwnd)) || FAILED(sc->GetDesc1(&d1)) || FAILED(sc->GetParent(IID_PPV_ARGS(&factory))))
+    if (FAILED(sc->GetHwnd(&hwnd)) || FAILED(sc->GetDesc1(&d1)) || FAILED(CreateDXGIFactory2(0, IID_PPV_ARGS(&factory))))
         return false;
     const bool fullscreen = SUCCEEDED(sc->GetFullscreenDesc(&fs)) && !fs.Windowed;
     sc.Reset();   // one swapchain per window: the old one has to be gone before the proxy is made for it

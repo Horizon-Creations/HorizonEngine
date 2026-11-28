@@ -69,6 +69,7 @@
 #include "Backends/D3D12/D3D12MaterialRootSignature.h" // A4: the material root signature, shared with he_tests (Thema 56)
 #include "Backends/D3D12/D3D12Landscape.h"            // the world-scale landscape (Thema 326)
 #include "Backends/D3D12/D3D12Fsr.h"                  // AMD FSR (AAMethod::FSR)
+#include "Backends/Streamline/StreamlineDlss.h"       // NVIDIA DLSS through Streamline (AAMethod::DLSS)
 #include <SDL3/SDL.h>
 #include <d3d12.h>
 #include <d3d12sdklayers.h>
@@ -1976,7 +1977,10 @@ struct D3D12RendererImpl
     bool taaReady() const { return postFxReady && taaVelocityPSO && taaResolvePSO && taaSharpenPSO; }
     // TAA's targets, jitter and velocity pass: for TAA itself and for FSR, which takes the jitter and the velocity (not the
     // resolve, see aaTaa in runPostFX). shortcut: FSR keeps TAA's two RGBA8 history targets it never reads; split if memory matters.
-    bool taaWanted() const { return (aaMethod == HE::AAMethod::TAA || aaMethod == HE::AAMethod::FSR) && taaReady(); }
+    bool taaWanted() const
+    {
+        return (aaMethod == HE::AAMethod::TAA || aaMethod == HE::AAMethod::FSR || aaMethod == HE::AAMethod::DLSS) && taaReady();
+    }
 
     // ── AMD FSR (AAMethod::FSR; D3D12Fsr.h) ──────────────────────────────────
     // Dispatched on the HDR image right after the underwater fog (before motion blur, bloom and the tonemap: AMD's order).
@@ -2107,11 +2111,18 @@ struct D3D12RendererImpl
     uint64_t               fgLastNs = 0;
     UINT                   sceneW = 0, sceneH = 0; // the scene targets' size (createViewportRT); = viewport unless upscaling
     bool fsrFrame() const { return aaMethod == HE::AAMethod::FSR && fsr.available(); }
-    // The scene size a viewport of w x h wants now: smaller only through FSR, on the post chain, outside a still.
-    // The materials' texture reads take FSR's mip bias meanwhile (lit.giParams.w, HE_TEX_BIAS).
+    // NVIDIA DLSS through Streamline (StreamlineDlss.h): FSR's place in the chain, its targets, jitter and mip bias.
+    bool dlssFrame() const { return aaMethod == HE::AAMethod::DLSS && HE::StreamlineDlss::instance().available(); }
+    bool upscalerFrame() const { return fsrFrame() || dlssFrame(); }
+    uint32_t dlssFrameIndex = 0;
+    ComPtr<ID3D12Device>  slDeviceProxy;    // Streamline's proxies (Init), kept until after slShutdown
+    ComPtr<IDXGIFactory4> slFactoryProxy;
+    ComPtr<ID3D12CommandQueue> slQueueProxy;   // the swapchain's queue as Streamline made it; cmdQueue is the native one
+    // The scene size a viewport of w x h wants now: smaller only through an upscaler, on the post chain, outside a still.
+    // The materials' texture reads take its mip bias meanwhile (lit.giParams.w, HE_TEX_BIAS).
     UINT sceneSizeFor(UINT v) const
     {
-        const bool up = fsrFrame() && postFxReady && !rvtStill.active && renderScale < 1.0f;
+        const bool up = upscalerFrame() && postFxReady && !rvtStill.active && renderScale < 1.0f;
         return up ? IRenderer::UpscaleRenderSize(v, renderScale) : v;
     }
     bool sceneScaled() const { return sceneW != viewportW || sceneH != viewportH; }
@@ -2993,11 +3004,13 @@ struct D3D12RendererImpl
         // bloomed would ghost in its history). Native AA: the output goes back over hdrRT, real frames only. Upscaling: every
         // frame, since nothing else brings the scene to the viewport size; the tail reads fsrOut. A frame outside the jitter
         // sequence (no taaFrame) goes through unjittered with the history reset.
-        const bool fsrNative  = !upscale && taaFrame && fsrFrame() && mbRealFrame && fsr.sizedFor(w, h, w, h);
-        const bool fsrUpscale = upscale && fsrFrame() && fsr.sizedFor(sw, sh, w, h);
+        // NVIDIA DLSS (Streamline, StreamlineDlss.h) takes the same place, inputs and output image: only the dispatch differs.
+        const bool dlssOn     = dlssFrame();
+        const bool fsrNative  = !upscale && taaFrame && mbRealFrame && (dlssOn || (fsrFrame() && fsr.sizedFor(w, h, w, h)));
+        const bool fsrUpscale = upscale && (dlssOn || (fsrFrame() && fsr.sizedFor(sw, sh, w, h)));
         if ((fsrNative || fsrUpscale) && viewportDepth && taaVelocityRT)
         {
-            _post.next("FSR");
+            _post.next(dlssOn ? "DLSS" : "FSR");
             if (!upscale && (!fsrOut || fsrOut->GetDesc().Width != w || fsrOut->GetDesc().Height != h))
             {
                 fsrOut.Reset();
@@ -3027,19 +3040,53 @@ struct D3D12RendererImpl
                 const float A = P[2][2], B = P[3][2];
                 const float n = B / (A - 1.0f), f = B / (A + 1.0f);
                 const uint64_t nowNs = SDL_GetTicksNS();
-                HE::D3D12Fsr::Dispatch fd;
-                fd.cl = cl; fd.color = hdrRT.Get(); fd.depth = viewportDepth.Get(); fd.velocity = taaVelocityRT.Get();
-                fd.output = fsrOut.Get();
-                fd.renderW = sw; fd.renderH = sh; fd.displayW = w; fd.displayH = h;
-                fd.jitter = taaFrame ? fsrJitter : glm::vec2(0.0f);
-                fd.nearZ = 2.0f * f * n / (f + n); fd.farZ = f;
-                fd.fovY = 2.0f * std::atan(1.0f / P[1][1]);
-                fd.frameMs = fsrLastNs ? float(double(nowNs - fsrLastNs) * 1e-6) : 16.6f;
-                fd.sharpness = aaSharpness;
-                fd.reset = fsrReset || !taaFrame;
-                fd.reactive = fsrReactiveValid ? fsrReactive.Get() : nullptr;   // the blended tail (DrawScene)
-                fsrLastNs = nowNs;
-                const bool fsrOk = fsr.dispatch(fd);
+                bool fsrOk = false;
+                if (dlssOn)
+                {
+                    // Streamline is told each image's state at the dispatch (manual hooking): the barriers above.
+                    static const bool s_jflip = [] { const char* e = std::getenv("HE_DLSS_JITTERFLIP"); return e && *e == '1'; }();
+                    static const bool s_mflip = [] { const char* e = std::getenv("HE_DLSS_MVFLIP"); return e && *e == '1'; }();
+                    const glm::mat4 vp = P * m_renderWorld.camera.view;
+                    const glm::mat4 inv = glm::inverse(m_renderWorld.camera.view);
+                    HE::StreamlineDlss::Eval ev;
+                    ev.cmd = cl;
+                    ev.frameIndex = ++dlssFrameIndex;
+                    ev.color  = { hdrRT.Get(), nullptr, uint32_t(kRead), sw, sh };
+                    ev.depth  = { viewportDepth.Get(), nullptr, uint32_t(kRead), sw, sh };
+                    ev.motion = { taaVelocityRT.Get(), nullptr, uint32_t(kRead), sw, sh };
+                    ev.output = { fsrOut.Get(), nullptr, uint32_t(D3D12_RESOURCE_STATE_UNORDERED_ACCESS), w, h };
+                    ev.renderW = sw; ev.renderH = sh; ev.displayW = w; ev.displayH = h;
+                    ev.scale = upscale ? renderScale : 1.0f;
+                    // The engine's pixel offset with y the way the clip-space shift moves it (as FSR's on D3D12).
+                    ev.jitter = taaFrame ? glm::vec2(taaJitter.x, s_jflip ? taaJitter.y : -taaJitter.y) : glm::vec2(0.0f);
+                    // Velocity is uvNow - uvPrev; DLSS wants the way back to the previous frame, in [-1,1] screen units.
+                    ev.mvecScale = s_mflip ? glm::vec2(1.0f) : glm::vec2(-1.0f);
+                    ev.viewToClip = P;
+                    ev.clipToPrevClip = mbHasPrev ? mbPrevViewProj * glm::inverse(vp) : glm::mat4(1.0f);
+                    ev.camPos = glm::vec3(inv[3]); ev.camUp = glm::normalize(glm::vec3(inv[1]));
+                    ev.camRight = glm::normalize(glm::vec3(inv[0])); ev.camFwd = -glm::normalize(glm::vec3(inv[2]));
+                    ev.nearZ = 2.0f * f * n / (f + n); ev.farZ = f;
+                    ev.fovY = 2.0f * std::atan(1.0f / P[1][1]);
+                    ev.aspect = float(w) / float(std::max(1u, h));
+                    ev.reset = fsrReset || !taaFrame;
+                    fsrOk = HE::StreamlineDlss::instance().evaluate(ev);
+                }
+                else
+                {
+                    HE::D3D12Fsr::Dispatch fd;
+                    fd.cl = cl; fd.color = hdrRT.Get(); fd.depth = viewportDepth.Get(); fd.velocity = taaVelocityRT.Get();
+                    fd.output = fsrOut.Get();
+                    fd.renderW = sw; fd.renderH = sh; fd.displayW = w; fd.displayH = h;
+                    fd.jitter = taaFrame ? fsrJitter : glm::vec2(0.0f);
+                    fd.nearZ = 2.0f * f * n / (f + n); fd.farZ = f;
+                    fd.fovY = 2.0f * std::atan(1.0f / P[1][1]);
+                    fd.frameMs = fsrLastNs ? float(double(nowNs - fsrLastNs) * 1e-6) : 16.6f;
+                    fd.sharpness = aaSharpness;
+                    fd.reset = fsrReset || !taaFrame;
+                    fd.reactive = fsrReactiveValid ? fsrReactive.Get() : nullptr;   // the blended tail (DrawScene)
+                    fsrLastNs = nowNs;
+                    fsrOk = fsr.dispatch(fd);
+                }
                 if (fsrOk && upscale)
                 {
                     fsrReset = !taaFrame;   // an unjittered frame starts no history the next one could build on
@@ -3060,8 +3107,9 @@ struct D3D12RendererImpl
                     barrier12(cl, hdrRT.Get(), kRead, D3D12_RESOURCE_STATE_RENDER_TARGET);
                 hdrState = D3D12_RESOURCE_STATE_RENDER_TARGET;
                 barrier12(cl, viewportDepth.Get(), kRead, D3D12_RESOURCE_STATE_DEPTH_WRITE);
-                // FSR left its own heaps, root signature and pipeline on the list: everything after sets its own again
-                // (the motion blur and the chain below both bind heap, root signature and pipeline before drawing).
+                // FSR / DLSS left their own heaps, root signature and pipeline on the list: everything after sets its own
+                // again (the motion blur and the chain below both bind heap, root signature and pipeline before drawing).
+                // That is the restore manual hooking asks of the host (Streamline's ProgrammingGuideManualHooking 7.1).
             }
         }
 
@@ -12547,6 +12595,16 @@ void D3D12Renderer::Initialize(HE::Window* window)
         if (SUCCEEDED(CreateDXGIFactory1(IID_PPV_ARGS(&factory))))
             factory->EnumAdapterByLuid(m_impl->device->GetAdapterLuid(), IID_PPV_ARGS(&adapter));
         HE::d3d::logAdapter("D3D12Renderer", adapter.Get());
+        // NVIDIA DLSS through Streamline, on an NVIDIA adapter only: after the device, before the command queue and the
+        // swapchain (both are made through its proxies below, so it sees the queue and every present).
+        DXGI_ADAPTER_DESC ad{};
+        if (adapter && SUCCEEDED(adapter->GetDesc(&ad)) && ad.VendorId == 0x10DE)
+        {
+            HE::StreamlineDlss& sl = HE::StreamlineDlss::instance();
+            const LUID luid = m_impl->device->GetAdapterLuid();
+            if (sl.init(HE::StreamlineDlss::Api::D3D12) && !sl.setD3DDevice(m_impl->device.Get(), &luid, sizeof(luid)))
+                sl.shutdown();   // no DLSS on this GPU: nothing of Streamline stays in the way
+        }
     }
     {   // Hull/domain shaders come with feature level 11_0, the floor above.
         const char* tessEnv = std::getenv("HE_TESSELLATION");
@@ -12568,14 +12626,52 @@ void D3D12Renderer::Initialize(HE::Window* window)
 
     D3D12_COMMAND_QUEUE_DESC qd{};
     qd.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
-    if (FAILED(m_impl->device->CreateCommandQueue(&qd, IID_PPV_ARGS(&m_impl->cmdQueue))))
-        throw std::runtime_error("D3D12Renderer: CreateCommandQueue failed");
+    {
+        // With Streamline (manual hooking) the queue is made through its device proxy (sl_hooks.h: CreateCommandQueue);
+        // everything else keeps the native device. The proxy lives until after slShutdown (Shutdown): Streamline keeps it.
+        ID3D12Device* queueDevice = m_impl->device.Get();
+        if (HE::StreamlineDlss::instance().initialized())
+        {
+            ID3D12Device* proxy = m_impl->device.Get();
+            proxy->AddRef();   // slUpgradeInterface swaps the pointer: this reference goes with it
+            if (HE::StreamlineDlss::instance().upgradeInterface(reinterpret_cast<void**>(&proxy)))
+            {
+                m_impl->slDeviceProxy.Attach(proxy);
+                queueDevice = proxy;
+            }
+            else
+                proxy->Release();
+        }
+        if (FAILED(queueDevice->CreateCommandQueue(&qd, IID_PPV_ARGS(&m_impl->cmdQueue))))
+            throw std::runtime_error("D3D12Renderer: CreateCommandQueue failed");
+        // The renderer (and FSR's frame generation, which hands it to native DXGI) uses the NATIVE queue; Streamline's proxy
+        // is kept for the one call it hooks with it, the swapchain creation below.
+        if (void* native = HE::StreamlineDlss::instance().nativeInterface(m_impl->cmdQueue.Get()))
+        {
+            m_impl->slQueueProxy = m_impl->cmdQueue;
+            m_impl->cmdQueue = static_cast<ID3D12CommandQueue*>(native);
+        }
+    }
 
     laps.mark("infoQueue+CreateCommandQueue");
 
     ComPtr<IDXGIFactory4> factory;
     if (FAILED(CreateDXGIFactory2(0, IID_PPV_ARGS(&factory))))
         throw std::runtime_error("D3D12Renderer: CreateDXGIFactory2 failed");
+    // ... and the swapchain through its factory proxy: the swapchain is then Streamline's proxy, so every Present,
+    // ResizeBuffers and GetBuffer of the renderer goes through it (its present hook must run every frame).
+    if (HE::StreamlineDlss::instance().initialized())
+    {
+        IDXGIFactory4* proxy = factory.Get();
+        proxy->AddRef();
+        if (HE::StreamlineDlss::instance().upgradeInterface(reinterpret_cast<void**>(&proxy)))
+        {
+            factory = proxy;                           // a reference of its own for this function
+            m_impl->slFactoryProxy.Attach(proxy);      // ... and the one kept until after slShutdown
+        }
+        else
+            proxy->Release();
+    }
 
     // ALLOW_TEARING (for unsynced present) is only legal when the adapter+OS support
     // it. Using the flag unconditionally on hardware that lacks it produces visible
@@ -12617,7 +12713,8 @@ void D3D12Renderer::Initialize(HE::Window* window)
     scd.SampleDesc.Count = 1;
 
     ComPtr<IDXGISwapChain1> sc1;
-    if (FAILED(factory->CreateSwapChainForHwnd(m_impl->cmdQueue.Get(), hwnd, &scd, nullptr, nullptr, &sc1)))
+    ID3D12CommandQueue* scQueue = m_impl->slQueueProxy ? m_impl->slQueueProxy.Get() : m_impl->cmdQueue.Get();
+    if (FAILED(factory->CreateSwapChainForHwnd(scQueue, hwnd, &scd, nullptr, nullptr, &sc1)))
         throw std::runtime_error("D3D12Renderer: CreateSwapChainForHwnd failed");
     if (FAILED(sc1.As(&m_impl->swapchain)))
         throw std::runtime_error("D3D12Renderer: swapchain cast to IDXGISwapChain3 failed");
@@ -12902,6 +12999,8 @@ void D3D12Renderer::Shutdown()
     m_impl->fsr.destroyFrameGen(m_impl->swapchain.Get());
     m_impl->fsr.destroySwapchainContext();
     m_impl->fgHudless.Reset();
+    // Streamline before the swapchain, queue and device it holds proxies of (the GPU is idle here).
+    HE::StreamlineDlss::instance().shutdown();
     for (UINT i = 0; i < k_frameCount; ++i)
     {
         m_impl->cmdAllocators[i].Reset();
@@ -12911,6 +13010,9 @@ void D3D12Renderer::Shutdown()
     m_impl->rtvHeap.Reset();
     m_impl->swapchain.Reset();
     m_impl->cmdQueue.Reset();
+    m_impl->slQueueProxy.Reset();
+    m_impl->slFactoryProxy.Reset();   // Streamline's proxies, after the swapchain and queue made through them
+    m_impl->slDeviceProxy.Reset();
     m_impl->device.Reset();
     HE_LOG_INFO(RHI, "%s", "D3D12Renderer: all resources released");
 }
@@ -13015,7 +13117,7 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
     // the graph materials' reads (lit.giParams.w, HE_TEX_BIAS). 0 otherwise (TAA, stills, RVT pages, the swapchain
     // path); HE_FSR_MIPBIAS=0 is the witness's control.
     static const bool s_noMipBias = [] { const char* e = std::getenv("HE_FSR_MIPBIAS"); return e && *e == '0'; }();
-    const float frameMipBias = (!s_noMipBias && p.fsrFrame() && p.usingHDR && (p.taaFrame || p.sceneScaled())
+    const float frameMipBias = (!s_noMipBias && p.upscalerFrame() && p.usingHDR && (p.taaFrame || p.sceneScaled())
                                 && UINT(width) == p.sceneW && p.viewportW)
                              ? IRenderer::UpscaleMipBias(p.sceneW, p.viewportW) : 0.0f;
 
@@ -15122,7 +15224,7 @@ void D3D12Renderer::DrawViewportFrame()
         // frame's motion.
         p.taaFrame = p.taaWanted() && p.taaHistoryRT[0]
                   && p.taaW == p.sceneW && p.taaH == p.sceneH
-                  && !(p.fsrFrame() && !p.mbRealFrame);   // FSR: a still or an RVT page is drawn unjittered, outside its history
+                  && !(p.upscalerFrame() && !p.mbRealFrame);   // FSR / DLSS: a still or an RVT page is drawn unjittered, outside its history
         if (p.taaFrame)
         {
             p.barrier12(p.cmdList.Get(), p.taaVelocityRT.Get(), p.taaVelocityState,
@@ -15639,7 +15741,9 @@ IRenderer::Capabilities D3D12Renderer::GetCapabilities() const
     c.supportsTemporalAA = m_impl->taaReady();
     // AMD FSR: the loader DLL opened at Initialize; it takes TAA's jitter + velocity, so TAA's readiness too.
     c.supportsFSR        = c.supportsTemporalAA && m_impl->fsr.available();
-    c.supportsRenderScale = c.supportsFSR && m_impl->postFxReady;   // smaller scene targets only with FSR to bring them up (sceneSizeFor)
+    c.supportsDLSS        = c.supportsTemporalAA && HE::StreamlineDlss::instance().available();
+    // Smaller scene targets only with an upscaler to bring them up (sceneSizeFor).
+    c.supportsRenderScale = (c.supportsFSR || c.supportsDLSS) && m_impl->postFxReady;
     // FSR 3.1 frame generation makes one frame per rendered one (the packaged game's swapchain; SetFrameGeneration).
     c.maxFrameGeneration = (c.supportsFSR && m_impl->fsr.frameGenAvailable(m_impl->device.Get())) ? 2 : 1;
     // Deferred (Thema 150): G-buffer PSOs + resolve built at Initialize. Like

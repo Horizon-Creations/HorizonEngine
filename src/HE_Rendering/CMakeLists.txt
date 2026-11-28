@@ -119,6 +119,9 @@ if(HE_VULKAN_ENABLED)
         ${Vulkan_INCLUDE_DIRS}
     )
     target_link_libraries(RendererVulkan PUBLIC Vulkan::Vulkan PRIVATE glm::glm HorizonCore)
+    if(WIN32)
+        target_link_libraries(RendererVulkan PRIVATE he_streamline)   # NVIDIA DLSS (Streamline), defined below with D3D12's
+    endif()
     # A4: shared material-graph shader layer (GLSL→SPIR-V via glslang/SPIRV-Cross) so the
     # Vulkan backend can build per-material pipelines from node-graph materials.
     if(TARGET he_materialshader)
@@ -252,6 +255,24 @@ if(WIN32)
     target_compile_definitions(RendererD3D11 PRIVATE GLM_FORCE_DEPTH_ZERO_TO_ONE HE_RENDERING_BUILD_DLL)
 endif()
 
+# ─── NVIDIA DLSS through Streamline (D3D12 + Vulkan share it: Streamline is process-wide) ─────
+if(WIN32)
+    add_library(he_streamline STATIC
+        src/Backends/Streamline/StreamlineDlss.cpp
+        include/Backends/Streamline/StreamlineDlss.h)
+    target_include_directories(he_streamline PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include ${HE_CORE_INCLUDE})
+    target_link_libraries(he_streamline PRIVATE glm::glm HorizonCore)
+    target_compile_definitions(he_streamline PRIVATE HE_RENDERING_BUILD_DLL)
+    if(HE_HAVE_STREAMLINE)
+        target_include_directories(he_streamline PRIVATE ${HE_SL_INCLUDE_DIRS})
+        target_compile_definitions(he_streamline PRIVATE HE_HAVE_STREAMLINE)
+        if(TARGET Vulkan::Vulkan)
+            target_link_libraries(he_streamline PRIVATE Vulkan::Vulkan)   # its headers (VkDevice etc. in sl_helpers_vk.h)
+        endif()
+        target_link_libraries(he_streamline PRIVATE wintrust crypt32)   # sl_security.h's signature check
+    endif()
+endif()
+
 # ─── D3D12 Backend ─────────────────────────────────────────────────────────────
 if(WIN32)
     add_library(RendererD3D12 STATIC
@@ -269,7 +290,7 @@ if(WIN32)
         # the HLSL they share verbatim. PRIVATE: nothing outside the backend needs it.
         PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
     )
-    target_link_libraries(RendererD3D12 PRIVATE d3d12 dxgi d3dcompiler glm::glm HorizonCore)
+    target_link_libraries(RendererD3D12 PRIVATE d3d12 dxgi d3dcompiler glm::glm HorizonCore he_streamline)
     # A4: shared material-graph shader layer (GLSL→HLSL via glslang/SPIRV-Cross) so the
     # D3D12 backend can build per-material PSOs from node-graph materials. Propagates
     # HE_HAVE_SHADERC=1 (mirrors what RendererVulkan added).
@@ -429,6 +450,15 @@ if(HE_HAVE_FSR)
         COMMAND ${CMAKE_COMMAND} -E copy_if_different ${HE_FSR_RUNTIME_FILES} "$<TARGET_FILE_DIR:HorizonRendering>"
         COMMAND ${CMAKE_COMMAND} -E make_directory "${DEPLOY_EDITOR}"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different ${HE_FSR_RUNTIME_FILES} "${DEPLOY_EDITOR}"
+        VERBATIM)
+endif()
+# NVIDIA DLSS through Streamline (cmake/HeStreamline.cmake; he_streamline above holds the headers): the signed DLLs and
+# NVIDIA's licences beside HorizonRendering and in the editor deploy (StreamlineDlss.cpp loads them at run time).
+if(HE_HAVE_STREAMLINE)
+    add_custom_command(TARGET HorizonRendering POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different ${HE_SL_RUNTIME_FILES} "$<TARGET_FILE_DIR:HorizonRendering>"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${DEPLOY_EDITOR}"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different ${HE_SL_RUNTIME_FILES} "${DEPLOY_EDITOR}"
         VERBATIM)
 endif()
 

@@ -4442,9 +4442,11 @@ namespace
 	  "How jagged edges are smoothed. SMAA is one cheap pass; TAA is steadier in "
 	  "motion but needs a velocity buffer, which falls back to SMAA on a backend "
 	  "that is not ready to write one yet. FSR is AMD's temporal upscaler "
-	  "(DirectX 12 for now, any GPU vendor); DLSS and XeSS are listed but not "
-	  "built in yet. An entry this machine cannot run is greyed out with the "
-	  "reason; a config that names one falls back (DLSS/XeSS to FSR, FSR to TAA).",
+	  "(DirectX 12 and Vulkan, any GPU vendor); DLSS is NVIDIA's (NVIDIA RTX GPUs, "
+	  "through NVIDIA Streamline; DLSS at Render Scale 1 is DLAA); XeSS is listed but "
+	  "not built in yet. An entry this machine cannot run is greyed out with the "
+	  "reason; a config that names one falls back (DLSS/XeSS to FSR, FSR to TAA). "
+	  "A game that ships with DLSS must name NVIDIA DLSS in its credits (NVIDIA's licence).",
 	  "", "rendering#postfx" },
 	{ "Preferences/Post-Processing/AA Sharpness", "",
 	  "How much detail is pulled back after the anti-aliasing pass softened it. "
@@ -4453,8 +4455,10 @@ namespace
 	{ "Preferences/Post-Processing/Render Scale", "",
 	  "Renders the 3D view at a fraction of the window size and upscales it. The "
 	  "single most effective performance dial there is; 0.75 is often invisible. "
-	  "On Metal any AA mode upscales; on DirectX 12 and Vulkan it needs FSR as the "
-	  "anti-aliasing (greyed out without an upscaler), and values above 1 count as 1.",
+	  "On Metal any AA mode upscales; on DirectX 12 and Vulkan it needs FSR or DLSS as "
+	  "the anti-aliasing (greyed out without an upscaler), and values above 1 count as 1. "
+	  "DLSS picks its mode from it: 1 DLAA, 0.67 Quality, 0.58 Balanced, 0.5 Performance, "
+	  "0.33 Ultra Performance.",
 	  "", "rendering#performance" },
 	{ "Preferences/Post-Processing/Specular AA", "",
 	  "Tames the sparkle that fine, shiny detail produces in motion, by widening "

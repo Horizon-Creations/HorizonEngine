@@ -1547,6 +1547,11 @@ static void drawAboutPopup(AppContext& ctx, bool openAboutPopup)
         ImGui::Spacing();
         ImGui::TextUnformatted("Editor and runtime, built by Horizon Creations.");
         ImGui::Spacing();
+        // The upscalers' licences ask for this: NVIDIA's (DLSS SDK: attribution in the about box) and AMD's notice.
+        ImGui::TextDisabled("Uses NVIDIA DLSS (NVIDIA RTX) through NVIDIA Streamline,");
+        ImGui::TextDisabled("and AMD FidelityFX Super Resolution (FSR).");
+        ImGui::TextDisabled("Their licences ship beside the editor (NVIDIA_*.txt, AMD_FSR_SDK_LICENSE.md).");
+        ImGui::Spacing();
         if (EditorWidgets::smallButton("Documentation")) { DocsPanel::open(); ImGui::CloseCurrentPopup(); }
         ImGui::SameLine();
         if (EditorWidgets::smallButton("Website"))       SDL_OpenURL("https://horizoncreations.dev");

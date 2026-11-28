@@ -460,7 +460,8 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const DrawOptions& o
 			mfxOK  ? nullptr : "MetalFX needs Metal on Apple Silicon — falls back to TAA.",
 			fsrOK  ? nullptr : fsrBackend ? "AMD's FSR runtime (amd_fidelityfx_*.dll) was not found beside the editor — falls back to TAA."
 			                              : "AMD FSR runs on DirectX 12 and Vulkan — falls back to TAA.",
-			dlssOK ? nullptr : "NVIDIA DLSS is not built into this engine version yet (it will need an RTX GPU) — falls back to FSR, else TAA.",
+			dlssOK ? nullptr : fsrBackend ? "NVIDIA DLSS needs an NVIDIA RTX GPU and NVIDIA's Streamline runtime (sl.*.dll, nvngx_dlss.dll) beside the editor — falls back to FSR, else TAA."
+			                              : "NVIDIA DLSS runs on DirectX 12 and Vulkan with an NVIDIA RTX GPU — falls back to FSR, else TAA.",
 			xessOK ? nullptr : "Intel XeSS is not built into this engine version yet — falls back to FSR, else TAA.",
 		};
 		int aaMode = std::clamp(cfg.AntiAliasing, 0, IM_ARRAYSIZE(kAA) - 1);
@@ -474,14 +475,14 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const DrawOptions& o
 		// upscales (with TAA that becomes TAAU), > 1 is plain supersampling.
 		// Only a backend that sizes its render targets by it reports
 		// supportsRenderScale; on the others the slider moved and nothing happened.
-		// Metal scales under any AA mode; the others only through an upscaler (FSR).
+		// Metal scales under any AA mode; the others only through an upscaler (FSR, DLSS).
 		const bool scaleCap = ctx.renderer && ctx.renderer->GetCapabilities().supportsRenderScale;
-		const bool scaleOK  = scaleCap && (ctx.backend == HE::RendererBackend::Metal || aaMode == 5);
+		const bool scaleOK  = scaleCap && (ctx.backend == HE::RendererBackend::Metal || aaMode == 5 || (aaMode == 6 && dlssOK));
 		ImGui::BeginDisabled(!scaleOK);
 		Row::sliderFloat("Render Scale", &cfg.RenderScale, 0.5f, 2.0f, "%.2f");
 		ImGui::EndDisabled();
 		if (!scaleOK && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-			ImGui::SetTooltip(scaleCap ? "Choose FSR as the anti-aliasing: on this backend the "
+			ImGui::SetTooltip(scaleCap ? "Choose FSR or DLSS as the anti-aliasing: on this backend the "
 			                             "upscaler is what renders below the window size."
 			                           : "This backend always renders at the window's own "
 			                             "resolution (no render scale yet).");

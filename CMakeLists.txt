@@ -811,6 +811,7 @@ else()
 endif()
 
 include("${CMAKE_SOURCE_DIR}/cmake/HeFidelityFX.cmake")   # AMD FSR upscaler: HE_HAVE_FSR, HE_FSR_INCLUDE_DIRS, HE_FSR_RUNTIME_FILES
+include("${CMAKE_SOURCE_DIR}/cmake/HeStreamline.cmake")   # NVIDIA DLSS via Streamline: HE_HAVE_STREAMLINE, HE_SL_INCLUDE_DIRS, HE_SL_RUNTIME_FILES
 
 # ─── Shader cross-compiler: glslang + SPIRV-Cross (Material-System M0) ──────────
 # Canonical GLSL → glslang → SPIR-V → SPIRV-Cross → MSL / HLSL / GLSL(-ES).
