@@ -89,6 +89,12 @@ private:
 // is the closed form wind * time, so a pinned frame does not depend on what ran before it.
 HE_RENDERING_API glm::vec3 CloudDriftOffset(const glm::vec3& wind, float time);
 
+// The view-projection the sky reconstructs its view rays from: the camera's ROTATION only. The sky shader reads nothing but
+// directions (normalize(far point - near point); the cloud and star fields, the 3D clouds' parallax comes from cameraPos), and with
+// the camera's translation inside the matrix its float inverse lost them far from the world origin: a camera flying 60 m a frame
+// 38 km out made the dome clouds jump 20-50 px back and forth every frame. Invert THIS (after any TAA jitter) for invViewProj.
+inline glm::mat4 SkyViewProj(const glm::mat4& proj, const glm::mat4& view) { return proj * glm::mat4(glm::mat3(view)); }
+
 // Per-frame values the environment cannot supply (camera/time/resource state).
 struct SkyFrameInputs
 {

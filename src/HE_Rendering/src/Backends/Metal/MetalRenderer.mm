@@ -16839,8 +16839,11 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 	// under test). Normal runs use the wall clock. Mirrors the OpenGL backend.
 	float skyClock = static_cast<float>(SDL_GetTicks()) / 1000.0f;
 	if (const char* ov = std::getenv("HE_SKY_TIME"); ov && *ov) skyClock = static_cast<float>(std::atof(ov));
+	// The sky's rays from the camera's rotation alone (HE::SkyViewProj), on the same jitter grid as the scene.
+	const glm::mat4 skyInvViewProj = glm::inverse(JitteredViewProj(
+		HE::SkyViewProj(m_renderWorld.camera.projection, m_renderWorld.camera.view), width, height));
 	auto drawSky = [&]() {
-		EncodeSky(renderEncoder, glm::inverse(viewProj), sunDir, skyClock,
+		EncodeSky(renderEncoder, skyInvViewProj, sunDir, skyClock,
 		          GetEnvironment(), m_renderWorld.camera.position, /*lowResClouds=*/true,
 		          /*useSkyLut=*/true);
 	};
@@ -20188,7 +20191,8 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 					// moment of their drift than the sky they are composited into.
 					float cloudClock = static_cast<float>(SDL_GetTicks()) / 1000.0f;
 					if (const char* ov = std::getenv("HE_SKY_TIME"); ov && *ov) cloudClock = static_cast<float>(std::atof(ov));
-					EncodeCloudPrepass((__bridge void*)cmdBuf, glm::inverse(m_prepassViewProj),
+					EncodeCloudPrepass((__bridge void*)cmdBuf,
+						glm::inverse(HE::SkyViewProj(m_renderWorld.camera.projection, m_renderWorld.camera.view)),
 						m_renderWorld.sunDirection, cloudClock,
 						std::max(1, sceneW / 2), std::max(1, sceneH / 2));
 				}
