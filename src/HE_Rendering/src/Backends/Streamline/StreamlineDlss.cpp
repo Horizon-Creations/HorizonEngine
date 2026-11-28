@@ -372,6 +372,7 @@ bool StreamlineDlss::setFrameGenLoaded(bool loaded)
     }
     m_fgLoaded = loaded;
     m_fgMode = 1;
+    m_fgUiTagged = m_fgUiOpt = false;
     applyReflex();   // at least on while frame generation runs (NVIDIA's requirement)
     HE_LOG_INFO(RHI, "Streamline: DLSS Frame Generation %s", loaded ? "loaded (swapchain made again)" : "unloaded");
     return true;
@@ -411,15 +412,18 @@ bool StreamlineDlss::frameGenTag(const FrameGenTags& t)
         r.width = i.width; r.height = i.height; r.nativeFormat = i.format; r.mipLevels = 1; r.arrayLayers = 1; r.usage = i.usage;
         return r;
     };
-    sl::Resource depth = res(t.depth), mvec = res(t.motion), hudless = res(t.hudless);
+    sl::Resource depth = res(t.depth), mvec = res(t.motion), hudless = res(t.hudless), ui = res(t.ui);
     const sl::Extent renderExt{ 0, 0, t.renderW, t.renderH }, displayExt{ 0, 0, t.displayW, t.displayH };
     // Valid until Present: the renderer leaves them alone until the next frame starts (NVIDIA's first choice).
     const sl::ResourceTag tags[] = {
         sl::ResourceTag(&depth,   sl::kBufferTypeDepth,          sl::ResourceLifecycle::eValidUntilPresent, &renderExt),
         sl::ResourceTag(&mvec,    sl::kBufferTypeMotionVectors,  sl::ResourceLifecycle::eValidUntilPresent, &renderExt),
         sl::ResourceTag(&hudless, sl::kBufferTypeHUDLessColor,   sl::ResourceLifecycle::eValidUntilPresent, &displayExt),
+        sl::ResourceTag(&ui,      sl::kBufferTypeUIColorAndAlpha, sl::ResourceLifecycle::eValidUntilPresent, &displayExt),
     };
-    return fns(m_fns).setTagForFrame(*static_cast<sl::FrameToken*>(m_token), sl::ViewportHandle(0u), tags, 3, t.cmd) == sl::Result::eOk;
+    m_fgUiTagged = t.ui.native != nullptr;   // frameGenSetMode turns UI recomposition on with it
+    return fns(m_fns).setTagForFrame(*static_cast<sl::FrameToken*>(m_token), sl::ViewportHandle(0u), tags,
+                                     m_fgUiTagged ? 4u : 3u, t.cmd) == sl::Result::eOk;
 #else
     (void)t;
     return false;
@@ -431,14 +435,23 @@ bool StreamlineDlss::frameGenSetMode(int multiplier)
 #ifdef HE_HAVE_STREAMLINE
     if (!m_fgLoaded) return multiplier <= 1;
     multiplier = std::clamp(multiplier, 1, m_fgMax);
-    if (multiplier == m_fgMode) return true;
+    if (multiplier == m_fgMode && m_fgUiTagged == m_fgUiOpt) return true;
     sl::DLSSGOptions o{};
     o.mode = multiplier > 1 ? sl::DLSSGMode::eOn : sl::DLSSGMode::eOff;
     o.numFramesToGenerate = uint32_t(std::max(1, multiplier - 1));
     o.flags = sl::DLSSGFlags::eRetainResourcesWhenOff;
+    // With the UI buffer beside the hudless one: the UI interpolated apart and composited after, and a fullscreen menu
+    // switches generation off by itself (both need that buffer).
+    if (m_fgUiTagged)
+    {
+        o.flags = o.flags | sl::DLSSGFlags::eEnableFullscreenMenuDetection;
+        o.enableUserInterfaceRecomposition = sl::Boolean::eTrue;
+    }
     if (fns(m_fns).dlssgSetOptions(sl::ViewportHandle(0u), o) != sl::Result::eOk) return false;
     m_fgMode = multiplier;
-    HE_LOG_INFO(RHI, "Streamline: DLSS Frame Generation %s", multiplier > 1 ? (std::to_string(multiplier) + "x").c_str() : "off");
+    m_fgUiOpt = m_fgUiTagged;
+    HE_LOG_INFO(RHI, "Streamline: DLSS Frame Generation %s%s", multiplier > 1 ? (std::to_string(multiplier) + "x").c_str() : "off",
+                m_fgUiTagged ? " (UI recomposition)" : "");
     return true;
 #else
     (void)multiplier;

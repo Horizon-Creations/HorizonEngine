@@ -2104,7 +2104,12 @@ struct D3D12RendererImpl
     uint64_t               fgFrameId = 0;
     ComPtr<ID3D12Resource> fgHudless;              // RGBA8, back-buffer size
     D3D12_RESOURCE_STATES  fgHudlessState = D3D12_RESOURCE_STATE_COPY_DEST;
-    uint64_t               fgPresents = 0;         // Render() presents since FG went on (HE_FSR_FG_STATS witness)
+    // DLSS-G's UI buffer: the UI canvas drawn a second time on transparent black (the UI PSO's "over" blend leaves RGB
+    // premultiplied, alpha the coverage: Final = UI.rgb + (1 - UI.a) * hudless, NVIDIA's contract).
+    ComPtr<ID3D12Resource>       fgUi;             // RGBA8, back-buffer size
+    ComPtr<ID3D12DescriptorHeap> fgUiRtvHeap;
+    D3D12_RESOURCE_STATES        fgUiState = D3D12_RESOURCE_STATE_RENDER_TARGET;
+    uint64_t               fgPresents = 0;        // Render() presents since FG went on (HE_FSR_FG_STATS witness)
     uint64_t               fgStatsBase = 0;        // generatedFrames() when FG went on
     bool                   fgTried = false;        // the swapchain replacement was attempted (once per run)
     bool                   fgWasOn = false;        // last frame configured FG on: switching it off is one configure
@@ -13032,6 +13037,8 @@ void D3D12Renderer::Shutdown()
     m_impl->fsr.destroyFrameGen(m_impl->swapchain.Get());
     m_impl->fsr.destroySwapchainContext();
     m_impl->fgHudless.Reset();
+    m_impl->fgUi.Reset();
+    m_impl->fgUiRtvHeap.Reset();
     // Streamline before the swapchain, queue and device it holds proxies of (the GPU is idle here).
     HE::StreamlineDlss::instance().shutdown();
     for (UINT i = 0; i < k_frameCount; ++i)
@@ -15311,6 +15318,19 @@ void D3D12Renderer::DrawViewportFrame()
         p.renderUIPass12(p.cmdList.Get(), p.frameIndex,
                          static_cast<int>(p.viewportW), static_cast<int>(p.viewportH),
                          m_contentManager);
+        // DLSS-G's UI buffer: the same UI once more, alone (the same constants rewritten into the same slots).
+        if (p.dlssgFrame && p.fgUi && p.viewportW == p.fgUi->GetDesc().Width && p.viewportH == p.fgUi->GetDesc().Height)
+        {
+            p.barrier12(p.cmdList.Get(), p.fgUi.Get(), p.fgUiState, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            const auto urtv = p.fgUiRtvHeap->GetCPUDescriptorHandleForHeapStart();
+            const float clear0[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+            p.cmdList->OMSetRenderTargets(1, &urtv, FALSE, nullptr);
+            p.cmdList->ClearRenderTargetView(urtv, clear0, 0, nullptr);
+            p.renderUIPass12(p.cmdList.Get(), p.frameIndex, static_cast<int>(p.viewportW), static_cast<int>(p.viewportH),
+                             m_contentManager);
+            p.fgUiState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+            p.barrier12(p.cmdList.Get(), p.fgUi.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, p.fgUiState);
+        }
         // Transition back to PSR so ImGui can sample viewportRT.
         p.barrier12(p.cmdList.Get(), p.viewportRT.Get(),
                     p.viewportState, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
@@ -15517,6 +15537,27 @@ void D3D12Renderer::Render()
                 p.fgHudless.Reset();
             p.fgHudlessState = D3D12_RESOURCE_STATE_COPY_DEST;
         }
+        if (dlssFg && (!p.fgUi || p.fgUi->GetDesc().Width != bbW || p.fgUi->GetDesc().Height != bbH))
+        {
+            p.waitForAllFrames();
+            p.fgUi.Reset();
+            D3D12_HEAP_PROPERTIES hp{}; hp.Type = D3D12_HEAP_TYPE_DEFAULT;
+            D3D12_RESOURCE_DESC rd = bbDesc;
+            rd.Format = DXGI_FORMAT_R8G8B8A8_UNORM;   // the UI PSO's target format
+            rd.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+            D3D12_CLEAR_VALUE cv{}; cv.Format = rd.Format;   // transparent black
+            if (!p.fgUiRtvHeap)
+            {
+                D3D12_DESCRIPTOR_HEAP_DESC hd{}; hd.NumDescriptors = 1; hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+                p.device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&p.fgUiRtvHeap));
+            }
+            if (!p.fgUiRtvHeap || FAILED(p.device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd,
+                    D3D12_RESOURCE_STATE_RENDER_TARGET, &cv, IID_PPV_ARGS(&p.fgUi))))
+                p.fgUi.Reset();
+            else
+                p.device->CreateRenderTargetView(p.fgUi.Get(), nullptr, p.fgUiRtvHeap->GetCPUDescriptorHandleForHeapStart());
+            p.fgUiState = D3D12_RESOURCE_STATE_RENDER_TARGET;
+        }
         p.fgFrame = fsrFg && p.fgHudless != nullptr;
         p.dlssgFrame = dlssFg && p.fgHudless != nullptr;
     }
@@ -15650,6 +15691,8 @@ void D3D12Renderer::Render()
                 t.depth   = { p.viewportDepth.Get(), nullptr, uint32_t(D3D12_RESOURCE_STATE_DEPTH_WRITE), p.sceneW, p.sceneH };
                 t.motion  = { p.taaVelocityRT.Get(), nullptr, uint32_t(p.taaVelocityState), p.sceneW, p.sceneH };
                 t.hudless = { p.fgHudless.Get(), nullptr, uint32_t(kRead), bbW, bbH };
+                if (p.fgUi && p.fgUiState == kRead && !std::getenv("HE_DLSS_FG_NOUI"))   // HE_DLSS_FG_NOUI: hudless only (A/B)
+                    t.ui = { p.fgUi.Get(), nullptr, uint32_t(kRead), bbW, bbH };
                 t.renderW = p.sceneW; t.renderH = p.sceneH; t.displayW = bbW; t.displayH = bbH;
                 if (!sl.frameGenTag(t))
                 {

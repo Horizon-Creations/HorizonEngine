@@ -109,6 +109,7 @@ public:
     {
         void* cmd = nullptr;
         Image depth, motion, hudless;   // states as they are at Present (D3D12_RESOURCE_STATES)
+        Image ui;                       // optional: the UI alone, RGB premultiplied, alpha 0 where no UI (back-buffer size)
         uint32_t renderW = 0, renderH = 0, displayW = 0, displayH = 0;
     };
     bool frameGenTag(const FrameGenTags& t);
@@ -122,6 +123,7 @@ private:
     void*       m_token = nullptr;   // sl::FrameToken* of the current frame (beginFrame)
     bool        m_fgAvailable = false, m_fgLoaded = false, m_reflex = false;
     int         m_fgMax = 1, m_fgMode = 1;
+    bool        m_fgUiTagged = false, m_fgUiOpt = false;   // a UI buffer came with the tags / the options know it
     int         m_reflexWanted = 1, m_reflexApplied = -1;
     void        applyReflex();
     void*       m_module = nullptr;
