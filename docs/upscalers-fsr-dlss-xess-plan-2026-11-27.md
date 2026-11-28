@@ -131,6 +131,17 @@ later). Branch `claude/upscalers-fsr`, on top of `claude/motion-blur-d3d-vulkan`
      the UI pass (RGBA8, FG told so; the swapchain is BGRA8). Prepare/configure after DrawViewportFrame
      (`m_fgJitteredFrame`: DrawViewportFrame clears `m_taaFrame`). Teardown in `VulkanFsr::destroySwapchain`: FG off →
      FG ctx → WaitForPresents → swapchain ctx → `pOutDestroySwapchainFFXAPI`.
+  11. **RVT page lookup takes the mip bias** (Hive step 4): `heRvtSample` (RvtLookup.h:84) picks its page mip as
+     `floor(log2(metres per pixel / texel) + HE_TEX_BIAS)` — the pixel is a render pixel while FSR upscales, the page is
+     chosen for the display one; a finer page that is not resident falls back to a coarser one (`eff`), never worse
+     than before. `HE_TEX_BIAS` is 0 outside FSR frames, so every other backend and frame is unchanged (bias 0 = the old
+     mip exactly). The 5 auto-landscape materials bake the lookup: regenerated (+596 bytes each = 2 lookups × the new
+     lines; with the old lines put back only 6 container size bytes differ). New dump switch `HE_DUMP_RVTLIVE=1`: the
+     dump renders without scene ticks, so it drives an RvtLandscape around the dump camera itself (EditorApplication,
+     before the last settle loop) — the RVT driver witnesses only use stills, which never upscale.
+     Per backend: D3D11 / OpenGL / Software have no render scale (nothing to bias). **Metal** upscales through MetalFX
+     with no mip bias anywhere yet (scene albedo, graph materials, and its hand-kept MSL mirror of the lookup at
+     MetalRenderer.mm:2986/3519) — Mac work, left open.
 - **Verified** (NN-WS03, RTX 4070, Release; `HE_DUMP` SHADOWINSTTEST, 40 settle frames, cube band): the loader
   picks **FSR 3.1.6**, `HE_FSR_DEBUG=1` reports nothing. Sign A/B against the AA-off frame of the same pose
   (run-to-run noise 0.040): still FSR 0.754 vs jitter-y flipped 0.855; pan (`HE_DUMP_PANYAW=0.5`) FSR 1.239 vs
@@ -169,15 +180,20 @@ later). Branch `claude/upscalers-fsr`, on top of `claude/motion-blur-d3d-vulkan`
   FG: only FFX-side messages left (`rw_output` 3-component write to BGRA, a static line width in one of its pipelines,
   2 "AMD FSR FrameRenderedSemaphore" per proxy + one pipeline set not destroyed at exit — teardown calls return OK);
   without FG 0. PrintWindow FG on/off: clean picture (the witness camera moves between runs, no pixel A/B).
+  **RVT mip bias** (`HE_DUMP_AUTOLAND=1 HE_DUMP_AUTOLANDSIZE=512 HE_RVT=1 HE_RVT_NATIVE_NEAR=0 HE_DUMP_RVTLIVE=1`, camera
+  (-150, 306, 200) pitch -6, FSR): RVT debug view, page mip of the ground pixels — 0.5 without bias 75.0 % mip 0 /
+  14.6 % mip 1 / 10.4 % coarser, with 94.5 / 4.8 / 0.7 %, native 1.0 93.4 / 5.8 / 0.8 %; D3D12 and Vulkan identical.
+  Lit, mean |luma gradient| far / mid band: 0.706 / 0.531 without, 0.955 / 0.668 with (repeats within 0.003 D3D12,
+  0.024 Vulkan), 1.0 1.158 / 0.824; near band unchanged (mip 0 either way). `test_rvt_shader` pins the biased line.
   **Game DLL trap:** building HorizonGame refreshes `build/engine_bundle/HorizonEngine.dll`, but `deploy/Game` only when
   the exe relinks — copy the bundle's DLL into a test export, or the run measures the old code.
   **Witness trap:** `cap.ps1` clears `HE_DUMP_*` only — an `HE_FSR_*`/`HE_TAA_*` switch set for one capture stays
   set for every later capture IN THE SAME PowerShell call. Set them explicitly (=0/=1) per capture.
 - **Not verified:** FSR 4 (needs an RX 9000); Vulkan FG on AMD hardware or a GPU whose graphics family has one queue
   (the present queue then comes from another present-capable family: untested), Vulkan FG in fullscreen; GPU particles (D3D12 draws none: CPU particles are tail
-  draws, covered by the mask); the mip bias in motion (more shimmer is AMD's trade-off) and for the RVT landscape
-  main view (`heRvtSample` picks its page mip from derivatives — not biased, so RVT-textured ground stays softer
-  at 0.5); D3D11's albedo sampler (same zero `MaxLOD`? not looked at); a player choice through
+  draws, covered by the mask); the mip bias in motion (more shimmer is AMD's trade-off); the RVT bias on the tile
+  landscape (same lookup text, only the auto landscape was captured) and with a camera in motion (finer pages are
+  wanted than the distance rings hold: they fall back, not looked at); D3D11's albedo sampler (same zero `MaxLOD`? not looked at); a player choice through
   `settings.setUpscaler` / `setFrameGeneration` in a running game (rows unit-tested;
   the game ran with config keys / `HE_GAME_FRAMEGEN`); FG with a camera in motion judged by eye (counted only);
   FG in fullscreen and across a window resize (code path: `destroyFrameGen` before `ResizeBuffers`);
@@ -189,5 +205,5 @@ later). Branch `claude/upscalers-fsr`, on top of `claude/motion-blur-d3d-vulkan`
   Particles get FSR's reactive mask, not velocity (AMD's guidance for alpha-blended effects).
   Frame generation 2× only: FSR 3.1's swapchain path generates one frame; 3×/4× (DLSS MFG, RTX 50) stay
   unavailable. FG renders at most ~half the frames it would without (pacing), as AMD's.
-- **Next:** the RVT page lookup's mip bias; D3D11's albedo sampler MaxLOD; a settings menu in the template wired to the new rows;
+- **Next:** Metal's mip bias under MetalFX (step 4's last part, on the Mac); D3D11's albedo sampler MaxLOD; a settings menu in the template wired to the new rows;
   DLSS / XeSS (steps 4, 5).

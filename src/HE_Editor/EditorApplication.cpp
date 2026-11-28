@@ -13370,8 +13370,33 @@ void EditorApplication::dumpFrameHeadless()
 			            farLevels, withMat, n ? sum / double(n) : -1.0, mx, n);
 		}
 	}
+	// HE_DUMP_RVTLIVE=1: the dump renders without scene ticks, so a landscape is drawn from its virtual texture only if someone
+	// drives it: the frame loop's RvtLandscape (the project's settings, the camera's view), ticked around the dump camera until it
+	// is active and once more per settle frame (pages arrive while the frames run). What the upscaler's mip bias on the page
+	// lookup changes is seen only this way: the still path (RenderSceneImage, the RVT driver witnesses) never upscales.
+	std::shared_ptr<HE::landscape::RvtLandscape> dumpRvt;
+	if (const char* rl = std::getenv("HE_DUMP_RVTLIVE"); rl && *rl && *rl != '0' && m_editorWorld && r && r->GetCapabilities().supportsRvt)
+	{
+		dumpRvt = std::make_shared<HE::landscape::RvtLandscape>(contentManager(), *r);
+		dumpRvt->setSettings(HE::landscape::RvtLandscape::settingsFromProject(m_projectManager.currentProject().settings.rvt));
+#ifdef HE_IMGUI_ENABLED
+		int vpW = 0, vpH = 0;
+		ViewportPanel::renderSizePx(vpW, vpH);
+		dumpRvt->setView(glm::radians(m_editorCamera.fovDegrees()), vpH > 0 ? float(vpH) : 720.0f);
+#endif
+		uint32_t painted = 0;
+		int ticks = 0;
+		for (; ticks < 600 && !dumpRvt->active(); ++ticks)
+		{
+			TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
+			painted += dumpRvt->tick(*m_editorWorld, m_editorCamera.position()).pagesPainted;
+		}
+		HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTLIVE active %d after %d tick(s), %u pages painted",
+		            dumpRvt->active() ? 1 : 0, ticks, painted);
+	}
 	for (int i = 0; i < settleFrames; ++i)
 	{
+		if (dumpRvt) dumpRvt->tick(*m_editorWorld, m_editorCamera.position());
 		if (arriveWitness && !arriveEarly && i == settleFrames / 2)
 			arriveArrays(("mid, before settle frame " + std::to_string(i)).c_str());
 		if (repaintMidWitness && i == settleFrames / 2)

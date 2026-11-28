@@ -49,6 +49,11 @@ TEST_CASE("RVT node: the fragment calls the shared lookup and declares the table
 	// texelFetch only: no filtered read of the table or the pool (that is what spends no sampler register).
 	CHECK(glsl.find("texture(heRvt") == std::string::npos);
 	CHECK(glsl.find("texelFetch(heRvtTable") != std::string::npos);
+	// The page mip takes the upscaler's mip bias (HE_TEX_BIAS; its default 0 is defined above the lookup).
+	const size_t bias = glsl.find("#define HE_TEX_BIAS 0.0");
+	CHECK(bias != std::string::npos);
+	CHECK(bias < at);
+	CHECK(glsl.find("1e-6)) + HE_TEX_BIAS)), 0, mipCount - 1)") != std::string::npos);
 
 	// A graph without the node declares none of it.
 	HE::MaterialGraph plain;
