@@ -96,7 +96,7 @@ layout(set = 0, binding = 0) uniform Frame {
     vec4  viewport; // x=W, y=H, z=ssaoEnabled(1.0), w=unused — must match FrameUBOData exactly
     vec4  giGridOrigin; // xyz = probe grid origin, w = spacing
     vec4  giGridCounts; // xyz = probe counts, w = probesPerRow
-    vec4  giParams;     // x = indirectIntensity, y = giEnabled(1.0), zw = 0
+    vec4  giParams;     // x = indirectIntensity, y = giEnabled(1.0), z = 0, w = the albedo's mip bias while FSR upscales
     // Forward SSR (docs/ssr-cross-backend-plan.md B5): x = 1 → a trace ran and
     // uSSRFwd holds it, y = intensity, z = max roughness, w = 0. Same four lanes
     // heLitP reads out of Lighting::ssr — must match FrameUBOData exactly.
@@ -420,7 +420,7 @@ void main()
 {
     // A base-color texture (flagged by roughPad.z) replaces the flat colour, mirroring
     // GL/Metal/D3D11. PBR scalars still come from the material UBO.
-    vec3  base  = (mat_ubo.roughPad.z > 0.5) ? texture(uAlbedo, vUV).rgb
+    vec3  base  = (mat_ubo.roughPad.z > 0.5) ? texture(uAlbedo, vUV, uf.giParams.w).rgb   // w: FSR's mip bias
                                              : mat_ubo.baseColorMet.rgb;
     // Unlit view mode: the material's base colour and nothing else — before
     // any lighting, shadow or weather term. Twin of GL's uUnlit/Metal's

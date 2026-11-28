@@ -213,31 +213,6 @@ bool VulkanFsr::dispatch(const Dispatch& d)
 #endif
 }
 
-bool VulkanFsr::generateReactive(VkCommandBuffer cmd, const Image& opaque, const Image& color, const Image& reactive,
-                                 uint32_t renderW, uint32_t renderH)
-{
-#ifdef HE_HAVE_FSR
-    if (!m_context || !cmd || !opaque.image || !color.image || !reactive.image) return false;
-    ffxDispatchDescUpscaleGenerateReactiveMask g{};
-    g.header.type = FFX_API_DISPATCH_DESC_TYPE_UPSCALE_GENERATEREACTIVEMASK;
-    g.commandList = cmd;
-    g.colorOpaqueOnly = resourceOf(opaque, FFX_API_RESOURCE_STATE_PIXEL_COMPUTE_READ);
-    g.colorPreUpscale = resourceOf(color, FFX_API_RESOURCE_STATE_PIXEL_COMPUTE_READ);
-    g.outReactive     = resourceOf(reactive, FFX_API_RESOURCE_STATE_UNORDERED_ACCESS);
-    g.renderSize = { renderW, renderH };
-    // AMD sample's values (fsrapirendermodule.cpp), the same as D3D12Fsr's.
-    g.scale = 1.0f;
-    g.cutoffThreshold = 0.2f;
-    g.binaryValue = 0.9f;
-    g.flags = FFX_UPSCALE_AUTOREACTIVEFLAGS_APPLY_TONEMAP | FFX_UPSCALE_AUTOREACTIVEFLAGS_APPLY_THRESHOLD
-            | FFX_UPSCALE_AUTOREACTIVEFLAGS_USE_COMPONENTS_MAX;
-    return fns(m_fns).Dispatch(reinterpret_cast<ffxContext*>(&m_context), &g.header) == FFX_API_RETURN_OK;
-#else
-    (void)cmd; (void)opaque; (void)color; (void)reactive; (void)renderW; (void)renderH;
-    return false;
-#endif
-}
-
 void VulkanFsr::destroy()
 {
 #ifdef HE_HAVE_FSR

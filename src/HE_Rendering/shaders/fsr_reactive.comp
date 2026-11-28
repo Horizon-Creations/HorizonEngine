@@ -1,0 +1,21 @@
+#version 450
+// FSR's reactive mask on Vulkan: the blended tail's footprint, from the HDR frame before (uOpaque) and after (uColor) it.
+// Not FFX's GENERATEREACTIVEMASK dispatch: its Vulkan backend recycles that dispatch's image views while earlier frames
+// still use them (VUID-vkDestroyImageView-imageView-01026). The same math with the AMD sample's values (D3D12Fsr):
+// tonemap both, the largest per-channel change, scale 1, under 0.2 nothing, else 0.9.
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 0) uniform sampler2D uOpaque;
+layout(set = 0, binding = 1) uniform sampler2D uColor;
+layout(set = 0, binding = 2, r8) uniform writeonly image2D uReactive;
+
+vec3 tonemap(vec3 c) { return c / (max(max(0.0, c.r), max(c.g, c.b)) + 1.0); }
+
+void main()
+{
+    const ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(p, imageSize(uReactive)))) return;
+    const vec3 d = abs(tonemap(texelFetch(uColor, p, 0).rgb) - tonemap(texelFetch(uOpaque, p, 0).rgb));
+    const float r = max(d.r, max(d.g, d.b));
+    imageStore(uReactive, p, vec4(r < 0.2 ? 0.0 : 0.9));
+}

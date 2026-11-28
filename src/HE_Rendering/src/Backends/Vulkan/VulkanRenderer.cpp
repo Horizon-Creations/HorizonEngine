@@ -385,6 +385,12 @@ void VulkanRenderer::Shutdown()
     if (m_ssaoWhiteMem)         { vkFreeMemory           (m_device, m_ssaoWhiteMem,          nullptr); m_ssaoWhiteMem         = VK_NULL_HANDLE; }
     // Skeletal mesh skinning resources
     destroySkeletalMeshCache();
+    if (m_fsrRxPipe) { vkDestroyPipeline(m_device, m_fsrRxPipe, nullptr); m_fsrRxPipe = VK_NULL_HANDLE; }
+    if (m_fsrRxPL)   { vkDestroyPipelineLayout(m_device, m_fsrRxPL, nullptr); m_fsrRxPL = VK_NULL_HANDLE; }
+    if (m_fsrRxPool) { vkDestroyDescriptorPool(m_device, m_fsrRxPool, nullptr); m_fsrRxPool = VK_NULL_HANDLE; }
+    if (m_fsrRxDSL)  { vkDestroyDescriptorSetLayout(m_device, m_fsrRxDSL, nullptr); m_fsrRxDSL = VK_NULL_HANDLE; }
+    if (m_skinVelPipe)         { vkDestroyPipeline      (m_device, m_skinVelPipe,        nullptr);  m_skinVelPipe         = VK_NULL_HANDLE; }
+    if (m_skinVelPipeLayout)   { vkDestroyPipelineLayout(m_device, m_skinVelPipeLayout,  nullptr);  m_skinVelPipeLayout   = VK_NULL_HANDLE; }
     if (m_skinnedPipelineHDR)  { vkDestroyPipeline      (m_device, m_skinnedPipelineHDR, nullptr);  m_skinnedPipelineHDR  = VK_NULL_HANDLE; }
     if (m_skinnedPipeline)     { vkDestroyPipeline      (m_device, m_skinnedPipeline,    nullptr);  m_skinnedPipeline     = VK_NULL_HANDLE; }
     if (m_skinnedPipeLayout)   { vkDestroyPipelineLayout(m_device, m_skinnedPipeLayout,  nullptr);  m_skinnedPipeLayout   = VK_NULL_HANDLE; }
@@ -408,6 +414,9 @@ void VulkanRenderer::Shutdown()
         if (m_boneUBOPtr[i])  { vkUnmapMemory(m_device, m_boneUBOMem[i]); m_boneUBOPtr[i] = nullptr; }
         if (m_boneUBO[i])     { vkDestroyBuffer(m_device, m_boneUBO[i],   nullptr); m_boneUBO[i]    = VK_NULL_HANDLE; }
         if (m_boneUBOMem[i])  { vkFreeMemory  (m_device, m_boneUBOMem[i], nullptr); m_boneUBOMem[i] = VK_NULL_HANDLE; }
+        if (m_prevBoneUBOPtr[i]) { vkUnmapMemory(m_device, m_prevBoneUBOMem[i]); m_prevBoneUBOPtr[i] = nullptr; }
+        if (m_prevBoneUBO[i])    { vkDestroyBuffer(m_device, m_prevBoneUBO[i], nullptr); m_prevBoneUBO[i] = VK_NULL_HANDLE; }
+        if (m_prevBoneUBOMem[i]) { vkFreeMemory(m_device, m_prevBoneUBOMem[i], nullptr); m_prevBoneUBOMem[i] = VK_NULL_HANDLE; }
     }
     // Destroy secondary windows first
     for (auto& [sdlWin, wd] : m_extraWindows)
@@ -857,6 +866,7 @@ void VulkanRenderer::Render()
 void VulkanRenderer::DrawViewportFrame(VkCommandBuffer cmd)
 {
     GpuPassScope _frame(this, "Scene");   // the passes inside it (shadow-free: SSAO, GI, SSR, decals) interrupt it
+    logFsrReactiveStats();   // HE_FSR_REACTIVE_STATS: last frame's mask (a device wait, witness runs only)
     // The shadow, GI and SSAO depth passes and the geometry pass below all take
     // instance-buffer slots from this frame's arena (beginInstanceFrame). Reset here too, not
     // only in Render(): RenderSceneImage records this frame on its own. Same for
@@ -987,6 +997,7 @@ void VulkanRenderer::DrawViewportFrame(VkCommandBuffer cmd)
         vkCmdEndRenderPass(cmd);
         m_fogFrameActive = false; // consumed: the world previews and the swapchain fallback must never see it
         m_hdrLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        encodeFsrReactive(cmd);   // only when DrawScene took the opaque snapshot (an FSR frame with a blended tail)
 
         // ── TAA velocity (A2): its own pass right after the scene, against the
         // depth the scene pass stored. Runs on every TAA frame, even an empty
@@ -6102,6 +6113,7 @@ bool VulkanRenderer::encodeFsr(VkCommandBuffer cmd)
     fd.depth    = { m_viewportDepthImage, m_depthFormat, sW, sH, false };
     fd.velocity = { m_taaVelocityImage, VK_FORMAT_R16G16_SFLOAT, sW, sH, false };
     fd.output   = { m_fsrOutImage, VK_FORMAT_R16G16B16A16_SFLOAT, dW, dH, true };
+    if (m_fsrReactiveValid) fd.reactive = { m_fsrReactiveImage, VK_FORMAT_R8_UNORM, sW, sH, false };   // SHADER_READ
     fd.renderW = sW; fd.renderH = sH; fd.displayW = dW; fd.displayH = dH;
     fd.jitter = m_fsrJitter;
     // kVulkanClipFix maps GL's whole -1..1 onto 0..1: the depth's planes are the projection's own.
@@ -6149,6 +6161,246 @@ bool VulkanRenderer::encodeFsr(VkCommandBuffer cmd)
     return ok;
 }
 
+bool VulkanRenderer::ensureFsrReactiveTargets()
+{
+    if (m_fsrOpaqueImage && m_fsrReactiveImage) return true;
+    if (!m_sceneW || !m_sceneH || !ensureFsrReactivePipe()) return false;
+    auto make = [&](VkFormat fmt, VkImageUsageFlags usage, VkImage& img, VkDeviceMemory& mem, VkImageView& view) -> bool {
+        VkImageCreateInfo ici{ VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+        ici.imageType = VK_IMAGE_TYPE_2D; ici.format = fmt; ici.extent = { m_sceneW, m_sceneH, 1 };
+        ici.mipLevels = 1; ici.arrayLayers = 1; ici.samples = VK_SAMPLE_COUNT_1_BIT; ici.usage = usage;
+        ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        if (vkCreateImage(m_device, &ici, nullptr, &img) != VK_SUCCESS) { img = VK_NULL_HANDLE; return false; }
+        VkMemoryRequirements req{}; vkGetImageMemoryRequirements(m_device, img, &req);
+        VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+        mai.allocationSize = req.size;
+        mai.memoryTypeIndex = findMemoryType(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        if (vkAllocateMemory(m_device, &mai, nullptr, &mem) != VK_SUCCESS) { mem = VK_NULL_HANDLE; return false; }
+        vkBindImageMemory(m_device, img, mem, 0);
+        VkImageViewCreateInfo vci{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+        vci.image = img; vci.viewType = VK_IMAGE_VIEW_TYPE_2D; vci.format = fmt;
+        vci.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+        return vkCreateImageView(m_device, &vci, nullptr, &view) == VK_SUCCESS;
+    };
+    const bool ok = make(VK_FORMAT_R16G16B16A16_SFLOAT, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                         m_fsrOpaqueImage, m_fsrOpaqueMemory, m_fsrOpaqueView)
+                 && make(VK_FORMAT_R8_UNORM, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                         m_fsrReactiveImage, m_fsrReactiveMemory, m_fsrReactiveView);
+    if (!ok) destroyFsrReactiveTargets();
+    m_fsrReactiveLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    return ok;
+}
+
+bool VulkanRenderer::ensureFsrReactivePipe()
+{
+    if (m_fsrRxPipe) return true;
+    static bool s_failed = false;   // a missing shader logs once, not per frame
+    if (s_failed) return false;
+    VkDescriptorSetLayoutBinding b[3]{};
+    for (uint32_t i = 0; i < 3; ++i)
+    {
+        b[i].binding = i; b[i].descriptorCount = 1; b[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        b[i].descriptorType = i < 2 ? VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER : VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    }
+    VkDescriptorSetLayoutCreateInfo slci{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
+    slci.bindingCount = 3; slci.pBindings = b;
+    VkPipelineLayoutCreateInfo plci{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+    plci.setLayoutCount = 1; plci.pSetLayouts = &m_fsrRxDSL;
+    const VkDescriptorPoolSize ps[2] = { { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2 * k_maxFramesInFlight },
+                                         { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, k_maxFramesInFlight } };
+    VkDescriptorPoolCreateInfo dpci{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
+    dpci.maxSets = k_maxFramesInFlight; dpci.poolSizeCount = 2; dpci.pPoolSizes = ps;
+    VkShaderModule cs = VK_NULL_HANDLE;
+    bool ok = vkCreateDescriptorSetLayout(m_device, &slci, nullptr, &m_fsrRxDSL) == VK_SUCCESS
+           && vkCreatePipelineLayout(m_device, &plci, nullptr, &m_fsrRxPL) == VK_SUCCESS
+           && vkCreateDescriptorPool(m_device, &dpci, nullptr, &m_fsrRxPool) == VK_SUCCESS
+           && (cs = loadShaderModule("fsr_reactive.comp.spv")) != VK_NULL_HANDLE;
+    if (ok)
+    {
+        VkComputePipelineCreateInfo cpi{ VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO };
+        cpi.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        cpi.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT; cpi.stage.module = cs; cpi.stage.pName = "main";
+        cpi.layout = m_fsrRxPL;
+        ok = createComputePipelines(1, &cpi, nullptr, &m_fsrRxPipe) == VK_SUCCESS;
+        vkDestroyShaderModule(m_device, cs, nullptr);
+    }
+    for (uint32_t i = 0; ok && i < k_maxFramesInFlight; ++i)
+    {
+        VkDescriptorSetAllocateInfo dsai{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
+        dsai.descriptorPool = m_fsrRxPool; dsai.descriptorSetCount = 1; dsai.pSetLayouts = &m_fsrRxDSL;
+        ok = vkAllocateDescriptorSets(m_device, &dsai, &m_fsrRxSet[i]) == VK_SUCCESS;
+    }
+    if (ok) return true;
+    s_failed = true;
+    HE_LOG_WARN(RHI, "%s", "VulkanRenderer: FSR reactive mask pipeline failed (fsr_reactive.comp.spv) — FSR runs without it");
+    if (m_fsrRxPipe) { vkDestroyPipeline(m_device, m_fsrRxPipe, nullptr); m_fsrRxPipe = VK_NULL_HANDLE; }
+    if (m_fsrRxPL)   { vkDestroyPipelineLayout(m_device, m_fsrRxPL, nullptr); m_fsrRxPL = VK_NULL_HANDLE; }
+    if (m_fsrRxPool) { vkDestroyDescriptorPool(m_device, m_fsrRxPool, nullptr); m_fsrRxPool = VK_NULL_HANDLE; }
+    if (m_fsrRxDSL)  { vkDestroyDescriptorSetLayout(m_device, m_fsrRxDSL, nullptr); m_fsrRxDSL = VK_NULL_HANDLE; }
+    return false;
+}
+
+void VulkanRenderer::destroyFsrReactiveTargets()
+{
+    for (VkImageView* v : { &m_fsrOpaqueView, &m_fsrReactiveView }) if (*v) { vkDestroyImageView(m_device, *v, nullptr); *v = VK_NULL_HANDLE; }
+    for (VkImage* i : { &m_fsrOpaqueImage, &m_fsrReactiveImage }) if (*i) { vkDestroyImage(m_device, *i, nullptr); *i = VK_NULL_HANDLE; }
+    for (VkDeviceMemory* m : { &m_fsrOpaqueMemory, &m_fsrReactiveMemory }) if (*m) { vkFreeMemory(m_device, *m, nullptr); *m = VK_NULL_HANDLE; }
+    if (m_fsrRxReadback)    { vkDestroyBuffer(m_device, m_fsrRxReadback, nullptr); m_fsrRxReadback = VK_NULL_HANDLE; }
+    if (m_fsrRxReadbackMem) { vkFreeMemory(m_device, m_fsrRxReadbackMem, nullptr); m_fsrRxReadbackMem = VK_NULL_HANDLE; }
+    m_fsrReactiveLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    m_fsrOpaqueTaken = m_fsrReactiveValid = m_fsrRxPending = false;
+}
+
+void VulkanRenderer::logFsrReactiveStats()
+{
+    if (!m_fsrRxPending || !m_fsrRxReadbackMem) return;
+    m_fsrRxPending = false;
+    vkDeviceWaitIdle(m_device);
+    const uint32_t w = m_sceneW, h = m_sceneH;
+    const uint8_t* px = nullptr;
+    if (vkMapMemory(m_device, m_fsrRxReadbackMem, 0, VkDeviceSize(w) * h, 0, (void**)&px) != VK_SUCCESS || !px) return;
+    if (const char* pgm = std::getenv("HE_FSR_REACTIVE_PGM"); pgm && *pgm)   // the mask itself, as a picture
+        if (FILE* fp = std::fopen(pgm, "wb"))
+        {
+            std::fprintf(fp, "P5\n%u %u\n255\n", w, h);
+            std::fwrite(px, 1, size_t(w) * h, fp);
+            std::fclose(fp);
+        }
+    uint64_t marked = 0, sum = 0;
+    for (size_t i = 0, n = size_t(w) * h; i < n; ++i) { sum += px[i]; if (px[i] > 25) ++marked; }   // > 0.1
+    vkUnmapMemory(m_device, m_fsrRxReadbackMem);
+    HE_LOG_INFO(RHI, "VulkanRenderer: FSR reactive mask %ux%u: %llu px > 0.1 (%.2f %%), mean %.4f", w, h,
+                static_cast<unsigned long long>(marked), 100.0 * double(marked) / double(w * h),
+                double(sum) / 255.0 / double(w * h));
+}
+
+// FSR reactive mask, part 1: the HDR pass ended (colour/depth ATTACHMENT layouts), m_hdrImage copied, reopened as
+// m_hdrLoadRP the way encodeFogApplyAndReopen reopens it.
+void VulkanRenderer::encodeFsrOpaqueSnapshotAndReopen(VkCommandBuffer cmd, uint32_t w, uint32_t h)
+{
+    if (ensureFsrReactiveTargets())
+    {
+        auto barrier = [&](VkImage img, VkImageLayout from, VkImageLayout to, VkAccessFlags srcA, VkAccessFlags dstA,
+                           VkPipelineStageFlags srcS, VkPipelineStageFlags dstS) {
+            VkImageMemoryBarrier b{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+            b.oldLayout = from; b.newLayout = to;
+            b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            b.image = img; b.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+            b.srcAccessMask = srcA; b.dstAccessMask = dstA;
+            vkCmdPipelineBarrier(cmd, srcS, dstS, 0, 0, nullptr, 0, nullptr, 1, &b);
+        };
+        constexpr VkPipelineStageFlags kXfer = VK_PIPELINE_STAGE_TRANSFER_BIT, kColor = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        barrier(m_hdrImage, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT, kColor, kXfer);
+        // The last frame's mask generation read the snapshot: its compute reads before this copy's writes.
+        barrier(m_fsrOpaqueImage, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, kXfer);
+        VkImageCopy copy{};
+        copy.srcSubresource = copy.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+        copy.extent = { w, h, 1 };
+        vkCmdCopyImage(cmd, m_hdrImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, m_fsrOpaqueImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+        barrier(m_fsrOpaqueImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, kXfer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+        barrier(m_hdrImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, kXfer, kColor);
+        m_fsrOpaqueTaken = true;
+    }
+    // As encodeFogApplyAndReopen: m_hdrLoadRP's own dependency cannot order the earlier pass's writes before its LOADs.
+    VkMemoryBarrier mb{ VK_STRUCTURE_TYPE_MEMORY_BARRIER };
+    mb.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+    mb.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
+                     | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+    vkCmdPipelineBarrier(cmd,
+        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT
+            | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+        0, 1, &mb, 0, nullptr, 0, nullptr);
+    VkRenderPassBeginInfo hbi{ VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
+    hbi.renderPass = m_hdrLoadRP; hbi.framebuffer = m_hdrFB;
+    hbi.renderArea.extent = { w, h };
+    vkCmdBeginRenderPass(cmd, &hbi, VK_SUBPASS_CONTENTS_INLINE);
+    const VkViewport vp{ 0.0f, 0.0f, static_cast<float>(w), static_cast<float>(h), 0.0f, 1.0f };
+    const VkRect2D   sc{ { 0, 0 }, { w, h } };
+    vkCmdSetViewport(cmd, 0, 1, &vp);
+    vkCmdSetScissor(cmd, 0, 1, &sc);
+}
+
+// FSR reactive mask, part 2: the tail's footprint from the snapshot DrawScene took before it and the finished scene.
+void VulkanRenderer::encodeFsrReactive(VkCommandBuffer cmd)
+{
+    m_fsrReactiveValid = false;
+    if (!m_fsrOpaqueTaken) return;
+    m_fsrOpaqueTaken = false;
+    auto barrier = [&](VkImage img, VkImageLayout from, VkImageLayout to, VkAccessFlags srcA, VkAccessFlags dstA,
+                       VkPipelineStageFlags srcS, VkPipelineStageFlags dstS) {
+        VkImageMemoryBarrier b{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+        b.oldLayout = from; b.newLayout = to;
+        b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b.image = img; b.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+        b.srcAccessMask = srcA; b.dstAccessMask = dstA;
+        vkCmdPipelineBarrier(cmd, srcS, dstS, 0, 0, nullptr, 0, nullptr, 1, &b);
+    };
+    constexpr VkPipelineStageFlags kCompute = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+    barrier(m_hdrImage, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, kCompute);
+    barrier(m_fsrReactiveImage, m_fsrReactiveLayout, VK_IMAGE_LAYOUT_GENERAL,
+            m_fsrReactiveLayout == VK_IMAGE_LAYOUT_UNDEFINED ? 0u : VkAccessFlags(VK_ACCESS_SHADER_READ_BIT),
+            VK_ACCESS_SHADER_WRITE_BIT, kCompute, kCompute);
+    {
+        // This slot's set: the frame that used it last has finished (its fence), so it is rewritten here.
+        const VkDescriptorSet set = m_fsrRxSet[m_currentFrame];
+        const VkDescriptorImageInfo opII{ m_albedoSampler, m_fsrOpaqueView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+        const VkDescriptorImageInfo coII{ m_albedoSampler, m_hdrView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+        const VkDescriptorImageInfo rxII{ VK_NULL_HANDLE, m_fsrReactiveView, VK_IMAGE_LAYOUT_GENERAL };
+        VkWriteDescriptorSet wr[3]{};
+        const VkDescriptorImageInfo* infos[3] = { &opII, &coII, &rxII };
+        for (uint32_t i = 0; i < 3; ++i)
+        {
+            wr[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; wr[i].dstSet = set; wr[i].dstBinding = i;
+            wr[i].descriptorCount = 1; wr[i].pImageInfo = infos[i];
+            wr[i].descriptorType = i < 2 ? VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER : VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        }
+        vkUpdateDescriptorSets(m_device, 3, wr, 0, nullptr);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_fsrRxPipe);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_fsrRxPL, 0, 1, &set, 0, nullptr);
+        vkCmdDispatch(cmd, (m_sceneW + 7) / 8, (m_sceneH + 7) / 8, 1);
+        m_fsrReactiveValid = true;
+    }
+    static const bool s_rxStats = [] { const char* e = std::getenv("HE_FSR_REACTIVE_STATS"); return e && *e == '1'; }();
+    if (s_rxStats && m_fsrReactiveValid)
+    {
+        if (!m_fsrRxReadback)
+        {
+            VkBufferCreateInfo bci{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+            bci.size = VkDeviceSize(m_sceneW) * m_sceneH; bci.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+            vkCheck(vkCreateBuffer(m_device, &bci, nullptr, &m_fsrRxReadback), "FSR reactive readback");
+            VkMemoryRequirements req{}; vkGetBufferMemoryRequirements(m_device, m_fsrRxReadback, &req);
+            VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+            mai.allocationSize = req.size;
+            mai.memoryTypeIndex = findMemoryType(req.memoryTypeBits,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+            vkCheck(vkAllocateMemory(m_device, &mai, nullptr, &m_fsrRxReadbackMem), "FSR reactive readback mem");
+            vkBindBufferMemory(m_device, m_fsrRxReadback, m_fsrRxReadbackMem, 0);
+        }
+        barrier(m_fsrReactiveImage, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT, kCompute, VK_PIPELINE_STAGE_TRANSFER_BIT);
+        VkBufferImageCopy bic{};
+        bic.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+        bic.imageExtent = { m_sceneW, m_sceneH, 1 };
+        vkCmdCopyImageToBuffer(cmd, m_fsrReactiveImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, m_fsrRxReadback, 1, &bic);
+        barrier(m_fsrReactiveImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, kCompute);
+        m_fsrRxPending = true;
+    }
+    else
+        barrier(m_fsrReactiveImage, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, kCompute, kCompute);
+    m_fsrReactiveLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    barrier(m_hdrImage, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_READ_BIT,
+            kCompute, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+}
+
 void VulkanRenderer::destroyFsrOut()
 {
     if (m_fsrOutView)   { vkDestroyImageView(m_device, m_fsrOutView, nullptr); m_fsrOutView = VK_NULL_HANDLE; }
@@ -6187,6 +6439,7 @@ void VulkanRenderer::destroyPostFXResources()
     if (m_hdrImage)   { vkDestroyImage    (m_device, m_hdrImage,   nullptr); m_hdrImage=VK_NULL_HANDLE; }
     if (m_hdrMemory)  { vkFreeMemory      (m_device, m_hdrMemory,  nullptr); m_hdrMemory=VK_NULL_HANDLE; }
     destroyFsrOut();
+    destroyFsrReactiveTargets();   // the HDR target's size: made again on the next FSR frame
     m_hdrLayout = m_bloomLayout[0] = m_bloomLayout[1] = m_ldrLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 }
 
@@ -6623,6 +6876,48 @@ void VulkanRenderer::encodeTaaVelocity(VkCommandBuffer cmd)
             vkCmdBindIndexBuffer(cmd, mesh->ibuf, 0, VK_INDEX_TYPE_UINT32);
             vkCmdDrawIndexed(cmd, mesh->indexCount, 1, 0, 0, 0);
         }
+        // Skinned meshes: each one the skinned pass drew, with this frame's palette (its bones-ring slot) and the one
+        // its entity had last frame — the limbs' own motion on top of the camera's. Same rules as the rigid objects:
+        // first seen (or a palette of another size) = no motion of its own; sections share the entity's pose.
+        m_taaCurSkins.clear();
+        static const bool s_noSkinVel = [] { const char* e = std::getenv("HE_TAA_SKINVEL"); return e && *e == '0'; }();
+        if (!s_noSkinVel && m_skinVelPipe && !m_skinVelDraws.empty() && m_prevBoneUBOPtr[m_currentFrame])
+        {
+            constexpr VkDeviceSize kBoneSlotSize = 128 * sizeof(glm::mat4);
+            constexpr uint32_t     kMaxSkinnedVk = 256;
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_skinVelPipe);
+            uint32_t slot = 0;
+            for (const SkinVelDraw& d : m_skinVelDraws)
+            {
+                if (slot >= kMaxSkinnedVk) break;
+                const SkinnedDrawCall& dc = *d.dc;
+                const auto it = m_taaPrevSkins.find(dc.entityId);
+                const bool known = it != m_taaPrevSkins.end() && it->second.bones.size() == dc.boneMatrices.size();
+                const std::vector<glm::mat4>& prevBones = known ? it->second.bones : dc.boneMatrices;
+                auto* dst = reinterpret_cast<glm::mat4*>(static_cast<uint8_t*>(m_prevBoneUBOPtr[m_currentFrame]) + slot * kBoneSlotSize);
+                const size_t n = std::min<size_t>(prevBones.size(), 128);
+                for (size_t b = 0; b < 128; ++b) dst[b] = b < n ? prevBones[b] : glm::mat4(1.0f);
+                if (!m_taaCurSkins.count(dc.entityId)) m_taaCurSkins[dc.entityId] = PrevSkin{ dc.transform, dc.boneMatrices };
+
+                const uint32_t prevOffset = static_cast<uint32_t>(slot * kBoneSlotSize);
+                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_skinVelPipeLayout, 0, 1,
+                                        &m_boneDescSet[m_currentFrame], 1, &d.bonesOffset);
+                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_skinVelPipeLayout, 1, 1,
+                                        &m_prevBoneDescSet[m_currentFrame], 1, &prevOffset);
+                const PushConstants pc{ m_taaViewProjJit * dc.transform,
+                                        known ? prevJit * it->second.transform : prevJitHere * dc.transform };
+                vkCmdPushConstants(cmd, m_skinVelPipeLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(pc), &pc);
+                const VkBuffer vbs[3] = { d.mesh->vb, d.mesh->boneIdVb, d.mesh->boneWgtVb };
+                const VkDeviceSize offs[3] = { 0, 0, 0 };
+                vkCmdBindVertexBuffers(cmd, 0, 3, vbs, offs);
+                vkCmdBindIndexBuffer(cmd, d.mesh->ib, 0, VK_INDEX_TYPE_UINT32);
+                const VulkanIndexRange range = DrawIndexRange(dc, static_cast<uint32_t>(d.mesh->indexCount));
+                if (range.count > 0) vkCmdDrawIndexed(cmd, range.count, 1, range.start, 0, 0);
+                ++slot;
+            }
+        }
+        m_taaPrevSkins.swap(m_taaCurSkins);
+
         // Advance the history HERE, at the end of the one pass that consumed
         // it, so a frame is never compared against itself.
         m_taaPrevViewProj = m_taaViewProjClean;
@@ -10846,7 +11141,7 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
         f.giGridOrigin  = glm::vec4(m_giGridOrigin, m_giProbeSpacing);
         f.giGridCounts  = glm::vec4(float(m_giGridCounts.x), float(m_giGridCounts.y),
                                     float(m_giGridCounts.z), float(m_giProbesPerRow));
-        f.giParams      = glm::vec4(m_giIndirectIntensity, m_giRanThisFrame ? 1.0f : 0.0f, 0.0f, 0.0f);
+        f.giParams      = glm::vec4(m_giIndirectIntensity, m_giRanThisFrame ? 1.0f : 0.0f, 0.0f, frameMipBias(width, hdr));
         f.ambient       = glm::vec4(m_renderWorld.ambient, 0.0f); // GI-branch floor only
         // Forward SSR: the gate is a REAL trace result this frame, nothing weaker
         // — the same shape as m_ssaoRanThisFrame above.
@@ -10937,6 +11232,7 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
         lit.giParams[0] = static_cast<float>(width);
         lit.giParams[1] = static_cast<float>(height);
         lit.giParams[2] = m_giRanThisFrame ? 1.0f : 0.0f;
+        lit.giParams[3] = frameMipBias(width, hdr);   // graph materials' texture reads (HE_TEX_BIAS)
         // DDGI probe field (Lighting v2.5) — the same grid the frame UBO hands
         // scene.frag's sampleDDGIIrradiance, so a graph material's indirect
         // diffuse matches a built-in neighbour instead of flat ambient while GI
@@ -12166,6 +12462,7 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
         // Use a dynamic-offset UBO (4d.3+) to handle multiple poses correctly.
         const VkPipeline skinnedPipe = hdr && m_skinnedPipelineHDR
             ? m_skinnedPipelineHDR : m_skinnedPipeline;
+        m_skinVelDraws.clear();   // what this pass draws, drawn again by the velocity pass (encodeTaaVelocity)
         if (skinnedPipe && !cmds.skinnedDrawCalls().empty())
         {
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, skinnedPipe);
@@ -12255,6 +12552,7 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                     vkCmdDrawIndexed(cmd, range.count, 1, range.start, 0, 0);
                     ++m_statDraws;
                     m_statTris += range.count / 3;
+                    if (hdr && m_taaFrame) m_skinVelDraws.push_back({ &dc, smesh, dynOffset });
                 }
                 ++skinnedIdx;
             }
@@ -12283,6 +12581,16 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
 
         const VkPipeline transPipe = hdr && m_sceneTransparentPipelineHDR
             ? m_sceneTransparentPipelineHDR : m_sceneTransparentPipeline;
+        // FSR reactive mask, part 1 (encodeFsrReactive is part 2): the scene as it stands before the blended tail.
+        if (!transparentDCs.empty() && transPipe && hdr && fsrFrame() && m_taaFrame
+            && width == m_sceneW && height == m_sceneH && fsrReactiveWanted())
+        {
+            vkCmdEndRenderPass(cmd);
+            encodeFsrOpaqueSnapshotAndReopen(cmd, width, height);
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, activeMatScenePipe);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_scenePipelineLayout,
+                                    0, 1, &m_frameUBO[m_currentFrame].set, 1, &m_sceneMatOffset);
+        }
         if (!transparentDCs.empty() && transPipe) {
             allowInstancing = false; // transparent batches keep the per-instance loop (blend + depth sort)
             GpuPassScope _transTimer(this, "Transparent");
@@ -18076,9 +18384,10 @@ void VulkanRenderer::createSkinnedPipeline()
     }
 
     // ── Descriptor pool for per-frame bones sets ──────────────────────────────
-    VkDescriptorPoolSize bonePooSize{ VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, k_maxFramesInFlight };
+    // Two sets per frame: this frame's palettes and last frame's (the skinned velocity's m_prevBoneDescSet).
+    VkDescriptorPoolSize bonePooSize{ VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 2 * k_maxFramesInFlight };
     VkDescriptorPoolCreateInfo bonesPoolci{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
-    bonesPoolci.maxSets       = k_maxFramesInFlight;
+    bonesPoolci.maxSets       = 2 * k_maxFramesInFlight;
     bonesPoolci.poolSizeCount = 1;
     bonesPoolci.pPoolSizes    = &bonePooSize;
     if (vkCreateDescriptorPool(m_device, &bonesPoolci, nullptr, &m_skinnedDescPool) != VK_SUCCESS)
@@ -18136,6 +18445,94 @@ void VulkanRenderer::createSkinnedPipeline()
         wr.descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
         wr.pBufferInfo     = &dbi;
         vkUpdateDescriptorSets(m_device, 1, &wr, 0, nullptr);
+    }
+
+    // ── Last frame's palettes, the same ring shape, for the skinned velocity (set 1 of m_skinVelPipeLayout) ──
+    for (uint32_t i = 0; i < k_maxFramesInFlight; ++i)
+    {
+        VkBufferCreateInfo bci{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+        bci.size  = kBoneUBOTotal;
+        bci.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+        if (vkCreateBuffer(m_device, &bci, nullptr, &m_prevBoneUBO[i]) != VK_SUCCESS) { m_prevBoneUBO[i] = VK_NULL_HANDLE; break; }
+        VkMemoryRequirements req{};
+        vkGetBufferMemoryRequirements(m_device, m_prevBoneUBO[i], &req);
+        VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+        mai.allocationSize  = req.size;
+        mai.memoryTypeIndex = findMemoryType(req.memoryTypeBits,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        if (vkAllocateMemory(m_device, &mai, nullptr, &m_prevBoneUBOMem[i]) != VK_SUCCESS) { m_prevBoneUBOMem[i] = VK_NULL_HANDLE; break; }
+        vkBindBufferMemory(m_device, m_prevBoneUBO[i], m_prevBoneUBOMem[i], 0);
+        vkMapMemory(m_device, m_prevBoneUBOMem[i], 0, kBoneUBOTotal, 0, &m_prevBoneUBOPtr[i]);
+        VkDescriptorSetAllocateInfo dsai{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
+        dsai.descriptorPool = m_skinnedDescPool; dsai.descriptorSetCount = 1; dsai.pSetLayouts = &m_skinnedBonesDSL;
+        if (vkAllocateDescriptorSets(m_device, &dsai, &m_prevBoneDescSet[i]) != VK_SUCCESS) { m_prevBoneDescSet[i] = VK_NULL_HANDLE; break; }
+        VkDescriptorBufferInfo dbi{ m_prevBoneUBO[i], 0, kBoneSlotSize };
+        VkWriteDescriptorSet wr{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+        wr.dstSet = m_prevBoneDescSet[i]; wr.dstBinding = 0; wr.descriptorCount = 1;
+        wr.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC; wr.pBufferInfo = &dbi;
+        vkUpdateDescriptorSets(m_device, 1, &wr, 0, nullptr);
+    }
+
+    // ── Skinned velocity pipeline (taa_velocity_skinned.vert + taa_velocity.frag on m_taaVelocityRP) ──
+    // Optional: without it skinned meshes keep the velocity clear's zero, as before.
+    if (m_taaVelocityRP && m_prevBoneDescSet[k_maxFramesInFlight - 1])
+    {
+        VkShaderModule svs = loadShaderModule("taa_velocity_skinned.vert.spv");
+        VkShaderModule sfs = loadShaderModule("taa_velocity.frag.spv");
+        VkDescriptorSetLayout velSets[2] = { m_skinnedBonesDSL, m_skinnedBonesDSL };
+        VkPushConstantRange vpcr{ VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(PushConstants) };
+        VkPipelineLayoutCreateInfo vplci{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+        vplci.setLayoutCount = 2; vplci.pSetLayouts = velSets;
+        vplci.pushConstantRangeCount = 1; vplci.pPushConstantRanges = &vpcr;
+        if (svs && sfs && vkCreatePipelineLayout(m_device, &vplci, nullptr, &m_skinVelPipeLayout) == VK_SUCCESS)
+        {
+            VkPipelineShaderStageCreateInfo st[2]{};
+            st[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+            st[0].stage = VK_SHADER_STAGE_VERTEX_BIT;   st[0].module = svs; st[0].pName = "main";
+            st[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+            st[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT; st[1].module = sfs; st[1].pName = "main";
+            // The skinned pass's three vertex streams; only position, ids and weights are read.
+            const VkVertexInputBindingDescription vb[3] = {
+                { 0, 32u, VK_VERTEX_INPUT_RATE_VERTEX }, { 1, 16u, VK_VERTEX_INPUT_RATE_VERTEX }, { 2, 16u, VK_VERTEX_INPUT_RATE_VERTEX } };
+            const VkVertexInputAttributeDescription va[3] = {
+                { 0, 0, VK_FORMAT_R32G32B32_SFLOAT, 0 }, { 3, 1, VK_FORMAT_R32G32B32A32_UINT, 0 },
+                { 4, 2, VK_FORMAT_R32G32B32A32_SFLOAT, 0 } };
+            VkPipelineVertexInputStateCreateInfo vvi{ VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
+            vvi.vertexBindingDescriptionCount = 3; vvi.pVertexBindingDescriptions = vb;
+            vvi.vertexAttributeDescriptionCount = 3; vvi.pVertexAttributeDescriptions = va;
+            VkPipelineInputAssemblyStateCreateInfo via{ VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO };
+            via.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+            VkPipelineViewportStateCreateInfo vvp{ VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO };
+            vvp.viewportCount = 1; vvp.scissorCount = 1;
+            // The skinned pipeline's rasterizer (cull none, CCW), so the raster reproduces its depth; test, never write.
+            VkPipelineRasterizationStateCreateInfo vrs{ VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO };
+            vrs.polygonMode = VK_POLYGON_MODE_FILL; vrs.cullMode = VK_CULL_MODE_NONE;
+            vrs.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE; vrs.lineWidth = 1.0f;
+            VkPipelineMultisampleStateCreateInfo vms{ VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO };
+            vms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+            VkPipelineDepthStencilStateCreateInfo vds{ VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO };
+            vds.depthTestEnable = VK_TRUE; vds.depthWriteEnable = VK_FALSE; vds.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
+            VkPipelineColorBlendAttachmentState vcba{};
+            vcba.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+            VkPipelineColorBlendStateCreateInfo vcb{ VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO };
+            vcb.attachmentCount = 1; vcb.pAttachments = &vcba;
+            VkDynamicState vdynS[2] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+            VkPipelineDynamicStateCreateInfo vdyn{ VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO };
+            vdyn.dynamicStateCount = 2; vdyn.pDynamicStates = vdynS;
+            VkGraphicsPipelineCreateInfo vpci{ VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO };
+            vpci.stageCount = 2; vpci.pStages = st;
+            vpci.pVertexInputState = &vvi; vpci.pInputAssemblyState = &via; vpci.pViewportState = &vvp;
+            vpci.pRasterizationState = &vrs; vpci.pMultisampleState = &vms; vpci.pDepthStencilState = &vds;
+            vpci.pColorBlendState = &vcb; vpci.pDynamicState = &vdyn;
+            vpci.layout = m_skinVelPipeLayout; vpci.renderPass = m_taaVelocityRP; vpci.subpass = 0;
+            if (createGraphicsPipelines(1, &vpci, nullptr, &m_skinVelPipe) != VK_SUCCESS)
+            {
+                m_skinVelPipe = VK_NULL_HANDLE;
+                HE_LOG_WARN(RHI, "%s", "VulkanRenderer: skinned velocity pipeline failed — skinned meshes keep zero motion");
+            }
+        }
+        if (svs) vkDestroyShaderModule(m_device, svs, nullptr);
+        if (sfs) vkDestroyShaderModule(m_device, sfs, nullptr);
     }
 
     // ── Shaders: skinned.vert.spv + scene.frag.spv ───────────────────────────

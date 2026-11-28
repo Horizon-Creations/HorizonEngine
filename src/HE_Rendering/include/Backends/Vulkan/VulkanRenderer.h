@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdint>
+#include <cstdlib>
 #include <Renderer/IRenderer.h>
 #include <MaterialGraph/MaterialParamLimits.h> // kMatParamFloats / kMatParamBytes
 #include "VulkanShaderManager.h"
@@ -1259,11 +1260,46 @@ private:
 		return up ? IRenderer::UpscaleRenderSize(v, m_renderScale) : v;
 	}
 	bool sceneScaled() const { return m_sceneW != m_viewportW || m_sceneH != m_viewportH; }
+	// AMD's mip bias on texture reads while FSR renders this pass at the scene size (the scene shader's albedo,
+	// Frame.giParams.w; graph materials' HE_TEX_BIAS, Lighting.giParams.w); 0 otherwise. HE_FSR_MIPBIAS=0: the control.
+	float frameMipBias(uint32_t width, bool hdr) const
+	{
+		static const bool s_off = [] { const char* e = std::getenv("HE_FSR_MIPBIAS"); return e && *e == '0'; }();
+		return (!s_off && hdr && fsrFrame() && (m_taaFrame || sceneScaled()) && width == m_sceneW && m_viewportW)
+		     ? IRenderer::UpscaleMipBias(m_sceneW, m_viewportW) : 0.0f;
+	}
 	// The image the tail after FSR reads: m_fsrOutImage while upscaling, else m_hdrImage.
 	VkImage        tailHdrImage()  const { return sceneScaled() ? m_fsrOutImage : m_hdrImage; }
 	VkImageLayout& tailHdrLayout()       { return sceneScaled() ? m_fsrOutLayout : m_hdrLayout; }
 	void createFsrOut(uint32_t w, uint32_t h);
 	void destroyFsrOut();
+	// FSR's reactive mask (particles and the rest of the blended tail have no velocity): the HDR image copied right
+	// before the tail (the scene pass ends there and reopens as m_hdrLoadRP), the mask generated right after the scene
+	// pass (DrawViewportFrame), handed to the upscale dispatch. Scene size; made lazily, dropped with the post targets.
+	VkImage        m_fsrOpaqueImage = VK_NULL_HANDLE, m_fsrReactiveImage = VK_NULL_HANDLE;
+	VkDeviceMemory m_fsrOpaqueMemory = VK_NULL_HANDLE, m_fsrReactiveMemory = VK_NULL_HANDLE;
+	VkImageView    m_fsrOpaqueView = VK_NULL_HANDLE, m_fsrReactiveView = VK_NULL_HANDLE;
+	VkImageLayout  m_fsrReactiveLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	// fsr_reactive.comp: made once on the first FSR frame with a blended tail, its set per frame in flight rewritten
+	// each use (the targets follow the scene size).
+	VkDescriptorSetLayout m_fsrRxDSL = VK_NULL_HANDLE;
+	VkPipelineLayout      m_fsrRxPL = VK_NULL_HANDLE;
+	VkPipeline            m_fsrRxPipe = VK_NULL_HANDLE;
+	VkDescriptorPool      m_fsrRxPool = VK_NULL_HANDLE;
+	VkDescriptorSet       m_fsrRxSet[2] = {};   // k_maxFramesInFlight
+	bool ensureFsrReactivePipe();
+	bool           m_fsrOpaqueTaken = false, m_fsrReactiveValid = false;
+	bool ensureFsrReactiveTargets();
+	void destroyFsrReactiveTargets();
+	void encodeFsrOpaqueSnapshotAndReopen(VkCommandBuffer cmd, uint32_t w, uint32_t h);
+	// HE_FSR_REACTIVE_STATS=1 (HE_FSR_REACTIVE_PGM=<file>): the mask read back and its marked pixels logged at the next
+	// frame's start, as D3D12 does. Witness runs only (a device wait).
+	VkBuffer       m_fsrRxReadback = VK_NULL_HANDLE;
+	VkDeviceMemory m_fsrRxReadbackMem = VK_NULL_HANDLE;
+	bool           m_fsrRxPending = false;
+	void logFsrReactiveStats();
+	void encodeFsrReactive(VkCommandBuffer cmd);   // after the scene pass; m_hdrImage COLOR_ATTACHMENT in and out
+	static bool fsrReactiveWanted() { static const bool s_off = [] { const char* e = std::getenv("HE_FSR_REACTIVE"); return e && e[0] == '0'; }(); return !s_off; }
 	// The FSR dispatch of DrawViewportFrame (after the fog, before motion blur); false = it did not run.
 	bool encodeFsr(VkCommandBuffer cmd);
 
@@ -2105,6 +2141,20 @@ private:
 	void                    createSkinnedPipeline();
 	const GpuSkeletalMesh*  resolveSkeletalMesh(const HE::UUID& id);
 	void                    destroySkeletalMeshCache();
+
+	// Skinned meshes' velocity (encodeTaaVelocity): taa_velocity_skinned.vert with this frame's palette (the skinned
+	// pass's bones-ring slot, set 0) and last frame's (m_prevBoneUBO, set 1), per entity (m_taaPrevSkins). The skinned
+	// pass records what it drew (m_skinVelDraws). HE_TAA_SKINVEL=0 leaves them at zero (the witness's control).
+	VkPipelineLayout m_skinVelPipeLayout = VK_NULL_HANDLE;
+	VkPipeline       m_skinVelPipe       = VK_NULL_HANDLE;   // renderPass = m_taaVelocityRP
+	VkBuffer         m_prevBoneUBO[2]    = {};
+	VkDeviceMemory   m_prevBoneUBOMem[2] = {};
+	void*            m_prevBoneUBOPtr[2] = {};
+	VkDescriptorSet  m_prevBoneDescSet[2] = {};
+	struct SkinVelDraw { const SkinnedDrawCall* dc; const GpuSkeletalMesh* mesh; uint32_t bonesOffset; };
+	std::vector<SkinVelDraw> m_skinVelDraws;
+	struct PrevSkin { glm::mat4 transform{ 1.0f }; std::vector<glm::mat4> bones; };
+	std::unordered_map<uint32_t, PrevSkin> m_taaPrevSkins, m_taaCurSkins;
 
 	// ── 2D UI canvas rendering ──────────────────────────────────────────────────
 	// Draws solid-color quads (UIRenderObject) over the final image.

@@ -32,6 +32,27 @@ layout(set = 0, binding = 2) uniform MatUBO {
 } mat_ubo;
 
 layout(set = 2, binding = 0) uniform sampler2D uAlbedo;
+// scene.frag's Frame block up to giParams (the same layout, std140 offsets of a prefix): giParams.w is the albedo's mip
+// bias while FSR upscales (0 otherwise).
+layout(set = 0, binding = 0) uniform Frame {
+    vec4  cameraPos;
+    ivec4 lightCount;
+    vec4  lightPos[8];
+    vec4  lightDir[8];
+    vec4  lightColor[8];
+    vec4  lightParams[8];
+    mat4  cascadeVP[3];
+    vec4  cascadeSplits;
+    vec4  cameraFwd;
+    vec4  shadowBias;
+    ivec4 shadowEnabled;
+    vec4  sunDir;
+    vec4  fog;
+    vec4  viewport;
+    vec4  giGridOrigin;
+    vec4  giGridCounts;
+    vec4  giParams;
+} uf;
 
 // scene.frag's giOctEncode — the signed octahedral map the resolve's
 // heOctDecode inverts.
@@ -44,7 +65,7 @@ vec2 giOctEncode(vec3 n)
 
 void main()
 {
-    vec3 base = (mat_ubo.roughPad.z > 0.5) ? texture(uAlbedo, vUV).rgb * mat_ubo.baseColorMet.rgb
+    vec3 base = (mat_ubo.roughPad.z > 0.5) ? texture(uAlbedo, vUV, uf.giParams.w).rgb * mat_ubo.baseColorMet.rgb
                                            : mat_ubo.baseColorMet.rgb;
     vec3 N = normalize(vNormal);
     oGB0 = vec4(base, clamp(mat_ubo.baseColorMet.a, 0.0, 1.0));

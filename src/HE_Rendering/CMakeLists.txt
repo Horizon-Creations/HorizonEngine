@@ -146,12 +146,12 @@ if(HE_VULKAN_ENABLED)
                       postfx_bloom_bright.frag postfx_bloom_blur.frag
                       postfx_underwaterfog.frag postfx_underwatercaustics.frag
                       motionblur_velocity.frag motionblur_blur.frag
-                      taa_velocity.vert taa_velocity.frag taa_resolve.frag taa_sharpen.frag
+                      taa_velocity.vert taa_velocity_skinned.vert taa_velocity.frag taa_resolve.frag taa_sharpen.frag
                       sky.vert sky.frag
                       debug_line.vert debug_line.frag
                       ssao_pos.vert ssao_pos_instanced.vert ssao_pos.frag ssao.frag ssao_blur.frag
                       gi_gbuf.vert gi_gbuf_instanced.vert gi_gbuf.frag gi_temporal.frag gi_atrous.frag
-                      gi_shadow.comp gi_probe.comp
+                      gi_shadow.comp gi_probe.comp fsr_reactive.comp
                       gi_shadow_hw.comp gi_probe_hw.comp
                       gi_refl.comp gi_refl_hw.comp gi_refl_blur.frag gi_refl_mix.frag
                       skinned.vert
