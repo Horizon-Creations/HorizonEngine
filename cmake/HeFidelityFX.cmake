@@ -16,6 +16,7 @@ set(HE_FSR_SDK_VERSION "2.4.0")
 set(HE_FSR_SDK_COMMIT "7539ae8b6568ad29ed78a753404351daf3b5cca7")   # tag v2.4.0
 set(HE_HAVE_FSR FALSE)
 set(HE_HAVE_FSR_FG FALSE)      # frame generation: its own files, so a failed download of them keeps the upscaler
+set(HE_HAVE_FSR_FG_VK FALSE)   # ... and Vulkan's after D3D12's, so a failed one of them keeps D3D12's
 set(HE_FSR_INCLUDE_DIRS "")
 set(HE_FSR_RUNTIME_FILES "")   # the DLLs and the license, copied beside the engine
 
@@ -41,7 +42,10 @@ elseif(HE_ENABLE_FSR AND WIN32 AND CMAKE_SYSTEM_PROCESSOR MATCHES "(AMD64|x86_64
         "framegeneration/include/ffx_framegeneration.h"           bc78a18aa95f5157b4699b0602700592b624788c5bc55d1762cb46a1b6557ca1
         "framegeneration/include/ffx_framegeneration_api_types.h" 396596af3df63310674e8036abd2ad0fcd061e61334e7a2c76653a2be3c686b4
         "framegeneration/include/dx12/ffx_api_framegeneration_dx12.h" 8ddb1cb78f83caf3598509df4968e84c851504cd6c00d9923261a5fc2c7ef0ed
-        "signedbin/amd_fidelityfx_framegeneration_dx12.dll"       e6843252f58b0341a0d80f6a20bc0d840643ee95bc48c22cac08745344577bb6)
+        "signedbin/amd_fidelityfx_framegeneration_dx12.dll"       e6843252f58b0341a0d80f6a20bc0d840643ee95bc48c22cac08745344577bb6
+        # Vulkan (37 MB, signed by AMD): last in the list, the loop stops at the first failure.
+        "framegeneration/include/vk/ffx_api_framegeneration_vk.h" 321d3138005757759d9ee05281d3dcd4cc2c3608bc1d524f9b1d0a6dadd49f61
+        "signedbin/amd_fidelityfx_framegeneration_vk.dll"         d002dabff8c5e71eaa715fc99438cd4dc81230262a7897b16bc402efec3498b4)
     set(_fsr_root "${HE_FSR_SDK_ROOT}")
     if(NOT _fsr_root)
         set(_fsr_root "${CMAKE_BINARY_DIR}/_deps/fsr-sdk-${HE_FSR_SDK_VERSION}")
@@ -60,7 +64,7 @@ elseif(HE_ENABLE_FSR AND WIN32 AND CMAKE_SYSTEM_PROCESSOR MATCHES "(AMD64|x86_64
                     continue()
                 endif()
             endif()
-            if(_f MATCHES "upscaler_|framegeneration_dx12")
+            if(_f MATCHES "upscaler_|framegeneration_(dx12|vk)\\.dll")
                 message(STATUS "HorizonEngine: downloading FSR SDK ${HE_FSR_SDK_VERSION} ${_f} (once per build tree)")
             endif()
             file(DOWNLOAD "${_fsr_base}/${_f}" "${_fsr_root}/${_f}" EXPECTED_HASH SHA256=${_h} STATUS _st)
@@ -101,6 +105,12 @@ elseif(HE_ENABLE_FSR AND WIN32 AND CMAKE_SYSTEM_PROCESSOR MATCHES "(AMD64|x86_64
             list(APPEND HE_FSR_INCLUDE_DIRS "${_fsr_root}/framegeneration/include")
             list(APPEND HE_FSR_RUNTIME_FILES "${_fsr_root}/signedbin/amd_fidelityfx_framegeneration_dx12.dll")
             message(STATUS "HorizonEngine: FSR frame generation enabled (D3D12)")
+            if(EXISTS "${_fsr_root}/framegeneration/include/vk/ffx_api_framegeneration_vk.h"
+               AND EXISTS "${_fsr_root}/signedbin/amd_fidelityfx_framegeneration_vk.dll")
+                set(HE_HAVE_FSR_FG_VK TRUE)
+                list(APPEND HE_FSR_RUNTIME_FILES "${_fsr_root}/signedbin/amd_fidelityfx_framegeneration_vk.dll")
+                message(STATUS "HorizonEngine: FSR frame generation enabled (Vulkan)")
+            endif()
         else()
             message(WARNING "HorizonEngine: FSR frame generation files missing under '${_fsr_root}' — frame generation left out")
         endif()

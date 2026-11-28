@@ -11,6 +11,10 @@
 #include <ffx_api_loader.h>
 #include <ffx_upscale.h>
 #include <vk/ffx_api_vk.h>
+#ifdef HE_HAVE_FSR_FG_VK
+#include <ffx_framegeneration.h>
+#include <vk/ffx_api_framegeneration_vk.h>
+#endif
 #endif
 
 #include <cstdlib>
@@ -220,5 +224,249 @@ void VulkanFsr::destroy()
 #endif
     m_context = nullptr;
     m_rw = m_rh = m_dw = m_dh = 0;
+}
+
+// ── Frame generation ─────────────────────────────────────────────────────────
+bool VulkanFsr::frameGenAvailable(VkPhysicalDevice phys, VkDevice device) const
+{
+#if defined(HE_HAVE_FSR) && defined(HE_HAVE_FSR_FG_VK)
+    if (m_fgAvail >= 0) return m_fgAvail == 1;
+    if (!m_loaded || !device || !phys) return false;
+    VkDeviceContext dc{ device, phys, vkGetDeviceProcAddr };
+    uint64_t count = 0;
+    ffxQueryDescGetVersions q{};
+    q.header.type = FFX_API_QUERY_DESC_TYPE_GET_VERSIONS;
+    q.createDescType = FFX_API_CREATE_CONTEXT_DESC_TYPE_FRAMEGENERATION;
+    q.device = &dc;   // for VK a VkDeviceContext* (ffx_api.h), not a handle
+    q.outputCount = &count;
+    fns(m_fns).Query(nullptr, &q.header);
+    m_fgAvail = count > 0 ? 1 : 0;
+    if (!m_fgAvail)
+        HE_LOG_INFO(RHI, "%s", "VulkanRenderer: FSR frame generation unavailable (no provider: amd_fidelityfx_framegeneration_vk.dll)");
+    return m_fgAvail == 1;
+#else
+    (void)phys; (void)device;
+    return false;
+#endif
+}
+
+bool VulkanFsr::replaceSwapchain(VkPhysicalDevice phys, VkDevice device, VkSwapchainKHR& sc, const VkSwapchainCreateInfoKHR& ci,
+                                 const Queues& q)
+{
+#if defined(HE_HAVE_FSR) && defined(HE_HAVE_FSR_FG_VK)
+    if (m_scContext || sc || !m_loaded || !device || !q.game.queue || !q.asyncCompute.queue || !q.present.queue
+        || !q.imageAcquire.queue) return false;
+    ffxCreateContextDescFrameGenerationSwapChainVersionVK ver{};
+    ver.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_FRAMEGENERATIONSWAPCHAIN_VERSION_VK;
+    ver.version = FFX_FRAMEGENERATION_SWAPCHAIN_VK_VERSION;
+    ffxCreateContextDescFrameGenerationSwapChainVK desc{};
+    desc.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_FGSWAPCHAIN_VK;
+    desc.header.pNext = &ver.header;
+    desc.physicalDevice = phys;
+    desc.device = device;
+    desc.swapchain = &sc;
+    desc.createInfo = ci;
+    desc.createInfo.oldSwapchain = VK_NULL_HANDLE;
+    auto info = [](const Queue& x) { VkQueueInfoFFXAPI i{}; i.queue = x.queue; i.familyIndex = x.family; return i; };
+    desc.gameQueue = info(q.game);
+    desc.asyncComputeQueue = info(q.asyncCompute);
+    desc.presentQueue = info(q.present);
+    desc.imageAcquireQueue = info(q.imageAcquire);
+    ffxContext ctx = nullptr;
+    const ffxReturnCode_t rc = fns(m_fns).CreateContext(&ctx, &desc.header, nullptr);
+    ffxQueryDescSwapchainReplacementFunctionsVK r{};
+    r.header.type = FFX_API_QUERY_DESC_TYPE_FGSWAPCHAIN_FUNCTIONS_VK;
+    if (rc == FFX_API_RETURN_OK && ctx && sc && fns(m_fns).Query(&ctx, &r.header) == FFX_API_RETURN_OK
+        && r.pOutAcquireNextImageKHR && r.pOutQueuePresentKHR && r.pOutGetSwapchainImagesKHR && r.pOutDestroySwapchainFFXAPI)
+    {
+        m_scContext = ctx;
+        m_pfnAcquire = r.pOutAcquireNextImageKHR;
+        m_pfnPresent = r.pOutQueuePresentKHR;
+        m_pfnGetImages = r.pOutGetSwapchainImagesKHR;
+        m_pfnDestroy = reinterpret_cast<void*>(r.pOutDestroySwapchainFFXAPI);
+        m_pfnPresentCount = reinterpret_cast<void*>(r.pOutGetLastPresentCountFFXAPI);
+        HE_LOG_INFO(RHI, "VulkanRenderer: FSR frame generation swapchain in place (%ux%u)", ci.imageExtent.width, ci.imageExtent.height);
+        return true;
+    }
+    if (ctx) fns(m_fns).DestroyContext(&ctx, nullptr);
+    if (sc && r.pOutDestroySwapchainFFXAPI) r.pOutDestroySwapchainFFXAPI(device, sc, nullptr, nullptr);
+    sc = VK_NULL_HANDLE;
+    HE_LOG_WARN(RHI, "VulkanRenderer: FSR frame generation swapchain failed (%u) — frame generation off", rc);
+    return false;
+#else
+    (void)phys; (void)device; (void)sc; (void)ci; (void)q;
+    return false;
+#endif
+}
+
+VkResult VulkanFsr::acquireNextImage(VkDevice device, VkSwapchainKHR sc, uint64_t timeout, VkSemaphore sem, VkFence fence,
+                                     uint32_t* index)
+{
+    return (m_scContext ? m_pfnAcquire : vkAcquireNextImageKHR)(device, sc, timeout, sem, fence, index);
+}
+
+VkResult VulkanFsr::queuePresent(VkQueue queue, const VkPresentInfoKHR* info)
+{
+    return (m_scContext ? m_pfnPresent : vkQueuePresentKHR)(queue, info);
+}
+
+VkResult VulkanFsr::getSwapchainImages(VkDevice device, VkSwapchainKHR sc, uint32_t* count, VkImage* images)
+{
+    return (m_scContext ? m_pfnGetImages : vkGetSwapchainImagesKHR)(device, sc, count, images);
+}
+
+uint64_t VulkanFsr::presentCount(VkSwapchainKHR sc) const
+{
+#if defined(HE_HAVE_FSR) && defined(HE_HAVE_FSR_FG_VK)
+    if (m_scContext && m_pfnPresentCount) return reinterpret_cast<PFN_getLastPresentCountFFXAPI>(m_pfnPresentCount)(sc);
+#endif
+    (void)sc;
+    return 0;
+}
+
+void VulkanFsr::destroySwapchain(VkDevice device, VkSwapchainKHR& sc)
+{
+#if defined(HE_HAVE_FSR) && defined(HE_HAVE_FSR_FG_VK)
+    if (m_scContext)
+    {
+        // AMD's teardown order: FG off and its context, the proxy's queued presents, the swapchain context, the swapchain.
+        destroyFrameGen(sc);
+        ffxDispatchDescFrameGenerationSwapChainWaitForPresentsVK w{};
+        w.header.type = FFX_API_DISPATCH_DESC_TYPE_FGSWAPCHAIN_WAIT_FOR_PRESENTS_VK;
+        const ffxReturnCode_t rw = fns(m_fns).Dispatch(reinterpret_cast<ffxContext*>(&m_scContext), &w.header);
+        const ffxReturnCode_t rd = fns(m_fns).DestroyContext(reinterpret_cast<ffxContext*>(&m_scContext), nullptr);
+        if (rw != FFX_API_RETURN_OK || rd != FFX_API_RETURN_OK)
+            HE_LOG_WARN(RHI, "VulkanRenderer: FSR frame generation swapchain teardown: wait %u, destroy %u", rw, rd);
+        m_scContext = nullptr;
+        if (sc) reinterpret_cast<PFN_vkDestroySwapchainFFXAPI>(m_pfnDestroy)(device, sc, nullptr, nullptr);
+        sc = VK_NULL_HANDLE;
+        m_pfnAcquire = nullptr; m_pfnPresent = nullptr; m_pfnGetImages = nullptr;
+        m_pfnDestroy = m_pfnPresentCount = nullptr;
+        return;
+    }
+#endif
+    if (sc) vkDestroySwapchainKHR(device, sc, nullptr);
+    sc = VK_NULL_HANDLE;
+}
+
+bool VulkanFsr::ensureFrameGen(VkPhysicalDevice phys, VkDevice device, uint32_t displayW, uint32_t displayH, VkFormat backBuffer,
+                               VkFormat hudless)
+{
+#if defined(HE_HAVE_FSR) && defined(HE_HAVE_FSR_FG_VK)
+    if (!m_scContext || !device || !phys || !displayW || !displayH) return false;
+    if (m_fgContext && m_fgW == displayW && m_fgH == displayH) return true;
+    if (m_fgContext) { fns(m_fns).DestroyContext(reinterpret_cast<ffxContext*>(&m_fgContext), nullptr); m_fgContext = nullptr; }
+    ffxCreateBackendVKDesc backend{};
+    backend.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_BACKEND_VK;
+    backend.deviceContext = { device, phys, vkGetDeviceProcAddr };
+    ffxCreateContextDescFrameGenerationHudless hud{};
+    hud.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_FRAMEGENERATION_HUDLESS;
+    hud.header.pNext = &backend.header;
+    hud.hudlessBackBufferFormat = ffxApiGetSurfaceFormatVK(hudless);   // RGBA8 (the viewport image), the swapchain BGRA8
+    ffxCreateContextDescFrameGenerationVersion ver{};
+    ver.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_FRAMEGENERATION_VERSION;
+    ver.header.pNext = &hud.header;
+    ver.version = FFX_FRAMEGENERATION_VERSION;   // PrepareV2 works only with this chained
+    ffxCreateContextDescFrameGeneration desc{};
+    desc.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_FRAMEGENERATION;
+    desc.header.pNext = &ver.header;
+    // The back buffer it interpolates is display-encoded 8-bit: no HDR flag. Depth 0..1 (kVulkanClipFix), not inverted.
+    desc.flags = debugOn() ? FFX_FRAMEGENERATION_ENABLE_DEBUG_CHECKING : 0u;
+    desc.displaySize   = { displayW, displayH };
+    desc.maxRenderSize = { displayW, displayH };
+    desc.backBufferFormat = ffxApiGetSurfaceFormatVK(backBuffer);
+    ffxContext ctx = nullptr;
+    const ffxReturnCode_t rc = fns(m_fns).CreateContext(&ctx, &desc.header, nullptr);
+    if (rc != FFX_API_RETURN_OK || !ctx)
+    {
+        HE_LOG_WARN(RHI, "VulkanRenderer: FSR frame generation context failed (%u) at %ux%u", rc, displayW, displayH);
+        return false;
+    }
+    m_fgContext = ctx;
+    m_fgW = displayW; m_fgH = displayH;
+    HE_LOG_INFO(RHI, "VulkanRenderer: FSR frame generation ready (%ux%u)", displayW, displayH);
+    return true;
+#else
+    (void)phys; (void)device; (void)displayW; (void)displayH; (void)backBuffer; (void)hudless;
+    return false;
+#endif
+}
+
+bool VulkanFsr::frameGen(const FrameGen& f)
+{
+#if defined(HE_HAVE_FSR) && defined(HE_HAVE_FSR_FG_VK)
+    if (!m_fgContext || !f.swapchain) return false;
+    // HE_FSR_FG_DEBUG=1: AMD's tear lines on the generated frames' edges (a visible witness that frames are generated).
+    static const bool s_lines = [] { const char* e = std::getenv("HE_FSR_FG_DEBUG"); return e && *e == '1'; }();
+    const uint32_t flags = s_lines ? uint32_t(FFX_FRAMEGENERATION_FLAG_DRAW_DEBUG_TEAR_LINES) : 0u;
+    ffxConfigureDescFrameGeneration cfg{};
+    cfg.header.type = FFX_API_CONFIGURE_DESC_TYPE_FRAMEGENERATION;
+    cfg.swapChain = reinterpret_cast<void*>(f.swapchain);
+    // AMD's recommended default: the proxy dispatches the generation itself, inside its present.
+    cfg.frameGenerationCallback = [](ffxDispatchDescFrameGeneration* params, void* user) -> ffxReturnCode_t
+    {
+        auto* self = static_cast<VulkanFsr*>(user);
+        const ffxReturnCode_t rc = fns(self->m_fns).Dispatch(reinterpret_cast<ffxContext*>(&self->m_fgContext), &params->header);
+        if (rc == FFX_API_RETURN_OK) self->m_fgGenerated.fetch_add(params->numGeneratedFrames, std::memory_order_relaxed);
+        return rc;
+    };
+    cfg.frameGenerationCallbackUserContext = this;
+    cfg.frameGenerationEnabled = f.enabled;
+    cfg.allowAsyncWorkloads = false;   // one hudless image, reused next frame: the game queue does the work
+    if (f.enabled && f.hudless.image) cfg.HUDLessColor = resourceOf(f.hudless, FFX_API_RESOURCE_STATE_PIXEL_COMPUTE_READ);
+    cfg.flags = flags;
+    cfg.generationRect = { 0, 0, int32_t(f.displayW), int32_t(f.displayH) };
+    cfg.frameID = f.frameID;
+    if (fns(m_fns).Configure(reinterpret_cast<ffxContext*>(&m_fgContext), &cfg.header) != FFX_API_RETURN_OK) return false;
+    if (!f.enabled) return true;
+    if (!f.cmd || !f.depth.image || !f.velocity.image) return false;
+
+    constexpr uint32_t kRead = FFX_API_RESOURCE_STATE_PIXEL_COMPUTE_READ;
+    ffxDispatchDescFrameGenerationPrepareV2 p{};
+    p.header.type = FFX_API_DISPATCH_DESC_TYPE_FRAMEGENERATION_PREPARE_V2;
+    p.frameID = f.frameID;
+    p.flags = flags;
+    p.commandList = f.cmd;
+    p.renderSize = { f.renderW, f.renderH };
+    p.jitterOffset = { f.jitter.x, f.jitter.y };   // what the upscaler is told
+    p.motionVectorScale = { -static_cast<float>(f.renderW), -static_cast<float>(f.renderH) };   // as the upscaler's
+    p.frameTimeDelta = f.frameMs;
+    p.reset = f.reset;
+    p.cameraNear = f.nearZ;
+    p.cameraFar = f.farZ;
+    p.cameraFovAngleVertical = f.fovY;
+    p.viewSpaceToMetersFactor = 1.0f;
+    p.depth = resourceOf(f.depth, kRead);
+    p.motionVectors = resourceOf(f.velocity, kRead);
+    const glm::vec3* v[4] = { &f.camPos, &f.camUp, &f.camRight, &f.camForward };
+    float* dst[4] = { p.cameraPosition, p.cameraUp, p.cameraRight, p.cameraForward };
+    for (int i = 0; i < 4; ++i) { dst[i][0] = v[i]->x; dst[i][1] = v[i]->y; dst[i][2] = v[i]->z; }
+    m_fgLastFrameID = f.frameID;
+    return fns(m_fns).Dispatch(reinterpret_cast<ffxContext*>(&m_fgContext), &p.header) == FFX_API_RETURN_OK;
+#else
+    (void)f;
+    return false;
+#endif
+}
+
+void VulkanFsr::destroyFrameGen(VkSwapchainKHR sc)
+{
+#if defined(HE_HAVE_FSR) && defined(HE_HAVE_FSR_FG_VK)
+    if (!m_fgContext) return;
+    // FG off first: that configure waits for the proxy's queued presents (AMD's teardown order).
+    ffxConfigureDescFrameGeneration cfg{};
+    cfg.header.type = FFX_API_CONFIGURE_DESC_TYPE_FRAMEGENERATION;
+    cfg.swapChain = reinterpret_cast<void*>(sc);
+    cfg.frameGenerationEnabled = false;
+    cfg.frameID = m_fgLastFrameID + 1;
+    const ffxReturnCode_t rc = fns(m_fns).Configure(reinterpret_cast<ffxContext*>(&m_fgContext), &cfg.header);
+    const ffxReturnCode_t rd = fns(m_fns).DestroyContext(reinterpret_cast<ffxContext*>(&m_fgContext), nullptr);
+    if (rc != FFX_API_RETURN_OK || rd != FFX_API_RETURN_OK)
+        HE_LOG_WARN(RHI, "VulkanRenderer: FSR frame generation teardown: configure %u, destroy %u", rc, rd);
+#else
+    (void)sc;
+#endif
+    m_fgContext = nullptr;
+    m_fgW = m_fgH = 0;
 }
 } // namespace HE

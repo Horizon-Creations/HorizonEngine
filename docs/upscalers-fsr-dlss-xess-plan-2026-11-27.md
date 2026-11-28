@@ -51,7 +51,7 @@ later). Branch `claude/upscalers-fsr`, on top of `claude/motion-blur-d3d-vulkan`
 
 ## Handoff
 
-- **Topic / step:** none (owner's direct request, not a Hive topic).
+- **Topic / step:** Hive topic 356 (branch `claude/upscaling-fsr-dlss-xess`; local branch `claude/upscalers-fsr`).
 - **Done** (branch `claude/upscalers-fsr`):
   1. This plan; the SDK fetched at configure (`cmake/HeFidelityFX.cmake`, `7785dc13b`; owner allowed the download).
   2. FSR on **D3D12 as native AA** (render size = display size): `AAMethod::FSR = 5`, `Capabilities::supportsFSR`,
@@ -112,6 +112,25 @@ later). Branch `claude/upscalers-fsr`, on top of `claude/motion-blur-d3d-vulkan`
      **Pre-existing fix on the way:** D3D12's static albedo sampler `s2` had `MaxLOD = 0` (zero-initialised desc),
      so simple textured materials never left mip 0 — they shimmered at a distance. Now `D3D12_FLOAT32_MAX`.
      Witness `HE_DUMP_MIPTEST=1` (1024² one-texel checker floor with its mip chain), control `HE_FSR_MIPBIAS=0`.
+  10. **Vulkan, every FSR feature** (`2979f90ef`, `f1dfc0076`, FG commit after them): `VulkanFsr.{h,cpp}` (loader
+     beside the module; `ffxQueryDescGetVersions.device` = `&VkDeviceContext`, a handle crashes in vulkan-1.dll),
+     `encodeFsr` (VulkanRenderer.cpp) after the fog, before motion blur. Vulkan conventions: jitter `(x, +y)` as FFX
+     gives it, near/far = `B/(A∓1)` (kVulkanClipFix), MV scale `(-renderW, -renderH)`. Device: `shaderInt16`,
+     `VK_KHR_compute_shader_derivatives`, storage images without format, timeline semaphores (FG). Render scale:
+     `m_sceneW/H` for every scene target, `m_fsrOutImage` read by the tail (`tailHdrImage`). Mip bias in Frame
+     `giParams.w` (scene.frag, gbuffer.frag) + `HE_TEX_BIAS`. Skinned velocity `taa_velocity_skinned.vert` (prev bones
+     ring). **Reactive mask: our own `fsr_reactive.comp`, not FFX's GENERATEREACTIVEMASK** — its Vulkan backend
+     destroys that dispatch's image views while earlier frames still use them (VUID-vkDestroyImageView-01026, gone
+     only with a device wait per frame); same math and AMD values, mask byte-identical to FFX's.
+     **FG**: own CMake files after D3D12's (`HE_HAVE_FSR_FG_VK`, `amd_fidelityfx_framegeneration_vk.dll` 37 MB, signed
+     by AMD, SHA256-pinned). The proxy needs queues of its own (createDevice: present = graphics family slot 1, async
+     compute, image acquire; none free = no FG). `createSwapchain` makes the proxy when `m_fgProxyWanted` (first FG
+     frame → `recreateSwapchain`; a resize makes it again), every acquire/present/get-images/destroy goes through
+     `VulkanFsr`'s wrappers (FFX's replacement functions, plain Vulkan otherwise). **The proxy takes its back buffer
+     in SHADER_READ_ONLY, not PRESENT_SRC** (barrier after the swapchain pass). Hudless = `m_viewportImage` copied before
+     the UI pass (RGBA8, FG told so; the swapchain is BGRA8). Prepare/configure after DrawViewportFrame
+     (`m_fgJitteredFrame`: DrawViewportFrame clears `m_taaFrame`). Teardown in `VulkanFsr::destroySwapchain`: FG off →
+     FG ctx → WaitForPresents → swapchain ctx → `pOutDestroySwapchainFFXAPI`.
 - **Verified** (NN-WS03, RTX 4070, Release; `HE_DUMP` SHADOWINSTTEST, 40 settle frames, cube band): the loader
   picks **FSR 3.1.6**, `HE_FSR_DEBUG=1` reports nothing. Sign A/B against the AA-off frame of the same pose
   (run-to-run noise 0.040): still FSR 0.754 vs jitter-y flipped 0.855; pan (`HE_DUMP_PANYAW=0.5`) FSR 1.239 vs
@@ -139,9 +158,23 @@ later). Branch `claude/upscalers-fsr`, on top of `claude/motion-blur-d3d-vulkan`
   unchanged (mip 0 there); a forced +4 blurs it to 0 (the chain works); `test_material_graph` "Texture reads carry
   the upscaler's mip bias" (HLSL `SampleBias(..., heLight_giParams.w)`, `exp2` on the bombed gradients), the
   pinned-text test now proves the bias is the only change.
+  **Vulkan** (same machine, FSR 3.1.6): still at 1.0 FSR 0.773 vs jitter-y flipped 0.823 (noise 0.049), at 0.5 1.36
+  vs 1.63; pan MV flipped 1.153 vs 0.886; 0.5 = whole frame, log `640x360 -> 1280x720`; GPU 2560x1440 ~2.5-5 ms at
+  0.5 vs ~6.2 ms at 1.0 (Vulkan clock drift, bimodal). Mip bias far band std 0.5: 0.90 → 3.95. Skinned velocity: TAA
+  0.562 vs 0.689 without. Reactive mask at 0.5 with a 0.9 glass cube: 4284-4336 px (1.86 %, D3D12 1.92 %), PGM = the
+  cube, byte-identical to FFX's mask; `HE_FSR_REACTIVE=0`, TAA, no tail: no mask; `HE_GPU_DEBUG=1` + fog: 0 errors.
+  FG (Vulkan game export, 1600x900, scale 0.5): `FSR frame generation swapchain in place`, `6720 generated / 6720
+  rendered = 1.00; proxy presents 13410` (FFX's own counter, ≈ 2×); `HE_GAME_FRAMEGEN=1`: 0 generated, no proxy; a
+  window resize mid-run made the proxy again (1357x766) and FG went on at 1.00; WM_CLOSE: exit code 0. Validation with
+  FG: only FFX-side messages left (`rw_output` 3-component write to BGRA, a static line width in one of its pipelines,
+  2 "AMD FSR FrameRenderedSemaphore" per proxy + one pipeline set not destroyed at exit — teardown calls return OK);
+  without FG 0. PrintWindow FG on/off: clean picture (the witness camera moves between runs, no pixel A/B).
+  **Game DLL trap:** building HorizonGame refreshes `build/engine_bundle/HorizonEngine.dll`, but `deploy/Game` only when
+  the exe relinks — copy the bundle's DLL into a test export, or the run measures the old code.
   **Witness trap:** `cap.ps1` clears `HE_DUMP_*` only — an `HE_FSR_*`/`HE_TAA_*` switch set for one capture stays
   set for every later capture IN THE SAME PowerShell call. Set them explicitly (=0/=1) per capture.
-- **Not verified:** FSR 4 (needs an RX 9000); Vulkan; GPU particles (D3D12 draws none: CPU particles are tail
+- **Not verified:** FSR 4 (needs an RX 9000); Vulkan FG on AMD hardware or a GPU whose graphics family has one queue
+  (the present queue then comes from another present-capable family: untested), Vulkan FG in fullscreen; GPU particles (D3D12 draws none: CPU particles are tail
   draws, covered by the mask); the mip bias in motion (more shimmer is AMD's trade-off) and for the RVT landscape
   main view (`heRvtSample` picks its page mip from derivatives — not biased, so RVT-textured ground stays softer
   at 0.5); D3D11's albedo sampler (same zero `MaxLOD`? not looked at); a player choice through
@@ -156,6 +189,5 @@ later). Branch `claude/upscalers-fsr`, on top of `claude/motion-blur-d3d-vulkan`
   Particles get FSR's reactive mask, not velocity (AMD's guidance for alpha-blended effects).
   Frame generation 2× only: FSR 3.1's swapchain path generates one frame; 3×/4× (DLSS MFG, RTX 50) stay
   unavailable. FG renders at most ~half the frames it would without (pacing), as AMD's.
-- **Next:** Vulkan FSR + FG (`*_vk.dll`, and the same skinned velocity / reactive mask / mip bias there); the
-  RVT page lookup's mip bias; D3D11's albedo sampler MaxLOD; a settings menu in the template wired to the new rows;
+- **Next:** the RVT page lookup's mip bias; D3D11's albedo sampler MaxLOD; a settings menu in the template wired to the new rows;
   DLSS / XeSS (steps 4, 5).

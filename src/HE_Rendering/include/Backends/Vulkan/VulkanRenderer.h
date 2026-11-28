@@ -152,6 +152,7 @@ public:
 	// size and draws its result into the swapchain image (docs/spielpfad-
 	// postfx-parity-analyse-2026-10-03.md, Weg a).
 	void  SetSwapchainPostProcessing(bool enabled) override;
+	void  SetFrameGeneration(int multiplier) override;   // acted on in Render(): the game's swapchain frames, with FSR
 	bool  HasViewportResourceChanged() const;
 	void  ClearViewportResourceChanged();
 	// The Vulkan stand-in for a D3D12 fence value. Every frame handed to the
@@ -1269,6 +1270,22 @@ private:
 		     ? IRenderer::UpscaleMipBias(m_sceneW, m_viewportW) : 0.0f;
 	}
 	// The image the tail after FSR reads: m_fsrOutImage while upscaling, else m_hdrImage.
+	// Frame generation (SetFrameGeneration; D3D12's design): the packaged game's swapchain frames only, with FSR. The
+	// first FG frame makes the window's swapchain FSR's proxy (m_fgProxyWanted, through recreateSwapchain; a resize
+	// makes the proxy again), kept for the run; FG then switches per frame. m_fgHudless = the frame before its UI.
+	HE::VulkanFsr::Queues m_fgQueues;            // the proxy's own queues (createDevice); present empty = no FG here
+	int            m_fgWanted = 1;
+	bool           m_fgProxyWanted = false;      // createSwapchain makes the proxy
+	bool           m_fgTried = false;            // the proxy was asked for (once per run)
+	bool           m_fgFrame = false;            // this Render(): FG prepared (game frame, FSR, hudless ready)
+	bool           m_fgWasOn = false;            // last frame configured FG on: switching off is one configure
+	bool           m_fgJitteredFrame = false;    // DrawViewportFrame's m_taaFrame (it clears that on the way out)
+	uint64_t       m_fgFrameId = 0, m_fgLastNs = 0, m_fgPresents = 0, m_fgStatsBase = 0, m_fgPresentBase = 0;
+	VkImage        m_fgHudless = VK_NULL_HANDLE;   // RGBA8 (the viewport image's format), swapchain size
+	VkDeviceMemory m_fgHudlessMem = VK_NULL_HANDLE;
+	uint32_t       m_fgHudlessW = 0, m_fgHudlessH = 0;
+	VkImageLayout  m_fgHudlessLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	void destroyFgHudless();
 	VkImage        tailHdrImage()  const { return sceneScaled() ? m_fsrOutImage : m_hdrImage; }
 	VkImageLayout& tailHdrLayout()       { return sceneScaled() ? m_fsrOutLayout : m_hdrLayout; }
 	void createFsrOut(uint32_t w, uint32_t h);

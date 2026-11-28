@@ -283,7 +283,8 @@ void VulkanRenderer::Shutdown()
     destroyRibbonMeshes();
     destroyPostFXResources();      // the G-buffer targets with them
     m_fsr.destroy();               // its resources live on the device (the GPU is idle above)
-    destroyFogResources();         // its Apply pipeline is built against the underwater fog's render pass
+    destroyFgHudless();            // (the FG context goes with the proxy swapchain, destroySwapchain below)
+    destroyFogResources();        // its Apply pipeline is built against the underwater fog's render pass
     destroyDeferredPipelines();    // before the material pipelines' render passes go
     destroyPostFXPipelines();
     // SSAO viewport-size targets (already freed by destroyViewportResources below,
@@ -594,6 +595,17 @@ void VulkanRenderer::Render()
     // ignored meanwhile, and the capture reads this very image. An sRGB
     // swapchain is left on the old path: the present pass would encode the
     // already gamma-encoded image a second time.
+    // FSR frame generation on the game's swapchain: the first frame that wants it makes the window's swapchain FSR's
+    // proxy (recreateSwapchain: one wait, once per run; on failure a plain swapchain again). FG then switches per frame.
+    const bool fgWant = m_fgWanted >= 2 && m_swapchainPostFx && m_postFxReady && fsrFrame() && m_fgQueues.present.queue
+                     && m_fsr.frameGenAvailable(m_physDevice, m_device);
+    if (fgWant && !m_fgTried)
+    {
+        m_fgTried = true;
+        m_fgProxyWanted = true;
+        recreateSwapchain();
+    }
+
     const bool swapIsSrgb = m_swapFormat == VK_FORMAT_B8G8R8A8_SRGB
                          || m_swapFormat == VK_FORMAT_R8G8B8A8_SRGB
                          || m_swapFormat == VK_FORMAT_A8B8G8R8_SRGB_PACK32;
@@ -675,6 +687,41 @@ void VulkanRenderer::Render()
     const bool useViewport = !gameChain && m_viewportImage != VK_NULL_HANDLE
                           && m_viewportW > 0 && m_viewportH > 0;
 
+    // Frame generation this frame: its context at the swapchain's size and the hudless copy target (a size change makes
+    // them again; the proxy itself was made again by the resize).
+    m_fgFrame = false;
+    if (fgWant && gameFrame && m_fsr.swapchainReplaced()
+        && m_fsr.ensureFrameGen(m_physDevice, m_device, m_swapExtent.width, m_swapExtent.height, m_swapFormat,
+                                VK_FORMAT_R8G8B8A8_UNORM))
+    {
+        if (!m_fgHudless || m_fgHudlessW != m_swapExtent.width || m_fgHudlessH != m_swapExtent.height)
+        {
+            deviceWaitIdle();
+            destroyFgHudless();
+            VkImageCreateInfo ici{ VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+            ici.imageType = VK_IMAGE_TYPE_2D; ici.format = VK_FORMAT_R8G8B8A8_UNORM;   // the viewport image's
+            ici.extent = { m_swapExtent.width, m_swapExtent.height, 1 };
+            ici.mipLevels = 1; ici.arrayLayers = 1; ici.samples = VK_SAMPLE_COUNT_1_BIT;
+            // A copy target FG reads, and copies from itself.
+            ici.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+            if (vkCreateImage(m_device, &ici, nullptr, &m_fgHudless) == VK_SUCCESS)
+            {
+                VkMemoryRequirements req{}; vkGetImageMemoryRequirements(m_device, m_fgHudless, &req);
+                VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+                mai.allocationSize = req.size;
+                mai.memoryTypeIndex = findMemoryType(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+                if (vkAllocateMemory(m_device, &mai, nullptr, &m_fgHudlessMem) == VK_SUCCESS)
+                {
+                    vkBindImageMemory(m_device, m_fgHudless, m_fgHudlessMem, 0);
+                    m_fgHudlessW = m_swapExtent.width; m_fgHudlessH = m_swapExtent.height;
+                }
+                else destroyFgHudless();
+            }
+            else m_fgHudless = VK_NULL_HANDLE;
+        }
+        m_fgFrame = m_fgHudless != VK_NULL_HANDLE;
+    }
+
     const uint32_t fi = m_currentFrame;
 
     {
@@ -686,8 +733,8 @@ void VulkanRenderer::Render()
     VkResult acq;
     {
         HE_PROFILE_SCOPE_N("AcquireImage");
-        acq = vkAcquireNextImageKHR(m_device, m_swapchain, UINT64_MAX,
-                                    m_imageReady[fi], VK_NULL_HANDLE, &imageIndex);
+        acq = m_fsr.acquireNextImage(m_device, m_swapchain, UINT64_MAX,   // FSR's proxy through FFX, else plain
+                                     m_imageReady[fi], VK_NULL_HANDLE, &imageIndex);
     }
     if (acq == VK_ERROR_OUT_OF_DATE_KHR)
     {
@@ -745,6 +792,71 @@ void VulkanRenderer::Render()
             b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
             vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
                 VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &b);
+
+            // FSR frame generation: configure, and on a jittered FSR frame its prepare on the upscaler's inputs (depth
+            // and velocity at the scene size, FSR's jitter; encodeFsr's conventions). The proxy generates in its present.
+            const bool fgOn = m_fgFrame && m_fgJitteredFrame && m_viewportDepthImage && m_taaVelocityImage;
+            if (fgOn || m_fgWasOn)
+            {
+                auto depthBarrier = [&](VkImageLayout from, VkImageLayout to, VkAccessFlags sa, VkAccessFlags da,
+                                        VkPipelineStageFlags ss, VkPipelineStageFlags ds) {
+                    VkImageMemoryBarrier d{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+                    d.oldLayout = from; d.newLayout = to;
+                    d.srcQueueFamilyIndex = d.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                    d.image = m_viewportDepthImage; d.subresourceRange = { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1 };
+                    d.srcAccessMask = sa; d.dstAccessMask = da;
+                    vkCmdPipelineBarrier(cmd, ss, ds, 0, 0, nullptr, 0, nullptr, 1, &d);
+                };
+                HE::VulkanFsr::FrameGen fg;
+                fg.cmd = cmd;
+                fg.swapchain = m_swapchain;
+                fg.enabled = fgOn;
+                fg.frameID = ++m_fgFrameId;
+                if (fgOn)
+                {
+                    depthBarrier(VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                 VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
+                                 VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+                    VkMemoryBarrier mb{ VK_STRUCTURE_TYPE_MEMORY_BARRIER };   // the velocity pass's writes, for compute
+                    mb.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+                    mb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+                    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                         0, 1, &mb, 0, nullptr, 0, nullptr);
+                    const glm::mat4& P = m_renderWorld.camera.projection;
+                    const float A = P[2][2], B = P[3][2];
+                    const glm::mat4 inv = glm::inverse(m_renderWorld.camera.view);
+                    const uint64_t nowNs = SDL_GetTicksNS();
+                    fg.hudless  = { m_fgHudless, VK_FORMAT_R8G8B8A8_UNORM, m_fgHudlessW, m_fgHudlessH, false };
+                    fg.depth    = { m_viewportDepthImage, m_depthFormat, m_sceneW, m_sceneH, false };
+                    fg.velocity = { m_taaVelocityImage, VK_FORMAT_R16G16_SFLOAT, m_sceneW, m_sceneH, false };
+                    fg.renderW = m_sceneW; fg.renderH = m_sceneH;
+                    fg.displayW = m_swapExtent.width; fg.displayH = m_swapExtent.height;
+                    fg.jitter = m_fsrJitter;
+                    fg.nearZ = B / (A - 1.0f); fg.farZ = B / (A + 1.0f);   // as encodeFsr: the projection's own planes
+                    fg.fovY = 2.0f * std::atan(1.0f / P[1][1]);
+                    fg.frameMs = m_fgLastNs ? float(double(nowNs - m_fgLastNs) * 1e-6) : 16.6f;
+                    fg.reset = !m_fgWasOn;
+                    fg.camPos = glm::vec3(inv[3]); fg.camUp = glm::normalize(glm::vec3(inv[1]));
+                    fg.camRight = glm::normalize(glm::vec3(inv[0])); fg.camForward = -glm::normalize(glm::vec3(inv[2]));
+                    m_fgLastNs = nowNs;
+                }
+                if (!m_fsr.frameGen(fg) && fgOn)
+                {
+                    static bool s_fgFailLogged = false;
+                    if (!s_fgFailLogged) { s_fgFailLogged = true; HE_LOG_WARN(RHI, "%s", "VulkanRenderer: FSR frame generation configure/prepare failed"); }
+                }
+                if (fgOn)
+                    depthBarrier(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                                 VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                                 VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT);
+                if (fgOn && !m_fgWasOn)
+                {
+                    m_fgPresents = 0; m_fgStatsBase = m_fsr.generatedFrames(); m_fgPresentBase = m_fsr.presentCount(m_swapchain);
+                    HE_LOG_INFO(RHI, "%s", "VulkanRenderer: FSR frame generation on (2x)");
+                }
+                else if (!fgOn && m_fgWasOn) HE_LOG_INFO(RHI, "%s", "VulkanRenderer: FSR frame generation off");
+                m_fgWasOn = fgOn;
+            }
         }
     }
     else
@@ -811,6 +923,18 @@ void VulkanRenderer::Render()
         m_overlayCallback(cmd);
     }
     vkCmdEndRenderPass(cmd);
+    // FSR's proxy takes its back buffer in SHADER_READ_ONLY (it composes and interpolates from it on its own queues;
+    // its first command expects that layout, the validation layer showed), not PRESENT_SRC as a real swapchain image.
+    if (m_fsr.swapchainReplaced())
+    {
+        VkImageMemoryBarrier b{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+        b.oldLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR; b.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b.image = m_swapImages[imageIndex]; b.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+        b.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT; b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                             0, 0, nullptr, 0, nullptr, 1, &b);
+    }
     gpuTimerEnd(cmd);   // frame-end timestamp (after all GPU work this frame)
     vkEndCommandBuffer(cmd);
 
@@ -840,7 +964,21 @@ void VulkanRenderer::Render()
     VkResult pres;
     {
         HE_PROFILE_SCOPE_N("Present");
-        pres = vkQueuePresentKHR(m_graphicsQueue, &pi);
+        pres = m_fsr.queuePresent(m_graphicsQueue, &pi);   // FSR's proxy generates its frame inside this
+    }
+    // HE_FSR_FG_STATS=1: frames FSR generated against frames rendered, every 240 game frames, and the proxy's own
+    // present count (~2x rendered with FG on). ~1 with FG 2x, 0 without.
+    if (m_swapchainPostFx)
+    {
+        static const bool s_fgStats = [] { const char* e = std::getenv("HE_FSR_FG_STATS"); return e && *e == '1'; }();
+        if (s_fgStats && ++m_fgPresents % 240 == 0)
+        {
+            const uint64_t gen = m_fsr.generatedFrames(), shown = m_fsr.presentCount(m_swapchain);
+            HE_LOG_INFO(RHI, "VulkanRenderer: frames (FG %s): %llu generated / %llu rendered = %.2f; proxy presents %llu",
+                        m_fgWasOn ? "on" : "off", static_cast<unsigned long long>(gen - m_fgStatsBase),
+                        static_cast<unsigned long long>(m_fgPresents), double(gen - m_fgStatsBase) / double(m_fgPresents),
+                        static_cast<unsigned long long>(shown - m_fgPresentBase));
+        }
     }
     // OUT_OF_DATE/SUBOPTIMAL after present: the image was still shown, but the
     // swapchain no longer matches the surface — rebuild for the next frame.
@@ -1388,6 +1526,38 @@ void VulkanRenderer::DrawViewportFrame(VkCommandBuffer cmd)
           blitPass(m_postFxFinalRP, m_fxaaFB, m_viewportW, m_viewportH, aaPipe, aaSet, p); }
         m_viewportLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
+        // Frame generation: the finished frame BEFORE its UI, so FG can keep the UI out of the interpolation. Both RGBA8
+        // (a raw copy; the swapchain's BGRA order is FG's backBufferFormat, the hudless one is told apart).
+        if (m_fgFrame && m_fgHudless && m_fgHudlessW == m_viewportW && m_fgHudlessH == m_viewportH)
+        {
+            auto barrier = [&](VkImage img, VkImageLayout from, VkImageLayout to, VkAccessFlags sa, VkAccessFlags da,
+                               VkPipelineStageFlags ss, VkPipelineStageFlags ds) {
+                VkImageMemoryBarrier b{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+                b.oldLayout = from; b.newLayout = to;
+                b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                b.image = img; b.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+                b.srcAccessMask = sa; b.dstAccessMask = da;
+                vkCmdPipelineBarrier(cmd, ss, ds, 0, 0, nullptr, 0, nullptr, 1, &b);
+            };
+            constexpr VkPipelineStageFlags kXfer = VK_PIPELINE_STAGE_TRANSFER_BIT;
+            barrier(m_viewportImage, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                    VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, kXfer);
+            // Last frame's FG read it (compute, on this queue inside the proxy's present).
+            barrier(m_fgHudless, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                    VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, kXfer);
+            VkImageCopy copy{};
+            copy.srcSubresource = copy.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+            copy.extent = { m_viewportW, m_viewportH, 1 };
+            vkCmdCopyImage(cmd, m_viewportImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, m_fgHudless, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                           1, &copy);
+            barrier(m_fgHudless, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                    VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, kXfer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+            m_fgHudlessLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            barrier(m_viewportImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                    VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, kXfer,
+                    VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+        }
+
         _frame.next("UI");
         // ── UI canvas: composite onto viewport image (editor path) ──────
         if (m_uiViewportPipeline && !m_renderWorld.uiObjects.empty() && m_uiViewportFB)
@@ -1474,6 +1644,7 @@ void VulkanRenderer::DrawViewportFrame(VkCommandBuffer cmd)
     // The jitter belongs to this frame's viewport passes only; whatever draws
     // after them (a world preview, the swapchain pass — the game's present
     // blit or the direct fallback) rasterises unjittered.
+    m_fgJitteredFrame = m_taaFrame;   // FG's prepare in Render() runs after this, on this frame's jitter
     m_taaFrame = false;
     m_deferredFrame = false; // likewise the deferred path (the world previews draw forward)
 }
@@ -1514,6 +1685,9 @@ IRenderer::Capabilities VulkanRenderer::GetCapabilities() const
     // FSR rides on TAA's jitter and velocity; render scale only through it (sceneSizeFor).
     c.supportsFSR         = c.supportsTemporalAA && m_fsr.available();
     c.supportsRenderScale = c.supportsFSR;
+    // FSR 3.1 frame generation makes one frame per rendered one (the packaged game's swapchain; SetFrameGeneration),
+    // given the proxy's own queues (createDevice).
+    c.maxFrameGeneration = (c.supportsFSR && m_fgQueues.present.queue && m_fsr.frameGenAvailable(m_physDevice, m_device)) ? 2 : 1;
     // Deferred (Thema 150): G-buffer pass + resolve built at Initialize. Like
     // SSR/TAA it lives on the HDR viewport frame (DrawViewportFrame's useHDR
     // branch), which the editor viewport and the packaged game both run; the
@@ -1741,12 +1915,47 @@ void VulkanRenderer::createDevice()
         if ((qProps[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) && present)
         { m_graphicsFamily = i; break; }
     }
-    float prio = 1.0f;
-    VkDeviceQueueCreateInfo qci{};
-    qci.sType            = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
-    qci.queueFamilyIndex = m_graphicsFamily;
-    qci.queueCount       = 1;
-    qci.pQueuePriorities = &prio;
+    // FSR frame generation's proxy swapchain (VulkanFsr::Queues) submits from its own threads on queues of its own:
+    // present beside the game queue in its family where it has the slots (the swapchain images stay in one family),
+    // async compute and image acquire wherever there is room. Only where the FG runtime is built in; a device without
+    // the slots has no frame generation (maxFrameGeneration 1).
+    std::vector<uint32_t> qUsed(qCount, 0);
+    qUsed[m_graphicsFamily] = 1;
+    struct QSlot { uint32_t family = UINT32_MAX, index = 0; };
+    QSlot fgPresent, fgCompute, fgAcquire;
+#ifdef HE_HAVE_FSR_FG_VK
+    {
+        auto take = [&](auto accept) -> QSlot {
+            for (uint32_t f = 0; f < qCount; ++f)
+                if (qUsed[f] < qProps[f].queueCount && accept(f)) return { f, qUsed[f]++ };
+            return {};
+        };
+        auto flags = [&](uint32_t f) { return qProps[f].queueFlags; };
+        auto presents = [&](uint32_t f) {
+            VkBool32 p = VK_FALSE;
+            vkGetPhysicalDeviceSurfaceSupportKHR(m_physDevice, f, m_surface, &p);
+            return p == VK_TRUE;
+        };
+        fgPresent = take([&](uint32_t f) { return f == m_graphicsFamily; });
+        if (fgPresent.family == UINT32_MAX)
+            fgPresent = take([&](uint32_t f) { return presents(f) && (flags(f) & (VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT)); });
+        fgCompute = take([&](uint32_t f) { return (flags(f) & VK_QUEUE_COMPUTE_BIT) && !(flags(f) & VK_QUEUE_GRAPHICS_BIT); });
+        if (fgCompute.family == UINT32_MAX) fgCompute = take([&](uint32_t f) { return (flags(f) & VK_QUEUE_COMPUTE_BIT) != 0; });
+        fgAcquire = take([&](uint32_t f) { return (flags(f) & (VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT)) == 0; });
+        if (fgAcquire.family == UINT32_MAX) fgAcquire = take([](uint32_t) { return true; });
+    }
+#endif
+    const std::vector<float> prios(*std::max_element(qUsed.begin(), qUsed.end()), 1.0f);
+    std::vector<VkDeviceQueueCreateInfo> qcis;
+    for (uint32_t f = 0; f < qCount; ++f)
+    {
+        if (!qUsed[f]) continue;
+        VkDeviceQueueCreateInfo qci{ VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO };
+        qci.queueFamilyIndex = f;
+        qci.queueCount       = qUsed[f];
+        qci.pQueuePriorities = prios.data();
+        qcis.push_back(qci);
+    }
 
     // ── Hardware ray tracing probe (VK_KHR_ray_query in compute) ────────────
     // Needs Vulkan 1.2 (instance AND device), the three KHR extensions and the
@@ -1836,6 +2045,9 @@ void VulkanRenderer::createDevice()
         coreEnable.tessellationShader = m_tessSupported ? VK_TRUE : VK_FALSE;
         HE::setWaterTessellationAvailable(m_tessSupported);
         coreEnable.shaderInt16 = have.shaderInt16;   // AMD FSR's shaders declare Int16 (VulkanFsr)
+        // ... and its frame generation's read and write storage images without a format.
+        coreEnable.shaderStorageImageReadWithoutFormat  = have.shaderStorageImageReadWithoutFormat;
+        coreEnable.shaderStorageImageWriteWithoutFormat = have.shaderStorageImageWriteWithoutFormat;
         HE_LOG_INFO(RHI, "%s", m_tessSupported
             ? "VulkanRenderer: tessellationShader enabled (material Displacement pin)"
             : "VulkanRenderer: no tessellation (feature missing or HE_TESSELLATION=0), "
@@ -1874,19 +2086,48 @@ void VulkanRenderer::createDevice()
         }
     }
     derivEnable.pNext = wantHwRt ? static_cast<void*>(&asEnable) : nullptr;
+    void* chain = wantDerivatives ? static_cast<void*>(&derivEnable) : wantHwRt ? static_cast<void*>(&asEnable) : nullptr;
+
+    // FSR frame generation's proxy swapchain paces with timeline semaphores (Vulkan 1.2 core): without them no FG.
+    VkPhysicalDeviceTimelineSemaphoreFeatures timelineEnable{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES };
+    bool timeline = false;
+#ifdef HE_HAVE_FSR_FG_VK
+    {
+        VkPhysicalDeviceProperties props{};
+        vkGetPhysicalDeviceProperties(m_physDevice, &props);
+        if (m_instanceApiVersion >= VK_API_VERSION_1_2 && props.apiVersion >= VK_API_VERSION_1_2)
+        {
+            VkPhysicalDeviceTimelineSemaphoreFeatures have{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES };
+            VkPhysicalDeviceFeatures2 feat2{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2 };
+            feat2.pNext = &have;
+            vkGetPhysicalDeviceFeatures2(m_physDevice, &feat2);
+            timeline = have.timelineSemaphore == VK_TRUE;
+        }
+        if (timeline) { timelineEnable.timelineSemaphore = VK_TRUE; timelineEnable.pNext = chain; chain = &timelineEnable; }
+    }
+#endif
 
     VkDeviceCreateInfo dci{};
     dci.sType                   = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
-    dci.pNext                   = wantDerivatives ? static_cast<void*>(&derivEnable)
-                                : wantHwRt        ? static_cast<void*>(&asEnable) : nullptr;
+    dci.pNext                   = chain;
     dci.pEnabledFeatures        = &coreEnable;
-    dci.queueCreateInfoCount    = 1;
-    dci.pQueueCreateInfos       = &qci;
+    dci.queueCreateInfoCount    = static_cast<uint32_t>(qcis.size());
+    dci.pQueueCreateInfos       = qcis.data();
     dci.enabledExtensionCount   = static_cast<uint32_t>(devExts.size());
     dci.ppEnabledExtensionNames = devExts.data();
     vkCheck(vkCreateDevice(m_physDevice, &dci, nullptr, &m_device), "vkCreateDevice");
     vkGetDeviceQueue(m_device, m_graphicsFamily, 0, &m_graphicsQueue);
     vkGetPhysicalDeviceMemoryProperties(m_physDevice, &m_memoryProperties);
+    if (timeline && fgPresent.family != UINT32_MAX && fgCompute.family != UINT32_MAX && fgAcquire.family != UINT32_MAX)
+    {
+        m_fgQueues.game = { m_graphicsQueue, m_graphicsFamily };
+        for (auto [slot, q] : { std::pair{ fgPresent, &m_fgQueues.present }, std::pair{ fgCompute, &m_fgQueues.asyncCompute },
+                                std::pair{ fgAcquire, &m_fgQueues.imageAcquire } })
+        {
+            q->family = slot.family;
+            vkGetDeviceQueue(m_device, slot.family, slot.index, &q->queue);
+        }
+    }
 
     if (wantHwRt)
     {
@@ -1960,11 +2201,16 @@ void VulkanRenderer::createSwapchain(uint32_t w, uint32_t h)
     sci.compositeAlpha   = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
     sci.presentMode      = m_vsync ? VK_PRESENT_MODE_FIFO_KHR : VK_PRESENT_MODE_IMMEDIATE_KHR;
     sci.clipped          = VK_TRUE;
-    vkCheck(vkCreateSwapchainKHR(m_device, &sci, nullptr, &m_swapchain), "vkCreateSwapchainKHR");
+    // Frame generation: FSR's proxy instead (on failure a plain swapchain, and FG stays off for the run).
+    if (!(m_fgProxyWanted && m_fsr.replaceSwapchain(m_physDevice, m_device, m_swapchain, sci, m_fgQueues)))
+    {
+        m_fgProxyWanted = false;
+        vkCheck(vkCreateSwapchainKHR(m_device, &sci, nullptr, &m_swapchain), "vkCreateSwapchainKHR");
+    }
     uint32_t imgCount = 0;
-    vkGetSwapchainImagesKHR(m_device, m_swapchain, &imgCount, nullptr);
+    m_fsr.getSwapchainImages(m_device, m_swapchain, &imgCount, nullptr);   // the proxy's own images through FFX
     m_swapImages.resize(imgCount);
-    vkGetSwapchainImagesKHR(m_device, m_swapchain, &imgCount, m_swapImages.data());
+    m_fsr.getSwapchainImages(m_device, m_swapchain, &imgCount, m_swapImages.data());
     m_swapViews.resize(imgCount);
     for (uint32_t i = 0; i < imgCount; ++i)
     {
@@ -2168,7 +2414,7 @@ void VulkanRenderer::destroySwapchain()
     m_framebuffers.clear();
     m_swapViews.clear();
     m_swapImages.clear();
-    if (m_swapchain) { vkDestroySwapchainKHR(m_device, m_swapchain, nullptr); m_swapchain = VK_NULL_HANDLE; }
+    m_fsr.destroySwapchain(m_device, m_swapchain);   // a proxy with its FG and swapchain contexts (VulkanFsr)
 }
 
 void VulkanRenderer::recreateSwapchain()
@@ -2182,7 +2428,8 @@ void VulkanRenderer::recreateSwapchain()
     if (w <= 0 || h <= 0) return;
 
     deviceWaitIdle();
-    destroySwapchain();                                  // also frees depth + framebuffers
+    destroySwapchain();                                  // also frees depth + framebuffers (and a proxy's FG context)
+    m_fgWasOn = false;                                   // a new FG context: its first prepare resets
     createSwapchain(static_cast<uint32_t>(w), static_cast<uint32_t>(h));
     createFramebuffers();
     createCommandBuffers();                              // pool kept, buffers reallocated
@@ -7158,6 +7405,19 @@ void  VulkanRenderer::SetViewportSize(uint32_t w, uint32_t h)
 void VulkanRenderer::SetSwapchainPostProcessing(bool enabled)
 {
     m_swapchainPostFx = enabled;   // Render() builds or drops the set
+}
+
+void VulkanRenderer::SetFrameGeneration(int multiplier)
+{
+    m_fgWanted = multiplier;   // acted on in Render(): the game's swapchain frames, with FSR (maxFrameGeneration)
+}
+
+void VulkanRenderer::destroyFgHudless()
+{
+    if (m_fgHudless)    { vkDestroyImage(m_device, m_fgHudless, nullptr); m_fgHudless = VK_NULL_HANDLE; }
+    if (m_fgHudlessMem) { vkFreeMemory(m_device, m_fgHudlessMem, nullptr); m_fgHudlessMem = VK_NULL_HANDLE; }
+    m_fgHudlessW = m_fgHudlessH = 0;
+    m_fgHudlessLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 }
 
 bool VulkanRenderer::CaptureViewport(std::vector<uint8_t>& rgba, uint32_t& outW, uint32_t& outH)
