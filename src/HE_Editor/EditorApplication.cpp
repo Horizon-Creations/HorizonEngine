@@ -11466,7 +11466,8 @@ void EditorApplication::dumpFrameHeadless()
 		// Streaming tab's button and the Automatic setting drive) over those cell files, before Play starts. Play then draws every cell it
 		// does not build as its proxy (syncCellProxies), and the log counts the proxy entities against the cells built.
 		// HE_DUMP_PLAYCELLS_CAM=x,y,z[,pitch,yaw] puts the play camera elsewhere: a far shot past the load radius shows nothing but proxies.
-		const bool hlodWitness = [] { const char* h = std::getenv("HE_DUMP_PLAYCELLS_HLOD"); return h && *h == '1'; }();
+		// =2 also runs the three settings over those cells (below): Off, Manual, Automatic, with one cell file touched in each.
+		const bool hlodWitness = [] { const char* h = std::getenv("HE_DUMP_PLAYCELLS_HLOD"); return h && (*h == '1' || *h == '2'); }();
 		size_t hlodCells = 0;
 		double hlodMs = 0.0;
 		if (hlodWitness)
@@ -11485,6 +11486,54 @@ void EditorApplication::dumpFrameHeadless()
 			hlodMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - h0).count();
 			if (const HE::LandscapeHlodTable* t = CellProxyBake::table(m_editorConfig.LandscapeFarBake)) hlodCells = t->cellCount();
 			HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_PLAYCELLS_HLOD %s", CellProxyBake::summary().c_str());
+
+			if (const char* h = std::getenv("HE_DUMP_PLAYCELLS_HLOD"); h && *h == '2')
+			{
+				// Each setting on this split scene, one cell file touched (a newline more: the stamp is size and time, the cell is the same).
+				// The module's own log lines carry the time of every bake it ran by itself.
+				const int modeBefore = m_editorConfig.LandscapeFarBake;
+				HE::CellManifest wm;
+				HE::CellManifest::parse(m_editorWorld->cellManifestJson(), wm);
+				const auto say = [](const std::string& s) { HE_LOG_INFO(Editor, "%s", ("EditorApplication: HE_DUMP_PLAYCELLS_HLOD modes: " + s).c_str()); };
+				const auto touch = [&](size_t i) {
+					std::ofstream(cellRoot / wm.cellPath(wm.cells[i].x, wm.cells[i].z), std::ios::binary | std::ios::app) << '\n';
+					say("touched cell (" + std::to_string(wm.cells[i].x) + ", " + std::to_string(wm.cells[i].z) + ")");
+				};
+				const auto run = [&](double seconds, bool untilIdle)
+				{
+					const auto t = std::chrono::steady_clock::now();
+					while (std::chrono::steady_clock::now() - t < std::chrono::duration<double>(seconds))
+					{
+						CellProxyBake::tick(wctx, false);
+						if (untilIdle && !CellProxyBake::baking()) break;
+						std::this_thread::sleep_for(std::chrono::milliseconds(5));
+					}
+				};
+				if (wm.cells.size() >= 3)
+				{
+					m_editorConfig.LandscapeFarBake = 0;
+					touch(0);
+					const bool started = CellProxyBake::bakeNow(wctx);
+					run(1.5, false);
+					say(std::string("Off: the button ") + (started ? "STARTED a bake (wrong)" : "is refused"));
+					say(std::string("Off: the table is ") + (CellProxyBake::table(0) ? "drawn (wrong)" : "not drawn"));
+					m_editorConfig.LandscapeFarBake = 1;
+					const bool again = CellProxyBake::bakeNow(wctx);
+					run(10.0, true);
+					say(std::string("Manual, the touched cell, the button ") + (again ? "pressed" : "REFUSED (wrong)") + ": " + CellProxyBake::summary());
+					run(0.5, false);   // the cache write of that bake is over (a press during it is ignored)
+					const bool unchanged = CellProxyBake::bakeNow(wctx);
+					run(10.0, true);
+					say(std::string("Manual, nothing touched, the button ") + (unchanged ? "pressed" : "REFUSED (wrong)") + ": " + CellProxyBake::summary());
+					m_editorConfig.LandscapeFarBake = 2;
+					touch(1);
+					run(3.0, false);
+					touch(2);
+					run(14.0, false);
+					say("Automatic: left to itself for 17 s with two cells touched 3 s apart, last summary: " + CellProxyBake::summary());
+				}
+				m_editorConfig.LandscapeFarBake = modeBefore;
+			}
 		}
 
 		setPlayMode(true);

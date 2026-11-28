@@ -79,6 +79,8 @@ namespace
 		return !s_witnessRoot.empty() || (ctx.projectLoaded && ctx.projectManager && !projectRoot(ctx).empty());
 	}
 
+	bool writing() { return s_write && !s_write->done.load(std::memory_order_acquire); }
+
 	void forget()
 	{
 		s_job.cancel();
@@ -173,14 +175,14 @@ void tick(AppContext& ctx, bool userBusy)
 	s_nextCheck = t + kCheckEvery;
 	if (!usable(ctx) || !refreshManifest(ctx)) { if (s_loaded || s_load) forget(); return; }
 	if (const fs::path file = cacheFileFor(ctx, s_manifest); file != s_cacheFile) { forget(); s_cacheFile = file; }
-	if (s_write && s_write->done.load(std::memory_order_acquire)) s_write.reset();
+	if (s_write && !writing()) s_write.reset();
 	if (!s_loaded)
 	{
 		if (!s_load) startLoad();
 		else if (s_load->done.load(std::memory_order_acquire)) { s_cache = std::move(s_load->cache); s_load.reset(); s_loaded = true; }
 		return;
 	}
-	if (mode == 2 && !userBusy && !s_write && t >= s_nextPoll)
+	if (mode == 2 && !userBusy && !writing() && t >= s_nextPoll)
 	{
 		s_nextPoll = t + kPollEvery;
 		startBake(ctx, false);
@@ -189,7 +191,7 @@ void tick(AppContext& ctx, bool userBusy)
 
 bool bakeNow(AppContext& ctx)
 {
-	if (ctx.editorConfig.LandscapeFarBake == 0 || !usable(ctx) || !s_hasCells || !s_loaded || s_job.active() || s_write) return false;
+	if (ctx.editorConfig.LandscapeFarBake == 0 || !usable(ctx) || !s_hasCells || !s_loaded || s_job.active() || writing()) return false;
 	startBake(ctx, true);
 	s_summary = "Cell proxies: baking...";
 	return true;
