@@ -451,6 +451,30 @@ void fadeEdges(Map& m, float width)
 		}
 }
 
+void groundColours(const Map& m, float sizeM, float heightM, bool coloured, std::vector<uint8_t>& rgba)
+{
+	rgba.assign(m.v.size() * 4, 255);
+	const float cell = sizeM / static_cast<float>(std::max(1, std::max(m.w, m.h) - 1));   // metres a pixel
+	const auto at = [&](int x, int y) { return m.v[static_cast<size_t>(std::clamp(y, 0, m.h - 1)) * m.w + std::clamp(x, 0, m.w - 1)]; };
+	for (int y = 0; y < m.h; ++y)
+		for (int x = 0; x < m.w; ++x)
+		{
+			float c[3] = { 0.72f, 0.72f, 0.72f };
+			if (coloured)
+			{
+				const float v = at(x, y);
+				const float slope = std::hypot(at(x + 1, y) - at(x - 1, y), at(x, y + 1) - at(x, y - 1)) * heightM / (2.0f * cell);   // rise over run
+				const float rock = ease((slope - 0.45f) / 0.55f);   // from about 25 degrees, all rock at 45
+				const float snow = ease((v - 0.62f) / 0.18f) * (1.0f - 0.6f * rock);
+				const float soil = ease((v - 0.2f) / 0.3f);
+				const float grass[3] = { 0.42f, 0.52f, 0.28f }, earth[3] = { 0.60f, 0.52f, 0.40f }, stone[3] = { 0.58f, 0.56f, 0.54f };
+				for (int k = 0; k < 3; ++k) c[k] = mix(mix(mix(grass[k], earth[k], soil), stone[k], rock), 1.0f, snow);
+			}
+			uint8_t* out = &rgba[(static_cast<size_t>(y) * m.w + x) * 4];
+			for (int k = 0; k < 3; ++k) out[k] = static_cast<uint8_t>(std::lround(c[k] * 255.0f));
+		}
+}
+
 bool writePgm16(const Map& m, const std::string& path, std::string& error)
 {
 	std::error_code ec;

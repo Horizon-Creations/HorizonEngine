@@ -22,8 +22,14 @@ naturalize, erode, filter, with a test landscape beside the picture.
   warp; blend Replace/Add/Subtract/Max/Min); `refine` (the sketch-to-ground pass: blur, warp, height-scaled ridged relief,
   erosion); `erode` (droplet erosion after Beyer 2015 + thermal passes); `blur`, `terrace`, `normalize`, `invert`, `fadeEdges`;
   every generator and filter takes an optional mask; `writePgm16`, `read`; `requestEdit` / `takeEditRequest`.
-- `src/HE_Editor/StampHeightmapPanel.{h,cpp}`: the tab (`kTabPath`, `render`, `open`, `save`). Controls left, picture in the
-  middle, test landscape right. Undo/Redo 16 steps. Ctrl+S saves the picture (`doSaveActiveTab` in `EditorUI.cpp`).
+- `src/HE_Editor/StampHeightmapPanel.{h,cpp}`: the tab (`kTabPath`, `render`, `open`, `save`). On top one `EditorToolbar::Bar`:
+  File / Edit / View (popups), the modes Generate, Sketch, Naturalize, Erode, Filters, Select, then Undo / Redo, Save on the
+  right. The left column shows only the options of the mode that is on (`drawModeOptions`); the picture is in the middle, the
+  test landscape right. The mouse paints only in Sketch and Select. Undo/Redo 16 steps. Ctrl+S saves (`doSaveActiveTab`).
+- Test landscape (third pass, after the owner's screenshot showed a burnt-out white sheet with too coarse a grid): 513 x 513
+  grid (was 129), rebuilt at once after a button and ten times a second during a stroke; a material of its own
+  (`kGroundAlbedo` 0.6 times a texture from `StampHeightmap::groundColours`: grass, soil, rock by slope, snow by height; View >
+  Ground Colours off = even grey); the sun lower by default (`timeOfDay` 0.33).
 - Live preview on the real landscape: after Save or Load every change rewrites the file and calls
   `AppContext::reloadLandscapeStamps` (= `LandscapeStampSync::reset()`).
 - Registered: `EditorUI.cpp` (Window menu, tab dispatch, save, request), `MacMenuBar.{h,mm}` (`OpenStampHeightmap`),
@@ -44,7 +50,9 @@ naturalize, erode, filter, with a test landscape beside the picture.
 
 **Not verified**
 - The PIXELS of the test landscape: the UI shot rasters foreign textures as flat grey, so only "a texture came back and the
-  terrain was built" is proven, not what it looks like. Nobody has looked at the tab on a real screen yet.
+  terrain was built" is proven, not what it looks like. The owner saw the second pass on screen (D3D, white and burnt out);
+  whether the material of the third pass cures that, whether the ground texture arrives at all and whether it lies the right
+  way round on every backend has NOT been seen. If it is still too bright: lower `kGroundAlbedo`.
 - Any stroke with a real mouse, camera navigation in the test landscape, the live preview on a real landscape.
 - Metal (`MacMenuBar.mm` not compiled here); Software has no world preview and no ImGui textures (text + coarse cells instead).
 

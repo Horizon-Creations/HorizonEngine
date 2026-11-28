@@ -167,6 +167,28 @@ TEST_CASE("stamp heightmap: erosion moves ground downhill, the filters do what t
 	CHECK(at(fl, 16, 16) == doctest::Approx(0.6f));
 }
 
+TEST_CASE("stamp heightmap: the ground colours show rock on steep ground, snow on top, and never a white sheet")
+{
+	SH::Map m;
+	SH::fill(m, 64, 64, 0.0f);
+	SH::gradient(m, 20.0f, 0.0f, 44.0f, 0.0f, 0.0f, 1.0f, 1.0f);   // flat low, a steep face, flat high
+	std::vector<uint8_t> rgba;
+	SH::groundColours(m, 64.0f, 80.0f, true, rgba);
+	REQUIRE(rgba.size() == m.v.size() * 4);
+	const auto px = [&](int x, int y) { return &rgba[(static_cast<size_t>(y) * 64 + x) * 4]; };
+	CHECK(px(2, 32)[1] > px(2, 32)[0]);                // low and flat: green leads
+	CHECK(px(62, 32)[0] == 255);                       // high and flat: snow
+	const uint8_t* face = px(32, 32);                  // the steep face: grey rock, neither green nor white
+	CHECK(std::abs(face[0] - face[1]) < 12);
+	CHECK(face[0] < 200);
+	CHECK(px(2, 32)[3] == 255);
+
+	SH::groundColours(m, 64.0f, 80.0f, false, rgba);  // off: one even grey
+	CHECK(px(2, 32)[0] == px(62, 32)[0]);
+	CHECK(px(2, 32)[0] == px(2, 32)[2]);
+	CHECK(px(2, 32)[0] < 200);
+}
+
 TEST_CASE("stamp heightmap: a request to edit a file is taken once")
 {
 	std::string file;

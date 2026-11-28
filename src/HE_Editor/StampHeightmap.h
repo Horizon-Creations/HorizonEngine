@@ -74,6 +74,12 @@ void invert(Map& m, const Map* mask = nullptr);
 // Fades the picture to 0 toward its border over `width` (a share of the half edge), so the stamp has no visible rim.
 void fadeEdges(Map& m, float width);
 
+// ── A look ──
+// The picture as ground colours (RGBA8, sRGB, w * h): grass low, soil above it, rock where it is steep, snow on top. For the test
+// landscape's material, so its relief reads as terrain and not as a white sheet. `sizeM` and `heightM` are the landscape's edge and
+// what white is, which make a slope a slope. `coloured` off gives one even grey, to judge the form alone.
+void groundColours(const Map& m, float sizeM, float heightM, bool coloured, std::vector<uint8_t>& rgba);
+
 // ── File ──
 // 16-bit PGM, the form a Landscape Stamp's heightmap file is read in at full precision (TerrainHeightmap::readGrey16).
 bool writePgm16(const Map& m, const std::string& path, std::string& error);

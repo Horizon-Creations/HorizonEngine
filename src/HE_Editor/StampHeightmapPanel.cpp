@@ -1,6 +1,7 @@
 #include "StampHeightmapPanel.h"
 #include "StampHeightmap.h"
 #include "EditorApplication.h"     // AppContext, EditorUndo
+#include "EditorToolbar.h"         // the shared toolbar strip: menus, modes, Save
 #include "EditorWidgets.h"
 #include "EditorHelp.h"            // "Stamp Heightmap/<label>" scope for its controls
 #include "EditorCamera.h"          // the Scene window's camera, for the test landscape
@@ -10,12 +11,15 @@
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/TerrainSystem.h>
 #include <HorizonScene/Components/LandscapeStampComponent.h>
+#include <HorizonScene/Components/MaterialComponent.h>
 #include <HorizonScene/Components/TerrainComponent.h>
 #include <HorizonScene/Components/TransformComponent.h>
+#include <ContentManager/Assets.h>
 #include <ContentManager/ContentManager.h>
 #include <Diagnostics/Log.h>
 
 #include <algorithm>
+#include <cfloat>
 #include <cmath>
 #include <cstdlib>
 #include <filesystem>
@@ -34,22 +38,29 @@ namespace
 {
 namespace Row = EditorWidgets::Row;
 namespace SH = HE::StampHeightmap;
+namespace T = EditorToolbar;
 
-enum Tool { Raise, Lower, Smooth, Flatten, Line, Transition, Select, Deselect };
-const char* const kTools[] = { "Raise", "Lower", "Smooth", "Flatten", "Line", "Transition", "Select", "Deselect" };
+// The modes of the bar, in the order a heightmap is usually made: a landform from a seed, corrections by hand, the pass that
+// makes the hand disappear, weather, finishing. Any order works; each mode shows only its own options on the left.
+enum Mode { ModeGenerate, ModeSketch, ModeNaturalize, ModeErode, ModeFilters, ModeSelect };
+enum Tool { Raise, Lower, Smooth, Flatten, Line, Transition, Select, Deselect, NoTool };
+const char* const kSketchTools[] = { "Raise", "Lower", "Smooth", "Flatten", "Line", "Transition" };
+const char* const kSelectBrushes[] = { "Add to Selection", "Remove from Selection" };
 const char* const kShapes[] = { "Hills", "Mountain", "Mountain Range", "Plateau", "Crater", "Volcano", "Dunes", "Island" };
 const char* const kBlends[] = { "Replace", "Add", "Subtract", "Lighten (Max)", "Darken (Min)" };
-const char* const kSizes[] = { "128", "256", "512", "1024" };
-const int kSizeValues[] = { 128, 256, 512, 1024 };
-constexpr uint32_t kPreviewResolution = 129;   // the test landscape's grid: 2^7 + 1, what a terrain snaps to
+// The test landscape's grid: 2^9 + 1 a side, four times as fine as it was. A 256 picture is then drawn finer than it is stored.
+constexpr uint32_t kPreviewResolution = 513;
+// What the ground colours are multiplied with. Below 1 on purpose: a white sheet under the preview's sun burns out, and should
+// the texture ever not arrive, the landscape is an even grey instead of that.
+constexpr float kGroundAlbedo = 0.6f;
 
 struct State
 {
 	SH::Map map;
 	SH::Map mask;                      // the selection, 0..1; no values: everything
 	std::vector<SH::Map> undo, redo;   // the picture before each step, newest last
-	int   tool = Raise;
-	int   sizeIndex = 1;
+	int   mode = ModeGenerate;
+	int   sketchTool = Raise, selectBrush = 0;
 	float radius = 24.0f, strength = 0.5f, startHeight = 1.0f, endHeight = 1.0f;
 
 	int   shape = static_cast<int>(SH::Shape::Mountain), blend = 0, seed = 1, detail = 6;
@@ -61,7 +72,7 @@ struct State
 	std::string name = "Stamp";
 	bool  live = true;
 	bool  fileDirty = false;           // changes the file does not hold yet
-	std::string boundFile;             // the file Save or Load named: Live Preview writes only to it, never over a file nobody chose
+	std::string boundFile;             // the file Save or Open named: Live Preview writes only to it, never over a file nobody chose
 	double lastWrite = 0.0;
 	void* texture = nullptr;           // the picture as the renderer's ImGui texture
 	bool  textureDirty = true;
@@ -73,10 +84,12 @@ struct State
 	// The test landscape: a one-terrain world drawn by the renderer's world preview.
 	std::unique_ptr<HorizonWorld> world;
 	Entity terrain = entt::null;
-	ContentManager* worldContent = nullptr;   // whose meshes the terrain's chunks are; another one (another project) starts over
+	ContentManager* worldContent = nullptr;   // whose assets the terrain's chunks, material and texture are; another one (another project) starts over
+	HE::UUID groundTexture, groundMaterial;
 	EditorCamera cam;
-	bool  camFramed = false, previewDirty = true, previewSaid = false;
-	float previewSize = 256.0f, previewHeight = 80.0f, timeOfDay = 0.4f;
+	bool  camFramed = false, previewDirty = true, previewSaid = false, groundColours = true;
+	double lastPreview = 0.0;
+	float previewSize = 256.0f, previewHeight = 80.0f, timeOfDay = 0.33f;
 };
 State& st() { static State s; return s; }
 
@@ -111,8 +124,34 @@ void pushUndo(State& s)
 	s.redo.clear();
 }
 void changed(State& s) { s.textureDirty = true; s.fileDirty = true; s.previewDirty = true; }
-// The picture got another size (New, Load, an undo across one): a selection of the old size means nothing.
+// The picture got another size (New, Open, an undo across one): a selection of the old size means nothing.
 void sizeChanged(State& s) { if (s.mask.v.size() != s.map.v.size()) s.mask = {}; }
+
+void undoStep(State& s)
+{
+	if (s.undo.empty()) return;
+	s.redo.push_back(std::move(s.map));
+	s.map = std::move(s.undo.back());
+	s.undo.pop_back();
+	sizeChanged(s);
+	changed(s);
+}
+void redoStep(State& s)
+{
+	if (s.redo.empty()) return;
+	s.undo.push_back(std::move(s.map));
+	s.map = std::move(s.redo.back());
+	s.redo.pop_back();
+	sizeChanged(s);
+	changed(s);
+}
+void newPicture(State& s, int size)
+{
+	pushUndo(s);
+	SH::fill(s.map, size, size, 0.0f);
+	sizeChanged(s);
+	changed(s);
+}
 
 void uploadTexture(AppContext& ctx, State& s)
 {
@@ -136,171 +175,247 @@ void uploadTexture(AppContext& ctx, State& s)
 
 void releasePreview(AppContext& ctx, State& s)
 {
-	if (s.world && s.worldContent == ctx.contentManager) TerrainSystem::releaseWorld(*s.world, *ctx.contentManager, ctx.renderer);
+	if (s.world && s.worldContent == ctx.contentManager)
+	{
+		TerrainSystem::releaseWorld(*s.world, *ctx.contentManager, ctx.renderer);
+		ctx.contentManager->unloadAsset(s.groundMaterial);
+		ctx.contentManager->unloadAsset(s.groundTexture);
+	}
 	s.world.reset();
 	s.terrain = entt::null;
+	s.groundTexture = s.groundMaterial = HE::UUID{};
 	s.previewDirty = true;
 }
 
-// ── Controls ──
-void drawPaint(State& s)
+// ── The bar: menus, modes, undo, Save ──
+void drawFileMenu(AppContext& ctx, State& s)
 {
-	ImGui::SeparatorText("Sketch");
-	Row::combo("Tool", &s.tool, kTools, IM_ARRAYSIZE(kTools));
-	if (s.tool != Transition) Row::dragFloat("Radius", &s.radius, 0.5f, 1.0f, 512.0f, "%.0f px");
-	Row::sliderFloat("Strength", &s.strength, 0.0f, 1.0f);
-	if (s.tool == Line || s.tool == Transition || s.tool == Flatten)
-		Row::sliderFloat("Start Height", &s.startHeight, 0.0f, 1.0f);
-	if (s.tool == Line || s.tool == Transition)
-		Row::sliderFloat("End Height", &s.endHeight, 0.0f, 1.0f);
-	ImGui::BeginDisabled(s.undo.empty());
-	if (EditorWidgets::button("Undo Step"))
+	ImGui::SetNextWindowSizeConstraints(ImVec2(280.0f, 0.0f), ImVec2(420.0f, FLT_MAX));
+	if (!ImGui::BeginPopup("##shFileMenu")) return;
+	if (ImGui::BeginMenu("New Picture"))
 	{
-		s.redo.push_back(std::move(s.map));
-		s.map = std::move(s.undo.back());
-		s.undo.pop_back();
-		sizeChanged(s);
-		changed(s);
+		if (EditorWidgets::menuItem("128 x 128")) newPicture(s, 128);
+		if (EditorWidgets::menuItem("256 x 256")) newPicture(s, 256);
+		if (EditorWidgets::menuItem("512 x 512")) newPicture(s, 512);
+		if (EditorWidgets::menuItem("1024 x 1024")) newPicture(s, 1024);
+		ImGui::EndMenu();
 	}
-	ImGui::EndDisabled();
-	ImGui::SameLine();
-	ImGui::BeginDisabled(s.redo.empty());
-	if (EditorWidgets::button("Redo Step"))
-	{
-		s.undo.push_back(std::move(s.map));
-		s.map = std::move(s.redo.back());
-		s.redo.pop_back();
-		sizeChanged(s);
-		changed(s);
-	}
-	ImGui::EndDisabled();
-}
-
-void drawGenerate(State& s)
-{
-	ImGui::SeparatorText("Generate");
-	Row::combo("Landform", &s.shape, kShapes, IM_ARRAYSIZE(kShapes));
-	Row::combo("Blend", &s.blend, kBlends, IM_ARRAYSIZE(kBlends));
-	Row::inputInt("Seed", &s.seed);
-	Row::sliderFloat("Feature Size", &s.scale, 0.05f, 1.5f);
-	Row::sliderInt("Octaves", &s.detail, 1, 9);
-	Row::sliderFloat("Roughness", &s.roughness, 0.2f, 0.8f);
-	Row::sliderFloat("Warp##gen", &s.warp, 0.0f, 1.0f);
-	Row::sliderFloat("Peak Height", &s.genHeight, 0.0f, 1.0f);
-	const bool generate = EditorWidgets::button("Generate");
-	ImGui::SameLine();
-	const bool again = EditorWidgets::button("New Seed");   // the same landform, another sibling of it
-	if (again) ++s.seed;
-	if (generate || again)
-	{
-		pushUndo(s);
-		SH::GenParams p;
-		p.shape = static_cast<SH::Shape>(std::clamp(s.shape, 0, static_cast<int>(SH::Shape::Count) - 1));
-		p.blend = static_cast<SH::Blend>(std::clamp(s.blend, 0, static_cast<int>(SH::Blend::Count) - 1));
-		p.seed = static_cast<uint32_t>(s.seed);
-		p.scale = s.scale; p.detail = s.detail; p.roughness = s.roughness; p.warp = s.warp; p.height = s.genHeight;
-		SH::generate(s.map, p, maskOf(s));
-		changed(s);
-	}
-}
-
-void drawNaturalize(State& s)
-{
-	ImGui::SeparatorText("Naturalize");
-	Row::sliderFloat("Smoothing", &s.natSmoothing, 0.0f, 0.15f, "%.3f");
-	Row::sliderFloat("Relief", &s.natDetail, 0.0f, 1.0f);
-	Row::sliderFloat("Warp##nat", &s.natWarp, 0.0f, 1.0f);
-	Row::sliderFloat("Erosion##nat", &s.natErosion, 0.0f, 1.0f);
-	if (EditorWidgets::button("Naturalize Sketch"))
-	{
-		pushUndo(s);
-		SH::RefineParams p;
-		p.seed = static_cast<uint32_t>(s.seed);
-		p.smoothing = s.natSmoothing; p.detail = s.natDetail; p.warp = s.natWarp; p.erosion = s.natErosion;
-		SH::refine(s.map, p, maskOf(s));
-		changed(s);
-	}
-}
-
-void drawFilters(State& s)
-{
-	ImGui::SeparatorText("Filters");
-	Row::sliderFloat("Water", &s.erosion, 0.0f, 1.0f);
-	Row::sliderInt("Gravity Passes", &s.thermalPasses, 0, 40);
-	if (EditorWidgets::button("Erode")) { pushUndo(s); SH::erode(s.map, s.erosion, s.thermalPasses, static_cast<uint32_t>(s.seed), maskOf(s)); changed(s); }
-	Row::dragFloat("Blur Radius", &s.blurRadius, 0.25f, 1.0f, 128.0f, "%.0f px");
-	if (EditorWidgets::button("Blur")) { pushUndo(s); SH::blur(s.map, s.blurRadius, maskOf(s)); changed(s); }
-	Row::sliderInt("Terrace Steps", &s.terraceSteps, 2, 32);
-	Row::sliderFloat("Terrace Sharpness", &s.terraceSharpness, 0.0f, 1.0f);
-	if (EditorWidgets::button("Terrace")) { pushUndo(s); SH::terrace(s.map, s.terraceSteps, s.terraceSharpness, maskOf(s)); changed(s); }
-	Row::sliderFloat("Edge Fade Width", &s.fadeWidth, 0.02f, 1.0f);
-	if (EditorWidgets::button("Fade Edges")) { pushUndo(s); SH::fadeEdges(s.map, s.fadeWidth); changed(s); }
-	if (EditorWidgets::button("Normalize")) { pushUndo(s); SH::normalize(s.map); changed(s); }
-	ImGui::SameLine();
-	if (EditorWidgets::button("Invert")) { pushUndo(s); SH::invert(s.map, maskOf(s)); changed(s); }
-}
-
-void drawSelection(State& s)
-{
-	ImGui::SeparatorText("Selection");
-	const bool has = maskOf(s) != nullptr;
-	ImGui::TextDisabled(has ? "Generate and the filters work in the selection." : "Nothing selected: everything is worked on.");
-	ImGui::BeginDisabled(!has);
-	if (EditorWidgets::button("Clear Selection")) { s.mask = {}; s.textureDirty = true; }
-	ImGui::SameLine();
-	if (EditorWidgets::button("Invert Selection")) { for (float& v : s.mask.v) v = 1.0f - v; s.textureDirty = true; }
-	if (EditorWidgets::button("Feather Selection")) { SH::blur(s.mask, std::max(2.0f, s.radius * 0.5f)); s.textureDirty = true; }
-	ImGui::EndDisabled();
-}
-
-void drawFile(AppContext& ctx, State& s)
-{
-	ImGui::SeparatorText("Picture");
-	Row::combo("Resolution", &s.sizeIndex, kSizes, IM_ARRAYSIZE(kSizes));
-	if (EditorWidgets::button("New"))
-	{
-		pushUndo(s);
-		SH::fill(s.map, kSizeValues[s.sizeIndex], kSizeValues[s.sizeIndex], 0.0f);
-		sizeChanged(s);
-		changed(s);
-	}
-	ImGui::SameLine();
-	if (EditorWidgets::button("Fill"))
-	{
-		pushUndo(s);
-		SH::fill(s.map, s.map.w, s.map.h, s.startHeight);
-		changed(s);
-	}
-
-	ImGui::SeparatorText("File");
 	Row::inputText("Name", &s.name);
-	if (EditorWidgets::button("Save")) saveFile(ctx, s);
-	ImGui::SameLine();
-	if (EditorWidgets::button("Load")) open(ctx, relativeFile(s));
-	EditorWidgets::checkbox("Live Preview", &s.live);
-
-	ImGui::SeparatorText("Landscape");
+	if (EditorWidgets::menuItem("Open")) open(ctx, relativeFile(s));
+	if (EditorWidgets::menuItem("Save", "Ctrl+S")) saveFile(ctx, s);
+	ImGui::Separator();
+	if (EditorWidgets::menuItem("Live Preview", nullptr, s.live)) s.live = !s.live;
 	auto& reg = ctx.world->registry();
 	const Entity sel = ctx.selection.primary();
 	LandscapeStampComponent* stamp = reg.valid(sel) ? reg.try_get<LandscapeStampComponent>(sel) : nullptr;
-	ImGui::BeginDisabled(!stamp);
-	if (EditorWidgets::button("Assign to Selected Stamp") && saveFile(ctx, s))
+	if (EditorWidgets::menuItem("Assign to Selected Stamp", nullptr, false, stamp != nullptr) && saveFile(ctx, s))
 	{
 		if (ctx.undoSys) ctx.undoSys->snapshotNow("Assign Stamp Heightmap");
 		stamp->heightmapFile = relativeFile(s);
+		s.status = "The selected stamp now reads " + relativeFile(s);
 	}
-	ImGui::EndDisabled();
-	if (EditorWidgets::button("Use in Stamp Tool") && saveFile(ctx, s))
+	if (EditorWidgets::menuItem("Use in Stamp Tool") && saveFile(ctx, s))
 	{
 		LandscapeWorldTools::setStampToolFile(relativeFile(s));
 		s.status = "The Stamp tool of the Landscape mode now places " + relativeFile(s);
 	}
+	ImGui::EndPopup();
+}
 
-	ImGui::SeparatorText("Test Landscape");
+void drawEditMenu(State& s)
+{
+	if (!ImGui::BeginPopup("##shEditMenu")) return;
+	if (EditorWidgets::menuItem("Undo Step", nullptr, false, !s.undo.empty())) undoStep(s);
+	if (EditorWidgets::menuItem("Redo Step", nullptr, false, !s.redo.empty())) redoStep(s);
+	ImGui::Separator();
+	const bool has = maskOf(s) != nullptr;
+	if (EditorWidgets::menuItem("Clear Selection", nullptr, false, has)) { s.mask = {}; s.textureDirty = true; }
+	if (EditorWidgets::menuItem("Invert Selection", nullptr, false, has)) { for (float& v : s.mask.v) v = 1.0f - v; s.textureDirty = true; }
+	ImGui::EndPopup();
+}
+
+void drawViewMenu(State& s)
+{
+	ImGui::SetNextWindowSizeConstraints(ImVec2(280.0f, 0.0f), ImVec2(420.0f, FLT_MAX));
+	if (!ImGui::BeginPopup("##shViewMenu")) return;
 	if (Row::dragFloat("Test Size", &s.previewSize, 1.0f, 16.0f, 8192.0f, "%.0f m")) { s.previewDirty = true; s.camFramed = false; }
 	if (Row::dragFloat("Test Height", &s.previewHeight, 0.5f, 1.0f, 4096.0f, "%.0f m")) s.previewDirty = true;
 	Row::sliderFloat("Time of Day", &s.timeOfDay, 0.2f, 0.8f);
-	if (!s.status.empty()) ImGui::TextDisabled("%s", s.status.c_str());
+	if (EditorWidgets::menuItem("Ground Colours", nullptr, s.groundColours)) { s.groundColours = !s.groundColours; s.previewDirty = true; }
+	if (EditorWidgets::menuItem("Frame Test Landscape", "F")) s.camFramed = false;
+	ImGui::EndPopup();
+}
+
+void drawBar(AppContext& ctx, State& s)
+{
+	// OpenPopup and BeginPopup have to meet in one ID scope, and the bar's cells push their own: remember, open below.
+	const char* openMenu = nullptr;
+	{
+		T::Bar bar;
+		bar.group();
+		if (bar.item("##shFile", T::iconFolder, "File", false, true, "New picture, open, save, hand the picture to a stamp")) openMenu = "##shFileMenu";
+		if (bar.item("##shEdit", T::iconList, "Edit", false, true, "Undo, redo, the selection")) openMenu = "##shEditMenu";
+		if (bar.item("##shView", T::iconEye, "View", false, true, "The test landscape: size, height, sun, colours")) openMenu = "##shViewMenu";
+		bar.endGroup();
+		bar.gap();
+		bar.group();
+		const auto mode = [&](const char* id, T::IconFn icon, const char* label, int m, const char* tip) {
+			if (bar.item(id, icon, label, s.mode == m, true, tip)) s.mode = m;
+		};
+		mode("##shGenerate", T::iconMountain, "Generate", ModeGenerate, "Make a landform from a seed");
+		mode("##shSketch", T::iconBrush, "Sketch", ModeSketch, "Draw heights roughly with brushes, lines and transitions");
+		mode("##shNaturalize", T::iconSparkle, "Naturalize", ModeNaturalize, "Turn a rough sketch into ground that looks grown");
+		mode("##shErode", T::iconWave, "Erode", ModeErode, "Let water and gravity work on the ground");
+		mode("##shFilters", T::iconLayers, "Filters", ModeFilters, "Blur, terrace, fade the edges, normalize, invert");
+		mode("##shSelect", T::iconCircle, "Select", ModeSelect, "Paint the region the other modes are limited to");
+		bar.endGroup();
+		bar.gap();
+		bar.group();
+		if (bar.item("##shUndo", T::iconHistory, "Undo", false, !s.undo.empty(), "Take back the last step")) undoStep(s);
+		if (bar.item("##shRedo", T::iconRefresh, "Redo", false, !s.redo.empty(), "Bring back the step Undo took away")) redoStep(s);
+		bar.endGroup();
+		bar.markDirty(s.fileDirty);
+		if (T::saveButton(bar, true)) saveFile(ctx, s);   // with the editor's save hook this goes the Ctrl+S way (save() below)
+	}
+	if (openMenu) ImGui::OpenPopup(openMenu);
+	drawFileMenu(ctx, s);
+	drawEditMenu(s);
+	drawViewMenu(s);
+}
+
+// ── The left column: the options of the mode that is on, and its one action ──
+void hint(const char* text)
+{
+	EditorWidgets::WrapText wrap;
+	ImGui::TextDisabled("%s", text);
+}
+
+void drawModeOptions(State& s)
+{
+	const bool selection = maskOf(s) != nullptr;
+	const char* const where = selection ? "Works in the selection." : "Works on the whole picture. Paint a region in Select to limit it.";
+	switch (s.mode)
+	{
+	case ModeGenerate:
+	{
+		ImGui::SeparatorText("Generate");
+		hint("A landform from a seed. The same seed gives the same ground, another one a sibling of it.");
+		Row::combo("Landform", &s.shape, kShapes, IM_ARRAYSIZE(kShapes));
+		Row::combo("Blend", &s.blend, kBlends, IM_ARRAYSIZE(kBlends));
+		Row::inputInt("Seed", &s.seed);
+		Row::sliderFloat("Feature Size", &s.scale, 0.05f, 1.5f);
+		Row::sliderInt("Octaves", &s.detail, 1, 9);
+		Row::sliderFloat("Roughness", &s.roughness, 0.2f, 0.8f);
+		Row::sliderFloat("Warp##gen", &s.warp, 0.0f, 1.0f);
+		Row::sliderFloat("Peak Height", &s.genHeight, 0.0f, 1.0f);
+		const bool generate = EditorWidgets::primaryButton("Generate");
+		ImGui::SameLine();
+		const bool again = EditorWidgets::button("New Seed");   // the same landform, another sibling of it
+		if (again) ++s.seed;
+		if (generate || again)
+		{
+			pushUndo(s);
+			SH::GenParams p;
+			p.shape = static_cast<SH::Shape>(std::clamp(s.shape, 0, static_cast<int>(SH::Shape::Count) - 1));
+			p.blend = static_cast<SH::Blend>(std::clamp(s.blend, 0, static_cast<int>(SH::Blend::Count) - 1));
+			p.seed = static_cast<uint32_t>(s.seed);
+			p.scale = s.scale; p.detail = s.detail; p.roughness = s.roughness; p.warp = s.warp; p.height = s.genHeight;
+			SH::generate(s.map, p, maskOf(s));
+			changed(s);
+		}
+		hint(where);
+		break;
+	}
+	case ModeSketch:
+	{
+		ImGui::SeparatorText("Sketch");
+		hint("Draw on the picture where the ground is high. Rough is enough: Naturalize works it out.");
+		Row::combo("Tool", &s.sketchTool, kSketchTools, IM_ARRAYSIZE(kSketchTools));
+		if (s.sketchTool != Transition) Row::dragFloat("Radius", &s.radius, 0.5f, 1.0f, 512.0f, "%.0f px");
+		Row::sliderFloat("Strength", &s.strength, 0.0f, 1.0f);
+		if (s.sketchTool == Line || s.sketchTool == Transition || s.sketchTool == Flatten)
+			Row::sliderFloat("Start Height", &s.startHeight, 0.0f, 1.0f);
+		if (s.sketchTool == Line || s.sketchTool == Transition)
+			Row::sliderFloat("End Height", &s.endHeight, 0.0f, 1.0f);
+		if (EditorWidgets::button("Fill"))
+		{
+			pushUndo(s);
+			SH::fill(s.map, s.map.w, s.map.h, s.startHeight);
+			changed(s);
+		}
+		break;
+	}
+	case ModeNaturalize:
+	{
+		ImGui::SeparatorText("Naturalize");
+		hint("Takes the picture as a rough statement of where the ground is high: brush marks are blurred away, outlines bent, ridged relief added, the result eroded.");
+		Row::sliderFloat("Smoothing", &s.natSmoothing, 0.0f, 0.15f, "%.3f");
+		Row::sliderFloat("Relief", &s.natDetail, 0.0f, 1.0f);
+		Row::sliderFloat("Warp##nat", &s.natWarp, 0.0f, 1.0f);
+		Row::sliderFloat("Erosion##nat", &s.natErosion, 0.0f, 1.0f);
+		Row::inputInt("Seed##nat", &s.seed);
+		if (EditorWidgets::primaryButton("Naturalize Sketch"))
+		{
+			pushUndo(s);
+			SH::RefineParams p;
+			p.seed = static_cast<uint32_t>(s.seed);
+			p.smoothing = s.natSmoothing; p.detail = s.natDetail; p.warp = s.natWarp; p.erosion = s.natErosion;
+			SH::refine(s.map, p, maskOf(s));
+			changed(s);
+		}
+		hint(where);
+		break;
+	}
+	case ModeErode:
+	{
+		ImGui::SeparatorText("Erode");
+		hint("Water carves channels and fills hollows; gravity lets slopes that are too steep slide. Press again for more.");
+		Row::sliderFloat("Water", &s.erosion, 0.0f, 1.0f);
+		Row::sliderInt("Gravity Passes", &s.thermalPasses, 0, 40);
+		Row::inputInt("Seed##erode", &s.seed);
+		if (EditorWidgets::primaryButton("Erode")) { pushUndo(s); SH::erode(s.map, s.erosion, s.thermalPasses, static_cast<uint32_t>(s.seed), maskOf(s)); changed(s); }
+		hint(where);
+		break;
+	}
+	case ModeFilters:
+	{
+		ImGui::SeparatorText("Soften");
+		Row::dragFloat("Blur Radius", &s.blurRadius, 0.25f, 1.0f, 128.0f, "%.0f px");
+		if (EditorWidgets::button("Blur")) { pushUndo(s); SH::blur(s.map, s.blurRadius, maskOf(s)); changed(s); }
+		ImGui::SeparatorText("Terraces");
+		Row::sliderInt("Terrace Steps", &s.terraceSteps, 2, 32);
+		Row::sliderFloat("Terrace Sharpness", &s.terraceSharpness, 0.0f, 1.0f);
+		if (EditorWidgets::button("Terrace")) { pushUndo(s); SH::terrace(s.map, s.terraceSteps, s.terraceSharpness, maskOf(s)); changed(s); }
+		ImGui::SeparatorText("Border");
+		Row::sliderFloat("Edge Fade Width", &s.fadeWidth, 0.02f, 1.0f);
+		if (EditorWidgets::button("Fade Edges")) { pushUndo(s); SH::fadeEdges(s.map, s.fadeWidth); changed(s); }
+		ImGui::SeparatorText("Heights");
+		if (EditorWidgets::button("Normalize")) { pushUndo(s); SH::normalize(s.map); changed(s); }
+		ImGui::SameLine();
+		if (EditorWidgets::button("Invert")) { pushUndo(s); SH::invert(s.map, maskOf(s)); changed(s); }
+		hint(where);
+		break;
+	}
+	default:
+	{
+		ImGui::SeparatorText("Select");
+		hint("Paint the region Generate, Naturalize, Erode and the filters are limited to. What is outside is dimmed blue. Feather the edge and what is made inside blends into the rest.");
+		Row::combo("Brush", &s.selectBrush, kSelectBrushes, IM_ARRAYSIZE(kSelectBrushes));
+		Row::dragFloat("Radius", &s.radius, 0.5f, 1.0f, 512.0f, "%.0f px");
+		ImGui::BeginDisabled(!selection);
+		if (EditorWidgets::button("Feather Selection")) { SH::blur(s.mask, std::max(2.0f, s.radius * 0.5f)); s.textureDirty = true; }
+		if (EditorWidgets::button("Clear Selection")) { s.mask = {}; s.textureDirty = true; }
+		ImGui::SameLine();
+		if (EditorWidgets::button("Invert Selection")) { for (float& v : s.mask.v) v = 1.0f - v; s.textureDirty = true; }
+		ImGui::EndDisabled();
+		break;
+	}
+	}
+	if (!s.status.empty())
+	{
+		ImGui::Spacing();
+		hint(s.status.c_str());
+	}
 }
 
 // ── The picture ──
@@ -328,17 +443,21 @@ void drawCanvas(State& s, const ImVec2& avail)
 	}
 	dl->AddRect(p0, ImVec2(p0.x + size.x, p0.y + size.y), ImGui::GetColorU32(ImGuiCol_Border));
 
+	// Which tool the mouse holds: the Sketch mode's, the Select mode's brush, none in the modes that work by a button.
+	const int tool = s.mode == ModeSketch ? s.sketchTool : s.mode == ModeSelect ? (s.selectBrush == 0 ? Select : Deselect) : NoTool;
+	if (tool == NoTool) { s.dragging = false; return; }
+
 	const ImVec2 mouse = ImGui::GetIO().MousePos;
 	const ImVec2 px((mouse.x - p0.x) / scale - 0.5f, (mouse.y - p0.y) / scale - 0.5f);   // the mouse in pixels of the picture
 	const auto screen = [&](const ImVec2& p) { return ImVec2(p0.x + (p.x + 0.5f) * scale, p0.y + (p.y + 0.5f) * scale); };
-	const bool dragTool = s.tool == Line || s.tool == Transition;   // applied when the button is let go
-	const bool selectTool = s.tool == Select || s.tool == Deselect; // paints the selection, not the picture
+	const bool dragTool = tool == Line || tool == Transition;   // applied when the button is let go
+	const bool selectTool = tool == Select || tool == Deselect; // paints the selection, not the picture
 
 	if (active && !s.dragging)
 	{
 		if (!selectTool) pushUndo(s);
-		// The first Select stroke starts from nothing selected, the first Deselect from everything.
-		else if (!maskOf(s)) SH::fill(s.mask, s.map.w, s.map.h, s.tool == Select ? 0.0f : 1.0f);
+		// The first Add stroke starts from nothing selected, the first Remove from everything.
+		else if (!maskOf(s)) SH::fill(s.mask, s.map.w, s.map.h, tool == Select ? 0.0f : 1.0f);
 		s.dragging = true;
 		s.dragStart = s.dragLast = px;
 	}
@@ -352,13 +471,13 @@ void drawCanvas(State& s, const ImVec2& avail)
 		{
 			const float t = steps > 0 ? static_cast<float>(i) / steps : 1.0f;
 			const float x = s.dragLast.x + (px.x - s.dragLast.x) * t, y = s.dragLast.y + (px.y - s.dragLast.y) * t;
-			switch (s.tool)
+			switch (tool)
 			{
 			case Smooth:   SH::smooth(s.map, x, y, s.radius, s.strength); break;
 			case Flatten:  SH::flatten(s.map, x, y, s.radius, s.startHeight, s.strength * 0.5f); break;
 			case Select:   SH::dab(s.mask, x, y, s.radius, 1.0f); break;
 			case Deselect: SH::dab(s.mask, x, y, s.radius, -1.0f); break;
-			default:       SH::dab(s.map, x, y, s.radius, s.tool == Lower ? -amount : amount); break;
+			default:       SH::dab(s.map, x, y, s.radius, tool == Lower ? -amount : amount); break;
 			}
 		}
 		if (steps > 0) s.dragLast = px;
@@ -367,15 +486,15 @@ void drawCanvas(State& s, const ImVec2& avail)
 	}
 	if (s.dragging && !active)
 	{
-		if (s.tool == Line) SH::line(s.map, s.dragStart.x, s.dragStart.y, px.x, px.y, s.radius, s.startHeight, s.endHeight, s.strength);
-		if (s.tool == Transition) SH::gradient(s.map, s.dragStart.x, s.dragStart.y, px.x, px.y, s.startHeight, s.endHeight, s.strength);
+		if (tool == Line) SH::line(s.map, s.dragStart.x, s.dragStart.y, px.x, px.y, s.radius, s.startHeight, s.endHeight, s.strength);
+		if (tool == Transition) SH::gradient(s.map, s.dragStart.x, s.dragStart.y, px.x, px.y, s.startHeight, s.endHeight, s.strength);
 		if (dragTool) changed(s);
 		s.dragging = false;
 	}
 
 	const ImU32 accent = ImGui::GetColorU32(ImGuiCol_PlotHistogram);
 	if (s.dragging && dragTool) dl->AddLine(screen(s.dragStart), screen(px), accent, 2.0f);
-	if (hovered && s.tool != Transition) dl->AddCircle(screen(px), s.radius * scale, accent, 48);
+	if (hovered && tool != Transition) dl->AddCircle(screen(px), s.radius * scale, accent, 48);
 }
 
 // ── The test landscape ──
@@ -390,10 +509,31 @@ void drawPreview(AppContext& ctx, State& s, const ImVec2& avail)
 		s.world->addComponent(s.terrain, TransformComponent{});
 		TerrainComponent tc;
 		tc.resolution = kPreviewResolution;
+		tc.lodDistanceScale = 16.0f;   // one object looked at as a whole: no chunk of it is "far"
 		s.world->addComponent(s.terrain, tc);
+
+		// The ground's material: the picture as colours (StampHeightmap::groundColours), laid once over the whole terrain.
+		TextureAsset tex;
+		tex.type = HE::AssetType::Texture;
+		tex.name = "StampHeightmapGround";
+		tex.width = tex.height = 1; tex.channels = 4;
+		tex.srgb = true;
+		tex.data.assign(4, 0xB8);
+		s.groundTexture = ctx.contentManager->registerTexture(std::move(tex));
+		MaterialAsset mat;
+		mat.type = HE::AssetType::Material;
+		mat.name = "StampHeightmapGround";
+		mat.baseColor[0] = mat.baseColor[1] = mat.baseColor[2] = kGroundAlbedo;
+		mat.roughness = 0.95f;
+		mat.texturePaths = { "StampHeightmapGround.tex" };
+		mat.textureIds = { s.groundTexture };
+		s.groundMaterial = ctx.contentManager->registerMaterial(std::move(mat));
+		s.world->addComponent(s.terrain, MaterialComponent{ s.groundMaterial });
 		s.previewDirty = true;
 	}
-	if (s.previewDirty)
+	// The terrain follows the picture: at once when a button made the change, ten times a second during a stroke (513 x 513
+	// heights and the chunks from them are too much for every frame of one).
+	if (s.previewDirty && (!s.dragging || ImGui::GetTime() - s.lastPreview > 0.1))
 	{
 		// The picture resampled onto the terrain's grid, in metres. Row 0 of the picture is the terrain's -Z edge, as on a stamp.
 		TerrainComponent& tc = s.world->registry().get<TerrainComponent>(s.terrain);
@@ -414,7 +554,15 @@ void drawPreview(AppContext& ctx, State& s, const ImVec2& avail)
 			}
 		tc.dirty = true;
 		TerrainSystem::updateTerrains(*s.world, *ctx.contentManager, ctx.renderer);
+		if (TextureAsset* tex = ctx.contentManager->getTextureMutable(s.groundTexture))
+		{
+			SH::groundColours(s.map, s.previewSize, s.previewHeight, s.groundColours, tex->data);
+			tex->width = static_cast<uint32_t>(s.map.w);
+			tex->height = static_cast<uint32_t>(s.map.h);
+			ctx.renderer->InvalidateTexture(s.groundTexture);
+		}
 		s.previewDirty = false;
+		s.lastPreview = ImGui::GetTime();
 	}
 	if (!s.camFramed)
 	{
@@ -468,7 +616,7 @@ void open(AppContext& ctx, const std::string& file)
 	const bool own = std::filesystem::equivalent(p, projectDir(ctx) / relativeFile(s), ec);
 	s.boundFile = own ? relativeFile(s) : std::string();
 	s.fileDirty = !own;
-	s.status = "Loaded " + p.filename().string();
+	s.status = "Opened " + p.filename().string();
 }
 
 bool save(AppContext& ctx)
@@ -488,7 +636,7 @@ void render(AppContext& ctx, const ImVec2& pos, const ImVec2& size)
 		ImGuiWindowFlags_NoSavedSettings);
 	if (!ctx.projectLoaded || !ctx.world || !ctx.contentManager || !ctx.renderer)
 	{
-		ImGui::TextDisabled("No project is open.");
+		ImGui::TextDisabled("Open a project to make a stamp heightmap.");
 		ImGui::End();
 		return;
 	}
@@ -506,17 +654,14 @@ void render(AppContext& ctx, const ImVec2& pos, const ImVec2& size)
 		}
 	}
 
+	drawBar(ctx, s);
+
 	ImGui::BeginChild("##stampHeightmapControls", ImVec2(300.0f, 0.0f));
-	drawPaint(s);
-	drawGenerate(s);
-	drawNaturalize(s);
-	drawFilters(s);
-	drawSelection(s);
-	drawFile(ctx, s);
+	drawModeOptions(s);
 	ImGui::EndChild();
 	ImGui::SameLine();
 
-	// The picture on the left, the test landscape on the right, half the remaining width each.
+	// The picture, then the test landscape, half the remaining width each.
 	const ImVec2 rest = ImGui::GetContentRegionAvail();
 	const float half = std::max(64.0f, (rest.x - ImGui::GetStyle().ItemSpacing.x) * 0.5f);
 	ImGui::BeginChild("##stampHeightmapCanvasArea", ImVec2(half, 0.0f));
