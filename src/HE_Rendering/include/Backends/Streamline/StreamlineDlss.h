@@ -97,6 +97,10 @@ public:
     // DLSS-G attaches to the swapchain made through Streamline's factory proxy WHILE it is loaded: it is unloaded after
     // init, and the renderer makes its swapchain again after setFrameGenLoaded (NVIDIA's pattern: on and off each recreate
     // the swapchain, so frames without it carry no overhead).
+    // NVIDIA Reflex low latency: 0 off, 1 on, 2 on + boost; while DLSS-G is loaded at least on.
+    bool reflexAvailable() const { return m_reflex; }
+    void setReflexMode(int mode);
+
     bool frameGenAvailable() const { return m_fgAvailable; }
     int  frameGenMax() const { return m_fgMax; }              // frames shown per rendered one (1 + generated)
     bool setFrameGenLoaded(bool loaded);
@@ -118,6 +122,8 @@ private:
     void*       m_token = nullptr;   // sl::FrameToken* of the current frame (beginFrame)
     bool        m_fgAvailable = false, m_fgLoaded = false, m_reflex = false;
     int         m_fgMax = 1, m_fgMode = 1;
+    int         m_reflexWanted = 1, m_reflexApplied = -1;
+    void        applyReflex();
     void*       m_module = nullptr;
     void*       m_fns = nullptr;   // the resolved function table (Streamline.cpp)
     Api         m_api = Api::D3D12;

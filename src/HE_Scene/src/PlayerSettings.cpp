@@ -117,7 +117,7 @@ bool isEmpty(const Values& v)
 {
     return !v.stickDeadzone && !v.stickSensitivityScale && !v.stickInvertY
         && !v.vsync && !v.fullscreen && v.volumes.empty()
-        && !v.upscaler && !v.upscalerMode && !v.frameGeneration;
+        && !v.upscaler && !v.upscalerMode && !v.frameGeneration && !v.lowLatency;
 }
 
 template <std::size_t N>
@@ -194,6 +194,7 @@ std::string toJson(const Values& v)
     if (v.upscaler)              j["upscaler"]              = *v.upscaler;
     if (v.upscalerMode)          j["upscalerMode"]          = *v.upscalerMode;
     if (v.frameGeneration)       j["frameGeneration"]       = *v.frameGeneration;
+    if (v.lowLatency)            j["lowLatency"]            = *v.lowLatency;
     return j.dump();
 }
 
@@ -236,6 +237,7 @@ bool fromJson(const std::string& json, Values& out)
     name("upscalerMode", kUpscalerModes, out.upscalerMode);
     if (auto it = j.find("frameGeneration"); it != j.end() && it->is_number_integer())
         out.frameGeneration = it->get<int>();
+    name("lowLatency", kLowLatencyModes, out.lowLatency);
     out = sanitized(std::move(out));
     return true;
 }
@@ -384,6 +386,39 @@ int frameGeneration()
 {
     const int n = state().values.frameGeneration.value_or(1);
     return n <= frameGenerationMax() ? n : 1;
+}
+
+// NVIDIA Reflex low latency (with frame generation it runs anyway: DLSS-G requires it, the renderer keeps it at least On).
+std::vector<std::string> lowLatencyModes()
+{
+    if (!support().reflex) return {};
+    return { std::begin(kLowLatencyModes), std::end(kLowLatencyModes) };
+}
+
+bool isLowLatencyAvailable() { return support().reflex; }
+
+void setLowLatency(const std::string& mode)
+{
+    const std::vector<std::string> modes = lowLatencyModes();
+    if (std::find(modes.begin(), modes.end(), mode) == modes.end())
+    {
+        HE_LOG_WARN(Script, "settings.setLowLatency: \"%s\" is not available here — ignored "
+                    "(settings.lowLatencyModes lists what is: NVIDIA Reflex)", mode.c_str());
+        return;
+    }
+    state().values.lowLatency = mode;
+}
+
+std::string lowLatency()
+{
+    if (!support().reflex) return "Off";
+    return state().values.lowLatency.value_or("On");   // NVIDIA's guideline: Reflex on by default where it runs
+}
+
+int lowLatencyModeFor()
+{
+    const std::string m = lowLatency();
+    return m == "OnBoost" ? 2 : m == "On" ? 1 : 0;
 }
 
 int aaMethodFor(int configuredMethod)

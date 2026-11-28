@@ -352,6 +352,8 @@ public:
         // than 2x on GPUs with multi frame generation).
         int  maxFrameGeneration = 1;
         int  maxFrameGenerationDLSS = 1;
+        // NVIDIA Reflex low latency (D3D12 with Streamline on an NVIDIA GPU; SetLowLatencyMode).
+        bool supportsReflex = false;
         // A second window with its own widget tree (docs/he-apps-plan.md §13.3).
         // Reported by the backends that actually DRAW into one: Software (its own
         // SDL surface per window) and Metal (a layer per window). OpenGL, Vulkan
@@ -512,6 +514,9 @@ public:
     // Frame generation (Capabilities::maxFrameGeneration): frames shown per rendered one, 1 = off. Only the packaged
     // game's swapchain generates (the editor viewport is no swapchain), and only with FSR as the AA method.
     virtual void SetFrameGeneration(int /*multiplier*/) {}
+    // NVIDIA Reflex low latency (Capabilities::supportsReflex): 0 off, 1 on, 2 on + boost. With DLSS frame generation the
+    // backend keeps it at least on (NVIDIA requires it).
+    virtual void SetLowLatencyMode(int /*mode*/) {}
 
     // The one place the fallback chain lives, so five backends cannot disagree
     // about what "TAA on a machine without TAA" means. `caps` is normally the

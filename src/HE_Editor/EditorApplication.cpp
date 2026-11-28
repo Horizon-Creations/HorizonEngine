@@ -16652,6 +16652,7 @@ void EditorApplication::setPlayMode(bool play)
 				g.renderScale        = c.supportsRenderScale;
 				g.maxFrameGeneration = c.maxFrameGeneration;
 				g.maxFrameGenerationDLSS = c.maxFrameGenerationDLSS;
+				g.reflex = c.supportsReflex;
 				return g;
 			};
 			HE::api::settings::install(std::move(host));

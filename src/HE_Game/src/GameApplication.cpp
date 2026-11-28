@@ -3716,6 +3716,7 @@ void GameApplication::OnRender(float deltaTime)
 			// The player's (settings.setFrameGeneration); 1 = off. HE_GAME_FRAMEGEN=n forces it for a witness run.
 			static const char* s_fgOverride = std::getenv("HE_GAME_FRAMEGEN");
 			r->SetFrameGeneration(s_fgOverride && *s_fgOverride ? std::atoi(s_fgOverride) : HE::api::settings::frameGeneration());
+			r->SetLowLatencyMode(HE::api::settings::lowLatencyModeFor());   // settings.setLowLatency (Reflex)
 
 			// Render path — same config.json key the editor's Preferences combo
 			// writes ("RenderPath": 0 = Forward, 1 = Deferred), capability-gated. An absent
@@ -3862,6 +3863,7 @@ void GameApplication::installPlayerSettings()
 		g.renderScale        = c.supportsRenderScale;
 		g.maxFrameGeneration = c.maxFrameGeneration;
 		g.maxFrameGenerationDLSS = c.maxFrameGenerationDLSS;
+		g.reflex = c.supportsReflex;
 		return g;
 	};
 	HE::api::settings::install(std::move(host));

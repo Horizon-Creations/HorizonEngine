@@ -352,6 +352,22 @@ TEST_CASE("Player settings: upscaler and frame generation answer what the machin
     CHECK(settings::frameGenerationModes().empty());
     settings::setFrameGeneration(1);
 
+    // NVIDIA Reflex: no modes without it (reads back Off); on by default once the GPU has it; an unknown mode refused.
+    CHECK(settings::lowLatencyModes().empty());
+    CHECK(settings::lowLatency() == "Off");
+    CHECK(settings::lowLatencyModeFor() == 0);
+    g.reflex = true;
+    CHECK(call("settings.isLowLatencyAvailable")[0].b);
+    CHECK(settings::lowLatency() == "On");
+    CHECK(settings::lowLatencyModeFor() == 1);
+    call("settings.setLowLatency", { Value::ofString("Turbo") });
+    CHECK_FALSE(settings::values().lowLatency.has_value());
+    call("settings.setLowLatency", { Value::ofString("OnBoost") });
+    CHECK(std::string(call("settings.lowLatency")[0].s) == "OnBoost");
+    CHECK(settings::lowLatencyModeFor() == 2);
+    g.reflex = false;
+    CHECK(settings::lowLatencyModeFor() == 0);   // the saved choice stays, this machine cannot run it
+
     // A saved choice this machine cannot run reads back as the fallback.
     settings::setUpscaler("FSR");
     settings::setFrameGeneration(2);

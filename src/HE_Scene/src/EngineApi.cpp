@@ -7220,6 +7220,14 @@ const std::vector<ApiFn>& registry()
             [](Ctx&, const VV& a){ settings::setFrameGeneration(aI(a, 0)); return VV{}; } });
         t.push_back({ "settings.frameGeneration", "Settings", false, {}, {{"multiplier", P::Int}}, "HE::api::settings::frameGeneration",
             [](Ctx&, const VV&){ return VV{ Value::ofInt(settings::frameGeneration()) }; } });
+        t.push_back({ "settings.lowLatencyModes", "Settings", false, {}, {{"modes", P::String, /*isArray=*/true}}, "HE::api::settings::lowLatencyModes",
+            [strings](Ctx&, const VV&){ return strings(settings::lowLatencyModes()); } });
+        t.push_back({ "settings.isLowLatencyAvailable", "Settings", false, {}, {{"available", P::Bool}}, "HE::api::settings::isLowLatencyAvailable",
+            [](Ctx&, const VV&){ return VV{ Value::ofBool(settings::isLowLatencyAvailable()) }; } });
+        t.push_back({ "settings.setLowLatency", "Settings", true, {{"mode", P::String}}, {}, "HE::api::settings::setLowLatency",
+            [](Ctx&, const VV& a){ settings::setLowLatency(aS(a, 0)); return VV{}; } });
+        t.push_back({ "settings.lowLatency", "Settings", false, {}, {{"mode", P::String}}, "HE::api::settings::lowLatency",
+            [](Ctx&, const VV&){ return VV{ Value::ofString(settings::lowLatency()) }; } });
 
         // Date and time — the WALL clock, unlike the time group. Double pins:
         // at today's epoch a float steps in 128 s, so on a Float pin `now` read
@@ -8479,6 +8487,9 @@ const std::vector<ApiFn>& registry()
             { "settings.isFrameGenerationAvailable", "Is Frame Generation Available" },
             { "settings.setFrameGeneration", "Set Frame Generation" },
             { "settings.frameGeneration", "Get Frame Generation" },
+            { "settings.lowLatencyModes", "Available Low Latency Modes" },
+            { "settings.isLowLatencyAvailable", "Is Low Latency Available" },
+            { "settings.setLowLatency", "Set Low Latency" }, { "settings.lowLatency", "Get Low Latency" },
             { "datetime.now", "Now" }, { "datetime.format", "Format Time" },
             { "datetime.year", "Year" }, { "datetime.month", "Month" }, { "datetime.day", "Day" },
             { "datetime.hour", "Hour" }, { "datetime.minute", "Minute" },

@@ -1078,6 +1078,19 @@ namespace
 	  "FSR nor DLSS (each brings its own: AMD's with FSR, NVIDIA DLSS Frame "
 	  "Generation with DLSS, 3x and 4x only on GPUs that offer them): set the "
 	  "upscaler first." },
+	{ "settings.lowLatencyModes",
+	  "The low-latency modes this machine offers: \"Off\", \"On\" and \"OnBoost\" "
+	  "(NVIDIA Reflex, on an NVIDIA GPU); empty elsewhere." },
+	{ "settings.isLowLatencyAvailable",
+	  "True when NVIDIA Reflex low latency runs here (Available Low Latency Modes "
+	  "is not empty)." },
+	{ "settings.setLowLatency",
+	  "Choose the low-latency mode (one of Available Low Latency Modes). Save "
+	  "Settings keeps it. With DLSS frame generation Reflex stays at least On "
+	  "(NVIDIA requires it)." },
+	{ "settings.lowLatency",
+	  "The low-latency mode in effect: the player's choice, else \"On\" where "
+	  "Reflex runs, \"Off\" where it does not." },
 	{ "settings.isFrameGenerationAvailable",
 	  "True when this machine can generate frames (Available Frame Generation "
 	  "Modes is not empty)." },

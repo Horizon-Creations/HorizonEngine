@@ -97,6 +97,7 @@ public:
     void SetMotionBlurSettings(const MotionBlurSettings& settings) override;
     void SetAntiAliasingSettings(const AntiAliasingSettings& settings) override;
     void SetFrameGeneration(int multiplier) override;
+    void SetLowLatencyMode(int mode) override;
     // Ray-traced DDGI (software BVH + CS 5.0 compute) — pushed every frame by
     // the editor prefs / packaged game, mirroring the Metal/GL/D3D11 backends.
     void SetGISettings(const GISettings& settings) override;

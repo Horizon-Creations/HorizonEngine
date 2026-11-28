@@ -2397,6 +2397,7 @@ namespace settings {
         std::optional<std::string> upscaler;           // kUpscalers: "Off", "FSR", "DLSS", "XeSS", "MetalFX"
         std::optional<std::string> upscalerMode;       // kUpscalerModes: "NativeAA" … "UltraPerformance"
         std::optional<int>         frameGeneration;    // frames shown per rendered one, 1 = off, up to 4
+        std::optional<std::string> lowLatency;         // kLowLatencyModes: "Off", "On", "OnBoost" (NVIDIA Reflex)
     };
     // What the renderer the game runs on can do, asked at call time (a backend
     // can load its upscaler runtime after the window is up).
@@ -2406,7 +2407,9 @@ namespace settings {
         bool renderScale = false;        // the backend sizes its scene targets by the scale
         int  maxFrameGeneration = 1;     // 1 = no frame generation (FSR's, with FSR as the upscaler)
         int  maxFrameGenerationDLSS = 1; // NVIDIA DLSS-G's, with DLSS as the upscaler
+        bool reflex = false;             // NVIDIA Reflex low latency (Streamline on an NVIDIA GPU)
     };
+    inline constexpr const char* kLowLatencyModes[] = { "Off", "On", "OnBoost" };
     // The upscaler names (the AAMethod each stands for) and the quality modes,
     // with the per-axis render scale ffx_upscale.h documents for each.
     inline constexpr const char* kUpscalers[]     = { "Off", "FSR", "DLSS", "XeSS", "MetalFX" };
@@ -2488,6 +2491,13 @@ namespace settings {
     bool        isFrameGenerationAvailable();
     void        setFrameGeneration(int multiplier);  // 1 = off
     int         frameGeneration();                   // effective; 1 when the choice is not available here
+    // NVIDIA Reflex low latency: "Off", "On", "OnBoost" where Reflex runs (an NVIDIA GPU with Streamline), else none.
+    // Default On (NVIDIA's guideline); with DLSS frame generation the renderer keeps it at least On.
+    std::vector<std::string> lowLatencyModes();
+    bool        isLowLatencyAvailable();
+    void        setLowLatency(const std::string& mode);
+    std::string lowLatency();                        // effective; "Off" where Reflex does not run
+    int         lowLatencyModeFor();                 // the renderer push: 0 off, 1 on, 2 on + boost
     // For the renderer push, not rows: the configured AAMethod / render scale
     // with the player's choice over them (unchanged when they chose nothing).
     int   aaMethodFor(int configuredMethod);

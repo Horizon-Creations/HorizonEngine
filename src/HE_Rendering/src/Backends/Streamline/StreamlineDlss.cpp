@@ -372,15 +372,33 @@ bool StreamlineDlss::setFrameGenLoaded(bool loaded)
     }
     m_fgLoaded = loaded;
     m_fgMode = 1;
-    // Reflex low latency while frame generation runs (NVIDIA's requirement), off otherwise.
-    sl::ReflexOptions ro{};
-    ro.mode = loaded ? sl::ReflexMode::eLowLatency : sl::ReflexMode::eOff;
-    f.reflexSetOptions(ro);
+    applyReflex();   // at least on while frame generation runs (NVIDIA's requirement)
     HE_LOG_INFO(RHI, "Streamline: DLSS Frame Generation %s", loaded ? "loaded (swapchain made again)" : "unloaded");
     return true;
 #else
     (void)loaded;
     return false;
+#endif
+}
+
+void StreamlineDlss::setReflexMode(int mode)
+{
+    m_reflexWanted = std::clamp(mode, 0, 2);
+    applyReflex();
+}
+
+void StreamlineDlss::applyReflex()
+{
+#ifdef HE_HAVE_STREAMLINE
+    if (!m_initialized || !m_reflex) return;
+    const int mode = m_fgLoaded ? std::max(m_reflexWanted, 1) : m_reflexWanted;
+    if (mode == m_reflexApplied) return;
+    sl::ReflexOptions ro{};
+    ro.mode = mode == 2 ? sl::ReflexMode::eLowLatencyWithBoost : mode == 1 ? sl::ReflexMode::eLowLatency : sl::ReflexMode::eOff;
+    if (fns(m_fns).reflexSetOptions(ro) != sl::Result::eOk) return;
+    m_reflexApplied = mode;
+    static const char* names[] = { "off", "on", "on + boost" };
+    HE_LOG_INFO(RHI, "Streamline: Reflex low latency %s", names[mode]);
 #endif
 }
 

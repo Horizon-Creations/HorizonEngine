@@ -15855,6 +15855,7 @@ IRenderer::Capabilities D3D12Renderer::GetCapabilities() const
     // NVIDIA DLSS Frame Generation through Streamline (with DLSS as the upscaler): as many as the GPU offers.
     c.maxFrameGenerationDLSS = (c.supportsDLSS && HE::StreamlineDlss::instance().frameGenAvailable())
                              ? HE::StreamlineDlss::instance().frameGenMax() : 1;
+    c.supportsReflex = HE::StreamlineDlss::instance().reflexAvailable();
     // Deferred (Thema 150): G-buffer PSOs + resolve built at Initialize. Like
     // SSR/TAA it lives on the viewport frame's HDR target (Render()'s
     // usingHDR branch); the LDR viewport branch, the direct-swapchain branch
@@ -17553,6 +17554,11 @@ void D3D12Renderer::SetAntiAliasingSettings(const AntiAliasingSettings& s)
 void D3D12Renderer::SetFrameGeneration(int multiplier)
 {
     m_impl->fgWanted = multiplier;   // acted on in Render(): the game's swapchain frames, with FSR (maxFrameGeneration)
+}
+
+void D3D12Renderer::SetLowLatencyMode(int mode)
+{
+    HE::StreamlineDlss::instance().setReflexMode(mode);   // a no-op until the mode changes, and without Reflex
 }
 
 void D3D12Renderer::InvalidateMaterial(const HE::UUID& materialId)
